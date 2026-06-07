@@ -161,24 +161,42 @@ The experiment patch lives on branch `track-a-workstealing` (worktree
   process" limitation for placement; still no migration (INV-2 preserved). The
   remaining uneven-occupancy case (a process that turns long-running *after*
   placement) is unfixable without migration — see the fresh-steal note below.
-- ⬜ **Limited work-stealing of *fresh* processes only.** §3.1a found stealing
-  never-yet-resumed processes is safe (their first `resume` is on the thief, no
-  saved native stack to migrate); only *suspended mid-computation* coroutines are
-  unmovable. An idle worker could steal a fresh, runnable process from a backed-up
-  peer's queue without tripping the substrate constraint — the one migration-shaped
-  win available without changing the coroutine substrate. Deferred (no consumer
-  yet); full anything-anytime stealing needs a reified/heap stack like BEAM's.
-- 🟡 **Fresh-only stealing (optional, additive).** An idle worker may steal
-  processes that have **never been resumed** (a backlog of unstarted spawns on
-  one worker) — proven safe in §3.1a, since the first resume then happens on the
-  thief with no saved stack to migrate. This is real, migration-free
-  work-stealing for the spawn-burst case; it does **not** rebalance already-
-  running processes. Worth it only if a workload shows spawn bursts piling onto
-  one worker that balancing-at-spawn didn't already spread.
-- ❌ **Stealing live (suspended) coroutines** — needs a coroutine substrate that
-  supports cross-thread resume of a deep saved stack (evaluate alternatives to
-  corosensei, or a custom suspend mechanism). Large effort, gated on a
-  demonstrated need that the two options above can't meet. Not recommended now.
+- ✅ **Fresh-only work-stealing — LANDED in main (2026-06-07).** An idle worker
+  steals a process that has **never been resumed** from a backed-up peer's queue
+  and runs it itself — proven safe in §3.1a, since the first resume then happens
+  on the thief with no saved native stack to migrate. Implementation
+  (`scheduler.rs`): a `Process.fresh` flag (cleared at the first `resume` in
+  `run_one`); `try_steal(thief)` scans peers from a rotating start under
+  `try_lock`, pulls the first fresh process from a victim's **back** (the owner
+  pops the front), and re-pins its `worker_id` to the thief (owner-for-life from
+  then on, so INV-2 holds); `worker_loop` does own-queue → `try_steal` →
+  park-with-`STEAL_BACKOFF`-backstop (an idle worker isn't notified when a *peer's*
+  queue grows, so it re-probes on a 10 ms timeout, gated by a relaxed `STEALABLE`
+  counter so a truly-idle pool re-parks on one atomic load). Observable via the
+  new `(steal-count)` builtin. This rebalances the **spawn-burst backlog** (fresh,
+  unstarted processes piled onto one worker that placement-at-spawn didn't
+  spread); it does **not** rebalance already-running processes — see §7. Verified:
+  `tests/work_stealing.rs` (20/20 release, 5/5 debug), KI-1 guard
+  (`concurrency_race.rs`) clean 13/13 plain-release incl. `BROOD_GC_STRESS`, full
+  suite green.
+  - Implementation note (cost me a debug cycle, recorded so it isn't re-hit):
+    `worker_loop`'s own-queue pop must bind the `pop_front()` result to a `let` so
+    the queue `MutexGuard` drops **before** `run_one`. In edition 2021 a guard
+    held in an `if let` scrutinee lives to the end of the whole block, so
+    `if let Some(p) = lock(..).pop_front() { run_one(p) }` holds the queue lock
+    across the resume — and the running coroutine's first preempt re-enqueues onto
+    this same worker, re-locking the non-reentrant mutex → the worker deadlocks.
+- ❌ **Stealing live (suspended) processes — needs the stepping-VM evaluator, not
+  a corosensei replacement.** This is the BEAM-style full rebalancing (migrate a
+  *running* process off a hot worker). It is blocked not by corosensei
+  specifically but by where a process's **call continuation** lives — the native
+  Rust stack — which is true of the tree-walker *and* today's VM (non-tail calls
+  still recurse natively). Swapping the stackful substrate doesn't fix it; the
+  fix is to reify the call stack as relocatable heap data (the "stepping VM" arm
+  of `memory-model.md`'s coupling diagram). The full design — what it requires,
+  what's already migration-ready, the staged plan and acceptance bar — is **§7**.
+  Large effort; gated on a workload that fresh-only stealing + placement can't
+  serve. Recorded as the committed long-term direction (ADR-100).
 
 ### 3.3 Non-negotiables for any work-stealing design
 
@@ -261,5 +279,128 @@ Any change here must, before merge, pass the KI-1 reconstruction in **plain
 release** (not just debug-assertions release): the 40-worker prelude fan-out,
 ≥10 clean runs, plus the 80-worker + `BROOD_GC_STRESS=1` variant. A regression
 test in `crates/lisp/tests/` should encode it so the race can't silently return.
+(Encoded: `tests/concurrency_race.rs`. Fresh-only stealing adds
+`tests/work_stealing.rs`, which must clear the same plain-release bar.)
+
+## 7. Full process migration — the stepping-VM endgame
+
+> **Status: committed direction, deferred build (2026-06-07). ADR-100.**
+> This is the design for BEAM-style rebalancing: moving an *already-running*
+> process off a hot worker onto an idle one. Fresh-only stealing (§3.2) handles
+> the unstarted backlog; this section is the rest. The conclusion of the analysis
+> is that it is **not** a "replace corosensei" task — it is an evaluator-core
+> change, and corosensei falls away as a side effect.
+
+### 7.1 Why it's blocked: the call continuation lives on the native stack
+
+A green process's *continuation* — the chain of pending non-tail calls (return
+points, locals, "where do I go when this returns") — is encoded in **native Rust
+stack frames**. This is true of both execution engines:
+
+- the **tree-walker** (`eval/mod.rs`) recurses one Rust frame per combination;
+- **today's VM** (`eval/compile.rs`, ADR-076) reified the **operand stack** onto
+  the heap (so the moving GC can relocate transients at a safepoint) and
+  trampolines **tail** calls (`dispatch`'s `'apply: loop`) — but **non-tail calls
+  still recurse on the native Rust stack** (`exec_call` → `vm_apply`).
+
+corosensei's only role is to freeze that native stack at a `receive`/preempt
+point and resume it later. §3.1a proved that resuming a frozen native stack on a
+*different* OS thread segfaults (smashed return addresses) — so the suspended
+continuation is **thread-pinned because it is a native stack**, not because of
+anything Brood-specific. Replacing corosensei with another stackful library
+inherits the same hazard: any saved native stack can hold thread-affine state
+(cached TLS addresses, pointers into per-thread structures) and is fragile to
+resume cross-thread. That route is the ❌ in §3.2 for good reason.
+
+### 7.2 What migration actually requires: reify the call stack
+
+Migration becomes trivial once a paused process's **entire** state is relocatable
+heap data rather than a native stack. That is the "stepping VM" arm of the
+coupling in [`memory-model.md`](memory-model.md) ("state as data → suspension is
+*stop stepping*, migration is *move the data*"). Concretely, finish what the VM
+started — reify the **call/frame stack** the way the operand stack already is:
+
+- A heap **frame stack** — `Vec<Frame>` (or a per-process arena region), each
+  `Frame` carrying its instruction pointer / continuation node, its locals/slot
+  window, and its return target.
+- A **flat dispatch loop** — `loop { step the top frame }` with `Call` pushing a
+  frame and `Return` popping one, replacing the `exec_call → vm_apply` native
+  recursion. (Tail calls already work this way; this generalises it to *all*
+  calls.)
+- A paused process is then exactly `(frame_stack, operand_stack, ip)` — plain
+  `Send` data. **No coroutine.** Suspension is "return out of the loop"; resume is
+  "re-enter the loop with the saved state," on **any** worker.
+
+This single change delivers three things at once — which is why it is the right
+endgame rather than a point fix:
+
+1. **Migration of any started process** + **anytime work-stealing** (not just
+   fresh): the steal handshake §3.3 already built for fresh processes generalises
+   directly once the continuation is movable.
+2. **Fully precise mid-eval GC** — the original, separately-motivated reason
+   `memory-model.md` wanted the stepping VM (no native frames to scan for roots).
+3. **corosensei is removed** — along with the 16 MiB-per-process native stacks
+   (`CORO_STACK_BYTES`) and the `unsafe impl Send for Process`; processes get
+   genuinely cheap (heap frames grow on demand), closer to BEAM's millions.
+
+### 7.3 What's already migration-ready (the substrate is the *only* gap)
+
+Everything around the evaluator was already built to migrate, so this is a
+contained (if large) change, not a system-wide one:
+
+- **Per-process heaps are `Send`** and travel with the process; messages cross as
+  deep copies (share-nothing already holds — §3.3, `memory-model.md`). ✅
+- **Scheduler thread-locals** (`CURRENT`, `REDUCTIONS`, `GC_BLOCK`, `STACK_BASE`,
+  `MACRO_BLOCK`) are saved/restored around every suspend and were *explicitly
+  designed to survive migration* (§2 note, `scheduler.rs` comments). ✅
+- **The one-owner handshake** — a process is in exactly one queue / running on one
+  worker / parked in one mailbox, never two (INV-2) — is implemented and now
+  exercised by the fresh-steal path; it generalises to any process. ✅
+- **INV-1** (no slot reuse; moving collector + generation epochs) is independent
+  of the engine and stays as-is. ✅
+
+### 7.4 The one carve-out (same as BEAM's dirty schedulers)
+
+A process blocked **inside a long native builtin** (e.g. a blocking socket read)
+still can't be migrated or preempted mid-call — there is no Brood-level safepoint
+in the middle of Rust code to capture a continuation at. This is exactly Erlang's
+*dirty scheduler* carve-out. Brood's builtins are nearly all short, so it's
+minor; the blocking-IO offload pool (`handoff-blocking-io.md`, M4) is the place
+that already plans to push the genuinely-blocking ones off the worker threads.
+
+### 7.5 Staging (keep the suite green at each step)
+
+The VM is the default engine, so this is staged *inside* it, behind a flag until
+parity, not a parallel rewrite:
+
+1. **Reify the call stack for the VM** — convert `exec_call`/`vm_apply` native
+   recursion into the explicit frame stack + flat loop. No scheduler change yet;
+   prove parity (full suite, the differential test vs the tree-walker) and
+   benchmark — the flat loop should be neutral-to-faster (no per-call Rust frame).
+2. **Replace coroutine suspension with state capture** — `receive`/preempt return
+   out of the loop with `(frames, operands, ip)` instead of `yielder.suspend`.
+   The scheduler stores that struct in place of a `Coroutine`. Drop corosensei and
+   the per-process native stack. Re-run the **§6 acceptance bar** (this is the
+   point the KI-1 surface could in principle reopen — it must not).
+3. **Generalise stealing/migration** — `try_steal` (and a periodic rebalancer, if
+   a workload wants it) may now move *any* runnable process, not only `fresh` ones.
+   The `fresh` flag and its special-case stealing become redundant and are removed.
+4. **(Optional) BEAM-style periodic migration** — compute migration paths from
+   per-worker queue lengths and rebalance proactively, not only on steal-when-idle.
+   Additive; gated on a demonstrated long-task-occupancy skew.
+
+### 7.6 Acceptance bar (in addition to §6)
+
+- The §6 KI-1 reconstruction stays green in **plain release** through stage 2
+  (the migration cutover) — the original race must not reopen.
+- A new regression test that **migrates a process mid-computation** under load
+  (deep non-tail recursion suspended at `receive`, resumed on a different worker)
+  and asserts the correct result over many trials — the live-migration analogue
+  of `work_stealing.rs`.
+- Tail-call O(1)-stack and deep non-tail-recursion behaviour preserved
+  (`tail_calls_do_not_overflow`; the `BROOD_STACK_BUDGET` guard becomes a
+  frame-count/heap-bytes guard instead of a native-stack-bytes guard).
+- VM parity + no perf regression on the bench suite (the flat loop is the bet that
+  it's faster).
 </content>
 </invoke>

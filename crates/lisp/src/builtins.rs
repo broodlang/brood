@@ -1629,6 +1629,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "steal-count",
+        Arity::exact(0),
+        Sig::nullary(int),
+        steal_count,
+    );
+    def(
+        heap,
         "list-processes",
         Arity::exact(0),
         Sig::nullary(list_ty),
@@ -1899,6 +1906,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
+    ("steal-count", &[], "How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
     ("whereis", &["name"], "The local pid registered under `name`, or nil. Strictly local — does not query other nodes."),
     ("node-name", &[], "This runtime's node name (:nonode until node-start)."),
@@ -6986,6 +6994,13 @@ fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// green processes (≈ `nproc`, or the `-j` setting); 0 until the first spawn.
 fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::Int(crate::process::worker_threads() as i64))
+}
+
+/// `(steal-count)` — how many fresh processes the scheduler work-stole across
+/// worker threads since program start. A diagnostic of how much the pool had to
+/// rebalance; 0 means placement-at-spawn kept it even.
+fn steal_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Int(crate::process::steal_count() as i64))
 }
 
 /// `(list-processes)` — every currently-live local pid as a `Pid` value

@@ -435,6 +435,14 @@ pub struct CompiledArm {
     /// Total frame slots (params + optionals + rest + `let`/`letrec` binders).
     pub nslots: usize,
     pub body: Node,
+    /// True when the body or any optional default contains a `Node::Const` with a
+    /// movable RUNTIME handle (`ConstVal::Handle`), or a `Node::MakeClosure` (whose
+    /// `fn_rest` is always a RUNTIME Pair). Arms without RUNTIME handles do not need
+    /// to be registered in `Heap::live_vm_arms` because a `runtime_collect` pass has
+    /// nothing to rewrite in their node tree — skipping the registration avoids an
+    /// `Arc::clone` on the hot call path, removing cross-worker cache-line contention
+    /// on the shared refcount when many processes call the same function in parallel.
+    pub has_runtime_handles: bool,
 }
 
 /// One arm of a closure: its arity shape plus the compiled body **if** it was
@@ -1136,6 +1144,39 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
 /// default sees the required params and earlier optionals but never itself), then
 /// the `&` rest param — then compiles the body. The default nodes ride along in
 /// `optional_defaults` for `push_frame` to evaluate on a missing arg.
+/// Returns `true` if `node` (or any of its children) contains a
+/// [`ConstVal::Handle`] or a [`Node::MakeClosure`] (whose `fn_rest` is always a
+/// RUNTIME Pair handle). Used to set [`CompiledArm::has_runtime_handles`] at
+/// compile time so `vm_apply` can skip `live_vm_arms` registration for pure
+/// arithmetic / control-flow bodies that have nothing for `runtime_collect` to
+/// rewrite.
+fn node_has_rt_handles(node: &Node) -> bool {
+    match node {
+        Node::Const(cv) => matches!(cv, ConstVal::Handle { .. }),
+        Node::MakeClosure { fn_rest, captures, .. } => {
+            // fn_rest is always a RUNTIME Pair; captures may contain handles too.
+            matches!(fn_rest, ConstVal::Handle { .. })
+                || captures.iter().any(|(_, n)| node_has_rt_handles(n))
+        }
+        Node::If(a, b, c) => {
+            node_has_rt_handles(a) || node_has_rt_handles(b) || node_has_rt_handles(c)
+        }
+        Node::Do(ns) => ns.iter().any(node_has_rt_handles),
+        Node::Vector(ns) => ns.iter().any(node_has_rt_handles),
+        Node::Map(pairs) => pairs.iter().any(|(k, v)| node_has_rt_handles(k) || node_has_rt_handles(v)),
+        Node::Call { callee, args, .. } => {
+            node_has_rt_handles(callee) || args.iter().any(node_has_rt_handles)
+        }
+        Node::SelfCall { args, .. } => args.iter().any(node_has_rt_handles),
+        Node::LetBind { binds, body } => {
+            binds.iter().any(|(_, n)| node_has_rt_handles(n)) || node_has_rt_handles(body)
+        }
+        Node::Prim2 { a, b, .. } => node_has_rt_handles(a) || node_has_rt_handles(b),
+        Node::Prim1 { a, .. } => node_has_rt_handles(a),
+        Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
+    }
+}
+
 fn compile_arm(
     heap: &Heap,
     required: &[Symbol],
@@ -1176,13 +1217,17 @@ fn compile_arm(
         scope.bind(r);
     }
     let body = compile_body(heap, body, &mut scope, true)?;
+    let optional_defaults = optional_defaults.into_boxed_slice();
+    let has_runtime_handles = node_has_rt_handles(&body)
+        || optional_defaults.iter().flatten().any(node_has_rt_handles);
     Some(CompiledArm {
         nrequired,
         noptional,
-        optional_defaults: optional_defaults.into_boxed_slice(),
+        optional_defaults,
         rest_slot: rest.map(|_| nrequired + noptional),
         nslots: scope.max,
         body,
+        has_runtime_handles,
     })
 }
 
@@ -2029,41 +2074,67 @@ fn dispatch(
 ) -> Result<Step, LispError> {
     let mut cur_callee = callee;
     let mut cur_argv = argv;
-    // Thin-wrapper passthrough redirect (ADR-069), mirroring `eval`'s `'dispatch`
-    // loop: a pure pass-through prelude op (`(< n 2)` → `<` whose 2-arg arm is
-    // `(%lt n 2)`, etc.) redirects straight to its inner `%native` on remapped
-    // args — so the hot loop reaches `call_native` directly instead of re-entering
-    // `apply_closure` (a frame alloc + param binds + a body eval) for every
-    // arithmetic/comparison op. Late-binding safe: it reads the *live* closure and
-    // re-resolves the inner head each call (a symbol lookup — no GC, so `cur_argv`
-    // stays valid). Looped for chained passthroughs.
-    loop {
-        let id = match cur_callee {
-            Value::Fn(id) => id,
-            _ => break,
-        };
-        let Some((head, map)) = crate::eval::passthrough_arm(heap, id, cur_argv.len()) else {
-            break;
-        };
-        let cl_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
-        // VM inner-head resolution: a direct `env_get` for a symbol head (no GC, so
-        // `cur_argv` stays valid), else the head value itself. The shared
-        // `passthrough_redirect_ok` then gates the redirect (callable inner only),
-        // counts the reduction, and honours the deadline.
-        let inner = match head {
-            Value::Sym(s) => heap.env_get(cl_env, s),
-            other => Some(other),
-        };
-        let Some(inner) = inner else { break };
-        if !crate::eval::passthrough_redirect_ok(inner)? {
-            break;
+    // Outer `'apply` loop: mirrors the TW's `'dispatch` loop (eval/mod.rs). Each
+    // iteration runs the passthrough-redirect inner loop, then checks for `apply`
+    // unfolding. On unfold, `cur_callee`/`cur_argv` are rewritten and the outer
+    // loop continues so passthrough can redirect the unfolded callee (e.g.
+    // `(apply + '(1 2))` unfolds to `(+ 1 2)`, then passthrough elides `+`).
+    // On no-unfold, `break` falls through to the VM/TW dispatch below.
+    //
+    // O(1) stack: no new Rust frame per `apply` iteration — the unfolding and
+    // re-dispatch all happen inside this single `dispatch` call, then `vm_apply`
+    // (or a `Step::Tail` trampoline) handles the real callee.
+    'apply: loop {
+        // Thin-wrapper passthrough redirect (ADR-069), mirroring `eval`'s `'dispatch`
+        // loop: a pure pass-through prelude op (`(< n 2)` → `<` whose 2-arg arm is
+        // `(%lt n 2)`, etc.) redirects straight to its inner `%native` on remapped
+        // args — so the hot loop reaches `call_native` directly instead of re-entering
+        // `apply_closure` (a frame alloc + param binds + a body eval) for every
+        // arithmetic/comparison op. Late-binding safe: it reads the *live* closure and
+        // re-resolves the inner head each call (a symbol lookup — no GC, so `cur_argv`
+        // stays valid). Looped for chained passthroughs.
+        loop {
+            let id = match cur_callee {
+                Value::Fn(id) => id,
+                _ => break,
+            };
+            let Some((head, map)) = crate::eval::passthrough_arm(heap, id, cur_argv.len()) else {
+                break;
+            };
+            let cl_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+            // VM inner-head resolution: a direct `env_get` for a symbol head (no GC, so
+            // `cur_argv` stays valid), else the head value itself. The shared
+            // `passthrough_redirect_ok` then gates the redirect (callable inner only),
+            // counts the reduction, and honours the deadline.
+            let inner = match head {
+                Value::Sym(s) => heap.env_get(cl_env, s),
+                other => Some(other),
+            };
+            let Some(inner) = inner else { break };
+            if !crate::eval::passthrough_redirect_ok(inner)? {
+                break;
+            }
+            let mut next: SmallVec<[Value; 4]> = SmallVec::with_capacity(map.len());
+            for &i in &map {
+                next.push(cur_argv[i]);
+            }
+            cur_callee = inner;
+            cur_argv = next;
         }
-        let mut next: SmallVec<[Value; 4]> = SmallVec::with_capacity(map.len());
-        for &i in &map {
-            next.push(cur_argv[i]);
+        // `apply` unfolding: `(apply real arg... list)` → `(real arg... ...list)`.
+        // Mirrors the TW's inline unfolding (eval/mod.rs `while let Native … "apply"`).
+        // After unfolding, `continue 'apply` re-runs passthrough on the real callee.
+        // If the callee is not `apply`, or arity < 2, break and dispatch normally.
+        if let Value::Native(id) = cur_callee {
+            if heap.native(id).name == "apply" && cur_argv.len() >= 2 {
+                let list = cur_argv.pop().expect("cur_argv non-empty (len >= 2, checked)");
+                let real = cur_argv.remove(0);
+                cur_argv.extend(heap.seq_items(list)?);
+                cur_callee = real;
+                continue 'apply;
+            }
         }
-        cur_callee = inner;
-        cur_argv = next;
+        break;
     }
     // A VM-eligible closure of matching arity runs on the VM (or yields a tail
     // call for the trampoline); a native or non-passthrough/ineligible callee goes
@@ -2150,17 +2221,24 @@ fn push_frame(
 /// deadline, and the non-tail-recursion stack guard.
 fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
     crate::perf_bump!(vm_apply);
-    // Register this frame's compiled arm as LIVE for the duration of the call, so a
-    // RUNTIME compaction (at a nested `eval_at` safepoint — e.g. a builtin like `load`
-    // that churns the code region) rewrites the movable handles its node tree embeds.
-    // The `Arc`'d tree is off the GC root graph and `exec_node` holds it by `&Node`,
-    // so it can't be relocated by swapping the `Arc` — `runtime_collect` walks the
-    // registry and fixes the handles in place (ADR-076 / `docs/known-issues.md`). One
-    // push/truncate around the inner trampoline covers every (incl. error) return; the
-    // inner updates the slot on a tail call into a different arm.
-    let slot = heap.live_arm_push(compiled0.clone());
-    let r = vm_apply_inner(heap, compiled0, args, genv0, slot);
-    heap.live_arm_truncate(slot);
+    // Register this frame's compiled arm as LIVE only when it contains movable
+    // RUNTIME handles — `runtime_collect` needs to rewrite those in place.  Arms
+    // without any `ConstVal::Handle` or `MakeClosure` (e.g. pure arithmetic /
+    // control-flow functions like `fib`) skip the registration and, crucially, the
+    // `Arc::clone` it requires.  Under heavy parallelism that clone is a `LOCK XADD`
+    // on the *shared* refcount of the function's compiled arm, causing cache-line
+    // ping-pong across workers — the dominant overhead for workloads like pfib where
+    // many processes call the same function concurrently.
+    // `usize::MAX` is the sentinel meaning "nothing was pushed; no truncate needed."
+    let mut slot = if compiled0.has_runtime_handles {
+        heap.live_arm_push(compiled0.clone())
+    } else {
+        usize::MAX
+    };
+    let r = vm_apply_inner(heap, compiled0, args, genv0, &mut slot);
+    if slot != usize::MAX {
+        heap.live_arm_truncate(slot);
+    }
     r
 }
 
@@ -2169,7 +2247,7 @@ fn vm_apply_inner(
     compiled0: Arc<CompiledArm>,
     args: &[Value],
     genv0: EnvId,
-    arm_slot: usize,
+    arm_slot: &mut usize,
 ) -> LispResult {
     // Match `eval`: a GC-block guard (feeds the stack-overflow base) + the stack
     // budget check, so deep *non-tail* VM recursion fails cleanly instead of a
@@ -2251,7 +2329,17 @@ fn vm_apply_inner(
                 // default nodes would be left pointing into the evacuated region — a
                 // use-after-GC. Mirrors the first-arm order in `vm_apply`
                 // (`live_arm_push` before `push_frame`).
-                heap.live_arm_set(arm_slot, c2.clone());
+                //
+                // Slot may be the sentinel `usize::MAX` when the initial arm had no
+                // RUNTIME handles (see `vm_apply`). If `c2` also has none, skip the
+                // update entirely. If `c2` introduces handles (tail-call into a
+                // different function that closes over strings, etc.), push a fresh
+                // slot so compaction can rewrite them.
+                if *arm_slot != usize::MAX {
+                    heap.live_arm_set(*arm_slot, c2.clone());
+                } else if c2.has_runtime_handles {
+                    *arm_slot = heap.live_arm_push(c2.clone());
+                }
                 if let Err(e) = push_frame(heap, &c2, &a2, genv) {
                     heap.truncate_roots(base);
                     heap.truncate_env_roots(env_base);
@@ -2307,6 +2395,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             // LIVE: like a `vm_apply` frame, its `Const` literals are promoted RUNTIME
             // handles that a nested compaction (a sub-call into `load`/`eval`) would
             // strand — registering it lets `runtime_collect` rewrite them in place.
+            let has_runtime_handles = node_has_rt_handles(&node);
             let arm = Arc::new(CompiledArm {
                 nrequired: 0,
                 noptional: 0,
@@ -2314,8 +2403,13 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 rest_slot: None,
                 nslots: scope.max,
                 body: node,
+                has_runtime_handles,
             });
-            let arm_slot = heap.live_arm_push(arm.clone());
+            let arm_slot = if arm.has_runtime_handles {
+                heap.live_arm_push(arm.clone())
+            } else {
+                usize::MAX
+            };
             let env_base = heap.env_roots_len();
             let genv = heap.root_env(env);
             let base = heap.roots_len();
@@ -2325,7 +2419,9 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             let r = exec_value(heap, &arm.body, base, genv);
             heap.truncate_roots(base);
             heap.truncate_env_roots(env_base);
-            heap.live_arm_truncate(arm_slot);
+            if arm_slot != usize::MAX {
+                heap.live_arm_truncate(arm_slot);
+            }
             r
         }
         None => crate::eval::eval(heap, form, env),
@@ -2435,6 +2531,7 @@ mod tests {
             rest_slot: None,
             nslots: 0,
             body,
+            has_runtime_handles: true,
         };
 
         rewrite_arm_handles(&arm, &mut |v| bump(v, 100));

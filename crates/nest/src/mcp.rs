@@ -2096,6 +2096,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn handler_panic_is_caught_and_server_keeps_serving() {
         // Regression for the MCP-host panic-isolation behaviour
         // (`docs/deferred.md` §3): a *Rust panic* inside a tool handler must

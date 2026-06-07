@@ -1646,3 +1646,47 @@ cooperative suspend) does the waiting — `std::thread::sleep` there would freez
 isolated unit's own worker and starve a same-worker orphan (which is exactly why a
 first reap attempt failed). nextest 3/3 green (was ~1/5); 24× unbound 9→0, total
 failures halved. See known-issues.md KI-2 (2026-06-07) for the full write-up.
+
+## 2026-06-07 — VM bench harness, perf-stats pass, apply-unfolding in dispatch
+
+Three improvements to the VM benchmark/test infrastructure and one meaningful
+performance win.
+
+**Bench harness (eval.rs).** Stale `reduce_range` comment corrected (the
+`%range-reduce`→VM routing already landed in `4af9d2a`; it now says so). Two new
+`engine_grid!` benches added:
+- `try_body` — a `(try … (catch _ …))`-wrapped tail-recursive `defn`. Ratio
+  Vm/Tw ≈ 1.0, which is the correct expected result: the `try` macro wraps its
+  body in a LOCAL `(fn () …)` thunk, which falls back to TW in both engines
+  regardless of the `apply_engine` routing. Confirms no regression in try-heavy
+  code; the routing benefit only lands when the thunk itself is a RUNTIME closure
+  passed directly to `%try`.
+- `apply_driven` — `(apply f …)`-driven tail recursion. Ratio was Vm/Tw ≈ 1.09
+  (VM slightly slower) before the apply-unfolding work; see below for the after.
+
+**perf-stats pass.** Ran `BROOD_PERF_STATS=1` on all three bench programs. Key
+findings:
+- `reduce_range 200k`: `vm_apply = 200004` — routing confirmed live.
+- `try_body 10k`: `vm_apply = 0` — LOCAL thunk breaks the VM chain entirely. The
+  `apply_engine` routing for `try` is correct but has no practical effect for the
+  typical macro-expansion pattern.
+- `apply_driven 10k`: `vm_apply = 2`, `tw_defer = 1` — only setup + first
+  iteration hit the VM; all 10k `apply`-driven iterations were TW-bound.
+
+**apply-unfolding in `dispatch` (eval/compile.rs).** `dispatch` now handles
+`apply` inline via an outer `'apply: loop` that mirrors the TW's `'dispatch` loop
+in `eval/mod.rs`. After each passthrough-redirect inner loop, if the callee is the
+`apply` native (by name) with argc ≥ 2, it splices the trailing list and
+`continue 'apply`s so passthrough runs again on the real callee. No new Rust frame
+per iteration → O(1) stack preserved. `apply_builtin` stays on `eval::apply` for
+the TW fallback path only; it's no longer reached from the VM on VM-eligible
+callee chains.
+
+Result: `apply_driven` Vm/Tw flips from **1.09 → 0.31** (~69% faster); `vm_apply`
+goes 2 → 10,001 per 10k-iteration run. GC-stress + heap verifier clean (apply
+unfolding holds `cur_callee`/`cur_argv` on the Rust stack, safe because
+`seq_items` on a proper list doesn't allocate).
+
+Five new differential corpus entries cover `try`/`binding`/`isolate` thunk routing
+and apply-unfolding (tail-via-apply, basic splice, prefix+splice, nested apply,
+RUNTIME callee). All 548 nextest cases + differential test pass.

@@ -149,6 +149,14 @@ const CORPUS: &[&str] = &[
     "(defdyn *dv* 10) (defn get-dv () *dv*) [(get-dv) (binding (*dv* 42) (get-dv)) (get-dv)]",
     // isolate — thunk routes through apply_engine; visible def is rolled back
     "(defn iso-work () (def _iso-x 99) _iso-x) (%isolate iso-work)",
+    // apply unfolding in dispatch (ADR-096 follow-on): the VM now unfolds
+    // `(apply f args)` inline, re-dispatching the real callee through the VM.
+    // Both engines must agree on results and the O(1)-stack tail property.
+    "(defn f (n) (if (= n 0) :done (apply f (list (- n 1))))) (f 5000)", // tail via apply
+    "(apply + (list 1 2 3 4 5))",                                         // basic splice
+    "(apply list 1 2 (list 3 4))",                                        // prefix + splice
+    "(apply apply (list + (list 1 2 3)))",                                // nested apply
+    "(defn g (a b) (+ a b)) (apply g (list 10 20))",                     // RUNTIME callee
 ];
 
 #[test]

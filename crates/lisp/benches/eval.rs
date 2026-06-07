@@ -123,12 +123,11 @@ fn try_body(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     bencher.with_inputs(|| interp_on(eng)).bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
-/// `(apply f …)`-driven tail recursion — `apply_builtin` intentionally stays on
-/// `eval::apply` (tree-walker) to preserve O(1)-stack `apply`-driven tail
-/// recursion; routing through `apply_engine` creates a new `vm_apply` Rust frame
-/// per iteration, overflowing the stack. Both Vm and Tw rows exercise the same
-/// tree-walker dispatch path; the ratio is near 1.0. Serves as the before-baseline
-/// for any future `apply`-unfolding work in the VM's `exec_call`.
+/// `(apply f …)`-driven tail recursion. The VM's `dispatch` now unfolds `apply`
+/// inline (like the TW's `'dispatch` loop) and re-dispatches the real callee —
+/// so a RUNTIME-region `loop-` runs on the VM via `Step::Tail` trampolining with
+/// O(1) Rust stack. `apply_builtin` itself stays on `eval::apply` for the TW
+/// fallback path only. The Vm row should be clearly faster than Tw.
 #[divan::bench(args = engine_grid![10_000, 100_000])]
 fn apply_driven(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src = format!(

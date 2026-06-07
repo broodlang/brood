@@ -5833,6 +5833,21 @@ showed `self_tail`/`vm_apply` were zero there. The harness caught my own bad
 measurement; lesson in `docs/benchmarking.md`.) Mutual recursion still defers.
 Long-form analysis in `docs/vm-perf-and-jit-runway.md`.
 
+**Round 3 (2026-06-07): `apply`-unfolding in `dispatch` + bench/test harness
+hardening.** `dispatch` now wraps its passthrough-redirect inner loop in an outer
+`'apply: loop` (mirrors the TW's `'dispatch` loop in `eval/mod.rs`): after each
+passthrough exit, if the callee is the `apply` native with argc ≥ 2, the trailing
+list is spliced and `continue 'apply` re-runs passthrough on the real callee — no
+new Rust frame per iteration, O(1) stack. `apply_builtin` stays on `eval::apply`
+for the TW fallback only. Result: **`apply`-driven tail recursion ~69% faster on
+the VM** (`vm_apply` 2 → 10,001 per 10k-iteration run; ratio 1.09 → 0.31).
+Harness additions: `try_body` bench (ratio ≈ 1.0 — LOCAL thunk breaks VM chain,
+correct), `apply_driven` bench (now shows ~0.31 after this round), `reduce_range`
+comment corrected. `perf-stats` pass confirmed: `try_body vm_apply = 0` (LOCAL
+thunk → TW entirely); `apply_driven vm_apply = 10001` (every iteration on VM).
+Differential corpus extended with `try`/`binding`/`isolate` thunk routing and
+apply-unfolding cases. GC-stress + heap verifier clean.
+
 **Context.** A JIT (emit machine code at runtime) is the natural next rung above the
 closure-compiling VM (ADR-076): both engines compile a form once, but the VM *interprets*
 the compiled `Node` tree (a Rust `match` per node — ~50–100 instructions for a hot
@@ -6016,3 +6031,68 @@ pid-returning synchronous `remote-spawn`, a `terminate`-style worker-cleanup
 convention) and the larger deferred items (`gen_statem`, an Elixir-style
 `Registry`/`pg`, an `Application` behaviour, rollback-on-failure supervisor
 startup) are tracked in [roadmap.md](roadmap.md).
+
+## ADR-100 — Full process migration is a stepping-VM change, not a corosensei swap; fresh-only stealing is the migration-free partial
+
+**Status:** accepted (2026-06-07). Fresh-only stealing **landed**; full migration
+**deferred** (committed direction). See [concurrency-v2.md](concurrency-v2.md)
+§3.2/§7, [memory-model.md](memory-model.md) (the "stepping VM" coupling),
+[scheduler.md](scheduler.md). Builds on ADR-018/027 (M:N scheduler + preemption),
+ADR-076 (the VM that reified the operand stack), ADR-055 (automatic copying GC).
+
+**Context.** The scheduler pins each process to its spawn-worker for life: a
+process never migrates between worker threads after it has started. KI-1b
+(`concurrency-v2.md` §3.1a) proved *why* — resuming a `corosensei` coroutine that
+suspended mid-computation on a **different** OS thread segfaults (smashed return
+addresses). The reflex fix is "replace corosensei with a stackful library that
+allows cross-thread resume." That diagnosis is **wrong**: the real blocker is that
+a process's **call continuation** (the chain of pending non-tail calls) lives on
+the **native Rust stack** — true of the tree-walker *and* of today's VM, whose
+`exec_call → vm_apply` path still recurses natively (only the operand stack was
+reified and only tail calls are trampolined). Any saved native stack is
+thread-affine and fragile to move; swapping the stackful substrate inherits the
+same hazard. So spawn-placement (ADR-018 era) balances *process count*, not
+ongoing *CPU load*, and cannot self-correct when a process turns long-running
+*after* placement.
+
+**Decision.**
+
+1. **Land fresh-only work-stealing now** (migration-free, INV-2-preserving). An
+   idle worker steals a process that has **never been resumed** from a backed-up
+   peer and runs it itself — safe because the first `resume` then happens on the
+   thief with no saved native stack to migrate (§3.1a). Implementation in
+   `scheduler.rs`: a `Process.fresh` flag, `try_steal` (rotating-start, `try_lock`,
+   pulls the first fresh process from a victim's back and re-pins `worker_id`),
+   `worker_loop` = own-queue → steal → park-with-backstop, a relaxed `STEALABLE`
+   gate, and a `(steal-count)` builtin. This rebalances the spawn-burst backlog of
+   unstarted processes; it does **not** move running ones.
+2. **Full migration is the stepping-VM endgame, and is the committed long-term
+   direction.** Reify the **call/frame stack** as relocatable heap data (a
+   `Vec<Frame>` + a flat dispatch loop, the way the operand stack already is), so a
+   paused process is plain `Send` data `(frames, operands, ip)`. Then suspension is
+   "stop stepping," migration is "move the data," **corosensei is removed** (along
+   with the 16 MiB per-process native stacks and the `unsafe impl Send`), and the
+   same change independently delivers **fully precise mid-eval GC** (the original
+   `memory-model.md` motivation for the stepping VM) and **anytime work-stealing**.
+   The surrounding machinery is already migration-ready: `Send` per-process heaps,
+   migration-surviving scheduler thread-locals, the one-owner (INV-2) handshake,
+   and INV-1 (no slot reuse) are all engine-independent.
+3. **Defer the build** (ADR-011) until a workload shows fresh-only stealing +
+   spawn-placement leaves real long-task-occupancy skew. Staged inside the VM
+   behind a flag (reify call stack → swap suspension for state capture → generalise
+   stealing → optional periodic rebalancer), each step keeping the suite and the §6
+   KI-1 plain-release bar green. One carve-out remains, exactly as in BEAM: a
+   process blocked inside a long **native builtin** has no Brood-level safepoint to
+   capture, so it can't be migrated mid-call (the dirty-scheduler analogue; handled
+   by the M4 blocking-IO offload pool, `handoff-blocking-io.md`).
+
+**Consequences.** Spawn distribution and fresh-backlog stealing are now BEAM-like,
+and placement is arguably more proactive than BEAM's spawn-on-current-scheduler
+default; live-process migration/rebalancing is the one BEAM feature Brood
+structurally lacks, and ADR-100 records both *why* (continuation on the native
+stack) and the *one* principled way to get it (the stepping-VM call-stack
+reification), so the next person doesn't re-derive "just replace corosensei" and
+hit the §3.1a wall. Verified for the landed half: `tests/work_stealing.rs` (20/20
+release, 5/5 debug) and the KI-1 guard `tests/concurrency_race.rs` clean 13/13
+plain-release incl. `BROOD_GC_STRESS`; full suite green. The full-migration design,
+staging, and its added acceptance bar live in `concurrency-v2.md` §7.
