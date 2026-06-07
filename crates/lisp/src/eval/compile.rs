@@ -1548,12 +1548,31 @@ fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
 }
 
 /// Rewrite every movable handle embedded in a live compiled arm — its body plus each
-/// real `&optional` default form. Called by `runtime_collect` per registered live arm.
+/// real `&optional` default form, and the bytecode `chunk` if present (its `Const`s
+/// and `MakeClosure` `fn_rest` are separate handle copies that must move too). Called
+/// by `runtime_collect` per registered live arm.
 pub fn rewrite_arm_handles(arm: &CompiledArm, f: &mut dyn FnMut(Value) -> Value) {
     rewrite_node(&arm.body, f);
     for d in arm.optional_defaults.iter() {
         if let Some(n) = d {
             rewrite_node(n, f);
+        }
+    }
+    if let Some(chunk) = &arm.chunk {
+        rewrite_chunk(chunk, f);
+    }
+}
+
+/// Rewrite every movable handle a [`Chunk`] embeds — a `Const` literal and a
+/// `MakeClosure`'s `fn_rest` — in place through `f`, the bytecode counterpart of
+/// [`rewrite_node`]. (Capture-source values are computed at run time from
+/// `Local`/`Global` reads, not embedded, so they carry no handle.)
+fn rewrite_chunk(chunk: &Chunk, f: &mut dyn FnMut(Value) -> Value) {
+    for inst in chunk.code.iter() {
+        match inst {
+            Inst::Const(cv) => cv.rewrite(f),
+            Inst::MakeClosure { fn_rest, .. } => fn_rest.rewrite(f),
+            _ => {}
         }
     }
 }
@@ -2500,6 +2519,13 @@ enum Inst {
     /// returns a `Step::SelfTail` so the trampoline re-enters this arm in place.
     /// Mirrors `Node::SelfCall`.
     SelfCall { argc: usize },
+    /// Build a closure (`(fn …)` evaluated inside a compiled body). The `names`'
+    /// capture values have been pushed (in order) by preceding leaf instructions;
+    /// this binds them into a fresh captured env, builds the closure from `fn_rest`,
+    /// and (for a direct `letrec` self-ref) late-binds `self_name` to it. Mirrors
+    /// `Node::MakeClosure` / its `exec_value` arm exactly. `fn_rest` is a movable
+    /// RUNTIME handle — rewritten in place by [`rewrite_chunk`].
+    MakeClosure { fn_rest: ConstVal, names: Box<[Symbol]>, self_name: Option<Symbol> },
 }
 
 /// A compiled-to-bytecode arm body: a flat instruction stream evaluated by
@@ -2523,11 +2549,10 @@ fn compile_chunk(body: &Node) -> Option<Chunk> {
 /// Returns `None` (aborting the whole chunk) on any unsupported node.
 fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
     match node {
-        // Stage 1 keeps chunks handle-free, so a runtime-handle const defers the
-        // whole arm — that sidesteps having to rewrite chunk handles in place under
-        // a RUNTIME compaction (a later stage adds `rewrite_chunk`).
-        Node::Const(ConstVal::Atom(v)) => code.push(Inst::Const(ConstVal::Atom(*v))),
-        Node::Const(ConstVal::Handle { .. }) => return None,
+        // A fresh `ConstVal` cloned from the node's (atoms inline; a movable RUNTIME
+        // handle is re-encoded). Chunk handles are rewritten in place under a RUNTIME
+        // compaction by `rewrite_chunk` (registered via the arm's `has_runtime_handles`).
+        Node::Const(cv) => code.push(Inst::Const(ConstVal::new(cv.load()))),
         Node::Local(i) => code.push(Inst::Local(*i)),
         Node::Global(s) => code.push(Inst::Global(*s)),
         Node::GlobalIc { sym, site } => code.push(Inst::GlobalIc { sym: *sym, site: *site }),
@@ -2611,8 +2636,22 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             }
             code.push(Inst::SelfCall { argc: args.len() });
         }
-        // Still outside the bytecode vocabulary (Stage 3) — defer the whole arm.
-        Node::MakeClosure { .. } => return None,
+        Node::MakeClosure { fn_rest, captures, self_name } => {
+            // Capture sources are leaf reads (an enclosing lexical → `Local`, or a
+            // global → `Global`), so emitting them is safepoint-free; their values
+            // land on the operand stack in `captures` order and `MakeClosure` binds
+            // them to the matching names. A fresh `ConstVal` re-encodes `fn_rest`
+            // (rewritten in place by `rewrite_chunk` under a compaction).
+            for (_, src) in captures.iter() {
+                emit_node(src, code)?;
+            }
+            let names: Box<[Symbol]> = captures.iter().map(|(name, _)| *name).collect();
+            code.push(Inst::MakeClosure {
+                fn_rest: ConstVal::new(fn_rest.load()),
+                names,
+                self_name: *self_name,
+            });
+        }
     }
     Some(())
 }
@@ -2880,6 +2919,34 @@ fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> Res
                     argv.push(heap.root_at(n - argc + k));
                 }
                 return Ok(Step::SelfTail { args: argv });
+            }
+            Inst::MakeClosure { fn_rest, names, self_name } => {
+                // Mirrors `exec_value`'s `Node::MakeClosure`. The capture values are on
+                // the operand stack (pushed by preceding leaf insts — safepoint-free,
+                // and alloc here never collects mid-pass), so building the env and the
+                // closure is collection-free; `env` stays valid until `make_closure`
+                // consumes it. With no captures *and* no self-name the closure is
+                // global-capturing; a self-name needs a frame to late-bind into.
+                let ncap = names.len();
+                let n = heap.roots_len();
+                let env = if ncap == 0 && self_name.is_none() {
+                    heap.global()
+                } else {
+                    let frame = heap.new_env(Some(heap.global()));
+                    for i in 0..ncap {
+                        let v = heap.root_at(n - ncap + i);
+                        heap.env_define(frame, names[i], v);
+                    }
+                    frame
+                };
+                heap.truncate_roots(n - ncap); // drop the capture values
+                let closure = crate::eval::make_closure(heap, None, fn_rest.load(), env)?;
+                // Direct `letrec` self-recursion: bind the binder name to the closure
+                // in its own captured env (the env↔closure cycle the tracing GC owns).
+                if let Some(name) = self_name {
+                    heap.env_define(env, *name, closure);
+                }
+                heap.push_root(closure);
             }
         }
     }
