@@ -89,10 +89,11 @@ pub fn set_force_bytecode(choice: Option<bool>) {
 
 /// Is the **bytecode stepping engine** enabled? A per-thread [`set_force_bytecode`]
 /// override wins; otherwise it follows `BROOD_BYTECODE` (truthy enables it),
-/// **defaulting OFF** while the engine is built incrementally (ADR-100). Only
-/// consulted inside [`vm_apply_inner`] (so it implies the VM is active); a
-/// `CompiledArm` runs its `chunk` instead of its `Node` body exactly when this is
-/// true and the chunk exists.
+/// **defaulting ON** (ADR-100 Stage 5 cutover): the bytecode engine beats the
+/// `Node` walker on every benchmark, so it's the default whenever the VM is active.
+/// `BROOD_BYTECODE=0` is the escape hatch back to the `Node`-walking VM (kept for at
+/// least one release, mirroring `BROOD_VM=0` for the tree-walker). Consulted from
+/// [`vm_apply`], which routes a chunked arm to `vm_run_bc` when this is true.
 pub fn bytecode_enabled() -> bool {
     if let Some(forced) = FORCE_BYTECODE.with(|c| c.get()) {
         return forced;
@@ -101,7 +102,7 @@ pub fn bytecode_enabled() -> bool {
     fn truthy(v: &str) -> bool {
         !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no")
     }
-    *ON.get_or_init(|| std::env::var("BROOD_BYTECODE").map(|v| truthy(&v)).unwrap_or(false))
+    *ON.get_or_init(|| std::env::var("BROOD_BYTECODE").map(|v| truthy(&v)).unwrap_or(true))
 }
 
 /// "This `Node::Call` has no call-site inline cache" — the callee isn't a free
