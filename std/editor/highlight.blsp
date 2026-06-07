@@ -10,7 +10,10 @@
 ;;    symbol after a `(` is a call/special-form), not by resolving what a name
 ;;    binds to. Cheap, robust on incomplete input, and written in Brood (ADR-006).
 ;;  - The faces are `display.blsp`-style maps (`{:fg :cyan}` …) so they feed
-;;    straight into a `[:print str face]` op for `term-emit`.
+;;    straight into a `[:print str face]` op for `term-emit`. They're registered as
+;;    `:syntax/*` faces in the shared registry (`std/editor/face.blsp`) and resolved
+;;    live per span, so an app restyles the whole highlighter by redefining one face
+;;    — see the faces section below.
 
 (defmodule editor/highlight
   "Lexical syntax highlighting and bracket / call-site analysis for Brood source,
@@ -31,18 +34,42 @@ as pure functions over a source string (ADR-052):
   - `(enclosing-call full pos)` — `[callee arg-index]` for the call enclosing the cursor.
   - `(symbol-prefix-at full pos)` / `(common-prefix strs)` — completion helpers.
 
-Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable.")
+Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
+  (:use editor/face))  ; syntax faces live in the :syntax/* face registry, resolved live
 
-;; ---- faces (display.blsp-style maps) ----------------------------------------
+;; ---- faces: the :syntax/* theme seam ----------------------------------------
+;; Syntax faces live in the shared face registry (`std/editor/face.blsp`) under
+;; `:syntax/*` names, resolved live (`(face …)`) where each span is built — so an
+;; app restyles the whole highlighter by redefining ONE face
+;; (`(face-set :syntax/keyword {:fg \"#cba6f7\"})`), the same late-bound seam the
+;; `:ui/*` faces and keymaps use. The DEFAULTS are the original palette keywords, so
+;; the terminal REPL / observer are unchanged and keyword colours still honour the
+;; user's terminal theme; only an app that opts in (the GUI editor) sees a richer
+;; palette. (`def-face` returns the name; the registrations run at module load.)
 
-(def hl-face-comment {:fg :dark-grey})
-(def hl-face-string {:fg :green})
-(def hl-face-number {:fg :yellow})
-(def hl-face-keyword {:fg :magenta})
-(def hl-face-special {:fg :blue :bold true})
-(def hl-face-function {:fg :cyan})
-(def hl-face-match {:reverse true})
-(def hl-face-error {:fg :red :bold true})
+(def-face :syntax/comment {:fg :dark-grey})
+(def-face :syntax/string {:fg :green})
+(def-face :syntax/number {:fg :yellow})
+(def-face :syntax/keyword {:fg :magenta})
+(def-face :syntax/special {:fg :blue :bold true})  ; special forms / core macros
+(def-face :syntax/function {:fg :cyan})            ; a call head
+(def-face :syntax/match {:reverse true})           ; the matched bracket pair (REPL)
+(def-face :syntax/error {:fg :red :bold true})     ; a lone unmatched bracket (REPL)
+
+;; Resolved snapshots of the defaults, kept under the original `hl-face-*` names for
+;; consumers that read a face directly rather than re-resolving each frame: the REPL
+;; line editor's bracket match/error (`std/lineedit.blsp`) and the highlighter's own
+;; tests. The live fontify path (`hl--spans`) instead calls `(face :syntax/…)` per
+;; span, so an app's `face-set :syntax/…` restyles the editor on its next frame while
+;; these snapshots (and so the default REPL look) stay put.
+(def hl-face-comment (face :syntax/comment))
+(def hl-face-string (face :syntax/string))
+(def hl-face-number (face :syntax/number))
+(def hl-face-keyword (face :syntax/keyword))
+(def hl-face-special (face :syntax/special))
+(def hl-face-function (face :syntax/function))
+(def hl-face-match (face :syntax/match))
+(def hl-face-error (face :syntax/error))
 
 ;; The names that highlight as a *keyword* (special forms + core macros). Read once
 ;; from the `(special-forms)` primitive — the canonical Rust `SPECIAL_FORMS`, shared
@@ -104,12 +131,14 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
 ;; regardless of position — so `(nil? x)` shows `nil` as a constant, not a call head.
 ;; (The native `scan-tokens` classifies those, and `:`-prefixed names, as `:keyword`.)
 
-;; The face a `:keyword` / `:number` / `:comment` / `:string` token paints in — the
-;; position-independent kinds. `:symbol` is resolved separately (head position decides
-;; special-form vs call vs plain), and `:open`/`:close` carry no colour.
-(def hl--kind->face
-  {:comment hl-face-comment :string hl-face-string :number hl-face-number
-   :keyword hl-face-keyword})
+;; The `:syntax/*` face NAME a `:keyword` / `:number` / `:comment` / `:string` token
+;; paints in — the position-independent kinds. `:symbol` is resolved separately (head
+;; position decides special-form vs call vs plain), and `:open`/`:close` carry no
+;; colour. The name is resolved to a face via `(face …)` at span time, so a live
+;; restyle of `:syntax/*` takes effect on the next frame.
+(def hl--kind->face-name
+  {:comment :syntax/comment :string :syntax/string :number :syntax/number
+   :keyword :syntax/keyword})
 
 (defn hl--spans (toks after acc)
   "Walk the `scan-tokens` stream into `[start end face]` colour spans, tracking head
@@ -123,14 +152,14 @@ else uncoloured. Accumulates in reverse."
       (cond
         (= kind :open) (hl--spans rest (= text "(") acc)   ; only `(` opens head position
         (= kind :close) (hl--spans rest false acc)
-        (= kind :comment) (hl--spans rest after (cons [s e hl-face-comment] acc))  ; keeps `after`
+        (= kind :comment) (hl--spans rest after (cons [s e (face :syntax/comment)] acc))  ; keeps `after`
         (= kind :symbol)
-          (let (face (cond (and after (special-form? text)) hl-face-special
-                           after hl-face-function
-                           :else nil))
-            (hl--spans rest false (if (nil? face) acc (cons [s e face] acc))))
-        :else (let (face (get hl--kind->face kind))  ; :string / :number / :keyword
-                (hl--spans rest false (if (nil? face) acc (cons [s e face] acc))))))))
+          (let (f (cond (and after (special-form? text)) (face :syntax/special)
+                        after (face :syntax/function)
+                        :else nil))
+            (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))
+        :else (let (f (face (get hl--kind->face-name kind)))  ; :string / :number / :keyword
+                (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
 
 (defn highlight-spans (src)
   "Lexically tokenize Brood `src` into a list of `[start end face]` colour spans
