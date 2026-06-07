@@ -4647,6 +4647,13 @@ impl Heap {
         self.live_vm_arms.truncate(n);
     }
 
+    /// Current depth of the live-arm registry — captured at the bytecode driver's
+    /// entry so a multi-frame error unwind can truncate every frame's registration
+    /// back in one call (`vm_run_bc`).
+    pub fn live_arm_len(&self) -> usize {
+        self.live_vm_arms.len()
+    }
+
     // ----- the tracing GC ------------------------------------------------------
     //
     // A generational, moving **copy collector** over the LOCAL heap only
