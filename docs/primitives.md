@@ -100,6 +100,7 @@ arg silently becoming `nil`.
 | | `source-location` | 1 | `[file line col]` of where `'name` was defined (`def`/`defn`/`defmacro`/`defdyn` site), or nil. Captured pre-expansion so macros' surface forms are located accurately (ADR-031) |
 | | `parse-source` | 1 | parse a `.blsp` source string into a span-carrying CST node (`Atom`/`Cst`); the formatter and LSP read structure + positions from this rather than re-reading source. ADR-025 |
 | | `parse-source-positioned` | 1 | parse a source string into a CST of **maps** — `{:kind :start :end}` (leaves add `:text`, containers/wrappers add `:kids`) with half-open **character** offsets; backs structural navigation (`std/sexp`) without re-deriving positions in Brood. ADR-045 |
+| | `tree-sitter-parse` | 2 | parse `source` with the tree-sitter grammar named by keyword `lang` (`:ruby`/`:elixir`) into the **same** positioned-CST map shape as `parse-source-positioned` (`:kind` a node-type keyword, `:named` false for anonymous tokens) — so `std/sexp` + the editor's `:fontify` run over a foreign tree unchanged. Feature `treesit`; errors otherwise. ROADMAP §C |
 | **Introspection** (editor tooling) | `doc` | 1 | a function/macro's docstring, or nil |
 | | `arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
 | | `global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |

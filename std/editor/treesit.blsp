@@ -1,0 +1,146 @@
+;; std/editor/treesit.blsp — generic services for tree-sitter language modes.
+;; (require 'editor/treesit).
+;;
+;; `tree-sitter-parse` (the Rust builtin, feature "treesit") yields a positioned
+;; CST in the SAME node shape Brood's own reader gives — `{:kind :start :end
+;; :named}` per node, `:text` on leaves, `:kids` on nodes with children, half-open
+;; CHARACTER offsets. This module is the language-agnostic policy over that shape:
+;;
+;;  - `fontify` — a `:fontify` service: walk the tree and emit `[start end face]`
+;;    colour spans, colouring a whole node (and not descending) when a per-language
+;;    kind→face table assigns it one — tree-sitter highlight semantics, so a
+;;    `(string)`/`(comment)` span covers its delimiters and content as one.
+;;  - `point-forward` / `-backward` / `-up` / `-down` / `-defun-start` — pure
+;;    `(text lang point) -> point` structural motions, the foreign-language
+;;    analogue of `std/tool/sexp`'s, navigating named nodes of the tree.
+;;
+;; Mechanism is the builtin; the per-language kind→face tables and keymaps are
+;; policy in the editor's modes (`src/modes.blsp`). A new tree-sitter language is a
+;; grammar crate (Brood `Cargo.toml`) + a face table + a layer — no code here.
+;; Framework tier, pure, zero kernel surface beyond the parse builtin (§C).
+
+(defmodule treesit
+  "Generic tree-sitter language services over `tree-sitter-parse`'s positioned
+CST (`{:kind :start :end :named :kids/:text}`): `(fontify text lang face-of)` →
+`[start end face]` spans, and pure structural motions `(text lang point) ->
+point` — `point-forward` / `point-backward` / `point-up` / `point-down` /
+`point-defun-start`. `face-of` is built with `(face-of-kinds {kind face-name})`.
+Per-language face tables + keymaps are policy in the editor. `(require
+'editor/treesit)`."
+  (:use editor/face))
+
+(require 'editor/face)
+
+;; ---- fontify ----------------------------------------------------------------
+
+(defn face-of-kinds (kind->face-name)
+  "A node→face function for `fontify` from a map of `{:node-kind :syntax/face-name}`:
+the node's `:kind` looked up in the map and resolved live with `(face …)`, or nil
+when the kind isn't coloured (so `fontify` descends into its children)."
+  (fn (node)
+    (let (name (get kind->face-name (get node :kind)))
+      (if (nil? name) nil (face name)))))
+
+(defn ts--alpha? (c)
+  "True if the 1-char string `c` is a letter. Brood's `<`/`<=` are numeric-only, so
+test by case-folding: a letter changes between upper- and lower-case, punctuation
+and digits don't."
+  (not (= (string-upcase c) (string-downcase c))))
+
+(defn anonymous-keyword? (node)
+  "True for an anonymous token whose text is alphabetic — a language keyword
+(`def`/`end`/`do`/`if`/`fn`/`class`…). The cheap, cross-language way to colour
+keywords without enumerating every grammar's keyword set: keywords surface as
+anonymous tokens, operators/punctuation as anonymous non-alphabetic ones."
+  (and (not (get node :named))
+    (let (t (get node :text))
+      (and (not (nil? t)) (> (string-length t) 0) (ts--alpha? (char-at t 0))))))
+
+(defn face-of-syntax (kind->face-name)
+  "Like `face-of-kinds`, plus the cross-language rule that an anonymous alphabetic
+token (`anonymous-keyword?`) is a `:syntax/keyword`. Most language tables need
+only name the handful of *named* nodes they colour (string/comment/number/…) and
+get keywords for free. The face is resolved live, so a `(face-set :syntax/…)`
+restyles the editor on its next frame."
+  (fn (node)
+    (let (name (or (get kind->face-name (get node :kind))
+                 (if (anonymous-keyword? node) :syntax/keyword nil)))
+      (if (nil? name) nil (face name)))))
+
+(defn ts--spans (node face-of)
+  "Depth-first `[start end face]` spans (ascending — children are in source order).
+When `face-of` gives a node a face, colour the WHOLE node and stop; else descend."
+  (let (fc (face-of node))
+    (if (not (nil? fc))
+      (list [(get node :start) (get node :end) fc])
+      (apply concat (map (fn (c) (ts--spans c face-of)) (or (get node :kids) []))))))
+
+(defn fontify (text lang face-of)
+  "A `:fontify` service: `[start end face]` colour spans for `text` parsed as the
+tree-sitter language keyword `lang` (`:ruby`/`:elixir`), with `face-of` a node→face
+function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
+`(text)` service closing over its `lang` and table."
+  (ts--spans (tree-sitter-parse text lang) face-of))
+
+;; ---- structural navigation --------------------------------------------------
+;; The sexp module's `narrow` optimisation keys off column-0 brackets (a Lisp
+;; convention), so these motions read the whole-buffer tree directly instead — a
+;; motion fires once per chord, and tree-sitter parsing is C-fast. A container is
+;; any node with `:kids`; a "form" is a NAMED node (anonymous tokens — keywords,
+;; punctuation — are skipped, like sexp skips whitespace/comments).
+
+(defn ts--container? (node) (not (nil? (get node :kids))))
+
+(defn ts--named-kids (node)
+  "The named children of `node` (grammar nodes, not anonymous tokens)."
+  (filter (fn (k) (get k :named)) (or (get node :kids) [])))
+
+(defn ts--enclosing (node point)
+  "The deepest container node strictly containing `point`; `node` if none."
+  (let (hit (first (filter (fn (k)
+                             (and (ts--container? k)
+                               (< (get k :start) point)
+                               (< point (get k :end))))
+                     (or (get node :kids) []))))
+    (if (nil? hit) node (ts--enclosing hit point))))
+
+(defn ts--root? (node root)
+  (and (= (get node :start) (get root :start)) (= (get node :end) (get root :end))))
+
+(defn point-forward (text lang point)
+  "End of the next named node at or after `point` within the enclosing node;
+unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
+  (let (root (tree-sitter-parse text lang)
+        enc (ts--enclosing root point)
+        nxt (first (filter (fn (f) (>= (get f :start) point)) (ts--named-kids enc))))
+    (if (nil? nxt) point (get nxt :end))))
+
+(defn point-backward (text lang point)
+  "Start of the previous named node ending at or before `point` (`backward-sexp`)."
+  (let (root (tree-sitter-parse text lang)
+        enc (ts--enclosing root point)
+        prev (last (filter (fn (f) (<= (get f :end) point)) (ts--named-kids enc))))
+    (if (nil? prev) point (get prev :start))))
+
+(defn point-up (text lang point)
+  "Start of the enclosing node (`backward-up-list`); unchanged at top level."
+  (let (root (tree-sitter-parse text lang)
+        enc (ts--enclosing root point))
+    (if (ts--root? enc root) point (get enc :start))))
+
+(defn point-down (text lang point)
+  "Start of the next child container at or after `point` (`down-list`); unchanged
+if none."
+  (let (root (tree-sitter-parse text lang)
+        enc (ts--enclosing root point)
+        lst (first (filter (fn (f) (and (ts--container? f) (>= (get f :start) point)))
+                     (ts--named-kids enc))))
+    (if (nil? lst) point (get lst :start))))
+
+(defn point-defun-start (text lang point)
+  "Start of the top-level node containing `point` (`beginning-of-defun`);
+unchanged if none."
+  (let (root (tree-sitter-parse text lang)
+        top (first (filter (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
+                     (ts--named-kids root))))
+    (if (nil? top) point (get top :start))))

@@ -6231,3 +6231,62 @@ hand-rolled assembler drops AArch64 and costs more to maintain.
 forms (optional Layer 2 inline stubs; Layer 3 trampoline files) plus the Cranelift
 feature gate. No hand-written machine code per opcode. Default builds are
 unaffected. The `Value`-repr decision is flagged as a prerequisite blocker.
+
+## ADR-103 — Foreign-language parsing: one `tree-sitter-parse` builtin into the existing node shape, not an opaque tree resource
+
+**Status:** accepted (2026-06-08). Landed in `crates/lisp/src/treesit.rs` (the
+`tree-sitter-parse` builtin, feature `treesit`) + `std/editor/treesit.blsp` (the
+generic fontify/navigation policy); tests in `tests/tree_sitter_test.blsp` and
+`tests/treesit_module_test.blsp`. Drives ROADMAP §C (multi-language editor modes:
+ruby/elixir). Builds on ADR-045 (the rope + `parse-source-positioned` positioned
+CST) and the `std/tool/sexp` node abstraction.
+
+**Context.** The editor (brood-edit) is policy over Brood: brood-mode gets
+structural navigation from `std/tool/sexp` and syntax colouring from
+`std/editor/highlight`, both written against the positioned-CST node shape
+`parse-source-positioned` yields — `{:kind :start :end}` per node, `:text` on
+leaves, `:kids` on containers, half-open **character** offsets. `sexp`'s own
+docstring anticipated a second backend ("a different parser backend, e.g.
+tree-sitter, can later produce the same shape and reuse these commands
+unchanged"). To support Ruby/Elixir/… the editor needs a parser for languages
+Brood's reader can't read. The roadmap sketched this as "an opaque tree/node
+resource: parse, node-at, parent/children/siblings, type, range, incremental
+reparse" — i.e. a new `Value` variant wrapping a live `tree_sitter::Tree`, with a
+family of accessor builtins, mirroring `Value::Rope`/`Value::Socket`.
+
+**Decision.** Don't add a resource. Add **one** builtin, `(tree-sitter-parse
+source lang)`, that parses with tree-sitter and **eagerly projects the tree into
+the same node maps `parse-source-positioned` already produces** — plain immutable
+Brood data, no new `Value` variant, no GC/equality/printer/message surgery, no
+accessor-builtin family. `:kind` is a keyword of the tree-sitter node type,
+`:named` distinguishes grammar nodes from anonymous tokens (keywords/punctuation),
+byte spans are projected to char offsets exactly as the Brood CST is. Everything
+above it is Brood policy: `std/editor/treesit.blsp` walks that data for fontify
+(colour a whole node when a per-language kind→face table assigns it one, else
+descend — tree-sitter highlight semantics) and for structural motion (a container
+is any node with `:kids`, a form is a `:named` node). The mechanism in Rust is
+*parse + project*; which kinds get which face and which keys navigate are tables
+and keymaps in the editor's modes. tree-sitter + the Ruby/Elixir grammars sit
+behind a `treesit` feature (heavier native C build), but in `default` and the lean
+`make install` (a modern editor needs it), unlike the opt-in windowing stack.
+
+**Why not the opaque resource.** A `Value::TreeSitterTree` would touch every site
+that matches on `Value` (heap slab + region routing, GC marking, equality,
+hashing, printer, message-send rejection, the type lattice) for a feature whose
+entire consumer set wants the *positioned node shape* anyway — the same shape we
+already compute for Brood. The eager projection reuses `std/tool/sexp`'s decade of
+node-shape design for free and keeps the kernel surface at zero new variants. The
+cost is no **incremental reparse** and re-projecting the whole (windowed) slice per
+fontify; tree-sitter parsing is C-fast and the editor already re-parses Brood per
+frame, so this is well within budget. Incremental reparse / lazy node access
+remain available as a later optimisation behind the *same* Brood-facing data
+shape if a large-file profile ever demands it — the policy above wouldn't change.
+
+**Consequences.** A new language is a grammar crate in `crates/lisp/Cargo.toml` +
+one arm in `treesit.rs::language_for` + a face table and a layer in the editor —
+no kernel change. Keyword colouring is cross-language (an anonymous alphabetic
+token is a `:syntax/keyword`), so per-language tables name only the handful of
+*named* nodes they colour. The `treesit` feature being in `default` means dev
+builds and the in-language suite compile the grammars (a one-time build-time
+cost); the lean install adds `--features brood/treesit` explicitly since it builds
+`--no-default-features`.
