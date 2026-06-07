@@ -42,6 +42,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const any: Ty = Ty::ANY;
     const int: Ty = Ty::of(Tag::Int);
     const num: Ty = Ty::NUMBER;
+    const float: Ty = Ty::of(Tag::Float);
     const string: Ty = Ty::of(Tag::Str);
     const rope: Ty = Ty::of(Tag::Rope);
     const socket_ty: Ty = Ty::of(Tag::Socket);
@@ -521,6 +522,36 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], string),
         lower,
     );
+    // Codepoint ↔ char and byte-level UTF-8 access — the primitives encoding
+    // modules need that can't be written in Brood over `substring` alone.
+    def(
+        heap,
+        "char->int",
+        Arity::exact(1),
+        Sig::new(vec![string], int),
+        char_to_int,
+    );
+    def(
+        heap,
+        "int->char",
+        Arity::exact(1),
+        Sig::new(vec![int], string),
+        int_to_char,
+    );
+    def(
+        heap,
+        "string->utf8-bytes",
+        Arity::exact(1),
+        Sig::new(vec![string], vec_ty),
+        string_to_utf8_bytes,
+    );
+    def(
+        heap,
+        "utf8-bytes->string",
+        Arity::exact(1),
+        Sig::new(vec![vec_ty], string),
+        utf8_bytes_to_string,
+    );
     // string->number returns int *or* float *or* nil (the parse-failed case).
     def(
         heap,
@@ -539,6 +570,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![num, int], string),
         to_fixed,
     );
+
+    // transcendental math — hardware f64 ops that can't be approximated in Brood
+    // over `floor`/`rem`/`*` at the precision level scripts actually need.
+    def(heap, "sin",   Arity::exact(1), Sig::new(vec![num], float), math_sin);
+    def(heap, "cos",   Arity::exact(1), Sig::new(vec![num], float), math_cos);
+    def(heap, "tan",   Arity::exact(1), Sig::new(vec![num], float), math_tan);
+    def(heap, "asin",  Arity::exact(1), Sig::new(vec![num], float), math_asin);
+    def(heap, "acos",  Arity::exact(1), Sig::new(vec![num], float), math_acos);
+    def(heap, "atan",  Arity::exact(1), Sig::new(vec![num], float), math_atan);
+    def(heap, "atan2", Arity::exact(2), Sig::new(vec![num, num], float), math_atan2);
+    def(heap, "exp",   Arity::exact(1), Sig::new(vec![num], float), math_exp);
+    def(heap, "ln",    Arity::exact(1), Sig::new(vec![num], float), math_ln);
+    def(heap, "log2",  Arity::exact(1), Sig::new(vec![num], float), math_log2);
+    def(heap, "log10", Arity::exact(1), Sig::new(vec![num], float), math_log10);
 
     // rope — the editor buffer's text storage (ADR-045). The irreducible text
     // mechanism: a `ropey::Rope` gives O(log n) edits + char/line indexing that
@@ -1782,8 +1827,23 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("string-span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string-length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string-span."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),
     ("lower", &["s"], "s lower-cased (Unicode-aware)."),
+    ("char->int", &["s"], "Unicode codepoint of the first character of string s (identical to the byte value for ASCII)."),
+    ("int->char", &["n"], "A 1-char string for Unicode codepoint n. Errors on an invalid codepoint."),
+    ("string->utf8-bytes", &["s"], "The UTF-8 encoding of s as a vector of byte integers (0–255)."),
+    ("utf8-bytes->string", &["bytes"], "Decode a vector of UTF-8 byte integers (0–255) into a string. Errors on invalid UTF-8."),
     ("to-fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
     ("string->number", &["s"], "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike read-string). The inverse of number->string."),
+    ("sin",   &["x"], "The sine of x (radians). Returns a float."),
+    ("cos",   &["x"], "The cosine of x (radians). Returns a float."),
+    ("tan",   &["x"], "The tangent of x (radians). Returns a float."),
+    ("asin",  &["x"], "The arcsine of x in radians. x must be in [-1, 1]; raises otherwise."),
+    ("acos",  &["x"], "The arccosine of x in radians. x must be in [-1, 1]; raises otherwise."),
+    ("atan",  &["x"], "The arctangent of x in radians (result in [-π/2, π/2])."),
+    ("atan2", &["y", "x"], "The angle in radians of the vector (x, y) from the positive x-axis, in (-π, π]. Handles x=0."),
+    ("exp",   &["x"], "e raised to the power x. Returns a float."),
+    ("ln",    &["x"], "The natural logarithm of x. x must be positive; raises otherwise."),
+    ("log2",  &["x"], "The base-2 logarithm of x. x must be positive; raises otherwise."),
+    ("log10", &["x"], "The base-10 logarithm of x. x must be positive; raises otherwise."),
     ("string->rope", &["s"], "A rope (editor buffer text) holding the characters of string s."),
     ("rope->string", &["r"], "The full text of rope r as a string."),
     ("rope-length", &["r"], "The number of characters in rope r."),
@@ -3744,6 +3804,12 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // Date and time utilities (UTC): epoch↔datetime conversion, ISO 8601
     // format/parse, arithmetic, calendar predicates. Pure Brood over `now`.
     ("datetime", include_str!("../../../std/datetime.blsp")),
+    // Hex and Base64 encoding/decoding. Pure Brood over `char->int` /
+    // `string->utf8-bytes` / `utf8-bytes->string`. Opt-in, never in the prelude.
+    ("encoding", include_str!("../../../std/encoding.blsp")),
+    // Descriptive statistics over numeric sequences: mean, median, stddev,
+    // variance, percentile, mode, frequencies. Pure Brood over sort/fold/sqrt.
+    ("stats", include_str!("../../../std/stats.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("editor/buffer", include_str!("../../../std/editor/buffer.blsp")),
@@ -4451,6 +4517,128 @@ fn upper(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn lower(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "lower", arg(args, 0))?;
     Ok(heap.alloc_string(&s.to_lowercase()))
+}
+
+fn char_to_int(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "char->int", arg(args, 0))?;
+    match s.chars().next() {
+        Some(c) => Ok(Value::Int(c as i64)),
+        None => Err(LispError::runtime("char->int: empty string")),
+    }
+}
+
+fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "int->char", arg(args, 0))?;
+    let c = char::from_u32(n as u32)
+        .ok_or_else(|| LispError::runtime(format!("int->char: {} is not a valid Unicode codepoint", n)))?;
+    let mut buf = [0u8; 4];
+    Ok(heap.alloc_string(c.encode_utf8(&mut buf)))
+}
+
+fn string_to_utf8_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "string->utf8-bytes", arg(args, 0))?;
+    let items: Vec<Value> = s.as_bytes().iter().map(|&b| Value::Int(b as i64)).collect();
+    Ok(heap.alloc_vector(items))
+}
+
+fn utf8_bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // Accepts a vector *or* a proper list of byte integers (0–255).
+    let v = arg(args, 0);
+    let items: Vec<Value> = match v {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil => vec![],
+        Value::Pair(_) => {
+            let mut out = Vec::new();
+            let mut cur = v;
+            loop {
+                match cur {
+                    Value::Pair(id) => {
+                        let (head, tail) = heap.pair(id);
+                        out.push(head);
+                        cur = tail;
+                    }
+                    Value::Nil => break,
+                    other => return Err(LispError::wrong_type(
+                        heap, "utf8-bytes->string", "proper list", other,
+                    )),
+                }
+            }
+            out
+        }
+        other => return Err(LispError::wrong_type(heap, "utf8-bytes->string", "vector or list", other)),
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for (i, val) in items.iter().enumerate() {
+        match val {
+            Value::Int(n) if *n >= 0 && *n <= 255 => bytes.push(*n as u8),
+            Value::Int(n) => return Err(LispError::runtime(format!(
+                "utf8-bytes->string: byte at index {} is out of range: {}", i, n
+            ))),
+            other => return Err(LispError::wrong_type(heap, "utf8-bytes->string", "int", *other)),
+        }
+    }
+    match String::from_utf8(bytes) {
+        Ok(s) => Ok(heap.alloc_string(&s)),
+        Err(e) => Err(LispError::runtime(format!("utf8-bytes->string: invalid UTF-8: {}", e))),
+    }
+}
+
+// ---------- transcendental math ----------
+
+macro_rules! math1_unrestricted {
+    ($name:ident, $brood:literal, $method:ident) => {
+        fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+            let x = expect_number(heap, $brood, arg(args, 0))?;
+            Ok(Value::Float(x.$method()))
+        }
+    };
+}
+
+macro_rules! math1_bounded {
+    ($name:ident, $brood:literal, $method:ident) => {
+        fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+            let x = expect_number(heap, $brood, arg(args, 0))?;
+            if x < -1.0 || x > 1.0 {
+                return Err(LispError::runtime(format!(
+                    "{}: argument {} is out of domain [-1, 1]",
+                    $brood, x
+                )));
+            }
+            Ok(Value::Float(x.$method()))
+        }
+    };
+}
+
+macro_rules! math1_positive {
+    ($name:ident, $brood:literal, $method:ident) => {
+        fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+            let x = expect_number(heap, $brood, arg(args, 0))?;
+            if x <= 0.0 {
+                return Err(LispError::runtime(format!(
+                    "{}: argument {} must be positive",
+                    $brood, x
+                )));
+            }
+            Ok(Value::Float(x.$method()))
+        }
+    };
+}
+
+math1_unrestricted!(math_sin,  "sin", sin);
+math1_unrestricted!(math_cos,  "cos", cos);
+math1_unrestricted!(math_tan,  "tan", tan);
+math1_unrestricted!(math_atan, "atan", atan);
+math1_unrestricted!(math_exp,  "exp", exp);
+math1_bounded!(math_asin, "asin", asin);
+math1_bounded!(math_acos, "acos", acos);
+math1_positive!(math_ln,    "ln",    ln);
+math1_positive!(math_log2,  "log2",  log2);
+math1_positive!(math_log10, "log10", log10);
+
+fn math_atan2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let y = expect_number(heap, "atan2", arg(args, 0))?;
+    let x = expect_number(heap, "atan2", arg(args, 1))?;
+    Ok(Value::Float(y.atan2(x)))
 }
 
 // ---------- rope (editor buffer text — ADR-045) ----------

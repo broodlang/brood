@@ -1,0 +1,296 @@
+(defmodule datetime
+  (:doc "Date and time utilities (UTC). No timezone support.
+
+Datetimes, dates, and times are plain maps:
+  datetime  {:year Y :month M :day D :hour H :minute Min :second S :ms Ms}
+  date      {:year Y :month M :day D}
+  time-of-day  {:hour H :minute Min :second S :ms Ms}
+
+All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z)."))
+
+;; ---- internal helpers -------------------------------------------------------
+
+(defn dt--fdiv (a b)
+  ;; Integer division toward negative infinity (floor division).
+  (let (q (quot a b) r (rem a b))
+    (if (< r 0) (- q 1) q)))
+
+(defn dt--fmod (a b)
+  (- a (* b (dt--fdiv a b))))
+
+(defn dt--zero-pad (n width)
+  ;; Render n as a decimal string of at least `width` digits. Handles negative n.
+  (if (< n 0)
+    (str "-" (dt--zero-pad (- n) (- width 1)))
+    (let (s   (number->string n)
+          pad (- width (string-length s)))
+      (if (> pad 0) (str (string-repeat "0" pad) s) s))))
+
+;; ---- Gregorian <-> days-since-Unix-epoch ------------------------------------
+;; Howard Hinnant's civil_from_days / days_from_civil algorithms.
+;; Reference: https://howardhinnant.github.io/date_algorithms.html
+
+(defn dt--days->ymd (z)
+  ;; Days since 1970-01-01 → {:year :month :day}
+  (let (z   (+ z 719468)
+        era (dt--fdiv z 146097)
+        doe (- z (* era 146097))
+        yoe (dt--fdiv
+               (+ (- doe (dt--fdiv doe 1460))
+                  (- (dt--fdiv doe 36524) (dt--fdiv doe 146096)))
+               365)
+        y   (+ yoe (* era 400))
+        doy (- doe (+ (- (* 365 yoe) (dt--fdiv yoe 100)) (dt--fdiv yoe 4)))
+        mp  (dt--fdiv (+ (* 5 doy) 2) 153)
+        d   (+ (- doy (dt--fdiv (+ (* 153 mp) 2) 5)) 1)
+        m   (if (< mp 10) (+ mp 3) (- mp 9))
+        y   (if (<= m 2) (+ y 1) y))
+    {:year y :month m :day d}))
+
+(defn dt--ymd->days (year month day)
+  ;; Date → days since 1970-01-01
+  (let (y   (if (<= month 2) (- year 1) year)
+        era (dt--fdiv y 400)
+        yoe (- y (* era 400))
+        m+  (if (> month 2) (- month 3) (+ month 9))
+        doy (+ (dt--fdiv (+ (* 153 m+) 2) 5) (- day 1))
+        doe (+ (* yoe 365)
+               (- (dt--fdiv yoe 4) (dt--fdiv yoe 100))
+               doy))
+    (- (+ (* era 146097) doe) 719468)))
+
+;; ---- constructors -----------------------------------------------------------
+
+(defn datetime (year month day hour minute second ms)
+  "A datetime map {:year :month :day :hour :minute :second :ms}."
+  {:year year :month month :day day
+   :hour hour :minute minute :second second :ms ms})
+
+(defn date (year month day)
+  "A date map {:year :month :day}."
+  {:year year :month month :day day})
+
+(defn time-of-day (hour minute second ms)
+  "A time-of-day map {:hour :minute :second :ms}."
+  {:hour hour :minute minute :second second :ms ms})
+
+;; ---- epoch conversion -------------------------------------------------------
+
+(defn epoch-ms->dt (ms)
+  "Convert Unix epoch milliseconds to a UTC datetime map."
+  (let (total-s (dt--fdiv ms 1000)
+        ms-part (- ms (* total-s 1000))
+        days    (dt--fdiv total-s 86400)
+        time-s  (- total-s (* days 86400))
+        hour    (dt--fdiv time-s 3600)
+        minute  (dt--fdiv (rem time-s 3600) 60)
+        second  (rem time-s 60)
+        ymd     (dt--days->ymd days))
+    {:year   (get ymd :year)
+     :month  (get ymd :month)
+     :day    (get ymd :day)
+     :hour   hour
+     :minute minute
+     :second second
+     :ms     ms-part}))
+
+(defn dt->epoch-ms (dt)
+  "Convert a UTC datetime (or date) map to Unix epoch milliseconds."
+  (let (days   (dt--ymd->days (get dt :year) (get dt :month) (get dt :day))
+        time-s (+ (* (get dt :hour 0) 3600)
+                  (* (get dt :minute 0) 60)
+                  (get dt :second 0))
+        ms-val (get dt :ms 0))
+    (+ (* (+ (* days 86400) time-s) 1000) ms-val)))
+
+;; ---- current time -----------------------------------------------------------
+
+(defn utc-now ()
+  "The current UTC datetime."
+  (epoch-ms->dt (now)))
+
+(defn today ()
+  "The current UTC date {:year :month :day}."
+  (let (dt (utc-now))
+    {:year (get dt :year) :month (get dt :month) :day (get dt :day)}))
+
+;; ---- accessors --------------------------------------------------------------
+
+(defn dt-year   (dt) "The :year field."              (get dt :year))
+(defn dt-month  (dt) "The :month field (1–12)."      (get dt :month))
+(defn dt-day    (dt) "The :day field (1–31)."        (get dt :day))
+(defn dt-hour   (dt) "The :hour field (0–23)."       (get dt :hour 0))
+(defn dt-minute (dt) "The :minute field (0–59)."     (get dt :minute 0))
+(defn dt-second (dt) "The :second field (0–59)."     (get dt :second 0))
+(defn dt-ms     (dt) "The :ms field (0–999)."        (get dt :ms 0))
+
+;; ---- decomposition ----------------------------------------------------------
+
+(defn dt->date (dt)
+  "Extract the date portion of a datetime."
+  {:year (get dt :year) :month (get dt :month) :day (get dt :day)})
+
+(defn dt->time (dt)
+  "Extract the time-of-day portion of a datetime."
+  {:hour   (get dt :hour 0)
+   :minute (get dt :minute 0)
+   :second (get dt :second 0)
+   :ms     (get dt :ms 0)})
+
+(defn date+time (d t)
+  "Combine a date map and a time-of-day map into a datetime."
+  {:year   (get d :year)
+   :month  (get d :month)
+   :day    (get d :day)
+   :hour   (get t :hour 0)
+   :minute (get t :minute 0)
+   :second (get t :second 0)
+   :ms     (get t :ms 0)})
+
+;; ---- formatting -------------------------------------------------------------
+
+(defn date->iso8601 (d)
+  "Format as \"YYYY-MM-DD\"."
+  (str (dt--zero-pad (get d :year) 4)
+       "-" (dt--zero-pad (get d :month) 2)
+       "-" (dt--zero-pad (get d :day) 2)))
+
+(defn time->iso8601 (t)
+  "Format as \"HH:MM:SS.mmm\"."
+  (str (dt--zero-pad (get t :hour 0) 2)
+       ":" (dt--zero-pad (get t :minute 0) 2)
+       ":" (dt--zero-pad (get t :second 0) 2)
+       "." (dt--zero-pad (get t :ms 0) 3)))
+
+(defn dt->iso8601 (dt)
+  "Format as \"YYYY-MM-DDTHH:MM:SS.mmmZ\" (UTC)."
+  (str (date->iso8601 dt) "T" (time->iso8601 dt) "Z"))
+
+(defn dt--fmt-code (dt code)
+  (cond
+    (= code "Y") (dt--zero-pad (dt-year dt) 4)
+    (= code "m") (dt--zero-pad (dt-month dt) 2)
+    (= code "d") (dt--zero-pad (dt-day dt) 2)
+    (= code "H") (dt--zero-pad (dt-hour dt) 2)
+    (= code "M") (dt--zero-pad (dt-minute dt) 2)
+    (= code "S") (dt--zero-pad (dt-second dt) 2)
+    (= code "f") (dt--zero-pad (dt-ms dt) 3)
+    (= code "%") "%"
+    else (str "%" code)))
+
+(defn dt--fmt-loop (dt fmt i n acc)
+  (if (>= i n)
+    acc
+    (let (c (char-at fmt i))
+      (if (and (= c "%") (< (+ i 1) n))
+        (dt--fmt-loop dt fmt (+ i 2) n
+          (str acc (dt--fmt-code dt (char-at fmt (+ i 1)))))
+        (dt--fmt-loop dt fmt (+ i 1) n (str acc c))))))
+
+(defn dt-format (dt fmt)
+  "Format `dt` with %-codes: %Y year, %m month (01-12), %d day (01-31),
+%H hour (00-23), %M minute (00-59), %S second (00-59), %f ms (000-999), %% literal %."
+  (dt--fmt-loop dt fmt 0 (string-length fmt) ""))
+
+;; ---- parsing ----------------------------------------------------------------
+
+(defn dt--parse-int (s)
+  (let (n (string->number s))
+    (if (int? n) n nil)))
+
+(defn dt--frac->ms (frac)
+  ;; Right-pad the fractional-second digits to 3 and parse as milliseconds.
+  ;; "" → 0, "5" → 500, "05" → 50, "005" → 5, "123" → 123.
+  (let (padded (str frac "000"))
+    (or (dt--parse-int
+          (str (char-at padded 0) (char-at padded 1) (char-at padded 2)))
+        0)))
+
+(defn dt--parse-time-str (s)
+  ;; Parse "HH:MM:SS" or "HH:MM:SS.mmm" → time-of-day map, or nil.
+  (let (dot-parts (string-split s ".")
+        hms-str   (first dot-parts)
+        frac-str  (if (> (count dot-parts) 1) (nth dot-parts 1) "")
+        ms-val    (dt--frac->ms frac-str)
+        parts     (string-split hms-str ":"))
+    (when (= (count parts) 3)
+      (let (h  (dt--parse-int (nth parts 0))
+            mn (dt--parse-int (nth parts 1))
+            sc (dt--parse-int (nth parts 2)))
+        (when (and h mn sc)
+          (time-of-day h mn sc ms-val))))))
+
+(defn parse-date (s)
+  "Parse an ISO 8601 date string \"YYYY-MM-DD\" → date map, or nil on failure."
+  (let (parts (string-split s "-"))
+    (when (= (count parts) 3)
+      (let (y (dt--parse-int (nth parts 0))
+            m (dt--parse-int (nth parts 1))
+            d (dt--parse-int (nth parts 2)))
+        (when (and y m d)
+          (date y m d))))))
+
+(defn parse-time (s)
+  "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → time map, or nil."
+  (dt--parse-time-str (first (string-split s "Z"))))
+
+(defn parse-iso8601 (s)
+  "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z]\" → datetime map, or nil."
+  (let (parts (string-split s "T"))
+    (when (= (count parts) 2)
+      (let (d (parse-date (nth parts 0))
+            t (parse-time (nth parts 1)))
+        (when (and d t)
+          (date+time d t))))))
+
+;; ---- duration helpers -------------------------------------------------------
+
+(defn seconds (n) "Milliseconds in `n` seconds."  (* n 1000))
+(defn minutes (n) "Milliseconds in `n` minutes."  (* n 60000))
+(defn hours   (n) "Milliseconds in `n` hours."    (* n 3600000))
+(defn days    (n) "Milliseconds in `n` days."     (* n 86400000))
+
+;; ---- arithmetic -------------------------------------------------------------
+
+(defn dt-add (dt ms)
+  "Add `ms` milliseconds to `dt`, returning a new datetime."
+  (epoch-ms->dt (+ (dt->epoch-ms dt) ms)))
+
+(defn dt-diff (dt1 dt2)
+  "Milliseconds from `dt2` to `dt1` (positive when `dt1` is later)."
+  (- (dt->epoch-ms dt1) (dt->epoch-ms dt2)))
+
+;; ---- comparison -------------------------------------------------------------
+
+(defn dt<  (a b) "True if `a` is before `b`."         (< (dt->epoch-ms a) (dt->epoch-ms b)))
+(defn dt<= (a b) "True if `a` is at or before `b`."   (<= (dt->epoch-ms a) (dt->epoch-ms b)))
+(defn dt>  (a b) "True if `a` is after `b`."          (> (dt->epoch-ms a) (dt->epoch-ms b)))
+(defn dt>= (a b) "True if `a` is at or after `b`."    (>= (dt->epoch-ms a) (dt->epoch-ms b)))
+(defn dt=  (a b) "True if `a` and `b` are the same instant." (= (dt->epoch-ms a) (dt->epoch-ms b)))
+
+;; ---- calendar ---------------------------------------------------------------
+
+(defn leap-year? (y)
+  "True if year `y` is a Gregorian leap year."
+  (and (= (rem y 4) 0)
+       (or (not= (rem y 100) 0)
+           (= (rem y 400) 0))))
+
+(defn days-in-month (y m)
+  "Number of days in month `m` (1–12) of year `y`."
+  (cond
+    (or (= m 1) (= m 3) (= m 5) (= m 7) (= m 8) (= m 10) (= m 12)) 31
+    (or (= m 4) (= m 6) (= m 9) (= m 11)) 30
+    (= m 2) (if (leap-year? y) 29 28)
+    else (error (str "days-in-month: invalid month " m))))
+
+(defn day-of-week (dt)
+  "Day of week as a keyword: :monday … :sunday. Based on UTC date."
+  (let (w (dt--fmod (+ (dt--ymd->days (get dt :year) (get dt :month) (get dt :day)) 3) 7))
+    (nth [:monday :tuesday :wednesday :thursday :friday :saturday :sunday] w)))
+
+(defn day-of-year (dt)
+  "Day within the year (1–366)."
+  (+ (- (dt--ymd->days (get dt :year) (get dt :month) (get dt :day))
+        (dt--ymd->days (get dt :year) 1 1))
+     1))

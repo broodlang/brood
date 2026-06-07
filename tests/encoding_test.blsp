@@ -1,0 +1,120 @@
+;; Tests for std/encoding.blsp — hex and base64.
+
+(defmodule encoding-test (:use test))
+(require 'encoding)
+
+;; ---- char->int / int->char / utf8 primitives --------------------------------
+
+(describe "char->int / int->char"
+  (test "ASCII roundtrip"
+    (assert= 65  (char->int "A"))
+    (assert= 97  (char->int "a"))
+    (assert= 48  (char->int "0"))
+    (assert= "A" (int->char 65))
+    (assert= "a" (int->char 97)))
+  (test "char->int uses first char only"
+    (assert= 72  (char->int "Hello")))
+  (test "non-ASCII codepoint"
+    (assert= 233  (char->int "é"))
+    (assert= "é"  (int->char 233))))
+
+(describe "string->utf8-bytes / utf8-bytes->string"
+  (test "ASCII roundtrip"
+    (let (bytes (string->utf8-bytes "ABC"))
+      (assert= [65 66 67] bytes)
+      (assert= "ABC" (utf8-bytes->string bytes))))
+  (test "multi-byte UTF-8 roundtrip"
+    (let (s "é")  ; U+00E9 = 0xC3 0xA9 in UTF-8
+      (assert= s (utf8-bytes->string (string->utf8-bytes s)))))
+  (test "empty string"
+    (assert= [] (string->utf8-bytes ""))
+    (assert= "" (utf8-bytes->string []))))
+
+;; ---- hex encode -------------------------------------------------------------
+
+(describe "hex-encode"
+  (test "empty string"
+    (assert= "" (encoding/hex-encode "")))
+  (test "simple ASCII"
+    (assert= "48656c6c6f" (encoding/hex-encode "Hello")))
+  (test "single null byte"
+    (assert= "00" (encoding/hex-encode (int->char 0))))
+  (test "all hex digits present"
+    (assert= "0a0b0c0d0e0f" (encoding/hex-encode
+      (str (int->char 10) (int->char 11) (int->char 12)
+           (int->char 13) (int->char 14) (int->char 15))))))
+
+(describe "hex-encode-upper"
+  (test "uppercase output"
+    (assert= "48656C6C6F" (encoding/hex-encode-upper "Hello"))))
+
+;; ---- hex decode -------------------------------------------------------------
+
+(describe "hex-decode"
+  (test "roundtrip"
+    (assert= "Hello" (encoding/hex-decode "48656c6c6f")))
+  (test "uppercase hex"
+    (assert= "Hello" (encoding/hex-decode "48656C6C6F")))
+  (test "mixed case"
+    (assert= "Hello" (encoding/hex-decode "48656c6C6f")))
+  (test "empty string"
+    (assert= "" (encoding/hex-decode "")))
+  (test "odd length returns nil"
+    (assert= nil (encoding/hex-decode "abc")))
+  (test "invalid chars return nil"
+    (assert= nil (encoding/hex-decode "gg")))
+  (test "encode-decode roundtrip"
+    (let (s "Hello, World!")
+      (assert= s (encoding/hex-decode (encoding/hex-encode s))))))
+
+;; ---- base64 encode ----------------------------------------------------------
+
+(describe "base64-encode"
+  (test "empty string"
+    (assert= "" (encoding/base64-encode "")))
+  (test "RFC 4648 test vectors"
+    (assert= "Zg==" (encoding/base64-encode "f"))
+    (assert= "Zm8=" (encoding/base64-encode "fo"))
+    (assert= "Zm9v" (encoding/base64-encode "foo"))
+    (assert= "Zm9vYg==" (encoding/base64-encode "foob"))
+    (assert= "Zm9vYmE=" (encoding/base64-encode "fooba"))
+    (assert= "Zm9vYmFy" (encoding/base64-encode "foobar")))
+  (test "Hello"
+    (assert= "SGVsbG8=" (encoding/base64-encode "Hello")))
+  (test "uses + and / for standard alphabet"
+    (let (s (int->char 251))  ; byte 0xFB → encodes to chars needing +/
+      (is (string? (encoding/base64-encode s))))))
+
+;; ---- base64 decode ----------------------------------------------------------
+
+(describe "base64-decode"
+  (test "RFC 4648 test vectors"
+    (assert= "f"      (encoding/base64-decode "Zg=="))
+    (assert= "fo"     (encoding/base64-decode "Zm8="))
+    (assert= "foo"    (encoding/base64-decode "Zm9v"))
+    (assert= "foob"   (encoding/base64-decode "Zm9vYg=="))
+    (assert= "fooba"  (encoding/base64-decode "Zm9vYmE="))
+    (assert= "foobar" (encoding/base64-decode "Zm9vYmFy")))
+  (test "empty string"
+    (assert= "" (encoding/base64-decode "")))
+  (test "invalid char returns nil"
+    (assert= nil (encoding/base64-decode "Zg=!")))
+  (test "encode-decode roundtrip"
+    (let (s "The quick brown fox jumps over the lazy dog")
+      (assert= s (encoding/base64-decode (encoding/base64-encode s))))))
+
+;; ---- base64 URL-safe --------------------------------------------------------
+
+(describe "base64-url-encode / base64-url-decode"
+  (test "uses - and _ instead of + and /"
+    (let (s (encoding/base64-url-encode "Hello"))
+      (refute (string-contains? s "+"))
+      (refute (string-contains? s "/"))))
+  (test "roundtrip"
+    (let (s "Hello, World! 🎉")
+      (assert= s (encoding/base64-url-decode (encoding/base64-url-encode s)))))
+  (test "standard and url-safe differ for bytes that map to position 63"
+    ;; bytes [0 0 63] → v4 = rem(63,64) = 63 → '/' in std, '_' in url-safe
+    (let (bytes (str (int->char 0) (int->char 0) (int->char 63)))
+      (assert= "AAA/" (encoding/base64-encode bytes))
+      (assert= "AAA_" (encoding/base64-url-encode bytes)))))

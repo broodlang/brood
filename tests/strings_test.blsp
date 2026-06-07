@@ -284,6 +284,31 @@
       (spawn (send me (string-repeat "-" 8)))
       (assert= (receive) "--------"))))
 
+(describe "string-capitalize"
+  (test "basic"
+    (assert= (string-capitalize "hello") "Hello"))
+  (test "already capitalized"
+    (assert= (string-capitalize "Hello World") "Hello world"))
+  (test "all caps lowered except first"
+    (assert= (string-capitalize "HELLO") "Hello"))
+  (test "empty string"
+    (assert= (string-capitalize "") ""))
+  (test "single char"
+    (assert= (string-capitalize "a") "A")))
+
+(describe "string-codepoints / string-from-codepoints"
+  (test "ASCII codepoints"
+    (assert= (string-codepoints "ABC") [65 66 67]))
+  (test "empty string"
+    (assert= (string-codepoints "") []))
+  (test "roundtrip via codepoints"
+    (let (s "Hello, 世界")
+      (assert= s (string-from-codepoints (string-codepoints s)))))
+  (test "string-from-codepoints from a vector"
+    (assert= "ABC" (string-from-codepoints [65 66 67])))
+  (test "non-ASCII codepoint"
+    (assert= (string-codepoints "é") [233])))
+
 (describe "string-span / string-span-until (native char-class scanners)"
   (test "string-span: end of the run of set-members from start"
     (assert= (string-span "   abc" 0 " \t\n") 3)   ; three spaces
