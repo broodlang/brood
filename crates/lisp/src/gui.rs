@@ -81,6 +81,20 @@ pub enum CursorShape {
     RowResize,
 }
 
+/// How the text cursor is drawn at its cell. `Block` (the default) overlays the
+/// whole cell — the terminal-style caret; `Bar` is a thin vertical line on the
+/// cell's left edge (a modern GUI insertion caret); `Underline` a thin rule along
+/// the cell bottom. A `[:cursor row col]` op with no style is `Block`, so existing
+/// callers are unchanged. The terminal frontend maps these to crossterm's steady
+/// cursor styles.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum CursorStyle {
+    #[default]
+    Block,
+    Bar,
+    Underline,
+}
+
 /// One render op, parsed out of a frame vector into plain (Send) data so it can
 /// cross to the GUI thread. Mirrors the protocol `term-draw` interprets.
 pub enum Op {
@@ -94,6 +108,7 @@ pub enum Op {
     Cursor {
         row: u16,
         col: u16,
+        style: CursorStyle,
     },
     /// A rectangular hot-zone (cells) that asks the frontend to show `shape` while
     /// the pointer is over it — e.g. a resize cursor on a window divider. The GUI
@@ -309,6 +324,9 @@ mod backend {
     // A terminal-ish dark theme for unstyled cells.
     const DEFAULT_BG: [u8; 3] = [0x10, 0x14, 0x18];
     const DEFAULT_FG: [u8; 3] = [0xcd, 0xd6, 0xe0];
+    // The solid colour of a thin (bar / underline) cursor caret — crisp near-white,
+    // since the cursor op carries no face to colour it from.
+    const CURSOR_FG: [u8; 3] = [0xf5, 0xf5, 0xf5];
 
     /// Messages the Brood side pushes to the single GUI thread via the event-loop
     /// proxy. Each carries the window id it targets: winit allows only one event
@@ -1849,8 +1867,15 @@ mod backend {
         }
     }
 
-    /// A block cursor: overlay 50% white on the cell so any glyph under it stays
-    /// faintly visible.
+    /// Draw the text cursor at a cell per its `style`:
+    ///   * `Block` — overlay 50% white on the whole cell, so the glyph under it
+    ///     stays faintly visible (the terminal-style caret);
+    ///   * `Bar` — a thin, solid vertical line on the cell's left edge (a modern
+    ///     GUI insertion caret) that doesn't obscure the glyph;
+    ///   * `Underline` — a thin solid rule along the cell bottom.
+    /// The bar/underline thickness scales with the cell so it stays proportional on
+    /// HiDPI (≥2 physical px). They paint solid `CURSOR_FG` rather than a blend, so a
+    /// 2px caret reads crisply.
     fn cursor_cell(
         buf: &mut [u32],
         fb_w: usize,
@@ -1859,11 +1884,25 @@ mod backend {
         top: usize,
         w: usize,
         h: usize,
+        style: super::CursorStyle,
     ) {
-        for y in top..(top + h).min(fb_h) {
-            let row = y * fb_w;
-            for x in left..(left + w).min(fb_w) {
-                buf[row + x] = blend(buf[row + x], [0xff, 0xff, 0xff], 128);
+        match style {
+            super::CursorStyle::Block => {
+                for y in top..(top + h).min(fb_h) {
+                    let row = y * fb_w;
+                    for x in left..(left + w).min(fb_w) {
+                        buf[row + x] = blend(buf[row + x], [0xff, 0xff, 0xff], 128);
+                    }
+                }
+            }
+            super::CursorStyle::Bar => {
+                let thickness = (w / 8).max(2);
+                fill_cell(buf, fb_w, fb_h, left, top, thickness, h, pack(CURSOR_FG));
+            }
+            super::CursorStyle::Underline => {
+                let thickness = (h / 10).max(2);
+                let uy = top + h.saturating_sub(thickness);
+                fill_cell(buf, fb_w, fb_h, left, uy, w, thickness, pack(CURSOR_FG));
             }
         }
     }
@@ -1948,9 +1987,10 @@ mod backend {
                         cx += cells * scale;
                     }
                 }
-                Op::Cursor { row, col } => {
+                Op::Cursor { row, col, style } => {
                     // Always one base cell — the cursor op carries no face, so it
-                    // ignores `:scale`; it overlays the single base cell at (row, col).
+                    // ignores `:scale`; it draws at the single base cell at (row, col),
+                    // shaped by `style` (block / bar / underline).
                     cursor_cell(
                         &mut buf,
                         fb_w,
@@ -1959,6 +1999,7 @@ mod backend {
                         *row as usize * ch,
                         cw,
                         ch,
+                        *style,
                     );
                 }
                 // Not painted — a cursor zone is hover metadata, hit-tested on
