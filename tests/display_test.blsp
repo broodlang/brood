@@ -31,3 +31,16 @@
 
   (test ":scale on a faceless bar still carries the scale"
     (assert= (bar 0 4 "ab" {:scale 2}) [:text 0 0 "ab" {:scale 2}])))
+
+(describe "rect — a solid filled panel"
+  (test "builds a [:rect row col w h face] op verbatim"
+    (assert= (rect 3 5 20 4 {:bg :blue}) [:rect 3 5 20 4 {:bg :blue}]))
+  (test "carries an RGB hex background (the chrome-panel use)"
+    (assert= (rect 0 0 10 2 {:bg "#313244"}) [:rect 0 0 10 2 {:bg "#313244"}])))
+
+(describe "cursor — optional caret style"
+  (test "no style is the bare block-caret op"
+    (assert= (cursor 2 7) [:cursor 2 7]))
+  (test "a style keyword rides along (:bar / :underline / :block)"
+    (assert= (cursor 2 7 :bar) [:cursor 2 7 :bar])
+    (assert= (cursor 0 0 :underline) [:cursor 0 0 :underline])))
