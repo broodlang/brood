@@ -2523,12 +2523,19 @@ enum Inst {
     /// stack, so the stack machine never needs the explicit-root dance.)
     Prim2 { op: PrimOp, map: [u8; 2], head: Symbol, guard: AtomicU64, pos: Option<Pos> },
     /// A combination. The callee then each argument have been pushed (operand layout
-    /// `[.., callee, arg0 .. arg_{argc-1}]`); resolve via the existing `dispatch`. A
-    /// **non-tail** call forces the result and pushes it; a **tail** call returns the
-    /// `Step` so [`vm_apply_inner`]'s trampoline continues it (TCO). Stage 2 has no
-    /// call-site inline cache — the callee is resolved as a plain value (the IC is a
-    /// pure cache, so this is semantically identical), to be re-added as a perf pass.
-    Call { argc: usize, tail: bool, pos: Option<Pos> },
+    /// `[.., callee, arg0 .. arg_{argc-1}]` — callee resolved *before* the args, the
+    /// tree-walker's order). A **non-tail** call to a chunked VM arm becomes a frame
+    /// push (`ChunkExit::Call`); a tail call/self-call reuses the frame; a native /
+    /// tree-walked callee runs inline and its value is pushed.
+    ///
+    /// `site`/`head` drive the **call-site inline cache** (ADR-096, Stage 5): when the
+    /// head is a free global (`head = Some(sym)`, `site != NO_SITE`) and the frame
+    /// resolves frees through the process global, the cached `(arm, env)` for
+    /// `(site, sym, argc, epoch)` is used directly — skipping `dispatch`'s
+    /// passthrough probe + `compiled_arm_for`. The callee is still resolved in-order
+    /// (the pushed value), so eval order is unchanged and a `def` bumping the epoch
+    /// invalidates the entry (the in-order callee then takes the generic path).
+    Call { argc: usize, tail: bool, pos: Option<Pos>, site: u32, head: Option<Symbol> },
     /// Direct `letrec` self-tail-call (always tail position): args have been pushed;
     /// returns a `Step::SelfTail` so the trampoline re-enters this arm in place.
     /// Mirrors `Node::SelfCall`.
@@ -2635,14 +2642,17 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 pos: *pos,
             });
         }
-        Node::Call { callee, args, tail, pos, site: _ } => {
-            // Callee first, then each arg (the order `exec_call` evaluates them); no
-            // call-site IC in bytecode yet (Stage 2) — the callee resolves as a value.
+        Node::Call { callee, args, tail, pos, site } => {
+            // Callee first, then each arg (the order `exec_call` evaluates them). When
+            // the head is a free global, carry its symbol + `site` so the call-site IC
+            // can cache the resolved arm (Stage 5); the callee is still pushed and
+            // resolved in-order, so the IC is a pure cache.
+            let head = if let Node::Global(s) = &**callee { Some(*s) } else { None };
             emit_node(callee, code)?;
             for a in args.iter() {
                 emit_node(a, code)?;
             }
-            code.push(Inst::Call { argc: args.len(), tail: *tail, pos: *pos });
+            code.push(Inst::Call { argc: args.len(), tail: *tail, pos: *pos, site: *site, head });
         }
         Node::SelfCall { args, pos: _ } => {
             for a in args.iter() {
@@ -2900,7 +2910,7 @@ fn exec_chunk(
                     Err(e) => return Err(tag_pos(e, pos)),
                 }
             }
-            Inst::Call { argc, tail, pos } => {
+            Inst::Call { argc, tail, pos, site, head } => {
                 let pos = *pos;
                 // Operand layout: [.., callee, arg0 .. arg_{argc-1}] (callee emitted
                 // first, then each arg — the same order `exec_call` evaluates them).
@@ -2911,12 +2921,65 @@ fn exec_chunk(
                     argv.push(heap.root_at(n - argc + k));
                 }
                 let cur_env = heap.read_root_env(genv);
-                // Resolve with `tail = true` so a VM-closure callee comes back as
-                // `Step::Tail` (the resolved arm + args + env, **un-run**), while a
-                // native / tree-walked callee is executed and comes back as
-                // `Step::Done(value)`. (Every VM-eligible arm has a chunk since Stage 3,
-                // so a `Tail` arm is always chunked.) No call-site IC yet (Stage 2).
-                let step = dispatch(heap, callee, argv, true, cur_env).map_err(|e| tag_pos(e, pos))?;
+                // Call-site IC (Stage 5): if the head is a free global resolving through
+                // the process global, reuse the cached `(arm, env)` for this site/argc —
+                // skipping `dispatch`'s passthrough probe + `compiled_arm_for`. The
+                // callee was already resolved in-order (`callee` above), so this only
+                // caches the *arm*; the epoch guard drops a stale entry after any `def`.
+                let mut fast: Option<(Arc<CompiledArm>, EnvId)> = None;
+                if *site != NO_SITE {
+                    if let Some(sym) = head {
+                        if heap.is_global(cur_env) {
+                            let epoch = heap.global_epoch();
+                            if let Some((_v, payload)) =
+                                heap.vm_call_ic_probe(*site, *sym, *argc as u32, epoch)
+                            {
+                                crate::perf_bump!(call_ic_hit);
+                                fast = payload;
+                            } else if !value::is_dynamic(*sym) {
+                                crate::perf_bump!(call_ic_miss);
+                                // Cache the in-order-resolved `callee`'s arm (only a
+                                // non-passthrough closure with a compiled arm for this
+                                // argc gets the VM fast path; everything else caches the
+                                // value alone and still takes `dispatch`).
+                                let arm = match callee {
+                                    Value::Fn(id)
+                                        if crate::eval::passthrough_arm(heap, id, *argc)
+                                            .is_none() =>
+                                    {
+                                        compiled_arm_for(heap, id, *argc).map(|arm| {
+                                            let cenv = heap
+                                                .closure(id)
+                                                .env
+                                                .unwrap_or_else(|| heap.global());
+                                            (arm, cenv)
+                                        })
+                                    }
+                                    _ => None,
+                                };
+                                fast = arm.clone();
+                                heap.vm_call_ic_put(
+                                    *site,
+                                    crate::core::heap::CallIcEntry {
+                                        sym: *sym,
+                                        argc: *argc as u32,
+                                        epoch,
+                                        callee,
+                                        arm,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                // IC hit with a VM arm → skip `dispatch` entirely; else resolve with
+                // `tail = true` so a VM-closure callee comes back as `Step::Tail` (the
+                // resolved arm + args + env, **un-run**) and a native / tree-walked
+                // callee comes back executed as `Step::Done(value)`.
+                let step = match fast {
+                    Some((arm, cenv)) => Step::Tail { compiled: arm, args: argv, genv: cenv },
+                    None => dispatch(heap, callee, argv, true, cur_env).map_err(|e| tag_pos(e, pos))?,
+                };
                 if *tail {
                     // Tail position: hand the call to the driver, which reuses this
                     // frame (TCO). Leftover operands are dropped by the driver
