@@ -70,6 +70,40 @@ pub fn vm_enabled() -> bool {
     })
 }
 
+thread_local! {
+    /// Per-thread override for the bytecode stepping engine (the differential test
+    /// pins it), mirroring [`FORCED_ENGINE`]: `Some(true/false)` wins over the
+    /// `BROOD_BYTECODE` env / default. The bytecode engine is a *sub-mode of the VM*
+    /// — it runs a VM-compiled arm's body as flat bytecode instead of walking the
+    /// `Node` tree — so it only takes effect when the VM is the active engine.
+    static FORCE_BYTECODE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Force (or clear) the bytecode stepping engine for the current thread. Used by
+/// the differential harness to run a form through the bytecode engine and compare
+/// it against the tree-walker. `Some(true)` = bytecode, `Some(false)` = the
+/// `Node`-walking VM, `None` = the `BROOD_BYTECODE`/default choice.
+pub fn set_force_bytecode(choice: Option<bool>) {
+    FORCE_BYTECODE.with(|c| c.set(choice));
+}
+
+/// Is the **bytecode stepping engine** enabled? A per-thread [`set_force_bytecode`]
+/// override wins; otherwise it follows `BROOD_BYTECODE` (truthy enables it),
+/// **defaulting OFF** while the engine is built incrementally (ADR-100). Only
+/// consulted inside [`vm_apply_inner`] (so it implies the VM is active); a
+/// `CompiledArm` runs its `chunk` instead of its `Node` body exactly when this is
+/// true and the chunk exists.
+pub fn bytecode_enabled() -> bool {
+    if let Some(forced) = FORCE_BYTECODE.with(|c| c.get()) {
+        return forced;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    fn truthy(v: &str) -> bool {
+        !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no")
+    }
+    *ON.get_or_init(|| std::env::var("BROOD_BYTECODE").map(|v| truthy(&v)).unwrap_or(false))
+}
+
 /// "This `Node::Call` has no call-site inline cache" — the callee isn't a free
 /// global reference (ADR-096).
 pub const NO_SITE: u32 = u32::MAX;
@@ -435,6 +469,16 @@ pub struct CompiledArm {
     /// Total frame slots (params + optionals + rest + `let`/`letrec` binders).
     pub nslots: usize,
     pub body: Node,
+    /// The body compiled to flat **bytecode** (`Chunk`), or `None` when the body is
+    /// outside the bytecode VM's current vocabulary (it then runs via `exec_node`).
+    /// When `Some` *and* the bytecode engine is enabled ([`bytecode_enabled`]),
+    /// [`vm_apply_inner`] runs this instead of walking the `Node` tree — the stepping
+    /// engine of ADR-100's stepping-VM endgame, built incrementally. Both forms are
+    /// kept and must stay semantically identical (the differential test enforces it);
+    /// the `Node` body remains the source of truth and the fallback. (Stage 1: only a
+    /// **call-free** body with no movable handles compiles to a chunk; see
+    /// [`compile_chunk`].)
+    pub chunk: Option<Chunk>,
     /// True when the body or any optional default contains a `Node::Const` with a
     /// movable RUNTIME handle (`ConstVal::Handle`), or a `Node::MakeClosure` (whose
     /// `fn_rest` is always a RUNTIME Pair). Arms without RUNTIME handles do not need
@@ -1220,6 +1264,10 @@ fn compile_arm(
     let optional_defaults = optional_defaults.into_boxed_slice();
     let has_runtime_handles = node_has_rt_handles(&body)
         || optional_defaults.iter().flatten().any(node_has_rt_handles);
+    // Stage 1: try to compile the body to flat bytecode (a call-free, handle-free
+    // subset for now — `compile_chunk` returns `None` otherwise, and the arm runs
+    // via `exec_node` exactly as before).
+    let chunk = compile_chunk(&body);
     Some(CompiledArm {
         nrequired,
         noptional,
@@ -1227,6 +1275,7 @@ fn compile_arm(
         rest_slot: rest.map(|_| nrequired + noptional),
         nslots: scope.max,
         body,
+        chunk,
         has_runtime_handles,
     })
 }
@@ -2278,6 +2327,33 @@ fn vm_apply_inner(
         return Err(e);
     }
     let mut compiled = compiled0;
+    // Bytecode stepping engine (ADR-100, Stage 1): when enabled and this arm lowered
+    // to a chunk, run the flat instruction loop instead of walking the `Node` tree.
+    // Stage 1 chunks are call-free and bounded, so they have no tail step and need no
+    // mid-arm safepoint — run the same entry safepoint the `Node` loop runs on its
+    // first iteration, then execute straight through and return.
+    if bytecode_enabled() {
+        if let Some(chunk) = compiled.chunk.as_ref() {
+            if !crate::process::macro_block_active() && heap.gc_due() {
+                heap.collect(&mut [], &mut []);
+            }
+            if let Some(used) = crate::core::alloc::soft_limit_hit() {
+                heap.truncate_roots(base);
+                heap.truncate_env_roots(env_base);
+                return Err(crate::eval::memory_limit_error(used));
+            }
+            crate::process::tick();
+            if crate::process::deadline_exceeded() {
+                heap.truncate_roots(base);
+                heap.truncate_env_roots(env_base);
+                return Err(crate::eval::deadline_error());
+            }
+            let r = exec_chunk(heap, chunk, base, genv);
+            heap.truncate_roots(base);
+            heap.truncate_env_roots(env_base);
+            return r;
+        }
+    }
     loop {
         // GC safepoint — the frame slots live on `Heap::roots` and the captured env
         // on `Heap::env_roots`, so `collect` relocates both in place. LOCAL
@@ -2376,6 +2452,389 @@ fn vm_apply_inner(
     }
 }
 
+// ===================== bytecode stepping engine (ADR-100, Stage 1) =====================
+//
+// The first slice of the stepping-VM endgame: a compiled arm's `Node` body is also
+// lowered to a flat **bytecode** `Chunk` — a linear instruction stream over the
+// **same** operand stack (`Heap::roots`) the `Node` interpreter uses, run by a
+// single non-recursive loop (`exec_chunk`). Stage 1 lowers only a **call-free,
+// handle-free** subset (leaf/control/prim/let/collection nodes); anything else
+// makes `compile_chunk` return `None` and the arm keeps running on `exec_node`.
+//
+// Why this shape: the endgame (concurrency-v2.md §7) needs a process's continuation
+// to be relocatable heap data rather than a native Rust stack. Reifying the operand
+// state was already done (it lives on `Heap::roots`); this reifies the *control*
+// state (the instruction pointer) for a single arm. Later stages add `Call`/`Return`
+// as explicit frame push/pop — at which point the cross-arm call stack is data too,
+// and corosensei can go. For now this is a behaviour-preserving second engine, kept
+// bit-identical to the `Node` interpreter by the differential test.
+
+/// One bytecode instruction. A **stack machine**: each instruction pushes/pops on
+/// the operand region of `Heap::roots` that sits just above the activation frame's
+/// slots (`base..base+nslots`). Frame slots are read/written by absolute index
+/// (`Local`/`SetLocal`); everything else is push/pop. The semantics of each arm
+/// mirror the matching [`Node`] case in `exec_value`/`exec_node` exactly.
+enum Inst {
+    /// Push a constant. Stage 1 only embeds **atoms** (`compile_chunk` defers any
+    /// body carrying a movable RUNTIME handle), so no in-place handle rewrite is
+    /// needed for a chunk — unlike the `Node` tree (`rewrite_node`).
+    Const(ConstVal),
+    /// Push frame slot `base + i`.
+    Local(usize),
+    /// Push a free reference resolved through the env (no inline cache).
+    Global(Symbol),
+    /// Push a free reference in value position, with the global-read inline cache.
+    GlobalIc { sym: Symbol, site: u32 },
+    /// Discard the top operand (a non-final `do` form's value).
+    Pop,
+    /// Pop the top operand into frame slot `base + i` (a `let`/`letrec` binder).
+    SetLocal(usize),
+    /// Unconditional jump: set the instruction pointer to this index.
+    Jump(usize),
+    /// Pop the top operand; if falsy, jump to this index (an `if`'s else target).
+    JumpIfFalse(usize),
+    /// Pop `n` operands and push a fresh vector built from them.
+    MakeVector(usize),
+    /// Pop `2*n` operands (key, value, …) and push a fresh map.
+    MakeMap(usize),
+    /// Inlined 1-ary primitive (`first`/`rest`): replace the top operand with the
+    /// result, or fall back to a general call on `head`. Mirrors `Node::Prim1`.
+    Prim1 { op: PrimOp1, head: Symbol, guard: AtomicU64, pos: Option<Pos> },
+    /// Inlined 2-ary primitive (`+`/`<`/`=`/`cons`/…): replace the top two operands
+    /// with the result, or fall back to a general call on `head`. Mirrors
+    /// `Node::Prim2`. (No `broot`: both operands are already rooted on the operand
+    /// stack, so the stack machine never needs the explicit-root dance.)
+    Prim2 { op: PrimOp, map: [u8; 2], head: Symbol, guard: AtomicU64, pos: Option<Pos> },
+}
+
+/// A compiled-to-bytecode arm body: a flat instruction stream evaluated by
+/// [`exec_chunk`], leaving the body's single value on top of the operand stack.
+/// `Send + Sync` (its `Inst`s hold only atoms, symbols, indices, and atomics), so it
+/// rides in the `Arc<CompiledArm>` cached in a `Send` `Heap`.
+pub struct Chunk {
+    code: Vec<Inst>,
+}
+
+/// Lower a compiled `Node` body to a [`Chunk`], or `None` if it uses any node
+/// outside Stage 1's vocabulary (`Call`/`SelfCall`/`MakeClosure`, or a `Const` with
+/// a movable RUNTIME handle). `None` is always safe — the arm runs on `exec_node`.
+fn compile_chunk(body: &Node) -> Option<Chunk> {
+    let mut code = Vec::new();
+    emit_node(body, &mut code)?;
+    Some(Chunk { code })
+}
+
+/// Recursively emit `node` into `code`, leaving its value on the operand stack.
+/// Returns `None` (aborting the whole chunk) on any unsupported node.
+fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
+    match node {
+        // Stage 1 keeps chunks handle-free, so a runtime-handle const defers the
+        // whole arm — that sidesteps having to rewrite chunk handles in place under
+        // a RUNTIME compaction (a later stage adds `rewrite_chunk`).
+        Node::Const(ConstVal::Atom(v)) => code.push(Inst::Const(ConstVal::Atom(*v))),
+        Node::Const(ConstVal::Handle { .. }) => return None,
+        Node::Local(i) => code.push(Inst::Local(*i)),
+        Node::Global(s) => code.push(Inst::Global(*s)),
+        Node::GlobalIc { sym, site } => code.push(Inst::GlobalIc { sym: *sym, site: *site }),
+        Node::If(cond, then, els) => {
+            emit_node(cond, code)?;
+            let j_else = code.len();
+            code.push(Inst::JumpIfFalse(0)); // backpatched
+            emit_node(then, code)?;
+            let j_end = code.len();
+            code.push(Inst::Jump(0)); // backpatched
+            let else_ip = code.len();
+            emit_node(els, code)?;
+            let end_ip = code.len();
+            code[j_else] = Inst::JumpIfFalse(else_ip);
+            code[j_end] = Inst::Jump(end_ip);
+        }
+        Node::Do(nodes) => {
+            if nodes.is_empty() {
+                code.push(Inst::Const(ConstVal::Atom(Value::Nil)));
+            } else {
+                let last = nodes.len() - 1;
+                for n in &nodes[..last] {
+                    emit_node(n, code)?;
+                    code.push(Inst::Pop); // evaluated for effect
+                }
+                emit_node(&nodes[last], code)?;
+            }
+        }
+        Node::LetBind { binds, body } => {
+            for (slot, rhs) in binds.iter() {
+                emit_node(rhs, code)?;
+                code.push(Inst::SetLocal(*slot));
+            }
+            emit_node(body, code)?;
+        }
+        Node::Vector(elems) => {
+            for e in elems.iter() {
+                emit_node(e, code)?;
+            }
+            code.push(Inst::MakeVector(elems.len()));
+        }
+        Node::Map(entries) => {
+            for (k, v) in entries.iter() {
+                emit_node(k, code)?;
+                emit_node(v, code)?;
+            }
+            code.push(Inst::MakeMap(entries.len()));
+        }
+        Node::Prim1 { op, a, head, guard, pos } => {
+            emit_node(a, code)?;
+            code.push(Inst::Prim1 {
+                op: *op,
+                head: *head,
+                guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
+                pos: *pos,
+            });
+        }
+        Node::Prim2 { op, a, b, map, head, guard, pos, broot: _ } => {
+            emit_node(a, code)?;
+            emit_node(b, code)?;
+            code.push(Inst::Prim2 {
+                op: *op,
+                map: *map,
+                head: *head,
+                guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
+                pos: *pos,
+            });
+        }
+        // Outside Stage 1's vocabulary — defer the whole arm to `exec_node`.
+        Node::Call { .. } | Node::SelfCall { .. } | Node::MakeClosure { .. } => return None,
+    }
+    Some(())
+}
+
+/// Tag an error with `pos` if it doesn't already carry one (innermost wins),
+/// matching the `Node` interpreter's `or_pos` discipline.
+#[inline]
+fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
+    match pos {
+        Some(p) => e.or_pos(p),
+        None => e,
+    }
+}
+
+/// Run a [`Chunk`] to completion, returning the body's value. The operand stack
+/// (`Heap::roots` above `base + nslots`) carries intermediate values; frame slots
+/// live at `base..`; `genv` is the captured-env root. On error, returns `Err`
+/// without unwinding the operand stack — the caller ([`vm_apply_inner`]) truncates
+/// `Heap::roots` back to `base`, exactly as the `exec_node` error path does.
+///
+/// Stage 1 chunks are **call-free and bounded** (no loops without a call), so no
+/// GC safepoint / preemption tick is needed *inside* the loop — the caller runs one
+/// at arm entry, identical to the `Node` arm's first trampoline iteration.
+fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> LispResult {
+    let mut ip = 0usize;
+    while ip < chunk.code.len() {
+        let inst = &chunk.code[ip];
+        ip += 1;
+        match inst {
+            Inst::Const(cv) => {
+                let v = cv.load();
+                heap.push_root(v);
+            }
+            Inst::Local(i) => {
+                let v = heap.root_at(base + i);
+                heap.push_root(v);
+            }
+            Inst::Global(s) => {
+                let env = heap.read_root_env(genv);
+                match heap.env_get(env, *s) {
+                    Some(v) => heap.push_root(v),
+                    None => return Err(crate::eval::unbound_error(heap, *s)),
+                }
+            }
+            Inst::GlobalIc { sym, site } => {
+                let env = heap.read_root_env(genv);
+                let v = if heap.is_global(env) {
+                    let epoch = heap.global_epoch();
+                    if let Some(v) = heap.vm_global_ic_probe(*site, *sym, epoch) {
+                        crate::perf_bump!(global_ic_hit);
+                        v
+                    } else {
+                        crate::perf_bump!(global_ic_miss);
+                        match heap.env_get(env, *sym) {
+                            Some(v) => {
+                                if !value::is_dynamic(*sym) {
+                                    heap.vm_global_ic_put(*site, *sym, epoch, v);
+                                }
+                                v
+                            }
+                            None => return Err(crate::eval::unbound_error(heap, *sym)),
+                        }
+                    }
+                } else {
+                    match heap.env_get(env, *sym) {
+                        Some(v) => v,
+                        None => return Err(crate::eval::unbound_error(heap, *sym)),
+                    }
+                };
+                heap.push_root(v);
+            }
+            Inst::Pop => {
+                let n = heap.roots_len();
+                heap.truncate_roots(n - 1);
+            }
+            Inst::SetLocal(slot) => {
+                let n = heap.roots_len();
+                let v = heap.root_at(n - 1);
+                heap.truncate_roots(n - 1);
+                heap.set_root_at(base + slot, v);
+            }
+            Inst::Jump(t) => ip = *t,
+            Inst::JumpIfFalse(t) => {
+                let n = heap.roots_len();
+                let c = heap.root_at(n - 1);
+                heap.truncate_roots(n - 1);
+                if !crate::eval::truthy(c) {
+                    ip = *t;
+                }
+            }
+            Inst::MakeVector(nelem) => {
+                // Same discipline as `exec_value`'s `Node::Vector`: read the elements
+                // (already on the operand stack), truncate, then build.
+                let n = heap.roots_len();
+                let start = n - nelem;
+                let mut vals = Vec::with_capacity(*nelem);
+                for k in 0..*nelem {
+                    vals.push(heap.root_at(start + k));
+                }
+                heap.truncate_roots(start);
+                let v = heap.alloc_vector(vals);
+                heap.push_root(v);
+            }
+            Inst::MakeMap(npairs) => {
+                let n = heap.roots_len();
+                let start = n - 2 * npairs;
+                let mut pairs = Vec::with_capacity(*npairs);
+                for i in 0..*npairs {
+                    pairs.push((heap.root_at(start + 2 * i), heap.root_at(start + 2 * i + 1)));
+                }
+                heap.truncate_roots(start);
+                let v = heap.map_from_pairs(pairs);
+                heap.push_root(v);
+            }
+            Inst::Prim1 { op, head, guard, pos } => {
+                let pos = *pos;
+                let n = heap.roots_len();
+                let sa = heap.root_at(n - 1);
+                let cur = heap.global_epoch();
+                let inlinable = if guard.load(Ordering::Relaxed) == cur {
+                    true
+                } else {
+                    match resolve_prim1(heap, *head) {
+                        Some(op2) if op2 == *op => {
+                            guard.store(cur, Ordering::Relaxed);
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if inlinable {
+                    match (op, sa) {
+                        (PrimOp1::First, Value::Pair(p)) => {
+                            crate::perf_bump!(prim1_inline);
+                            let v = heap.pair(p).0;
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(v);
+                            continue;
+                        }
+                        (PrimOp1::Rest, Value::Pair(p)) => {
+                            crate::perf_bump!(prim1_inline);
+                            let v = heap.pair(p).1;
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(v);
+                            continue;
+                        }
+                        (PrimOp1::First | PrimOp1::Rest, Value::Nil) => {
+                            crate::perf_bump!(prim1_inline);
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(Value::Nil);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                crate::perf_bump!(prim1_fallback);
+                let cur_env = heap.read_root_env(genv);
+                let callee = match heap.env_get(cur_env, *head) {
+                    Some(c) => c,
+                    None => return Err(tag_pos(crate::eval::unbound_error(heap, *head), pos)),
+                };
+                let sa = heap.root_at(n - 1);
+                let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa]);
+                let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
+                heap.truncate_roots(n - 1);
+                match result {
+                    Ok(v) => heap.push_root(v),
+                    Err(e) => return Err(tag_pos(e, pos)),
+                }
+            }
+            Inst::Prim2 { op, map, head, guard, pos } => {
+                let pos = *pos;
+                let n = heap.roots_len();
+                let sa = heap.root_at(n - 2); // operand `a` (pushed first)
+                let sb = heap.root_at(n - 1); // operand `b` (pushed second)
+                let src = [sa, sb];
+                let x = src[map[0] as usize];
+                let y = src[map[1] as usize];
+                let cur = heap.global_epoch();
+                let inlinable = if guard.load(Ordering::Relaxed) == cur {
+                    true
+                } else {
+                    match resolve_prim(heap, *head) {
+                        Some((op2, m2)) if op2 == *op && m2 == [map[0] as usize, map[1] as usize] => {
+                            guard.store(cur, Ordering::Relaxed);
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if inlinable {
+                    match prim_apply(*op, x, y) {
+                        Ok(Some(v)) => {
+                            crate::perf_bump!(prim2_inline);
+                            heap.truncate_roots(n - 2);
+                            heap.push_root(v);
+                            continue;
+                        }
+                        Ok(None) if *op == PrimOp::Cons => {
+                            crate::perf_bump!(prim2_inline);
+                            let v = heap.alloc_pair(x, y);
+                            heap.truncate_roots(n - 2);
+                            heap.push_root(v);
+                            continue;
+                        }
+                        Ok(None) => {} // non-inline operand shape → defer to the real primitive
+                        Err(e) => return Err(tag_pos(e, pos)),
+                    }
+                }
+                crate::perf_bump!(prim2_fallback);
+                let cur_env = heap.read_root_env(genv);
+                let callee = match heap.env_get(cur_env, *head) {
+                    Some(c) => c,
+                    None => return Err(tag_pos(crate::eval::unbound_error(heap, *head), pos)),
+                };
+                let sa = heap.root_at(n - 2);
+                let sb = heap.root_at(n - 1);
+                let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
+                let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
+                heap.truncate_roots(n - 2);
+                match result {
+                    Ok(v) => heap.push_root(v),
+                    Err(e) => return Err(tag_pos(e, pos)),
+                }
+            }
+        }
+    }
+    // The body's value is the lone operand left above the frame.
+    let n = heap.roots_len();
+    Ok(heap.root_at(n - 1))
+}
+
 // ===================== entry =====================
 
 /// Compile-then-run a resolved top-level `form` — the VM entry the form loops use
@@ -2403,6 +2862,9 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 rest_slot: None,
                 nslots: scope.max,
                 body: node,
+                // Top-level forms run via `exec_value` below, not the bytecode loop
+                // (Stage 1 bytecode is reached only through `vm_apply`); no chunk.
+                chunk: None,
                 has_runtime_handles,
             });
             let arm_slot = if arm.has_runtime_handles {
@@ -2531,6 +2993,7 @@ mod tests {
             rest_slot: None,
             nslots: 0,
             body,
+            chunk: None,
             has_runtime_handles: true,
         };
 

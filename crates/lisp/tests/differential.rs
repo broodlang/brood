@@ -12,7 +12,7 @@
 
 use std::sync::LazyLock;
 
-use brood::eval::compile::set_forced_engine;
+use brood::eval::compile::{set_force_bytecode, set_forced_engine};
 use brood::Interp;
 
 static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
@@ -24,26 +24,39 @@ static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
 
 /// Evaluate `src` in a fresh interpreter pinned to one engine. `Ok(printed)` or
 /// `Err(message)` — the message alone (engine-independent), not the position, which
-/// is asserted separately in `basic.rs`.
-fn eval_on(src: &str, vm: bool) -> Result<String, String> {
+/// is asserted separately in `basic.rs`. `bc` forces the bytecode stepping engine
+/// (a sub-mode of the VM, ADR-100 Stage 1) on or off.
+fn eval_with(src: &str, vm: bool, bc: bool) -> Result<String, String> {
     LazyLock::force(&MEM_GUARD);
     set_forced_engine(Some(vm));
+    set_force_bytecode(Some(bc));
     let mut interp = Interp::new();
     let out = match interp.eval_str(src) {
         Ok(v) => Ok(interp.print(v)),
         Err(e) => Err(e.message),
     };
     set_forced_engine(None);
+    set_force_bytecode(None);
     out
 }
 
-/// Assert both engines agree on `src`.
+fn eval_on(src: &str, vm: bool) -> Result<String, String> {
+    eval_with(src, vm, false)
+}
+
+/// Assert all engines agree on `src`: the tree-walker, the `Node`-walking VM, and
+/// the bytecode stepping engine (VM + bytecode). The tree-walker is the reference.
 fn agree(src: &str) {
     let tw = eval_on(src, false);
     let vm = eval_on(src, true);
+    let bc = eval_with(src, true, true);
     assert_eq!(
         tw, vm,
         "engine divergence on:\n  {src}\n  tree-walker: {tw:?}\n  vm:          {vm:?}"
+    );
+    assert_eq!(
+        tw, bc,
+        "bytecode-engine divergence on:\n  {src}\n  tree-walker: {tw:?}\n  bytecode:    {bc:?}"
     );
 }
 
@@ -157,6 +170,18 @@ const CORPUS: &[&str] = &[
     "(apply list 1 2 (list 3 4))",                                        // prefix + splice
     "(apply apply (list + (list 1 2 3)))",                                // nested apply
     "(defn g (a b) (+ a b)) (apply g (list 10 20))",                     // RUNTIME callee
+    // bytecode stepping engine (ADR-100 Stage 1): call-free helper bodies lower to a
+    // chunk and run on the bytecode loop when called. These exercise its node set —
+    // arithmetic, if-nesting, let, vector/map build, first/rest, the fallback/error
+    // paths, and the epoch-guard re-resolve after redefining an inlined operator.
+    "(defn sq (x) (* x x)) (map sq (range 1 7))",
+    "(defn classify (n) (if (< n 0) :neg (if (= n 0) :zero :pos))) (map classify (list -3 0 8))",
+    "(defn pick (x) (let (a (* x 2) b (+ a 1)) [a b {:k a :v b}])) (pick 10)",
+    "(defn hd (xs) (first xs)) (defn tl (xs) (rest xs)) [(hd [10 20 30]) (tl '(1 2 3)) (hd '())]",
+    "(defn boom (x) (first x)) (boom 5)",          // Prim1 fallback → type error, both engines
+    "(defn dz (a b) (/ a b)) (dz 1 0)",            // Prim2 fallback (Div) → div-by-zero
+    "(defn add1 (x) (+ x 1)) (def + (fn (a b) (* a b))) (add1 5)", // redefine + → guard fallback
+    "(defn cz (a b) (cons a b)) (cz 1 (list 2 3))",                // Prim2 Cons inline
 ];
 
 #[test]

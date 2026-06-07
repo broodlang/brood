@@ -1736,3 +1736,34 @@ TLS, the INV-2 handshake the fresh-steal path now exercises). Full design +
 staging + acceptance bar: `concurrency-v2.md` §7; recorded as ADR-100;
 cross-linked from `memory-model.md` (the recursive-vs-stepping coupling) and
 `scheduler.md`.
+
+## 2026-06-07 — bytecode stepping engine, Stage 1 (the §7 endgame begins)
+
+First slice of the stepping-VM endgame (ADR-100 / concurrency-v2.md §7). The goal
+is to make a process's continuation relocatable heap data instead of a native Rust
+stack; the operand state already lives on `Heap::roots`, so this reifies the
+*control* state — a compiled arm's `Node` body is now also lowered to a flat
+**bytecode `Chunk`** run by a single non-recursive loop (`exec_chunk`), over the
+same operand stack.
+
+Scope (deliberately small, to land green): only a **call-free, handle-free** body
+lowers to a chunk — leaf/control/prim/let/collection nodes (`Const` atom, `Local`,
+`Global`/`GlobalIc`, `If`, `Do`, `LetBind`, `Vector`, `Map`, `Prim1`, `Prim2`). Any
+`Call`/`SelfCall`/`MakeClosure` (or a movable RUNTIME-handle const) makes
+`compile_chunk` return `None` and the arm runs on `exec_node` exactly as before, so
+the call/trampoline machinery is untouched. `CompiledArm` gains an `Option<Chunk>`;
+`vm_apply_inner` runs it (with the same entry safepoint/tick) instead of walking the
+`Node` tree when `bytecode_enabled()`. Each `Inst` arm mirrors its `exec_value`/
+`exec_node` counterpart exactly (epoch-guarded prim inlining + fallback, the
+operand-stack/GC discipline, innermost error-position tagging).
+
+Engine is **default-OFF** behind `BROOD_BYTECODE` (truthy enables; per-thread
+`set_force_bytecode` override for tests), so default behaviour is unchanged while
+it's built up. Parity proven: the differential test now runs a **third** engine
+(VM + bytecode) against the tree-walker over the corpus (+8 call-free-helper
+entries), green incl. under `BROOD_GC_STRESS`; the full in-language suite (1434
+tests) passes with `BROOD_BYTECODE=1` (every call-free arm in prelude/stdlib/tests
+on the new engine); `maps_test` green under bytecode + GC stress (the operand-stack
+rooting is the riskiest part). Next: `Call`/`SelfCall` (Stage 2), then the explicit
+cross-arm frame stack (Stage 4 — the migration prerequisite that retires
+corosensei).
