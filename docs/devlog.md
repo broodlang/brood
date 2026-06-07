@@ -1804,3 +1804,28 @@ three green/parity-verified commits on top of Stage 1.
   default-OFF behind `BROOD_BYTECODE`. Next (Stage 5): re-add the call-site IC,
   benchmark, make bytecode the default, retire the `Node`-walk — then suspension as
   data and live-process migration, at which point corosensei goes.
+
+## 2026-06-07 — bytecode Stage 5: call-site IC + bytecode is now the default engine
+
+Closed the perf gap and flipped the default. Two commits.
+
+- **5a — call-site inline cache.** The bytecode `Call` carries `(site, head)` and
+  caches the resolved `(arm, env)` per `(site, sym, argc, epoch)`, skipping
+  `dispatch`'s passthrough probe + `compiled_arm_for` on a hit. Crucially the callee
+  is still *pushed and resolved in-order* (before the args, the tree-walker's order),
+  so the IC caches only the arm and stays a pure cache — a `def` bumps the epoch and
+  the stale entry drops (the in-order callee then takes the generic path). This is
+  why I didn't resolve-at-call-time (that would reorder head-vs-arg evaluation and
+  diverge from the reference on `(f (… (def f g) …))`).
+- **5b — default flip.** Benched Bc vs the `Node`-VM (medians, isolated to avoid
+  load/GC contention noise — a full concurrent bench run had falsely shown
+  `cons_build` slow): fib ~33% faster, sum_tail ~34%, reduce_range ~25%, defseq_map
+  ~45%, cons_build ~30%, apply_driven ~15%, try_body ~par — **faster everywhere**.
+  The IC flipped fib from ~18% slower (Stage 4) to ~33% faster. So
+  `bytecode_enabled()` now defaults ON; `BROOD_BYTECODE=0` is the escape hatch back to
+  the `Node` walker (mirroring `BROOD_VM=0`). Full `make test` (550) green at the
+  default; differential + `concurrency_race` green incl. `BROOD_GC_STRESS`.
+
+Remaining: retire the `Node`-walking executor after a release (the `Node` tree stays
+as the compile *source*); then suspension-as-data + live-process migration (§7.5),
+where corosensei finally goes.

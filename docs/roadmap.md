@@ -85,9 +85,20 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     reload / RUNTIME compaction rewrites every in-flight chunk. Parity: differential
     (incl. GC stress), full suite (1434), `concurrency_race`, `gc`, `runtime_collector`
     all green with bytecode on. (Native-stack byte guard → `MAX_BC_FRAMES` frame cap.)
-  - ⬜ Stage 5: re-add the call-site inline cache to bytecode `Call`; benchmark; then
-    make bytecode the default and retire the `Node`-walk. Then suspension-as-data +
-    live-process migration (§7.5 stages 2–4) — corosensei goes.
+  - ✅ **Stage 5 — call-site IC + bytecode is now the default engine.** Re-added the
+    call-site inline cache to the bytecode `Call` (caches the resolved arm per
+    `(site, sym, argc, epoch)`, callee still resolved in-order so it's a pure cache).
+    Bench (Bc vs the `Node`-VM, medians): fib ~33% faster, sum_tail ~34%, reduce ~25%,
+    defseq_map ~45%, cons_build ~30% — **faster across the board**. So
+    `bytecode_enabled()` now defaults ON (`BROOD_BYTECODE=0` is the escape hatch,
+    mirroring `BROOD_VM=0`); full `make test` (550) green at the default.
+  - ⬜ Cleanup: retire the `Node`-walking VM (`exec_node`/`exec_value`/the `Node` IR
+    as an *executor*) once the bytecode default has baked a release — the `Node` tree
+    stays as the compile *source* feeding `compile_chunk`.
+  - ⬜ **Then the actual migration** (§7.5 stages 2–4): capture a suspended process as
+    `(frames, operands, ip)` data instead of a corosensei coroutine, generalize
+    stealing/migration to *running* processes, remove corosensei. BEAM-style
+    rebalancing lands here.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
