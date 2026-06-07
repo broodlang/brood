@@ -1894,7 +1894,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col mods] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order, [] when none — so Ctrl+wheel etc. are bindable), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:rect row col w h face], [:cursor row col] / [:cursor row col style]. A face is a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey, the terminal's named colour) or an explicit [r g b] vector / \"#rrggbb\" hex string (a true-colour cell). [:rect …] fills a w×h cell block with the face's background (a solid panel). The optional cursor `style` is :block (default), :bar, or :underline — the steady caret shape. The in-process frontend for the display protocol; returns nil."),
-    ("gui-open", &["title?", "width?", "height?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
+    ("gui-open", &["title?", "width?", "height?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable; a `:press` carries a trailing 7th element, its click-chain count `[… mods n]` — 1 single, 2 double, 3 triple, … for repeated presses of the same button in the same cell within the double-click window, so double-click-to-select-word and triple-click-to-select-line are bindable; the terminal reports 1), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
     ("gui-icon!", &["id", "rgba", "w", "h"], "Set window id's taskbar / title-bar icon from raw RGBA pixels: rgba is a vector of w*h*4 byte ints (0-255), row-major, 4 per pixel (red, green, blue, alpha). Needs --features gui; a silent no-op if the GUI thread never started, id isn't a live window, or the data length isn't w*h*4. Where the OS shows it depends on the platform (X11/Windows use it directly; Wayland prefers a .desktop file). Returns nil."),
@@ -4800,6 +4800,7 @@ fn mouse_value(
     row: u16,
     col: u16,
     mods: (bool, bool, bool),
+    count: u8,
 ) -> Value {
     let btn = button.map(value::kw).unwrap_or(Value::Nil);
     let (ctrl, alt, shift) = mods;
@@ -4814,14 +4815,21 @@ fn mouse_value(
         ms.push(value::kw("shift"));
     }
     let ms = heap.alloc_vector(ms);
-    heap.alloc_vector(vec![
+    let mut v = vec![
         value::kw("mouse"),
         value::kw(action),
         btn,
         Value::Int(row as i64),
         Value::Int(col as i64),
         ms,
-    ])
+    ];
+    // A press carries its click-chain count as a trailing 7th element; other actions
+    // (count 0) stay 6-element. The terminal can't detect multi-click, so it reports 1
+    // for every press — keeping the GUI and terminal shapes identical.
+    if count > 0 {
+        v.push(Value::Int(count as i64));
+    }
+    heap.alloc_vector(v)
 }
 
 /// Translate a crossterm mouse event into the shared `[:mouse …]` vector.
@@ -4836,15 +4844,17 @@ fn mouse_to_value(heap: &mut Heap, m: crossterm::event::MouseEvent) -> Value {
         CB::Right => "right",
         CB::Middle => "middle",
     };
-    let (action, btn) = match m.kind {
-        MK::Down(b) => ("press", Some(button(b))),
-        MK::Up(b) => ("release", Some(button(b))),
+    let (action, btn, count) = match m.kind {
+        // The terminal reports no click chain, so a press always counts as 1 (single);
+        // the trailing count keeps the terminal vector shape identical to the GUI's.
+        MK::Down(b) => ("press", Some(button(b)), 1),
+        MK::Up(b) => ("release", Some(button(b)), 0),
         // Motion with a button held — a drag (e.g. resizing a divider, ADR-077).
         // Crossterm already reports this per-cell, matching the GUI's cell-granular
         // throttle. Bare `Moved` (no button) falls through to nil, as before.
-        MK::Drag(b) => ("drag", Some(button(b))),
-        MK::ScrollUp => ("scroll-up", None),
-        MK::ScrollDown => ("scroll-down", None),
+        MK::Drag(b) => ("drag", Some(button(b)), 0),
+        MK::ScrollUp => ("scroll-up", None, 0),
+        MK::ScrollDown => ("scroll-down", None, 0),
         _ => return Value::Nil,
     };
     let mods = (
@@ -4852,7 +4862,7 @@ fn mouse_to_value(heap: &mut Heap, m: crossterm::event::MouseEvent) -> Value {
         m.modifiers.contains(KeyModifiers::ALT),
         m.modifiers.contains(KeyModifiers::SHIFT),
     );
-    mouse_value(heap, action, btn, m.row, m.column, mods)
+    mouse_value(heap, action, btn, m.row, m.column, mods, count)
 }
 
 /// Encode a crossterm key event as a Brood value: a printable char becomes a
@@ -7442,5 +7452,25 @@ mod mouse_event_tests {
             panic!("mods should be a vector");
         };
         assert!(heap.vector(mid).is_empty());
+    }
+
+    // A press carries a trailing click-chain count (the 7th element); the terminal
+    // can't detect multi-click, so it always reports 1. Non-press actions omit it.
+    #[test]
+    fn a_press_carries_a_trailing_count_others_do_not() {
+        let mut heap = Heap::new();
+
+        let Value::Vector(id) = mouse_to_value(&mut heap, ev(MK::Down(CB::Left))) else {
+            panic!("expected a [:mouse …] vector");
+        };
+        let xs = heap.vector(id).to_vec();
+        assert_eq!(xs.len(), 7, "a press has the trailing count");
+        assert!(matches!(xs[6], Value::Int(1)), "terminal press counts as 1");
+
+        // A release stays 6-element (no count).
+        let Value::Vector(id) = mouse_to_value(&mut heap, ev(MK::Up(CB::Left))) else {
+            panic!("expected a [:mouse …] vector");
+        };
+        assert_eq!(heap.vector(id).len(), 6, "a release has no trailing count");
     }
 }

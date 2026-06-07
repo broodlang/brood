@@ -162,7 +162,7 @@ pub enum Key {
 }
 
 /// A mouse button, mirrored from winit's; the Brood side keywords it (`:left`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum MouseButton {
     Left,
     Right,
@@ -190,7 +190,11 @@ pub enum MouseAction {
 /// A mouse event at a character-cell position; the Brood side turns it into a
 /// `[:mouse action button row col mods]` vector (`button` is nil for scroll;
 /// `mods` is a vector of the held modifier keywords, e.g. `[:ctrl]` / `[]`, so an
-/// app can bind Ctrl+wheel, Ctrl+drag, etc.).
+/// app can bind Ctrl+wheel, Ctrl+drag, etc.). A **press** also carries a `count`
+/// (1 = single, 2 = double, 3 = triple, …) — consecutive presses of the same button
+/// in the same cell within the double-click window — appended as a trailing 7th
+/// element `[… mods count]`; for every other action `count` is 0 and omitted, so the
+/// vector stays 6 elements.
 #[derive(Clone, Copy)]
 pub struct Mouse {
     pub action: MouseAction,
@@ -200,6 +204,8 @@ pub struct Mouse {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    /// Click chain length for a press (1/2/3/…); 0 for non-press actions (omitted).
+    pub count: u8,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -279,6 +285,11 @@ mod backend {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::{self, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Instant;
+
+    /// Max gap between consecutive presses (same button, same cell) that still counts
+    /// as part of one click chain — the double/triple-click window, in milliseconds.
+    const MULTI_CLICK_MS: u128 = 400;
 
     use winit::application::ApplicationHandler;
     use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -683,14 +694,20 @@ mod backend {
         if m.shift {
             mods.push(Message::Keyword(value::intern("shift")));
         }
-        Message::Vector(vec![
+        let mut v = vec![
             Message::Keyword(value::intern("mouse")),
             Message::Keyword(value::intern(action)),
             button,
             Message::Int(m.row as i64),
             Message::Int(m.col as i64),
             Message::Vector(mods),
-        ])
+        ];
+        // A press carries its click-chain count as a trailing 7th element; other
+        // actions (count 0) stay 6-element. Mirrors `builtins::mouse_value`.
+        if m.count > 0 {
+            v.push(Message::Int(m.count as i64));
+        }
+        Message::Vector(v)
     }
 
     /// A synthetic release of held button `b` at cell `(col, row)` — delivered when the
@@ -705,6 +722,7 @@ mod backend {
             ctrl: mods.control_key(),
             alt: mods.alt_key(),
             shift: mods.shift_key(),
+            count: 0,
         }
     }
 
@@ -740,6 +758,10 @@ mod backend {
         /// chording two buttons isn't tracked. Revisit only if multi-button drag is
         /// ever needed.
         held: Option<MouseButton>,
+        /// The last press's click-chain state — `(count, button, cell, when)` — so a
+        /// fresh press in the same cell with the same button within `MULTI_CLICK_MS`
+        /// increments the count (double/triple-click); anything else restarts at 1.
+        last_click: Option<(u8, MouseButton, (u16, u16), Instant)>,
         /// The key currently held down (set on a fresh press, cleared on its release
         /// or focus loss), shared with the Brood side for `gui-held-key`. Also how the
         /// event loop suppresses auto-repeat: a press for the key already here is a
@@ -804,6 +826,7 @@ mod backend {
             mods: ModifiersState::empty(),
             cursor: (0, 0),
             held: None,
+            last_click: None,
             held_key: Arc::new(Mutex::new(None)),
             held_physical: None,
             zones: Vec::new(),
@@ -1174,6 +1197,7 @@ mod backend {
                                 ctrl: w.mods.control_key(),
                                 alt: w.mods.alt_key(),
                                 shift: w.mods.shift_key(),
+                                count: 0,
                             }),
                         );
                         // Hover cursor: show a zone's shape (e.g. a resize cursor on
@@ -1195,6 +1219,21 @@ mod backend {
                     if let Some(b) = translate_button(button) {
                         w.held = Some(b);
                         let (col, row) = w.cursor;
+                        // Click-chain count: a fresh press in the same cell, with the same
+                        // button, within MULTI_CLICK_MS of the previous extends the chain
+                        // (double/triple-click); anything else restarts at 1.
+                        let now = Instant::now();
+                        let count = match w.last_click {
+                            Some((c, lb, lcell, lt))
+                                if lb == b
+                                    && lcell == (col, row)
+                                    && now.duration_since(lt).as_millis() <= MULTI_CLICK_MS =>
+                            {
+                                c.saturating_add(1)
+                            }
+                            _ => 1,
+                        };
+                        w.last_click = Some((count, b, (col, row), now));
                         deliver(
                             w.subscriber,
                             mouse_message(&Mouse {
@@ -1205,6 +1244,7 @@ mod backend {
                                 ctrl: w.mods.control_key(),
                                 alt: w.mods.alt_key(),
                                 shift: w.mods.shift_key(),
+                                count,
                             }),
                         );
                     }
@@ -1227,6 +1267,7 @@ mod backend {
                                 ctrl: w.mods.control_key(),
                                 alt: w.mods.alt_key(),
                                 shift: w.mods.shift_key(),
+                                count: 0,
                             }),
                         );
                     }
@@ -1254,6 +1295,7 @@ mod backend {
                                 ctrl: w.mods.control_key(),
                                 alt: w.mods.alt_key(),
                                 shift: w.mods.shift_key(),
+                                count: 0,
                             }),
                         );
                     }

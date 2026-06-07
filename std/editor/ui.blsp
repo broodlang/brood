@@ -26,8 +26,9 @@
 `display` frontend (`*term-display*` / `(gui-display)` / `display-broadcast`) plus a
 TEA-style `(ui-run model view update display)` loop. Build an app by supplying a
 pure `view` (model + cols/rows → a render frame) and an `update` (model + input +
-cols/rows → model); set `:done` in the model to quit, `:tick-ms` to set the refresh
-beat. The observer and the coming editor are both `ui-run` clients — see
+cols/rows → model); set `:done` in the model to quit, and declare time-driven work
+as `:timers` (named timers, ADR-101) — or, legacy, `:tick-ms` for a single refresh
+beat. The observer and the editor are both `ui-run` clients — see
 `std/observer.blsp`."
   ;; the shared named-face / theme registry, for every ui-run client
   (:use editor/face))
@@ -151,8 +152,117 @@ event feed). Requires `(require 'sse)` on the producing side."
 ;; ---- the app loop (TEA: model + view + update) ------------------------------
 
 (defn ui--tick-ms (model)
-  "The poll timeout (refresh beat) in ms: `(get model :tick-ms)` or 1000 by default."
+  "The poll timeout (refresh beat) in ms: `(get model :tick-ms)` or 1000 by default.
+The legacy single-beat knob; superseded by `:timers` (ADR-101) — kept for the
+synthesized back-compat timer below and any app that hasn't moved to named timers."
   (or (get model :tick-ms) 1000))
+
+;; ---- named timers (ADR-101) -------------------------------------------------
+;; A model may carry `:timers` — a map `name -> spec`, where a spec is `{:every ms}`
+;; (repeating) or `{:after ms}` (one-shot), optionally with `:idle? true` (count from
+;; the last *real* input, not from arm/last-fire). Each firing delivers `[:timer name]`
+;; as loop input; an idle timer pauses while input flows and resumes once it settles.
+;; This replaces juggling a single `:tick-ms` beat: a steady animation timer (cursor
+;; blink) and several idle one-shots (debounce, which-key) now coexist, each with its
+;; own clock and its own fired-event identity. Named timers are **opt-in by the
+;; `:timers` key**: with no such key the loop takes the legacy path unchanged (a `nil`
+;; poll → the bare keyword `:tick`, the `:tick-ms` beat) — so the observer and any
+;; pre-timers app are untouched; with the key, the clock-driven path below. The
+;; per-timer bookkeeping — when each timer appeared, when it last fired, and the
+;; last-input time — lives in a `clock` map threaded through `ui--loop`, NOT in the
+;; model: it's wall-clock reality, so it never rolls back when a view/update crash
+;; rolls the model back.
+
+(def *ui-idle-cap* 60000)
+;; The longest the loop will park when no live timer needs servicing sooner — a
+;; ceiling on the poll timeout so a far-future (or fired-and-done) timer can't make
+;; the loop oversleep. Input still wakes it immediately; this only bounds the idle wait.
+
+(defn ui--now (model)
+  "The current wall-clock in ms — `(now)`, unless the model carries a `:now-fn` (a
+0-arg fn), which the loop calls instead. The injection seam tests use to drive timers
+off a scripted clock deterministically, with no real sleeping."
+  ((or (get model :now-fn) now)))
+
+(defn ui--timer-ms (spec)
+  "A timer spec's interval in ms — its `:every` (repeating) or `:after` (one-shot)."
+  (or (get spec :every) (get spec :after)))
+
+(defn ui--deadline (spec armed fired last-input)
+  "When timer `spec` next wants to fire, as an absolute ms time. `armed` is when it
+first appeared; `fired` is when it last fired (nil if never). A repeating timer counts
+from its last fire (or, before the first fire, from `armed`); a one-shot always counts
+from `armed`, so its deadline is fixed and it fires exactly once per arming. An
+`:idle?` timer counts from the later of that base and `last-input`, so a real key
+pushes it out — it fires only after input settles."
+  (let (ms (ui--timer-ms spec)
+        base0 (if (contains? spec :every) (or fired armed) armed)
+        base (if (get spec :idle?) (max base0 last-input) base0))
+    (+ base ms)))
+
+(defn ui--timer-live? (fired deadline)
+  "Whether a timer with last-fire `fired` and next-fire `deadline` can still fire — its
+deadline is strictly past its last firing. False for a one-shot that already fired (its
+deadline is fixed at-or-before `fired`); true for a repeating timer (each fire advances
+the base, so the next deadline moves ahead) and for an idle one-shot once new input has
+pushed the deadline past the last fire."
+  (> deadline (or fired -1)))
+
+(defn ui--clock-init (clock timers now)
+  "Refresh the loop clock for this iteration: default `:last-input` to `now` on the
+first pass, GC the per-timer `:armed`/`:fired` maps down to the live timer set (so a
+removed-then-re-added timer re-arms clean and stale entries can't leak), and stamp
+`:armed` = `now` for any timer seen for the first time (its base)."
+  (let (ks (keys timers)
+        last-input (or (get clock :last-input) now)
+        armed0 (select-keys (or (get clock :armed) {}) ks)
+        fired (select-keys (or (get clock :fired) {}) ks)
+        armed (fold (fn (a k) (if (contains? a k) a (assoc a k now))) armed0 ks))
+    {:last-input last-input :armed armed :fired fired}))
+
+(defn ui--poll-ms (timers clock now)
+  "How long to park the poll: the soonest *live* timer deadline minus `now` (at least
+1ms), or `*ui-idle-cap*` when no live timer is pending — capped at the idle ceiling so
+a far-future timer can't oversleep a responsive app."
+  (let (last-input (get clock :last-input)
+        armed (get clock :armed)
+        fired (get clock :fired)
+        best (reduce-kv
+               (fn (acc name spec)
+                 (let (d (ui--deadline spec (get armed name) (get fired name) last-input))
+                   (if (and (ui--timer-live? (get fired name) d)
+                         (or (nil? acc) (< d acc)))
+                     d
+                     acc)))
+               nil
+               timers))
+    (if (nil? best)
+      *ui-idle-cap*
+      (max 1 (min *ui-idle-cap* (- best now))))))
+
+(defn ui--fire (timers clock now)
+  "Service the timers at time `now`: find the earliest *live* timer whose deadline has
+arrived and return `[event clock']`, where `event` is `[:timer name]` and `clock'`
+records the firing. When none is due, `[nil clock]` — the loop re-parks without folding.
+Only one timer fires per call; simultaneous timers serialize over successive iterations
+(each next poll clamps to 1ms while another is overdue)."
+  (let (last-input (get clock :last-input)
+        armed (get clock :armed)
+        fired (get clock :fired)
+        due (reduce-kv
+              (fn (acc name spec)
+                (let (d (ui--deadline spec (get armed name) (get fired name) last-input))
+                  (if (and (>= now d)
+                        (ui--timer-live? (get fired name) d)
+                        (or (nil? acc) (< d (second acc))))
+                    [name d]
+                    acc)))
+              nil
+              timers))
+    (if (nil? due)
+      [nil clock]
+      (let (name (first due))
+        [[:timer name] (assoc-in clock [:fired name] now)]))))
 
 (defn quit-request? (input)
   "True if `input` is a window-close request (`:close`) — the frontend (the GUI's X
@@ -176,14 +286,23 @@ already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)
 `where` names the phase it came from (`\"view\"` / `\"update\"`). Returns nil."
   (eprintln (str "ui-run: " where " error (recovering to last good frame): " (error-message e))))
 
-(defn ui--loop (model last-good view update display)
+(defn ui--loop (model last-good clock view update display)
   "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
-O(1) stack). Renders, polls, folds the input, recurses; stops when `:done` (the
+O(1) stack). Renders, parks the poll until the soonest timer is due, folds the input
+(a key/mouse/system event, or a timer firing), recurses; stops when `:done` (the
 caller, `ui-run`, runs `:leave` in all cases). A `:close` input (the window's X
 button) always quits, so every `ui-run` app is closeable by its close button without
 wiring it into `update` — independent of how the app binds the Escape key. A `:focus`
 control message (from another process) raises the window via the display's `:focus`
 and is NOT folded into `update`.
+
+**Named timers (ADR-101).** The poll timeout is `ui--poll-ms` — the soonest live
+timer in `(ui--timers model)`. A timed-out poll (nil) fires the earliest due timer via
+`ui--fire`, folding `[:timer name]` (or the bare `:tick` legacy beat). A real input
+stamps `:last-input` on the `clock` (so idle timers reset). The `clock` is threaded
+alongside `model`/`last-good` and is wall-clock bookkeeping, NOT model state: it does
+**not** roll back on a crash (a key the user pressed stays pressed), and the `:focus`
+branch passes it through without advancing `:last-input` (a focus message isn't input).
 
 **Let-it-crash at the render loop** (the editor's application of userland
 supervision, M4 — see `docs/supervision.md`). A throw from `view` or `update` is
@@ -207,32 +326,69 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                  (do (ui--log-error "view" e) :failed)))))
       (if (= rendered :failed)
         ;; couldn't render `model` — roll back to the last model that did, and re-render it
-        (ui--loop last-good last-good view update display)
+        ;; (the clock keeps advancing — it's wall-clock reality, not model state).
+        (ui--loop last-good last-good clock view update display)
         (do
           ((get display :draw) (second rendered))
           ;; `model` rendered cleanly: it's now the fallback point for the next turns.
-          (let (input (or ((get display :poll) (ui--tick-ms model)) :tick))
+          ;; Named timers are opt-in via the `:timers` key — `timers` is nil for a
+          ;; pre-timers app (the legacy `:tick-ms`/`:tick` path) and the clock is just
+          ;; passed through untouched; with timers, the poll parks until the soonest is
+          ;; due and `ui--fire` decides what (if anything) fired.
+          (let (timers (get model :timers)
+                now1 (ui--now model)
+                clock1 (if (nil? timers) clock (ui--clock-init clock timers now1))
+                poll-ms (if (nil? timers) (ui--tick-ms model) (ui--poll-ms timers clock1 now1))
+                raw ((get display :poll) poll-ms))
             (cond
               ;; the window's close button always quits; `ui-run` then runs `:leave`
-              (quit-request? input) nil
-              ;; raise-to-front request: act on the display, keep the model untouched
-              (focus-request? input) (let (f (get display :focus))
-                                       (do (when f (f)) (ui--loop model model view update display)))
+              (quit-request? raw) nil
+              ;; raise-to-front request: act on the display, keep the model untouched and
+              ;; do NOT advance `:last-input` (a focus message from another process is
+              ;; not user input — it must not reset idle timers).
+              (focus-request? raw) (let (f (get display :focus))
+                                     (do (when f (f))
+                                       (ui--loop model model clock1 view update display)))
+              ;; poll timed out (nil). Legacy: deliver the bare `:tick`. Timers: fire the
+              ;; earliest due timer (if any), else re-park without folding.
+              (nil? raw)
+              (if (nil? timers)
+                (let (next (try
+                             (update model :tick cols rows)
+                             (catch e (do (ui--log-error "update" e) model))))
+                  (ui--loop next model clock1 view update display))
+                (let (fr (ui--fire timers clock1 (ui--now model))
+                      event (first fr)
+                      clock2 (second fr))
+                  (if (nil? event)
+                    (ui--loop model model clock2 view update display)
+                    (let (next (try
+                                 (update model event cols rows)
+                                 (catch e (do (ui--log-error "update" e) model))))
+                      (ui--loop next model clock2 view update display)))))
+              ;; a real key/mouse/system event: with timers, stamp `:last-input` (resets
+              ;; idle timers); then fold it. A throwing `update` drops this input.
               :else
-              ;; fold the input; a throwing `update` drops this input and keeps `model`
-              (let (next (try
-                           (update model input cols rows)
+              (let (clock2 (if (nil? timers) clock1 (assoc clock1 :last-input (ui--now model)))
+                    next (try
+                           (update model raw cols rows)
                            (catch e (do (ui--log-error "update" e) model))))
-                (ui--loop next model view update display)))))))))
+                (ui--loop next model clock2 view update display)))))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
 `(view model cols rows)` → `:draw` → `(:poll ms)` → `(update model input cols rows)`
 → recurse — until the model is `:done`, then `:leave`. `input` is the frontend's
-key/mouse value (`\"a\"`, `:up`, `[:mouse …]`), or `:tick` on the poll timeout (the
-refresh beat, `(model :tick-ms)` or 1000 ms). `view` is pure (model + size → a
-`display.blsp` render frame); `update` folds an input into the next model and sets
-`:done` to quit.
+key/mouse value (`\"a\"`, `:up`, `[:mouse …]`), or a timer firing. `view` is pure
+(model + size → a `display.blsp` render frame); `update` folds an input into the next
+model and sets `:done` to quit.
+
+**Timers (ADR-101).** Declare time-driven work as data on the model: `:timers`, a map
+`name -> {:every ms}` / `{:after ms}` (optionally `:idle? true`). The loop parks the
+poll until the soonest is due and folds `[:timer name]` when it fires — so a steady
+animation timer and several idle one-shots coexist, each on its own clock. A model
+with no `:timers` key keeps the legacy single beat (`:tick-ms`, default 1000 ms),
+delivered as the bare keyword `:tick`. See `ui--loop` and the named-timers section.
 
 **The window's close button (the X) always quits.** A GUI frontend delivers it as
 a `:close` input (distinct from the Escape *key*, `:escape`), and `ui-run` treats
@@ -262,7 +418,9 @@ non-blocking window. The shared loop behind the observer (and the editor)."
     ((get display :enter))
     (try
       (do
-        (ui--loop model nil view update display)  ; nil last-good: first render must succeed
+        ;; nil last-good: first render must succeed. {} clock: a fresh timer bookkeeping
+        ;; map (last-input/armed/fired filled lazily on the first iteration).
+        (ui--loop model nil {} view update display)
         ((get display :leave)))
       (catch e
         ((get display :leave))  ; restore the terminal even on a frontend/startup error
