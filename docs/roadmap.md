@@ -70,10 +70,35 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     existing `dispatch`, a tail call/self-call reuses the frame (TCO). Most arms now
     lower to bytecode. Parity: differential green incl. GC stress; full in-language
     suite (1434) green with it enabled. (No call-site IC yet — a later perf pass.)
-  - ⬜ Stage 3: `MakeClosure`/captures/optional-rest defaults → full per-arm parity.
-  - ⬜ Stage 4: explicit cross-arm frame stack (replaces native dispatch recursion —
-    the migration prerequisite); then make bytecode the default and retire the
-    `Node`-walk. Suspension-as-data + migration follow (§7.5 stages 2–4).
+  - ✅ **Stage 3 — `MakeClosure` (closures/captures).** The last node type; chunks
+    may now carry movable RUNTIME handles, rewritten in place under compaction by
+    `rewrite_chunk`. Nearly every VM-eligible arm now lowers to a chunk. Parity:
+    differential + full suite (1434) green with bytecode on, incl. GC stress and the
+    RUNTIME-compaction collector tests.
+  - ✅ **Stage 4 — explicit cross-arm frame stack (`vm_run_bc`).** A chunked arm and
+    its whole chain of chunked calls run on one heap frame stack — a non-tail call
+    pushes a frame, a tail call/self-call reuses it (TCO), `Done` pops it; natives /
+    tree-walked arms run inline as leaves. **No native recursion per Brood call**, so
+    a process's call continuation is now relocatable heap data (the migration
+    prerequisite) and deep *non-tail* recursion is heap-bounded (computes where the
+    `Node` engine overflows). Each frame registers its arm in `live_vm_arms`, so hot
+    reload / RUNTIME compaction rewrites every in-flight chunk. Parity: differential
+    (incl. GC stress), full suite (1434), `concurrency_race`, `gc`, `runtime_collector`
+    all green with bytecode on. (Native-stack byte guard → `MAX_BC_FRAMES` frame cap.)
+  - ✅ **Stage 5 — call-site IC + bytecode is now the default engine.** Re-added the
+    call-site inline cache to the bytecode `Call` (caches the resolved arm per
+    `(site, sym, argc, epoch)`, callee still resolved in-order so it's a pure cache).
+    Bench (Bc vs the `Node`-VM, medians): fib ~33% faster, sum_tail ~34%, reduce ~25%,
+    defseq_map ~45%, cons_build ~30% — **faster across the board**. So
+    `bytecode_enabled()` now defaults ON (`BROOD_BYTECODE=0` is the escape hatch,
+    mirroring `BROOD_VM=0`); full `make test` (550) green at the default.
+  - ⬜ Cleanup: retire the `Node`-walking VM (`exec_node`/`exec_value`/the `Node` IR
+    as an *executor*) once the bytecode default has baked a release — the `Node` tree
+    stays as the compile *source* feeding `compile_chunk`.
+  - ⬜ **Then the actual migration** (§7.5 stages 2–4): capture a suspended process as
+    `(frames, operands, ip)` data instead of a corosensei coroutine, generalize
+    stealing/migration to *running* processes, remove corosensei. BEAM-style
+    rebalancing lands here.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
