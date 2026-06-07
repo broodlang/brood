@@ -70,10 +70,15 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     existing `dispatch`, a tail call/self-call reuses the frame (TCO). Most arms now
     lower to bytecode. Parity: differential green incl. GC stress; full in-language
     suite (1434) green with it enabled. (No call-site IC yet — a later perf pass.)
-  - ⬜ Stage 3: `MakeClosure`/captures/optional-rest defaults → full per-arm parity.
+  - ✅ **Stage 3 — `MakeClosure` (closures/captures).** The last node type; chunks
+    may now carry movable RUNTIME handles, rewritten in place under compaction by
+    `rewrite_chunk`. Nearly every VM-eligible arm now lowers to a chunk. Parity:
+    differential + full suite (1434) green with bytecode on, incl. GC stress and the
+    RUNTIME-compaction collector tests.
   - ⬜ Stage 4: explicit cross-arm frame stack (replaces native dispatch recursion —
-    the migration prerequisite); then make bytecode the default and retire the
-    `Node`-walk. Suspension-as-data + migration follow (§7.5 stages 2–4).
+    the migration prerequisite); re-add the call-site IC; then make bytecode the
+    default and retire the `Node`-walk. Suspension-as-data + migration follow
+    (§7.5 stages 2–4).
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
