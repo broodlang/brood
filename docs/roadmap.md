@@ -632,6 +632,21 @@ the workaround available today.
     Remaining stretch (low-value): mutual recursion, quasiquote-built / unkeyable
     LOCAL bodies; and a frame-local IC for the still-uncached captured-fn call in
     local closures.
+  - 🟡 **VM profiling harness** (2026-06-07) — `perf-stats` cargo feature
+    (`(vm-stats)` / `BROOD_PERF_STATS`) for work attribution + `scripts/bench-ratio.sh`
+    (load-robust VM÷tree-walker ratio). First profile: the VM is **dispatch-bound**
+    (IC 99.99% hit, prim2 96% inlined) — so the micro-opts are maxed and the next
+    *structural* lever is bytecode lowering. See `docs/benchmarking.md`. Also landed:
+    `(def x <expr>)` runs its RHS on the VM; `%range-reduce` calls its reducer on the
+    VM (`reduce`/`fold` over a range ~65–67% faster).
+  - ⬜ **Next VM items (planned — see [`handoff-vm-callback-routing.md`](handoff-vm-callback-routing.md)):**
+    (1) fix the `let`-self-ref **send** divergence — a VM `let`-self-ref closure
+    isn't *structurally* self-referential, so `send` accepts it where the tree-walker
+    rejects (correctness gap + differential blind spot); (2) route the remaining
+    native higher-order callbacks (`try`/`binding`/`apply`/`isolate`) through the VM
+    like `%range-reduce` (blocked on (1) — running `try` bodies on the VM surfaces the
+    divergence). Then **bytecode lowering** (ADR-096; the JIT on-ramp), gated on the
+    now-available profile.
 
 ## M2 — Editor data model
 
