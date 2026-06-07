@@ -53,13 +53,23 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   first resume on the thief, no saved native stack — safe per `concurrency-v2.md`
   §3.1a). Rebalances spawn-burst backlog that placement didn't spread; new
   `(steal-count)` builtin. `tests/work_stealing.rs`; KI-1 bar clean plain-release.
-  ⬜ **Deferred — full live-process migration (the stepping-VM endgame).** Moving
+  ⬜ **In progress — full live-process migration (the stepping-VM endgame).** Moving
   an *already-running* process off a hot worker (BEAM-style rebalancing) needs the
   call continuation reified off the native stack — reify the VM's call/frame stack
   (a `Vec<Frame>` + flat dispatch loop), which also unlocks fully-precise mid-eval
   GC and removes corosensei. **Not** a corosensei swap. Full design/staging:
-  `concurrency-v2.md` §7, ADR-100. Gated on a workload that fresh-steal + placement
-  can't serve.
+  `concurrency-v2.md` §7, ADR-100.
+  - ✅ **Stage 1 — bytecode stepping engine scaffolding.** A compiled arm's body
+    also lowers to a flat bytecode `Chunk` run by a non-recursive loop
+    (`exec_chunk`) over the existing `Heap::roots` operand stack; default-off behind
+    `BROOD_BYTECODE`. Stage 1 lowers a call-free/handle-free subset (others stay on
+    `exec_node`). Parity: differential test runs it as a third engine; full
+    in-language suite (1434) green with it enabled, incl. GC stress.
+  - ⬜ Stage 2: `Call`/`SelfCall` ops (still via the existing dispatch/trampoline).
+  - ⬜ Stage 3: `MakeClosure`/captures/optional-rest defaults → full per-arm parity.
+  - ⬜ Stage 4: explicit cross-arm frame stack (replaces native dispatch recursion —
+    the migration prerequisite); then make bytecode the default and retire the
+    `Node`-walk. Suspension-as-data + migration follow (§7.5 stages 2–4).
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
