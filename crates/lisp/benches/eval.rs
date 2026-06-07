@@ -95,6 +95,17 @@ fn defseq_map(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
+#[divan::bench(args = engine_grid![200_000, 1_000_000])]
+fn reduce_range(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
+    // `(reduce <named-fn> 0 (range n))` — drives the `%range-reduce` *native*,
+    // which calls the reducer back per element. Today it uses `eval::apply`
+    // (tree-walker) regardless of engine, so the VM/TW ratio is ~1.0 (the reducer
+    // is stuck on the tree-walker either way). After routing the callback through
+    // the VM (`apply_value` when `vm_enabled`), the Vm row should drop.
+    let src = format!("(defn rf (a x) (+ a (* x 2))) (reduce rf 0 (range {n}))");
+    bencher.with_inputs(|| interp_on(eng)).bench_refs(|interp| interp.eval_str(&src).unwrap());
+}
+
 /// Naive (non-tail) recursive Fibonacci — exercises function-call overhead and
 /// the growing-then-unwinding Rust call stack. fib(25) is ~242k calls.
 #[divan::bench(args = engine_grid![15, 20, 25])]

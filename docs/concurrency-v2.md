@@ -152,11 +152,22 @@ The experiment patch lives on branch `track-a-workstealing` (worktree
   queue, rotating-start scan, ties toward the rotation), replacing pure
   round-robin. No migration, INV-2 preserved, proven clean in §3.1a and
   re-validated default-on (plain-release KI-1 0/8, full in-language suites green).
-  Degrades to round-robin when load is even. Known limitation: queue-length is an
-  imperfect load signal — it doesn't see a long-running process *occupying* a
-  worker (only queued ones) — so it improves burst distribution, not uneven
-  long-task occupancy. A per-worker "busy" flag is the future refinement if that
-  matters.
+  Degrades to round-robin when load is even.
+- ✅ **Per-worker "busy" flag — LANDED in main (2026-06-07).** The refinement the
+  bullet above anticipated: `assign_worker`'s load metric now adds 1 when a worker
+  is inside `resume` (the `WORKER_BUSY` gauge, set/cleared in `run_one`), so a
+  worker *occupied* by one long-running process no longer reads as idle just
+  because its queue is empty. Closes the "queue-length doesn't see the running
+  process" limitation for placement; still no migration (INV-2 preserved). The
+  remaining uneven-occupancy case (a process that turns long-running *after*
+  placement) is unfixable without migration — see the fresh-steal note below.
+- ⬜ **Limited work-stealing of *fresh* processes only.** §3.1a found stealing
+  never-yet-resumed processes is safe (their first `resume` is on the thief, no
+  saved native stack to migrate); only *suspended mid-computation* coroutines are
+  unmovable. An idle worker could steal a fresh, runnable process from a backed-up
+  peer's queue without tripping the substrate constraint — the one migration-shaped
+  win available without changing the coroutine substrate. Deferred (no consumer
+  yet); full anything-anytime stealing needs a reified/heap stack like BEAM's.
 - 🟡 **Fresh-only stealing (optional, additive).** An idle worker may steal
   processes that have **never been resumed** (a backlog of unstarted spawns on
   one worker) — proven safe in §3.1a, since the first resume then happens on the

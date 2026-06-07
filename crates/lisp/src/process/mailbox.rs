@@ -160,7 +160,19 @@ impl Mailbox {
     /// publishes the flag, so any reader (`pending_kill`) that observes the flag set
     /// is guaranteed to see the reason. A later signal overwrites the reason.
     pub(super) fn request_kill(&self, reason: Message) {
-        crate::core::sync::lock(&self.state).kill = Some(reason);
+        {
+            let mut st = crate::core::sync::lock(&self.state);
+            // A latched untrappable `:kill` is **sticky**: a later *soft* `(exit pid
+            // reason)` must not overwrite it (Erlang's guarantee that `exit(pid, kill)`
+            // can't be undone — otherwise a racing soft exit could downgrade the kill
+            // and spare a CPU-bound target, which only honours `:kill` at `preempt`).
+            // A fresh `:kill` may still upgrade a pending soft reason.
+            let latched_kill =
+                matches!(&st.kill, Some(existing) if super::scheduler::is_kill_reason(existing));
+            if !latched_kill {
+                st.kill = Some(reason);
+            }
+        }
         self.kill_pending.store(true, Ordering::Relaxed);
     }
 
@@ -580,5 +592,44 @@ mod tests {
         assert_ne!(gen1, current, "first park's entry is superseded");
         assert_ne!(gen2, current, "second park's entry is superseded");
         assert_eq!(gen3, current, "only the latest park's entry is live");
+    }
+
+    /// Sticky `:kill` (the `request_kill` hardening): once an untrappable `:kill` is
+    /// latched, a racing *soft* `(exit …)` must not overwrite it — otherwise the soft
+    /// reason would downgrade the kill and a CPU-bound target (which honours only
+    /// `:kill`, at `preempt`) could survive. A `:kill` may still upgrade a pending
+    /// soft reason, and two soft reasons never become a kill.
+    #[test]
+    fn kill_is_sticky_against_a_racing_soft_exit() {
+        use crate::process::scheduler::is_kill_reason;
+        let kill = || Message::Keyword(value::intern(pk::KILL));
+        let soft = || Message::Keyword(value::intern("shutdown"));
+
+        // :kill, then a soft exit → still :kill (no downgrade).
+        let mb = Mailbox::new();
+        mb.request_kill(kill());
+        mb.request_kill(soft());
+        assert!(
+            is_kill_reason(&mb.pending_kill().unwrap()),
+            "a soft exit must not downgrade a latched :kill"
+        );
+
+        // soft, then :kill → upgraded to :kill.
+        let mb = Mailbox::new();
+        mb.request_kill(soft());
+        mb.request_kill(kill());
+        assert!(
+            is_kill_reason(&mb.pending_kill().unwrap()),
+            "a :kill must upgrade a pending soft reason"
+        );
+
+        // soft, then another soft → last soft wins; never spuriously a kill.
+        let mb = Mailbox::new();
+        mb.request_kill(soft());
+        mb.request_kill(Message::Keyword(value::intern("other")));
+        assert!(
+            !is_kill_reason(&mb.pending_kill().unwrap()),
+            "two soft reasons never become a kill"
+        );
     }
 }

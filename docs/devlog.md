@@ -285,6 +285,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-07** — ADR-096 round 2 (item 6, defer-set shrink): direct `letrec` self-recursion now VM-compiles for RUNTIME-region closures — the prelude `defseq` family (`map`/`filter`/`mapcat`/`remove`/`keep`), which deferred *wholesale* before. `MakeClosure` binds the closure to its own name in its captured env (the tree-walker's late-bind); a self-call optimization (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset). `(count (map inc (range n)))` **~58–60% faster** on the VM than the tree-walker. Top-level `letrec`/lambda literals defer by design (LOCAL region). (An earlier "−30…−54%" figure was a noisy read of a top-level-`letrec` bench that *defers* — the `perf-stats` harness later showed it never hit the VM; corrected 2026-06-07. Lesson: measure the path you think you are.)
 - **2026-06-07** — ADR-098 small-core audit: dropped the unused `lambda`/`let*` alias spellings (no `.blsp` used them) and demoted `defmacro` from a core special form to a prelude macro over a new `(%make-macro f)` primitive (the `try`/`%try` pattern). Evaluator core 9 → **8 true special forms** (`quote if do def fn let letrec quasiquote`). `letrec` reviewed and kept (irreducible — merging into `let` would break shadow-rebinding). Surface syntax unchanged, so tooling untouched; full suite green on both engines.
 - **2026-06-07** — VM profiling harness + `(def x <expr>)` runs its RHS on the VM. New `perf-stats` cargo feature (`src/perf.rs`): zero-cost-off work-attribution counters (`vm_apply`/IC hit-miss/prim inline-fallback/`self_tail`/`env_hops`/`alloc`/`tw_defer`), surfaced via `(vm-stats)` + `BROOD_PERF_STATS=1`. Plus `scripts/bench-ratio.sh` — the load-robust VM÷tree-walker ratio (the only trustworthy timing on this box). Two questions, two tools (`docs/benchmarking.md`). First profile finding: the VM is **dispatch-bound** on call-heavy code (IC 99.99% hit, prim2 96% inlined, env/alloc minor) — the bytecode-lowering gate signal. Second: a top-level `(def x <expr>)` was running `<expr>` on the tree-walker (`def` is a special form → the whole form deferred); now its RHS goes through `compile::run` (falls back to the tree-walker for anything it can't compile), so `(def a (fib 27))` runs `fib` on the VM (`vm_apply` 0 → 635k). Suite green both engines, GC-stress clean.
+- **2026-06-07** — `%range-reduce` callback runs on the VM. `reduce`/`fold` over a *lazy range* drive the `%range-reduce` native, which called the reducer back via `eval::apply` (tree-walker) regardless of engine — so `(reduce <vm-eligible-fn> 0 (range n))` was pinned to the tree-walker (VM/TW ≈ 1.0). Now it routes through `compile::apply_value` when `vm_enabled` (pure tree-walker under `BROOD_VM=0`, so the escape hatch / differential TW mode stay honest): **65–67% faster** on the VM (VM/TW 0.35/0.33), measured load-robustly via the eval-grid `reduce_range` bench. Suite green both engines, GC-stress clean (allocating reducer). **Attempted + reverted:** generalising the same VM-callback routing to the *other* native higher-order sites (`apply`, `%try` thunk/handler, `binding`/`isolate` body) broke the adversarial suite — running a `try`/test-framework body on the VM where it used to tree-walk surfaced a **VM↔tree-walker divergence**: a *self-referential local closure* (a `letrec` fn that captures itself — the round-2 self-name `env_define` builds a closure whose env contains itself) is **rejected by `send` when tree-walker-built but accepted when VM-built**. Reverted to keep only the proven `%range-reduce` win; the divergence (is the VM-built self-ref closure correctly send-able, or a latent cycle bug the differential harness doesn't probe because it doesn't `send` such closures?) must be understood before native callbacks can route to the VM generally.
 
 ---
 
@@ -1592,3 +1593,35 @@ nextest pass is orthogonal. See ADR-099 and `docs/language.md` §"The `proc/gen`
 server framework". Tiers 2–3 (timers, pid-returning `remote-spawn`, `terminate`
 worker convention; `gen_statem`, `Registry`/`pg`, `Application`) are on the
 roadmap.
+
+## 2026-06-07 — scheduler: sticky `:kill` + busy-aware spawn placement
+
+Two small scheduler changes after a bug-review of the process subsystem (the
+park/wake handshake, lock discipline, exit/link/monitor paths all checked out —
+these were the only actionable items).
+
+**Sticky `:kill` (correctness, `mailbox.rs` `request_kill`).** `request_kill`
+overwrote the pending exit reason unconditionally, so two racing `(exit pid …)`
+calls — one `:kill`, one soft — could let the soft reason **downgrade** a latched
+untrappable `:kill`. Since a CPU-bound process honours only `:kill` (at `preempt`)
+and ignores soft signals, the target could survive a kill it shouldn't. Fix: once
+a `:kill` is latched it's sticky; a soft reason can't replace it, but a fresh
+`:kill` still upgrades a pending soft one. Deterministic unit test
+`kill_is_sticky_against_a_racing_soft_exit` in `mailbox.rs`. (Erlang's guarantee
+that `exit(pid, kill)` can't be undone.)
+
+**Busy-aware spawn placement (enhancement, `scheduler.rs` `assign_worker`).**
+Because a process is pinned to its spawn-worker for life (no migration, KI-1b),
+the only load-balancing lever is the one-shot placement at spawn. It scored a
+worker purely by runnable-queue length, which **ignores the process the worker is
+currently running** — a worker draining one CPU-bound loop has an empty queue yet
+no spare capacity, and would be picked as "idle." Added a per-worker `WORKER_BUSY`
+gauge (set/cleared around `resume` in `run_one`) and folded it into the load
+metric, so a busy-but-empty-queue worker is no longer mistaken for idle. Empty +
+idle still scores 0 (so N spawns onto N idle cores still land one-per-core); the
+change only bites when counts tie but a core is actually working. No new locks, no
+migration, no race surface (one relaxed atomic per worker). See `scheduler.md`
+§Placement.
+
+Full Brood suite green (1422 tests) with both changes; the busy gauge is exercised
+by the whole concurrent suite (a heuristic, so no isolated unit test).
