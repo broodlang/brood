@@ -216,6 +216,34 @@ the substrate.
 underlying race is fixed (same as KI-1) · **Severity:** was medium → none ·
 **First seen:** 2026-05-28
 
+### 2026-06-07 — a residual `unbound` recurrence, root-caused to test isolation (fixed)
+
+A flaky `unbound symbol` resurfaced under **maximal** load (a full `cargo nextest`
+run, or ~24 suites in parallel — far past the original repros): a spawned process
+dying with e.g. `unbound symbol: concurrency-test/tco--srv`. It read like KI-1
+returning, but it is **not a core race** — instrumenting the unbound site
+(`present_in_globals=false` at the failure, with the runtime `version` churning)
+showed the global was *genuinely absent from the table*, not mis-looked-up.
+
+Root cause: **`%isolate` (test-only) wholesale-restores the globals table when an
+isolated test ends.** A test that spawned a process it never stopped (e.g.
+`concurrency_test`'s self-recursive `tco--srv` server) leaves an orphan still
+running the test's code; when `restore_globals` swaps the table back, the global
+the test `def`'d vanishes, and the orphan's next lookup dies `unbound`. Flaky
+because, under load, the orphan is far more likely to still be alive at teardown.
+`restore_globals` is called *only* by `%isolate` — production never wholesale-
+restores globals — so **the language/runtime itself was never implicated.**
+
+Fix: `%isolate` now **reaps the processes the isolated thunk spawned** (untrappable
+`:kill`) and waits for them to deregister **before** restoring globals. The wait
+uses a new green-friendly `scheduler::yield_now` (cooperative suspend, like
+`preempt`), **not** `std::thread::sleep` — `%isolate` runs inside the isolated
+unit's own green process, so a thread sleep would freeze that worker and starve a
+same-worker orphan (the trap that sank a first attempt). Validated: `nextest`
+3/3 green (was ~1/5 failing); at 24× the unbound count went 9→0 and total
+failures roughly halved (the rest are pre-existing 24×-oversubscription timing
+artifacts, not this race).
+
 Same root cause as KI-1, surfacing through the test runner. `nest test` runs
 each `test` in its own parallel green process (default scheduler). When more
 than one test does real compute over globals concurrently (e.g. two tests each

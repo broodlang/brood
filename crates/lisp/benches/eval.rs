@@ -97,12 +97,43 @@ fn defseq_map(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 
 #[divan::bench(args = engine_grid![200_000, 1_000_000])]
 fn reduce_range(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
-    // `(reduce <named-fn> 0 (range n))` — drives the `%range-reduce` *native*,
-    // which calls the reducer back per element. Today it uses `eval::apply`
-    // (tree-walker) regardless of engine, so the VM/TW ratio is ~1.0 (the reducer
-    // is stuck on the tree-walker either way). After routing the callback through
-    // the VM (`apply_value` when `vm_enabled`), the Vm row should drop.
+    // `(reduce <named-fn> 0 (range n))` — drives the `%range-reduce` native,
+    // which calls the reducer back per element through `apply_value` when
+    // `vm_enabled` (commit `4af9d2a`). A named `defn` reducer is RUNTIME-region
+    // and VM-compiles, so the Vm row shows a clear speedup over the Tw row
+    // (~65–67% faster measured at the time of routing).
     let src = format!("(defn rf (a x) (+ a (* x 2))) (reduce rf 0 (range {n}))");
+    bencher.with_inputs(|| interp_on(eng)).bench_refs(|interp| interp.eval_str(&src).unwrap());
+}
+
+/// A `(try … (catch e …))` body — the `try` macro wraps the body in a LOCAL
+/// `(fn () …)` thunk, so `apply_engine` (which routes VM-eligible callees)
+/// falls back to the tree-walker for this LOCAL thunk regardless of engine.
+/// The inner `acc-sum` recursion therefore runs on TW in both rows, and the
+/// Vm/Tw ratio is ~1.0. This is the expected and correct result: it confirms
+/// `try`-heavy code has no regression, and that the routing benefit lands only
+/// when the thunk itself is a RUNTIME closure (a `defn` passed directly to
+/// `%try`, rather than the typical macro-expanded LOCAL wrapper).
+#[divan::bench(args = engine_grid![1_000, 10_000])]
+fn try_body(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
+    let src = format!(
+        "(defn acc-sum (n acc) (if (= n 0) acc (acc-sum (- n 1) (+ acc n)))) \
+         (try (acc-sum {n} 0) (catch _ -1))"
+    );
+    bencher.with_inputs(|| interp_on(eng)).bench_refs(|interp| interp.eval_str(&src).unwrap());
+}
+
+/// `(apply f …)`-driven tail recursion — `apply_builtin` intentionally stays on
+/// `eval::apply` (tree-walker) to preserve O(1)-stack `apply`-driven tail
+/// recursion; routing through `apply_engine` creates a new `vm_apply` Rust frame
+/// per iteration, overflowing the stack. Both Vm and Tw rows exercise the same
+/// tree-walker dispatch path; the ratio is near 1.0. Serves as the before-baseline
+/// for any future `apply`-unfolding work in the VM's `exec_call`.
+#[divan::bench(args = engine_grid![10_000, 100_000])]
+fn apply_driven(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
+    let src = format!(
+        "(def loop- (fn (n) (if (= n 0) :done (apply loop- (list (- n 1)))))) (loop- {n})"
+    );
     bencher.with_inputs(|| interp_on(eng)).bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 

@@ -140,6 +140,15 @@ const CORPUS: &[&str] = &[
     "(/ 1 0)",
     "(+ 1 \"x\")",
     "(1 2 3)",   // calling a non-function — both engines: "cannot call non-function: 1"
+    // try/catch — body and handler thunks route through apply_engine (builtins
+    // `try_catch`). Both the success and the error path must agree across engines.
+    "(defn safe-div (a b) (try (/ a b) (catch _ :div-zero))) [(safe-div 10 2) (safe-div 1 0)]",
+    "(try (+ 1 2) (catch _ :err))",            // success path: no throw
+    "(try (/ 1 0) (catch e (get e :kind)))",   // error path: handler invoked
+    // binding (dynamic scope) — body thunk routes through apply_engine
+    "(defdyn *dv* 10) (defn get-dv () *dv*) [(get-dv) (binding (*dv* 42) (get-dv)) (get-dv)]",
+    // isolate — thunk routes through apply_engine; visible def is rolled back
+    "(defn iso-work () (def _iso-x 99) _iso-x) (%isolate iso-work)",
 ];
 
 #[test]

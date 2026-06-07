@@ -6959,7 +6959,40 @@ fn list_processes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let thunk = arg(args, 0);
     let saved = heap.snapshot_globals();
+    // Pids alive before the run, to tell apart the ones the thunk spawns.
+    let before: std::collections::HashSet<u64> =
+        crate::process::list_local_pids().into_iter().collect();
     let result = apply_engine(heap, thunk, &[], env);
+    // Reap processes the thunk spawned and left running, BEFORE the wholesale
+    // global restore below. Otherwise an orphan still running the test's code (a
+    // server it spawned but never stopped) looks up a global the test `def`'d,
+    // finds it gone after the swap, and dies with a bogus `unbound symbol` (the
+    // flaky-suite race). Kill the newcomers, then **yield** until they deregister
+    // — `crate::process::yield_now`, NOT `std::thread::sleep`: this runs inside the
+    // isolated unit's own green process, so a thread sleep would freeze its worker
+    // and starve any orphan pinned to that same worker. Bounded so a wedged orphan
+    // can't hang the run.
+    let spawned: std::collections::HashSet<u64> = crate::process::list_local_pids()
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect();
+    if !spawned.is_empty() {
+        let kill = crate::process::Message::Keyword(crate::core::value::intern(
+            crate::process::keywords::KILL,
+        ));
+        for &pid in &spawned {
+            crate::process::exit(pid, kill.clone());
+        }
+        for _ in 0..10_000 {
+            if !crate::process::list_local_pids()
+                .into_iter()
+                .any(|p| spawned.contains(&p))
+            {
+                break;
+            }
+            crate::process::yield_now();
+        }
+    }
     heap.restore_globals(saved);
     result
 }
