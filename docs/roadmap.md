@@ -92,12 +92,18 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     defseq_map ~45%, cons_build ~30% — **faster across the board**. So
     `bytecode_enabled()` now defaults ON (`BROOD_BYTECODE=0` is the escape hatch,
     mirroring `BROOD_VM=0`); full `make test` (550) green at the default.
-  - ⬜ Cleanup: retire the `Node`-walking VM (`exec_node`/`exec_value`/the `Node` IR
-    as an *executor*) once the bytecode default has baked a release — the `Node` tree
-    stays as the compile *source* feeding `compile_chunk`.
-  - ⬜ **Then the actual migration** (§7.5 stages 2–4): capture a suspended process as
-    `(frames, operands, ip)` data instead of a corosensei coroutine, generalize
-    stealing/migration to *running* processes, remove corosensei. BEAM-style
+  - ✅ **Cleanup — retired the `Node`-walking executor.** Deleted `exec_node`, the
+    `vm_apply_inner` `Node` trampoline, `Step::SelfTail`, and the `BROOD_BYTECODE`
+    gating (`bytecode_enabled`/`set_force_bytecode`): the bytecode driver is the
+    **sole VM executor**, `vm_apply` → `vm_run_bc` unconditionally. The `Node` tree
+    stays as the lowering source (`compile_chunk`); `exec_value`/`exec_call` survive
+    only for `push_frame`'s `&optional` defaults + top-level `run`; the tree-walker
+    (`BROOD_VM=0`) is the remaining fallback. Full `make test` (550) green.
+  - 🟡 **In progress — the actual migration** (§7.5 stages 2–4): replace coroutine
+    suspension with **state capture** — `receive`-on-empty unwinds `vm_run_bc` to the
+    scheduler carrying `(frames, operands, ip)` as a heap struct stored in the
+    `Process` in place of the `Coroutine`; re-enter on any worker; generalize
+    stealing/migration to *running* processes; remove corosensei. BEAM-style
     rebalancing lands here.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
@@ -698,6 +704,35 @@ the workaround available today.
     like `%range-reduce` (blocked on (1) — running `try` bodies on the VM surfaces the
     divergence). Then **bytecode lowering** (ADR-096; the JIT on-ramp), gated on the
     now-available profile.
+  - ⬜ **JIT tier-1: template JIT via Cranelift** (ADR-101,
+    [`vm-perf-and-jit-runway.md §6`](vm-perf-and-jit-runway.md)) —
+    **gated on all three**: (a) bytecode lowering done, (b) editor workload
+    profile confirms dispatch is the bottleneck, (c) `Value` repr decided
+    (NaN-box vs 16-byte enum — the JIT register model depends on it; pre-alpha
+    is the cheapest window). Staged:
+    - ⬜ **Stage 0 — Cranelift plumbing** (`--features jit`): `build.rs`
+      compiles `trampoline_x86_64.s` / `trampoline_aarch64.s` via `cc` crate
+      (Layer 3); `extern "C"` runtime-callback table
+      (`brood_rt_alloc_pair`, `brood_rt_gc_safepoint`, `brood_rt_tick`,
+      `brood_rt_global_epoch`, `brood_rt_call_slow`); r15/x28-pinned `Heap`
+      context pointer; Cranelift dep behind the feature flag. No codegen yet.
+    - ⬜ **Stage 1 — Arm compilation**: on call-count threshold crossing, compile
+      a RUNTIME-region arm to Cranelift IR and atomically install it; trampoline
+      in; epoch-guard deopt falls back to the VM. All GC-visible values in
+      `Heap::roots` between safepoints (no stack maps at tier 1).
+    - ⬜ **Stage 2 — Inline primitives**: `cons` / arithmetic / `car` / `cdr` as
+      Cranelift IR with inline tag checks; deopt to `brood_rt_call_slow` on
+      mismatch.
+    - ⬜ **Stage 3 — IC in native code**: epoch-guarded call-site IC compiles to
+      `cmp [EPOCH_SLOT], r_epoch; jne slow_path`; global-read IC same. `def`
+      hot-reload invalidates via the existing epoch bump.
+    - ⬜ **Stage 4 — RUNTIME compaction survival** (ADR-091): constant pool
+      (indirection table per ADR-096 §4.C) lets `runtime_collect` rewrite
+      handles without invalidating machine code.
+    - ⬜ **Layer 2 stubs** (`std::arch::asm!`): computed-goto bytecode dispatch
+      for the interpreter loop, if profiling after Stage 1 still shows dispatch
+      overhead worth removing (x86-64 only, `#[cfg]`-gated, pure-Rust fallback).
+      Additive; not on the critical path.
 
 ## M2 — Editor data model
 

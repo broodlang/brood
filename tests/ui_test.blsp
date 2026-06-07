@@ -238,7 +238,7 @@
       (assert= (editor/ui/ui--coalesce-drag [:mouse :drag :left 5 5 []]) [:mouse :drag :left 7 7 []])
       (assert= (receive (m m) (after 200 :none)) "k"))))  ; the key is still there
 
-;; ---- named timers (ADR-101) ------------------------------------------------
+;; ---- named timers (ADR-102) ------------------------------------------------
 ;; The firing logic is pure (deadline math over a clock map + the timer specs), so it
 ;; tests deterministically with hand-supplied `now`/`clock` — no wall-clock, no loop.
 ;; The one integration test drives `ui-run` with a `:now-fn` (the injected clock) and a
