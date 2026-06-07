@@ -1767,3 +1767,65 @@ on the new engine); `maps_test` green under bytecode + GC stress (the operand-st
 rooting is the riskiest part). Next: `Call`/`SelfCall` (Stage 2), then the explicit
 cross-arm frame stack (Stage 4 — the migration prerequisite that retires
 corosensei).
+
+## 2026-06-07 — bytecode engine Stages 2–4: calls, closures, and the explicit frame stack
+
+Pushed the bytecode stepping engine through to the migration-critical milestone, in
+three green/parity-verified commits on top of Stage 1.
+
+- **Stage 2 — `Call`/`SelfCall`.** `exec_chunk` returns a `Step` and shares
+  `vm_apply_inner`'s trampoline with `exec_node`; non-tail call delegates to
+  `dispatch`, tail call/self-call reuses the frame (TCO).
+- **Stage 3 — `MakeClosure`.** Capture sources emit as leaf instructions; chunks may
+  now carry movable RUNTIME handles, rewritten in place by `rewrite_chunk` under
+  compaction. After this `compile_chunk` handles **every** `Node` variant — so every
+  VM-eligible arm has a chunk, which simplifies Stage 4.
+- **Stage 4 — explicit cross-arm frame stack (`vm_run_bc`).** The big one: a chunked
+  arm and its whole chain of chunked calls run on one heap `Vec<Frame>` driven by a
+  single loop — a non-tail call to a chunked arm **pushes a frame** (`ChunkExit::Call`)
+  instead of recursing into `vm_apply`; tail/self-tail reuse the frame; `Done` pops.
+  Calls to natives / tree-walked arms run inline via `dispatch(tail=true)` (which
+  returns the resolved arm un-run for a VM closure, or an executed value otherwise) —
+  they're leaves to this stack. The current frame is held in registers so a tail loop
+  doesn't touch the Vec; only non-tail calls push. Every frame's slots live on
+  `Heap::roots` and its env on `env_roots`, so one safepoint relocates the whole stack
+  in place; each frame registers its arm in `live_vm_arms` for compaction (hot reload
+  intact). The native-stack byte guard becomes a `MAX_BC_FRAMES` cap.
+
+  **Result: a process's call continuation is no longer on the native Rust stack** —
+  it's relocatable heap data (`frames` + `roots` + `ip`), the prerequisite for
+  migrating a running process (§7). Visible win already: deep *non-tail* recursion
+  (`(nsum 20000)`) computes on bytecode where the `Node` engine overflows the stack.
+
+  Hot reload verified unchanged (late binding + epoch-guarded ICs + per-frame
+  compaction rewrite). Parity at every stage: differential test as a third engine
+  (incl. `BROOD_GC_STRESS`), full in-language suite (1434) with `BROOD_BYTECODE=1`,
+  and `concurrency_race`/`gc`/`runtime_collector` green with bytecode on. Still
+  default-OFF behind `BROOD_BYTECODE`. Next (Stage 5): re-add the call-site IC,
+  benchmark, make bytecode the default, retire the `Node`-walk — then suspension as
+  data and live-process migration, at which point corosensei goes.
+
+## 2026-06-07 — bytecode Stage 5: call-site IC + bytecode is now the default engine
+
+Closed the perf gap and flipped the default. Two commits.
+
+- **5a — call-site inline cache.** The bytecode `Call` carries `(site, head)` and
+  caches the resolved `(arm, env)` per `(site, sym, argc, epoch)`, skipping
+  `dispatch`'s passthrough probe + `compiled_arm_for` on a hit. Crucially the callee
+  is still *pushed and resolved in-order* (before the args, the tree-walker's order),
+  so the IC caches only the arm and stays a pure cache — a `def` bumps the epoch and
+  the stale entry drops (the in-order callee then takes the generic path). This is
+  why I didn't resolve-at-call-time (that would reorder head-vs-arg evaluation and
+  diverge from the reference on `(f (… (def f g) …))`).
+- **5b — default flip.** Benched Bc vs the `Node`-VM (medians, isolated to avoid
+  load/GC contention noise — a full concurrent bench run had falsely shown
+  `cons_build` slow): fib ~33% faster, sum_tail ~34%, reduce_range ~25%, defseq_map
+  ~45%, cons_build ~30%, apply_driven ~15%, try_body ~par — **faster everywhere**.
+  The IC flipped fib from ~18% slower (Stage 4) to ~33% faster. So
+  `bytecode_enabled()` now defaults ON; `BROOD_BYTECODE=0` is the escape hatch back to
+  the `Node` walker (mirroring `BROOD_VM=0`). Full `make test` (550) green at the
+  default; differential + `concurrency_race` green incl. `BROOD_GC_STRESS`.
+
+Remaining: retire the `Node`-walking executor after a release (the `Node` tree stays
+as the compile *source*); then suspension-as-data + live-process migration (§7.5),
+where corosensei finally goes.
