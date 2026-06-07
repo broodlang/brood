@@ -826,6 +826,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![kw, map_ty], kw),
         gui_font_register,
     );
+    // The window content inset (`gui-inset!`): a blank pixel margin before the cell
+    // grid on every edge, so a GUI app's text breathes instead of sitting flush.
+    def(
+        heap,
+        "gui-inset!",
+        Arity::exact(1),
+        Sig::new(vec![Ty::of_tags(&[Tag::Int, Tag::Float])], nil_ty),
+        gui_inset,
+    );
     // The one process-introspection accessor the language can't reach from Brood
     // (the mailbox queue lives behind the scheduler registry). Everything else an
     // observer shows — pid id, liveness — is assembled in Brood (std/observer.blsp).
@@ -1895,6 +1904,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
     ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."),
     ("gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
+    ("gui-inset!", &["px"], "Set the window content inset to px logical pixels: a blank margin before the cell grid on every window edge, so a GUI app's text breathes instead of sitting flush against the frame. Applies to every open window and the default for ones opened later; the grid loses 2*px per axis (fewer cells) and re-renders. The inset is shared by the renderer and mouse hit-testing, so clicks stay aligned. Needs --features gui. Returns nil."),
     ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),
@@ -5564,6 +5574,22 @@ fn gui_font(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         _ => None,
     };
     crate::gui::font(win, family, font_px(heap, m)).map_err(LispError::runtime)?;
+    Ok(Value::Nil)
+}
+
+/// `(gui-inset! px)` — set the window content inset (logical pixels): a blank margin
+/// before the cell grid on every edge, so text doesn't sit flush against the window
+/// frame. Applies to every open window + the default for ones opened later. The grid
+/// loses `2*px` per axis (fewer cells) and re-renders. GUI only.
+fn gui_inset(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let px = match arg(args, 0) {
+        Value::Int(n) => n.max(0) as f32,
+        Value::Float(f) => f.max(0.0) as f32,
+        other => {
+            return Err(LispError::wrong_type(heap, "gui-inset!", "a number (pixels)", other))
+        }
+    };
+    crate::gui::inset(px).map_err(LispError::runtime)?;
     Ok(Value::Nil)
 }
 

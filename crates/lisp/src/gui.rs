@@ -243,6 +243,9 @@ mod disabled {
     pub fn font(_id: Option<u64>, _family: Option<u32>, _px: Option<f32>) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
+    pub fn inset(_px: f32) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
     pub fn register_family(
         _name: u32,
         _regular: Vec<u8>,
@@ -256,12 +259,12 @@ mod disabled {
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    close, draw, focus, font, grab, held_key, icon, open, register_family, size, title,
+    close, draw, focus, font, grab, held_key, icon, inset, open, register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    close, draw, focus, font, grab, held_key, icon, open, register_family, size, title,
+    close, draw, focus, font, grab, held_key, icon, inset, open, register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
@@ -379,6 +382,11 @@ mod backend {
             family: Option<u32>,
             px: Option<f32>,
         },
+        /// Set the content inset (logical px) — the margin before the cell grid on
+        /// every window edge — for every open window and ones opened later. Behind
+        /// `gui-inset!`. The grid loses `2*inset` px of usable area per axis, so its
+        /// cell count shrinks; the window re-renders at the new size.
+        Inset { px: f32 },
         /// Register a font family (interned `name`) from raw TTF bytes per style, so
         /// a face's `:family` can select it. Parsed on the GUI thread and shared by
         /// every renderer. Behind `gui-font-register`.
@@ -568,6 +576,16 @@ mod backend {
         Ok(())
     }
 
+    /// `(gui-inset! px)` — set the content inset (logical px) on every window + the
+    /// global default for ones opened later. No-op (silently) if the GUI thread never
+    /// started.
+    pub fn inset(px: f32) -> Result<(), String> {
+        if let Ok(g) = gui() {
+            let _ = g.lock().unwrap().send_event(UserEvent::Inset { px });
+        }
+        Ok(())
+    }
+
     /// `(gui-title! id text)` — set window `id`'s title-bar text at runtime. Routed
     /// through the event-loop proxy like `font`; a no-op (silently) if the GUI thread
     /// never started or `id` isn't a live window.
@@ -753,6 +771,7 @@ mod backend {
         families: Families,
         base_px: f32,
         default_family: Option<u32>,
+        default_inset: f32,
     ) -> Result<Win, String> {
         let (w, h) = size.unwrap_or((840.0, 560.0));
         let window = elwt
@@ -772,6 +791,8 @@ mod backend {
         if let Some(f) = default_family {
             renderer.set_font(Some(f), None);
         }
+        // honour a global default content inset set before this window opened
+        renderer.set_inset(default_inset);
         Ok(Win {
             window,
             _context: context,
@@ -804,6 +825,8 @@ mod backend {
         /// Global default cell font (family / px) applied to windows opened later.
         default_family: Option<u32>,
         default_px: f32,
+        /// Global default content inset (logical px) applied to windows opened later.
+        default_inset: f32,
         /// winit 0.30 only lets a window be created once the event loop is
         /// **resumed** (an `ActiveEventLoop` whose platform display is live). On
         /// desktop `resumed` fires before the first user event, but rather than
@@ -838,6 +861,7 @@ mod backend {
                 self.families.clone(),
                 self.default_px,
                 self.default_family,
+                self.default_inset,
             ) {
                 Ok(win) => {
                     update_cells(&win.window, &win.renderer, &win.size);
@@ -962,6 +986,14 @@ mod backend {
                                 apply_font(w, family, px);
                             }
                         }
+                    }
+                }
+                UserEvent::Inset { px } => {
+                    self.default_inset = px.max(0.0);
+                    for w in self.wins.values_mut() {
+                        w.renderer.set_inset(px);
+                        update_cells(&w.window, &w.renderer, &w.size);
+                        w.window.request_redraw();
                     }
                 }
                 // Register a font family from raw TTF bytes; parse here and share it
@@ -1258,6 +1290,7 @@ mod backend {
             families: default_families(),
             default_family: None,
             default_px: DEFAULT_PX,
+            default_inset: 0.0,
             resumed: false,
             pending_open: Vec::new(),
         };
@@ -1277,19 +1310,27 @@ mod backend {
     /// metrics, and publish it for `gui-size`.
     fn update_cells(window: &winit::window::Window, r: &Renderer, size: &Arc<Mutex<(u16, u16)>>) {
         let sz = window.inner_size();
-        let cols = (sz.width as usize / r.cell_w.max(1))
+        // The inset eats a margin on each edge, so the usable area is the window
+        // minus `2*inset` before it's divided into cells.
+        let inset = r.inset();
+        let usable_w = (sz.width as usize).saturating_sub(2 * inset);
+        let usable_h = (sz.height as usize).saturating_sub(2 * inset);
+        let cols = (usable_w / r.cell_w.max(1))
             .max(1)
             .min(u16::MAX as usize) as u16;
-        let rows = (sz.height as usize / r.cell_h.max(1))
+        let rows = (usable_h / r.cell_h.max(1))
             .max(1)
             .min(u16::MAX as usize) as u16;
         *size.lock().unwrap() = (cols, rows);
     }
 
-    /// A window pixel position to a (col, row) character cell, clamped to u16.
+    /// A window pixel position to a (col, row) character cell, clamped to u16. The
+    /// inset (the same the grid is drawn with) is subtracted first, so a click lands on
+    /// the cell painted under it; a click in the inset margin clamps to the edge cell.
     fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer) -> (u16, u16) {
-        let col = (pos.x.max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
-        let row = (pos.y.max(0.0) as usize / r.cell_h.max(1)).min(u16::MAX as usize) as u16;
+        let inset = r.inset() as f64;
+        let col = ((pos.x - inset).max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
+        let row = ((pos.y - inset).max(0.0) as usize / r.cell_h.max(1)).min(u16::MAX as usize) as u16;
         (col, row)
     }
 
@@ -1563,6 +1604,8 @@ mod backend {
         cell_w: usize,
         cell_h: usize,
         baseline: i32, // pixels from a cell's top to the text baseline
+        base_inset: f32, // logical-px content margin before the grid (ADR-079); 0 = flush
+
         // keyed by (cluster, family id, bold, italic, scale): the same cluster at a
         // different family/style/scale rasterises to a different baked canvas.
         cache: HashMap<(ClusterKey, u32, bool, bool, u16), CachedGlyph>,
@@ -1579,10 +1622,27 @@ mod backend {
                 cell_w: 1,
                 cell_h: 1,
                 baseline: 0,
+                base_inset: 0.0,
                 cache: HashMap::new(),
             };
             r.recompute();
             r
+        }
+
+        /// The content inset in PHYSICAL pixels (the logical `base_inset` × HiDPI
+        /// scale) — the margin painted before the cell grid on every edge, and the
+        /// offset every pixel↔cell conversion shares (`update_cells`, `px_to_cell`,
+        /// `paint`) so the grid the renderer draws and the one the mouse hit-tests stay
+        /// the same. 0 leaves the grid flush to the window edge (the default).
+        fn inset(&self) -> usize {
+            (self.base_inset * self.scale as f32).round().max(0.0) as usize
+        }
+
+        /// Set the content inset (logical px). The cell metrics don't change — only the
+        /// grid's origin and how many cells fit — so the caller recomputes the grid
+        /// (`update_cells`) and repaints; no glyph-cache drop (unlike `set_font`).
+        fn set_inset(&mut self, px: f32) {
+            self.base_inset = px.max(0.0);
         }
 
         /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
@@ -1952,6 +2012,11 @@ mod backend {
             }
         }
         let (cw, ch) = (r.cell_w, r.cell_h);
+        // The content inset shifts the whole grid's origin by `inset` px on each edge;
+        // every op's pixel base adds it, matching `update_cells` / `px_to_cell` so the
+        // painted grid and the hit-tested grid coincide. The `clear`/pre-clear already
+        // filled the margin with the background, so it reads as padding.
+        let inset = r.inset();
         for op in frame {
             match op {
                 Op::Clear => {
@@ -1973,7 +2038,7 @@ mod backend {
                     // cells — a wide glyph (emoji, CJK) takes two.
                     let scale = face.scale.max(1) as usize;
                     let ch_s = ch * scale;
-                    let top = *row as usize * ch;
+                    let top = inset + *row as usize * ch;
                     let mut cx = *col as usize;
                     let bg_packed = pack(bg);
                     for g in s.graphemes(true) {
@@ -1983,7 +2048,7 @@ mod backend {
                             continue;
                         }
                         let block_w = cells * cw * scale; // the cluster's pixel span
-                        let left = cx * cw;
+                        let left = inset + cx * cw;
                         fill_cell(&mut buf, fb_w, fb_h, left, top, block_w, ch_s, bg_packed);
                         r.draw_cluster(
                             &mut buf, fb_w, fb_h, left, top, g, face.family, face.bold,
@@ -2007,8 +2072,8 @@ mod backend {
                             &mut buf,
                             fb_w,
                             fb_h,
-                            *col as usize * cw,
-                            *row as usize * ch,
+                            inset + *col as usize * cw,
+                            inset + *row as usize * ch,
                             *w as usize * cw,
                             *h as usize * ch,
                             pack(bg),
@@ -2023,8 +2088,8 @@ mod backend {
                         &mut buf,
                         fb_w,
                         fb_h,
-                        *col as usize * cw,
-                        *row as usize * ch,
+                        inset + *col as usize * cw,
+                        inset + *row as usize * ch,
                         cw,
                         ch,
                         *style,
@@ -2034,9 +2099,9 @@ mod backend {
                 // pointer-move in the window event handler (ADR-080).
                 Op::CursorZone { .. } => {}
                 Op::VSpans { row0, col0, cols } => {
-                    let top0 = *row0 as usize * ch;
+                    let top0 = inset + *row0 as usize * ch;
                     for (i, segs) in cols.iter().enumerate() {
-                        let left = (*col0 as usize + i) * cw;
+                        let left = inset + (*col0 as usize + i) * cw;
                         let mut y = top0;
                         for (h, color) in segs {
                             let span_h = *h as usize * ch;
