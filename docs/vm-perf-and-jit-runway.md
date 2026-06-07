@@ -191,11 +191,135 @@ JIT on-ramp proper.
 - **End of round**: a final archived `scripts/bench.sh` run; the before/after
   table goes into `docs/bytecode-vm.md`'s as-built section and the devlog.
 
+## 6. Assembly integration and calling-convention architecture (ADR-101)
+
+This section records the concrete build and ABI design for when the JIT gate
+opens. Nothing here is built yet — it is the committed architecture that makes
+the prerequisites (bytecode lowering, `Value`-repr decision) the *only* remaining
+unknowns.
+
+### 6.1 Three-layer assembly model
+
+Assembly enters the Brood build in three distinct, non-overlapping ways:
+
+**Layer 1 — Runtime code emission (no compile-time assembly).**
+Cranelift emits machine bytes into `mmap`-allocated executable pages at runtime.
+The JIT itself writes *no* `.s` files and contains *no* inline asm; opcodes are
+expressed as Cranelift IR, not assembly text. This is the entire JIT codegen path.
+
+**Layer 2 — Inline assembly (`std::arch::asm!`).**
+Reserved for hot interpreter stubs where Cranelift brings no benefit:
+
+- **Computed-goto dispatch** for the bytecode loop — the direct-threaded
+  `&&label` trick (~10–15% on tight bytecode loops, standard in CPython/LuaJIT).
+  `std::arch::asm!` lets Rust load a label address and `jmp [table + op*8]`.
+  x86-64 only; always `#[cfg(target_arch = "x86_64")]`-gated with a pure-Rust
+  `match`-dispatch fallback. Applied only if profiling after bytecode lowering
+  shows the dispatch overhead is still measurable.
+- **SIMD** in the rope/string kernel, if a specific hot path warrants it. Rust's
+  `std::simd` covers most of this; raw `asm!` only if the intrinsics fall short.
+
+This layer is optional and additive — it is *not* part of the JIT; it is a
+potential bytecode-interpreter micro-optimisation.
+
+**Layer 3 — External `.s` files via the `cc` crate.**
+Platform-specific trampolines that bridge the JIT/Rust ABI boundary:
+
+```
+crates/lisp/src/jit/
+  trampoline_x86_64.s
+  trampoline_aarch64.s
+```
+
+Compiled in `build.rs` under `--features jit`:
+
+```rust
+// build.rs
+#[cfg(feature = "jit")]
+fn build_jit_stubs() {
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    cc::Build::new()
+        .file(format!("src/jit/trampoline_{arch}.s"))
+        .compile("brood_jit_stubs");
+}
+```
+
+The trampoline (~30 lines per arch) saves callee-saved registers, loads the
+pinned context pointer into its reserved register, calls the JIT'd function
+pointer, then restores on return. It is the only hand-written machine code in
+the project.
+
+### 6.2 Calling convention
+
+JIT'd arms use the platform C ABI (`extern "C"`) with one reserved-register
+extension and a safepoint discipline that sidesteps stack maps entirely.
+
+**Context-pointer register** — r15 (x86-64) / x28 (AArch64) is pinned to
+`*mut Heap` for the lifetime of a JIT'd call. The trampoline saves the caller's
+r15/x28, loads the `Heap` pointer, and restores on return. Every runtime
+callback reaches the heap through this register without an explicit argument.
+This is the same pattern used by V8 and LuaJIT.
+
+**GC-visible values in `Heap::roots` between safepoints** — at tier 1, JIT'd
+code keeps all live `Value`s in `Heap::roots` slots (the same operand stack the
+bytecode VM uses), loading them into and storing them back from registers only
+within a safepoint-free segment. A safepoint can occur only at a call into a
+runtime callback or at an allocation. This sidesteps stack-map generation
+entirely — the single hardest part of JIT-ing under a moving collector. Stack
+maps (needed to allow values in callee-saved registers *across* safepoints)
+are tier-2 territory.
+
+**`extern "C"` runtime callbacks** — every service the JIT needs from the
+runtime is a `#[no_mangle] extern "C"` function:
+
+| symbol | purpose |
+|---|---|
+| `brood_rt_alloc_pair(heap, a, b) -> u64` | allocate a cons cell |
+| `brood_rt_gc_safepoint(heap)` | trigger the safepoint check |
+| `brood_rt_tick(heap) -> bool` | preemption poll (ADR-027); returns true if the process should yield |
+| `brood_rt_global_epoch(heap) -> u64` | read the current epoch for IC validation |
+| `brood_rt_call_slow(heap, callee, argc, argv) -> u64` | slow-path call dispatch (deopt) |
+
+Their addresses live in a per-arm **constant table** — an indirection table
+(§4.C above) that RUNTIME compaction (ADR-091) can rewrite without touching
+machine code.
+
+**Epoch guard** — the call-site IC invariant (§4.A above) compiles directly to
+JIT'd code: `cmp [EPOCH_SLOT], r_cached_epoch; jne slow_path`. A `def`
+hot-reload bumps the global epoch, invalidating all JIT'd IC caches at their
+next call, exactly as it invalidates the interpreter IC.
+
+**Reduction-counter poll** — JIT'd loop back-edges call `brood_rt_tick()`.
+The preemption contract (ADR-027) must hold in native code.
+
+### 6.3 Backend choice rationale (Cranelift)
+
+| option | verdict |
+|---|---|
+| **Cranelift** | ✅ pure Rust, no C++ dep, designed for dynamic-language JITs, mature (Wasmtime + rustc backend), ADR-014-compliant |
+| LLVM via `inkwell` | better optimisations but C++ dep, large binary, tier-2 complexity — not warranted for a template JIT |
+| hand-rolled x86 | feasible but drops AArch64, fragile to maintain; ~same LOC as Cranelift IR generation |
+
+Cranelift is accepted as infrastructure (ADR-014): it reduces real complexity
+vs. hand-assembling two architectures, and it is gated behind `--features jit`
+so default builds and `nest release` bundles (ADR-038) are unaffected.
+
+### 6.4 Prerequisites the JIT depends on
+
+1. **Bytecode lowering** (§2 above, the JIT on-ramp) — Cranelift IR is
+   generated from flat bytecode ops, not from the `Node` tree.
+2. **`Value` representation** (§4.E — NaN-box vs 16-byte enum) — the calling
+   convention above assumes a single-word `Value` in registers; the tier-1
+   design with values in `Heap::roots` works with either rep, but a 64-bit
+   tagged `Value` is what JIT'd register code *wants* and pre-alpha is the
+   cheapest window to decide this.
+
 ## References
 
-ADR-096 (this plan), ADR-076 (closure-compiling VM), ADR-069 (dispatch perf:
-passthrough + inline cache), ADR-091 (RUNTIME compaction — why in-place
-patching can't survive a JIT), ADR-026 (immutability), ADR-038 (bundles — the
-Cranelift size concern). Key files: `crates/lisp/src/eval/compile.rs` (the
-whole work list), `crates/lisp/src/core/heap.rs` (`global_epoch`, `vm_cache_*`,
-`roots`), `docs/bytecode-vm.md` (§2.4 bytecode lowering, §7 staging).
+ADR-096 (this plan), ADR-101 (JIT architecture decision), ADR-076
+(closure-compiling VM), ADR-069 (dispatch perf: passthrough + inline cache),
+ADR-091 (RUNTIME compaction — why in-place patching can't survive a JIT),
+ADR-026 (immutability), ADR-038 (bundles — the Cranelift size concern).
+Key files: `crates/lisp/src/eval/compile.rs` (the whole work list),
+`crates/lisp/src/core/heap.rs` (`global_epoch`, `vm_cache_*`, `roots`),
+`docs/bytecode-vm.md` (§2.4 bytecode lowering, §7 staging).

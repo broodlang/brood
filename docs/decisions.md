@@ -107,6 +107,7 @@ listed (italicised) in the index below so the numbering stays complete.
 | 085 | `std/` is the basic-language core; frameworks are packages; hierarchical names |
 | 086 | GUI keys are press/release transitions, not an OS-repeat flood |
 | 087 | Expose O(1) kernel facts (`map-count`) as primitives |
+| 101 | JIT compilation: three-layer assembly model, Cranelift backend, calling convention |
 
 ---
 
@@ -6096,3 +6097,79 @@ hit the §3.1a wall. Verified for the landed half: `tests/work_stealing.rs` (20/
 release, 5/5 debug) and the KI-1 guard `tests/concurrency_race.rs` clean 13/13
 plain-release incl. `BROOD_GC_STRESS`; full suite green. The full-migration design,
 staging, and its added acceptance bar live in `concurrency-v2.md` §7.
+
+## ADR-101 — JIT compilation: three-layer assembly model, Cranelift backend, calling convention
+
+**Status:** accepted (architecture, 2026-06-07). Implementation gated on bytecode
+lowering + editor workload profile (ADR-096 prerequisites). Full design in
+[`vm-perf-and-jit-runway.md`](vm-perf-and-jit-runway.md) §6. Staged roadmap in
+[`roadmap.md`](roadmap.md) (JIT tier-1 entries under the VM section).
+
+**Context.** ADR-096 deferred actual JIT codegen until three gates pass: (a) the
+VM is bytecode-based, (b) a real editor workload profile names interpretive
+dispatch as the bottleneck, and (c) the `Value` representation is decided. The
+June 2026 profiling harness confirms the VM is already dispatch-bound at its
+current tier (IC 99.99% hit, prim2 96% inlined), so the structural levers are
+maxed and bytecode lowering is the live prerequisite. When that lands and the
+profile gate opens, the concrete architecture for assembly integration and the
+JIT calling convention is needed. This ADR records those decisions.
+
+**Decision.**
+
+**Backend: Cranelift (`--features jit`).** `cranelift-codegen` is the codegen
+backend, compiled only when `--features jit` is requested. It is pure Rust (no
+C++ dep), designed for dynamic-language JITs (used by Wasmtime and the rustc
+Cranelift backend), and passes ADR-014's bar — ~7 kloc of Cranelift IR generation
+replaces hand-assembling x86-64 and AArch64. Default builds and `nest release`
+bundles (ADR-038) are unaffected; the large binary is an explicit opt-in.
+LLVM would add stronger optimisations but those are tier-2 territory; a
+hand-rolled assembler drops AArch64 and costs more to maintain.
+
+**Three-layer assembly model** (full detail in `vm-perf-and-jit-runway.md` §6.1):
+
+- *Layer 1 — Runtime code emission.* Cranelift writes machine bytes into
+  `mmap`-allocated executable pages at runtime. The JIT itself has no `.s`
+  files and no inline asm; opcodes are Cranelift IR.
+- *Layer 2 — `std::arch::asm!`.* Reserved for hot interpreter stubs Cranelift
+  doesn't improve: the computed-goto bytecode dispatch table (x86-64 only,
+  `#[cfg]`-gated, pure-Rust fallback) and any rope/string SIMD paths. Optional,
+  additive, and gated on profiling showing the overhead is still measurable after
+  bytecode lowering.
+- *Layer 3 — External `.s` files via the `cc` crate.* Platform trampolines
+  (`trampoline_x86_64.s` / `trampoline_aarch64.s`) compiled in `build.rs` under
+  `--features jit`. The trampoline saves callee-saved registers, pins the context
+  pointer into its reserved register, calls the JIT'd function pointer, and
+  restores on return. ~30 lines per architecture; the only hand-written machine
+  code in the project.
+
+**Calling convention** (full detail in `vm-perf-and-jit-runway.md` §6.2):
+
+- Platform C ABI (`extern "C"`) with one reserved-register extension: r15
+  (x86-64) / x28 (AArch64) is pinned to `*mut Heap` for the lifetime of a JIT'd
+  call (same pattern as V8 and LuaJIT). The trampoline saves/restores it.
+- All GC-visible values live in `Heap::roots` slots between safepoints — never
+  in callee-saved registers across a call. Sidesteps stack-map generation
+  entirely at tier 1.
+- Runtime services (`brood_rt_alloc_pair`, `brood_rt_gc_safepoint`,
+  `brood_rt_tick`, `brood_rt_global_epoch`, `brood_rt_call_slow`) are `#[no_mangle]
+  extern "C"` functions. Their addresses live in a per-arm indirection table
+  (ADR-096 §4.C) that RUNTIME compaction (ADR-091) can rewrite without
+  invalidating machine code.
+- Epoch guard: the call-site IC (ADR-096 §4.A) compiles to `cmp [EPOCH_SLOT],
+  r_epoch; jne slow_path`. A `def` hot-reload bumps the global epoch and
+  invalidates all JIT'd IC caches at their next call.
+- Preemption: JIT'd loop back-edges call `brood_rt_tick()` (ADR-027).
+
+**Prerequisites not in this ADR:**
+
+1. Bytecode lowering (ADR-096, the JIT on-ramp) — Cranelift IR is generated
+   from flat bytecode ops, not from the `Node` tree.
+2. `Value` representation decision (ADR-096 §4.E — NaN-box vs 16-byte enum).
+   The tier-1 design with values in `Heap::roots` works with either rep, but a
+   single-word `Value` is what JIT'd register code wants, and pre-alpha is the
+   cheapest window to decide this.
+
+**Consequences.** Assembly enters the build in two minor, architecturally-localised
+forms (optional Layer 2 inline stubs; Layer 3 trampoline files) plus the Cranelift
+feature gate. No hand-written machine code per opcode. Default builds are
+unaffected. The `Value`-repr decision is flagged as a prerequisite blocker.
