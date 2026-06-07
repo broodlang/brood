@@ -118,6 +118,7 @@ not for *how things are now*.
 | [handoff-eval-dispatch.md](handoff-eval-dispatch.md) | Handoff: the evaluator-dispatch performance campaign. |
 | [handoff-gc.md](handoff-gc.md) | Handoff: the GC bring-up. |
 | [handoff-vm-gc-memory.md](handoff-vm-gc-memory.md) | Handoff: VM × GC × memory interactions. |
+| [handoff-vm-callback-routing.md](handoff-vm-callback-routing.md) | Handoff: route native higher-order callbacks (`try`/`binding`/`apply`) through the VM, blocked on the `let`-self-ref `send` divergence (fix plan inside). |
 | [runtime-collector-exploration.md](runtime-collector-exploration.md) | Exploration of a collector for the shared RUNTIME code region. |
 | [memory-review.md](memory-review.md) | A full memory/GC review snapshot. |
 | [findings-closure-promotion-overflow.md](findings-closure-promotion-overflow.md) | Findings: closure-promotion stack overflow. |
