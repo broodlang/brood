@@ -89,3 +89,25 @@
           x (first (rest forms)))
       (assert= (get x :start) 2)             ; "x" at char 2 (byte 3) — char offset
       (assert= (get x :end) 3))))
+
+;; The paredit family: pure structural edits returning [new-text new-point], nil when
+;; the op doesn't apply. Slurp/barf are inverses; raise/splice collapse a level.
+(describe "sexp structural edits (paredit, pure over the CST)"
+  (test "slurp-forward pulls the next sibling in; barf-forward expels the last"
+    (assert= (point-slurp-forward "(foo) bar" 2) ["(foo bar)" 2])
+    (assert= (point-barf-forward "(foo bar)" 2) ["(foo) bar" 2]))
+  (test "slurp-backward pulls the previous sibling in; barf-backward expels the first"
+    (assert= (point-slurp-backward "foo (bar)" 6) ["(foo bar)" 6])
+    (assert= (point-barf-backward "(foo bar)" 6) ["foo (bar)" 6]))
+  (test "raise replaces the enclosing list with the child at point"
+    (assert= (point-raise "(a (b c) d)" 6) ["(a c d)" 3]))   ; point on c
+  (test "splice drops the enclosing delimiters, keeping the contents"
+    (assert= (point-splice "(a (b) c)" 4) ["(a b c)" 3]))
+  (test "wrap-round wraps the form at point, point landing just inside"
+    (assert= (point-wrap-round "foo bar" 0) ["(foo) bar" 1]))
+  (test "ops return nil when inapplicable (no sibling, top level)"
+    (assert= (point-slurp-forward "(foo)" 2) nil)   ; nothing after to slurp
+    (assert= (point-splice "foo" 1) nil))           ; not inside any list
+  (test "point-kill-end caps at the enclosing close, never breaking parens"
+    (assert= (point-kill-end "(foo bar)" 1) 8)      ; kill foo bar, keep the )
+    (assert= (point-kill-end "(foo\n bar)" 1) 4)))  ; multi-line → only to end of line
