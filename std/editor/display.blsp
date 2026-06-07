@@ -15,7 +15,8 @@
 ;;   [:clear]                       clear the whole screen
 ;;   [:text row col s]              draw string `s` at (row, col), 0-based cells
 ;;   [:text row col s face]         …styled by `face`, a map (see below)
-;;   [:cursor row col]              place the hardware cursor
+;;   [:cursor row col]              place the text cursor (a block caret)
+;;   [:cursor row col style]        …shaped :block / :bar / :underline
 ;; A FACE is a map of style attributes, any subset of:
 ;;   {:fg <colour> :bg <colour> :bold <truthy> :reverse <truthy>}
 ;; where a colour is either a palette keyword — :black :red :green :yellow :blue
@@ -51,9 +52,15 @@ styled by `face` (a map like `{:fg :red :bold true}`)."
     [:text row col s]
     [:text row col s face]))
 
-(defn cursor (row col)
-  "A render op placing the hardware cursor at (`row`, `col`)."
-  [:cursor row col])
+(defn cursor (row col &optional (style nil))
+  "A render op placing the text cursor at (`row`, `col`). With `style` — `:bar`
+(a thin insertion caret on the cell's left edge), `:underline` (a rule along the
+cell bottom), or `:block` (the default full-cell caret) — the GUI frontend shapes
+the caret accordingly and the terminal maps it to its matching steady cursor. With
+no `style` it's `[:cursor row col]`, unchanged (a block caret)."
+  (if (nil? style)
+    [:cursor row col]
+    [:cursor row col style]))
 
 (defn cursor-zone (x y w h shape)
   "A render op marking a rectangular hot-zone (cells: `[x y]` origin, `w`×`h`) that
