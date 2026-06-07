@@ -540,6 +540,21 @@ fn preempt() {
     // Root thread (yielder None): budget refreshed, never suspends.
 }
 
+/// Is state-capture suspension armed (`BROOD_STATE_CAPTURE`)? The corosensei-removal
+/// migration (concurrency-v2.md §8, ADR-100): when on, a clean `receive` on an empty
+/// mailbox captures the VM continuation as relocatable heap data and parks it, rather
+/// than freezing a coroutine's native stack. **Default off** — `main` stays on
+/// corosensei until state-capture is proven across the §6 plain-release KI-1 bar, then
+/// corosensei is deleted (§8.4). Read once and cached; can't change mid-run. Truthy
+/// values: anything but `0`/`false`/`off`/`no`/empty.
+pub(crate) fn state_capture_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("BROOD_STATE_CAPTURE") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no"),
+        Err(_) => false, // corosensei stays the default until the migration flips it
+    })
+}
+
 /// Cooperatively yield so other ready work can make progress, **without blocking a
 /// worker thread**. In a green process, suspend (re-enqueued behind peers, like
 /// `preempt`) so the worker runs other ready processes; on the root thread (no

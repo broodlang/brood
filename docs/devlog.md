@@ -287,6 +287,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-07** — VM profiling harness + `(def x <expr>)` runs its RHS on the VM. New `perf-stats` cargo feature (`src/perf.rs`): zero-cost-off work-attribution counters (`vm_apply`/IC hit-miss/prim inline-fallback/`self_tail`/`env_hops`/`alloc`/`tw_defer`), surfaced via `(vm-stats)` + `BROOD_PERF_STATS=1`. Plus `scripts/bench-ratio.sh` — the load-robust VM÷tree-walker ratio (the only trustworthy timing on this box). Two questions, two tools (`docs/benchmarking.md`). First profile finding: the VM is **dispatch-bound** on call-heavy code (IC 99.99% hit, prim2 96% inlined, env/alloc minor) — the bytecode-lowering gate signal. Second: a top-level `(def x <expr>)` was running `<expr>` on the tree-walker (`def` is a special form → the whole form deferred); now its RHS goes through `compile::run` (falls back to the tree-walker for anything it can't compile), so `(def a (fib 27))` runs `fib` on the VM (`vm_apply` 0 → 635k). Suite green both engines, GC-stress clean.
 - **2026-06-07** — `%range-reduce` callback runs on the VM. `reduce`/`fold` over a *lazy range* drive the `%range-reduce` native, which called the reducer back via `eval::apply` (tree-walker) regardless of engine — so `(reduce <vm-eligible-fn> 0 (range n))` was pinned to the tree-walker (VM/TW ≈ 1.0). Now it routes through `compile::apply_value` when `vm_enabled` (pure tree-walker under `BROOD_VM=0`, so the escape hatch / differential TW mode stay honest): **65–67% faster** on the VM (VM/TW 0.35/0.33), measured load-robustly via the eval-grid `reduce_range` bench. Suite green both engines, GC-stress clean (allocating reducer). **Attempted + reverted:** generalising the same VM-callback routing to the *other* native higher-order sites (`apply`, `%try` thunk/handler, `binding`/`isolate` body) broke the adversarial suite — running a `try`/test-framework body on the VM where it used to tree-walk surfaced a **VM↔tree-walker divergence**: a *self-referential local closure* (a `letrec` fn that captures itself — the round-2 self-name `env_define` builds a closure whose env contains itself) is **rejected by `send` when tree-walker-built but accepted when VM-built**. Reverted to keep only the proven `%range-reduce` win; the divergence (is the VM-built self-ref closure correctly send-able, or a latent cycle bug the differential harness doesn't probe because it doesn't `send` such closures?) must be understood before native callbacks can route to the VM generally.
 - **2026-06-07** — refined the above divergence + wrote a handoff (`docs/handoff-vm-callback-routing.md`); paused #1/#2 because the `let`/closure/`send` area is under active edit. Precise diagnosis (HEAD `9931e1d`): it is **`let`-self-ref**, not `letrec` (both engines agree on `letrec`: call works, `send` rejects). For a sequential-`let` self-ref closure, *calling* now works on both engines, but **`send` diverges — VM accepts, tree-walker rejects** — because the VM's `let`-self-ref closure is resolved at call time *without* being **structurally** self-referential (its captured env has no `f→self` cycle), so `closure_to_message`'s cycle walk finds nothing; the tree-walker (by-ref `let` env) and both engines' `letrec` (round-2 self-name `env_define`) *are* structural → rejected. Fix (#1): make the VM `let`-self-ref structural via the same `self_name` path `letrec` uses, so `send` rejects consistently; that unblocks #2 (native-callback VM routing). Also flagged: add a differential test that `send`s a RUNTIME-context `let`-self-ref closure (the blind spot that let this ship). Plan + the #2 code in the handoff.
+- **2026-06-08** — corosensei removal §8.4 step 1: the capture/resume machinery behind `BROOD_STATE_CAPTURE` (default **off** — `main` stays on corosensei). `vm_run_bc` gains `resume: Option<Suspended>` and returns `VmOutcome::{Done,Suspended}`; a clean `receive` on an empty mailbox raises `Control::Suspend` through `%receive`, `exec_chunk` intercepts it (rewinds the suspending `Inst::Call`'s `ip`) into `ChunkExit::Suspend`, and the driver captures `(frames, cur_*, ip, entry-marks, deadline)` as a `Suspended` **without unwinding** (operand stack + frame slots survive on the heap so the resume replays straight from the `%receive` call). `scan_mailbox` no-match + green + flag → `Err(LispError::suspend)`; a suspend that surfaces in a VM run **nested under a native** re-raises (the §8.1 re-run case). Capture→resume unit test (a suspend-once native) + a green-receive signal test. Suite green at the default; differential parity green; §6 plain-release KI-1 bar re-cleared (10/10 + `BROOD_GC_STRESS`). The scheduler still drives corosensei — `run_one` dual-mode + the live-migration test are §8.4 step 2.
 
 ---
 
@@ -1829,3 +1830,65 @@ Closed the perf gap and flipped the default. Two commits.
 Remaining: retire the `Node`-walking executor after a release (the `Node` tree stays
 as the compile *source*); then suspension-as-data + live-process migration (§7.5),
 where corosensei finally goes.
+
+## 2026-06-08 — corosensei removal §8.4 step 1: state-capture machinery (flag-gated)
+
+First slice of the actual corosensei-removal migration (concurrency-v2.md §8,
+architecture B). The continuation already lives on the heap (the bytecode frame
+stack, ADR-100 Stage 4); what still pins a parked process to its worker is
+corosensei freezing the *native* stack at the `receive`. This step builds the
+machinery to capture/resume that continuation as plain `Send` data — behind
+`BROOD_STATE_CAPTURE`, **default off**, so `main` keeps running on corosensei until
+the path is proven and then corosensei is deleted (the bytecode-default playbook).
+
+**The flow (flag on, a clean `receive` on an empty mailbox):**
+- `scan_mailbox` returns `Ok(None)` (clean no-match); `receive_match`'s `Ok(None)`
+  arm, for a green process under the flag, drops its scan roots and returns
+  `Err(LispError::suspend(deadline))` instead of `wait_for_message` (the coroutine
+  yield). The deadline-already-expired → run-`after` semantics stay ahead of it.
+- That `Control::Suspend` rides the error channel up through the `%receive` native.
+  `exec_chunk`'s `Inst::Call` intercepts a control signal (it is *not* an error):
+  it rewinds `*ip` to re-point at the suspending call — leaving the callee + args on
+  the operand stack untouched — and returns `ChunkExit::Suspend { deadline }`.
+- `vm_run_bc` turns that into `VmOutcome::Suspended(Suspended { frames, cur,
+  entry-marks, deadline })` and returns it **without unwinding**: the operand stack
+  and frame slots must survive on the process heap so the resume replays from the
+  `%receive` call (a collection while parked relocates them in place; the saved
+  `base`/`env_base` indices stay valid). `vm_run_bc` now takes
+  `resume: Option<Suspended>` — `Some(s)` restores the registers + frame stack and
+  re-enters the loop, on any worker, no coroutine.
+
+**Signatures.** `vm_run_bc` → `Result<VmOutcome, LispError>` (`Done` | `Suspended`,
+or a real `Err`). The local `Frame` is promoted to a module `BcFrame` so a
+`Suspended` can hold the whole stack. `vm_apply` keeps returning `LispResult`: it
+maps `Done`, and on `Suspended` it **re-raises** the control signal (unwinding the
+inner roots) — the native-nested `receive` case (§8.1), where the enclosing native
+is re-run on resume rather than its inner continuation captured. The three
+`vm_apply` callers (`dispatch`, `force`, the IC fast path) are unchanged.
+
+**Why this shape over a coroutine swap.** §7.1: any saved native stack is
+thread-affine (cached TLS / return trampolines) — the KI-1b cross-thread-resume
+segfault is fundamental to *any* stackful library, not corosensei-specific. Capturing
+the continuation as data sidesteps it entirely, and is the same change that buys
+live-process migration + fully-precise GC. The survey (§8.1) found the suspending
+`receive` is always a clean loop tail across the stdlib, so state-capture covers the
+real workloads; the rare native-nested case re-runs.
+
+**Tests.** A capture→resume unit test in `compile.rs` drives `vm_run_bc` with a
+suspend-once test native (suspends on call 1, returns 42 on call 2) and asserts:
+first run → `Suspended` with the operand stack still rooted; resume → `Done(42)`
+with the frame stack torn back down to entry. A `mailbox.rs` test installs a green
+ctx (dummy, never-deref'd yielder) + empty mailbox and asserts `receive_match`
+returns a `Control::Suspend` — not a real error, and without blocking.
+
+**Green.** Full `make test` passes at the default (the one failure was the
+pre-existing reader-depth test `parser_rejects_deeply_nested_input_instead_of_overflowing`,
+a native-stack-size flake on this box — passes under `RUST_MIN_STACK=16M`; the
+reader is untouched). Differential parity green. §6 plain-release KI-1 bar
+re-cleared: `concurrency_race` 10/10 clean + the `BROOD_GC_STRESS` variant, plus
+`work_stealing`, all in plain release.
+
+Next (§8.4 step 2): `run_one` dual-mode — store `Run::Suspended(Box<Suspended>)`
+and call `vm_run_bc(.., resume)` directly behind the flag, park on the deadline/
+mailbox a `Suspended` outcome (the work `wait_for_message` did) — plus the
+live-migration regression test (§7.6, resume on a *different* worker).
