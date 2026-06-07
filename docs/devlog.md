@@ -282,6 +282,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-04** — lsp: `resolve_in_source` stops interning transient identifiers (daemon-lifetime interner leak — kernel audit, perf #4)
 - **2026-06-04** — kernel-audit hardening batch: min cookie length, bounded `macroexpand`, bignum `string->number`, scanner line breaks + hard-error hex escapes, epoch-tripwire mask, dead-watcher monitor sweep
 - **2026-06-06** — whole-kernel review sweep: every Rust file reviewed (duplication / style / bugs / comments), then all findings fixed — VM `quote` divergence, LSP interning leak, timer cancellation, iterative `flush_rt_pair`, `from_node` wire excision, cross-binary dedup into `cli_support`, printer control-char escapes, ~20 comment-drift fixes
+- **2026-06-07** — ADR-096 round 2 (item 6, defer-set shrink): direct `letrec` self-recursion now VM-compiled — closes the `defseq` (`map`/`filter`/`mapcat`/`remove`/`keep`) + hand-written local-loop defer. `MakeClosure` binds the closure to its own name in its captured env (the tree-walker's late-bind); a self-call optimization (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset) makes dispatch-bound local recursion **−30…−54%** vs the tree-walker; allocation-bound `defseq` at parity. (Measurement lesson: separate-process VM-vs-TW reads on this loaded machine were noise; the load-robust signal is adjacent Vm/Tw rows in one `divan` process.)
 
 ---
 
@@ -1447,3 +1448,54 @@ timeouts, which is exactly the "suite suddenly times out at 300 s" symptom that
 initially looked like a VM regression. If `nest test` slows by minutes and
 fails 5 package tests: unlock 1Password (or run the suite minus
 `tests/package_test.blsp`).
+
+## 2026-06-07 — ADR-096 round 2 (item 6): direct letrec self-recursion on the VM
+
+Round 1's item 6 (shrink the defer set) picked up. An instrumented run revealed
+the highest-value gap was real and hot: **`defseq` — the macro behind `map`,
+`filter`, `mapcat`, `remove`, `keep`** — expands to a `defn` whose body is a
+`(letrec (--loop (fn …)) (reverse (--loop …)))` where the inner `fn` captures
+`--loop`, the in-progress letrec binder. `compile_captures` deferred the whole
+closure (a value snapshot can't express recursive late-binding), so the five
+core sequence ops ran *entirely on the tree-walker* — getting zero benefit from
+round 1 (corroborated by round 1's own "mapcat flat" note).
+
+**Fix, two layers:**
+1. *Eligibility.* When a `(fn …)` is the RHS of a `letrec` binder it captures
+   (direct self-recursion, tracked via `Scope::letrec_self`), `MakeClosure`
+   builds the closure, then `env_define`s the binder name → the closure into its
+   own captured env — exactly the late-bind the tree-walker's `letrec` does
+   (env contains the closure; the closure captures the env; the same cycle, the
+   same tracing-GC handling). A *sibling* unsafe capture (mutual recursion) still
+   defers. `compile_closure` recovers the self-name by scanning the captured
+   frame for a binding to itself (`Heap::env_frame_self_name`) — which a global
+   `defn` never has, so late binding for globals is untouched.
+2. *Speed (the self-call optimization).* A naïve eligibility fix **regressed**
+   the `defseq` benches ~10–13%: `--loop`'s per-iteration tail call paid the full
+   uncached local-closure dispatch (both ICs disengage for a local-capturing
+   frame). So a tail call to the closure's own self-name compiles to
+   `Node::SelfCall`, which the trampoline runs as a new `Step::SelfTail` —
+   re-enter *this* arm in *this* env with the frame **reset in place**: no callee
+   resolve, no `cache_key`/`vm_cache` lookup, no dispatch, no env re-root, no
+   `Arc` clone, no frame teardown/rebuild. Safe because a letrec binder is an
+   immutable lexical slot (no `def`/epoch concern). Gated to tail position +
+   plain fixed arity (so `exec_node` — which the trampoline drives — is the only
+   executor that needs it; `exec_value`/`force` `unreachable!` it).
+
+**Result (load-robust — adjacent Vm/Tw rows in one `divan` process):**
+dispatch-bound `letrec_loop` is **−30% at 100k, −54% at 1M** vs the tree-walker;
+allocation-bound `defseq` pipeline is at parity (a `cons` per element dominates;
+the residual is the still-uncached `(f item)` captured-fn call — a frame-local IC
+is future work, not safely expressible with the per-site IC since a captured fn
+differs per closure instance). Correctness: VM == tree-walker on every case
+(self-recursion, per-instance freshness, mutual recursion via deferral, non-fn
+RHS, shadowing), 544/544 suite green on both engines, `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1` clean. New `letrec_loop` Vm/Tw bench in `benches/eval.rs`;
+five regression tests in `tests/basic.rs`.
+
+**Measurement lesson (cost me an afternoon):** on this loaded, low-powered box,
+comparing VM (default) vs `BROOD_VM=0` as *separate process runs* gave pure
+noise — the self-call fix looked like a flat-to-regression until the same
+workload measured as adjacent Vm/Tw rows *in one process* (the `eval.rs` engine
+grid) showed the real −30…−54%. Trust within-process ratios here, not
+cross-run absolutes; the archived `bench.sh` headline still wants a quiet machine.

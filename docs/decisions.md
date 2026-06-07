@@ -5814,7 +5814,16 @@ Lives in `crates/lisp/src/builtins.rs` (`clipboard` mod + the two builtins), `Ca
 **Status:** accepted + round 1 implemented (2026-06-06): items 1–5 all landed —
 fib −22%, sum_tail −26%, cons_build −42%, sort −13…−24%, spawn_fanout −25%
 (~1.2–1.7× on top of the Stage-3 VM), no regressions, every item gated on both
-suites + GC-stress. Long-form analysis + as-built numbers in
+suites + GC-stress. **Round 2 (2026-06-07): item 6 (defer-set shrink) done for
+`letrec`** — direct self-recursion now VM-compiled (the `defseq` family +
+hand-written local loops, which deferred wholesale before): `MakeClosure`
+late-binds the closure to its own name in its captured env, and a **self-call
+optimization** (`Node::SelfCall` → `Step::SelfTail`, in-place frame reset)
+re-enters the arm with no resolve/dispatch/env-re-root. Load-robust result:
+dispatch-bound local recursion −30…−54% vs the tree-walker, allocation-bound
+`defseq` at parity (the residual per-element captured-fn call stays uncached — a
+frame-local IC is the next lever, unsafe with the per-site IC). Mutual recursion
+still defers. Long-form analysis + as-built numbers in
 `docs/vm-perf-and-jit-runway.md`.
 
 **Context.** A JIT (emit machine code at runtime) is the natural next rung above the

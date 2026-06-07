@@ -315,6 +315,20 @@ pub enum Node {
         pos: Option<Pos>,
         site: u32,
     },
+    /// A **direct `letrec` self-recursive tail call** (the self-call optimization).
+    /// Emitted only for a tail call whose head is the closure's own self-name with
+    /// exactly the arm's required arity (see [`Scope::self_call`]). Evaluates `args`
+    /// and hands the trampoline a [`Step::Tail`] for the *current* arm — no callee
+    /// resolution, no `env_get` walk, no `cache_key`/`vm_cache` lookup, no dispatch.
+    /// Safe because a letrec binder is an immutable lexical slot (no `def`/late
+    /// binding to observe). Only ever appears in tail position, so only
+    /// [`exec_node`] (which carries the running arm) handles it. `pos` tags an error
+    /// from an argument's eval. The arm has no `&optional`/`&` rest (gated in
+    /// `compile_arm`), so `args.len()` always equals the arm's frame arity.
+    SelfCall {
+        args: Box<[Node]>,
+        pos: Option<Pos>,
+    },
     /// `let`/`let*`/`letrec` (Stage 2a). Lexical scope is **flattened** into the
     /// single activation frame: each binder owns a frame slot (pre-allocated in
     /// `nslots`). Evaluate each `rhs` and write it into its `slot`
@@ -341,6 +355,15 @@ pub enum Node {
         /// so a runtime compaction rewrites it in place like a `Const` handle.
         fn_rest: ConstVal,
         captures: Box<[(Symbol, Node)]>,
+        /// Direct `letrec` self-recursion: when this `(fn …)` is the RHS of a
+        /// `letrec` binder it references, the closure must see *itself*. A value
+        /// snapshot can't express that (the binder slot is still nil at build
+        /// time), so the binder name rides here and the exec arm `env_define`s it
+        /// to the freshly-built closure in the closure's own captured env —
+        /// exactly the late-bind the tree-walker's `letrec` does. `None` for an
+        /// ordinary (non-self-recursive) nested closure. A `Symbol` (interned
+        /// `u32`), not a heap handle, so `rewrite_node` needn't touch it.
+        self_name: Option<Symbol>,
     },
     /// An inlined 2-ary primitive (perf #1) — `(+ a b)`, `(< a b)`, `(= a b)`, etc.
     /// `a`/`b` are the operands in **source order**; `map` routes them to the
@@ -469,6 +492,15 @@ enum Step {
         /// tail call can cross into a closure with a different captured env).
         genv: EnvId,
     },
+    /// A **direct `letrec` self-tail-call** (the self-call optimization): re-enter
+    /// the *current* arm in the *current* env with new `args`. The trampoline resets
+    /// the existing frame in place — no env re-root, no arm re-registration, no
+    /// `Arc` clone, no frame teardown/rebuild — which is exactly the overhead that
+    /// otherwise leaves a tight VM self-loop slower than the tree-walker. Produced
+    /// only by [`Node::SelfCall`] (tail position), so it never reaches [`force`].
+    SelfTail {
+        args: SmallVec<[Value; 4]>,
+    },
 }
 
 // ===================== compiler (form → Node) =====================
@@ -497,6 +529,21 @@ struct Scope {
     max: usize,
     enclosing: Vec<Symbol>,
     unsafe_slots: Vec<usize>,
+    /// While compiling a `letrec` binder whose RHS is *directly* a `(fn …)`, the
+    /// slot of that binder — so a nested closure capturing it recognises the
+    /// **direct self-recursion** case and binds its own name to itself at build
+    /// time (see [`compile_captures`]) rather than deferring. `None` everywhere
+    /// else, so an ordinary capture of an in-progress letrec binder (mutual
+    /// recursion) still defers.
+    letrec_self: Option<usize>,
+    /// `(self-name, arity)` when this arm is a plain fixed-arity local recursive
+    /// helper (a `letrec` binder bound to itself — see [`compile_closure`]). A
+    /// **tail** call to `self-name` with exactly `arity` args compiles to a
+    /// [`Node::SelfCall`] that re-invokes the current arm directly, skipping the
+    /// env-resolve + dispatch the generic call path pays per iteration. `None`
+    /// for an ordinary closure (and unset while compiling a nested `(fn …)`, which
+    /// gets its own scope).
+    self_call: Option<(Symbol, usize)>,
 }
 
 impl Scope {
@@ -507,6 +554,8 @@ impl Scope {
             max: 0,
             enclosing: Vec::new(),
             unsafe_slots: Vec::new(),
+            letrec_self: None,
+            self_call: None,
         }
     }
     fn with_params(params: &[Symbol]) -> Self {
@@ -609,7 +658,18 @@ fn compile_let(heap: &Heap, items: &[Value], scope: &mut Scope, tail: bool, rec:
             // capture; they become safe once we reach the body (all rhs done).
             scope.unsafe_slots.extend_from_slice(&slots);
             for (pair, &slot) in elems.chunks_exact(2).zip(slots.iter()) {
-                binds.push((slot, compile_node(heap, pair[1], scope, false)?));
+                // A binder whose RHS is *directly* a `(fn …)` enables the direct
+                // self-recursion path: `compile_captures` may bind that name to the
+                // built closure instead of deferring. Set it only for the fn-RHS
+                // case (and only across this one `compile_node`, which consumes it
+                // without recursing first) so a fn nested elsewhere in a non-fn RHS
+                // — e.g. `(g (fn …))`, whose binder value is the *call* result, not
+                // the fn — never misclaims self-recursion.
+                let saved_self = scope.letrec_self;
+                scope.letrec_self = is_fn_form(heap, pair[1]).then_some(slot);
+                let rhs = compile_node(heap, pair[1], scope, false);
+                scope.letrec_self = saved_self;
+                binds.push((slot, rhs?));
             }
             scope.unsafe_slots.truncate(unsafe_saved);
         } else {
@@ -705,9 +765,10 @@ fn value_is_immovable(v: Value) -> bool {
 /// **not** captured — they resolve live (late-bound) through the new closure's
 /// frame parent. Returns `None` (defer) if a capture would read a not-yet-finalized
 /// `letrec` slot, which a value snapshot can't express.
-fn compile_captures(scope: &Scope) -> Option<Vec<(Symbol, Node)>> {
+fn compile_captures(scope: &Scope) -> Option<(Vec<(Symbol, Node)>, Option<Symbol>)> {
     let mut seen: Vec<Symbol> = Vec::new();
     let mut caps: Vec<(Symbol, Node)> = Vec::new();
+    let mut self_name: Option<Symbol> = None;
     // Current-frame lexicals, innermost binding first (so shadowing wins).
     for &(sym, slot) in scope.names.iter().rev() {
         if seen.contains(&sym) {
@@ -715,7 +776,17 @@ fn compile_captures(scope: &Scope) -> Option<Vec<(Symbol, Node)>> {
         }
         seen.push(sym);
         if scope.is_unsafe(slot) {
-            return None; // capturing an in-progress letrec binder → defer
+            // An in-progress `letrec` binder. If it's the very binder this `(fn …)`
+            // is the RHS of (direct self-recursion — `scope.letrec_self`), the
+            // closure references *itself*: don't snapshot the slot (still nil),
+            // record the name for the exec arm to bind to the built closure (the
+            // tree-walker's late-bind). Any *other* unsafe binder is mutual
+            // recursion a value snapshot can't express — defer the whole closure.
+            if Some(slot) == scope.letrec_self {
+                self_name = Some(sym);
+                continue;
+            }
+            return None;
         }
         caps.push((sym, Node::Local(slot)));
     }
@@ -727,7 +798,19 @@ fn compile_captures(scope: &Scope) -> Option<Vec<(Symbol, Node)>> {
         seen.push(sym);
         caps.push((sym, Node::Global(sym)));
     }
-    Some(caps)
+    Some((caps, self_name))
+}
+
+/// Is `form` *directly* a `(fn …)`/`(lambda …)` combination? Used by `letrec` to
+/// gate the direct self-recursion path (only a fn-valued binder can be its own
+/// recursive callee).
+fn is_fn_form(heap: &Heap, form: Value) -> bool {
+    if let Value::Pair(p) = form {
+        if let Value::Sym(h) = heap.pair(p).0 {
+            return value::symbol_is(h, kw::FN) || value::symbol_is(h, kw::LAMBDA);
+        }
+    }
+    false
 }
 
 /// Compile a `(fn …)`/`(lambda …)` evaluated inside a compiled body to a
@@ -747,10 +830,11 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
     if !fn_rest_is_stable(fn_rest) {
         return None;
     }
-    let captures = compile_captures(scope)?;
+    let (captures, self_name) = compile_captures(scope)?;
     Some(Node::MakeClosure {
         fn_rest: ConstVal::new(fn_rest),
         captures: captures.into_boxed_slice(),
+        self_name,
     })
 }
 
@@ -941,6 +1025,26 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                     }
                 }
             }
+            // Direct `letrec` self-recursive tail call (the self-call optimization):
+            // a tail call whose head is this closure's own self-name, not shadowed by
+            // a local, with exactly the arm's arity. Re-runs the current arm via the
+            // trampoline without resolving the callee or dispatching. A non-tail
+            // self-call, a shadowed name, or a mismatched arity falls through to the
+            // regular env-resolved path below (still correct).
+            if tail {
+                if let (Value::Sym(h), Some((name, arity))) = (head, scope.self_call) {
+                    if h == name && scope.lookup(h).is_none() && items.len() - 1 == arity {
+                        let mut args = Vec::with_capacity(arity);
+                        for &a in &items[1..] {
+                            args.push(compile_node(heap, a, scope, false)?);
+                        }
+                        return Some(Node::SelfCall {
+                            args: args.into_boxed_slice(),
+                            pos: heap.form_pos(form),
+                        });
+                    }
+                }
+            }
             // Function call: compile the callee and every argument (value position).
             // A free-symbol head compiles to a plain `Node::Global` (not a
             // `GlobalIc`): the call's own site IC below caches the head's full
@@ -1019,10 +1123,21 @@ fn compile_arm(
     rest: Option<Symbol>,
     body: &[Value],
     enclosing: Vec<Symbol>,
+    self_name: Option<Symbol>,
 ) -> Option<CompiledArm> {
     let nrequired = required.len();
     let noptional = optionals.len();
     let mut scope = Scope::with_params_enclosing(&[], enclosing);
+    // The self-call optimization applies only to a plain fixed-arity closure (no
+    // `&optional`/`&` rest), where a tail call passing exactly `nrequired` args
+    // re-runs this arm verbatim. With optionals/rest the frame-fill differs per
+    // call, so such calls fall back to the regular env-resolved path (correct,
+    // just unoptimized).
+    if let Some(name) = self_name {
+        if noptional == 0 && rest.is_none() {
+            scope.self_call = Some((name, nrequired));
+        }
+    }
     for &p in required {
         scope.bind(p);
     }
@@ -1060,6 +1175,18 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
         Some(e) if !heap.is_global(e) => heap.env_chain_names(e),
         _ => Vec::new(),
     };
+    // Direct `letrec` self-recursion (the self-call optimization): a closure whose
+    // captured frame binds a name to *itself* (the `env_define` the `MakeClosure`
+    // self-name path installs) is a local recursive helper — `defseq`'s `--loop`,
+    // a hand-written named loop. A tail call to that name can re-invoke this very
+    // arm without resolving the callee through the env or any dispatch (the binding
+    // is an immutable letrec slot — no late-binding/epoch concern, unlike a global
+    // `defn`, which is *not* self-bound in a captured frame and so never matches
+    // here). `compile_arm` turns such calls into [`Node::SelfCall`].
+    let self_name: Option<Symbol> = match cl.env {
+        Some(e) if !heap.is_global(e) => heap.env_frame_self_name(e, id),
+        _ => None,
+    };
     // Snapshot every arm's shape + body (cloning ends the `cl` borrow), then compile
     // each via [`compile_arm`]. An arm is VM-eligible when its body — and every real
     // `&optional` default form — is core vocabulary; otherwise that arm defers
@@ -1087,7 +1214,7 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
         let noptional = s.optionals.len();
         let has_rest = s.rest.is_some();
         let compiled =
-            compile_arm(heap, &s.required, &s.optionals, s.rest, &s.body, enclosing.clone())
+            compile_arm(heap, &s.required, &s.optionals, s.rest, &s.body, enclosing.clone(), self_name)
                 .map(Arc::new);
         specs.push(ArmSpec { nrequired, noptional, has_rest, compiled });
     }
@@ -1157,6 +1284,9 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
     match step {
         Step::Done(v) => Ok(v),
         Step::Tail { compiled, args, genv } => vm_apply(heap, compiled, &args, genv),
+        // `SelfTail` is produced only by a tail-position `Node::SelfCall`, handled by
+        // the `vm_apply` trampoline; a value-position step never carries it.
+        Step::SelfTail { .. } => unreachable!("Step::SelfTail is tail-only"),
     }
 }
 
@@ -1278,13 +1408,18 @@ fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
                 rewrite_node(a, f);
             }
         }
+        Node::SelfCall { args, .. } => {
+            for a in args.iter() {
+                rewrite_node(a, f);
+            }
+        }
         Node::LetBind { binds, body } => {
             for (_, n) in binds.iter() {
                 rewrite_node(n, f);
             }
             rewrite_node(body, f);
         }
-        Node::MakeClosure { fn_rest, captures } => {
+        Node::MakeClosure { fn_rest, captures, self_name: _ } => {
             fn_rest.rewrite(f);
             for (_, n) in captures.iter() {
                 rewrite_node(n, f);
@@ -1359,6 +1494,36 @@ fn exec_node(
         }
         Node::Call { callee, args, tail, pos, site } => {
             exec_call(heap, callee, args, *tail, *pos, *site, frame_base, genv)
+        }
+        Node::SelfCall { args, pos } => {
+            // Direct letrec self-recursion (the self-call optimization): evaluate the
+            // args on the operand stack (a collection relocates them in place, like
+            // `exec_call`), then hand the trampoline a `SelfTail` — re-enter THIS arm
+            // in THIS env with no callee resolve, no `cache_key`/`vm_cache` lookup, no
+            // dispatch, no env re-root, no `Arc` clone (the trampoline keeps the
+            // running arm + env). Always tail position (only emitted there) and the
+            // arm has no optional/rest (gated in `compile_arm`), so `argv` exactly
+            // fills the frame the trampoline resets in place.
+            let tag = |e: LispError| match pos {
+                Some(p) => e.or_pos(*p),
+                None => e,
+            };
+            let save = heap.roots_len();
+            for a in args.iter() {
+                match exec_value(heap, a, frame_base, genv) {
+                    Ok(v) => heap.push_root(v),
+                    Err(e) => {
+                        heap.truncate_roots(save);
+                        return Err(tag(e));
+                    }
+                }
+            }
+            let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(args.len());
+            for k in 0..args.len() {
+                argv.push(heap.root_at(save + k));
+            }
+            heap.truncate_roots(save);
+            Ok(Step::SelfTail { args: argv })
         }
         other => exec_value(heap, other, frame_base, genv).map(Step::Done),
     }
@@ -1486,14 +1651,15 @@ fn exec_value(
             }
             exec_value(heap, body, frame_base, genv)
         }
-        Node::MakeClosure { fn_rest, captures } => {
+        Node::MakeClosure { fn_rest, captures, self_name } => {
             // Build the captured env: a flat snapshot of the enclosing lexicals
             // (parent = the process global, so true globals + dynamics still resolve
             // live and late-bound). No `captures` source is a call, so evaluating
             // them runs no safepoint — the fresh `frame` and the (immovable) node
             // fields stay valid until `make_closure` consumes them below. With no
-            // captures the closure is global-capturing (`env == None`).
-            let env = if captures.is_empty() {
+            // captures *and* no self-name the closure is global-capturing
+            // (`env == None`); a self-name needs a frame to bind into.
+            let env = if captures.is_empty() && self_name.is_none() {
                 heap.global()
             } else {
                 let frame = heap.new_env(Some(heap.global()));
@@ -1503,7 +1669,22 @@ fn exec_value(
                 }
                 frame
             };
-            crate::eval::make_closure(heap, None, fn_rest.load(), env)
+            let closure = crate::eval::make_closure(heap, None, fn_rest.load(), env)?;
+            // Direct `letrec` self-recursion: bind the binder name to the closure
+            // we just built, in the closure's own captured env. The recursive call
+            // then resolves through that env (uncached — a local-capturing frame
+            // isn't `is_global`, so neither inline cache engages). This makes the
+            // env contain the closure while the closure captures the env — the same
+            // cycle the tree-walker's `letrec` builds, handled by the tracing GC.
+            if let Some(name) = self_name {
+                heap.env_define(env, *name, closure);
+            }
+            Ok(closure)
+        }
+        Node::SelfCall { .. } => {
+            // Emitted only in tail position (`compile_node`'s `if tail` guard), so it
+            // is always handled by `exec_node`, never reached here in value position.
+            unreachable!("Node::SelfCall is tail-only — exec_node handles it");
         }
         Node::Call { callee, args, tail, pos, site } => {
             let step = exec_call(heap, callee, args, *tail, *pos, *site, frame_base, genv)?;
@@ -2036,6 +2217,25 @@ fn vm_apply_inner(
                 }
                 compiled = c2;
             }
+            Ok(Step::SelfTail { args: a2 }) => {
+                // Self-tail-call: the SAME arm in the SAME env. Skip the env re-root,
+                // the live-arm re-register, the `Arc` clone, and the frame
+                // teardown/rebuild that `Step::Tail` pays — just reset this frame in
+                // place. The frame region `[base, base+nslots)` is intact (the body
+                // balanced its roots and `SelfCall` truncated its arg evals), and the
+                // arm has no `&optional`/`&` rest (gated in `compile_arm`), so re-nil
+                // every slot — clearing the body's `let`/`letrec` binders for the next
+                // iteration — then rebind the required params from `a2`. `genv` and
+                // the live arm are unchanged; the loop-top GC safepoint then sees the
+                // fresh frame (the params are now in rooted slots).
+                heap.truncate_roots(base + compiled.nslots);
+                for i in 0..compiled.nslots {
+                    heap.set_root_at(base + i, Value::Nil);
+                }
+                for i in 0..compiled.nrequired {
+                    heap.set_root_at(base + i, a2[i]);
+                }
+            }
             Err(e) => {
                 heap.truncate_roots(base);
                 heap.truncate_env_roots(env_base);
@@ -2164,6 +2364,7 @@ mod tests {
                 Box::new(Node::MakeClosure {
                     fn_rest: ConstVal::new(Value::Pair(PairId::runtime(3))),
                     captures: Box::new([]),
+                    self_name: None,
                 }),
             ),
         ]));

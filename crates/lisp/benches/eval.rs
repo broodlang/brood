@@ -78,6 +78,19 @@ fn sum_tail(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
+/// Tail-recursive **local** loop via `letrec` self-recursion — the `defseq`
+/// (`map`/`filter`) shape. Exercises the VM self-call optimization (`Step::SelfTail`,
+/// ADR-096): a local-capturing closure calling itself, vs the same on the
+/// tree-walker. Adjacent Vm/Tw rows make the ratio load-robust.
+#[divan::bench(args = engine_grid![100_000, 1_000_000])]
+fn letrec_loop(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
+    let src =
+        format!("(letrec (s (fn [n acc] (if (= n 0) acc (s (- n 1) (+ acc n))))) (s {n} 0))");
+    bencher
+        .with_inputs(|| interp_on(eng))
+        .bench_refs(|interp| interp.eval_str(&src).unwrap());
+}
+
 /// Naive (non-tail) recursive Fibonacci — exercises function-call overhead and
 /// the growing-then-unwinding Rust call stack. fib(25) is ~242k calls.
 #[divan::bench(args = engine_grid![15, 20, 25])]

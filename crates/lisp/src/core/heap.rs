@@ -3765,6 +3765,21 @@ impl Heap {
         (frame.parent, &frame.vars)
     }
 
+    /// The name `env`'s *immediate* frame binds to `val`, if any — used by the VM's
+    /// self-call optimization to recognise a `letrec` self-recursive closure: its
+    /// captured frame binds its own name to itself (the `MakeClosure` self-name
+    /// `env_define`). Scans the frame only (not parents), newest binding first (so
+    /// the self-binding, pushed last, wins). `None` when nothing in the frame is
+    /// `val` — e.g. a global-capturing closure, which resolves its name via the
+    /// global table rather than a captured binding.
+    pub fn env_frame_self_name(&self, env: EnvId, id: ClosureId) -> Option<Symbol> {
+        let (_, vars) = self.env_frame_ref(env);
+        vars.iter()
+            .rev()
+            .find(|(_, v)| matches!(v, Value::Fn(fid) if *fid == id))
+            .map(|(s, _)| *s)
+    }
+
     pub fn new_env(&mut self, parent: Option<EnvId>) -> EnvId {
         let idx = self.local.envs.len();
         self.local.envs.push(EnvFrame {

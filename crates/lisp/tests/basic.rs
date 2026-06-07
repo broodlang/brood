@@ -1747,3 +1747,78 @@ fn prim1_guard_sees_redefinition() {
     let v = interp.eval_str("(use-first (list 1 2))").unwrap();
     assert_eq!(interp.print(v), ":redefined");
 }
+
+// ----- ADR-096 round 2: direct letrec self-recursion runs on the VM -----
+//
+// A `letrec` binder whose RHS is a `(fn …)` that calls itself used to make the
+// whole enclosing closure ineligible (a value snapshot can't capture an
+// in-progress binder), so the `defseq` family — `map`/`filter`/`mapcat`/
+// `remove`/`keep` — and every hand-written local loop deferred to the
+// tree-walker. The fix binds the closure's own name to itself in its captured
+// env at build time (the tree-walker's late-bind). These guard the semantics;
+// the differential harness compares the two engines across the whole suite.
+
+/// A hand-written self-recursive `letrec` loop accumulates correctly on the VM.
+#[test]
+fn letrec_self_recursion_accumulates() {
+    assert_eq!(
+        run("(letrec (sumto (fn (n acc) (if (= n 0) acc (sumto (- n 1) (+ acc n))))) (sumto 100 0))"),
+        "5050"
+    );
+}
+
+/// The `defseq` ops (which expand to a self-recursive `letrec` loop) produce the
+/// same results they always did, now that they compile rather than defer.
+#[test]
+fn defseq_ops_run_correctly() {
+    assert_eq!(run("(map inc (range 5))"), "(1 2 3 4 5)");
+    assert_eq!(run("(filter even? (range 10))"), "(0 2 4 6 8)");
+    assert_eq!(run("(mapcat (fn (x) (list x x)) (range 3))"), "(0 0 1 1 2 2)");
+    assert_eq!(run("(remove even? (range 6))"), "(1 3 5)");
+    assert_eq!(run("(keep (fn (x) (if (even? x) (* x 10) nil)) (range 6))"), "(0 20 40)");
+}
+
+/// Each call builds a *fresh* self-recursive closure with its own captured env;
+/// the recursive call must resolve through that instance's env, never a cached
+/// resolution from another instance (the call-site IC stays disengaged for a
+/// local-capturing frame). Two `make-counter` closures with different bases run
+/// interleaved and must not cross-contaminate.
+#[test]
+fn letrec_self_recursion_is_per_instance() {
+    // `count-down` returns a self-recursive accumulator closing over `base`; two
+    // instances with different bases summed over the same depth must differ by
+    // exactly depth*(b2-b1) — proving each saw its own `step`, not a sibling's.
+    let prog = "
+      (defn make-summer (base)
+        (letrec (step (fn (n acc) (if (= n 0) acc (step (- n 1) (+ acc base n)))))
+          step))
+      (let (a (make-summer 0) b (make-summer 1000))
+        (list (a 10 0) (b 10 0)))";
+    // a: sum 1..10 = 55 ; b: 55 + 10*1000 = 10055
+    assert_eq!(run(prog), "(55 10055)");
+}
+
+/// Mutual local recursion is *not* covered by the direct-self path and still
+/// defers — but must remain correct.
+#[test]
+fn letrec_mutual_recursion_still_correct() {
+    assert_eq!(
+        run("(letrec (ev? (fn (n) (if (= n 0) true (od? (- n 1))))
+                      od? (fn (n) (if (= n 0) false (ev? (- n 1)))))
+               (list (ev? 10) (od? 7)))"),
+        "(true true)"
+    );
+}
+
+/// A binder bound to a *call that returns a fn* (not directly a `fn`) must not
+/// be misclassified as self-recursive: the binder's value is the call result.
+#[test]
+fn letrec_non_fn_rhs_not_misclassified_as_self() {
+    // `g` returns an identity fn; `h`'s value is `(g)`'s result, which captures
+    // nothing recursive. If the compiler wrongly bound `h` to the inner fn, the
+    // body's `(h 41)` would misbehave; correct is 42.
+    assert_eq!(
+        run("(letrec (g (fn () (fn (x) (inc x))) h (g)) (h 41))"),
+        "42"
+    );
+}
