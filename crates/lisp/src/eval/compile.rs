@@ -2327,33 +2327,13 @@ fn vm_apply_inner(
         return Err(e);
     }
     let mut compiled = compiled0;
-    // Bytecode stepping engine (ADR-100, Stage 1): when enabled and this arm lowered
-    // to a chunk, run the flat instruction loop instead of walking the `Node` tree.
-    // Stage 1 chunks are call-free and bounded, so they have no tail step and need no
-    // mid-arm safepoint — run the same entry safepoint the `Node` loop runs on its
-    // first iteration, then execute straight through and return.
-    if bytecode_enabled() {
-        if let Some(chunk) = compiled.chunk.as_ref() {
-            if !crate::process::macro_block_active() && heap.gc_due() {
-                heap.collect(&mut [], &mut []);
-            }
-            if let Some(used) = crate::core::alloc::soft_limit_hit() {
-                heap.truncate_roots(base);
-                heap.truncate_env_roots(env_base);
-                return Err(crate::eval::memory_limit_error(used));
-            }
-            crate::process::tick();
-            if crate::process::deadline_exceeded() {
-                heap.truncate_roots(base);
-                heap.truncate_env_roots(env_base);
-                return Err(crate::eval::deadline_error());
-            }
-            let r = exec_chunk(heap, chunk, base, genv);
-            heap.truncate_roots(base);
-            heap.truncate_env_roots(env_base);
-            return r;
-        }
-    }
+    // Bytecode stepping engine (ADR-100): when enabled, run an arm that lowered to a
+    // chunk on the flat instruction loop (`exec_chunk`) instead of walking the `Node`
+    // tree (`exec_node`); both return a `Step`, so they share this trampoline (and a
+    // tail call from either reuses the frame). Chosen per iteration because a tail
+    // call may cross into a different arm that has (or lacks) a chunk. Constant per
+    // call, so read once.
+    let use_bc = bytecode_enabled();
     loop {
         // GC safepoint — the frame slots live on `Heap::roots` and the captured env
         // on `Heap::env_roots`, so `collect` relocates both in place. LOCAL
@@ -2379,7 +2359,11 @@ fn vm_apply_inner(
             return Err(crate::eval::deadline_error());
         }
 
-        match exec_node(heap, &compiled.body, base, genv) {
+        let step = match compiled.chunk.as_ref() {
+            Some(chunk) if use_bc => exec_chunk(heap, chunk, base, genv),
+            _ => exec_node(heap, &compiled.body, base, genv),
+        };
+        match step {
             Ok(Step::Done(v)) => {
                 heap.truncate_roots(base);
                 heap.truncate_env_roots(env_base);
@@ -2505,6 +2489,17 @@ enum Inst {
     /// `Node::Prim2`. (No `broot`: both operands are already rooted on the operand
     /// stack, so the stack machine never needs the explicit-root dance.)
     Prim2 { op: PrimOp, map: [u8; 2], head: Symbol, guard: AtomicU64, pos: Option<Pos> },
+    /// A combination. The callee then each argument have been pushed (operand layout
+    /// `[.., callee, arg0 .. arg_{argc-1}]`); resolve via the existing `dispatch`. A
+    /// **non-tail** call forces the result and pushes it; a **tail** call returns the
+    /// `Step` so [`vm_apply_inner`]'s trampoline continues it (TCO). Stage 2 has no
+    /// call-site inline cache — the callee is resolved as a plain value (the IC is a
+    /// pure cache, so this is semantically identical), to be re-added as a perf pass.
+    Call { argc: usize, tail: bool, pos: Option<Pos> },
+    /// Direct `letrec` self-tail-call (always tail position): args have been pushed;
+    /// returns a `Step::SelfTail` so the trampoline re-enters this arm in place.
+    /// Mirrors `Node::SelfCall`.
+    SelfCall { argc: usize },
 }
 
 /// A compiled-to-bytecode arm body: a flat instruction stream evaluated by
@@ -2601,8 +2596,23 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 pos: *pos,
             });
         }
-        // Outside Stage 1's vocabulary — defer the whole arm to `exec_node`.
-        Node::Call { .. } | Node::SelfCall { .. } | Node::MakeClosure { .. } => return None,
+        Node::Call { callee, args, tail, pos, site: _ } => {
+            // Callee first, then each arg (the order `exec_call` evaluates them); no
+            // call-site IC in bytecode yet (Stage 2) — the callee resolves as a value.
+            emit_node(callee, code)?;
+            for a in args.iter() {
+                emit_node(a, code)?;
+            }
+            code.push(Inst::Call { argc: args.len(), tail: *tail, pos: *pos });
+        }
+        Node::SelfCall { args, pos: _ } => {
+            for a in args.iter() {
+                emit_node(a, code)?;
+            }
+            code.push(Inst::SelfCall { argc: args.len() });
+        }
+        // Still outside the bytecode vocabulary (Stage 3) — defer the whole arm.
+        Node::MakeClosure { .. } => return None,
     }
     Some(())
 }
@@ -2617,16 +2627,21 @@ fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
     }
 }
 
-/// Run a [`Chunk`] to completion, returning the body's value. The operand stack
-/// (`Heap::roots` above `base + nslots`) carries intermediate values; frame slots
-/// live at `base..`; `genv` is the captured-env root. On error, returns `Err`
-/// without unwinding the operand stack — the caller ([`vm_apply_inner`]) truncates
-/// `Heap::roots` back to `base`, exactly as the `exec_node` error path does.
+/// Run a [`Chunk`], returning a [`Step`] — `Done(value)` for a straight-line body,
+/// or `Tail`/`SelfTail` when the body ends in a tail call (handed to
+/// [`vm_apply_inner`]'s trampoline for TCO, exactly like [`exec_node`]). The operand
+/// stack (`Heap::roots` above `base + nslots`) carries intermediate values; frame
+/// slots live at `base..`; `genv` is the captured-env root. On error, returns `Err`
+/// without unwinding the operand stack — the caller truncates `Heap::roots` back to
+/// `base`, exactly as the `exec_node` error path does.
 ///
-/// Stage 1 chunks are **call-free and bounded** (no loops without a call), so no
-/// GC safepoint / preemption tick is needed *inside* the loop — the caller runs one
-/// at arm entry, identical to the `Node` arm's first trampoline iteration.
-fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> LispResult {
+/// Stage 2: `Call`/`SelfCall` are supported. A non-tail `Call` recurses through the
+/// existing `dispatch`/`vm_apply` (native recursion — the explicit cross-arm frame
+/// stack is Stage 4); a tail `Call`/`SelfCall` returns a `Step` so the trampoline
+/// reuses the frame. A single pass through a chunk is bounded by its length (loops
+/// are tail calls that return to the trampoline's per-iteration safepoint), so no
+/// mid-chunk safepoint is needed.
+fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> Result<Step, LispError> {
     let mut ip = 0usize;
     while ip < chunk.code.len() {
         let inst = &chunk.code[ip];
@@ -2828,11 +2843,49 @@ fn exec_chunk(heap: &mut Heap, chunk: &Chunk, base: usize, genv: EnvRoot) -> Lis
                     Err(e) => return Err(tag_pos(e, pos)),
                 }
             }
+            Inst::Call { argc, tail, pos } => {
+                let pos = *pos;
+                // Operand layout: [.., callee, arg0 .. arg_{argc-1}] (callee emitted
+                // first, then each arg — the same order `exec_call` evaluates them).
+                // Read callee + args fresh from the (rooted) operand stack right
+                // before `dispatch`, so no read straddles a collection.
+                let n = heap.roots_len();
+                let callee = heap.root_at(n - argc - 1);
+                let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(*argc);
+                for k in 0..*argc {
+                    argv.push(heap.root_at(n - argc + k));
+                }
+                let cur_env = heap.read_root_env(genv);
+                if *tail {
+                    // Tail position: hand the call to the trampoline (TCO). The
+                    // leftover operands are dropped by the trampoline (truncate to
+                    // `base`), exactly as `exec_call`'s `save` region is.
+                    return dispatch(heap, callee, argv, true, cur_env).map_err(|e| tag_pos(e, pos));
+                }
+                let result =
+                    dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
+                heap.truncate_roots(n - argc - 1);
+                match result {
+                    Ok(v) => heap.push_root(v),
+                    Err(e) => return Err(tag_pos(e, pos)),
+                }
+            }
+            Inst::SelfCall { argc } => {
+                // Direct `letrec` self-tail-call (always tail position, emitted last):
+                // args are already on the operand stack; hand the trampoline a
+                // `SelfTail` to reset THIS frame in place. Mirrors `Node::SelfCall`.
+                let n = heap.roots_len();
+                let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(*argc);
+                for k in 0..*argc {
+                    argv.push(heap.root_at(n - argc + k));
+                }
+                return Ok(Step::SelfTail { args: argv });
+            }
         }
     }
     // The body's value is the lone operand left above the frame.
     let n = heap.roots_len();
-    Ok(heap.root_at(n - 1))
+    Ok(Step::Done(heap.root_at(n - 1)))
 }
 
 // ===================== entry =====================
