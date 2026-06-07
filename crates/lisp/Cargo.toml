@@ -11,7 +11,7 @@ name = "brood"
 path = "src/lib.rs"
 
 [features]
-default = ["dev-tools"]
+default = ["dev-tools", "treesit"]
 # Dev/tooling surface baked into the runtime: the test framework (`test`), the
 # process observer (`observer`), the agent/doc/hot-reload tooling (`mcp`/`docs`/
 # `reload`), the interactive REPL (`repl`/`lineedit`), and the GC debug builtins
@@ -44,8 +44,27 @@ clipboard = ["dep:arboard"]
 # This is a *counting* tool, not a timing one — the increments perturb timing, so
 # read counts here and times from the (counter-free) benches. See docs/benchmarking.md.
 perf-stats = []
+# tree-sitter parsing for *foreign* languages — the `tree-sitter-parse` builtin
+# (ADR: multi-language modes / ROADMAP §C). tree-sitter is the incremental,
+# error-tolerant parser that produces, for Ruby/Elixir/…, the same positioned CST
+# node shape (`{:kind :start :end :kids}`) Brood's own reader gives for `.blsp` —
+# so `std/tool/sexp`'s structural navigation and the editor's mode services run
+# over a foreign tree unchanged. The grammar crates carry vendored C parsers
+# (their own ABI via `tree-sitter-language`), so this is a heavier native build;
+# it's a runtime capability (a modern editor needs it), so it's in `default` and
+# the lean `make install` adds it explicitly (`--features brood/treesit`), unlike
+# the windowing stack which stays opt-in. Add a language = add one grammar crate
+# here + one arm in `src/treesit.rs`.
+treesit = ["dep:tree-sitter", "dep:tree-sitter-ruby", "dep:tree-sitter-elixir"]
 
 [dependencies]
+# The tree-sitter runtime + the Ruby/Elixir grammars (feature `treesit`). All
+# three are pulled in only with `--features treesit`; a build without it links no
+# parser. The grammar crates expose a `tree_sitter_language::LanguageFn` (`LANGUAGE`)
+# that `tree_sitter::Language` converts from, decoupling them from the core version.
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-ruby = { version = "0.23", optional = true }
+tree-sitter-elixir = { version = "0.3", optional = true }
 # Lock-free, append-only vector for the shared RUNTIME code region: stable
 # references survive concurrent pushes, so many process threads read closure
 # bodies lock-free while `def` appends new code (old versions never move/free —

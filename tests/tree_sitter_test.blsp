@@ -1,0 +1,82 @@
+;; tree-sitter-parse (ROADMAP §C): foreign-language parsing into the SAME
+;; positioned-CST node shape `parse-source-positioned` gives for Brood —
+;; `{:kind :start :end :named}` per node, `:text` on leaves, `:kids` on nodes
+;; with children, half-open CHARACTER offsets. So std/tool/sexp's structural
+;; navigation and the editor's :fontify service run over a Ruby/Elixir tree
+;; unchanged. Mechanism in crate::treesit (feature "treesit"); these assert the
+;; data shape the Brood side depends on.
+;;
+;; Register-only — discovered and run by `nest test` (and `brood --test`).
+
+(defmodule tree-sitter-test (:use test))
+
+;; ---- helpers ---------------------------------------------------------------
+
+;; The first descendant of `node` (depth-first) whose :kind = `k`, or nil.
+(defn tst-find (node k)
+  (if (= (get node :kind) k)
+    node
+    (first (filter (fn (x) (not (nil? x)))
+             (map (fn (c) (tst-find c k)) (or (get node :kids) []))))))
+
+;; ---- ruby ------------------------------------------------------------------
+
+(describe "tree-sitter-parse ruby"
+  (test "root is a positioned :program node with children"
+    (let (root (tree-sitter-parse "x = 1\n" :ruby))
+      (assert= (get root :kind) :program)
+      (assert= (get root :start) 0)
+      (assert= (get root :end) 6)          ; includes the trailing newline
+      (is (get root :named))
+      (is (not (empty? (get root :kids))))))
+
+  (test "an assignment node nests identifier/operator/integer leaves"
+    (let (root (tree-sitter-parse "x = 1\n" :ruby)
+          asgn (tst-find root :assignment))
+      (refute (nil? asgn))
+      (is (not (nil? (tst-find asgn :identifier))))
+      (is (not (nil? (tst-find asgn :integer))))))
+
+  (test "leaves carry :text spanning their char offsets"
+    (let (root (tree-sitter-parse "x = 1\n" :ruby)
+          ident (tst-find root :identifier))
+      (assert= (get ident :text) "x")
+      (assert= (get ident :start) 0)
+      (assert= (get ident :end) 1)
+      (is (get ident :named))))
+
+  (test "anonymous tokens are :named false"
+    (let (root (tree-sitter-parse "x = 1\n" :ruby)
+          op (tst-find root :=))
+      (refute (nil? op))
+      (refute (get op :named))
+      (assert= (get op :text) "=")))
+
+  (test "char offsets, not byte offsets, for multibyte source"
+    ;; "café" is 4 chars / 5 bytes; the string literal's end must be a CHAR offset.
+    (let (root (tree-sitter-parse "s = \"café\"\n" :ruby)
+          str (tst-find root :string))
+      (refute (nil? str))
+      (assert= (get str :start) 4)
+      (assert= (get str :end) 10))))        ; 4 + len("\"café\"") = 4 + 6 chars
+
+;; ---- elixir ----------------------------------------------------------------
+
+(describe "tree-sitter-parse elixir"
+  (test "root is a :source node"
+    (let (root (tree-sitter-parse "x = 1\n" :elixir))
+      (assert= (get root :kind) :source)
+      (is (not (empty? (get root :kids))))))
+
+  (test "an assignment is a binary_operator over identifier and integer"
+    (let (root (tree-sitter-parse "x = 1\n" :elixir)
+          bin (tst-find root :binary_operator))
+      (refute (nil? bin))
+      (is (not (nil? (tst-find bin :identifier))))
+      (is (not (nil? (tst-find bin :integer)))))))
+
+;; ---- errors ----------------------------------------------------------------
+
+(describe "tree-sitter-parse errors"
+  (test "an unknown language throws"
+    (assert-error (tree-sitter-parse "x" :python))))
