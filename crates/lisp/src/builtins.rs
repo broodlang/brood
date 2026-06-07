@@ -1877,7 +1877,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-leave", &[], "Restore the terminal: show the cursor, disable mouse capture, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col mods] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order, [] when none — so Ctrl+wheel etc. are bindable), or nil on timeout. Always pass a finite ms."),
-    ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}. The in-process frontend for the display protocol; returns nil."),
+    ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:cursor row col]. A face is a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey, the terminal's named colour) or an explicit [r g b] vector / \"#rrggbb\" hex string (a true-colour cell). The in-process frontend for the display protocol; returns nil."),
     ("gui-open", &["title?", "width?", "height?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
@@ -5094,10 +5094,10 @@ fn apply_face<W: std::io::Write>(out: &mut W, heap: &Heap, face: Value) -> Resul
     use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroundColor};
     let Value::Map(id) = face else { return Ok(()) };
     let k = &*FACE_KEYS;
-    if let Some(fg) = heap.map_get(id, k.fg).and_then(color_of) {
+    if let Some(fg) = heap.map_get(id, k.fg).and_then(|v| color_of(heap, v)) {
         crossterm::queue!(out, SetForegroundColor(fg)).map_err(term_err)?;
     }
-    if let Some(bg) = heap.map_get(id, k.bg).and_then(color_of) {
+    if let Some(bg) = heap.map_get(id, k.bg).and_then(|v| color_of(heap, v)) {
         crossterm::queue!(out, SetBackgroundColor(bg)).map_err(term_err)?;
     }
     if heap.map_get(id, k.bold).is_some_and(face_truthy) {
@@ -5120,23 +5120,29 @@ fn face_truthy(v: Value) -> bool {
     !matches!(v, Value::Nil | Value::Bool(false))
 }
 
-/// A face colour keyword (`:red`, `:dark-grey`, …) to a crossterm `Color`.
-fn color_of(v: Value) -> Option<crossterm::style::Color> {
+/// A face colour value to a crossterm `Color`. A palette keyword (`:red`,
+/// `:dark-grey`, …) maps to the terminal's *named* colour, so it honours the
+/// user's terminal theme; an explicit `[r g b]` vector or `"#rrggbb"` string maps
+/// to a true-colour cell (`Color::Rgb`) — the same RGB the GUI frontend paints, so
+/// a curated palette renders identically in both.
+fn color_of(heap: &Heap, v: Value) -> Option<crossterm::style::Color> {
     use crossterm::style::Color;
-    let Value::Keyword(s) = v else { return None };
-    Some(match value::symbol_name(s).as_str() {
-        "black" => Color::Black,
-        "red" => Color::Red,
-        "green" => Color::Green,
-        "yellow" => Color::Yellow,
-        "blue" => Color::Blue,
-        "magenta" => Color::Magenta,
-        "cyan" => Color::Cyan,
-        "white" => Color::White,
-        "grey" | "gray" => Color::Grey,
-        "dark-grey" | "dark-gray" => Color::DarkGrey,
-        _ => return None,
-    })
+    if let Value::Keyword(s) = v {
+        return Some(match value::symbol_name(s).as_str() {
+            "black" => Color::Black,
+            "red" => Color::Red,
+            "green" => Color::Green,
+            "yellow" => Color::Yellow,
+            "blue" => Color::Blue,
+            "magenta" => Color::Magenta,
+            "cyan" => Color::Cyan,
+            "white" => Color::White,
+            "grey" | "gray" => Color::Grey,
+            "dark-grey" | "dark-gray" => Color::DarkGrey,
+            _ => return None,
+        });
+    }
+    face_rgb(heap, v).map(|[r, g, b]| Color::Rgb { r, g, b })
 }
 
 /// Clamp a Brood int to a terminal coordinate (crossterm uses `u16`).
@@ -5175,14 +5181,59 @@ fn color_rgb(v: Value) -> Option<[u8; 3]> {
     })
 }
 
+/// Resolve a face colour VALUE to an RGB triple — the one place every frontend
+/// agrees on what a colour means. Accepts a palette keyword (`:red`, via
+/// `color_rgb`), an explicit `[r g b]` vector (each channel clamped to 0..255), or
+/// a `"#rgb"` / `"#rrggbb"` hex string. Anything else is `None` (the default face).
+/// This is what lets a UI curate a soft RGB palette instead of the harsh
+/// ANSI-16 keywords — and the `:vspans` fast path shares it too.
+fn face_rgb(heap: &Heap, v: Value) -> Option<[u8; 3]> {
+    match v {
+        Value::Keyword(_) => color_rgb(v),
+        Value::Vector(id) => {
+            let xs = heap.vector(id);
+            if xs.len() == 3 {
+                let chan = |k: usize| match xs[k] {
+                    Value::Int(n) => n.clamp(0, 255) as u8,
+                    _ => 0,
+                };
+                Some([chan(0), chan(1), chan(2)])
+            } else {
+                None
+            }
+        }
+        Value::Str(id) => parse_hex_color(heap.string(id)),
+        _ => None,
+    }
+}
+
+/// Parse a `"#rgb"` or `"#rrggbb"` hex colour to an RGB triple. `None` for any
+/// other shape (no leading `#`, a bad length, or a non-hex digit). The 3-digit
+/// shorthand expands each nibble (`#f0a` → `[0xff 0x00 0xaa]`).
+fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+    let h = s.strip_prefix('#')?;
+    let b = h.as_bytes();
+    match h.len() {
+        3 => {
+            let d = |i: usize| (b[i] as char).to_digit(16).map(|n| (n * 17) as u8);
+            Some([d(0)?, d(1)?, d(2)?])
+        }
+        6 => {
+            let p = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+            Some([p(0)?, p(2)?, p(4)?])
+        }
+        _ => None,
+    }
+}
+
 /// Resolve a face map (`{:fg :red :bg :blue :bold true :reverse true}`) into the
 /// plain `gui::Face` the backend renders. A non-map face is the default face.
 fn gui_face(heap: &Heap, face: Value) -> crate::gui::Face {
     let mut f = crate::gui::Face::default();
     let Value::Map(id) = face else { return f };
     let k = &*FACE_KEYS;
-    f.fg = heap.map_get(id, k.fg).and_then(color_rgb);
-    f.bg = heap.map_get(id, k.bg).and_then(color_rgb);
+    f.fg = heap.map_get(id, k.fg).and_then(|v| face_rgb(heap, v));
+    f.bg = heap.map_get(id, k.bg).and_then(|v| face_rgb(heap, v));
     f.bold = heap.map_get(id, k.bold).is_some_and(face_truthy);
     f.italic = heap.map_get(id, k.italic).is_some_and(face_truthy);
     f.underline = heap.map_get(id, k.underline).is_some_and(face_truthy);
@@ -5407,26 +5458,12 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Nil)
 }
 
-/// A `:vspans` segment colour: a face colour keyword (`:red` → the GUI palette,
-/// via `color_rgb`), an explicit `[r g b]` triple (each clamped to 0..255), or
-/// anything else (nil) for "transparent" — leave the background showing.
+/// A `:vspans` segment colour: a face colour keyword (`:red` → the GUI palette),
+/// an explicit `[r g b]` triple, or a `"#rrggbb"` hex string (all via the shared
+/// `face_rgb`); anything else is `None` — "transparent", leaving the background
+/// showing.
 fn span_color(heap: &Heap, v: Value) -> Option<[u8; 3]> {
-    match v {
-        Value::Keyword(_) => color_rgb(v),
-        Value::Vector(id) => {
-            let xs = heap.vector(id);
-            if xs.len() == 3 {
-                let chan = |k: usize| match xs[k] {
-                    Value::Int(n) => n.clamp(0, 255) as u8,
-                    _ => 0,
-                };
-                Some([chan(0), chan(1), chan(2)])
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
+    face_rgb(heap, v)
 }
 
 /// Read a `:height` value from a font spec as a pixel size (int or float), or None.
@@ -7110,6 +7147,57 @@ mod gui_face_tests {
         assert!(f.fg.is_none());
         assert!(!f.bold && !f.italic && !f.underline && !f.reverse);
         assert!(f.family.is_none());
+    }
+
+    // A curated palette needs explicit colours, not just the 16 named slots: an
+    // `[r g b]` vector and a `"#rrggbb"` hex string both resolve to that true colour.
+    #[test]
+    fn fg_accepts_rgb_vector_and_hex_string() {
+        let mut heap = Heap::new();
+        let triple = heap.alloc_vector(vec![Value::Int(0x28), Value::Int(0x2c), Value::Int(0x34)]);
+        let by_vec = heap.map_from_pairs(vec![(value::kw("fg"), triple)]);
+        assert_eq!(gui_face(&heap, by_vec).fg, Some([0x28, 0x2c, 0x34]));
+
+        let hex = heap.alloc_string("#61afef");
+        let by_hex = heap.map_from_pairs(vec![(value::kw("bg"), hex)]);
+        assert_eq!(gui_face(&heap, by_hex).bg, Some([0x61, 0xaf, 0xef]));
+    }
+}
+
+#[cfg(test)]
+mod color_value_tests {
+    use super::{face_rgb, parse_hex_color};
+    use crate::core::heap::Heap;
+    use crate::core::value::{self, Value};
+
+    #[test]
+    fn parses_six_and_three_digit_hex() {
+        assert_eq!(parse_hex_color("#61afef"), Some([0x61, 0xaf, 0xef]));
+        assert_eq!(parse_hex_color("#f0a"), Some([0xff, 0x00, 0xaa])); // nibble doubling
+        assert_eq!(parse_hex_color("#000000"), Some([0, 0, 0]));
+    }
+
+    #[test]
+    fn rejects_malformed_hex() {
+        assert_eq!(parse_hex_color("61afef"), None); // no leading #
+        assert_eq!(parse_hex_color("#12g456"), None); // non-hex digit
+        assert_eq!(parse_hex_color("#1234"), None); // bad length
+        assert_eq!(parse_hex_color("#"), None);
+    }
+
+    #[test]
+    fn face_rgb_spans_keyword_vector_and_hex() {
+        let mut heap = Heap::new();
+        // a palette keyword still resolves via the shared path
+        assert_eq!(face_rgb(&heap, value::kw("red")), Some([0xcd, 0x31, 0x31]));
+        // an explicit vector, clamped to 0..255
+        let v = heap.alloc_vector(vec![Value::Int(300), Value::Int(-5), Value::Int(128)]);
+        assert_eq!(face_rgb(&heap, v), Some([255, 0, 128]));
+        // a hex string
+        let s = heap.alloc_string("#282c34");
+        assert_eq!(face_rgb(&heap, s), Some([0x28, 0x2c, 0x34]));
+        // anything else is the default face
+        assert_eq!(face_rgb(&heap, Value::Int(7)), None);
     }
 }
 

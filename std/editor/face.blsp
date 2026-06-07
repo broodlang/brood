@@ -24,7 +24,11 @@
 ;;
 ;; ATTRIBUTES a face map may carry (all optional; unknown keys are ignored by every
 ;; frontend, so the vocabulary grows without breaking older ones):
-;;   :fg :bg        — a colour keyword (:red :green … :dark-grey), both frontends
+;;   :fg :bg        — a colour, both frontends: a palette keyword (:red :green …
+;;                    :dark-grey, rendered as the terminal's named colour), or an
+;;                    explicit `[r g b]` vector (0..255) / `"#rgb"`|`"#rrggbb"` hex
+;;                    string (a true colour, identical in both frontends — for a
+;;                    curated palette beyond the 16 named slots)
 ;;   :bold :reverse — flags, both frontends
 ;;   :underline :italic — flags (terminal + GUI)
 ;;   :family        — GUI only: a font-family keyword (`:mono` is the bundled
