@@ -237,3 +237,110 @@
       ;; pass in the first drag (as the poll would); the queued drags drain to the last
       (assert= (editor/ui/ui--coalesce-drag [:mouse :drag :left 5 5 []]) [:mouse :drag :left 7 7 []])
       (assert= (receive (m m) (after 200 :none)) "k"))))  ; the key is still there
+
+;; ---- named timers (ADR-101) ------------------------------------------------
+;; The firing logic is pure (deadline math over a clock map + the timer specs), so it
+;; tests deterministically with hand-supplied `now`/`clock` — no wall-clock, no loop.
+;; The one integration test drives `ui-run` with a `:now-fn` (the injected clock) and a
+;; nil-returning poll, so a due timer fires without any real sleeping.
+
+(describe "ui--deadline — when a timer next wants to fire"
+  (test "repeating: counts from the last fire, or from arm before the first fire"
+    (assert= (editor/ui/ui--deadline {:every 100} 1000 nil 500) 1100)    ; never fired → arm+ms
+    (assert= (editor/ui/ui--deadline {:every 100} 1000 1300 500) 1400))  ; fired → fire+ms
+  (test "one-shot: always counts from arm (fixed), ignoring the last fire"
+    (assert= (editor/ui/ui--deadline {:after 100} 1000 nil 500) 1100)
+    (assert= (editor/ui/ui--deadline {:after 100} 1000 1300 500) 1100))  ; fire doesn't move it
+  (test "idle: counts from the later of the base and last-input (input pushes it out)"
+    (assert= (editor/ui/ui--deadline {:after 100 :idle? true} 1000 nil 1500) 1600)
+    (assert= (editor/ui/ui--deadline {:every 100 :idle? true} 1000 1200 1500) 1600)))
+
+(describe "ui--timer-live? — can the timer still fire"
+  (test "never-fired is live; a fired one-shot (deadline at-or-before fire) is done"
+    (is (editor/ui/ui--timer-live? nil 1100))           ; never fired
+    (is (not (editor/ui/ui--timer-live? 1100 1100)))    ; one-shot: deadline == fire → done
+    (is (editor/ui/ui--timer-live? 1000 1100))))        ; repeating: deadline moved past fire
+
+(describe "ui--clock-init — per-iteration clock bookkeeping"
+  (test "first pass seeds last-input=now and arms each timer at now"
+    (let (c (editor/ui/ui--clock-init {} {:a {:every 100}} 5000))
+      (assert= (get c :last-input) 5000)
+      (assert= (get c :armed) {:a 5000})
+      (assert= (get c :fired) {})))
+  (test "preserves existing arm/fire/last-input and GCs removed timers"
+    (let (c (editor/ui/ui--clock-init
+              {:last-input 100 :armed {:a 50 :b 60} :fired {:a 70}}
+              {:a {:every 100}}  ; :b is gone
+              5000))
+      (assert= (get c :last-input) 100)
+      (assert= (get c :armed) {:a 50})    ; :a kept at its original arm, :b dropped
+      (assert= (get c :fired) {:a 70})))
+  (test "a newly-appeared timer is armed at now; established ones keep their arm"
+    (let (c (editor/ui/ui--clock-init
+              {:last-input 100 :armed {:a 50} :fired {}}
+              {:a {:every 100} :c {:after 10}}
+              5000))
+      (assert= (get c :armed) {:a 50 :c 5000}))))
+
+(describe "ui--poll-ms — how long to park"
+  (test "the soonest live deadline minus now, at least 1ms"
+    (assert= (editor/ui/ui--poll-ms {:a {:every 100}} {:last-input 1000 :armed {:a 1000} :fired {}} 1000) 100)
+    (assert= (editor/ui/ui--poll-ms {:a {:every 100}} {:last-input 1000 :armed {:a 1000} :fired {}} 1200) 1))  ; overdue → 1
+  (test "the earliest of several timers wins"
+    (assert= (editor/ui/ui--poll-ms {:a {:every 100} :b {:every 50}}
+               {:last-input 1000 :armed {:a 1000 :b 1000} :fired {}} 1000) 50))
+  (test "no live timer (a fired one-shot, or no timers) → the idle cap (60000)"
+    (assert= (editor/ui/ui--poll-ms {:a {:after 100}} {:last-input 1000 :armed {:a 1000} :fired {:a 1100}} 1200)
+      60000)
+    (assert= (editor/ui/ui--poll-ms {} {:last-input 1000 :armed {} :fired {}} 1200)
+      60000)))
+
+(describe "ui--fire — service the due timer"
+  (test "a due timer fires [:timer name] and records the firing"
+    (let (fr (editor/ui/ui--fire {:a {:every 100}} {:last-input 1000 :armed {:a 1000} :fired {}} 1200))
+      (assert= (first fr) [:timer :a])
+      (assert= (get (get (second fr) :fired) :a) 1200)))
+  (test "nothing due → [nil clock-unchanged]"
+    (let (clock {:last-input 1000 :armed {:a 1000} :fired {}}
+          fr (editor/ui/ui--fire {:a {:every 100}} clock 1050))
+      (is (nil? (first fr)))
+      (assert= (second fr) clock)))
+  (test "a one-shot fires once — after firing it's done until re-armed"
+    (let (fr (editor/ui/ui--fire {:a {:after 100}} {:last-input 1000 :armed {:a 1000} :fired {:a 1100}} 1300))
+      (is (nil? (first fr)))))  ; deadline (arm+ms=1100) not past the recorded fire (1100)
+  (test "an idle one-shot re-arms once new input pushes its deadline past the last fire"
+    (let (fr (editor/ui/ui--fire {:a {:after 100 :idle? true}}
+               {:last-input 1300 :armed {:a 1000} :fired {:a 1200}} 1500))
+      (assert= (first fr) [:timer :a])))  ; deadline = max(1000,1300)+100 = 1400 > fire 1200
+  (test "the earliest due timer fires when several are overdue"
+    (let (fr (editor/ui/ui--fire {:a {:every 100} :b {:every 50}}
+               {:last-input 1000 :armed {:a 1000 :b 1000} :fired {}} 2000))
+      (assert= (first fr) [:timer :b]))))  ; b's deadline (1050) is earlier than a's (1100)
+
+(describe "ui-run — timers drive the loop"
+  (test "a due timer is folded into update as [:timer name] (clock injected via :now-fn)"
+    (let (me (self))
+      ;; an :after-0 timer is due immediately at the injected clock (constant 1000);
+      ;; update quits on the first firing so the loop can't spin.
+      (ui-run {:done false :timers {:beat {:after 0}} :now-fn (fn () 1000)}
+        (fn (m c r) [])
+        (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+        {:enter (fn () nil)
+         :leave (fn () nil)
+         :size (fn () [80 24])
+         :draw (fn (f) nil)
+         :poll (fn (ms) nil)})  ; nil ⇒ timeout ⇒ ui--fire
+      (assert= (receive ([:saw x] x) (after 200 :none)) [:timer :beat])))
+
+  (test "a real input still folds normally when timers are present"
+    (let (me (self))
+      (send me [:input "z"])
+      (ui-run {:done false :timers {:beat {:every 100000}} :now-fn (fn () 1000)}
+        (fn (m c r) [])
+        (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+        {:enter (fn () nil)
+         :leave (fn () nil)
+         :size (fn () [80 24])
+         :draw (fn (f) nil)
+         :poll (fn (ms) (receive ([:input i] i) (after 0 nil)))})
+      (assert= (receive ([:saw x] x) (after 200 :none)) "z"))))

@@ -6096,3 +6096,61 @@ hit the §3.1a wall. Verified for the landed half: `tests/work_stealing.rs` (20/
 release, 5/5 debug) and the KI-1 guard `tests/concurrency_race.rs` clean 13/13
 plain-release incl. `BROOD_GC_STRESS`; full suite green. The full-migration design,
 staging, and its added acceptance bar live in `concurrency-v2.md` §7.
+
+## ADR-101 — Named timers for the `ui-run` loop
+
+**Status:** accepted (2026-06-07). Landed in `std/editor/ui.blsp` (the
+`:timers` model API + the clock-threaded `ui--loop`); tests in
+`tests/ui_test.blsp`. Builds on ADR-046 (the one render-op protocol / many
+frontends seam `ui-run` lives on) and the M4 let-it-crash render loop.
+
+**Context.** `ui-run` had a single poll timeout — `:tick-ms` (default 1000 ms) —
+and no notion of wall-clock time: a `nil` poll became a bare `:tick`, and that was
+the *only* time-driven event an app could get. The editor (brood-edit) needed
+several independent time-driven concerns at once — eldoc/diagnostics debounce
+(250 ms), the which-key panel delay (500 ms), the undo-pause boundary (600 ms),
+and consumer-paced key-repeat (300 ms then 35 ms) — and had to multiplex them all
+onto that one scalar by *overwriting* it in a priority cascade
+(`ed-post-step`: `(ed--which-key-arm (ed--arm-undo-pause (ed-arm-idle-beat m)))`),
+with a held-key short-circuit and a single ambiguous `:tick` that re-derived its
+intent from model flags. This made a **steady** animation timer impossible: a
+cursor-blink beat (530 ms) would be stomped by the next keystroke's 250/600 ms
+arming, and a held key zeroed it out entirely. Every new time-driven feature added
+another branch to the cascade.
+
+**Decision.** Declare time-driven work as *data* on the model: `:timers`, a map
+`name -> spec`, where a spec is `{:every ms}` (repeating) or `{:after ms}`
+(one-shot), optionally `:idle? true` (count from the last real input, not from
+arm/last-fire). The loop parks the poll until the soonest timer is due and folds
+`[:timer name]` when it fires — so a steady animation timer and several idle
+one-shots coexist, each on its own clock and with its own fired-event identity. The
+per-timer bookkeeping (when each appeared, when it last fired, and the last-input
+time) lives in a `clock` map threaded through `ui--loop`, **not** in the model. The
+firing math is factored into pure functions (`ui--deadline`, `ui--timer-live?`,
+`ui--poll-ms`, `ui--fire`) so it tests deterministically off a hand-supplied
+clock; a `:now-fn` model hook injects a scripted clock in tests (default `(now)`).
+Named timers are **opt-in by the `:timers` key**: a model without it keeps the
+exact legacy path (`nil` poll → bare `:tick` on the `:tick-ms` beat), so
+`std/observer.blsp` and any pre-timers app are untouched.
+
+Two subtleties the implementation pins down: (1) a `nil` poll only fires a timer
+when `(now)` confirms its deadline has actually arrived — `display--poll-any`
+slices the timeout across frontends and can wake early, so firing must be
+clock-gated, not "the poll returned nil." (2) "fire once per arming/idle stretch"
+falls out of the fire predicate `(and (>= now deadline) (> deadline last-fire))`:
+a non-idle one-shot's deadline is fixed at arm-time so it never re-fires; an idle
+one-shot re-arms automatically once new input pushes its deadline past the last
+fire. Stale per-timer state is GC'd against the live timer set each iteration, so
+a removed-then-re-added timer re-arms clean.
+
+**Consequences.** The clock is wall-clock reality, so it does **not** roll back
+when the let-it-crash loop rolls the model back on a `view`/`update` throw (a key
+the user pressed stays pressed), and the `:focus` branch threads it through without
+advancing `:last-input` (a focus message from another process is not user input).
+brood-edit's eldoc/which-key/undo/key-repeat arming all migrate onto named timers,
+deleting the `:tick-ms`-overwrite cascade, and a cursor-blink the old architecture
+couldn't express becomes a one-line `{:every 530 :idle? true}` timer. The single
+`:tick-ms` knob is kept only for the legacy back-compat path. (A companion change
+in the same effort: GUI mouse presses now carry a click-chain count, enabling
+double-click-word / triple-click-line — independent of timers but part of the same
+"make the editor feel like GUI Emacs" push.)
