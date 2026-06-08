@@ -11,8 +11,11 @@
 //! - [`receive_match`] is the **selective** receive — scans messages in
 //!   order, runs the user's matcher in eval-tail position, removes the
 //!   first match. Non-matches stay queued (Erlang semantics).
-//! - [`wait_for_message`] parks the caller: a green process suspends
-//!   via its coroutine yielder; the root thread blocks on the condvar.
+//! - a clean top-level green `receive` on an empty mailbox **captures** its
+//!   continuation (returning a suspend signal for the scheduler to park);
+//!   [`wait_for_message`] **blocks** the caller on the condvar for the cases
+//!   that can't capture — the root thread, a tree-walked body, and a
+//!   native-nested receive (the §7.4 dirty carve-out).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -26,10 +29,7 @@ use crate::error::{LispError, LispResult};
 use crate::eval;
 
 use super::message::{from_message, to_message, Message};
-use super::scheduler::{
-    ensure_ctx, gc_block_save, gc_block_set, macro_block_save, macro_block_set, stack_base_save,
-    stack_base_set, wake_enqueue, Ctx, Process, Suspend,
-};
+use super::scheduler::{ensure_ctx, wake_enqueue, Ctx, Process};
 use super::timer::arm_timer;
 
 /// Coarse run-status for `process-info` (ADR-051), stored as a lock-free cell on
@@ -134,14 +134,12 @@ pub(super) struct MailboxState {
     /// `receive_match` also writes it before returning the suspend signal, so the
     /// invariant holds there too.)
     pub(super) scanned: usize,
-    /// **Capture-mode only** (`BROOD_STATE_CAPTURE`): the absolute deadline of the
-    /// `receive` currently in progress, or `None`. A capture-mode `receive` is
-    /// re-entered from scratch on each wake (the continuation replays the `%receive`
-    /// call), so recomputing `now + ms` every resume would reset — and never fire —
-    /// the `after` timeout. The first entry stores the absolute deadline here; resumes
-    /// reuse it; the matching/timeout exit clears it. (The coroutine path keeps the
-    /// deadline in its own `receive_match` stack frame — its loop never exits — so it
-    /// never touches this.) Single slot: one `receive` runs at a time per process.
+    /// The absolute deadline of the `receive` currently in progress, or `None`. A
+    /// captured `receive` is re-entered from scratch on each wake (the continuation
+    /// replays the `%receive` call), so recomputing `now + ms` every resume would
+    /// reset — and never fire — the `after` timeout. The first entry stores the
+    /// absolute deadline here; resumes reuse it; the matching/timeout exit clears it.
+    /// Single slot: one `receive` runs at a time per process.
     pub(super) recv_deadline: Option<Instant>,
 }
 
@@ -313,7 +311,7 @@ pub(crate) fn read_name_address(heap: &Heap, mid: MapId) -> Result<(Symbol, Symb
 /// not run here. The `receive` macro applies it in tail position (`((%receive …))`),
 /// so a loop that tail-calls back into `receive` trampolines through eval's TCO and
 /// stays O(1) native stack (running it here would nest a `receive_match` per message
-/// and overflow the green-process coroutine stack). Non-matching messages stay queued
+/// and overflow the worker stack). Non-matching messages stay queued
 /// (Erlang selective receive). `timeout` is `nil` (wait forever) or an integer of
 /// milliseconds; on expiry the `on-timeout` thunk is returned the same way (a `throw`
 /// inside it still propagates through `try`/`catch`). A green process suspends while
@@ -401,26 +399,23 @@ pub fn receive_match(
                         return Ok(on_timeout);
                     }
                 }
-                // State-capture path (ADR-100 §8): a clean no-match in a **capture-mode**
-                // green process (no coroutine — `in_capture_run`) becomes a *suspend
-                // control signal* returned to the scheduler instead of freezing a
-                // coroutine in `wait_for_message`. Record the scan position (so the
-                // scheduler re-runs us only on a NEW message) and arm any deadline timer
-                // — the same park bookkeeping `wait_for_message`'s green branch does,
-                // minus the coroutine yield — then drop this scan's operand roots (as the
-                // match / timeout returns do, so the driver's `%receive` `Inst::Call`
-                // re-runs against a clean operand stack on resume) and hand the suspend
-                // signal up: it rides the error channel through `%receive` to `vm_run_bc`,
-                // which captures the VM continuation and returns it for `run_one` to park.
-                // A coroutine-mode process (flag off, or a tree-walked body) and the root
-                // thread fall through to the coroutine/condvar wait below — as does a
-                // **native-nested** capture receive (`in_capture_run` but not
-                // `capture_top_level`: a `%isolate`/`%try`/HOF callback sits between this
-                // receive and the body driver). Its continuation can't be captured across
-                // the native frame, and re-running the native repeats side effects (the
-                // §8.1 footgun), so it instead **blocks the worker** via the yielder-less
-                // root branch of `wait_for_message` — the dirty-scheduler carve-out (§7.4).
-                // Only a clean top-level receive captures (and can migrate).
+                // State-capture path (ADR-100 §8): a clean no-match in a green process
+                // (`in_capture_run`) becomes a *suspend control signal* returned to the
+                // scheduler instead of blocking the worker. Record the scan position (so
+                // the scheduler re-runs us only on a NEW message) and arm any deadline
+                // timer, then drop this scan's operand roots (as the match / timeout
+                // returns do, so the driver's `%receive` `Inst::Call` re-runs against a
+                // clean operand stack on resume) and hand the suspend signal up: it rides
+                // the error channel through `%receive` to `vm_run_bc`, which captures the
+                // VM continuation and returns it for `run_one` to park. The root thread,
+                // a tree-walked process body, and a **native-nested** capture receive
+                // (`in_capture_run` but not `capture_top_level`: a `%isolate`/`%try`/HOF
+                // callback sits between this receive and the body driver) all fall through
+                // to the condvar wait below instead. A native-nested receive's continuation
+                // can't be captured across the native frame, and re-running the native
+                // repeats side effects (the §8.1 footgun), so it **blocks the worker** —
+                // the dirty-scheduler carve-out (§7.4). Only a clean top-level receive
+                // captures (and can migrate).
                 if crate::process::in_capture_run() && crate::process::capture_top_level() {
                     crate::core::sync::lock(&ctx.mailbox.state).scanned = i;
                     set_self_status(&ctx, ST_WAITING);
@@ -432,12 +427,12 @@ pub fn receive_match(
                     return Err(LispError::suspend(deadline));
                 }
                 wait_for_message(&ctx, i, deadline);
-                // Back from the wait → running again. The green-coroutine/`run_one`
-                // path already flips the status to RUNNING on resume, but the
-                // yielder-less *block* path (the root thread, and a native-nested
-                // capture receive — §7.4) returns inline without a `run_one`, so its
-                // `ST_WAITING` would otherwise leak into the next scan (and a
-                // `process-info` after the receive would read `:waiting` while running).
+                // Back from the wait → running again. This *block* path (the root thread,
+                // and a native-nested capture receive — §7.4) returns inline without a
+                // `run_one`, so its `ST_WAITING` would otherwise leak into the next scan
+                // (and a `process-info` after the receive would read `:waiting` while
+                // running). The capture path that suspends above is flipped back by
+                // `run_one` on resume instead.
                 set_self_status(&ctx, ST_RUNNING);
             }
             Err(e) => {
@@ -458,16 +453,16 @@ pub fn receive_match(
 /// `*i` past non-matching messages (Erlang selective receive — non-matches stay
 /// queued). Returns `Ok(Some(thunk))` — the matched clause body, with that message
 /// removed, to be applied in tail position by the caller — or `Ok(None)` when every
-/// currently-queued message was scanned with no match (the caller then waits and
-/// re-scans; in the coming state-capture path it instead returns a suspend signal).
+/// currently-queued message was scanned with no match (the caller then either captures
+/// a suspend signal or blocks and re-scans — see `receive_match`).
 ///
 /// This does the matcher `apply` (which can collect at any eval depth — ADR-061 — so
 /// the operand-rooted `matcher` at `rbase+0` is re-read each candidate) but **never
-/// blocks/yields for a message** — that's the caller's `wait_for_message`. It is thus
-/// the reusable scan for both the corosensei wait and the future scheduler-parked
-/// resume. The `receive`-boundary kill check rides at the top (a soft `(exit …)` — and
-/// any hard `:kill` not caught at `preempt` — dies here with its reason rather than
-/// taking another message; the root has no yielder and can't be killed this way).
+/// blocks/waits for a message** — that's the caller's `wait_for_message`. It is thus the
+/// reusable scan for both the capture-suspend and the worker-block paths. The
+/// `receive`-boundary kill check rides at the top (a soft `(exit …)` — and any hard
+/// `:kill` not caught at the VM loop top — dies here with its reason rather than taking
+/// another message).
 fn scan_mailbox(
     heap: &mut Heap,
     ctx: &Ctx,
@@ -475,13 +470,8 @@ fn scan_mailbox(
     i: &mut usize,
 ) -> Result<Option<Value>, LispError> {
     loop {
-        if let Some(yptr) = ctx.yielder {
-            if let Some(reason) = ctx.mailbox.pending_kill() {
-                // SAFETY: the yielder is valid while this coroutine runs (we're
-                // inside its body, called from eval). `run_one` retires us on `Kill`.
-                unsafe { (*yptr).suspend(Suspend::Kill(reason)) };
-            }
-        }
+        // (A hard `:kill` is caught at the VM driver's loop top; a soft exit at the
+        // `park_on_receive` boundary — not here, since there's no coroutine to suspend.)
         // Rebuild candidate `*i` into the heap (no eval here → no collection).
         let candidate = {
             let st = crate::core::sync::lock(&ctx.mailbox.state);
@@ -501,7 +491,7 @@ fn scan_mailbox(
                     // TAIL position — `((%receive …))` — so a loop that tail-calls back
                     // into `receive` trampolines through eval's TCO and stays O(1)
                     // native stack (running it here instead nests a `receive_match` per
-                    // message → green-process coroutine-stack overflow).
+                    // message → worker-stack overflow).
                     crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i);
                     return Ok(Some(thunk));
                 }
@@ -512,78 +502,32 @@ fn scan_mailbox(
     }
 }
 
-/// Wait until a message beyond index `i` might be available, honouring `deadline`.
-/// Green: record the scan position and suspend (arming a timer if there's a deadline,
-/// so it wakes to check). Root: block on the mailbox condvar (with timeout). Returns
-/// when the caller should re-scan from `i`.
+/// Block until a message beyond index `i` might be available, honouring `deadline`,
+/// then return for the caller to re-scan from `i`. With no coroutine, a `receive` that
+/// must wait **blocks its worker thread** on the mailbox condvar — the dirty-scheduler
+/// path (§7.4): `dirty_block` excludes the worker from `assign_worker` and re-routes its
+/// backlog so nothing is stranded on a worker that won't run it (the mass-kill/monitor
+/// deadlock); the real **root** thread (which owns no worker) just blocks. Only reached
+/// by the root thread and a **native-nested** capture `receive`; a clean *top-level*
+/// capture receive never gets here — it captures its continuation and returns instead
+/// (the gate in `receive_match`).
 fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
-    match ctx.yielder {
-        // Root thread: block on the condvar (with timeout) until a send or deadline.
-        // Also the **native-nested capture** path (a `receive` reached through a native
-        // frame in a capture-mode process — §7.4): it blocks this worker thread, so
-        // `dirty_block` marks the worker excluded from `assign_worker` and re-routes its
-        // movable backlog, lest a process be stranded on a worker that won't run it
-        // (the deadlock that bit the mass-kill/monitor-at-scale tests). A no-op on the
-        // real root thread (it owns no worker), and the green-coroutine path never
-        // reaches here (it suspends via the yielder below).
-        None => {
-            let st = crate::core::sync::lock(&ctx.mailbox.state);
-            if st.queue.len() > i {
-                return; // a message arrived between the scan and here — re-scan
-            }
-            set_self_status(ctx, ST_WAITING);
-            let _dirty = crate::process::dirty_block();
-            match deadline {
-                Some(d) => {
-                    let now = Instant::now();
-                    if now < d {
-                        // Re-acquired guard dropped at end of scope (before we return).
-                        let _g = ctx.mailbox.cv.wait_timeout(st, d - now);
-                    }
-                }
-                None => {
-                    let _g = ctx.mailbox.cv.wait(st);
-                }
+    let st = crate::core::sync::lock(&ctx.mailbox.state);
+    if st.queue.len() > i {
+        return; // a message arrived between the scan and here — re-scan
+    }
+    set_self_status(ctx, ST_WAITING);
+    let _dirty = crate::process::dirty_block();
+    match deadline {
+        Some(d) => {
+            let now = Instant::now();
+            if now < d {
+                // Guard dropped at end of scope (before we return).
+                let _g = ctx.mailbox.cv.wait_timeout(st, d - now);
             }
         }
-        // Green process: record how far we scanned (so the worker re-runs us only on
-        // a *new* message — see `run_one`), then suspend. A timer wakes us at the
-        // deadline; `send` wakes us on a new message.
-        Some(yptr) => {
-            {
-                let mut st = crate::core::sync::lock(&ctx.mailbox.state);
-                if st.queue.len() > i {
-                    return; // raced — a message arrived; re-scan without suspending
-                }
-                st.scanned = i;
-            }
-            set_self_status(ctx, ST_WAITING);
-            if let Some(d) = deadline {
-                // Stamp the timer entry with a fresh park generation. If this
-                // process is woken (by `send`) and re-parks before the deadline,
-                // the next `arm_timer` carries a higher gen, so the timer thread's
-                // `wake_for_timeout` discards *this* now-superseded entry instead of
-                // firing a spurious wakeup. `fetch_add` returns the value to stamp;
-                // the bump makes every earlier outstanding entry stale.
-                let gen = ctx.mailbox.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
-                arm_timer(ctx.pid, d, gen);
-            }
-            // Save this process's GC-block depth before yielding (same
-            // rationale as `preempt`): the worker may run other processes
-            // whose eval/macroexpand changes the thread-local before we resume.
-            let saved_block = gc_block_save();
-            let saved_base = stack_base_save();
-            let saved_macro = macro_block_save();
-            // SAFETY: the yielder is valid while this coroutine runs — which is now
-            // (called from within eval, within the coroutine body). Suspending
-            // returns control to the worker (`run_one`), which parks us.
-            unsafe { (*yptr).suspend(Suspend::Receive) };
-            // Resumed (by send or timer): the worker may have run others or migrated
-            // us to another worker — re-establish the context, depth and stack base.
-            crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
-            gc_block_set(saved_block);
-            stack_base_set(saved_base);
-            macro_block_set(saved_macro);
+        None => {
+            let _g = ctx.mailbox.cv.wait(st);
         }
     }
 }
@@ -683,8 +627,8 @@ mod tests {
     /// The lazy-cancellation core (Fix 1): each park-with-deadline bumps the
     /// mailbox's `timer_gen` and stamps its timer entry with the new value; the
     /// timer thread fires only the entry whose gen is still current. This unit test
-    /// exercises the gen bookkeeping without standing up the timer thread or a real
-    /// coroutine — it models the sequence of arms and asserts which entries are
+    /// exercises the gen bookkeeping without standing up the timer thread or the
+    /// scheduler — it models the sequence of arms and asserts which entries are
     /// considered live vs. superseded.
     #[test]
     fn timer_gen_supersedes_earlier_entries() {
@@ -749,8 +693,8 @@ mod tests {
         );
     }
 
-    /// State-capture seam (ADR-100 §8): in a **capture-mode** green process (no
-    /// coroutine — modelled by setting the `CAPTURE_RUN` flag `run_one` sets), a
+    /// State-capture seam (ADR-100 §8): in a green process (modelled by setting the
+    /// `CAPTURE_RUN` + `CAPTURE_TOP_LEVEL` flags `run_one`/`vm_run_bc` set), a
     /// `receive` that scans an empty mailbox with no match produces a `Control::Suspend`
     /// *control signal* (for the VM driver to capture and the scheduler to park) instead
     /// of blocking in `wait_for_message`. Assert `receive_match` returns that signal —
@@ -758,13 +702,8 @@ mod tests {
     #[test]
     fn empty_receive_in_a_capture_run_suspends() {
         let mailbox = Mailbox::new();
-        // A capture-mode green ctx has no yielder; greenness comes from `in_capture_run`.
-        let ctx = Ctx {
-            pid: 999_999,
-            mailbox: Arc::clone(&mailbox),
-            yielder: None,
-            capture: Vec::new(),
-        };
+        // Greenness comes from `in_capture_run` (set below), not a yielder.
+        let ctx = Ctx { pid: 999_999, mailbox: Arc::clone(&mailbox), capture: Vec::new() };
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         crate::process::scheduler::set_capture_run(true);
         // A *top-level* capture receive (bytecode-reachable, no native frame between it

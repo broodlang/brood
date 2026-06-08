@@ -179,7 +179,7 @@ fn engines_agree_on_corpus() {
     // expansion is a large nested-`if` tree, and macroexpand/compile recurse over it
     // deeper than libtest's small default thread stack would allow.
     std::thread::Builder::new()
-        .stack_size(brood::process::CORO_STACK_BYTES)
+        .stack_size(brood::process::WORKER_STACK_BYTES)
         .spawn(|| {
             for &src in CORPUS {
                 agree(src);

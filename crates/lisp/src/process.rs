@@ -1,12 +1,14 @@
 //! Processes: share-nothing green processes communicating by message passing
 //! (`spawn`/`send`/`receive`/`self`).
 //!
-//! **Step 4b** (see `docs/scheduler.md`, ADR-018): processes are lightweight
-//! *green* threads, not OS threads. Each runs inside a [`corosensei`] stackful
-//! coroutine — its own parkable stack — so the native recursive evaluator runs
-//! unchanged and `receive` on an empty mailbox **suspends** the coroutine instead
-//! of blocking a thread. A small pool of worker OS threads (≈ `nproc`, a setting)
-//! runs ready processes off a shared run queue; `send` wakes a parked process.
+//! Processes are lightweight *green* threads, not OS threads. Each runs its 0-arg
+//! body's bytecode directly on a worker thread (ADR-100 §8.4 — state capture,
+//! corosensei removed); `receive` on an empty mailbox **captures** the process's
+//! continuation as relocatable heap data (`Suspended`) instead of blocking the
+//! thread. A small pool of worker OS threads (≈ `nproc`, a setting) runs ready
+//! processes off per-worker run queues with work-stealing; `send` wakes a parked
+//! process — which, carrying no native stack, may resume on any worker (live
+//! migration, §7).
 //!
 //! **Code is shared, data is not.** A spawned process shares the runtime's code +
 //! global table (the `Arc`s in its `Heap`), so a `def` reaches it; but its data
@@ -15,8 +17,8 @@
 //! their global interned id (the interner is process-wide).
 //!
 //! The thread that started the program (the REPL / file runner) is a *root*
-//! process: it is not a coroutine, so its `receive` **blocks** on its mailbox
-//! rather than yielding. Everything `spawn`ed is a green process that yields.
+//! process: it never enters the scheduler, so its `receive` **blocks** on its
+//! mailbox rather than capturing. Everything `spawn`ed is a green process.
 //!
 //! ## Module map
 //!
@@ -24,9 +26,9 @@
 //!   (the deep-copy machinery that moves a `Value` between heaps).
 //! - [`mailbox`] — `Mailbox`, `REGISTRY`, `deliver`, `send`, `receive_match`,
 //!   `wait_for_message`, `wake_for_timeout`, `list_local_pids`.
-//! - [`scheduler`] — coroutine plumbing (`Process`, `Ctx`, `Suspend`), the
-//!   run queue + worker pool, `spawn`, `tick`/`preempt`, `GcBlockGuard`,
-//!   `self_pid`, `pid_value`, `deregister`.
+//! - [`scheduler`] — the state-capture driver (`Process`, `Ctx`), the run queue +
+//!   worker pool, `spawn`, `tick`/`preempt`, `GcBlockGuard`, `self_pid`,
+//!   `pid_value`, `deregister`.
 //! - [`monitor`] — Erlang-style monitors (`Watcher`, `MONITORS`,
 //!   `PENDING_REMOTE`, the full `monitor`/`demonitor`/`add_monitor`/
 //!   `drop_monitor`/`handle_node_down`/`fire_noconnection` surface).
@@ -66,7 +68,7 @@ pub use scheduler::{
     macro_block_active, parent_of, peak_threads, pid_value, self_pid, set_deadline,
     migrate_count, set_max_parallel, spawn, spawn_count, stack_budget, stack_overflow_check,
     steal_count, take_capture, tick, worker_threads, yield_now, GcBlockGuard, MacroBlockGuard,
-    CORO_STACK_BYTES,
+    WORKER_STACK_BYTES,
 };
 // State-capture driver helpers (ADR-100 §8): read by the bytecode VM driver to decide
 // when to capture a continuation (vs. yield the coroutine / block the root), and by the

@@ -2615,7 +2615,10 @@ impl Heap {
     /// and every argument one of the arm's parameters used directly. Returns the
     /// forwarding `(head, map)` if so. A pure function of the immutable arm, run
     /// once at allocation; mirrors the predicate `eval::passthrough_arm` used to
-    /// recompute on every call.
+    /// recompute on every call. (A *self-recursive* redirect — `head` resolving back
+    /// to this closure, as in `(defn hog () (hog))` — is detected and broken at the
+    /// redirect site, since the closure's own global name isn't known here; see the
+    /// redirect loops in `eval::eval` and `compile::dispatch`.)
     fn compute_passthrough(&self, arm: &ClosureArm) -> Option<Passthrough> {
         if !arm.optionals.is_empty() || arm.rest.is_some() || arm.body.len() != 1 {
             return None;

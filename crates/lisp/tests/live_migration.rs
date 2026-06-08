@@ -1,11 +1,10 @@
-//! Live process migration under state capture (ADR-100 §7 / §8.4 step 2, the §7.6
-//! acceptance test). With `BROOD_STATE_CAPTURE` on, a green process suspended
-//! **mid-computation** at `receive` is a captured continuation with no native stack,
-//! so the scheduler may resume it on a *different* worker than it suspended on — the
-//! migration that corosensei's thread-pinned coroutines could never do (KI-1b).
+//! Live process migration under state capture (ADR-100 §7 / §8.4, the §7.6
+//! acceptance test). A green process suspended **mid-computation** at `receive` is a
+//! captured continuation with no native stack, so the scheduler may resume it on a
+//! *different* worker than it suspended on — the migration that corosensei's
+//! thread-pinned coroutines could never do (KI-1b).
 //!
-//! Its own test binary because `set_max_parallel` is process-wide, and because the
-//! flag is read once and cached (`state_capture_enabled`) — set here before any spawn.
+//! Its own test binary because `set_max_parallel` is process-wide.
 //!
 //! What it proves, the live-migration analogue of `work_stealing.rs`:
 //!   1. **Correctness over many trials.** Each worker builds a deep **non-tail**
@@ -19,8 +18,6 @@ use brood::{process, Interp};
 
 #[test]
 fn deep_receive_continuations_resume_correctly_across_workers() {
-    // Arm state capture before the first spawn (the flag is cached on first read).
-    std::env::set_var("BROOD_STATE_CAPTURE", "1");
     // A small pool so woken processes contend for workers and migrate.
     process::set_max_parallel(2);
 

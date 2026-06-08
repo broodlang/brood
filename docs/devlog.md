@@ -292,6 +292,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-08** — corosensei removal §8.4 **step 3** (partial): the native-nested-receive footgun is **resolved** the BEAM dirty-scheduler way (§7.4), not by re-running. A clean *top-level* `receive` captures + migrates; a *native-nested* `receive` (reached through `%isolate`/`%try`/a HOF callback — can't be captured through the native frame, and re-running the native repeats its side effects) instead **blocks its worker** (no capture, no re-run), falling through to the yielder-less root branch of `wait_for_message`. A `CAPTURE_TOP_LEVEL` thread-local (set per `vm_run_bc` entry, restored on exit so the *innermost* driver wins) lets the `receive` gate tell a bytecode-reachable top-level receive from a native-nested one. Result flag-on: the previously-hanging files pass (`gen` 18/18, `concurrency` 33/33, `pids`/`link`/`exit`), **1852/1859** in-language tests pass, live migration + §6 bar hold, flag-off unregressed. **Still blocking the default flip:** 6 heavy **kill/monitor-of-parked-processes-at-scale** tests time out flag-on (mass-kill 100 parked, 1000 monitored → `:down`, `observer` process-info) — plain 1000-process fan-out is identical flag-on/off (41 ms), so the hang is in the `exit`→`wake_enqueue`→`Killed`-retire→`:down` path under load, not throughput. To debug next; flag stays **off**.
 - **2026-06-08** — corosensei removal §8.4 step 3 (cont'd): **kill/monitor-of-parked-processes-at-scale deadlock fixed.** Root cause: a worker parked in a dirty native-nested block (blocked inside `run_one`, never returning to its run loop) still looked schedulable to `assign_worker` (empty queue + busy = low load), so processes (e.g. 1000 monitored workers being killed, or children spawned during the parent's `mfan`) got routed onto it and stranded → all-threads-asleep deadlock. Fix (§7.4 dirty-scheduler): a worker marks itself **dirty** for the block (`dirty_block`, keyed by a new `CURRENT_WORKER` thread-local set at `worker_loop` entry); `assign_worker` excludes a dirty worker (load `MAX`), and entering the block **drains the stranded backlog** off it — only *non-fresh capture* procs (the unstealable ones) are re-routed; *fresh* stay (an idle worker steals them) and pinned *coroutines* stay (KI-1b). The mass-kill / 1000-monitored / `observer` process-info tests now pass flag-on (were 120s timeouts); `adversarial` 22/22, `concurrency` 33/33, `exit` 5/5. §6 plain-release KI-1 bar holds **flag on and off** (10/10 + `BROOD_GC_STRESS`). Also fixed a status leak: the yielder-less block left `ST_WAITING` set (it returns inline, with no `run_one` to flip it back), so a `process-info` after a native-nested receive read `:waiting` while running — now reset to `ST_RUNNING` after the wait. **Last flag-on flake before the flip:** `gen_test`'s linked-spawn describe (~25%: `%isolate` reap `:kill`s a still-alive *linked* server → `:kill` back-propagates to the isolate-runner; an async-`stop`-vs-reap race capture-mode timing exposes — Brood-side to resolve). `stream_test` is WIP. Flag stays **off**.
 - **2026-06-08** — corosensei removal §8.4 step 3: gen flake **fixed** + capture mode proven **correctness-equivalent**. The `%isolate` reap now `unlink_self(child)` before `(exit child :kill)`, so cleaning up a leftover `spawn-link`ed server can't back-propagate `:killed` and kill the isolate runner (the async-`stop`-vs-reap race is moot) — gen 8/8 flag-on. Full suite both modes (good binary): **1882/1902**, the **same 20 failures in both** — all environmental (≈15 tree-sitter, needs native grammars [WIP]; ≈5 package-`:git`, needs git/network, 120s timeouts) — so **capture mode adds zero failures**. Timing 218 s (off) vs 265 s (on) ≈ **+22%** (the 6× was the now-fixed deadlock/timeouts). So every capture-specific issue (the §8.1 native-nested footgun, the kill/monitor deadlock, the gen flake) is resolved; what's left for step 3 is the **flip-the-default decision** — correctness is proven, the open question is whether to eat the ~22% now (it lands before step 4's corosensei-deletion payoff) or optimise the capture hot path first. §6 plain-release bar holds flag on+off. Flag still **off**.
+- **2026-06-08** — corosensei removal §8.4 **steps 3-flip + 4 done: corosensei is gone.** Flipped the default and **deleted corosensei** in one move — the `BROOD_STATE_CAPTURE` flag, the `Run::{Coro|Capture}` split, the `corosensei` dep, all the coroutine plumbing (`Suspend`/`Yielder0`/`build_coro`/`resume_coro`/`handle_coro_outcome`), and `unsafe impl Send for Process` are removed. State capture is the **sole** scheduler engine; `Process` is now plain `Send` data and `run_one` always drives `vm_run_bc` (a body with no compiled 0-arg arm tree-walks on the worker thread, its `receive`s block — the §7.4 dirty carve-out). **Stealing generalised:** every process is heap-captured with no native stack, so `try_steal` takes **any** queued process (`pop_back`), `STEALABLE` counts all queued, and the now-vestigial `fresh` flag is dropped; `CORO_STACK_BYTES` → `WORKER_STACK_BYTES`. **Regression caught + fixed in validation:** a self-recursive pass-through `(defn hog () (hog))` spun **un-preemptibly** — ADR-069's pass-through opt flagged it as a thin wrapper redirecting `hog → hog`, and the redirect loop (`compile::dispatch` + `eval::eval`) relied on `tick()`→`preempt()` to yield, which is now a no-op (only the VM driver's loop-top `tick_capture` suspends). Both redirect loops now **break a self-cycle** (redirect resolving to the same closure by identity) and fall through to the normal call path, so it runs as a VM `SelfTail`/`Call` and preempts at the loop top (the closure's own name isn't known at `compute_passthrough` — a `defn` fn is anonymous). Validation: §6 plain-release KI-1 bar 10/10 + 5/5 `BROOD_GC_STRESS`; lib + differential (engines agree) + work-stealing + live-migration + preemption all green via nextest; full suite 553/555, the 2 failures pre-existing environmental (parser deep-nest stack flake — passes with `RUST_MIN_STACK=32M`; `dist` reconnect — fails on HEAD too, so not from this work). Suite runtime back to ~25 s (the +22% capture overhead is moot now that corosensei + its 16 MiB coroutine stacks are gone).
 
 ---
 
@@ -1967,3 +1968,72 @@ clean cases all pass. Resolving it — capture the continuation *through* the na
 frame so the thunk doesn't re-run, or run a stateful-native-wrapped suspending body on
 a coroutine — is the substance of step 3, before the default can flip. Details in
 `concurrency-v2.md` §8.1.
+
+## 2026-06-08 — corosensei removal §8.4 steps 3-flip + 4: corosensei is gone
+
+The end of the §8 migration. The default flipped to state capture and **corosensei was
+deleted** in the same move — once capture mode is proven correctness-equivalent (the
+step-3 entries above), keeping the flag and the coroutine engine around buys nothing.
+
+**What was removed.** The `BROOD_STATE_CAPTURE` flag and `state_capture_enabled()`; the
+`Run::{Coro|Capture}` enum on `Process` (now plain fields); the `corosensei` dependency;
+the coroutine plumbing — `Suspend`, `Yielder0`/`Coro` types, `build_coro`, `resume_coro`,
+`handle_coro_outcome`, the per-suspend `gc_block_save`/`macro_block_save`/`stack_base_save`
+dance; and `unsafe impl Send for Process` (the struct is now genuinely `Send`). `run_one`
+is capture-only: install ctx → drive `vm_run_bc` → save ctx → finish quantum → handle the
+`VmOutcome`. A process body with no compiled 0-arg arm tree-walks **on the worker thread**
+and its `receive`s block (the §7.4 dirty carve-out); everything else captures.
+
+**Stealing generalised.** Fresh-only stealing existed solely because corosensei couldn't
+resume a saved native stack on another thread (KI-1b). With no native stack, **any** queued
+process is migratable, so `try_steal` takes the back-most process (`pop_back`), `STEALABLE`
+counts every queued process (incremented in `enqueue`, decremented in `run_one`), and the
+`fresh` flag is dropped entirely. `CORO_STACK_BYTES` → `WORKER_STACK_BYTES`.
+
+**Doc/comment sweep.** Every `coroutine`/`corosensei`/`yielder`/`fresh-only` reference in
+`scheduler.rs` and the `process.rs` module doc was rewritten to the capture model.
+
+**Regression found and fixed in validation.** `cpu_bound_process_does_not_starve_peers_on_one_worker`
+hung: an infinite self-recursive function `(defn hog () (hog))` was never preempted. Root
+cause: ADR-069's pass-through optimisation classifies `(defn hog () (hog))` as a thin
+wrapper that redirects `hog → hog`, and the redirect loop (in both `compile::dispatch` and
+the tree-walker `eval::eval`) relied on `tick()` → `preempt()` to yield. With corosensei
+gone, `preempt()` only refreshes the reduction budget — only the VM driver's loop-top
+`tick_capture` can actually suspend a process. So the redirect spun forever in a tight Rust
+loop *below* any captureable safepoint, monopolising the worker (with one worker, the
+responder never ran). Fix: both redirect loops detect a **self-cycle** — a redirect whose
+inner head resolves back to the same closure (by closure identity, since a `defn` closure
+is anonymous so its global name isn't known at `compute_passthrough` time) — and break,
+falling through to the normal call path. The call then runs as a VM `SelfTail`/tail `Call`
+whose loop-top reduction check preempts it. The two engines stay in lock-step (the
+`differential` corpus test still passes), so the break is mirrored in both.
+
+**Validation.** §6 plain-release KI-1 bar (debug-assertions release): `concurrency_race`
+10/10 plain + 5/5 `BROOD_GC_STRESS`, plus `work_stealing`. Via nextest: lib (251),
+`differential` (incl. `engines_agree_on_corpus`), `work_stealing`, `live_migration`,
+`preemption` — all green. Full `make test`: 553/555, the two failures pre-existing and
+environmental — the deep-nest parser test (a stack flake; passes with
+`RUST_MIN_STACK=32M`) and the `dist` link-reconnect test (confirmed failing on committed
+HEAD too, i.e. with corosensei, so not from this work). Suite runtime is back to ~25 s now
+that the coroutine engine and its 16 MiB per-process stacks are gone — the +22% capture
+overhead measured under the flag is moot.
+
+**Review pass (same day).** A second read of the diff caught one real bug in the
+generalise-stealing change: `drain_worker_queue` (the dirty-block backlog re-route) now
+drains the *whole* queue and re-enqueues each process, but each was already counted in
+`STEALABLE` at its original `enqueue` — so re-enqueueing double-counted them, inflating
+`STEALABLE` by the drained count every dirty block and slowly defeating `try_steal`'s
+`== 0` fast-path. Fixed with a `STEALABLE.fetch_sub(stranded.len())` before the
+re-enqueue loop (net zero; the count stays equal to the processes actually queued). It's
+a hint, not a correctness gate, so the bug only wasted steal scans — but it's now correct.
+The rest of the pass was comment hygiene: every lingering `coroutine`/`corosensei`/
+`yielder`/`fresh-only`/`BROOD_STATE_CAPTURE` reference across `scheduler.rs`, `mailbox.rs`,
+`compile.rs`, `process.rs`, `cli_support.rs`, `Cargo.toml`, and `live_migration.rs`
+rewritten to the (flagless, coroutine-free) state-capture model. Re-validated: §6 bar
+10/10 + 5/5 GC-stress; the affected nextest suites green; the in-language suite passes in
+~43 s **with commit signing disabled** — the apparent "regression" during review was the
+package-manager test's `git commit` blocking on SSH-signing through a locked 1Password
+agent (a known environmental hang, KI in `next-up-schedulers` memory), not a code fault.
+Benchmarks archived (`docs/benchmarks/2026-06-08T15-28-17Z.md`): VM/tree-walker ratios
+unchanged and strong (fib25 7.7×, sum_tail-100k 9.7×, reduce_range-1M 3.8×); scheduler
+fan-out healthy (`spawn_fanout` 1000 = 4.6 ms).

@@ -70,11 +70,9 @@ tree-sitter-elixir = { version = "0.3", optional = true }
 # bodies lock-free while `def` appends new code (old versions never move/free —
 # in-flight calls keep running them; Erlang-style hot reload). See docs/shared-code.md.
 boxcar = "0.2"
-# Stackful coroutines for the green-process scheduler (step 4b): each process runs
-# in a coroutine that parks at `receive` and resumes on a worker thread, so the
-# native recursive evaluator suspends without a rewrite. It does the stack-switch
-# `unsafe` we'd otherwise hand-roll; swappable later. See docs/scheduler.md (ADR-018).
-corosensei = "0.3"
+# (The green-process scheduler ran on stackful `corosensei` coroutines through
+# 2026-06-08; ADR-100 §8 replaced them with heap-captured continuations — state
+# capture — and the dependency was removed. See docs/concurrency-v2.md §8.)
 # Small inline vectors for the per-call hot path: the argument vector and env-frame
 # bindings are built on every function call and are almost always tiny (≤ a handful),
 # so keeping them inline avoids a heap allocation per call — which also matters extra
