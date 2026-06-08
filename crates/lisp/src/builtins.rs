@@ -1813,6 +1813,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "demonitor-node",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(kw)], nil_ty),
+        demonitor_node,
+    );
+    def(
+        heap,
         "disconnect",
         Arity::exact(1),
         // Same name domain as `monitor-node`: the authoritative `:name@host`
@@ -7647,6 +7654,14 @@ fn monitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "monitor-node", arg(args, 0))?;
     crate::dist::monitor_node(name, crate::process::self_pid());
     Ok(Value::Keyword(name))
+}
+
+/// `(demonitor-node name)` — cancel the calling process's node monitor for `name`.
+/// A no-op if no monitor is registered. Returns `nil`.
+fn demonitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_node_name(heap, "demonitor-node", arg(args, 0))?;
+    crate::dist::demonitor_node(name, crate::process::self_pid());
+    Ok(Value::Nil)
 }
 
 /// `(disconnect name)` — drop the link to peer `name` now (Erlang's

@@ -291,16 +291,13 @@ fn ephemeral_secret() -> io::Result<StaticSecret> {
     Ok(StaticSecret::from(seed))
 }
 
-/// Constant-time comparison for the MAC check. `subtle`/`hmac::Mac::verify`
-/// would also do this, but `verify` consumes the HMAC state by computing the
-/// expected MAC at the same time — we already have the expected MAC, so do
-/// the byte compare ourselves.
+/// Constant-time comparison for the MAC check — prevents a timing oracle from
+/// leaking bits about the shared cookie via the comparison path. Uses
+/// `subtle::ConstantTimeEq` rather than a hand-rolled XOR loop so a future
+/// "simplification" to `a == b` can't silently reintroduce the side-channel.
 fn ct_eq(a: &[u8; MAC_LEN], b: &[u8; MAC_LEN]) -> bool {
-    let mut diff: u8 = 0;
-    for i in 0..MAC_LEN {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 /// 32 fresh bytes from the OS random pool. Each handshake gets its own pair

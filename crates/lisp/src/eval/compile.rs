@@ -1389,6 +1389,28 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
     }
 }
 
+/// Int×Int-only fast path for `prim2_inline_exec`: just the fixnum arithmetic,
+/// no type dispatch, no allocation.  Marked `#[inline(always)]` because it is
+/// tiny (one `match` arm per op) — LLVM constant-folds `op` at each call site
+/// in `prim2_inline_exec` (itself always-inlined), emitting a single checked op
+/// or compare per instruction variant.  Float, BigInt, overflow, Cons, and Div
+/// all return `None`; the caller falls through to `prim_apply`.
+#[inline(always)]
+fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
+    match op {
+        PrimOp::Add  => a.checked_add(b).map(Value::Int),
+        PrimOp::Sub  => a.checked_sub(b).map(Value::Int),
+        PrimOp::Mul  => a.checked_mul(b).map(Value::Int),
+        PrimOp::Lt   => Some(Value::Bool(a < b)),
+        PrimOp::Le   => Some(Value::Bool(a <= b)),
+        PrimOp::Eq   => Some(Value::Bool(a == b)),
+        PrimOp::Rem  => a.checked_rem(b).map(Value::Int),
+        PrimOp::Quot => a.checked_div(b).map(Value::Int),
+        // Cons needs heap alloc; Div may return Float — both handled by prim_apply.
+        PrimOp::Cons | PrimOp::Div => None,
+    }
+}
+
 /// The inline fast path for a [`Node::Prim2`] (perf #1): handle the `(Int, Int)`
 /// case of `op` directly, returning `Ok(Some(v))` when done inline, or `Ok(None)`
 /// to defer to the real `%`-primitive — for any non-`(Int, Int)` operands (float
@@ -1471,6 +1493,88 @@ fn prim_apply_float(op: PrimOp, x: Value, y: Value) -> Option<Value> {
         // the numeric-tower path, and zero-denominator `%div` errors — defer.
         _ => return None,
     })
+}
+
+/// Guard-checked inline path shared by all three `Prim2` bytecode handlers.
+/// Returns `Ok(Some(v))` when the operation completed inline (caller pushes `v`),
+/// `Ok(None)` when the guard is stale or the operand shape needs the native
+/// (overflow, BigInt, float-not-matched), and `Err` on a type/arithmetic error.
+/// Handles `Cons` inline here (it allocates, so it needs `&mut Heap`).
+#[inline(always)]
+fn prim2_inline_exec(
+    heap: &mut Heap,
+    op: PrimOp,
+    map: [u8; 2],
+    head: Symbol,
+    guard: &AtomicU64,
+    x: Value,
+    y: Value,
+) -> Result<Option<Value>, LispError> {
+    let cur = heap.global_epoch();
+    let inlinable = guard.load(Ordering::Relaxed) == cur || {
+        match resolve_prim(heap, head) {
+            Some((op2, m2)) if op2 == op && m2 == [map[0] as usize, map[1] as usize] => {
+                guard.store(cur, Ordering::Relaxed);
+                true
+            }
+            _ => false,
+        }
+    };
+    if !inlinable {
+        return Ok(None);
+    }
+    // Int×Int fast path: `prim2_int_fast` is tiny and #[inline(always)] — LLVM
+    // constant-folds `op` here, emitting one checked op or compare per handler,
+    // with no function call and without bloating exec_chunk via full prim_apply.
+    if let (Value::Int(a), Value::Int(b)) = (x, y) {
+        if let Some(v) = prim2_int_fast(op, a, b) {
+            crate::perf_bump!(prim2_inline);
+            return Ok(Some(v));
+        }
+        // Int overflow, Div, or Cons with Int operands → fall through to prim_apply.
+    }
+    // Float, BigInt, overflow, Cons, Div — the full type-coercing path (not inlined,
+    // so it stays out of exec_chunk's instruction footprint).
+    match prim_apply(op, x, y)? {
+        Some(v) => {
+            crate::perf_bump!(prim2_inline);
+            Ok(Some(v))
+        }
+        None if op == PrimOp::Cons => {
+            crate::perf_bump!(prim2_inline);
+            Ok(Some(heap.alloc_pair(x, y)))
+        }
+        None => Ok(None), // overflow or other deferred edge → fallback
+    }
+}
+
+/// Slow-path dispatch shared by all three `Prim2` bytecode handlers.
+/// Operands are already rooted at `[save]` and `[save+1]`; this function looks
+/// up `head`, dispatches, truncates back to `save`, and returns the result.
+/// Marked `inline(never)` to keep the cold path out of the hot dispatch loop.
+#[inline(never)]
+fn prim2_dispatch_rooted(
+    heap: &mut Heap,
+    head: Symbol,
+    save: usize,
+    pos: Option<Pos>,
+    genv: EnvRoot,
+) -> Result<Value, LispError> {
+    crate::perf_bump!(prim2_fallback);
+    let cur_env = heap.read_root_env(genv);
+    let callee = match heap.env_get(cur_env, head) {
+        Some(c) => c,
+        None => {
+            heap.truncate_roots(save);
+            return Err(tag_pos(crate::eval::unbound_error(heap, head), pos));
+        }
+    };
+    let sa = heap.root_at(save);
+    let sb = heap.root_at(save + 1);
+    let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
+    let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
+    heap.truncate_roots(save);
+    result.map_err(|e| tag_pos(e, pos))
 }
 
 /// Walk a compiled `Node` tree, rewriting every embedded movable handle
@@ -2322,6 +2426,15 @@ enum Inst {
     /// `Node::Prim2`. (No `broot`: both operands are already rooted on the operand
     /// stack, so the stack machine never needs the explicit-root dance.)
     Prim2 { op: PrimOp, map: [u8; 2], head: Symbol, guard: AtomicU64, pos: Option<Pos> },
+    /// Fused Prim2 where both operands are frame locals — reads `slot_a` and `slot_b`
+    /// directly, bypassing 2 intermediate root-stack pushes. The inline fast path
+    /// pushes only the result; the fallback pushes both slots before dispatching.
+    Prim2SlotSlot { op: PrimOp, map: [u8; 2], slot_a: usize, slot_b: usize, head: Symbol, guard: AtomicU64, pos: Option<Pos> },
+    /// Fused Prim2 where operand A is a frame local and B is a literal integer.
+    /// Covers the very common `(+ slot 1)` / `(- slot 1)` / `(< slot k)` shape.
+    /// Uses i64 directly (not ConstVal) so this variant stays under MakeClosure's
+    /// size, avoiding Inst enum bloat that would widen every instruction.
+    Prim2SlotInt { op: PrimOp, map: [u8; 2], slot_a: usize, int_b: i64, head: Symbol, guard: AtomicU64, pos: Option<Pos> },
     /// A combination. The callee then each argument have been pushed (operand layout
     /// `[.., callee, arg0 .. arg_{argc-1}]` — callee resolved *before* the args, the
     /// tree-walker's order). A **non-tail** call to a chunked VM arm becomes a frame
@@ -2432,15 +2545,51 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             });
         }
         Node::Prim2 { op, a, b, map, head, guard, pos, broot: _ } => {
-            emit_node(a, code)?;
-            emit_node(b, code)?;
-            code.push(Inst::Prim2 {
-                op: *op,
-                map: *map,
-                head: *head,
-                guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
-                pos: *pos,
-            });
+            // Snapshot the guard epoch; each push site creates its own AtomicU64
+            // (AtomicU64 is not Copy so we can't reuse a single binding).
+            let gv = guard.load(Ordering::Relaxed);
+            // Fuse when operands are frame locals or integer literals: avoids
+            // the 2 intermediate root-stack pushes the generic path needs.
+            // Only integer constants are fused (keeps Prim2SlotInt below
+            // MakeClosure's size, so the Inst enum doesn't grow).
+            let fused = match (&**a, &**b) {
+                (Node::Local(sa), Node::Local(sb)) => {
+                    code.push(Inst::Prim2SlotSlot {
+                        op: *op, map: *map, slot_a: *sa, slot_b: *sb,
+                        head: *head, guard: AtomicU64::new(gv), pos: *pos,
+                    });
+                    true
+                }
+                (Node::Local(sa), Node::Const(cv)) => {
+                    if let Value::Int(n) = cv.load() {
+                        code.push(Inst::Prim2SlotInt {
+                            op: *op, map: *map, slot_a: *sa, int_b: n,
+                            head: *head, guard: AtomicU64::new(gv), pos: *pos,
+                        });
+                        true
+                    } else { false }
+                }
+                (Node::Const(cv), Node::Local(sb)) => {
+                    if let Value::Int(n) = cv.load() {
+                        // Slot goes to src[0], const to src[1] — invert the map.
+                        let new_map = [1u8 - map[0], 1u8 - map[1]];
+                        code.push(Inst::Prim2SlotInt {
+                            op: *op, map: new_map, slot_a: *sb, int_b: n,
+                            head: *head, guard: AtomicU64::new(gv), pos: *pos,
+                        });
+                        true
+                    } else { false }
+                }
+                _ => false,
+            };
+            if !fused {
+                emit_node(a, code)?;
+                emit_node(b, code)?;
+                code.push(Inst::Prim2 {
+                    op: *op, map: *map, head: *head,
+                    guard: AtomicU64::new(gv), pos: *pos,
+                });
+            }
         }
         Node::Call { callee, args, tail, pos, site } => {
             // Callee first, then each arg (the order `exec_call` evaluates them). When
@@ -2658,59 +2807,51 @@ fn exec_chunk(
                 }
             }
             Inst::Prim2 { op, map, head, guard, pos } => {
-                let pos = *pos;
                 let n = heap.roots_len();
-                let sa = heap.root_at(n - 2); // operand `a` (pushed first)
-                let sb = heap.root_at(n - 1); // operand `b` (pushed second)
-                let src = [sa, sb];
-                let x = src[map[0] as usize];
-                let y = src[map[1] as usize];
-                let cur = heap.global_epoch();
-                let inlinable = if guard.load(Ordering::Relaxed) == cur {
-                    true
-                } else {
-                    match resolve_prim(heap, *head) {
-                        Some((op2, m2)) if op2 == *op && m2 == [map[0] as usize, map[1] as usize] => {
-                            guard.store(cur, Ordering::Relaxed);
-                            true
-                        }
-                        _ => false,
-                    }
-                };
-                if inlinable {
-                    match prim_apply(*op, x, y) {
-                        Ok(Some(v)) => {
-                            crate::perf_bump!(prim2_inline);
-                            heap.truncate_roots(n - 2);
-                            heap.push_root(v);
-                            continue;
-                        }
-                        Ok(None) if *op == PrimOp::Cons => {
-                            crate::perf_bump!(prim2_inline);
-                            let v = heap.alloc_pair(x, y);
-                            heap.truncate_roots(n - 2);
-                            heap.push_root(v);
-                            continue;
-                        }
-                        Ok(None) => {} // non-inline operand shape → defer to the real primitive
-                        Err(e) => return Err(tag_pos(e, pos)),
-                    }
-                }
-                crate::perf_bump!(prim2_fallback);
-                let cur_env = heap.read_root_env(genv);
-                let callee = match heap.env_get(cur_env, *head) {
-                    Some(c) => c,
-                    None => return Err(tag_pos(crate::eval::unbound_error(heap, *head), pos)),
-                };
                 let sa = heap.root_at(n - 2);
                 let sb = heap.root_at(n - 1);
-                let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
-                let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
-                heap.truncate_roots(n - 2);
-                match result {
-                    Ok(v) => heap.push_root(v),
-                    Err(e) => return Err(tag_pos(e, pos)),
+                let x = [sa, sb][map[0] as usize];
+                let y = [sa, sb][map[1] as usize];
+                match prim2_inline_exec(heap, *op, *map, *head, guard, x, y)? {
+                    Some(v) => { heap.truncate_roots(n - 2); heap.push_root(v); }
+                    None => {
+                        // Operands already rooted at n-2 and n-1.
+                        let v = prim2_dispatch_rooted(heap, *head, n - 2, *pos, genv)?;
+                        heap.push_root(v);
+                    }
                 }
+            }
+            Inst::Prim2SlotSlot { op, map, slot_a, slot_b, head, guard, pos } => {
+                let sa = heap.root_at(base + slot_a);
+                let sb = heap.root_at(base + slot_b);
+                let x = [sa, sb][map[0] as usize];
+                let y = [sa, sb][map[1] as usize];
+                let v = match prim2_inline_exec(heap, *op, *map, *head, guard, x, y)? {
+                    Some(v) => v,
+                    None => {
+                        let save = heap.roots_len();
+                        heap.push_root(sa);
+                        heap.push_root(sb);
+                        prim2_dispatch_rooted(heap, *head, save, *pos, genv)?
+                    }
+                };
+                heap.push_root(v);
+            }
+            Inst::Prim2SlotInt { op, map, slot_a, int_b, head, guard, pos } => {
+                let sa = heap.root_at(base + slot_a);
+                let sb = Value::Int(*int_b);
+                let x = [sa, sb][map[0] as usize];
+                let y = [sa, sb][map[1] as usize];
+                let v = match prim2_inline_exec(heap, *op, *map, *head, guard, x, y)? {
+                    Some(v) => v,
+                    None => {
+                        let save = heap.roots_len();
+                        heap.push_root(sa);
+                        heap.push_root(sb);
+                        prim2_dispatch_rooted(heap, *head, save, *pos, genv)?
+                    }
+                };
+                heap.push_root(v);
             }
             Inst::Call { argc, tail, pos, site, head } => {
                 let pos = *pos;

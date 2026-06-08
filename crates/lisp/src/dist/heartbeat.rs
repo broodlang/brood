@@ -18,9 +18,9 @@ use std::time::Duration;
 use super::wire::{encode_payload, Frame};
 use super::{now_millis, NODES};
 
-/// How often the (single, shared) heartbeat thread probes each link with a `Ping`
-/// and checks liveness. Idle-gated: a `Ping` is a 5-byte frame, only sent on the
-/// tick, never per message.
+/// How often the (single, shared) heartbeat thread wakes up to inspect each link.
+/// A `Ping` is only sent to a link that has been idle for at least this long —
+/// an active link that is already exchanging frames never receives a gratuitous probe.
 pub(super) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// A link with no inbound frame (data, `Ping`, or `Pong`) for this long is
@@ -45,11 +45,18 @@ pub(super) fn ensure_heartbeat() {
     });
 }
 
-/// Probe every link each interval: if it's been silent past [`DOWN_AFTER`],
-/// declare it down (shutdown → the reader runs `drop_link` → `[:nodedown]`);
-/// otherwise send a `Ping` (the peer answers `Pong`, refreshing its
-/// `last_seen`). One thread for all links; a `Ping` is sent only on the tick,
-/// never per message.
+/// On each tick, inspect every link. Three tiers by silence duration:
+///
+/// * `elapsed > DOWN_AFTER` — link is dead; `shutdown` it (reader calls `drop_link`
+///   → `[:nodedown]`).
+/// * `HEARTBEAT_INTERVAL < elapsed ≤ DOWN_AFTER` — link has been idle for at least
+///   one interval; send a `Ping` so the peer's `Pong` refreshes `last_seen`.
+/// * `elapsed ≤ HEARTBEAT_INTERVAL` — received a frame within the last interval;
+///   the link is clearly active, skip the probe.
+///
+/// The idle gate is the key safety property: a high-traffic link whose bounded
+/// writer queue is momentarily full would otherwise hit `try_send` failure on a
+/// gratuitous `Ping` and be torn down, mistaking backpressure for a dead peer.
 fn heartbeat_loop() {
     // One shared Ping payload for every link, every tick: each send is an
     // `Arc::clone` (atomic incr), not a `Vec` copy. The payload is plaintext; each
@@ -65,7 +72,8 @@ fn heartbeat_loop() {
             return;
         }
     };
-    let down_after = DOWN_AFTER.as_millis() as u64;
+    let down_after_ms = DOWN_AFTER.as_millis() as u64;
+    let idle_after_ms = HEARTBEAT_INTERVAL.as_millis() as u64;
     loop {
         std::thread::sleep(HEARTBEAT_INTERVAL);
         let now = now_millis();
@@ -86,14 +94,19 @@ fn heartbeat_loop() {
                 .collect()
         };
         for (sock, tx, last) in links {
-            if now.saturating_sub(last) > down_after {
-                let _ = sock.shutdown(Shutdown::Both); // dead peer → tear down via the reader
-            } else if tx.try_send(Arc::clone(&ping)).is_err() {
-                // Bounded queue Full/disconnected: the writer is stalled or gone —
-                // sever via the socket (the reader's `drop_link` deregisters)
-                // rather than buffer the ping.
+            let elapsed = now.saturating_sub(last);
+            if elapsed > down_after_ms {
+                // Silent too long → declare dead; reader unblocks and calls drop_link.
                 let _ = sock.shutdown(Shutdown::Both);
+            } else if elapsed > idle_after_ms {
+                // Idle for at least one interval → probe. If the bounded queue is full
+                // or the writer has gone, the link is unhealthy; tear it down rather
+                // than silently drop the probe.
+                if tx.try_send(Arc::clone(&ping)).is_err() {
+                    let _ = sock.shutdown(Shutdown::Both);
+                }
             }
+            // else: received a frame within the last interval — active link, skip probe.
         }
     }
 }
