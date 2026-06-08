@@ -1,0 +1,127 @@
+;; std/queue.blsp — purely functional FIFO queue and min-priority-queue.
+;; (require 'queue)
+;;
+;; FIFO queue: amortised O(1) push/pop using two lists (front + reversed back).
+;; Priority queue: O(n) insert / O(1) pop using a sorted list of [priority value]
+;; pairs. Simple enough for typical use; swap to a heap if n gets large.
+
+(defmodule queue
+  "Purely functional FIFO queue and min-priority queue.
+
+    (require 'queue)
+
+    ;; FIFO queue
+    (let (q (-> (queue/queue-new)
+                (queue/queue-push 1)
+                (queue/queue-push 2)
+                (queue/queue-push 3)))
+      (queue/queue-pop q))        ;; => [1 {:front (2 3) ...}]
+
+    ;; Priority queue (min first)
+    (let (pq (-> (queue/pq-new)
+                 (queue/pq-insert 3 :low)
+                 (queue/pq-insert 1 :high)
+                 (queue/pq-insert 2 :med)))
+      (queue/pq-pop pq))          ;; => [:high {...}]")
+
+;; ============================================================================
+;; FIFO queue — {front: list, back: reversed list, size: int}
+;; Invariant: if front is nil, back is also nil (rebalance on push to empty).
+;; ============================================================================
+
+(defn queue-new ()
+  "An empty FIFO queue."
+  {:front nil :back nil :size 0})
+
+(defn queue-empty? (q)
+  "True if the queue has no elements."
+  (= (get q :size) 0))
+
+(defn queue-size (q)
+  "Number of elements in the queue."
+  (get q :size))
+
+(defn queue--balance (front back size)
+  "Rebalance: if front is nil, reverse back to front."
+  (if (nil? front)
+    {:front (reverse back) :back nil :size size}
+    {:front front :back back :size size}))
+
+(defn queue-push (q v)
+  "Return a queue with `v` added at the back."
+  (queue--balance (get q :front) (cons v (get q :back)) (+ (get q :size) 1)))
+
+(defn queue-pop (q)
+  "Return `[front-value new-queue]`, or `:empty` if the queue is empty."
+  (if (queue-empty? q)
+    :empty
+    (let (front (get q :front))
+      [(first front)
+       (queue--balance (rest front) (get q :back) (- (get q :size) 1))])))
+
+(defn queue-peek (q)
+  "Return the front value without removing it, or `:empty` if empty."
+  (if (queue-empty? q)
+    :empty
+    (first (get q :front))))
+
+(defn queue-to-list (q)
+  "All elements in FIFO order as a list."
+  (if (queue-empty? q)
+    nil
+    (append (get q :front) (reverse (get q :back)))))
+
+(defn queue-from-list (xs)
+  "Build a queue from a list or vector, front → back."
+  (fold queue-push (queue-new) xs))
+
+;; ============================================================================
+;; Min-priority queue — sorted list of [priority value] pairs, min priority first.
+;; ============================================================================
+
+(defn pq-new ()
+  "An empty min-priority queue."
+  nil)
+
+(defn pq-empty? (pq)
+  "True if the priority queue has no elements."
+  (nil? pq))
+
+(defn pq-size (pq)
+  "Number of elements in the priority queue."
+  (count pq))
+
+(defn pq-insert (pq priority value)
+  "Return a priority queue with `[priority value]` inserted (min priority at front)."
+  (pq--sorted-insert pq priority value))
+
+(defn pq--sorted-insert (pq pri val)
+  (cond
+    (nil? pq)
+    (list [pri val])
+    (<= pri (first (first pq)))
+    (cons [pri val] pq)
+    else
+    (cons (first pq) (pq--sorted-insert (rest pq) pri val))))
+
+(defn pq-pop (pq)
+  "Return `[min-value new-pq]`, or `:empty` if the queue is empty."
+  (if (nil? pq)
+    :empty
+    [(second (first pq)) (rest pq)]))
+
+(defn pq-peek (pq)
+  "Return the minimum-priority value without removing it, or `:empty` if empty."
+  (if (nil? pq)
+    :empty
+    (second (first pq))))
+
+(defn pq-peek-priority (pq)
+  "Return the minimum priority (the key), or `:empty` if empty."
+  (if (nil? pq)
+    :empty
+    (first (first pq))))
+
+(defn pq-to-list (pq)
+  "All values in priority order (min first) as a list."
+  (map second pq))

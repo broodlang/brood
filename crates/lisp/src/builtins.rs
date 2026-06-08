@@ -1328,6 +1328,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], string),
         sha256_hex,
     );
+    // SHA-256 of a byte vector (HMAC construction and other binary hashing).
+    // Counterpart to %sha256 which takes a string; this takes a vector of ints.
+    def(
+        heap,
+        "%sha256-bytes",
+        Arity::exact(1),
+        Sig::new(vec![any], string),
+        sha256_hex_bytes,
+    );
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
     // layout / lock file / conflict policy are all Brood (std/package.blsp).
@@ -1912,6 +1921,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it)."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
     ("%sha256", &["s"], "Lowercase hex SHA-256 of string s's bytes. The package manager's one hashing primitive (ADR-037); file/tree hashing is Brood over it."),
+    ("%sha256-bytes", &["bytes"], "Lowercase hex SHA-256 of a vector (or list) of byte integers 0–255. Use this for hashing arbitrary binary data; %sha256 hashes UTF-8 string bytes."),
     ("%git-resolve-ref", &["url", "ref"], "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037)."),
     ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),
     ("%rm-rf", &["path"], "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037)."),
@@ -3810,6 +3820,35 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // Descriptive statistics over numeric sequences: mean, median, stddev,
     // variance, percentile, mode, frequencies. Pure Brood over sort/fold/sqrt.
     ("stats", include_str!("../../../std/stats.blsp")),
+    // Pull-stream protocol + combinators over green processes. Sources: list,
+    // fn-generator, range, TCP socket. Transformers: map/filter/take/drop/
+    // take-while/chunk/concat/lines. Terminals: fold/to-list/to-vector/
+    // for-each/pipe/to-socket. Foundation for the HTTP streaming layer.
+    ("stream", include_str!("../../../std/stream.blsp")),
+    // URL encoding/decoding and parsing: percent-encode/decode, query-string
+    // encode/decode, parse-url, build-url. Pure Brood over string primitives.
+    ("url", include_str!("../../../std/url.blsp")),
+    // CSV parsing and emitting: csv-parse, csv-parse-maps, csv-emit,
+    // csv-emit-maps. Handles quoted fields, escaped quotes, \r\n endings.
+    ("csv", include_str!("../../../std/csv.blsp")),
+    // RFC 4122 version-4 UUID generation via the OS CSPRNG (random-token).
+    // uuid-v4, uuid-nil, uuid?.
+    ("uuid", include_str!("../../../std/uuid.blsp")),
+    // {{var}} string templating: render a template string against a data map.
+    // render, render-all.
+    ("template", include_str!("../../../std/template.blsp")),
+    // Purely functional FIFO queue (two-list, amortised O(1)) and min-priority
+    // queue (sorted-list, O(n) insert / O(1) pop).
+    ("queue", include_str!("../../../std/queue.blsp")),
+    // Multi-valued map: one key may hold multiple values (a map of lists).
+    // multimap-assoc, multimap-get, multimap-get-all, multimap-dissoc, …
+    ("multimap", include_str!("../../../std/multimap.blsp")),
+    // SHA-256 and HMAC-SHA256. sha256 is a clean alias for %sha256;
+    // hmac-sha256 is pure Brood over %sha256 per RFC 2104; hash-string is djb2.
+    ("hash", include_str!("../../../std/hash.blsp")),
+    // LCS-based sequence diff: diff-seq, diff-lines, diff-summary, diff-patch,
+    // diff-unified. O(m*n) time/space; suitable for small-to-medium sequences.
+    ("diff", include_str!("../../../std/diff.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("editor/buffer", include_str!("../../../std/editor/buffer.blsp")),
@@ -6036,6 +6075,50 @@ fn sha256_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use sha2::{Digest, Sha256};
     let s = expect_string(heap, "%sha256", arg(args, 0))?;
     let digest = Sha256::digest(s.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    Ok(heap.alloc_string(&hex))
+}
+
+/// `(%sha256-bytes bytes)` — hex SHA-256 of a vector or list of byte integers.
+fn sha256_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha256};
+    let bv = arg(args, 0);
+    let bytes: Vec<u8> = match bv {
+        Value::Vector(id) => {
+            let vec = heap.vector(id).to_vec();
+            vec.iter()
+                .map(|v| match v {
+                    Value::Int(n) if *n >= 0 && *n <= 255 => Ok(*n as u8),
+                    other => Err(LispError::wrong_type(heap, "%sha256-bytes", "byte int (0-255)", *other)),
+                })
+                .collect::<Result<_, _>>()?
+        }
+        Value::Pair(_) | Value::Nil => {
+            let mut out = Vec::new();
+            let mut cur = bv;
+            loop {
+                match cur {
+                    Value::Nil => break,
+                    Value::Pair(id) => {
+                        let (h, t) = heap.pair(id);
+                        match h {
+                            Value::Int(n) if n >= 0 && n <= 255 => out.push(n as u8),
+                            other => return Err(LispError::wrong_type(heap, "%sha256-bytes", "byte int (0-255)", other)),
+                        }
+                        cur = t;
+                    }
+                    other => return Err(LispError::wrong_type(heap, "%sha256-bytes", "proper list", other)),
+                }
+            }
+            out
+        }
+        other => return Err(LispError::wrong_type(heap, "%sha256-bytes", "vector or list", other)),
+    };
+    let digest = Sha256::digest(&bytes);
     let mut hex = String::with_capacity(64);
     for b in digest {
         use std::fmt::Write;

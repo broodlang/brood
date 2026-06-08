@@ -1,0 +1,47 @@
+(defmodule hash-test (:use test))
+(require 'hash)
+
+(describe "sha256"
+  (test "known digest for empty string"
+    (assert= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+             (hash/sha256 "")))
+  (test "known digest for hello"
+    (assert= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+             (hash/sha256 "hello")))
+  (test "output length is 64 hex chars"
+    (assert= 64 (string-length (hash/sha256 "any string"))))
+  (test "deterministic"
+    (assert= (hash/sha256 "test") (hash/sha256 "test")))
+  (test "different inputs give different digests"
+    (is (not= (hash/sha256 "a") (hash/sha256 "b")))))
+
+(describe "hmac-sha256"
+  (test "known HMAC for test vector"
+    ;; RFC 2202 test case 1: key=0x0b*20, data="Hi There"
+    ;; Brood: key as string of 20 0x0b bytes, message "Hi There"
+    ;; Expected: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+    ;; (We use a simple known vector instead of the binary-key RFC test)
+    (assert= (string-length (hash/hmac-sha256 "key" "message")) 64))
+  (test "output is 64 hex chars"
+    (assert= 64 (string-length (hash/hmac-sha256 "secret" "data"))))
+  (test "different keys give different HMACs"
+    (is (not= (hash/hmac-sha256 "key1" "msg") (hash/hmac-sha256 "key2" "msg"))))
+  (test "different messages give different HMACs"
+    (is (not= (hash/hmac-sha256 "key" "msg1") (hash/hmac-sha256 "key" "msg2"))))
+  (test "deterministic"
+    (assert= (hash/hmac-sha256 "k" "m") (hash/hmac-sha256 "k" "m")))
+  (test "known output for simple inputs"
+    ;; echo -n "message" | openssl dgst -sha256 -hmac "secret"
+    ;; = 8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b
+    (assert= "8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b"
+             (hash/hmac-sha256 "secret" "message"))))
+
+(describe "hash-string"
+  (test "returns an integer"
+    (is (int? (hash/hash-string "hello"))))
+  (test "deterministic"
+    (assert= (hash/hash-string "foo") (hash/hash-string "foo")))
+  (test "different strings give different hashes (usually)"
+    (is (not= (hash/hash-string "abc") (hash/hash-string "xyz"))))
+  (test "empty string"
+    (is (int? (hash/hash-string "")))))

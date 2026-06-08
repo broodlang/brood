@@ -1,0 +1,94 @@
+;; std/multimap.blsp — multi-valued maps. (require 'multimap)
+;;
+;; A multimap is a map from keys to lists of values. Implemented as a plain
+;; Brood map where each value is a list. Values are prepended on insert, so
+;; `multimap-get` returns them in reverse insertion order; use `multimap-get-all`
+;; to get insertion order (at the cost of a reverse).
+
+(defmodule multimap
+  "Multi-valued map: one key may have multiple associated values.
+
+    (require 'multimap)
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :color \"red\")
+                 (multimap/multimap-assoc :color \"blue\")
+                 (multimap/multimap-assoc :size  \"large\")))
+      (multimap/multimap-get-all mm :color))   ;; => (\"red\" \"blue\")
+      (multimap/multimap-size mm)               ;; => 3")
+
+(defn multimap-new ()
+  "An empty multimap."
+  {})
+
+(defn multimap-empty? (mm)
+  "True if the multimap has no entries."
+  (= (count mm) 0))
+
+(defn multimap-assoc (mm k v)
+  "Return a multimap with value `v` added under key `k`."
+  (assoc mm k (cons v (get mm k nil))))
+
+(defn multimap-assoc-all (mm k vs)
+  "Return a multimap with all values in list `vs` added under key `k`."
+  (fold (fn (m v) (multimap-assoc m k v)) mm vs))
+
+(defn multimap-get (mm k)
+  "All values for key `k` in reverse insertion order, or nil if absent."
+  (get mm k nil))
+
+(defn multimap-get-all (mm k)
+  "All values for key `k` in insertion order (oldest first), or nil if absent."
+  (reverse (get mm k nil)))
+
+(defn multimap-contains? (mm k)
+  "True if `k` has at least one value in the multimap."
+  (not (nil? (get mm k nil))))
+
+(defn multimap-dissoc (mm k)
+  "Return a multimap with all values for key `k` removed."
+  (dissoc mm k))
+
+(defn multimap-remove-value (mm k v)
+  "Return a multimap with the first occurrence of `v` removed from key `k`.
+If no values remain under `k`, the key is dropped."
+  (let (vs (get mm k nil))
+    (if (nil? vs)
+      mm
+      (let (new-vs (multimap--remove-first vs v))
+        (if (nil? new-vs)
+          (dissoc mm k)
+          (assoc mm k new-vs))))))
+
+(defn multimap--remove-first (lst v)
+  (cond
+    (nil? lst) nil
+    (= (first lst) v) (rest lst)
+    else (cons (first lst) (multimap--remove-first (rest lst) v))))
+
+(defn multimap-keys (mm)
+  "All keys in the multimap (insertion order)."
+  (keys mm))
+
+(defn multimap-values (mm)
+  "All values across all keys as a flat list (insertion order within each key)."
+  (fold (fn (acc vs) (append acc (reverse vs))) [] (vals mm)))
+
+(defn multimap-size (mm)
+  "Total number of key-value pairs across all keys."
+  (fold (fn (n vs) (+ n (count vs))) 0 (vals mm)))
+
+(defn multimap-map-vals (mm f)
+  "Return a multimap where each value list has been transformed by `(f key values-list)`."
+  (fold (fn (m pair)
+          (let (k (first pair)
+                vs (second pair))
+            (assoc m k (f k vs))))
+        {}
+        (entries mm)))
+
+(defn multimap->map (mm)
+  "Flatten the multimap to a plain map from key → list-of-values (insertion order)."
+  (fold (fn (m pair)
+          (assoc m (first pair) (reverse (second pair))))
+        {}
+        (entries mm)))

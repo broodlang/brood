@@ -1,0 +1,148 @@
+;; Tests for std/url.blsp — URL encoding/decoding and parsing.
+
+(defmodule url-test (:use test))
+(require 'url)
+
+;; ---- percent-encode ---------------------------------------------------------
+
+(describe "percent-encode"
+  (test "empty string"
+    (assert= "" (url/percent-encode "")))
+  (test "unreserved chars pass through"
+    (assert= "abcABC012" (url/percent-encode "abcABC012"))
+    (assert= "-_.~"      (url/percent-encode "-_.~")))
+  (test "space is encoded"
+    (assert= "hello%20world" (url/percent-encode "hello world")))
+  (test "slash is encoded"
+    (assert= "a%2Fb" (url/percent-encode "a/b")))
+  (test "plus is encoded"
+    (assert= "a%2Bb" (url/percent-encode "a+b")))
+  (test "question mark is encoded"
+    (assert= "a%3Fb" (url/percent-encode "a?b")))
+  (test "special chars are uppercased hex"
+    (assert= "%21%40%23" (url/percent-encode "!@#")))
+  (test "multi-byte UTF-8 encodes all bytes"
+    ;; é is U+00E9 → UTF-8 bytes C3 A9
+    (assert= "%C3%A9" (url/percent-encode "é"))))
+
+;; ---- percent-decode ---------------------------------------------------------
+
+(describe "percent-decode"
+  (test "empty string"
+    (assert= "" (url/percent-decode "")))
+  (test "no sequences pass through"
+    (assert= "hello" (url/percent-decode "hello")))
+  (test "decode %20 as space"
+    (assert= "hello world" (url/percent-decode "hello%20world")))
+  (test "decode uppercase hex"
+    (assert= "hello world" (url/percent-decode "hello%20world")))
+  (test "decode lowercase hex"
+    (assert= "hello world" (url/percent-decode "hello%20world")))
+  (test "decode %2F as slash"
+    (assert= "a/b" (url/percent-decode "a%2Fb")))
+  (test "roundtrip"
+    (let (s "hello world! /path?q=1&r=2")
+      (assert= s (url/percent-decode (url/percent-encode s)))))
+  (test "roundtrip with multi-byte UTF-8"
+    (let (s "café résumé")
+      (assert= s (url/percent-decode (url/percent-encode s))))))
+
+;; ---- query-encode -----------------------------------------------------------
+
+(describe "query-encode"
+  (test "empty map"
+    (assert= "" (url/query-encode {})))
+  (test "single param"
+    (assert= "q=hello" (url/query-encode {"q" "hello"})))
+  (test "space encodes as +"
+    (assert= "q=hello+world" (url/query-encode {"q" "hello world"})))
+  (test "keyword keys"
+    (assert= "q=hello" (url/query-encode {:q "hello"})))
+  (test "special chars in values"
+    (assert= "q=a%2Fb" (url/query-encode {"q" "a/b"})))
+  (test "multiple params sorted by key"
+    (let (result (url/query-encode {"b" "2" "a" "1"}))
+      (assert= "a=1&b=2" result)))
+  (test "roundtrip via query-decode"
+    (let (params {"name" "Alice Smith" "city" "New York"})
+      (assert= params (url/query-decode (url/query-encode params))))))
+
+;; ---- query-decode -----------------------------------------------------------
+
+(describe "query-decode"
+  (test "empty string"
+    (assert= {} (url/query-decode "")))
+  (test "single param"
+    (assert= {"q" "hello"} (url/query-decode "q=hello")))
+  (test "plus decoded as space"
+    (assert= {"q" "hello world"} (url/query-decode "q=hello+world")))
+  (test "percent-encoded value"
+    (assert= {"q" "a/b"} (url/query-decode "q=a%2Fb")))
+  (test "multiple params"
+    (assert= {"a" "1" "b" "2"} (url/query-decode "a=1&b=2")))
+  (test "bare key gets empty value"
+    (assert= {"flag" ""} (url/query-decode "flag"))))
+
+;; ---- parse-url --------------------------------------------------------------
+
+(describe "parse-url"
+  (test "full URL with port, query, fragment"
+    (let (u (url/parse-url "https://example.com:8080/path?q=1#frag"))
+      (assert= "https"       (get u :scheme))
+      (assert= "example.com" (get u :host))
+      (assert= 8080          (get u :port))
+      (assert= "/path"       (get u :path))
+      (assert= "q=1"         (get u :query))
+      (assert= "frag"        (get u :fragment))))
+  (test "URL without port"
+    (let (u (url/parse-url "http://example.com/hello"))
+      (assert= "http"        (get u :scheme))
+      (assert= "example.com" (get u :host))
+      (assert= nil           (get u :port))
+      (assert= "/hello"      (get u :path))
+      (assert= nil           (get u :query))
+      (assert= nil           (get u :fragment))))
+  (test "URL without path"
+    (let (u (url/parse-url "https://example.com"))
+      (assert= "https"       (get u :scheme))
+      (assert= "example.com" (get u :host))
+      (assert= "/"           (get u :path))))
+  (test "URL with query but no fragment"
+    (let (u (url/parse-url "https://x.com/search?q=hello+world"))
+      (assert= "/search"     (get u :path))
+      (assert= "q=hello+world" (get u :query))
+      (assert= nil           (get u :fragment))))
+  (test "relative path (no scheme)"
+    (let (u (url/parse-url "/foo/bar"))
+      (assert= nil    (get u :scheme))
+      (assert= nil    (get u :host))
+      (assert= "/foo/bar" (get u :path)))))
+
+;; ---- build-url --------------------------------------------------------------
+
+(describe "build-url"
+  (test "full URL from parts"
+    (assert= "https://example.com:8080/path"
+      (url/build-url {:scheme "https" :host "example.com" :port 8080 :path "/path"})))
+  (test "no port"
+    (assert= "https://example.com/path"
+      (url/build-url {:scheme "https" :host "example.com" :path "/path"})))
+  (test "with raw query"
+    (assert= "https://x.com/s?q=1"
+      (url/build-url {:scheme "https" :host "x.com" :path "/s" :query "q=1"})))
+  (test "with query-params map"
+    (assert= "https://x.com/s?q=hello+world"
+      (url/build-url {:scheme "https" :host "x.com" :path "/s"
+                      :query-params {"q" "hello world"}})))
+  (test "with fragment"
+    (assert= "https://x.com/page#top"
+      (url/build-url {:scheme "https" :host "x.com" :path "/page" :fragment "top"})))
+  (test "parse-build roundtrip"
+    (let (original "https://example.com:8080/path?q=1")
+      (let (parsed (url/parse-url original))
+        (assert= original
+          (url/build-url {:scheme (get parsed :scheme)
+                          :host   (get parsed :host)
+                          :port   (get parsed :port)
+                          :path   (get parsed :path)
+                          :query  (get parsed :query)}))))))

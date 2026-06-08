@@ -1,0 +1,247 @@
+;; Tests for std/stream.blsp — pull-stream protocol and combinators.
+
+(defmodule stream-test (:use test))
+(require 'stream)
+
+;; ---- sources ----------------------------------------------------------------
+
+(describe "stream-empty"
+  (test "immediately done"
+    (assert= :done (stream/stream-next (stream/stream-empty)))))
+
+(describe "stream-singleton"
+  (test "yields one value then done"
+    (let (s (stream/stream-singleton 42))
+      (assert= [:ok 42] (stream/stream-next s))
+      (assert= :done     (stream/stream-next s)))))
+
+(describe "stream-from-list"
+  (test "empty list"
+    (assert= :done (stream/stream-next (stream/stream-from-list []))))
+  (test "single element"
+    (let (s (stream/stream-from-list [7]))
+      (assert= [:ok 7] (stream/stream-next s))
+      (assert= :done    (stream/stream-next s))))
+  (test "multiple elements in order"
+    (let (s (stream/stream-from-list [1 2 3]))
+      (assert= [:ok 1] (stream/stream-next s))
+      (assert= [:ok 2] (stream/stream-next s))
+      (assert= [:ok 3] (stream/stream-next s))
+      (assert= :done    (stream/stream-next s))))
+  (test "works with a list"
+    (assert= [1 2 3]
+             (stream/stream-to-vector (stream/stream-from-list '(1 2 3))))))
+
+(describe "stream-from-fn"
+  (test "generator terminates"
+    (let (s (stream/stream-from-fn
+              (fn (n) (if (> n 3) :done [:yield n (+ n 1)]))
+              1))
+      (assert= [1 2 3] (stream/stream-to-vector s))))
+  (test "empty generator"
+    (let (s (stream/stream-from-fn (fn (_) :done) nil))
+      (assert= :done (stream/stream-next s)))))
+
+(describe "stream-range"
+  (test "basic range"
+    (assert= [0 1 2 3 4] (stream/stream-to-vector (stream/stream-range 0 5))))
+  (test "range from non-zero start"
+    (assert= [3 4 5] (stream/stream-to-vector (stream/stream-range 3 6))))
+  (test "empty range"
+    (assert= :done (stream/stream-next (stream/stream-range 5 5))))
+  (test "reversed range is empty"
+    (assert= :done (stream/stream-next (stream/stream-range 5 3)))))
+
+;; ---- terminals --------------------------------------------------------------
+
+(describe "stream-to-list"
+  (test "collects in order"
+    (let (result (stream/stream-to-list (stream/stream-from-list [1 2 3])))
+      (assert= (count result) 3)
+      (assert= (nth result 0) 1)
+      (assert= (nth result 1) 2)
+      (assert= (nth result 2) 3)))
+  (test "empty stream returns nil (empty list)"
+    (is (nil? (stream/stream-to-list (stream/stream-empty))))))
+
+(describe "stream-to-vector"
+  (test "returns a vector"
+    (let (v (stream/stream-to-vector (stream/stream-from-list [10 20])))
+      (is (vector? v))
+      (assert= [10 20] v))))
+
+(describe "stream-fold"
+  (test "sum"
+    (assert= 15 (stream/stream-fold + 0 (stream/stream-range 1 6))))
+  (test "empty stream returns init"
+    (assert= 99 (stream/stream-fold + 99 (stream/stream-empty)))))
+
+(describe "stream-for-each"
+  (test "side effects in order"
+    (let (me (self))
+      (stream/stream-for-each (fn (x) (send me x)) (stream/stream-from-list [1 2 3]))
+      (assert= 1 (receive))
+      (assert= 2 (receive))
+      (assert= 3 (receive)))))
+
+(describe "stream-count"
+  (test "counts elements"
+    (assert= 5 (stream/stream-count (stream/stream-range 0 5))))
+  (test "empty"
+    (assert= 0 (stream/stream-count (stream/stream-empty)))))
+
+;; ---- transformers -----------------------------------------------------------
+
+(describe "stream-map"
+  (test "maps a function"
+    (assert= [2 4 6]
+             (stream/stream-to-vector
+               (stream/stream-map (fn (x) (* x 2)) (stream/stream-from-list [1 2 3])))))
+  (test "empty input"
+    (assert= []
+             (stream/stream-to-vector
+               (stream/stream-map inc (stream/stream-empty)))))
+  (test "chained maps"
+    (assert= [3 5 7]
+             (stream/stream-to-vector
+               (stream/stream-map inc
+                 (stream/stream-map (fn (x) (* x 2))
+                   (stream/stream-from-list [1 2 3])))))))
+
+(describe "stream-filter"
+  (test "keeps matching elements"
+    (assert= [2 4 6]
+             (stream/stream-to-vector
+               (stream/stream-filter even? (stream/stream-range 1 7)))))
+  (test "nothing matches"
+    (assert= []
+             (stream/stream-to-vector
+               (stream/stream-filter (fn (_) false) (stream/stream-range 0 5)))))
+  (test "everything matches"
+    (assert= [1 2 3]
+             (stream/stream-to-vector
+               (stream/stream-filter (fn (_) true) (stream/stream-from-list [1 2 3]))))))
+
+(describe "stream-take"
+  (test "takes first n"
+    (assert= [0 1 2]
+             (stream/stream-to-vector (stream/stream-take 3 (stream/stream-range 0 100)))))
+  (test "take more than available"
+    (assert= [1 2 3]
+             (stream/stream-to-vector (stream/stream-take 10 (stream/stream-from-list [1 2 3])))))
+  (test "take 0"
+    (assert= []
+             (stream/stream-to-vector (stream/stream-take 0 (stream/stream-range 0 100))))))
+
+(describe "stream-take-while"
+  (test "stops at first non-matching"
+    (assert= [0 1 2 3 4]
+             (stream/stream-to-vector
+               (stream/stream-take-while (fn (n) (< n 5)) (stream/stream-range 0 20)))))
+  (test "empty result when predicate fails immediately"
+    (assert= []
+             (stream/stream-to-vector
+               (stream/stream-take-while (fn (_) false) (stream/stream-from-list [1 2 3]))))))
+
+(describe "stream-drop"
+  (test "drops first n"
+    (assert= [3 4 5]
+             (stream/stream-to-vector (stream/stream-drop 3 (stream/stream-range 0 6)))))
+  (test "drop more than available"
+    (assert= []
+             (stream/stream-to-vector (stream/stream-drop 10 (stream/stream-from-list [1 2])))))
+  (test "drop 0"
+    (assert= [1 2 3]
+             (stream/stream-to-vector (stream/stream-drop 0 (stream/stream-from-list [1 2 3]))))))
+
+(describe "stream-chunk"
+  (test "even split"
+    (assert= [[1 2] [3 4] [5 6]]
+             (stream/stream-to-vector (stream/stream-chunk 2 (stream/stream-range 1 7)))))
+  (test "last chunk is shorter"
+    (assert= [[1 2] [3 4] [5]]
+             (stream/stream-to-vector (stream/stream-chunk 2 (stream/stream-range 1 6)))))
+  (test "chunk larger than stream"
+    (assert= [[1 2 3]]
+             (stream/stream-to-vector (stream/stream-chunk 10 (stream/stream-from-list [1 2 3])))))
+  (test "empty stream"
+    (assert= []
+             (stream/stream-to-vector (stream/stream-chunk 3 (stream/stream-empty))))))
+
+(describe "stream-concat"
+  (test "sequences two streams"
+    (assert= [1 2 3 4 5 6]
+             (stream/stream-to-vector
+               (stream/stream-concat
+                 (stream/stream-from-list [1 2 3])
+                 (stream/stream-from-list [4 5 6])))))
+  (test "first empty"
+    (assert= [4 5 6]
+             (stream/stream-to-vector
+               (stream/stream-concat
+                 (stream/stream-empty)
+                 (stream/stream-from-list [4 5 6])))))
+  (test "second empty"
+    (assert= [1 2 3]
+             (stream/stream-to-vector
+               (stream/stream-concat
+                 (stream/stream-from-list [1 2 3])
+                 (stream/stream-empty)))))
+  (test "both empty"
+    (assert= []
+             (stream/stream-to-vector
+               (stream/stream-concat (stream/stream-empty) (stream/stream-empty))))))
+
+(describe "stream-lines"
+  (test "LF-terminated lines"
+    (assert= ["a" "b" "c"]
+             (stream/stream-to-vector
+               (stream/stream-lines (stream/stream-from-list ["a\nb\nc\n"])))))
+  (test "CRLF-terminated lines"
+    (assert= ["a" "b" "c"]
+             (stream/stream-to-vector
+               (stream/stream-lines (stream/stream-from-list ["a\r\nb\r\nc\r\n"])))))
+  (test "split across chunks"
+    (assert= ["hello" "world"]
+             (stream/stream-to-vector
+               (stream/stream-lines (stream/stream-from-list ["hel" "lo\n" "wor" "ld"])))))
+  (test "trailing fragment without newline becomes last line"
+    (assert= ["foo" "bar"]
+             (stream/stream-to-vector
+               (stream/stream-lines (stream/stream-from-list ["foo\nbar"])))))
+  (test "empty stream"
+    (assert= []
+             (stream/stream-to-vector (stream/stream-lines (stream/stream-empty))))))
+
+;; ---- pipe -------------------------------------------------------------------
+
+(describe "stream-pipe"
+  (test "sends :stream-data then :stream-eof"
+    (let (me (self))
+      (spawn (stream/stream-pipe (stream/stream-from-list [1 2 3]) me))
+      (assert= [:stream-data 1] (receive))
+      (assert= [:stream-data 2] (receive))
+      (assert= [:stream-data 3] (receive))
+      (assert= :stream-eof      (receive)))))
+
+;; ---- socket stream ----------------------------------------------------------
+
+(describe "stream-from-socket / stream-to-socket"
+  :isolated
+  (test "loopback: write chunks to a socket, read them back as a stream"
+    (let (me   (self)
+          ls   (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      ;; Writer spawns, connects, sends two chunks, closes.
+      (spawn
+        (let (c (tcp-connect "127.0.0.1" port))
+          (tcp-send c "hello ")
+          (tcp-send c "world")
+          (tcp-close c)))
+      ;; Accept the connection; extract the client socket from the message.
+      (let (client (receive ([:tcp-accept ~ls c] c)))
+        ;; Wrap the accepted socket in a stream and collect it.
+        (let (s    (stream/stream-from-socket client)
+              data (stream/stream-fold str "" s))
+          (tcp-close ls)
+          (assert= data "hello world"))))))

@@ -1,0 +1,238 @@
+;; std/url.blsp — URL encoding/decoding and parsing, written entirely in Brood.
+;; (require 'url)
+;;
+;; Provides percent-encoding (RFC 3986 unreserved characters are left as-is),
+;; query-string encoding/decoding (with + for space), URL parsing/building.
+
+(defmodule url
+  "URL encoding/decoding and parsing, written entirely in Brood (pure; opt-in).
+
+    (require 'url)
+    (url/percent-encode \"hello world\")   ;; => \"hello%20world\"
+    (url/percent-decode \"hello%20world\") ;; => \"hello world\"
+    (url/query-encode {:q \"hello world\" :n \"42\"}) ;; => \"n=42&q=hello+world\"
+    (url/query-decode \"q=hello+world&n=42\") ;; => {\"q\" \"hello world\" \"n\" \"42\"}
+    (url/parse-url \"https://example.com:8080/path?q=1#frag\")
+    ;; => {:scheme \"https\" :host \"example.com\" :port 8080 :path \"/path\"
+    ;;     :query \"q=1\" :fragment \"frag\"}
+    (url/build-url {:scheme \"https\" :host \"example.com\" :path \"/search\"
+                    :query-params {:q \"hello world\"}})
+    ;; => \"https://example.com/search?q=hello+world\"")
+
+;; ---- percent-encoding -------------------------------------------------------
+;;
+;; Unreserved chars (RFC 3986 §2.3): A-Z a-z 0-9 - _ . ~
+;; Codepoints: 65-90 (A-Z), 97-122 (a-z), 48-57 (0-9), 45 (-), 95 (_), 46 (.), 126 (~).
+
+(def url--hex-upper "0123456789ABCDEF")
+
+(defn url--unreserved? (cp)
+  "True if codepoint `cp` is an RFC 3986 unreserved character."
+  (or (and (>= cp 65) (<= cp 90))
+      (and (>= cp 97) (<= cp 122))
+      (and (>= cp 48) (<= cp 57))
+      (= cp 45)
+      (= cp 95)
+      (= cp 46)
+      (= cp 126)))
+
+(defn url--byte->pct (b)
+  "Encode a single byte `b` as a %XX string (uppercase hex)."
+  (str "%" (char-at url--hex-upper (quot b 16)) (char-at url--hex-upper (rem b 16))))
+
+(defn url--encode-bytes (bytes acc)
+  "Encode a list of byte ints, emitting unreserved ASCII codepoints as-is and
+encoding everything else as %XX. Accumulates into `acc`."
+  (if (empty? bytes)
+    acc
+    (let (b (first bytes))
+      (url--encode-bytes
+        (rest bytes)
+        (str acc (if (url--unreserved? b) (int->char b) (url--byte->pct b)))))))
+
+(defn percent-encode (s)
+  "Percent-encode string `s` for use in a URL path or query component. Every byte
+that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
+%XX (uppercase hex). Multi-byte UTF-8 sequences are encoded byte-by-byte."
+  (url--encode-bytes (seq (string->utf8-bytes s)) ""))
+
+;; ---- percent-decoding -------------------------------------------------------
+
+(def url--hex-val
+  {"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7
+   "8" 8 "9" 9
+   "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
+   "A" 10 "B" 11 "C" 12 "D" 13 "E" 14 "F" 15})
+
+(defn url--pct-decode-loop (s i n acc)
+  "Decode percent-encoded string `s` (length `n`), accumulating decoded bytes into `acc`."
+  (if (>= i n)
+    (utf8-bytes->string (reverse acc))
+    (let (c (char-at s i))
+      (if (= c "%")
+        (if (>= (+ i 2) n)
+          ;; Incomplete %XX — emit the % literally as a byte
+          (url--pct-decode-loop s (+ i 1) n (cons (char->int c) acc))
+          (let (hi (get url--hex-val (char-at s (+ i 1)))
+                lo (get url--hex-val (char-at s (+ i 2))))
+            (if (and hi lo)
+              (url--pct-decode-loop s (+ i 3) n (cons (+ (* hi 16) lo) acc))
+              ;; Not a valid %XX — emit the % literally and re-process
+              (url--pct-decode-loop s (+ i 1) n (cons (char->int c) acc)))))
+        ;; Normal char: encode its UTF-8 bytes into the accumulator
+        (url--pct-decode-loop s (+ i 1) n
+          (append (reverse (seq (string->utf8-bytes c))) acc))))))
+
+(defn percent-decode (s)
+  "Decode percent-encoded sequences in `s`, returning the original string.
+Invalid or incomplete %XX sequences are passed through as-is."
+  (url--pct-decode-loop s 0 (string-length s) nil))
+
+;; ---- query string encoding --------------------------------------------------
+;;
+;; application/x-www-form-urlencoded: space → +, rest percent-encoded (same
+;; unreserved set). Keys and values are percent-encoded individually.
+
+(defn url--qenc-bytes (bytes acc)
+  (if (empty? bytes)
+    acc
+    (let (b (first bytes))
+      (url--qenc-bytes
+        (rest bytes)
+        (str acc
+          (cond
+            (url--unreserved? b) (int->char b)
+            (= b 32)             "+"
+            else                 (url--byte->pct b)))))))
+
+(defn url--query-encode-str (s)
+  "Encode a single key or value for use in a query string: unreserved chars
+pass through, space becomes +, all other bytes become %XX."
+  (url--qenc-bytes (seq (string->utf8-bytes s)) ""))
+
+(defn url--pairs->query (pairs acc first?)
+  "Encode a list of `[key value]` pairs as a query string."
+  (if (empty? pairs)
+    acc
+    (let (kv (first pairs)
+          k  (url--query-encode-str (first kv))
+          v  (url--query-encode-str (second kv))
+          sep (if first? "" "&"))
+      (url--pairs->query (rest pairs) (str acc sep k "=" v) false))))
+
+(defn query-encode (params)
+  "Encode a map of string→string (or keyword→string) params as a
+`key=value&key=value` query string, percent-encoding keys and values and using
+`+` for spaces. Keys are sorted for deterministic output."
+  (let (pairs (sort (map (fn (kv)
+                           (list (if (keyword? (first kv))
+                                   (name (first kv))
+                                   (str (first kv)))
+                                 (str (second kv))))
+                         (map-pairs params))))
+    (url--pairs->query pairs "" true)))
+
+;; ---- query string decoding --------------------------------------------------
+
+(defn url--qdecode-str (s)
+  "Decode a query-string value: replace + with space, then percent-decode."
+  (percent-decode (replace s "+" " ")))
+
+(defn url--parse-query-pairs (parts acc)
+  "Parse a list of `key=value` strings into a string→string map."
+  (if (empty? parts)
+    acc
+    (let (part (first parts)
+          eq   (index-of part "="))
+      (if (< eq 0)
+        ;; bare key with no value — store empty string
+        (url--parse-query-pairs (rest parts)
+          (assoc acc (url--qdecode-str part) ""))
+        (url--parse-query-pairs (rest parts)
+          (assoc acc
+            (url--qdecode-str (substring part 0 eq))
+            (url--qdecode-str (substring part (+ eq 1) (string-length part)))))))))
+
+(defn query-decode (s)
+  "Parse a query string `key=value&key=value` into a string→string map,
+decoding + as space and %XX sequences."
+  (if (= s "")
+    {}
+    (url--parse-query-pairs (string-split s "&") {})))
+
+;; ---- URL parsing ------------------------------------------------------------
+;;
+;; parse-url returns {:scheme :host :port :path :query :fragment}
+;; port is an integer when present in the URL, nil otherwise.
+
+(defn url--split-first (s sep)
+  "Split `s` on the first occurrence of `sep`; return `[before after]` or nil if
+`sep` is absent."
+  (let (i (index-of s sep))
+    (if (< i 0)
+      nil
+      [(substring s 0 i) (substring s (+ i (string-length sep)) (string-length s))])))
+
+(defn url--parse-authority (auth)
+  "Parse `host` or `host:port` into `{:host :port}`. Port is int or nil."
+  (let (colon (index-of auth ":"))
+    (if (< colon 0)
+      {:host auth :port nil}
+      (let (port-str (substring auth (+ colon 1) (string-length auth))
+            port-n   (string->number port-str))
+        {:host (substring auth 0 colon) :port port-n}))))
+
+(defn parse-url (s)
+  "Parse URL string `s` into a map `{:scheme :host :port :path :query :fragment}`.
+`:port` is an integer when present, nil otherwise. `:query` and `:fragment` are
+the raw (still-encoded) strings, or nil when absent. Relative URLs (no scheme)
+have nil `:scheme`, `:host`, and `:port`."
+  ;; 1. strip fragment
+  (let (frag-split (url--split-first s "#")
+        before-frag (if frag-split (first frag-split) s)
+        fragment    (if frag-split (second frag-split) nil))
+    ;; 2. strip query
+    (let (q-split  (url--split-first before-frag "?")
+          before-q  (if q-split (first q-split) before-frag)
+          query     (if q-split (second q-split) nil))
+      ;; 3. strip scheme
+      (let (scheme-split (url--split-first before-q "://")
+            scheme        (if scheme-split (first scheme-split) nil)
+            rest-url      (if scheme-split (second scheme-split) before-q))
+        ;; 4. split authority from path
+        (let (slash (index-of rest-url "/")
+              authority (if (< slash 0)
+                          (if (nil? scheme) "" rest-url)
+                          (substring rest-url 0 slash))
+              path      (if (< slash 0)
+                          (if (nil? scheme) rest-url "/")
+                          (substring rest-url slash (string-length rest-url)))
+              auth-map  (if (= authority "")
+                          {:host nil :port nil}
+                          (url--parse-authority authority)))
+          (merge auth-map {:scheme scheme :path path :query query :fragment fragment}))))))
+
+;; ---- URL building -----------------------------------------------------------
+
+(defn build-url (parts)
+  "Build a URL string from a map `{:scheme :host :port :path :query-params :query :fragment}`.
+`:query-params` is a map encoded via `query-encode`; `:query` is a raw query string
+(used only when `:query-params` is absent). Both `:port` and `:fragment` are optional."
+  (let (scheme       (get parts :scheme)
+        host         (get parts :host)
+        port         (get parts :port)
+        path         (or (get parts :path) "/")
+        query-params (get parts :query-params)
+        query        (if (nil? query-params)
+                       (get parts :query)
+                       (query-encode query-params))
+        fragment     (get parts :fragment)
+        authority    (if (nil? host)
+                       ""
+                       (str host (if (nil? port) "" (str ":" port)))))
+    (str
+      (if (nil? scheme) "" (str scheme "://"))
+      authority
+      path
+      (if (nil? query) "" (str "?" query))
+      (if (nil? fragment) "" (str "#" fragment)))))

@@ -1,0 +1,74 @@
+(defmodule multimap-test (:use test))
+(require 'multimap)
+
+(describe "multimap basics"
+  (test "new multimap is empty"
+    (is (multimap/multimap-empty? (multimap/multimap-new))))
+  (test "multimap-assoc adds a value"
+    (let (mm (multimap/multimap-assoc (multimap/multimap-new) :k "v"))
+      (assert= '("v") (multimap/multimap-get mm :k))))
+  (test "multiple values for same key"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :k "a")
+                 (multimap/multimap-assoc :k "b")
+                 (multimap/multimap-assoc :k "c")))
+      (assert= 3 (count (multimap/multimap-get mm :k)))))
+  (test "multimap-get-all returns insertion order"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :k "first")
+                 (multimap/multimap-assoc :k "second")
+                 (multimap/multimap-assoc :k "third")))
+      (let (vs (into [] (multimap/multimap-get-all mm :k)))
+        (assert= "first"  (nth vs 0))
+        (assert= "second" (nth vs 1))
+        (assert= "third"  (nth vs 2)))))
+  (test "missing key returns nil"
+    (is (nil? (multimap/multimap-get (multimap/multimap-new) :missing))))
+  (test "multimap-contains?"
+    (let (mm (multimap/multimap-assoc (multimap/multimap-new) :x 1))
+      (is (multimap/multimap-contains? mm :x))
+      (is (not (multimap/multimap-contains? mm :y)))))
+  (test "multimap-dissoc removes all values for key"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :k "a")
+                 (multimap/multimap-assoc :k "b")
+                 (multimap/multimap-dissoc :k)))
+      (is (nil? (multimap/multimap-get mm :k)))))
+  (test "multimap-remove-value removes first occurrence"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :k "a")
+                 (multimap/multimap-assoc :k "b")
+                 (multimap/multimap-remove-value :k "b")))
+      (assert= '("a") (multimap/multimap-get mm :k))))
+  (test "multimap-remove-value drops key when empty"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :k "only")
+                 (multimap/multimap-remove-value :k "only")))
+      (is (not (multimap/multimap-contains? mm :k))))))
+
+(describe "multimap aggregates"
+  (test "multimap-keys"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :a 1)
+                 (multimap/multimap-assoc :b 2)))
+      (assert= 2 (count (multimap/multimap-keys mm)))))
+  (test "multimap-size counts all pairs"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :x 1)
+                 (multimap/multimap-assoc :x 2)
+                 (multimap/multimap-assoc :y 3)))
+      (assert= 3 (multimap/multimap-size mm))))
+  (test "multimap-values returns all values"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :a "x")
+                 (multimap/multimap-assoc :b "y")))
+      (assert= 2 (count (multimap/multimap-values mm)))))
+  (test "multimap->map returns map of lists"
+    (let (mm (-> (multimap/multimap-new)
+                 (multimap/multimap-assoc :k "a")
+                 (multimap/multimap-assoc :k "b"))
+          m  (multimap/multimap->map mm))
+      (assert= ["a" "b"] (into [] (get m :k)))))
+  (test "multimap-assoc-all"
+    (let (mm (multimap/multimap-assoc-all (multimap/multimap-new) :k [1 2 3]))
+      (assert= 3 (count (multimap/multimap-get mm :k))))))
