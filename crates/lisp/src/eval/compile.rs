@@ -3390,6 +3390,144 @@ pub fn apply_engine(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId)
     }
 }
 
+// ===================== JIT lowering (ADR-101 Stage 1) =====================
+//
+// Lower a chunked arm to native code via Cranelift, co-located here because it reads
+// the private `Inst`/`Chunk` bytecode. Stage-1 Step A: the **straight-line int subset**
+// — `Const`(Int), `Local`, `Prim2`(Add/Sub/Mul) — keeping operands in SSA registers
+// (the operand stack is virtualised at compile time, so `roots` never grows) and
+// touching `Heap::roots` only to read frame slots and box the result. Any other `Inst`
+// (control flow, calls, non-int prims, globals) makes lowering **bail** (`None`) — the
+// arm stays on the VM. Control flow + the self-loop + deopt come next.
+
+#[cfg(feature = "jit")]
+static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Compile `arm`'s chunk to a native `extern "C" fn(heap: *mut Heap, base: i64) -> i64`
+/// for the Step-A int subset, or `None` to bail to the VM. The compiled fn reads its
+/// frame slots from `roots[base..]`, computes in registers, **boxes the result into
+/// `roots[base]`**, and returns `0` (Done) or `1` (deopt — an operand wasn't an `Int`).
+/// The returned pointer is valid for the life of `jit` (its module owns the code).
+#[cfg(feature = "jit")]
+pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*const u8> {
+    use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_INT};
+    use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_module::{Linkage, Module};
+    use std::sync::atomic::Ordering;
+
+    let chunk = arm.chunk.as_ref()?;
+    const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
+
+    let m = jit.module();
+    let ptr_ty = m.target_config().pointer_type();
+
+    let mut sig = m.make_signature();
+    sig.params.push(AbiParam::new(ptr_ty)); // heap
+    sig.params.push(AbiParam::new(types::I64)); // base (frame index into roots)
+    sig.returns.push(AbiParam::new(types::I64)); // 0 = Done, 1 = deopt
+    let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
+    let id = m.declare_function(&format!("brood_jit_arm_{seq}"), Linkage::Export, &sig).ok()?;
+
+    // The roots-base callback (import).
+    let mut rb_sig = m.make_signature();
+    rb_sig.params.push(AbiParam::new(ptr_ty));
+    rb_sig.returns.push(AbiParam::new(ptr_ty));
+    let rb_id = m.declare_function("brood_rt_roots_base", Linkage::Import, &rb_sig).ok()?;
+
+    let mut ctx = m.make_context();
+    ctx.func.signature = sig;
+    let mut fbctx = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+    let rb_ref = m.declare_func_in_func(rb_id, b.func);
+
+    let entry = b.create_block();
+    let deopt = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let heap = b.block_params(entry)[0];
+    let base = b.block_params(entry)[1];
+    let call = b.ins().call(rb_ref, &[heap]);
+    let roots_base = b.inst_results(call)[0];
+
+    // addr of frame slot k = roots_base + (base + k) * STRIDE
+    let slot_addr = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
+        let idx = b.ins().iadd_imm(base, k);
+        let off = b.ins().imul_imm(idx, STRIDE);
+        b.ins().iadd(roots_base, off)
+    };
+
+    let mut ok = true; // set false to bail (handled after the loop, blocks already half-built)
+    let mut stack: Vec<cranelift_codegen::ir::Value> = Vec::new();
+    for inst in &chunk.code {
+        match inst {
+            Inst::Const(cv) => match cv.load() {
+                Value::Int(n) => {
+                    let v = b.ins().iconst(types::I64, n);
+                    stack.push(v);
+                }
+                _ => {
+                    ok = false;
+                    break;
+                }
+            },
+            Inst::Local(i) => {
+                let addr = slot_addr(&mut b, *i as i64);
+                let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+                let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+                let cont = b.create_block();
+                b.ins().brif(is_int, cont, &[], deopt, &[]);
+                b.switch_to_block(cont);
+                let payload = b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                stack.push(payload);
+            }
+            Inst::Prim2 { op, .. } => {
+                let (bb, aa) = (stack.pop()?, stack.pop()?);
+                let r = match op {
+                    PrimOp::Add => b.ins().iadd(aa, bb),
+                    PrimOp::Sub => b.ins().isub(aa, bb),
+                    PrimOp::Mul => b.ins().imul(aa, bb),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                };
+                stack.push(r);
+            }
+            _ => {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    if !ok || stack.len() != 1 {
+        // Bail: abandon this (incomplete) function — clear the context, declare nothing.
+        m.clear_context(&mut ctx);
+        return None;
+    }
+
+    // Box the single result into roots[base] and return 0 (Done).
+    let result = stack.pop()?;
+    let addr0 = slot_addr(&mut b, 0);
+    let tag_int = b.ins().iconst(types::I8, TAG_INT as i64);
+    b.ins().store(MemFlags::new(), tag_int, addr0, 0);
+    b.ins().store(MemFlags::new(), result, addr0, PAYLOAD_OFFSET as i32);
+    let zero = b.ins().iconst(types::I64, 0);
+    b.ins().return_(&[zero]);
+    // Deopt: an operand wasn't an Int — return 1, the caller runs the VM.
+    b.switch_to_block(deopt);
+    let one = b.ins().iconst(types::I64, 1);
+    b.ins().return_(&[one]);
+    b.seal_all_blocks();
+    b.finalize();
+
+    m.define_function(id, &mut ctx).ok()?;
+    m.clear_context(&mut ctx);
+    m.finalize_definitions().ok()?;
+    Some(m.get_finalized_function(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3589,5 +3727,52 @@ mod tests {
             roots_before,
             "a completed resume must tear its frame stack back down to entry"
         );
+    }
+
+    /// JIT Stage-1 Step A: lower a straight-line int arm `(+ x 1)` to native code and
+    /// run it against a real heap frame — read the arg from `roots[base]`, compute in
+    /// registers, box the result back, and match the VM's answer.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_lowers_and_runs_a_straight_line_int_arm() {
+        let mut heap = Heap::new();
+        // Body `(+ x 1)`: [Local(0), Const(1), Prim2 Add].
+        let chunk = Chunk {
+            code: vec![
+                Inst::Local(0),
+                Inst::Const(ConstVal::new(Value::Int(1))),
+                Inst::Prim2 {
+                    op: PrimOp::Add,
+                    map: [0, 1],
+                    head: value::intern("+"),
+                    guard: AtomicU64::new(0),
+                    pos: None,
+                },
+            ],
+        };
+        let arm = CompiledArm {
+            nrequired: 1,
+            noptional: 0,
+            optional_defaults: Box::new([]),
+            rest_slot: None,
+            nslots: 1,
+            body: Node::Const(ConstVal::new(Value::Nil)),
+            chunk: Some(chunk),
+            has_runtime_handles: false,
+        };
+
+        let mut jit = crate::jit::Jit::new();
+        let ptr = jit_lower_arm(&mut jit, &arm).expect("straight-line int arm should JIT");
+        let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+
+        // Frame: x = 41 at roots[base].
+        let base = heap.roots_len();
+        heap.push_root(Value::Int(41));
+        let outcome = f(&mut heap as *mut Heap, base as i64);
+        assert_eq!(outcome, 0, "Done (no deopt — arg is an Int)");
+        match heap.root_at(base) {
+            Value::Int(n) => assert_eq!(n, 42, "JIT-compiled (+ x 1) on x=41"),
+            other => panic!("expected Int(42), got tag {:?}", value::tag(other)),
+        }
     }
 }
