@@ -4006,6 +4006,17 @@ impl Heap {
         self.roots.pop()
     }
 
+    /// Raw base pointer of the operand-stack/`roots` buffer, for JIT'd code to index
+    /// frame slots directly (`roots_base + (base+i) * size_of::<Value>()`). Valid only
+    /// while `roots` does not reallocate — a tier-1 JIT'd arm keeps operands in
+    /// registers (it never `push`es), and the int-arithmetic subset never allocates
+    /// (so no GC grows it), so the pointer is stable for the arm's duration. Callers
+    /// outside that invariant must re-fetch after any push. See `src/jit/`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn roots_base_ptr(&mut self) -> *mut Value {
+        self.roots.as_mut_ptr()
+    }
+
     /// Current root-stack depth, for a balanced `truncate_roots(roots_len())`
     /// guard around a region that may push variable numbers of roots.
     pub fn roots_len(&self) -> usize {

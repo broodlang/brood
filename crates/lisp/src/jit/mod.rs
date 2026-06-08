@@ -52,6 +52,7 @@ impl Jit {
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
         builder.symbol("brood_rt_alloc_pair", brood_rt_alloc_pair as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
+        builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         Jit { module: JITModule::new(builder) }
     }
 
@@ -167,6 +168,19 @@ pub unsafe extern "C" fn brood_rt_alloc_pair(heap: *mut Heap) {
     let car = h.pop_root().expect("brood_rt_alloc_pair: operand-stack underflow (car)");
     let pair = h.alloc_pair(car, cdr);
     h.push_root(pair);
+}
+
+/// Base pointer of the operand-stack/`roots` buffer. JIT'd code calls this once at
+/// entry, then indexes a frame slot `k` directly at `roots_base + k *
+/// size_of::<Value>()` (tag byte at +0, payload at +8). Valid for the arm's duration:
+/// a tier-1 JIT'd arm keeps operands in registers (never `push`es `roots`) and the
+/// int-arithmetic subset never allocates, so `roots` doesn't reallocate.
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_roots_base(heap: *mut Heap) -> *mut u8 {
+    (*heap).roots_base_ptr() as *mut u8
 }
 
 /// Slow-path call dispatch / deopt: when a JIT'd call site can't take its fast path (IC
