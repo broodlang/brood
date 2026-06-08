@@ -1381,6 +1381,28 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
     }
 }
 
+/// Int×Int-only fast path for `prim2_inline_exec`: just the fixnum arithmetic,
+/// no type dispatch, no allocation.  Marked `#[inline(always)]` because it is
+/// tiny (one `match` arm per op) — LLVM constant-folds `op` at each call site
+/// in `prim2_inline_exec` (itself always-inlined), emitting a single checked op
+/// or compare per instruction variant.  Float, BigInt, overflow, Cons, and Div
+/// all return `None`; the caller falls through to `prim_apply`.
+#[inline(always)]
+fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
+    match op {
+        PrimOp::Add  => a.checked_add(b).map(Value::Int),
+        PrimOp::Sub  => a.checked_sub(b).map(Value::Int),
+        PrimOp::Mul  => a.checked_mul(b).map(Value::Int),
+        PrimOp::Lt   => Some(Value::Bool(a < b)),
+        PrimOp::Le   => Some(Value::Bool(a <= b)),
+        PrimOp::Eq   => Some(Value::Bool(a == b)),
+        PrimOp::Rem  => a.checked_rem(b).map(Value::Int),
+        PrimOp::Quot => a.checked_div(b).map(Value::Int),
+        // Cons needs heap alloc; Div may return Float — both handled by prim_apply.
+        PrimOp::Cons | PrimOp::Div => None,
+    }
+}
+
 /// The inline fast path for a [`Node::Prim2`] (perf #1): handle the `(Int, Int)`
 /// case of `op` directly, returning `Ok(Some(v))` when done inline, or `Ok(None)`
 /// to defer to the real `%`-primitive — for any non-`(Int, Int)` operands (float
@@ -1493,29 +1515,18 @@ fn prim2_inline_exec(
     if !inlinable {
         return Ok(None);
     }
-    // Int×Int fast path: pure arithmetic, no function call.  This is the only
-    // case where the `#[inline(always)]` buys real work — LLVM sees the `op`
-    // constant and collapses this to a single checked op + compare.
+    // Int×Int fast path: `prim2_int_fast` is tiny and #[inline(always)] — LLVM
+    // constant-folds `op` here, emitting one checked op or compare per handler,
+    // with no function call and without bloating exec_chunk via full prim_apply.
     if let (Value::Int(a), Value::Int(b)) = (x, y) {
-        let r = match op {
-            PrimOp::Add  => a.checked_add(b).map(Value::Int),
-            PrimOp::Sub  => a.checked_sub(b).map(Value::Int),
-            PrimOp::Mul  => a.checked_mul(b).map(Value::Int),
-            PrimOp::Lt   => Some(Value::Bool(a < b)),
-            PrimOp::Le   => Some(Value::Bool(a <= b)),
-            PrimOp::Eq   => Some(Value::Bool(a == b)),
-            PrimOp::Rem  => a.checked_rem(b).map(Value::Int),
-            PrimOp::Quot => a.checked_div(b).map(Value::Int),
-            // Cons needs heap allocation; Div may return Float — both fall through.
-            PrimOp::Cons | PrimOp::Div => None,
-        };
-        if let Some(v) = r {
+        if let Some(v) = prim2_int_fast(op, a, b) {
             crate::perf_bump!(prim2_inline);
             return Ok(Some(v));
         }
-        // Int overflow, Div, or Cons with Int operands — delegate below.
+        // Int overflow, Div, or Cons with Int operands → fall through to prim_apply.
     }
-    // Float, BigInt, overflow, Cons, Div — use the full type-coercing path.
+    // Float, BigInt, overflow, Cons, Div — the full type-coercing path (not inlined,
+    // so it stays out of exec_chunk's instruction footprint).
     match prim_apply(op, x, y)? {
         Some(v) => {
             crate::perf_bump!(prim2_inline);
