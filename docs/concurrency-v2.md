@@ -442,9 +442,29 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
   stateful native re-raises the `Control::Suspend` (no cleanup), and on resume
   `vm_run_bc` re-executes the native's `Inst::Call` — **re-running** the native +
   its thunk from the start. Correct when the thunk has no irreversible side effect
-  *before* the `receive` (the only shape that occurs); a documented footgun
-  otherwise. `binding` re-installs its dynamic value on re-run (idempotent);
-  `%try` re-enters its body (the receive re-scans).
+  *before* the `receive`; a documented footgun otherwise. `binding` re-installs its
+  dynamic value on re-run (idempotent); `%try` re-enters its body (the receive
+  re-scans).
+
+  > **Empirical finding (2026-06-08, step-2 flag-on bring-up): the survey's "the only
+  > shape that occurs" was too optimistic — the footgun bites the real flag-on suite,
+  > and is now the explicit step-3 blocker.** Two shapes recur:
+  > 1. **`%isolate`-nested receive.** Every `:isolated` test block that spawns a worker
+  >    then `receive`s its reply nests a receive in `%isolate`. As written, `%isolate`
+  >    runs its reap/`restore-globals` cleanup on the *suspend* return — killing the
+  >    very child the thunk awaits and busy-spinning its `yield_now` reap-loop → hang.
+  >    Making `%isolate` re-raise the control signal untouched (the `%try` shape, §8.2)
+  >    fixes the *hang* but not the model: the re-run re-spawns/leaks children, since a
+  >    long-lived child predates the re-run's snapshot.
+  > 2. **gen-server `call`.** `gen-call` mints a fresh `ref`, spawns/sends, then
+  >    selective-`receive`s the reply matching *that* `ref`. On re-run it mints a *new*
+  >    `ref`, so the prior reply never matches → it re-suspends → re-runs → **livelock**.
+  >
+  > Both are "irreversible side effect (spawn / `next-ref`) before the receive." The
+  > clean cases are solid (plain spawn/receive, `%try`-nested, `after`, deep-frame
+  > live migration — all verified under GC-stress). The real fix is to capture the
+  > continuation *through* the native frame (so the thunk does **not** re-run), or to
+  > run a stateful-native-wrapped suspending body on a coroutine — the step-3 design.
 
 ### 8.2 The capture/resume machinery (`compile.rs`, `mailbox.rs`)
 
@@ -485,9 +505,25 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
    suspend re-raises (8.1 re-run). Capture→resume unit test + green-receive signal
    test; suite + differential green at the default; §6 plain-release KI-1 bar
    re-cleared (10/10 + `BROOD_GC_STRESS`).
-2. `run_one` dual-mode (coroutine default; state-capture under the flag); the new
-   live-migration regression test (§7.6) passes flag-on.
+2. ✅ **(2026-06-08)** `run_one` dual-mode + live process migration. `Process` holds
+   `Run::{Coro|Capture}`; `spawn` picks capture mode for a VM-eligible body under the
+   flag, a coroutine otherwise (tree-walked bodies stay corosensei, §8.1 option a).
+   `vm_run_bc` reifies `Preempted`/`Killed` at its loop-top safepoint; `run_one` parks a
+   `Suspended` (mailbox waiter + timer), re-queues a `Preempted`, retires `Done`/
+   `Killed`/error. **Migration falls out:** a *woken* capture process is `Send` data with
+   no native stack, so `wake_enqueue` re-routes it to the least-loaded worker — it resumes
+   on a different thread (preempt re-enqueue stays pinned for locality). Supporting fixes:
+   worker threads use a `CORO_STACK_BYTES` stack under the flag (capture bodies + nested
+   native recursion run on them, so the `stack_budget` guard must have headroom); the
+   capture-mode `receive` deadline is persisted in the mailbox (`recv_deadline`) so a
+   re-entered receive doesn't reset `after`. `tests/live_migration.rs` (§7.6) is green
+   under GC-stress + heap-verify; the §6 plain-release KI-1 bar holds **flag on and off**.
 3. Flip the default; full `make test` + the §6 plain-release KI-1 bar green.
+   **Gated on the §8.1 native-nested-receive footgun** (found in step-2 flag-on
+   bring-up): the flag-on suite hangs/fails where a `receive` nests in `%isolate` or a
+   gen-server `call` (side effects before the receive → the re-run repeats them). The
+   clean cases pass; this step is mostly *resolving that footgun* (capture through the
+   native frame, or run such a body on a coroutine), not a mere default flip.
 4. Delete corosensei (8.3 last bullet); re-run the bar. Generalise stealing.
 
 This is the scheduler core (the KI-1 subsystem) — run it as a focused effort, not

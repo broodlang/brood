@@ -288,6 +288,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-07** — `%range-reduce` callback runs on the VM. `reduce`/`fold` over a *lazy range* drive the `%range-reduce` native, which called the reducer back via `eval::apply` (tree-walker) regardless of engine — so `(reduce <vm-eligible-fn> 0 (range n))` was pinned to the tree-walker (VM/TW ≈ 1.0). Now it routes through `compile::apply_value` when `vm_enabled` (pure tree-walker under `BROOD_VM=0`, so the escape hatch / differential TW mode stay honest): **65–67% faster** on the VM (VM/TW 0.35/0.33), measured load-robustly via the eval-grid `reduce_range` bench. Suite green both engines, GC-stress clean (allocating reducer). **Attempted + reverted:** generalising the same VM-callback routing to the *other* native higher-order sites (`apply`, `%try` thunk/handler, `binding`/`isolate` body) broke the adversarial suite — running a `try`/test-framework body on the VM where it used to tree-walk surfaced a **VM↔tree-walker divergence**: a *self-referential local closure* (a `letrec` fn that captures itself — the round-2 self-name `env_define` builds a closure whose env contains itself) is **rejected by `send` when tree-walker-built but accepted when VM-built**. Reverted to keep only the proven `%range-reduce` win; the divergence (is the VM-built self-ref closure correctly send-able, or a latent cycle bug the differential harness doesn't probe because it doesn't `send` such closures?) must be understood before native callbacks can route to the VM generally.
 - **2026-06-07** — refined the above divergence + wrote a handoff (`docs/handoff-vm-callback-routing.md`); paused #1/#2 because the `let`/closure/`send` area is under active edit. Precise diagnosis (HEAD `9931e1d`): it is **`let`-self-ref**, not `letrec` (both engines agree on `letrec`: call works, `send` rejects). For a sequential-`let` self-ref closure, *calling* now works on both engines, but **`send` diverges — VM accepts, tree-walker rejects** — because the VM's `let`-self-ref closure is resolved at call time *without* being **structurally** self-referential (its captured env has no `f→self` cycle), so `closure_to_message`'s cycle walk finds nothing; the tree-walker (by-ref `let` env) and both engines' `letrec` (round-2 self-name `env_define`) *are* structural → rejected. Fix (#1): make the VM `let`-self-ref structural via the same `self_name` path `letrec` uses, so `send` rejects consistently; that unblocks #2 (native-callback VM routing). Also flagged: add a differential test that `send`s a RUNTIME-context `let`-self-ref closure (the blind spot that let this ship). Plan + the #2 code in the handoff.
 - **2026-06-08** — corosensei removal §8.4 step 1: the capture/resume machinery behind `BROOD_STATE_CAPTURE` (default **off** — `main` stays on corosensei). `vm_run_bc` gains `resume: Option<Suspended>` and returns `VmOutcome::{Done,Suspended}`; a clean `receive` on an empty mailbox raises `Control::Suspend` through `%receive`, `exec_chunk` intercepts it (rewinds the suspending `Inst::Call`'s `ip`) into `ChunkExit::Suspend`, and the driver captures `(frames, cur_*, ip, entry-marks, deadline)` as a `Suspended` **without unwinding** (operand stack + frame slots survive on the heap so the resume replays straight from the `%receive` call). `scan_mailbox` no-match + green + flag → `Err(LispError::suspend)`; a suspend that surfaces in a VM run **nested under a native** re-raises (the §8.1 re-run case). Capture→resume unit test (a suspend-once native) + a green-receive signal test. Suite green at the default; differential parity green; §6 plain-release KI-1 bar re-cleared (10/10 + `BROOD_GC_STRESS`). The scheduler still drives corosensei — `run_one` dual-mode + the live-migration test are §8.4 step 2.
+- **2026-06-08** — corosensei removal §8.4 **step 2**: `run_one` **dual-mode** + **live process migration** (flag-gated, default off). `Process` holds `Run::{Coro|Capture}`; under `BROOD_STATE_CAPTURE` a VM-eligible body runs in *capture mode* (worker drives `vm_run_bc` directly, no coroutine), a tree-walked body keeps a coroutine (§8.1 option a). `vm_run_bc` reifies `Preempted`/`Killed` at its loop-top safepoint (the coroutine-yield analogue); `run_one` parks a `Suspended` (mailbox waiter + timer), re-queues a `Preempted`, retires `Done`/`Killed`/error. **Live migration:** a *woken* capture process has no native stack, so `wake_enqueue` re-routes it to the least-loaded worker — it resumes on a different thread (what corosensei's KI-1b pinning forbids); preempt re-enqueue stays pinned for locality. Fixes: worker threads get a `CORO_STACK_BYTES` stack under the flag (capture bodies run on them); capture-mode `receive` deadline persisted in the mailbox (`recv_deadline`) so a re-entered receive doesn't reset `after`. `tests/live_migration.rs` (§7.6) green under GC-stress + heap-verify; §6 plain-release KI-1 bar holds **flag on and off**. Flag-on bring-up surfaced the **§8.1 native-nested-receive footgun** as the step-3 blocker: a `receive` nested in `%isolate` / a gen-server `call` (side effects — spawn, `next-ref` — *before* the receive) re-runs the native on resume → re-spawned/killed children, or a fresh non-matching `ref` each resume (livelock). Clean cases (plain spawn/receive, `%try`-nested, `after`, deep-frame migration) all pass; the fix (capture *through* native frames) is step 3. Flag stays **off**, so `main` is unchanged.
 
 ---
 
@@ -1892,3 +1893,74 @@ Next (§8.4 step 2): `run_one` dual-mode — store `Run::Suspended(Box<Suspended
 and call `vm_run_bc(.., resume)` directly behind the flag, park on the deadline/
 mailbox a `Suspended` outcome (the work `wait_for_message` did) — plus the
 live-migration regression test (§7.6, resume on a *different* worker).
+
+## 2026-06-08 — corosensei removal §8.4 step 2: dual-mode run_one + live process migration
+
+Wired the step-1 capture machinery into the scheduler and got **live migration** — a
+green process resumed mid-computation on a *different* worker than it suspended on,
+the thing corosensei's thread-pinned coroutines could never do (KI-1b). Flag-gated
+(`BROOD_STATE_CAPTURE`, default **off**), so `main` stays on corosensei.
+
+**Dual-mode `Process`.** `Process.run` is now `Run::{Coro(Coro) | Capture{heap, body,
+resume, capture}}`. `spawn` picks the mode: under the flag, a **VM-eligible** 0-arg
+body (`process_body_vm_eligible`) runs in capture mode — the worker owns the heap +
+body and drives `vm_run_bc` directly, no coroutine; everything else (flag off, or a
+body that defers to the tree-walker) keeps a coroutine (§8.1 option a — corosensei
+remains only for tree-walked bodies). `run_one` branches: capture mode installs the
+`Ctx` for the quantum (no coroutine holds it), drives `run_process_body`, reads the
+capture stack back, then dispatches the outcome.
+
+**`vm_run_bc` reifies the scheduler outcomes.** Beyond `Suspended` (step 1) it now
+returns, at its loop-top safepoint and only for the top-level body driver
+(`top_level && in_capture_run()`), `Preempted(Suspended)` when the reduction budget
+hits 0 (`tick_capture`) and `Killed` on a pending hard `:kill` — the state-capture
+analogues of the coroutine's `Suspend::{Preempt,Kill}`. A nested `vm_apply` run (a
+native callback) passes `top_level=false`, so it never captures these — they're the
+body driver's alone.
+
+**`run_one` outcome handling.** `Done` → retire `:normal`; `Err` → retire `[:error …]`
+(let-it-crash); `Killed` → retire the mailbox kill reason; `Preempted` → stash the
+continuation and re-queue (pinned — locality); `Suspended` → stash + `park_on_receive`
+(the same kill-check + raced-message recheck the coroutine path uses). `receive_match`
+sets `scanned` and arms the deadline timer before returning the suspend (the park
+bookkeeping `wait_for_message` did), and the gate moved from `ctx.yielder.is_some()`
+to `in_capture_run()` (capture mode has no yielder).
+
+**Migration falls out, at the right point.** A *woken* capture process (from
+`receive`/timer/`exit`, or a message racing its park) is plain `Send` data with no
+native stack, so `wake_enqueue` re-routes it to the least-loaded worker
+(`migrate_count()` counts the cross-worker moves). A *preempted* process re-enqueues
+**pinned** (plain `enqueue`) — migrating a hot, actively-running process every 2000
+reductions would only thrash its cache for no benefit; migration is for *idle*
+(parked) processes, like BEAM.
+
+**Two correctness fixes found in review.** (1) Capture bodies run on the *worker*
+thread stack, not a 16 MiB coroutine stack — so under the flag worker threads are
+spawned with a `CORO_STACK_BYTES` stack, else a deep native sub-recursion would
+overflow the default ~2 MiB before the `stack_budget` guard (calibrated to the coro
+size) trips. (2) A capture-mode `receive` is re-entered from scratch on each wake, so
+recomputing `now + ms` reset — and never fired — the `after` timeout; the absolute
+deadline is now persisted in the mailbox (`recv_deadline`, cleared on the
+match/timeout/error exit).
+
+**Validation.** `tests/live_migration.rs` (the §7.6 acceptance): 200 deep-frame
+(~150 non-tail `BcFrame`s) receive/reply processes per burst, suspended at `receive`,
+woken, resumed — asserts every result is correct (a mis-restored frame stack would
+corrupt it) **and** `migrate_count() > 0` (cross-worker resumes happened). Green under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` (heap-verifier walks the live graph each
+safepoint — no use-after-GC in the capture/migrate path). §6 plain-release KI-1 bar:
+10/10 clean + `BROOD_GC_STRESS`, **flag on and off**. Flag-off in-language suite
+1747/1747 standalone (unchanged).
+
+**Step-3 blocker, found and documented (not a step-2 regression — flag is off).** The
+flag-on full suite exposes the §8.1 **native-nested-receive footgun**: the re-run model
+(a stateful native re-executes its thunk on resume) breaks when the thunk has an
+irreversible side effect *before* the receive. Two real shapes: a `:isolated` test that
+spawns a worker then receives its reply (`%isolate` would kill the awaited child + spin
+its reap-loop → hang; re-raising untouched fixes the hang but the re-run leaks
+long-lived children), and a gen-server `call` that mints a fresh `ref` before its
+reply-receive (re-run mints a new ref → the prior reply never matches → livelock). The
+clean cases all pass. Resolving it — capture the continuation *through* the native
+frame so the thunk doesn't re-run, or run a stateful-native-wrapped suspending body on
+a coroutine — is the substance of step 3, before the default can flip. Details in
+`concurrency-v2.md` §8.1.

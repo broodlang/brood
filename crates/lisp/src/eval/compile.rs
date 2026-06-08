@@ -2177,7 +2177,10 @@ fn push_frame(
 /// Callers: `dispatch` (non-tail VM-closure branch), `exec_call`'s IC fast path, and
 /// `force` (a tail `Step`). The tree-walker (`BROOD_VM=0`) is the remaining fallback.
 fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0: EnvId) -> LispResult {
-    match vm_run_bc(heap, compiled0, args, genv0, None)? {
+    // `top_level = false`: this is a nested run (the process-body driver is
+    // `run_process_body`), so it does no loop-top preempt/kill capture — only the
+    // body driver does. A `receive` suspend that surfaces here re-raises (§8.1).
+    match vm_run_bc(heap, compiled0, args, genv0, None, false)? {
         VmOutcome::Done(v) => Ok(v),
         // A `receive` suspended inside this VM run — but this run is **nested** under a
         // native (a `map`/`try`/`binding`/`%isolate` callback that re-entered the VM via
@@ -2196,7 +2199,55 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
             heap.live_arm_truncate(s.entry_arms);
             Err(LispError::suspend(deadline))
         }
+        // `top_level = false` ⇒ no loop-top capture, so a nested run never preempts or
+        // self-kills; these are produced only by the body driver (`run_process_body`).
+        VmOutcome::Preempted(_) | VmOutcome::Killed => {
+            unreachable!("a nested vm_apply run does no loop-top preempt/kill capture")
+        }
     }
+}
+
+/// Run a green process's body thunk on the bytecode driver as the **top-level**
+/// state-capture run (ADR-100 §8.3) — the entry `run_one` uses in capture mode. A
+/// `None` `resume` starts the body fresh (resolving `body`'s 0-arg compiled arm); a
+/// `Some` replays a parked continuation. Unlike [`apply_value`]/[`vm_apply`], a
+/// `Suspended`/`Preempted`/`Killed` outcome is **returned** (the scheduler parks /
+/// re-enqueues / retires it) rather than re-raised — this is the body driver, so its
+/// continuation is the process's continuation. `body` must be VM-eligible
+/// ([`process_body_vm_eligible`]); the scheduler keeps a coroutine for any that isn't.
+pub(crate) fn run_process_body(
+    heap: &mut Heap,
+    body: Value,
+    resume: Option<Suspended>,
+) -> Result<VmOutcome, LispError> {
+    match resume {
+        // Resume: the continuation's own `cur.arm` drives; `arm0`/`genv0` are ignored
+        // by the resume branch, so pass a (cheap) clone of it as the placeholder.
+        Some(s) => {
+            let arm = s.cur.arm.clone();
+            vm_run_bc(heap, arm, &[], EnvId::GLOBAL, Some(s), true)
+        }
+        // Fresh: resolve the 0-arg body arm and run it as the top-level driver.
+        None => {
+            let id = match body {
+                Value::Fn(id) => id,
+                _ => return Err(LispError::type_err("process body must be a function")),
+            };
+            let arm = compiled_arm_for(heap, id, 0)
+                .expect("capture mode is selected only for a VM-eligible body");
+            let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
+            vm_run_bc(heap, arm, &[], cenv, None, true)
+        }
+    }
+}
+
+/// Is `f` a 0-arg thunk the bytecode driver can run end-to-end (so the scheduler can
+/// pick state-capture mode for it)? A closure whose 0-arity arm compiled to a chunk.
+/// Anything else (a non-`fn`, or a body that defers to the tree-walker — e.g. one
+/// carrying a `def`) stays on a coroutine, where `receive` yields the native stack
+/// (ADR-100 §8.1 option a: corosensei remains only for tree-walked process bodies).
+pub(crate) fn process_body_vm_eligible(heap: &Heap, f: Value) -> bool {
+    matches!(f, Value::Fn(id) if compiled_arm_for(heap, id, 0).is_some())
 }
 
 // ===================== bytecode stepping engine (ADR-100, Stage 1) =====================
@@ -2844,12 +2895,24 @@ pub(crate) struct Suspended {
     pub(crate) deadline: Option<std::time::Instant>,
 }
 
-/// What a [`vm_run_bc`] call produced: a finished value, or a captured continuation to
-/// park and later resume (ADR-100 §8). A real error is the `Err` of the enclosing
-/// `Result`. With `BROOD_STATE_CAPTURE` off, `Suspended` is never produced.
+/// What a [`vm_run_bc`] call produced (ADR-100 §8). A real error is the `Err` of the
+/// enclosing `Result`. With `BROOD_STATE_CAPTURE` off — or for any run not driving a
+/// capture-mode green process — only `Done` is produced; the other three are the
+/// state-capture scheduler outcomes the driver reifies in place of a coroutine yield.
 pub(crate) enum VmOutcome {
+    /// The body finished with this value.
     Done(Value),
+    /// A clean `receive` parked: the captured continuation to store + resume on a
+    /// wake (§8.2). `run_one` parks it on the mailbox.
     Suspended(Suspended),
+    /// The reduction budget was exhausted at a loop-top safepoint (the state-capture
+    /// analogue of `Suspend::Preempt`): captured the continuation so `run_one` can
+    /// **re-enqueue** it (possibly onto another worker — live migration, §7).
+    Preempted(Suspended),
+    /// A hard `:kill` was pending at a loop-top safepoint (the analogue of
+    /// `Suspend::Kill`): stop now, no capture — `run_one` retires the process with the
+    /// mailbox's kill reason. Untrappable by construction (fires below `%try`).
+    Killed,
 }
 
 /// The bytecode driver (ADR-100 Stage 4): run a chunked arm and the **entire chain of
@@ -2876,6 +2939,7 @@ fn vm_run_bc(
     args0: &[Value],
     genv0: EnvId,
     resume: Option<Suspended>,
+    top_level: bool,
 ) -> Result<VmOutcome, LispError> {
     crate::perf_bump!(vm_apply);
     // Keep the GC-block depth consistent for any nested native / tree-walked sub-call
@@ -2883,6 +2947,12 @@ fn vm_run_bc(
     // per Brood call — runaway non-tail recursion is caught by `MAX_BC_FRAMES` below,
     // not the native-stack byte guard.
     let _gc_block = crate::process::GcBlockGuard::enter();
+    // Loop-top **preempt/kill capture** is done only by the *top-level* body driver
+    // (`run_process_body`) of a capture-mode green process (ADR-100 §8). A nested
+    // `vm_apply` run (a `map`/`try`/`binding` native callback) is NOT top-level: it
+    // can't capture a `Preempted`/`Killed` across the native boundary, so it uses the
+    // normal `tick` and any `receive` suspend that surfaces re-raises (§8.1 re-run).
+    let capture = top_level && crate::process::in_capture_run();
 
     // Entry marks for a one-shot unwind on error (truncate every frame's roots / env
     // roots / live-arm registrations back to where the driver started). Carried in the
@@ -2957,7 +3027,36 @@ fn vm_run_bc(
             unwind(heap);
             return Err(crate::eval::memory_limit_error(used));
         }
-        crate::process::tick();
+        if capture {
+            // State-capture preemption/kill (ADR-100 §8.1), in place of the coroutine
+            // yield: the frame boundary is the safepoint. A pending hard `:kill` stops
+            // now (no capture — the process is retired and its heap dropped); a hit
+            // reduction budget captures the continuation so `run_one` re-enqueues it
+            // (on any worker — live migration). Both fire only at this clean loop top.
+            if crate::process::capture_hard_kill_pending() {
+                return Ok(VmOutcome::Killed);
+            }
+            if crate::process::tick_capture() {
+                let cur = BcFrame {
+                    arm: cur_arm,
+                    ip: cur_ip,
+                    base: cur_base,
+                    env: cur_env,
+                    env_base: cur_env_base,
+                    arm_slot: cur_arm_slot,
+                };
+                return Ok(VmOutcome::Preempted(Suspended {
+                    frames,
+                    cur,
+                    entry_roots,
+                    entry_env,
+                    entry_arms,
+                    deadline: None,
+                }));
+            }
+        } else {
+            crate::process::tick();
+        }
         if crate::process::deadline_exceeded() {
             unwind(heap);
             return Err(crate::eval::deadline_error());
@@ -3334,11 +3433,11 @@ mod tests {
         // WITHOUT unwinding (the operand stack — the pushed callee — survives on the
         // heap for the resume).
         let roots_before = heap.roots_len();
-        let outcome = vm_run_bc(&mut heap, arm.clone(), &[native], EnvId::GLOBAL, None)
+        let outcome = vm_run_bc(&mut heap, arm.clone(), &[native], EnvId::GLOBAL, None, true)
             .expect("first run errored");
         let suspended = match outcome {
             VmOutcome::Suspended(s) => s,
-            VmOutcome::Done(_) => panic!("expected a captured suspend, got Done"),
+            _ => panic!("expected a captured suspend"),
         };
         assert!(
             heap.roots_len() > roots_before,
@@ -3346,12 +3445,20 @@ mod tests {
         );
 
         // Resume: replay from the rewound `%receive` call; the native now returns 42.
-        let resumed = vm_run_bc(&mut heap, arm, &[native], EnvId::GLOBAL, Some(suspended))
+        let resumed = vm_run_bc(&mut heap, arm, &[native], EnvId::GLOBAL, Some(suspended), true)
             .expect("resume errored");
         match resumed {
             VmOutcome::Done(Value::Int(n)) => assert_eq!(n, 42, "resumed to the wrong value"),
             VmOutcome::Done(other) => panic!("resumed to a non-int: {:?}", value::tag(other)),
-            VmOutcome::Suspended(_) => panic!("resume suspended again — the gate didn't advance"),
+            other => panic!(
+                "expected Done(42), got {}",
+                match other {
+                    VmOutcome::Suspended(_) => "Suspended (the gate didn't advance)",
+                    VmOutcome::Preempted(_) => "Preempted",
+                    VmOutcome::Killed => "Killed",
+                    VmOutcome::Done(_) => unreachable!(),
+                }
+            ),
         }
         // The driver retired its only frame on `Done`, unwinding the operand stack
         // back to where the first run started.
