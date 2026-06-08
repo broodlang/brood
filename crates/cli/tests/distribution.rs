@@ -1282,7 +1282,7 @@ fn node_down_is_detected() {
 (send {{:name :echo :node :a@127.0.0.1}} [:hi (self)])
 (receive ([:welcome] :ok) (after 30000 (throw "no welcome")))   ; link + monitor are up
 (send {{:name :echo :node :a@127.0.0.1}} [:bye (self)])                  ; make :a exit
-(receive ([:nodedown :a] (println "NODEDOWN-OK"))
+(receive ([:nodedown _] (println "NODEDOWN-OK"))
          (after 10000 (throw "no nodedown")))
 "#
     );
@@ -1618,5 +1618,212 @@ fn dual_listen_serves_tcp_and_unix_at_once() {
         out.status.success() && stdout.contains("DUAL-LISTEN-OK"),
         "one node should be reachable over both TCP and the local Unix socket.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `(monitor-node name)` is **persistent**: after a peer dies (first
+/// `[:nodedown]`), reconnects, and dies again, the *same* monitor — registered
+/// once — fires a second `[:nodedown]` without needing a second `monitor-node`
+/// call. This exercises the "always register, then check liveness" path in
+/// `monitor_node` rather than the old "skip registration when peer is down" path.
+#[test]
+fn monitor_node_fires_on_every_reconnect_cycle() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-mon-persist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+
+    let server_src = format!(
+        r#"
+(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(register :probe (self))
+(defn serve ()
+  (receive
+    ([:ping from] (do (send from [:pong]) (serve)))
+    (_ (serve))))
+(serve)
+"#
+    );
+
+    // B registers ONE monitor, proves the link is up, then waits for a nodedown
+    // (harness kills A1). It then reconnects to A2 and signals "RECONNECTED".
+    // The harness kills A2; B must receive a second nodedown from the original
+    // single monitor registration — no second `monitor-node` call needed.
+    let client_src = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(connect "a@127.0.0.1:{port_a}")
+(monitor-node :a)   ; register once — must survive across reconnect cycles
+(send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
+(receive ([:pong] :ok) (after 10000 (throw "no first pong")))
+(println "ARMED")
+; Wait for the first nodedown (harness kills A1 after ARMED).
+(receive ([:nodedown _] (println "FIRST-NODEDOWN"))
+         (after 15000 (throw "no first nodedown")))
+; Reconnect to A2 (harness restarted A on the same port). Retry until it's up.
+(defn retry-connect (n)
+  (when (= n 0) (throw "reconnect to A2 failed after retries"))
+  (try (connect "a@127.0.0.1:{port_a}")
+    (catch _ (do (sleep 100) (retry-connect (- n 1))))))
+(retry-connect 60)
+(send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
+(receive ([:pong] :ok) (after 10000 (throw "no second pong")))
+(println "RECONNECTED")
+; Wait for the second nodedown (harness kills A2 after RECONNECTED).
+; The original monitor — registered before the first down — must fire again.
+(receive ([:nodedown _] (println "SECOND-NODEDOWN"))
+         (after 15000 (throw "no second nodedown from persistent monitor")))
+"#
+    );
+
+    let mut a1 = spawn_brood(&dir, "server.blsp", &server_src);
+    wait_until_listening(port_a);
+    let mut b = spawn_brood(&dir, "client.blsp", &client_src);
+    let mut b_stdout = b.stdout.take().expect("b stdout");
+
+    // Read until ARMED.
+    let mut buf = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline {
+        let mut chunk = [0u8; 256];
+        match b_stdout.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if String::from_utf8_lossy(&buf).contains("ARMED") {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&buf).contains("ARMED"),
+        "client never signalled ARMED.\n{}",
+        String::from_utf8_lossy(&buf)
+    );
+
+    // Kill A1, wait for port to free, bring A2 up on the same port.
+    let _ = a1.kill();
+    let _ = a1.wait();
+    let mut a2 = None;
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        if TcpStream::connect(("127.0.0.1", port_a)).is_err() {
+            a2 = Some(spawn_brood(&dir, "server.blsp", &server_src));
+            break;
+        }
+    }
+    let mut a2 = a2.expect("port never freed for A2");
+    wait_until_listening(port_a);
+
+    // Read until RECONNECTED.
+    let reconnect_deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < reconnect_deadline {
+        let mut chunk = [0u8; 256];
+        match b_stdout.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if String::from_utf8_lossy(&buf).contains("RECONNECTED") {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Kill A2; B should now receive the second [:nodedown :a].
+    let _ = a2.kill();
+    let _ = a2.wait();
+
+    let _ = b_stdout.read_to_end(&mut buf);
+    let status = b.wait().expect("client finished");
+    let mut b_err = String::new();
+    if let Some(mut e) = b.stderr.take() {
+        let _ = e.read_to_string(&mut b_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&buf);
+    assert!(
+        status.success()
+            && stdout.contains("FIRST-NODEDOWN")
+            && stdout.contains("RECONNECTED")
+            && stdout.contains("SECOND-NODEDOWN"),
+        "monitor_node must fire on every down, not just the first.\n\
+         --- client stdout ---\n{stdout}\n--- client stderr ---\n{b_err}"
+    );
+}
+
+/// `(demonitor-node name)` cancels a node monitor: after calling it, the process
+/// must NOT receive `[:nodedown name]` when the peer subsequently goes down.
+#[test]
+fn demonitor_node_stops_future_deliveries() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-demon-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Client: connect, monitor, demonitor, signal DEMONITORED, then assert
+    // no nodedown arrives within a generous window. The `:stop` message lets
+    // the harness terminate B cleanly without having to kill it.
+    let client_src = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(def peer (connect "a@127.0.0.1:{port_a}"))
+(monitor-node peer)
+(demonitor-node peer)
+(println "DEMONITORED")
+; Give the harness time to kill A, then wait for a nodedown that must NOT arrive.
+(receive
+  ([:nodedown _] (throw "demonitor-node did not cancel the monitor"))
+  (after 4000 (println "NO-NODEDOWN-OK")))
+"#
+    );
+
+    let mut a = spawn_brood(&dir, "server.blsp", &echo_server_src(port_a));
+    wait_until_listening(port_a);
+    let mut b = spawn_brood(&dir, "client.blsp", &client_src);
+    let mut b_stdout = b.stdout.take().expect("b stdout");
+
+    // Wait for B to print DEMONITORED, then kill A.
+    let mut buf = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let mut chunk = [0u8; 256];
+        match b_stdout.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if String::from_utf8_lossy(&buf).contains("DEMONITORED") {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&buf).contains("DEMONITORED"),
+        "client never printed DEMONITORED.\n{}",
+        String::from_utf8_lossy(&buf)
+    );
+
+    // Kill A now that B has demonitored. B's receive should time out cleanly.
+    let _ = a.kill();
+    let _ = a.wait();
+
+    let _ = b_stdout.read_to_end(&mut buf);
+    let status = b.wait().expect("client finished");
+    let mut b_err = String::new();
+    if let Some(mut e) = b.stderr.take() {
+        let _ = e.read_to_string(&mut b_err);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&buf);
+    assert!(
+        status.success() && stdout.contains("NO-NODEDOWN-OK"),
+        "demonitor-node must suppress [:nodedown] delivery.\n\
+         --- client stdout ---\n{stdout}\n--- client stderr ---\n{b_err}"
     );
 }
