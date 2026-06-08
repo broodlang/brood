@@ -3910,41 +3910,79 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     Some(m.get_finalized_function(id))
 }
 
+/// The background JIT compiler (ADR-101 1b). A single dedicated OS thread, lazily spawned,
+/// is the **only** place arms are lowered: it owns the sole mutable access to the JIT
+/// module via [`GLOBAL_JIT`](crate::jit::GLOBAL_JIT), so that lock is otherwise
+/// uncontended. Worker threads never compile — they hand a hot arm here and keep running
+/// the VM until the native pointer is installed.
+///
+/// This is the fix for the scheduler-starvation flake: compiling Cranelift IR is
+/// CPU-bound work of unbounded-ish duration, and doing it inline on a worker thread (while
+/// holding `GLOBAL_JIT`) stalls that worker — during a compile burst the whole pool
+/// serializes on the lock, and any process waiting on a tight timer (`(after ms …)`,
+/// monitor `:down` delivery) can miss its deadline. Moving compilation off the workers
+/// decouples scheduler responsiveness from codegen entirely.
+///
+/// The channel is bounded so a pathological burst can't grow it without limit; on a full
+/// queue the enqueue is dropped and the arm reset to "untried" (it re-tiers later). The
+/// thread is detached and lives for the process; sends after a (theoretical) hangup are
+/// swallowed.
+#[cfg(feature = "jit")]
+static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<Arc<CompiledArm>>> =
+    std::sync::LazyLock::new(|| {
+        use std::sync::atomic::Ordering::Release;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<CompiledArm>>(256);
+        std::thread::Builder::new()
+            .name("brood-jit".into())
+            .spawn(move || {
+                for arm in rx {
+                    let mut jit = crate::jit::GLOBAL_JIT.lock().unwrap_or_else(|e| e.into_inner());
+                    let lowered = jit_lower_arm(&mut jit, &arm);
+                    drop(jit); // install the pointer outside the module lock
+                    match lowered {
+                        Some(ptr) => arm.jit_code.store(ptr as *mut u8, Release),
+                        None => arm.jit_code.store(crate::jit::BAILED, Release),
+                    }
+                }
+            })
+            .expect("spawn brood-jit compiler thread");
+        tx
+    });
+
 /// Tiering entry (ADR-101 1b): on an arm invocation whose frame is already set up at
 /// `roots[base..]`, decide whether to run the JIT'd code. Counts the call; once the arm
-/// crosses the hotness threshold it is compiled once (under the global JIT lock, with a
-/// re-check so two threads don't double-compile) and the fn-pointer cached on the arm.
+/// crosses the hotness threshold it is handed to the [background compiler](JIT_COMPILER)
+/// **once** (a `null → QUEUED` CAS elects the single thread that enqueues it) and runs on
+/// the VM meanwhile. When the native pointer is later installed, subsequent calls run it.
 /// Returns `Some(outcome)` if JIT'd code ran (`0` = Done with the result in `roots[base]`,
 /// `1` = deopt — an operand wasn't an `Int`, `2` = preempt — the back-edge budget was
-/// spent), or `None` to run the arm on the VM (not hot yet, or out of the JIT's subset).
+/// spent), or `None` to run the arm on the VM (not hot yet, compile in flight, or out of
+/// the JIT's subset). **Never blocks on compilation** — that's the whole point.
 #[cfg(feature = "jit")]
-pub(crate) fn jit_tier(arm: &CompiledArm, heap: &mut Heap, base: usize) -> Option<i64> {
-    use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+pub(crate) fn jit_tier(arm: &Arc<CompiledArm>, heap: &mut Heap, base: usize) -> Option<i64> {
+    use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
     const THRESHOLD: u32 = 8;
 
     let code = arm.jit_code.load(Acquire);
-    if code == crate::jit::BAILED {
-        return None;
+    if code == crate::jit::BAILED || code == crate::jit::QUEUED {
+        return None; // out of subset, or compile in flight — run the VM
     }
     if code.is_null() {
-        // Count the invocation; only compile once the arm is hot.
+        // Count the invocation; only enqueue once the arm is hot.
         if arm.jit_calls.fetch_add(1, Relaxed) + 1 < THRESHOLD {
             return None;
         }
-        let mut jit = crate::jit::GLOBAL_JIT.lock().unwrap_or_else(|e| e.into_inner());
-        if arm.jit_code.load(Acquire).is_null() {
-            // Still uncompiled (we won the race): compile or mark BAILED.
-            match jit_lower_arm(&mut jit, arm) {
-                Some(ptr) => arm.jit_code.store(ptr as *mut u8, Release),
-                None => {
-                    arm.jit_code.store(crate::jit::BAILED, Release);
-                    return None;
-                }
-            }
+        // Hot. Elect a single enqueuer via CAS (others see QUEUED and run the VM), then
+        // hand the arm to the background compiler. A full queue → back off: reset to
+        // untried so a later hot call re-attempts (the arm just stays on the VM longer).
+        if arm
+            .jit_code
+            .compare_exchange(std::ptr::null_mut(), crate::jit::QUEUED, AcqRel, Acquire)
+            .is_ok()
+            && JIT_COMPILER.try_send(arm.clone()).is_err()
+        {
+            arm.jit_code.store(std::ptr::null_mut(), Release);
         }
-    }
-    let code = arm.jit_code.load(Acquire);
-    if code.is_null() || code == crate::jit::BAILED {
         return None;
     }
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base) -> i64` produced by
@@ -4373,7 +4411,7 @@ mod tests {
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
         };
-        let sumto = mk_arm(
+        let sumto = Arc::new(mk_arm(
             Chunk {
                 code: vec![
                     Inst::Local(0),
@@ -4393,23 +4431,29 @@ mod tests {
             },
             2,
             2,
-        );
+        ));
 
+        // Compilation is async now (the background compiler thread), so a hot arm returns
+        // None until the native pointer is installed. Poll past the threshold, giving the
+        // compiler time to land the code, and assert it eventually runs native.
         crate::process::yield_now(); // prime the reduction budget (short loops)
         let mut ran_native = 0;
-        for _ in 0..16 {
+        for _ in 0..400 {
             crate::process::yield_now(); // keep the budget topped up across calls
             let mut heap = Heap::new();
             let base = heap.roots_len();
             heap.push_root(Value::Int(5)); // i
             heap.push_root(Value::Int(0)); // acc
             match jit_tier(&sumto, &mut heap, base) {
-                None => {} // not hot yet (below threshold)
+                None => std::thread::sleep(std::time::Duration::from_millis(2)), // not hot / compile in flight
                 Some(0) => {
                     ran_native += 1;
                     match heap.root_at(base) {
                         Value::Int(r) => assert_eq!(r, 15, "JIT'd sumto(5,0)"),
                         other => panic!("expected Int(15), got tag {:?}", value::tag(other)),
+                    }
+                    if ran_native >= 3 {
+                        break;
                     }
                 }
                 Some(o) => panic!("unexpected JIT outcome {o}"),
@@ -4418,13 +4462,22 @@ mod tests {
         assert!(ran_native > 0, "the hot arm should tier up to native code");
 
         // An out-of-subset arm (a bare Global) is marked BAILED — never runs native.
-        let bailing = mk_arm(Chunk { code: vec![Inst::Global(value::intern("x"))] }, 0, 1);
-        for _ in 0..16 {
+        let bailing = Arc::new(mk_arm(Chunk { code: vec![Inst::Global(value::intern("x"))] }, 0, 1));
+        for _ in 0..400 {
             let mut heap = Heap::new();
             let base = heap.roots_len();
             heap.push_root(Value::Int(0));
             assert_eq!(jit_tier(&bailing, &mut heap, base), None, "out-of-subset arm bails");
+            if bailing.jit_code.load(std::sync::atomic::Ordering::Acquire) == crate::jit::BAILED {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        assert_eq!(
+            bailing.jit_code.load(std::sync::atomic::Ordering::Acquire),
+            crate::jit::BAILED,
+            "out-of-subset arm must settle to BAILED"
+        );
     }
 
     /// JIT Stage-1 end-to-end: `vm_run_bc`'s hot-path hook runs a tiered arm as native
@@ -4458,7 +4511,7 @@ mod tests {
                 Inst::SelfCall { argc: 2 },
             ],
         };
-        let sumto = CompiledArm {
+        let arm = Arc::new(CompiledArm {
             nrequired: 2,
             noptional: 0,
             optional_defaults: Box::new([]),
@@ -4469,28 +4522,32 @@ mod tests {
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
-        };
+        });
 
-        // Warm it past the threshold so jit_tier compiles + installs the native code.
+        // Warm it past the threshold so jit_tier hands it to the background compiler;
+        // poll until the native pointer is installed (compilation is async now).
+        use std::sync::atomic::Ordering::Acquire;
         crate::process::yield_now();
-        for _ in 0..10 {
+        let mut tiered = false;
+        for _ in 0..400 {
             crate::process::yield_now();
             let mut h = Heap::new();
             let base = h.roots_len();
             h.push_root(Value::Int(5));
             h.push_root(Value::Int(0));
-            let _ = jit_tier(&sumto, &mut h, base);
+            let _ = jit_tier(&arm, &mut h, base);
+            let code = arm.jit_code.load(Acquire);
+            if !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED {
+                tiered = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let code = sumto.jit_code.load(std::sync::atomic::Ordering::Acquire);
-        assert!(
-            !code.is_null() && code != crate::jit::BAILED,
-            "the arm should have tiered up to native code"
-        );
+        assert!(tiered, "the arm should have tiered up to native code");
 
         // Now run it through vm_run_bc — its fresh-start hook should call the native code.
         crate::process::yield_now();
         let mut heap = Heap::new();
-        let arm = Arc::new(sumto);
         let outcome = vm_run_bc(
             &mut heap,
             arm,
@@ -4573,16 +4630,22 @@ mod tests {
         }
         let vm = t.elapsed();
 
-        // JIT: warm the arm so it compiles, then the hook runs native.
+        // JIT: warm the arm so the background compiler installs native code, then the
+        // hook runs it. Poll until tiered (compilation is async).
+        use std::sync::atomic::Ordering::Acquire;
         let jit_arm = Arc::new(mk());
-        {
+        crate::process::yield_now();
+        for _ in 0..1000 {
             let mut h = Heap::new();
             let b = h.roots_len();
             h.push_root(Value::Int(5));
             h.push_root(Value::Int(0));
-            for _ in 0..10 {
-                let _ = jit_tier(&jit_arm, &mut h, b);
+            let _ = jit_tier(&jit_arm, &mut h, b);
+            let c = jit_arm.jit_code.load(Acquire);
+            if !c.is_null() && c != crate::jit::BAILED && c != crate::jit::QUEUED {
+                break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let r1 = run(&jit_arm);
         assert_eq!(r1, r0, "JIT must match the VM");
