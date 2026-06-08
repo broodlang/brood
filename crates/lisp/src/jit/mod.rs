@@ -59,6 +59,63 @@ impl Jit {
     pub fn module(&mut self) -> &mut JITModule {
         &mut self.module
     }
+
+    /// Compile a trivial `extern "C" fn(heap: *mut Heap) -> i64` that ignores its arg
+    /// and returns `n`, finalize it, and return the executable function pointer. The
+    /// Stage-1 codegen pipeline smoke test (`docs/jit-stage1.md` §1a): it exercises the
+    /// whole path — IR build → `define_function` → `finalize_definitions` →
+    /// `get_finalized_function` — with no asm and no heap access. The returned pointer
+    /// stays valid as long as `self` (the module owns the executable memory).
+    pub fn compile_return_const(&mut self, n: i64) -> *const u8 {
+        use cranelift_codegen::ir::{types, AbiParam, InstBuilder, UserFuncName};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+        use cranelift_module::{Linkage, Module};
+
+        let ptr = self.module.target_config().pointer_type();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(ptr)); // heap: *mut Heap (unused here)
+        sig.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .module
+            .declare_function("brood_jit_smoke", Linkage::Export, &sig)
+            .expect("declare smoke fn");
+
+        let mut ctx = self.module.make_context();
+        ctx.func.signature = sig;
+        ctx.func.name = UserFuncName::user(0, id.as_u32());
+        {
+            let mut fbctx = FunctionBuilderContext::new();
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let block = b.create_block();
+            b.append_block_params_for_function_params(block);
+            b.switch_to_block(block);
+            b.seal_block(block);
+            let v = b.ins().iconst(types::I64, n);
+            b.ins().return_(&[v]);
+            b.finalize();
+        }
+        self.module.define_function(id, &mut ctx).expect("define smoke fn");
+        self.module.clear_context(&mut ctx);
+        self.module.finalize_definitions().expect("finalize smoke fn");
+        self.module.get_finalized_function(id)
+    }
+}
+
+#[cfg(test)]
+mod smoke {
+    use super::*;
+
+    /// End-to-end: Cranelift compiles a constant-returning function, we finalize it and
+    /// call the resulting pointer. Validates the codegen pipeline (build + JITModule +
+    /// fn-pointer call) before any real arm lowering. No asm, no heap access.
+    #[test]
+    fn jit_compiles_and_runs_a_constant_fn() {
+        let mut jit = Jit::new();
+        let ptr = jit.compile_return_const(42);
+        let f: extern "C" fn(*mut Heap) -> i64 = unsafe { std::mem::transmute(ptr) };
+        assert_eq!(f(std::ptr::null_mut()), 42);
+        // `jit` (and its module-owned executable memory) stays alive through the call.
+    }
 }
 
 /// Preemption poll (ADR-027). JIT'd loop back-edges call this; returns nonzero when the

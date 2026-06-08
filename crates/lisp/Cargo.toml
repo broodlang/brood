@@ -49,7 +49,7 @@ perf-stats = []
 # plus (later increments) the Cranelift module and the platform trampolines. The heavy
 # Cranelift backend (cranelift-jit/-module/-codegen) is pulled in only here; default/
 # release/bundle builds link none of it. Stage 0: callback table + JITModule skeleton.
-jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen"]
+jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "dep:cranelift-frontend"]
 # tree-sitter parsing for *foreign* languages — the `tree-sitter-parse` builtin
 # (ADR: multi-language modes / ROADMAP §C). tree-sitter is the incremental,
 # error-tolerant parser that produces, for Ruby/Elixir/…, the same positioned CST
@@ -168,6 +168,7 @@ unicode-segmentation = "1"
 cranelift-jit = { version = "0.132.1", optional = true }
 cranelift-module = { version = "0.132.1", optional = true }
 cranelift-codegen = { version = "0.132.1", optional = true }
+cranelift-frontend = { version = "0.132.1", optional = true }
 
 [dev-dependencies]
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the

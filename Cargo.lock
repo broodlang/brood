@@ -258,6 +258,7 @@ dependencies = [
  "chacha20poly1305",
  "cosmic-text",
  "cranelift-codegen",
+ "cranelift-frontend",
  "cranelift-jit",
  "cranelift-module",
  "crossterm",
@@ -724,6 +725,18 @@ checksum = "55e57cd185782abada9ab2606bfe88d0abc0d42d83a7d432dcf69991e17fe76e"
 dependencies = [
  "cranelift-bitset",
  "wasmtime-internal-core",
+]
+
+[[package]]
+name = "cranelift-frontend"
+version = "0.132.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a0f17e48d15e29552e2f264d302c31a661a830196d879bbdaf4d7b2bf2f7011"
+dependencies = [
+ "cranelift-codegen",
+ "log",
+ "smallvec",
+ "target-lexicon",
 ]
 
 [[package]]
