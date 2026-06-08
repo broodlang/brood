@@ -44,6 +44,11 @@ pub(crate) static GLOBAL_JIT: LazyLock<Mutex<Jit>> = LazyLock::new(|| Mutex::new
 /// 8-aligned code pointer.
 pub(crate) const BAILED: *mut u8 = 1 as *mut u8;
 
+/// Sentinel: the arm is hot and has been handed to the background compiler thread, but
+/// its native code isn't installed yet. Callers run the VM until the real pointer
+/// replaces this. Distinct from null/`BAILED`/a real (8-aligned) pointer.
+pub(crate) const QUEUED: *mut u8 = 2 as *mut u8;
+
 /// The JIT backend (ADR-101, Layer 1). Owns a Cranelift [`JITModule`] — the executable
 /// memory + symbol table that compiled arms live in.
 ///
