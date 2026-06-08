@@ -3411,25 +3411,92 @@ static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 #[cfg(feature = "jit")]
 pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*const u8> {
     use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_INT};
-    use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags};
+    use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use cranelift_module::{Linkage, Module};
     use std::sync::atomic::Ordering;
 
     let chunk = arm.chunk.as_ref()?;
+    let code = &chunk.code;
+    let len = code.len();
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
+
+    // ---- Pre-bail on any out-of-subset instruction (so we never half-build) ----
+    // Subset: Const(Int) / Local / Prim2(Add,Sub,Mul,Lt,Le,Eq) / Jump / JumpIfFalse.
+    // (SelfCall/loop, Call, Global, etc. come in later increments.)
+    for inst in code {
+        match inst {
+            Inst::Const(cv) if matches!(cv.load(), Value::Int(_)) => {}
+            Inst::Local(_) | Inst::Jump(_) | Inst::JumpIfFalse(_) => {}
+            Inst::Prim2 { op, .. }
+                if matches!(
+                    op,
+                    PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Lt | PrimOp::Le | PrimOp::Eq
+                ) => {}
+            _ => return None,
+        }
+    }
+
+    // ---- Block leaders: ip 0, every jump target, the inst after a jump, the `len`
+    // "done" block. ----
+    let mut is_leader = vec![false; len + 1];
+    is_leader[0] = true;
+    is_leader[len] = true; // the implicit Done block
+    for (ip, inst) in code.iter().enumerate() {
+        if let Inst::Jump(t) | Inst::JumpIfFalse(t) = inst {
+            is_leader[*t] = true;
+            if ip + 1 <= len {
+                is_leader[ip + 1] = true;
+            }
+        }
+    }
+
+    // ---- Operand-stack depth at each leader (abstract interp; all subset stack
+    // values are 64-bit-wide, and a comparison `I8` is always consumed by the
+    // `JumpIfFalse` in its own block, so it never crosses a boundary). ----
+    let mut depth: Vec<Option<i32>> = vec![None; len + 1];
+    let mut work = vec![(0usize, 0i32)];
+    while let Some((ip, d)) = work.pop() {
+        if depth[ip].is_some() {
+            continue;
+        }
+        depth[ip] = Some(d);
+        let (mut cur, mut j) = (d, ip);
+        loop {
+            if j == len {
+                break;
+            }
+            match &code[j] {
+                Inst::Jump(t) => {
+                    work.push((*t, cur));
+                    break;
+                }
+                Inst::JumpIfFalse(t) => {
+                    cur -= 1; // pop the condition
+                    work.push((*t, cur));
+                    work.push((j + 1, cur));
+                    break;
+                }
+                Inst::Const(_) | Inst::Local(_) => cur += 1,
+                Inst::Prim2 { .. } => cur -= 1, // pop 2, push 1
+                _ => break,                     // unreachable (pre-bailed)
+            }
+            j += 1;
+            if is_leader[j] {
+                work.push((j, cur));
+                break;
+            }
+        }
+    }
 
     let m = jit.module();
     let ptr_ty = m.target_config().pointer_type();
-
     let mut sig = m.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // heap
     sig.params.push(AbiParam::new(types::I64)); // base (frame index into roots)
     sig.returns.push(AbiParam::new(types::I64)); // 0 = Done, 1 = deopt
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = m.declare_function(&format!("brood_jit_arm_{seq}"), Linkage::Export, &sig).ok()?;
-
-    // The roots-base callback (import).
     let mut rb_sig = m.make_signature();
     rb_sig.params.push(AbiParam::new(ptr_ty));
     rb_sig.returns.push(AbiParam::new(ptr_ty));
@@ -3441,6 +3508,20 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
 
+    // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt.
+    let leader_block: Vec<Option<cranelift_codegen::ir::Block>> = (0..=len)
+        .map(|ip| {
+            if is_leader[ip] {
+                let blk = b.create_block();
+                for _ in 0..depth[ip].unwrap_or(0) {
+                    b.append_block_param(blk, types::I64);
+                }
+                Some(blk)
+            } else {
+                None
+            }
+        })
+        .collect();
     let entry = b.create_block();
     let deopt = b.create_block();
     b.append_block_params_for_function_params(entry);
@@ -3449,66 +3530,115 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let base = b.block_params(entry)[1];
     let call = b.ins().call(rb_ref, &[heap]);
     let roots_base = b.inst_results(call)[0];
+    b.ins().jump(leader_block[0].unwrap(), &[]);
 
-    // addr of frame slot k = roots_base + (base + k) * STRIDE
     let slot_addr = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
         let idx = b.ins().iadd_imm(base, k);
         let off = b.ins().imul_imm(idx, STRIDE);
         b.ins().iadd(roots_base, off)
     };
+    let is_i64 = |b: &FunctionBuilder, v: cranelift_codegen::ir::Value| {
+        b.func.dfg.value_type(v) == types::I64
+    };
+    // Cranelift block edges carry `BlockArg`s; wrap our operand-stack SSA values.
+    let mkargs = |s: &[cranelift_codegen::ir::Value]| -> Vec<BlockArg> {
+        s.iter().map(|&v| BlockArg::Value(v)).collect()
+    };
 
-    let mut ok = true; // set false to bail (handled after the loop, blocks already half-built)
-    let mut stack: Vec<cranelift_codegen::ir::Value> = Vec::new();
-    for inst in &chunk.code {
-        match inst {
-            Inst::Const(cv) => match cv.load() {
-                Value::Int(n) => {
+    // Translate each leader block in ip order.
+    for ip in 0..len {
+        let Some(blk) = leader_block[ip] else { continue };
+        b.switch_to_block(blk);
+        let mut stack: Vec<cranelift_codegen::ir::Value> = b.block_params(blk).to_vec();
+        let mut j = ip;
+        loop {
+            match &code[j] {
+                Inst::Const(cv) => {
+                    let Value::Int(n) = cv.load() else { return None };
                     let v = b.ins().iconst(types::I64, n);
                     stack.push(v);
                 }
-                _ => {
-                    ok = false;
+                Inst::Local(i) => {
+                    let addr = slot_addr(&mut b, *i as i64);
+                    let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+                    let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+                    let cont = b.create_block();
+                    b.ins().brif(is_int, cont, &[], deopt, &[]);
+                    b.switch_to_block(cont);
+                    let payload =
+                        b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                    stack.push(payload);
+                }
+                Inst::Prim2 { op, .. } => {
+                    let (bb, aa) = (stack.pop()?, stack.pop()?);
+                    let r = match op {
+                        PrimOp::Add => b.ins().iadd(aa, bb),
+                        PrimOp::Sub => b.ins().isub(aa, bb),
+                        PrimOp::Mul => b.ins().imul(aa, bb),
+                        PrimOp::Lt => b.ins().icmp(IntCC::SignedLessThan, aa, bb),
+                        PrimOp::Le => b.ins().icmp(IntCC::SignedLessThanOrEqual, aa, bb),
+                        PrimOp::Eq => b.ins().icmp(IntCC::Equal, aa, bb),
+                        _ => return None,
+                    };
+                    stack.push(r);
+                }
+                Inst::Jump(t) => {
+                    // All boundary-crossing values must be I64 (no bool across a join).
+                    if !stack.iter().all(|&v| is_i64(&b, v)) {
+                        return None;
+                    }
+                    let args = mkargs(&stack);
+                    b.ins().jump(leader_block[*t]?, &args);
                     break;
                 }
-            },
-            Inst::Local(i) => {
-                let addr = slot_addr(&mut b, *i as i64);
-                let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
-                let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
-                let cont = b.create_block();
-                b.ins().brif(is_int, cont, &[], deopt, &[]);
-                b.switch_to_block(cont);
-                let payload = b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
-                stack.push(payload);
-            }
-            Inst::Prim2 { op, .. } => {
-                let (bb, aa) = (stack.pop()?, stack.pop()?);
-                let r = match op {
-                    PrimOp::Add => b.ins().iadd(aa, bb),
-                    PrimOp::Sub => b.ins().isub(aa, bb),
-                    PrimOp::Mul => b.ins().imul(aa, bb),
-                    _ => {
-                        ok = false;
-                        break;
+                Inst::JumpIfFalse(t) => {
+                    let cond = stack.pop()?;
+                    if !stack.iter().all(|&v| is_i64(&b, v)) {
+                        return None;
                     }
-                };
-                stack.push(r);
+                    let tgt = leader_block[*t]?; // falsy → else
+                    let fall = leader_block[j + 1]?; // truthy → fall-through
+                    let args = mkargs(&stack);
+                    if is_i64(&b, cond) {
+                        // A raw Int is *always truthy* in Brood (even 0) — never branch on
+                        // it; take the truthy path unconditionally.
+                        b.ins().jump(fall, &args);
+                    } else {
+                        // A comparison result (I8 0/1): nonzero = true = fall-through.
+                        b.ins().brif(cond, fall, &args, tgt, &args);
+                    }
+                    break;
+                }
+                _ => return None,
             }
-            _ => {
-                ok = false;
+            j += 1;
+            if j == len {
+                // Fall off the end into Done with the result on top.
+                if !stack.iter().all(|&v| is_i64(&b, v)) {
+                    return None;
+                }
+                let args = mkargs(&stack);
+                b.ins().jump(leader_block[len]?, &args);
+                break;
+            }
+            if is_leader[j] {
+                if !stack.iter().all(|&v| is_i64(&b, v)) {
+                    return None;
+                }
+                let args = mkargs(&stack);
+                b.ins().jump(leader_block[j]?, &args);
                 break;
             }
         }
     }
 
-    if !ok || stack.len() != 1 {
-        // Bail: abandon this (incomplete) function — clear the context, declare nothing.
-        m.clear_context(&mut ctx);
-        return None;
+    // Done block: box the single result into roots[base], return 0.
+    let done = leader_block[len]?;
+    b.switch_to_block(done);
+    if b.block_params(done).len() != 1 {
+        return None; // arm doesn't leave exactly one value (unexpected shape)
     }
-
-    // Box the single result into roots[base] and return 0 (Done).
-    let result = stack.pop()?;
+    let result = b.block_params(done)[0];
     let addr0 = slot_addr(&mut b, 0);
     let tag_int = b.ins().iconst(types::I8, TAG_INT as i64);
     b.ins().store(MemFlags::new(), tag_int, addr0, 0);
@@ -3773,6 +3903,60 @@ mod tests {
         match heap.root_at(base) {
             Value::Int(n) => assert_eq!(n, 42, "JIT-compiled (+ x 1) on x=41"),
             other => panic!("expected Int(42), got tag {:?}", value::tag(other)),
+        }
+    }
+
+    /// JIT Stage-1 Step B: control flow + comparisons. Lower `(if (< x 0) (- 0 x) x)`
+    /// (an `abs`) — JumpIfFalse/Jump → CFG blocks, `<` → an `icmp` branch, the two arms
+    /// merging at a Done block param — and check both arms against the math.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_lowers_and_runs_an_if_with_comparison() {
+        let prim2 = |op: PrimOp, head: &str| Inst::Prim2 {
+            op,
+            map: [0, 1],
+            head: value::intern(head),
+            guard: AtomicU64::new(0),
+            pos: None,
+        };
+        // (if (< x 0) (- 0 x) x), x = slot 0.
+        let chunk = Chunk {
+            code: vec![
+                Inst::Local(0),                            // 0: x
+                Inst::Const(ConstVal::new(Value::Int(0))), // 1: 0
+                prim2(PrimOp::Lt, "<"),                    // 2: x < 0
+                Inst::JumpIfFalse(8),                      // 3: false → else (ip 8)
+                Inst::Const(ConstVal::new(Value::Int(0))), // 4: then: 0
+                Inst::Local(0),                            // 5: x
+                prim2(PrimOp::Sub, "-"),                   // 6: 0 - x
+                Inst::Jump(9),                             // 7: → done (ip 9 = len)
+                Inst::Local(0),                            // 8: else: x
+            ],
+        };
+        let arm = CompiledArm {
+            nrequired: 1,
+            noptional: 0,
+            optional_defaults: Box::new([]),
+            rest_slot: None,
+            nslots: 1,
+            body: Node::Const(ConstVal::new(Value::Nil)),
+            chunk: Some(chunk),
+            has_runtime_handles: false,
+        };
+
+        let mut jit = crate::jit::Jit::new();
+        let ptr = jit_lower_arm(&mut jit, &arm).expect("if/cmp arm should JIT");
+        let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+
+        for (x, want) in [(-5i64, 5i64), (3, 3), (0, 0)] {
+            let mut heap = Heap::new();
+            let base = heap.roots_len();
+            heap.push_root(Value::Int(x));
+            assert_eq!(f(&mut heap as *mut Heap, base as i64), 0, "Done for x={x}");
+            match heap.root_at(base) {
+                Value::Int(n) => assert_eq!(n, want, "abs({x})"),
+                other => panic!("x={x}: expected Int({want}), got tag {:?}", value::tag(other)),
+            }
         }
     }
 }
