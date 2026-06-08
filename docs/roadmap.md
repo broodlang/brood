@@ -142,13 +142,17 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
       thread-local (set per `vm_run_bc` entry) lets the gate tell the two apart.
       Flag-on: the previously-hanging files pass (`gen` 18/18, `concurrency` 33/33,
       `pids`/`link`/`exit`), and **1852/1859** in-language tests pass; live migration +
-      §6 bar hold. **Still blocking the default flip:** 6 heavy **kill/monitor-of-parked-
-      processes-at-scale** tests time out flag-on (mass-kill 100 parked, 1000 monitored
-      → `:down`, `observer` process-info) — plain fan-out is identical flag-on/off, so it's
-      the `exit`→`wake_enqueue`→`Killed`-retire→`:down` path under load, not throughput.
-      Flag stays **off**.
-    - ⬜ §8.4 step 3 (rest) + step 4: debug the kill/monitor-at-scale hang → flip the
-      default → delete corosensei + generalize stealing to running processes. §6 bar.
+      §6 bar hold. The **kill/monitor-of-parked-processes-at-scale deadlock** is also
+      FIXED: a worker parked in a dirty native-nested block looked schedulable to
+      `assign_worker` (empty queue + busy), so processes were stranded on it → deadlock;
+      now a blocked worker marks itself **dirty** (`dirty_block`/`CURRENT_WORKER`),
+      `assign_worker` excludes it, and entering the block drains its stranded backlog
+      (non-fresh capture procs re-routed; fresh stay stealable; coroutines stay).
+      mass-kill/1000-monitored/`observer` pass flag-on; §6 bar holds flag on+off.
+    - ⬜ §8.4 step 3 (last bit) + step 4: one flag-on flake left — `gen_test`'s linked-spawn
+      describe (~25%: `%isolate` reap `:kill`s a still-alive *linked* server → back-propagates;
+      an async-`stop`-vs-reap timing race capture-mode exposes; resolve Brood-side). Then
+      flip the default → delete corosensei + generalize stealing. Flag stays **off**. §6 bar.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.

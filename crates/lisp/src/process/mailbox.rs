@@ -432,6 +432,13 @@ pub fn receive_match(
                     return Err(LispError::suspend(deadline));
                 }
                 wait_for_message(&ctx, i, deadline);
+                // Back from the wait → running again. The green-coroutine/`run_one`
+                // path already flips the status to RUNNING on resume, but the
+                // yielder-less *block* path (the root thread, and a native-nested
+                // capture receive — §7.4) returns inline without a `run_one`, so its
+                // `ST_WAITING` would otherwise leak into the next scan (and a
+                // `process-info` after the receive would read `:waiting` while running).
+                set_self_status(&ctx, ST_RUNNING);
             }
             Err(e) => {
                 // A control signal (suspend) keeps the in-progress receive's persisted
@@ -512,12 +519,20 @@ fn scan_mailbox(
 fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
     match ctx.yielder {
         // Root thread: block on the condvar (with timeout) until a send or deadline.
+        // Also the **native-nested capture** path (a `receive` reached through a native
+        // frame in a capture-mode process — §7.4): it blocks this worker thread, so
+        // `dirty_block` marks the worker excluded from `assign_worker` and re-routes its
+        // movable backlog, lest a process be stranded on a worker that won't run it
+        // (the deadlock that bit the mass-kill/monitor-at-scale tests). A no-op on the
+        // real root thread (it owns no worker), and the green-coroutine path never
+        // reaches here (it suspends via the yielder below).
         None => {
             let st = crate::core::sync::lock(&ctx.mailbox.state);
             if st.queue.len() > i {
                 return; // a message arrived between the scan and here — re-scan
             }
             set_self_status(ctx, ST_WAITING);
+            let _dirty = crate::process::dirty_block();
             match deadline {
                 Some(d) => {
                     let now = Instant::now();

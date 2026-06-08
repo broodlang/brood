@@ -528,11 +528,21 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
      lets the `receive` gate distinguish the two. Flag-on: 1852/1859 in-language tests
      pass; the previously-hanging files (`gen`/`concurrency`/`pids`/`link`/`exit`) pass;
      live migration + §6 bar hold.
-   - ⬜ **Still blocking the flip:** 6 heavy **kill/monitor-of-parked-processes-at-scale**
-     tests time out flag-on (mass-kill 100 parked, 1000 monitored → `:down`, `observer`
-     process-info). Plain 1000-process fan-out is identical flag-on/off (41 ms), so the
-     hang is in the `exit`→`wake_enqueue`→`Killed`-retire→`:down` path under load, not
-     throughput — to debug next.
+   - ✅ **(2026-06-08)** The **kill/monitor-of-parked-processes-at-scale deadlock** is
+     fixed. Root cause: a worker parked in a dirty native-nested block (inside `run_one`,
+     never back to its run loop) still looked schedulable to `assign_worker` (empty queue
+     + busy = low load), so processes were routed onto it and stranded → all-threads-asleep
+     deadlock. Fix (§7.4): a worker marks itself **dirty** for the block (`dirty_block`,
+     keyed by a `CURRENT_WORKER` thread-local); `assign_worker` excludes a dirty worker,
+     and entering the block **drains its stranded backlog** (non-fresh capture procs — the
+     unstealable ones — re-routed off it; fresh stay stealable; pinned coroutines stay).
+     The mass-kill/1000-monitored/`observer` tests now pass flag-on; §6 bar holds flag
+     on+off; the surgical drain keeps timing perturbation minimal.
+   - ⬜ **Last flag-on issue before the flip:** `gen_test`'s *linked-spawn* describe is
+     ~25% flaky flag-on (`%isolate`'s reap `:kill`s a *still-alive linked* server → `:kill`
+     back-propagates to the isolate-runner; an async-`stop`-vs-reap race that capture-mode
+     timing exposes). Not a scheduler-correctness bug; resolve by making the reap/stop
+     ordering deterministic (Brood side) before flipping. `stream_test` is WIP.
 4. Delete corosensei (8.3 last bullet); re-run the bar. Generalise stealing.
 
 This is the scheduler core (the KI-1 subsystem) — run it as a focused effort, not

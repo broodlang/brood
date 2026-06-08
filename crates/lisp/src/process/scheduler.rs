@@ -605,6 +605,73 @@ pub(super) fn set_capture_run(on: bool) {
 }
 
 thread_local! {
+    /// This thread's worker id, set once at `worker_loop` entry; `None` off a worker
+    /// (the root thread). Lets a worker mark *itself* dirty-blocked when it parks in a
+    /// native-nested receive.
+    static CURRENT_WORKER: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Per-worker "dirty-blocked" flag (ADR-100 §7.4): set while a worker is parked inside
+/// a **native-nested** capture `receive` (the dirty-scheduler carve-out — it blocks the
+/// thread, never returning to its run loop). A dirty worker is excluded from
+/// `assign_worker` and its movable backlog is re-routed, so no process is stranded on a
+/// worker that won't run it. Sized to match `WORKERS`.
+static WORKER_DIRTY: LazyLock<Vec<AtomicBool>> =
+    LazyLock::new(|| (0..WORKERS.len()).map(|_| AtomicBool::new(false)).collect());
+
+/// Mark the current worker dirty-blocked and re-route its movable backlog, returning a
+/// guard that clears the flag on drop. A no-op off a worker thread (the root, which
+/// owns no queue). Called by the yielder-less `receive` block (`wait_for_message`).
+pub(crate) fn dirty_block() -> DirtyBlockGuard {
+    match CURRENT_WORKER.with(|c| c.get()) {
+        Some(wid) => {
+            WORKER_DIRTY[wid].store(true, Ordering::Relaxed);
+            drain_worker_queue(wid);
+            DirtyBlockGuard(Some(wid))
+        }
+        None => DirtyBlockGuard(None),
+    }
+}
+
+/// Clears the current worker's dirty-blocked flag when the native-nested receive's
+/// blocking wait returns.
+pub(crate) struct DirtyBlockGuard(Option<usize>);
+impl Drop for DirtyBlockGuard {
+    fn drop(&mut self) {
+        if let Some(wid) = self.0 {
+            WORKER_DIRTY[wid].store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Re-route the genuinely-**stranded** processes off a dirty worker: a **non-fresh
+/// capture** process can't be stolen (`try_steal` is fresh-only) and has no native
+/// stack, so it must be moved by hand, or it sits forever on a worker stuck in a
+/// native-nested block (the mass-kill/monitor deadlock). A **fresh** process is left in
+/// place — an idle worker will steal it (`try_steal`); and a pinned **coroutine** must
+/// stay (moving it is the KI-1b hazard). Re-routing only the stranded set keeps the
+/// drain minimal, so it perturbs scheduling (and timing-sensitive tests) as little as
+/// possible. `assign_worker` already excludes `wid`, so they land elsewhere.
+fn drain_worker_queue(wid: usize) {
+    let mut stranded: Vec<Box<Process>> = Vec::new();
+    {
+        let mut q = crate::core::sync::lock(&WORKERS[wid].0);
+        let mut keep: VecDeque<Box<Process>> = VecDeque::new();
+        while let Some(proc) = q.pop_front() {
+            if !proc.fresh && matches!(proc.run, Run::Capture { .. }) {
+                stranded.push(proc);
+            } else {
+                keep.push_back(proc);
+            }
+        }
+        *q = keep;
+    }
+    for proc in stranded {
+        wake_enqueue(proc); // non-fresh capture → migrates to a non-dirty worker
+    }
+}
+
+thread_local! {
     /// True while the **innermost** `vm_run_bc` is the *top-level* body driver — i.e.
     /// the running `receive` is reached purely through bytecode, with no native frame
     /// (a `%isolate`/`%try`/`map` callback) between it and the driver. A clean
@@ -805,6 +872,11 @@ fn assign_worker() -> usize {
     // process is the one thing it misses.) Sampled via `try_lock`, so a momentarily
     // contended queue reads as `MAX` and is skipped rather than blocking the spawner.
     let load = |i: usize| -> usize {
+        // A dirty-blocked worker (parked in a native-nested receive — §7.4) won't return
+        // to its run loop, so never route work to it (it would be stranded there).
+        if WORKER_DIRTY[i].load(Ordering::Relaxed) {
+            return usize::MAX;
+        }
         match WORKERS[i].0.try_lock() {
             Ok(q) => q
                 .len()
@@ -1096,6 +1168,7 @@ fn ensure_workers() {
 }
 
 fn worker_loop(wid: usize) {
+    CURRENT_WORKER.with(|c| c.set(Some(wid)));
     loop {
         // 1. Our own queue first (FIFO). Pinned, possibly-suspended coroutines
         //    live only here and must resume on this thread (INV-2).
