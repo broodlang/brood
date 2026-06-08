@@ -805,19 +805,21 @@ the workaround available today.
       grows), a CFG with block-param merges, the self-loop as a back-edge with
       `brood_rt_tick` preemption (deopt codes 0=Done/1=non-int/2=preempt), and a tag-check
       `→` VM deopt on any non-`Int`. Tiering: a per-arm call counter compiles past a
-      threshold under a process-wide `Mutex<Jit>`, installs the fn-pointer atomically on
-      the `CompiledArm`. **Two VM hooks run it:** `vm_run_bc`'s fresh-start hook *and* the
+      threshold, electing one thread (`null→QUEUED` CAS) to hand the arm to a dedicated
+      `brood-jit` **background compiler thread** — the sole holder of `Mutex<Jit>`, so
+      workers never block on codegen (the fix for scheduler starvation: inline compile under
+      the lock stalled the pool during a burst and made tight-timer tests flake; proven with
+      an amplified 50ms-delay that failed synchronously at 326s, passes backgrounded at
+      ~55s). The finalized fn-pointer is installed atomically on the `CompiledArm`.
+      **Two VM hooks run it:** `vm_run_bc`'s fresh-start hook *and* the
       `ChunkExit::Call` site (so a hot Brood→Brood callee runs native too), each falling
       back to the VM on deopt/preempt/not-hot with the frame stack intact. The
       pinned-register trampoline (ADR-101 §6.2) was **not needed** — callbacks take `heap`
-      as a normal arg, so no asm. **Verified:** differential JIT≡VM 2/2, lib 258/258
+      as a normal arg, so no asm. **Verified:** differential JIT≡VM 2/2, lib 259/259
       (+6 JIT tests), in-language suite 2039/2039, §6 KI-1 bar 10/10 + `GC_STRESS`
-      (GC-safe by construction — the int subset never allocates); **~27× speedup** on a
+      (GC-safe by construction — the int subset never allocates); **~65× speedup** on a
       `sumto` int loop (`jit_speedup_vs_vm` bench). Repr was kept (`value-repr.md`): values
-      live in `roots`, only unboxed `i64` in registers. **Known timing sensitivity:**
-      compiling under the `GLOBAL_JIT` mutex briefly stalls the worker pool during a
-      compile burst (surfaced once as a flaky 500ms-monitor-timeout miss in the suite) —
-      moving compilation to a background thread is the Stage-2 fix.
+      live in `roots`, only unboxed `i64` in registers.
     - ⬜ **Stage 2 — Inline primitives**: `cons` / arithmetic / `car` / `cdr` as
       Cranelift IR with inline tag checks; deopt to `brood_rt_call_slow` on
       mismatch.

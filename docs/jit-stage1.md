@@ -122,9 +122,20 @@ when absent). What shipped:
   the `I8` result of a comparison prim (Int `0` is truthy in Brood, so a raw payload can't
   drive the branch).
 - **Tiering (1b):** each `CompiledArm` carries `jit_calls: AtomicU32` + `jit_code:
-  AtomicPtr<u8>`. On the 8th call the arm compiles under the `GLOBAL_JIT` mutex; the
-  finalized pointer is installed atomically and every subsequent entry runs native.
-  `BAILED` (≠ null, ≠ a real pointer) marks an out-of-subset arm so it's tried once.
+  AtomicPtr<u8>`. On the 8th call a `null → QUEUED` CAS elects one thread to hand the arm
+  to the **background compiler** (see below); the finalized pointer is then installed
+  atomically and every subsequent entry runs native. `BAILED` (1) marks an out-of-subset
+  arm so it's tried once; `QUEUED` (2) marks a compile in flight (run the VM meanwhile).
+- **Background compilation:** arms are lowered on a single dedicated `brood-jit` thread —
+  the sole holder of the `GLOBAL_JIT` mutex, so it's otherwise uncontended. **Worker
+  threads never compile**, they enqueue and keep running the VM. This is load-bearing for
+  the scheduler: Cranelift codegen is CPU-bound work of non-trivial duration, and doing it
+  inline on a worker (holding the lock) starves the pool during a compile burst — a process
+  on a tight timer (`(after ms …)`, monitor `:down`) could then miss its deadline. Proven
+  with an amplified 50ms-per-compile delay: synchronous compile failed the suite reliably
+  (at 326s, on whichever concurrent timing-sensitive test coincided with the burst);
+  background compile passes the *same* stress 2/2 at ~55s (the delay no longer touches the
+  workers).
 - **Safepoints/preempt/deopt (1d):** loop back-edges call `brood_rt_tick` (preempt only in
   a capture-mode green process — gated on `in_capture_run`, matching the VM loop-top);
   deopt returns code 1, preempt code 2, normal completion 0. Values live in `Heap::roots`
@@ -139,9 +150,6 @@ when absent). What shipped:
 debug-assertions=on" --release`. Demonstrated **~27× speedup** on a `sumto` int loop
 (`jit_speedup_vs_vm`, `#[ignore]` bench).
 
-**Known timing sensitivity (not a correctness bug).** Compilation holds the process-wide
-`GLOBAL_JIT` mutex on the worker thread running the hot process; during the suite's
-initial compile burst this can briefly stall the pool. It surfaced once as a flaky miss on
-`dynamic_test`'s tight `(after 500 :timeout)` monitor wait (the suite is otherwise green,
-and green by default since the JIT is off). Moving compilation off the scheduler's
-critical path (a background compile thread) is the natural Stage-2 fix.
+**Speedup** — `jit_speedup_vs_vm` measures **~65×** on `sumto(100000,0)` (VM ~18s vs JIT
+~0.28s over 300 reps): the native loop replaces the whole bytecode dispatch/IC/env-hop
+chain with a register-resident integer loop.
