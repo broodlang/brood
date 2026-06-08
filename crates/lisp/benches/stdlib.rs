@@ -145,7 +145,7 @@ mod hash {
     use super::*;
 
     /// SHA-256 a short string `n` times.
-    #[divan::bench(args = [100, 1_000])]
+    #[divan::bench(args = [100, 500])]
     fn sha256_short(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
@@ -170,7 +170,7 @@ mod hash {
     }
 
     /// HMAC-SHA-256 a short string `n` times.
-    #[divan::bench(args = [100, 1_000])]
+    #[divan::bench(args = [50, 200])]
     fn hmac_sha256(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
@@ -213,7 +213,7 @@ mod uuid {
     }
 
     /// Generate `n` name-based UUID v5 strings.
-    #[divan::bench(args = [100, 1_000])]
+    #[divan::bench(args = [50, 200])]
     fn v5(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
@@ -380,7 +380,7 @@ mod url {
     }
 
     /// `query-encode` → `query-decode` round-trip `n` times.
-    #[divan::bench(args = [100, 1_000])]
+    #[divan::bench(args = [50, 200])]
     fn query_roundtrip(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,

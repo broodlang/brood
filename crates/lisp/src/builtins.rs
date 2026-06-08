@@ -1357,6 +1357,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "%sha512-bytes",Arity::exact(1), Sig::new(vec![any], string),    sha512_hex_bytes);
     def(heap, "%md5",         Arity::exact(1), Sig::new(vec![string], string), md5_hex);
     def(heap, "%md5-bytes",   Arity::exact(1), Sig::new(vec![any], string),    md5_hex_bytes);
+    // HMAC primitives — one-call Rust implementations over the hmac crate already
+    // present for the node handshake. Replaces the pure-Brood RFC 2104 construction
+    // in std/hash.blsp which was ~200x slower due to hex-encode/decode round-trips.
+    def(heap, "%hmac-sha256", Arity::exact(2), Sig::new(vec![string, string], string), hmac_sha256_fn);
+    def(heap, "%hmac-sha1",   Arity::exact(2), Sig::new(vec![string, string], string), hmac_sha1_fn);
+    def(heap, "%hmac-sha512", Arity::exact(2), Sig::new(vec![string, string], string), hmac_sha512_fn);
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
     // layout / lock file / conflict policy are all Brood (std/package.blsp).
@@ -1960,6 +1966,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%sha512-bytes", &["bytes"], "Lowercase hex SHA-512 of a vector (or list) of byte integers 0–255."),
     ("%md5",          &["s"],     "Lowercase hex MD5 of string s's UTF-8 bytes. NOT collision-resistant; use sha256 for security-sensitive hashing."),
     ("%md5-bytes",    &["bytes"], "Lowercase hex MD5 of a vector (or list) of byte integers 0–255."),
+    ("%hmac-sha256", &["key", "message"], "HMAC-SHA256 of `message` keyed with `key` (both strings). Returns lowercase hex. RFC 2104 over sha2."),
+    ("%hmac-sha1",   &["key", "message"], "HMAC-SHA1 of `message` keyed with `key`. Returns lowercase hex. Not collision-resistant; prefer hmac-sha256."),
+    ("%hmac-sha512", &["key", "message"], "HMAC-SHA512 of `message` keyed with `key`. Returns lowercase hex."),
     ("%git-resolve-ref", &["url", "ref"], "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037)."),
     ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),
     ("%rm-rf", &["path"], "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037)."),
@@ -6260,6 +6269,44 @@ fn md5_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use md5::{Digest, Md5};
     let bytes = collect_bytes("%md5-bytes", arg(args, 0), heap)?;
     Ok(heap.alloc_string(&digest_to_hex(Md5::digest(&bytes))))
+}
+
+// ---- HMAC primitives -------------------------------------------------------
+
+/// `(%hmac-sha256 key message)` — HMAC-SHA256 → lowercase hex.
+fn hmac_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    let key = expect_string(heap, "%hmac-sha256", arg(args, 0))?;
+    let msg = expect_string(heap, "%hmac-sha256", arg(args, 1))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
+        .map_err(|e| LispError::runtime(format!("%hmac-sha256: {e}")))?;
+    mac.update(msg.as_bytes());
+    Ok(heap.alloc_string(&digest_to_hex(mac.finalize().into_bytes())))
+}
+
+/// `(%hmac-sha1 key message)` — HMAC-SHA1 → lowercase hex.
+fn hmac_sha1_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha1::Sha1;
+    let key = expect_string(heap, "%hmac-sha1", arg(args, 0))?;
+    let msg = expect_string(heap, "%hmac-sha1", arg(args, 1))?;
+    let mut mac = Hmac::<Sha1>::new_from_slice(key.as_bytes())
+        .map_err(|e| LispError::runtime(format!("%hmac-sha1: {e}")))?;
+    mac.update(msg.as_bytes());
+    Ok(heap.alloc_string(&digest_to_hex(mac.finalize().into_bytes())))
+}
+
+/// `(%hmac-sha512 key message)` — HMAC-SHA512 → lowercase hex.
+fn hmac_sha512_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha512;
+    let key = expect_string(heap, "%hmac-sha512", arg(args, 0))?;
+    let msg = expect_string(heap, "%hmac-sha512", arg(args, 1))?;
+    let mut mac = Hmac::<Sha512>::new_from_slice(key.as_bytes())
+        .map_err(|e| LispError::runtime(format!("%hmac-sha512: {e}")))?;
+    mac.update(msg.as_bytes());
+    Ok(heap.alloc_string(&digest_to_hex(mac.finalize().into_bytes())))
 }
 
 /// Run `git` with `args` (optionally in `cwd`), capturing stdout+stderr. The

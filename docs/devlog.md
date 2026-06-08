@@ -2082,3 +2082,25 @@ output for password/salt/1iter is `120fb6cffcf8b32c…`).
 
 **Suite result:** 553/555, same pre-existing failures as before (parser deep-nest SIGABRT,
 dist link-reconnect flake).
+
+## 2026-06-08 — HMAC primitives: ~200x speedup for hmac-sha256/sha1/sha512
+
+**Motivation:** the stdlib benchmark (`docs/benchmarks/2026-06-08T17-36-20Z.md`) showed
+`hash/hmac-sha256` at ~1.94ms/call vs `hash/sha256` at ~9µs/call — a ~200x gap. Root
+cause: the Brood RFC 2104 construction in `std/hash.blsp` round-tripped through hex
+(`%sha256-bytes` returns a hex string, so the inner-hash bytes had to be decoded back via
+`hash--hex->bytes-loop` before the outer hash). That loop + the 64-element `map` XOR key
+pads + multiple `append`/`into []` conversions added up.
+
+**Fix:** added `%hmac-sha256`, `%hmac-sha1`, `%hmac-sha512` as Rust builtins in
+`crates/lisp/src/builtins.rs` over the `hmac 0.13` crate already present (used by the
+node-link handshake and PBKDF2). These are justified as crypto primitives — the `hmac` crate
+is already a hard dependency, and the performance gap was caused by an API mismatch (hash
+returning hex, not raw bytes) rather than intrinsic Brood list-processing overhead.
+
+`std/hash.blsp` now delegates `hmac-sha256`/`hmac-sha1`/`hmac-sha512` to the primitives,
+removing `hash--hmac`, `hash--normalize-key`, `hash--xor-pad`, `hash--hex-nibble`,
+`hash--hex->bytes`, `hash--hex->bytes-loop` from the module.
+
+**Benchmark result:** `hmac_sha256 × 50` → median ~521µs (10.4µs/call), vs 1940µs before
+— ~190x faster, now comparable to `sha256` (~9µs/call). All 43 hash tests pass.
