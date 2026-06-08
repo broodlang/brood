@@ -322,7 +322,17 @@ impl EnvId {
 }
 
 /// A Brood value. `Copy`: primitives inline, heap objects as handles.
+///
+/// `#[repr(C, u8)]` is **load-bearing for the JIT** (ADR-101 / `docs/jit-stage1.md` §2):
+/// it pins a stable tagged-union layout — a `u8` discriminant at offset 0 (in
+/// *declaration order*: `Nil`=0, `Bool`=1, `Int`=2, …) and the payload 8-aligned at
+/// offset 8 — so JIT'd code can read a `Value` out of a `Heap::roots` slot, tag-check
+/// it, and extract the `i64`/`f64` without a runtime callback. It grows `Value` to 24
+/// bytes, which `docs/value-repr.md` measured perf-neutral for the operand stack. The
+/// layout is pinned by `value_layout_is_stable_for_the_jit` — treat a change as an ABI
+/// break the JIT codegen must follow.
 #[derive(Clone, Copy, Debug)]
+#[repr(C, u8)]
 pub enum Value {
     Nil,
     Bool(bool),
@@ -701,4 +711,45 @@ static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn gensym(prefix: &str) -> Value {
     let n = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed);
     sym(&format!("{}__{}", prefix, n))
+}
+
+/// JIT layout constants for [`Value`] (`#[repr(C, u8)]`). JIT codegen hardcodes these
+/// to read a `Value` out of a `Heap::roots` slot — the discriminant byte at offset 0,
+/// the payload at [`jit_layout::PAYLOAD_OFFSET`]. Pinned by the layout test below; a
+/// reorder of `Value`'s variants breaks both, intentionally (an ABI break the JIT
+/// codegen must follow — see `docs/jit-stage1.md` §2).
+#[cfg(any(test, feature = "jit"))]
+pub(crate) mod jit_layout {
+    /// The 8-aligned payload sits after the `u8` discriminant under `repr(C, u8)`.
+    pub const PAYLOAD_OFFSET: usize = 8;
+    /// `Value::Int`'s discriminant (declaration order: `Nil`=0, `Bool`=1, `Int`=2).
+    pub const TAG_INT: u8 = 2;
+}
+
+#[cfg(test)]
+mod jit_layout_tests {
+    use super::*;
+
+    /// Pins the `Value` byte layout the JIT depends on. If `Value`'s variant order or
+    /// `repr` changes, this fails — forcing the JIT codegen (and `jit_layout`) to be
+    /// updated rather than silently miscompiling. See `docs/jit-stage1.md` §2.
+    #[test]
+    fn value_layout_is_stable_for_the_jit() {
+        assert_eq!(std::mem::align_of::<Value>(), 8, "Value must stay 8-aligned");
+        let v = Value::Int(0x0123_4567_89ab_cdef_u64 as i64);
+        // Read the raw bytes (no transmute size constraint).
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &v as *const Value as *const u8,
+                std::mem::size_of::<Value>(),
+            )
+        };
+        assert_eq!(bytes[0], jit_layout::TAG_INT, "Value::Int discriminant drifted");
+        let off = jit_layout::PAYLOAD_OFFSET;
+        let payload = i64::from_ne_bytes(bytes[off..off + 8].try_into().unwrap());
+        assert_eq!(
+            payload, 0x0123_4567_89ab_cdef_u64 as i64,
+            "Value::Int payload not at offset {off}",
+        );
+    }
 }
