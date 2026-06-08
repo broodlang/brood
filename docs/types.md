@@ -360,22 +360,26 @@ fallback. Zero new false positives across `std/` + `tests/`.
 - **Expanded curated sigs** — `str`/`pr-str` → `string`, `println`/`print` → `nil`,
   `number->string` → `string`, etc. Small table additions that catch a specific class
   of silent bugs (`(+ 1 (println x))`, `(first (str …))`).
-- **Rest/variadic in `(sig …)` annotations** — `parse_arrow` in `annot.rs` only builds
-  fixed-arity `Sig`s; a `...type` notation (e.g. `(sig f (...int -> int))`) would wire
-  the `Sig::rest` field and let users annotate variadic functions. The `Sig` struct
-  already carries `rest: Option<Ty>`.
-- **`sig!` runtime enforcement (slice 2, ADR-082)** — `sig!` is currently parsed
-  identically to `sig` (advisory only). Making it wrap the target function with a
-  runtime type-check (throw on mismatch, passthrough on success) gives users a
-  contract system with no overhead on unannotated code.
+- ✅ **Rest/variadic in `(sig …)` annotations** — shipped: `(sig f (int & number -> int))`
+  wires `Sig::rest` and the `sig!` macro generates a rest-checking wrapper.
+- ✅ **`sig!` runtime enforcement** — shipped: `sig!` wraps the target function with a
+  per-argument and per-result runtime check; `BROOD_CONTRACTS=1` enforces every
+  `(sig …)` the same way. See `docs/type-annotations.md`.
 - **Inference through simple let-aliases** — `infer_sig` bails on any body with a
   `let`. A `(defn f (x) (let (y x) (callee y)))` is logically a straight-line wrapper;
   the alias machinery in `Ctx` already handles narrowing through this shape at
   check-time, so extending `infer_sig` to recognise a single-alias body is bounded
   and sound.
-- Intersections for overloaded fns; arrows/element types flowing into the straight-line
-  `infer_sig`; **type variables** for *user-defined* generic functions (Option A —
-  gated on a real consumer; the curated HOFs needed only the per-rule form).
+- **Intersections** `(and TypeA TypeB)` in the type grammar — designed in
+  [`docs/type-intersections.md`](type-intersections.md). Small, self-contained;
+  both the Brood runtime and the Rust checker need ~10 lines each. Ready to tackle.
+- **Map key/value types** `(map K V)` — designed in
+  [`docs/type-map-kv.md`](type-map-kv.md). Pure-Brood runtime slice ships alone;
+  full checker refinement (`map_kv` field on `Ty`) is the heavier follow-on.
+- **Type variables** for user-defined generic functions — designed in
+  [`docs/type-variables.md`](type-variables.md). Requires a `SigTerm` enum and
+  a unification pass; gated on a real consumer. The curated HOFs already ship via
+  per-rule Option B (no type variables needed there).
 
 ## How it runs — and why it's outside the runtime
 

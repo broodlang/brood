@@ -32,3 +32,45 @@
     (assert= (c-id nil) nil))
   (test "a union type still rejects a non-member"
     (assert-error (c-id "s"))))
+
+;; --- element-level (list E) / (vector E) checks --------------------------------
+
+(defn c-sum-list (xs) (reduce + 0 xs))
+(sig! c-sum-list ((list int) -> int))
+
+(defn c-first-vec (v) (first v))
+(sig! c-first-vec ((vector string) -> string))
+
+(describe "element-level sequence type checks"
+  (test "(list int) accepts a list of ints"
+    (assert= (c-sum-list (list 1 2 3)) 6))
+  (test "(list int) rejects a list containing a non-int"
+    (assert-error (c-sum-list (list 1 "two" 3))))
+  (test "(list int) accepts an empty list"
+    (assert= (c-sum-list nil) 0))
+  (test "(vector string) accepts a vector of strings"
+    (assert= (c-first-vec ["a" "b"]) "a"))
+  (test "(vector string) rejects a vector containing a non-string"
+    (assert-error (c-first-vec [1 "b"]))))
+
+;; --- rest params in sig! -------------------------------------------------------
+
+(defn c-sum (& xs) (reduce + 0 xs))
+(sig! c-sum (& int -> int))
+
+(defn c-join-strs (sep & parts) (join sep parts))
+(sig! c-join-strs (string & string -> string))
+
+(describe "rest param contracts (sig! with &)"
+  (test "pure variadic: correct rest args pass"
+    (assert= (c-sum 1 2 3 4) 10))
+  (test "pure variadic: a non-int rest arg throws"
+    (assert-error (c-sum 1 2 "oops")))
+  (test "pure variadic: zero rest args pass"
+    (assert= (c-sum) 0))
+  (test "fixed + rest: correct args pass"
+    (assert= (c-join-strs ", " "a" "b" "c") "a, b, c"))
+  (test "fixed + rest: bad fixed arg throws"
+    (assert-error (c-join-strs 42 "a" "b")))
+  (test "fixed + rest: bad rest arg throws"
+    (assert-error (c-join-strs ", " "a" 99 "c"))))
