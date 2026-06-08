@@ -2242,8 +2242,15 @@ fn dispatch(
             return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, callee_env)?));
         }
         // A closure with no VM-eligible arm for this argc — a true defer to the
-        // tree-walker (a native callee below is the normal path, not a defer).
+        // tree-walker. Native frames created by the tree-walker can't be captured
+        // by the state-capture machinery; gate off so any `receive` inside blocks
+        // the worker (§7.4 dirty-scheduler carve-out) instead of attempting a
+        // state-capture that can't cross the native boundary.
         crate::perf_bump!(tw_defer);
+        let prev = crate::process::set_capture_top_level(false);
+        let result = crate::eval::apply(heap, cur_callee, &cur_argv, genv);
+        crate::process::set_capture_top_level(prev);
+        return Ok(Step::Done(result?));
     }
     Ok(Step::Done(crate::eval::apply(heap, cur_callee, &cur_argv, genv)?))
 }
