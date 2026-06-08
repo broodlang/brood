@@ -576,8 +576,15 @@ fn preempt() {
 pub(crate) fn state_capture_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| match std::env::var("BROOD_STATE_CAPTURE") {
+        // **Capture mode is the default engine** (ADR-100 §8.4 step 3, flipped 2026-06-08):
+        // a VM-eligible green-process body runs as relocatable heap data (migratable, no
+        // 16 MiB native stack), proven correctness-equivalent to the coroutine path (the
+        // full suite is identical both ways) and ~no slower on the hot receive path after
+        // the wake-migration heuristic. `BROOD_STATE_CAPTURE=0` (or `false`/`off`/`no`/
+        // empty) is the escape hatch back to corosensei for one release. corosensei still
+        // backs tree-walked bodies until step 4 deletes it.
         Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no"),
-        Err(_) => false, // corosensei stays the default until the migration flips it
+        Err(_) => true,
     })
 }
 
@@ -666,8 +673,14 @@ fn drain_worker_queue(wid: usize) {
         }
         *q = keep;
     }
-    for proc in stranded {
-        wake_enqueue(proc); // non-fresh capture → migrates to a non-dirty worker
+    for mut proc in stranded {
+        // Force off this (dirty) worker directly — `assign_worker` already excludes a
+        // dirty worker, so this lands elsewhere. (Not `wake_enqueue`: its "migrate only
+        // when home is busy" heuristic would depend on `WORKER_BUSY[wid]` being set,
+        // which it is during a block, but relying on that coupling here is fragile —
+        // the whole point is that nothing must stay on a worker that won't run it.)
+        proc.worker_id = assign_worker();
+        enqueue(proc);
     }
 }
 
@@ -1073,11 +1086,21 @@ pub(super) fn enqueue(proc: Box<Process>) {
 /// (Preempt re-enqueue uses plain [`enqueue`] instead, to keep a hot process local.)
 pub(super) fn wake_enqueue(mut proc: Box<Process>) {
     if !proc.fresh && matches!(proc.run, Run::Capture { .. }) {
-        let new_wid = assign_worker();
-        if new_wid != proc.worker_id {
-            MIGRATED.fetch_add(1, Ordering::Relaxed);
+        // Migrate **only when the home worker is busy** — a single atomic load, vs an
+        // O(workers) `assign_worker` scan on every wake. If the home worker is idle it
+        // will run the woken process right away, so keep it there (cache locality, and
+        // no scan on the hot receive/reply path — ~all of capture mode's per-wake cost).
+        // Migrate (to the least-loaded worker) only when home is busy: re-queueing there
+        // would sit behind the running process. This also covers a home worker stuck in
+        // a **dirty** native-nested block — it reads busy (its `run_one` hasn't returned)
+        // and `assign_worker` excludes it, so the woken process is moved off it.
+        if WORKER_BUSY[proc.worker_id].load(Ordering::Relaxed) {
+            let new_wid = assign_worker();
+            if new_wid != proc.worker_id {
+                MIGRATED.fetch_add(1, Ordering::Relaxed);
+            }
+            proc.worker_id = new_wid;
         }
-        proc.worker_id = new_wid;
     }
     enqueue(proc);
 }

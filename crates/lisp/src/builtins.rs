@@ -7465,6 +7465,15 @@ fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             crate::process::keywords::KILL,
         ));
         for &pid in &spawned {
+            // Unlink the child from THIS isolate runner before killing it. A child the
+            // thunk `spawn-link`ed is symmetrically linked to us, so a bare
+            // `(exit pid :kill)` would propagate `:killed` back through the link and
+            // kill the runner itself — even though we're only cleaning up leftovers.
+            // Dropping the link first lets the reap take down any straggler (e.g. a
+            // server whose async `(stop …)` hasn't finished dying yet) without taking us
+            // with it. Best-effort + a no-op for an unlinked child. (Fixes a capture-mode
+            // flake where the stop-vs-reap race left a linked server alive at reap; §8.4.)
+            crate::process::unlink_self(pid);
             crate::process::exit(pid, kill.clone());
         }
         for _ in 0..10_000 {
