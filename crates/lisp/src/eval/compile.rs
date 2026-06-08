@@ -3257,6 +3257,29 @@ fn vm_run_bc(
                     unwind(heap);
                     return Err(e);
                 }
+                // JIT tiering at the call site (the dominant Brood→Brood path): the callee
+                // frame is now set up at `roots[cur_base..]`. If the callee is hot + in
+                // subset, run it natively and return to the caller exactly as `Done` does
+                // (read the result, retire the callee frame, restore the caller, push the
+                // result). On deopt/preempt/not-hot, fall through to run the callee's chunk.
+                #[cfg(feature = "jit")]
+                if let Some(0) = jit_tier(&cur_arm, heap, cur_base) {
+                    let result = heap.root_at(cur_base);
+                    heap.truncate_roots(cur_base);
+                    heap.truncate_env_roots(cur_env_base);
+                    if cur_arm_slot != usize::MAX {
+                        heap.live_arm_truncate(cur_arm_slot);
+                    }
+                    let caller = frames.pop().expect("a Call always pushed a caller frame");
+                    cur_arm = caller.arm;
+                    cur_ip = caller.ip;
+                    cur_base = caller.base;
+                    cur_env = caller.env;
+                    cur_env_base = caller.env_base;
+                    cur_arm_slot = caller.arm_slot;
+                    heap.push_root(result);
+                    continue;
+                }
                 cur_ip = 0;
             }
             Ok(ChunkExit::Tail { arm, args, genv }) => {
