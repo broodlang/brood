@@ -3089,6 +3089,9 @@ fn vm_run_bc(
     let mut cur_base;
     let mut cur_arm_slot;
     let mut cur_ip;
+    // Fresh start (vs. resuming a parked continuation) — the JIT tiering hook fires only
+    // on a fresh arm activation, never mid-receive resume.
+    let fresh;
     match resume {
         // Resume a parked continuation: its frame stack + operand roots are still on
         // the heap (the suspend didn't unwind), so restore the registers and re-enter
@@ -3105,6 +3108,7 @@ fn vm_run_bc(
             cur_env = cur.env;
             cur_env_base = cur.env_base;
             cur_arm_slot = cur.arm_slot;
+            fresh = false;
         }
         // Fresh start: push `arm0`'s activation frame.
         None => {
@@ -3128,6 +3132,7 @@ fn vm_run_bc(
                 return Err(e);
             }
             cur_ip = 0usize;
+            fresh = true;
         }
     }
     let unwind = |heap: &mut Heap| {
@@ -3135,6 +3140,24 @@ fn vm_run_bc(
         heap.truncate_env_roots(entry_env);
         heap.live_arm_truncate(entry_arms);
     };
+
+    // JIT tiering hook (ADR-101 1b): on a fresh arm activation whose frame is now set up
+    // at `roots[cur_base..]`, give the JIT a chance to run it natively. `Done` (0) → the
+    // result is in `roots[cur_base]`; unwind the frame and return it. `deopt`/`preempt`
+    // (1/2) or not-hot/out-of-subset (None) → fall through to the interpreter loop with
+    // the frame intact (for a preempt the slots hold the partial loop state, so the VM —
+    // which preempts at its own loop-top since the budget is already spent — resumes from
+    // exactly there). Only the int subset is ever compiled; everything else stays here.
+    #[cfg(feature = "jit")]
+    if fresh {
+        if let Some(0) = jit_tier(&cur_arm, heap, cur_base) {
+            let result = heap.root_at(cur_base);
+            unwind(heap);
+            return Ok(VmOutcome::Done(result));
+        }
+    }
+    #[cfg(not(feature = "jit"))]
+    let _ = fresh; // silence unused warning when the JIT is off
 
     loop {
         // Per-iteration safepoint / preemption / deadline — relocates every frame's
@@ -4237,6 +4260,86 @@ mod tests {
             let base = heap.roots_len();
             heap.push_root(Value::Int(0));
             assert_eq!(jit_tier(&bailing, &mut heap, base), None, "out-of-subset arm bails");
+        }
+    }
+
+    /// JIT Stage-1 end-to-end: `vm_run_bc`'s hot-path hook runs a tiered arm as native
+    /// code and returns the same result the interpreter would. Warm the arm past the
+    /// threshold so it compiles, then invoke it through `vm_run_bc` (fresh start) and
+    /// check the `Done` value.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
+        let prim2 = |op: PrimOp, head: &str| Inst::Prim2 {
+            op,
+            map: [0, 1],
+            head: value::intern(head),
+            guard: AtomicU64::new(0),
+            pos: None,
+        };
+        let chunk = Chunk {
+            code: vec![
+                Inst::Local(0),
+                Inst::Const(ConstVal::new(Value::Int(1))),
+                prim2(PrimOp::Lt, "<"),
+                Inst::JumpIfFalse(6),
+                Inst::Local(1),
+                Inst::Jump(13),
+                Inst::Local(0),
+                Inst::Const(ConstVal::new(Value::Int(1))),
+                prim2(PrimOp::Sub, "-"),
+                Inst::Local(1),
+                Inst::Local(0),
+                prim2(PrimOp::Add, "+"),
+                Inst::SelfCall { argc: 2 },
+            ],
+        };
+        let sumto = CompiledArm {
+            nrequired: 2,
+            noptional: 0,
+            optional_defaults: Box::new([]),
+            rest_slot: None,
+            nslots: 2,
+            body: Node::Const(ConstVal::new(Value::Nil)),
+            chunk: Some(chunk),
+            has_runtime_handles: false,
+            jit_code: AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: AtomicU32::new(0),
+        };
+
+        // Warm it past the threshold so jit_tier compiles + installs the native code.
+        crate::process::yield_now();
+        for _ in 0..10 {
+            crate::process::yield_now();
+            let mut h = Heap::new();
+            let base = h.roots_len();
+            h.push_root(Value::Int(5));
+            h.push_root(Value::Int(0));
+            let _ = jit_tier(&sumto, &mut h, base);
+        }
+        let code = sumto.jit_code.load(std::sync::atomic::Ordering::Acquire);
+        assert!(
+            !code.is_null() && code != crate::jit::BAILED,
+            "the arm should have tiered up to native code"
+        );
+
+        // Now run it through vm_run_bc — its fresh-start hook should call the native code.
+        crate::process::yield_now();
+        let mut heap = Heap::new();
+        let arm = Arc::new(sumto);
+        let outcome = vm_run_bc(
+            &mut heap,
+            arm,
+            &[Value::Int(5), Value::Int(0)],
+            EnvId::GLOBAL,
+            None,
+            true,
+        )
+        .expect("vm_run_bc errored");
+        match outcome {
+            VmOutcome::Done(Value::Int(n)) => assert_eq!(n, 15, "tiered sumto(5,0) via the hook"),
+            VmOutcome::Done(other) => panic!("Done non-int: tag {:?}", value::tag(other)),
+            _ => panic!("expected Done(15) from the JIT hook"),
         }
     }
 }
