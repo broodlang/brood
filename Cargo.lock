@@ -275,6 +275,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "softbuffer",
+ "subtle",
  "tree-sitter",
  "tree-sitter-elixir",
  "tree-sitter-ruby",
