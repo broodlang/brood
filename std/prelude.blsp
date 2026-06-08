@@ -1265,7 +1265,8 @@ runtime isn't a node yet."
 ;; continuously while down), so one missed connect would otherwise wedge the
 ;; supervisor; we drive the retry off connect's own success/failure here.
 (defn ensure-link--reconnect (addr)
-  (if (try (do (connect addr) true) (catch _ false))
+  (eprintln "EL-RECONNECT addr=" addr)
+  (if (try (do (connect addr) (eprintln "EL-CONNECTED nodes=" (nodes)) true) (catch e (do (eprintln "EL-CONN-FAIL " e) false)))
     nil
     (do (sleep 200) (ensure-link--reconnect addr))))
 
@@ -1273,12 +1274,15 @@ runtime isn't a node yet."
 ;; reconnect (retrying until success), then go back to listening. Exits
 ;; cleanly on `:stop`.
 (defn ensure-link--loop (addr peer)
-  (receive ([:nodedown p] (when (= p peer)
-                            (sleep 200)
-                            (ensure-link--reconnect addr)
-                            (ensure-link--loop addr peer)))
+  (eprintln "EL-LOOP-WAIT peer=" peer)
+  (receive ([:nodedown p] (do
+                            (eprintln "EL-NODEDOWN p=" p " peer=" peer " eq=" (= p peer))
+                            (when (= p peer)
+                              (sleep 200)
+                              (ensure-link--reconnect addr)
+                              (ensure-link--loop addr peer))))
     (:stop nil)
-    (_ (ensure-link--loop addr peer))))
+    (msg (do (eprintln "EL-OTHER " msg) (ensure-link--loop addr peer)))))
 
 (defn ensure-link (addr)
   "Maintain a persistent link to a peer node addressed as `\"name@host:port\"`. Synchronously attempts the initial `(connect addr)` (errors are swallowed — caller still gets a supervisor); spawns a small supervisor process that `monitor-node`s the peer and re-`connect`s with backoff on every `[:nodedown …]`. Returns the supervisor pid; send it `:stop` to disable. Pure Brood policy over `connect` + `monitor-node` + `receive (after …)`: no extra runtime support."

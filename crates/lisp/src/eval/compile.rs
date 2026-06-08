@@ -1215,6 +1215,7 @@ fn compile_arm(
     body: &[Value],
     enclosing: Vec<Symbol>,
     self_name: Option<Symbol>,
+    defn_name: Option<Symbol>,
 ) -> Option<CompiledArm> {
     let nrequired = required.len();
     let noptional = optionals.len();
@@ -1225,6 +1226,14 @@ fn compile_arm(
     // call, so such calls fall back to the regular env-resolved path (correct,
     // just unoptimized).
     if let Some(name) = self_name {
+        if noptional == 0 && rest.is_none() {
+            scope.self_call = Some((name, nrequired));
+        }
+    }
+    // `defn` tail self-calls get the same inline frame-reset via SelfCall. The
+    // in-flight call holds an Arc to its own compiled arm, so it correctly runs
+    // the current compiled version even if the global is redefined mid-call.
+    if let Some(name) = defn_name {
         if noptional == 0 && rest.is_none() {
             scope.self_call = Some((name, nrequired));
         }
@@ -1289,6 +1298,10 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
         Some(e) if !heap.is_global(e) => heap.env_frame_self_name(e, id),
         _ => None,
     };
+    // `defn` tail self-calls use the same `Inst::SelfCall` inline frame-reset path as
+    // letrec. The in-flight call's Arc owns the compiled arm, so it runs the current
+    // compiled version even if the global is redefined; new callers see the new version.
+    let defn_name: Option<Symbol> = if cl.env.is_none() { cl.name } else { None };
     // Snapshot every arm's shape + body (cloning ends the `cl` borrow), then compile
     // each via [`compile_arm`]. An arm is VM-eligible when its body — and every real
     // `&optional` default form — is core vocabulary; otherwise that arm defers
@@ -1316,7 +1329,7 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
         let noptional = s.optionals.len();
         let has_rest = s.rest.is_some();
         let compiled =
-            compile_arm(heap, &s.required, &s.optionals, s.rest, &s.body, enclosing.clone(), self_name)
+            compile_arm(heap, &s.required, &s.optionals, s.rest, &s.body, enclosing.clone(), self_name, defn_name)
                 .map(Arc::new);
         specs.push(ArmSpec { nrequired, noptional, has_rest, compiled });
     }
@@ -4660,4 +4673,11 @@ mod tests {
             vm.as_secs_f64() / jit.as_secs_f64().max(1e-9)
         );
     }
+}
+
+#[test]
+fn test_inst_size() {
+    eprintln!("Inst size: {}", std::mem::size_of::<Inst>());
+    // This test always passes — it just prints the size.
+    assert!(true);
 }

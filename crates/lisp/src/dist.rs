@@ -599,12 +599,36 @@ pub(crate) fn exit_remote(target_node: Symbol, target_pid: u64, reason: Message)
     );
 }
 
+/// Resolve a bare node name (no `@`) to the qualified form by looking in NODES.
+///
+/// `(monitor-node :a)` passes symbol `a`; NODES is keyed by `a@127.0.0.1`.
+/// Without this step the liveness check `!NODES.contains_key(&name)` always
+/// returns true for bare names, firing an immediate `[:nodedown]` even while the
+/// peer is alive — and `fire_nodedown` never finds the watcher on a real down.
+///
+/// Returns the name unchanged if it already contains `@`, or if no connected
+/// peer with the given base name exists (peer is already down; the bare name
+/// is used for the immediate-delivery path in `monitor_node`).
+fn qualify_node_name(name: Symbol) -> Symbol {
+    let s = value::symbol_name(name);
+    if s.contains('@') {
+        return name;
+    }
+    let prefix = format!("{s}@");
+    crate::core::sync::read(&NODES)
+        .keys()
+        .find(|&&k| value::symbol_name(k).starts_with(&prefix))
+        .copied()
+        .unwrap_or(name)
+}
+
 /// `(monitor-node name pid)` — deliver `[:nodedown name]` to `pid` when a link to
 /// `name` goes down. Persistent (fires on each down) until the process exits.
 /// If `name` isn't us and there's no current link, the node is effectively
 /// already down and `[:nodedown]` is delivered immediately (Erlang's
 /// `monitor_node` semantics).
 pub(crate) fn monitor_node(name: Symbol, pid: u64) {
+    let name = qualify_node_name(name);
     // Registration and the liveness check must be atomic w.r.t. `fire_nodedown`
     // (which reads NODE_MONITORS then delivers). Holding the write lock across
     // both prevents the race where fire_nodedown sees a new watcher AND our
@@ -638,7 +662,14 @@ pub(crate) fn monitor_node(name: Symbol, pid: u64) {
 /// Cancel `pid`'s node monitor for `name`. A no-op if no monitor is registered.
 /// Needed when a live process wants to stop watching a node before it exits;
 /// `unregister_dead_pid` handles the death case automatically.
+///
+/// **Residual race**: `fire_nodedown` snapshots the watcher list under a *read*
+/// lock and then delivers outside any lock. If a `fire_nodedown` for `name` is
+/// already past the snapshot step when `demonitor_node` removes `pid`, one
+/// spurious `[:nodedown name]` will still arrive. Callers must tolerate it
+/// (the same tolerance required for the `monitor_node` registration race).
 pub(crate) fn demonitor_node(name: Symbol, pid: u64) {
+    let name = qualify_node_name(name);
     let mut monitors = crate::core::sync::write(&NODE_MONITORS);
     if let Some(watchers) = monitors.get_mut(&name) {
         watchers.retain(|&w| w != pid);
@@ -966,14 +997,14 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let (peer, peer_addr, session) = handshake(&mut stream, Role::Initiator)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    // Post-handshake de-dup on the authenticated name: if the caller supplied a
-    // stale/wrong symbol but we're already connected under the real name, close
-    // our redundant socket rather than handing it to `establish` where the
-    // tie-break could evict a healthy existing link.
-    if crate::core::sync::read(&NODES).contains_key(&peer) {
-        let _ = stream.shutdown(Shutdown::Both);
-        return Ok(peer);
-    }
+    // Always pass to `establish` — even when we already have a link under the
+    // authenticated name. `establish` has its own symmetric tie-break (both sides
+    // compare connectors by name and reach the same decision). The losing side
+    // closes its own socket and returns; the winning side replaces the link. A
+    // short-circuit `stream.shutdown` here would skip the tie-break on our end
+    // while the peer still runs `establish` on theirs — they might win, register
+    // our doomed socket, and later fire a spurious `[:nodedown]` when the reader
+    // hits the EOF our shutdown sent.
     establish(peer, peer_addr, stream, Role::Initiator, session);
     Ok(peer)
 }

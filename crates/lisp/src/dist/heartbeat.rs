@@ -11,7 +11,7 @@
 use std::io;
 use std::net::Shutdown;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
@@ -95,15 +95,23 @@ fn heartbeat_loop() {
         };
         for (sock, tx, last) in links {
             let elapsed = now.saturating_sub(last);
-            if elapsed > down_after_ms {
-                // Silent too long → declare dead; reader unblocks and calls drop_link.
+            if elapsed >= down_after_ms {
+                // Silent for DOWN_AFTER or longer → declare dead.
                 let _ = sock.shutdown(Shutdown::Both);
             } else if elapsed > idle_after_ms {
-                // Idle for at least one interval → probe. If the bounded queue is full
-                // or the writer has gone, the link is unhealthy; tear it down rather
-                // than silently drop the probe.
-                if tx.try_send(Arc::clone(&ping)).is_err() {
-                    let _ = sock.shutdown(Shutdown::Both);
+                // Idle for at least one interval → probe.
+                match tx.try_send(Arc::clone(&ping)) {
+                    Ok(()) => {}
+                    // Writer thread is gone — link is already dead.
+                    Err(TrySendError::Disconnected(_)) => {
+                        let _ = sock.shutdown(Shutdown::Both);
+                    }
+                    // Queue is full: the writer is alive but stalled behind TCP
+                    // flow-control (peer slow to drain). This is backpressure, not
+                    // death — the same condition the idle gate protects against for
+                    // active links. Skip the probe; DOWN_AFTER will catch a genuinely
+                    // wedged peer once the silence window expires.
+                    Err(TrySendError::Full(_)) => {}
                 }
             }
             // else: received a frame within the last interval — active link, skip probe.
