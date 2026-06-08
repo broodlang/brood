@@ -344,10 +344,38 @@ variables. So `(first (map inc [1 2 3])) : number | nil` and `(reduce + 0 [1 2 3
 number` flow through. Uncertain callback / element → flat fallback (sound;
 `is_disjoint` stays tags-only). See [`parametric-result-types.md`](parametric-result-types.md).
 
-**⬜ Still deferred (ADR-011).** Intersections for overloaded fns; arrows/element
-types flowing into the straight-line `infer_sig`; **type variables** for
-*user-defined* generic functions (Option A — gated on a real consumer; the curated
-HOFs needed only the per-rule form).
+**✅ Structural combinators (fourth slice).** Element types now flow through
+`reverse`, `sort`, `sort-by`, `take`, `drop`, `take-while`, `drop-while`, `cons`,
+`append`, and `concat` — the structural combinators that reshape a sequence without
+transforming its elements. `(reverse vector<int>) : nil | list<int>`, `(take 2
+list<string>) : nil | list<string>`, `(cons 1 list<int>) : list<int>` and so on.
+`sort`/`sort-by` treat the sequence as the last argument (both 1-arg `(sort xs)` and
+2-arg `(sort f xs)` forms). `cons` requires both the head type *and* the tail element
+type to be known (either unknown → unrefined `pair`). `append`/`concat` union the
+element types of all arguments; any argument with an unknown element type → flat
+fallback. Zero new false positives across `std/` + `tests/`.
+
+**⬜ Still deferred (ADR-011).**
+
+- **Expanded curated sigs** — `str`/`pr-str` → `string`, `println`/`print` → `nil`,
+  `number->string` → `string`, etc. Small table additions that catch a specific class
+  of silent bugs (`(+ 1 (println x))`, `(first (str …))`).
+- **Rest/variadic in `(sig …)` annotations** — `parse_arrow` in `annot.rs` only builds
+  fixed-arity `Sig`s; a `...type` notation (e.g. `(sig f (...int -> int))`) would wire
+  the `Sig::rest` field and let users annotate variadic functions. The `Sig` struct
+  already carries `rest: Option<Ty>`.
+- **`sig!` runtime enforcement (slice 2, ADR-082)** — `sig!` is currently parsed
+  identically to `sig` (advisory only). Making it wrap the target function with a
+  runtime type-check (throw on mismatch, passthrough on success) gives users a
+  contract system with no overhead on unannotated code.
+- **Inference through simple let-aliases** — `infer_sig` bails on any body with a
+  `let`. A `(defn f (x) (let (y x) (callee y)))` is logically a straight-line wrapper;
+  the alias machinery in `Ctx` already handles narrowing through this shape at
+  check-time, so extending `infer_sig` to recognise a single-alias body is bounded
+  and sound.
+- Intersections for overloaded fns; arrows/element types flowing into the straight-line
+  `infer_sig`; **type variables** for *user-defined* generic functions (Option A —
+  gated on a real consumer; the curated HOFs needed only the per-rule form).
 
 ## How it runs — and why it's outside the runtime
 
