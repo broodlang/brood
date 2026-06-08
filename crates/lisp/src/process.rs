@@ -74,9 +74,14 @@ pub use scheduler::{
 // when to capture a continuation (vs. yield the coroutine / block the root), and by the
 // `receive` gate to tell a capturable top-level receive from a native-nested one.
 pub(crate) use scheduler::{
-    capture_hard_kill_pending, capture_top_level, dirty_block, in_capture_run, set_capture_run,
+    capture_hard_kill_pending, capture_top_level, dirty_block, in_capture_run,
     set_capture_top_level, tick_capture,
 };
+// Test-only: the JIT preempt unit test (`compile.rs`) drives a tiered arm as if it
+// were a capture-mode green process. Non-test callers reach it via `scheduler::` or
+// the local fn directly, so the re-export is test-gated to avoid an unused warning.
+#[cfg(test)]
+pub(crate) use scheduler::set_capture_run;
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};
 pub(crate) use monitor::{

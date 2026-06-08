@@ -1,10 +1,10 @@
 # Plan — JIT Stage 1: first compiled arm (ADR-101)
 
-> **Status: planning (2026-06-08). No code yet.** Stage 0 plumbing is in (`--features
-> jit`: the `brood_rt_*` callback table + the Cranelift `JITModule` skeleton, commits
-> `15ba15c`/`0cf1a9a`). Stage 1 is the first real codegen: compile a hot RUNTIME-region
-> arm to native code, run it through a trampoline, and deopt to the VM on anything it
-> can't handle — beating the interpreter on a dispatch-bound loop (`loop`/`fib`).
+> **Status: landed (2026-06-08).** Stage 1 is implemented behind `--features jit` (off by
+> default). See §7 for what shipped and the verification results. Stage 0 plumbing is in
+> commits `15ba15c`/`0cf1a9a`. Stage 1 is the first real codegen: compile a hot
+> RUNTIME-region arm to native code and deopt to the VM on anything it can't handle —
+> beating the interpreter ~27× on a dispatch-bound int loop.
 
 See also: ADR-101 (architecture + calling convention), `value-repr.md` (the kept-enum
 decision + the slot-size-is-neutral measurement this plan leans on), `vm-perf-and-jit-runway.md`
@@ -107,3 +107,41 @@ interpreter dispatch (Layer 2). Stage 1 is one arm, one arithmetic subset, corre
 When Stage 1 lands, record the `Value`-layout change (§2) as an ADR note (it's the one
 language-observable-ish decision — a fixed in-memory layout) and tick the roadmap JIT
 Stage-1 entry.
+
+## 7. Stage 1 — landed (2026-06-08)
+
+All of §3 (1a–1e) is implemented behind `--features jit` and off by default (zero cost
+when absent). What shipped:
+
+- **Layout (§2):** `Value` is `#[repr(C, u8)]`; `value_layout_is_stable_for_the_jit`
+  pins `PAYLOAD_OFFSET = 8` / `TAG_INT = 2` as a compile-time guard against drift.
+- **Codegen (1c):** `jit_lower_arm` lowers the int subset — `Const(Int)`, `Local`,
+  `Prim2{Add,Sub,Mul,Lt,Le,Eq}`, `JumpIfFalse`/`Jump`, `SelfCall` (loop back-edge) — to
+  Cranelift IR over block leaders + a depth worklist with block params. Anything outside
+  the subset bails the whole compile (the arm stays on the VM). `brif` is emitted only on
+  the `I8` result of a comparison prim (Int `0` is truthy in Brood, so a raw payload can't
+  drive the branch).
+- **Tiering (1b):** each `CompiledArm` carries `jit_calls: AtomicU32` + `jit_code:
+  AtomicPtr<u8>`. On the 8th call the arm compiles under the `GLOBAL_JIT` mutex; the
+  finalized pointer is installed atomically and every subsequent entry runs native.
+  `BAILED` (≠ null, ≠ a real pointer) marks an out-of-subset arm so it's tried once.
+- **Safepoints/preempt/deopt (1d):** loop back-edges call `brood_rt_tick` (preempt only in
+  a capture-mode green process — gated on `in_capture_run`, matching the VM loop-top);
+  deopt returns code 1, preempt code 2, normal completion 0. Values live in `Heap::roots`
+  between callbacks (no stack maps).
+- **VM hooks:** `vm_run_bc` runs a tiered arm both on fresh process start and at the
+  `ChunkExit::Call` site (so a hot Brood→Brood callee runs native), falling through to the
+  VM on deopt/preempt with the frame stack intact.
+
+**Verification (all with `--features jit`):** differential JIT≡VM 2/2; lib unit 258/258
+(+6 JIT tests); the full in-language suite 2039/2039; the §6 KI-1 bar —
+`concurrency_race` 10/10 under `BROOD_GC_STRESS=1`, built `RUSTFLAGS="-C
+debug-assertions=on" --release`. Demonstrated **~27× speedup** on a `sumto` int loop
+(`jit_speedup_vs_vm`, `#[ignore]` bench).
+
+**Known timing sensitivity (not a correctness bug).** Compilation holds the process-wide
+`GLOBAL_JIT` mutex on the worker thread running the hot process; during the suite's
+initial compile burst this can briefly stall the pool. It surfaced once as a flaky miss on
+`dynamic_test`'s tight `(after 500 :timeout)` monitor wait (the suite is otherwise green,
+and green by default since the JIT is off). Moving compilation off the scheduler's
+critical path (a background compile thread) is the natural Stage-2 fix.

@@ -2104,3 +2104,44 @@ removing `hash--hmac`, `hash--normalize-key`, `hash--xor-pad`, `hash--hex-nibble
 
 **Benchmark result:** `hmac_sha256 × 50` → median ~521µs (10.4µs/call), vs 1940µs before
 — ~190x faster, now comparable to `sha256` (~9µs/call). All 43 hash tests pass.
+
+## 2026-06-08 — JIT Stage 1 landed (tier-1 template JIT via Cranelift, ADR-101)
+
+Implemented Stage 1 of the JIT (`docs/jit-stage1.md` §7, roadmap) behind `--features jit`,
+off by default (zero cranelift linked, zero cost when absent). The first real codegen: a
+hot RUNTIME-region arm's **dispatch-bound int subset** — `Const(Int)`, `Local`,
+`Prim2{Add,Sub,Mul,Lt,Le,Eq}`, `JumpIfFalse`/`Jump`, `SelfCall` — lowers from its bytecode
+`Chunk` to Cranelift IR (`jit_lower_arm` in `eval/compile.rs`): block leaders + a depth
+worklist with block-param merges, the operand stack virtualised at compile time (so `roots`
+never grows), the self-loop as a back-edge calling `brood_rt_tick` for preemption. `brif`
+fires only on the `I8` result of a comparison prim (Brood Int `0` is truthy, so a raw
+payload can't drive a branch). Anything outside the subset bails the whole compile — the
+arm stays on the VM.
+
+**Tiering:** each `CompiledArm` carries `jit_calls: AtomicU32` + `jit_code: AtomicPtr<u8>`;
+the 8th call compiles under the process-wide `GLOBAL_JIT` mutex and installs the finalized
+pointer atomically (late-binding-safe: a `def` epoch bump invalidates as it does the VM IC).
+`BAILED` (≠ null, ≠ a real pointer) marks an out-of-subset arm so it's tried once.
+**Two VM hooks run it:** `vm_run_bc`'s fresh-start path and the `ChunkExit::Call` site (so a
+hot Brood→Brood callee runs native too), each deopting to the VM with the frame stack intact
+(codes 0=Done / 1=non-int / 2=preempt). The pinned-register trampoline (ADR-101 §6.2) was
+**not needed** — callbacks take `heap` as a normal arg, so no hand-written asm.
+
+**Repr decision held** (`value-repr.md`): `Value` stays the 16-byte `#[repr(C, u8)]` enum;
+GC-visible values live in `Heap::roots` between callbacks, only unboxed `i64` rides in
+registers (no stack maps — the moving collector can't see into a JIT segment, so it mustn't
+need to). `value_layout_is_stable_for_the_jit` pins the offsets as a compile-time ABI guard.
+
+**Verified (all `--features jit`):** differential JIT≡VM 2/2; lib 258/258 (+6 JIT tests);
+in-language suite 2039/2039; §6 KI-1 bar — `concurrency_race` 10/10 under
+`BROOD_GC_STRESS=1`, built `RUSTFLAGS="-C debug-assertions=on" --release`. **~27× speedup**
+on a `sumto` int loop (`jit_speedup_vs_vm`, `#[ignore]` bench). Also forwarded the `jit`
+feature through the `cli` crate (`cargo run -p cli --features jit`) for single-file
+iteration.
+
+**Known timing sensitivity (not a correctness bug):** compilation holds `GLOBAL_JIT` on the
+worker thread running the hot process, so the suite's initial compile burst can briefly
+stall the pool — it surfaced once as a flaky miss on `dynamic_test`'s tight
+`(after 500 :timeout)` monitor wait, then passed on re-run (and the suite is green by
+default since the JIT is off). Moving compilation off the scheduler's critical path (a
+background compile thread) is the natural Stage-2 fix.
