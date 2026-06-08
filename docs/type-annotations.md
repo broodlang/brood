@@ -1,10 +1,11 @@
 # Type annotations — `(sig …)` and the road to sound gradual typing
 
-**Status:** slice 1 (`(sig …)`, checker-facing) **and** slice 2 (`(sig! …)`,
-runtime enforcement — the soundness step) both shipped. Remaining: a
-`BROOD_CONTRACTS=1` switch to enforce *all* `(sig …)` declarations at once
-(fast-follow), richer type-exprs (intersections, rest/optional params), and
-element-level checks for `(list E)`/`(vector E)`.
+**Status:** slice 1 (`(sig …)`, checker-facing), slice 2 (`(sig! …)`, runtime
+enforcement — the soundness step), slice 3 (`BROOD_CONTRACTS=1` bulk-enforce
+switch), slice 4 (element-level `(list E)`/`(vector E)` checks), and slice 5
+(`&` rest params in the type grammar) all shipped. Deferred (designed):
+[intersections](type-intersections.md), [map key/value types](type-map-kv.md),
+[type variables](type-variables.md).
 
 This is Brood's answer to "can we be *more sound* given our parameters?"
 (advisory, never-gate, zero-false-positive, hot-reload, policy-in-Brood). The
@@ -36,15 +37,15 @@ type   ::= base | arrow | seq | union
 base   ::= any | never | int | float | number | string | symbol
          | keyword | bool | nil | pair | vector | list | map | fn
          | rope | pid | ref | socket
-arrow  ::= ( type* -> type )          ; params before ->, one result after
-seq    ::= (list type) | (vector type)
+arrow  ::= ( type* -> type )                   ; fixed arity
+         | ( type* & type -> type )            ; fixed leading params + variadic rest
+seq    ::= (list type) | (vector type)         ; element type checked at runtime
 union  ::= (or type type+)
 ```
 
 Base names map to the same lattice points the predicates imply (`number` =
 `int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …). Deferred (ADR-011, add
-on demand): intersections, rest/optional params, map key/value types, type
-variables.
+on demand): intersections, map key/value types, type variables.
 
 A `(sig name (… -> …))` whose type-expr is an **arrow** declares a function
 signature. Non-arrow `(sig x int)` (a value's type) is accepted by the grammar
@@ -105,9 +106,11 @@ Verified by `tests/contract_test.blsp`: a correct call passes; a bad argument,
 a bad *result* (a fn that lies about its return type), and a union-type
 non-member all throw.
 
-**Still to do:** a `BROOD_CONTRACTS=1` switch that enforces *every* `(sig …)`
-(not just `sig!`) for a dev/test run; element-level checks for `(list E)` /
-`(vector E)`; rest/optional params in the type grammar.
+**Also shipped (slice 3–5):** `BROOD_CONTRACTS=1` enforces every `(sig …)` as
+a runtime contract (same as `sig!`) for a dev/test run; element-level checks
+walk `(list E)` / `(vector E)` arguments at call time; and `&` rest params in
+the type grammar let `(sig! f (int & number -> int))` check both fixed and
+variadic arguments. See `tests/contract_test.blsp` for coverage.
 
 ## Why this is the right "more sound" move for Brood
 

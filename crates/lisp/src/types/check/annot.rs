@@ -94,17 +94,38 @@ fn is_arrow_marker(v: Value) -> bool {
 
 /// Parse the items of an arrow type-expr (the `->` at index `pos`) to a [`Sig`]:
 /// the items before `->` are parameter types, the single item after is the
-/// result. `None` if malformed (no single result, or any part unparseable).
+/// result. A `&` marker splits fixed params from a variadic rest type, e.g.
+/// `(int & number -> int)` → `Sig::with_rest([int], number, int)`. `None` if
+/// malformed (no single result, or any part unparseable).
 fn parse_arrow(heap: &Heap, items: &[Value], pos: usize) -> Option<Sig> {
     if pos + 2 != items.len() {
         return None; // exactly one result type must follow `->`
     }
-    let mut params = Vec::with_capacity(pos);
-    for &p in &items[..pos] {
-        params.push(parse_type(heap, p)?);
-    }
     let ret = parse_type(heap, items[pos + 1])?;
-    Some(Sig::new(params, ret))
+
+    // Detect an optional `&` rest marker in the params, e.g. `(int & number -> r)`.
+    let amp = items[..pos]
+        .iter()
+        .position(|v| matches!(v, Value::Sym(s) if value::symbol_is(*s, "&")));
+
+    if let Some(apos) = amp {
+        // Must be exactly one type after `&` before `->`.
+        if apos + 2 != pos {
+            return None;
+        }
+        let mut params = Vec::with_capacity(apos);
+        for &p in &items[..apos] {
+            params.push(parse_type(heap, p)?);
+        }
+        let rest = parse_type(heap, items[apos + 1])?;
+        Some(Sig::with_rest(params, rest, ret))
+    } else {
+        let mut params = Vec::with_capacity(pos);
+        for &p in &items[..pos] {
+            params.push(parse_type(heap, p)?);
+        }
+        Some(Sig::new(params, ret))
+    }
 }
 
 /// If `form` is a `(sig name (… -> …))` declaration whose type-expr is an arrow,

@@ -257,8 +257,9 @@ pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
         if let Some(&Value::Sym(name)) = items.get(1) {
             ctx.add_file_global(name);
             // If the value is a variadic `fn` (a `&` rest param), record it so a
-            // later `(sig …)`-derived *exact* arity isn't used to flag a call —
-            // the sig parser can't express rest, so it would be a false positive.
+            // later fixed-arity `(sig …)` declaration isn't misread as an exact
+            // arity for a variadic callee (a false positive). A sig that itself
+            // declares a `&` rest type is fine — it yields `Arity::at_least`.
             if items.get(2).is_some_and(|&v| def_value_is_variadic(heap, v)) {
                 ctx.mark_variadic_global(name);
             }
@@ -392,16 +393,20 @@ pub(super) fn check_into(
         let sig = declared.clone().or_else(|| sig_of(heap, s));
         // The real callable's arity is authoritative when known (a `sig!` wrapper
         // preserves the wrapped fn's arity); fall back to the declared param count
-        // for a file-local defn the read-only checker can't inspect. But the
-        // `(sig …)` parser only builds *fixed*-arity sigs, so for a file-local
-        // defn we know is **variadic** the declared param count is an undercount —
-        // using it as an exact arity would falsely flag a legitimate call. Suppress
-        // the sig-derived arity in that case (no false positive; the real callable
-        // isn't inspectable here anyway).
+        // for a file-local defn the read-only checker can't inspect. A declared
+        // sig with a `&` rest type uses `Arity::at_least`; a fixed-arity sig that
+        // applies to a known-variadic global is suppressed (the sig's fixed count
+        // is an undercount, so using it as an exact arity would be a false positive).
         let arity = arity_of(heap, s).or_else(|| {
             declared
-                .filter(|_| !ctx.is_variadic_global(s))
-                .map(|sg| Arity::exact(sg.params.len()))
+                .filter(|sg| sg.rest.is_some() || !ctx.is_variadic_global(s))
+                .map(|sg| {
+                    if sg.rest.is_some() {
+                        Arity::at_least(sg.params.len())
+                    } else {
+                        Arity::exact(sg.params.len())
+                    }
+                })
         });
         // Unbound-symbol diagnostic: warn only when the head is **truly not
         // resolvable** — not local, not a syntactic keyword, not in the global
