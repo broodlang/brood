@@ -47,9 +47,9 @@ perf-stats = []
 # JIT tier-1 (ADR-101), opt-in and off every default/release/bundle build. Stage 0 is
 # plumbing only: the `extern "C"` runtime-callback table (src/jit/) the JIT'd code calls,
 # plus (later increments) the Cranelift module and the platform trampolines. The heavy
-# Cranelift dependency is added with the codegen increment, not here — Stage-0 increment 1
-# is pure Rust, so this feature is currently dependency-free.
-jit = []
+# Cranelift backend (cranelift-jit/-module/-codegen) is pulled in only here; default/
+# release/bundle builds link none of it. Stage 0: callback table + JITModule skeleton.
+jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen"]
 # tree-sitter parsing for *foreign* languages — the `tree-sitter-parse` builtin
 # (ADR: multi-language modes / ROADMAP §C). tree-sitter is the incremental,
 # error-tolerant parser that produces, for Ruby/Elixir/…, the same positioned CST
@@ -165,6 +165,9 @@ cosmic-text = { version = "0.19", optional = true }
 # tables — so the width primitive is available in the lean runtime too.
 unicode-width = "0.2"
 unicode-segmentation = "1"
+cranelift-jit = { version = "0.132.1", optional = true }
+cranelift-module = { version = "0.132.1", optional = true }
+cranelift-codegen = { version = "0.132.1", optional = true }
 
 [dev-dependencies]
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the

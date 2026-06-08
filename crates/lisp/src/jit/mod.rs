@@ -25,6 +25,42 @@
 
 use crate::core::heap::Heap;
 
+use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::default_libcall_names;
+
+/// The JIT backend (ADR-101, Layer 1). Owns a Cranelift [`JITModule`] — the executable
+/// memory + symbol table that compiled arms live in.
+///
+/// **Stage 0: skeleton only.** [`Jit::new`] stands up the module for the host ISA and
+/// registers the [runtime-callback table](self) by name, so Stage-1 codegen can emit
+/// calls to `brood_rt_*`. No arm is compiled yet; [`Jit::module`] is the handle Stage 1
+/// declares and defines functions through.
+pub struct Jit {
+    module: JITModule,
+}
+
+impl Jit {
+    /// Stand up the Cranelift JIT module for the host ISA, with the runtime-callback
+    /// table registered as absolute symbols (so emitted code resolves `brood_rt_*` to
+    /// these Rust functions). No code is compiled here.
+    #[allow(clippy::new_without_default)] // construction can fail on an unsupported host
+    pub fn new() -> Self {
+        let mut builder = JITBuilder::new(default_libcall_names())
+            .expect("Cranelift JITBuilder for the host ISA");
+        builder.symbol("brood_rt_tick", brood_rt_tick as *const u8);
+        builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
+        builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
+        builder.symbol("brood_rt_alloc_pair", brood_rt_alloc_pair as *const u8);
+        builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
+        Jit { module: JITModule::new(builder) }
+    }
+
+    /// The Cranelift module to declare + define compiled arms through (Stage 1).
+    pub fn module(&mut self) -> &mut JITModule {
+        &mut self.module
+    }
+}
+
 /// Preemption poll (ADR-027). JIT'd loop back-edges call this; returns nonzero when the
 /// process has spent its reduction budget and should yield. Mirrors the interpreter's
 /// `tick_capture` at the bytecode loop top.
