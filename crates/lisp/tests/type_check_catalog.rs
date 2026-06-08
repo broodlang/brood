@@ -52,6 +52,15 @@ const SHOULD_WARN: &[(&str, &str)] = &[
         "(string-length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))",
         "string-length",
     ), // fold → number (lambda callback)
+    // ---- element types preserved through structural combinators ----
+    ("(string-length (first (reverse [1 2 3])))", "string-length"),      // reverse vector<int> → int
+    ("(string-length (first (sort [1 2 3])))", "string-length"),         // sort preserves int
+    ("(string-length (first (sort-by (fn (x) x) [1 2 3])))", "string-length"), // sort-by preserves int
+    ("(string-length (first (take 2 [1 2 3])))", "string-length"),       // take preserves int
+    ("(string-length (first (drop 1 [1 2 3])))", "string-length"),       // drop preserves int
+    ("(string-length (first (cons 1 (list 2 3))))", "string-length"),    // cons: int | int = int
+    ("(string-length (first (append [1 2] [3 4])))", "string-length"),   // append: int ∪ int = int
+    ("(string-length (first (concat [1 2] [3 4])))", "string-length"),   // concat: same
 ];
 
 /// Each snippet must produce **zero** warnings — the false-positive guards.
@@ -72,6 +81,16 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(fn (xs) (+ 1 (first xs)))",               // unknown sequence
     "(fn (f) (map f (list 1 2 3)))",            // local callback, unknown arity
     "(fn (init) (string-length (reduce + init (list 1 2 3))))", // unknown init type
+    // ---- structural combinators: correct uses stay silent ----
+    "(+ 1 (first (reverse [1 2 3])))",          // int element is fine for +
+    "(+ 1 (first (sort [1 2 3])))",
+    "(+ 1 (first (take 2 [1 2 3])))",
+    "(+ 1 (first (drop 1 [1 2 3])))",
+    "(+ 1 (first (cons 1 (list 2 3))))",        // int | int = int, fine for +
+    "(+ 1 (first (append [1 2] [3 4])))",
+    // unknown sequence → no refinement propagated, no warning
+    "(fn (xs) (+ 1 (first (reverse xs))))",
+    "(fn (xs ys) (+ 1 (first (append xs ys))))", // both unknown → unrefined
     // ---- guard-narrowing soundness (the fixed false positives) ----
     // `and` short-circuit: a falsy `(and (vector? m) …)` doesn't prove m isn't a
     // vector → the else-branch must NOT narrow m.

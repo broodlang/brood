@@ -320,6 +320,60 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
         return list_result(a);
     }
+    // `(reverse coll)` — the same elements, reversed; element type is unchanged.
+    if value::symbol_is(head, "reverse") {
+        let coll = *items.get(1)?;
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        return list_result(a);
+    }
+    // `(sort coll)` / `(sort less? coll)` and `(sort-by key-fn coll)` — the
+    // sequence is always the last argument; element type is preserved unchanged.
+    if value::symbol_is(head, "sort") || value::symbol_is(head, "sort-by") {
+        let coll = *items.last()?;
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        return list_result(a);
+    }
+    // `(take n coll)` / `(drop n coll)` / `(take-while pred coll)` /
+    // `(drop-while pred coll)` — prefix/suffix slices; the sequence arg is
+    // always the last (position 2). Element type is preserved unchanged.
+    if value::symbol_is(head, "take")
+        || value::symbol_is(head, "drop")
+        || value::symbol_is(head, "take-while")
+        || value::symbol_is(head, "drop-while")
+    {
+        let coll = *items.get(2)?;
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        return list_result(a);
+    }
+    // `(cons x xs)` — prepend `x` onto `xs`; the result element type is
+    // `type(x) | elem(xs)`. Both must be known; if either is unknown the element
+    // type is unknown (the tail may hold values of any type). The result is always
+    // a `pair` (not nil), so we return `list<E>` without the `nil` variant.
+    if value::symbol_is(head, "cons") && items.len() == 3 {
+        let hd_ty = expr_ty(heap, items[1], ctx);
+        let tail_elem = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty().cloned());
+        return match (hd_ty, tail_elem) {
+            (Some(h), Some(e)) => Some(Ty::list_of(h.union(e))),
+            _ => Some(Ty::of(Tag::Pair)), // one side unknown → unrefined pair
+        };
+    }
+    // `(append xs ys …)` / `(concat xs ys …)` — variadic list concatenation.
+    // Result element type is the union of every argument's element type; any
+    // argument with an unknown element type → fall through to the flat result.
+    if value::symbol_is(head, "append") || value::symbol_is(head, "concat") {
+        if items.len() == 1 {
+            return Some(Ty::of(Tag::Nil)); // (append) = nil
+        }
+        let mut acc: Option<Ty> = None;
+        for &arg in &items[1..] {
+            let elem = expr_ty(heap, arg, ctx).and_then(|t| t.elem_ty().cloned())?;
+            acc = Some(match acc {
+                Some(a) => a.union(elem),
+                None => elem,
+            });
+        }
+        return list_result(acc);
+    }
     // `(map f coll)` → `nil | list<B>`, `B` = the callback's return type applied
     // to `coll`'s element type. Unknown callback / element → flat `list`.
     if value::symbol_is(head, "map") {
