@@ -538,11 +538,21 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
      unstealable ones — re-routed off it; fresh stay stealable; pinned coroutines stay).
      The mass-kill/1000-monitored/`observer` tests now pass flag-on; §6 bar holds flag
      on+off; the surgical drain keeps timing perturbation minimal.
-   - ⬜ **Last flag-on issue before the flip:** `gen_test`'s *linked-spawn* describe is
-     ~25% flaky flag-on (`%isolate`'s reap `:kill`s a *still-alive linked* server → `:kill`
-     back-propagates to the isolate-runner; an async-`stop`-vs-reap race that capture-mode
-     timing exposes). Not a scheduler-correctness bug; resolve by making the reap/stop
-     ordering deterministic (Brood side) before flipping. `stream_test` is WIP.
+   - ✅ **(2026-06-08)** The `gen_test` linked-spawn flake is **fixed**: `%isolate` now
+     **unlinks each spawned child before `:kill`ing it** in its reap, so cleaning up a
+     leftover `spawn-link`ed server can't back-propagate `:killed` and take the isolate
+     runner down (the async-`stop`-vs-reap race no longer matters). gen 8/8 flag-on.
+   - ✅ **Capture mode is correctness-equivalent to coroutine mode.** Full suite both ways
+     (2026-06-08, good binary): **1882/1902** pass, the **same 20 failures in both** — all
+     environmental (≈15 tree-sitter, needs native grammars; ≈5 package-`:git`, needs
+     git/network and time out at 120 s). So capture mode adds **zero** failures. Timing
+     218 s (off) vs 265 s (on) ≈ +22% (the deadlock/timeouts that made it 6× are gone).
+   - ⬜ **Flip the default** (the remaining decision): make `BROOD_STATE_CAPTURE` default
+     **on** (`=0` stays the escape hatch). Correctness is proven; the open question is the
+     ~22% overhead, which lands *before* its payoff (corosensei + the 16 MiB stacks only
+     go in step 4). Reasonable to flip now (prove default-on, then delete) or to optimise
+     the capture hot path (per-spawn heap, `install/save_ctx`, per-wake `assign_worker`)
+     first. Must hold the §6 plain-release bar (it does, flag on+off).
 4. Delete corosensei (8.3 last bullet); re-run the bar. Generalise stealing.
 
 This is the scheduler core (the KI-1 subsystem) — run it as a focused effort, not

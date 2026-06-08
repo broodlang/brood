@@ -149,10 +149,16 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
       `assign_worker` excludes it, and entering the block drains its stranded backlog
       (non-fresh capture procs re-routed; fresh stay stealable; coroutines stay).
       mass-kill/1000-monitored/`observer` pass flag-on; §6 bar holds flag on+off.
-    - ⬜ §8.4 step 3 (last bit) + step 4: one flag-on flake left — `gen_test`'s linked-spawn
-      describe (~25%: `%isolate` reap `:kill`s a still-alive *linked* server → back-propagates;
-      an async-`stop`-vs-reap timing race capture-mode exposes; resolve Brood-side). Then
-      flip the default → delete corosensei + generalize stealing. Flag stays **off**. §6 bar.
+    - ✅ gen linked-spawn flake **fixed**: `%isolate` now unlinks each spawned child before
+      `:kill`ing it in its reap, so cleaning up a `spawn-link`ed server can't back-propagate
+      `:killed` and kill the isolate runner. **Capture mode is now correctness-equivalent to
+      coroutine mode**: full suite both ways = 1882/1902, the *same* 20 failures (all
+      environmental — tree-sitter grammars + package `:git`), so capture adds zero; ~22%
+      slower (was 6× before the deadlock fix). §6 bar holds flag on+off.
+    - ⬜ §8.4 step 3 (flip the default) + step 4: make `BROOD_STATE_CAPTURE` default on
+      (`=0` = escape hatch) — correctness proven; open question is the ~22% overhead (lands
+      before its payoff, which is step 4's corosensei deletion). Then delete corosensei +
+      generalize stealing. Flag stays **off** until the flip decision.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.

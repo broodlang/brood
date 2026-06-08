@@ -767,12 +767,19 @@ mod tests {
         };
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         crate::process::scheduler::set_capture_run(true);
+        // A *top-level* capture receive (bytecode-reachable, no native frame between it
+        // and the body driver) is the shape that suspends-and-captures; a native-nested
+        // one instead blocks. Mark top-level so the gate `in_capture_run &&
+        // capture_top_level` fires the suspend (else this would fall through to the
+        // condvar block and hang the test). Restore both flags after.
+        let prev_top = crate::process::scheduler::set_capture_top_level(true);
 
         let mut heap = Heap::new();
         // Empty mailbox, no timeout: the scan finds nothing and the capture branch
         // returns the suspend signal. `matcher`/`on_timeout` are never applied (the
         // queue is empty), so plain `nil`s suffice.
         let r = receive_match(&mut heap, Value::Nil, Value::Nil, Value::Nil);
+        crate::process::scheduler::set_capture_top_level(prev_top);
         crate::process::scheduler::set_capture_run(false);
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx
         let err = r.expect_err("an empty receive in a capture run must signal a suspend, not return");
