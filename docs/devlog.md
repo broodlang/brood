@@ -2037,3 +2037,48 @@ agent (a known environmental hang, KI in `next-up-schedulers` memory), not a cod
 Benchmarks archived (`docs/benchmarks/2026-06-08T15-28-17Z.md`): VM/tree-walker ratios
 unchanged and strong (fib25 7.7×, sum_tail-100k 9.7×, reduce_range-1M 3.8×); scheduler
 fan-out healthy (`spawn_fanout` 1000 = 4.6 ms).
+
+## 2026-06-08  stdlib expansion — path, system, crypto, agent, enum extras
+
+**Five new opt-in modules added to `std/`.**
+
+`std/path.blsp` (`require 'path`) — pure path-string manipulation: `join`, `split`,
+`basename`, `dirname`, `extension`, `stem`, `normalize` (resolves `.`/`..`), `relative-to`,
+`absolute?`, `with-extension`. No filesystem calls except `exists?`/`is-file?`/`is-dir?`.
+
+`std/system.blsp` (`require 'system`) — OS interaction over new Rust primitives: `env`
+(single var or nil), `env-all` (all env vars as a map), `argv` (vector of arg strings),
+`os-type` (`:linux`/`:macos`/`:windows`/`:unknown`), `cmd`/`cmd-ok?`/`cmd-out` (run a
+subprocess, capture stdout/stderr/exit), `working-dir`/`host` (aliases for builtins to
+avoid name collision), `halt`.
+
+`std/crypto.blsp` (`require 'crypto`) — ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt` on
+byte vectors, `encrypt-str`/`decrypt-str` for string convenience; wrong key/nonce returns
+`:error`), `random-bytes`/`random-key`/`random-nonce`, PBKDF2-HMAC-SHA256 (`pbkdf2`),
+`secure=?` (constant-time byte-vector equality). PBKDF2 implemented manually over
+`hmac 0.13` (the `pbkdf2 0.12` crate uses `digest 0.10` which conflicts with our
+`sha2 0.11`/`digest 0.11`).
+
+`std/agent.blsp` (`require 'agent`) — Erlang/Elixir-style process-backed state cell:
+`start`/`start-link` (spawn loop holding state), `get`/`update`/`get-and-update`/`cast`/
+`stop`. Uses `spawn`+`send`+`receive`+`ref` — all Brood, no new primitives. Bug fixed
+during testing: `(spawn (fn () body))` double-wraps the body (the `spawn` macro already
+adds `(fn () …)`); the correct form is `(spawn body)`.
+
+**Enum extras in `std/prelude.blsp`:** `chunk-every` (partition into fixed-size chunks,
+keeping remainder), `chunk-by` (partition by consecutive key), `scan`/`reductions`
+(running fold returning all intermediate values), `flat-map` (alias for `mapcat`),
+`zip-with` (combine two sequences element-wise), `intersperse` (alias for `interpose`),
+`min-by`/`max-by` (extremum by key function).
+
+**Tests:** `tests/path_test.blsp` (46), `tests/system_test.blsp` (19),
+`tests/crypto_test.blsp` (22), `tests/agent_test.blsp` (10),
+`tests/prelude_enum_test.blsp` (30). Two bugs found and fixed during test runs:
+`path/basename "/"` returned `""` instead of `"/"` (edge case in last-sep scan);
+`path/with-extension` on a bare filename prepended `"./foo.md"` instead of `"foo.md"`
+(dirname returns `"."` for bare names — fixed by skipping the prefix when dirname is `"."`).
+Also corrected a PBKDF2 test vector (comment said `120fb6cffccd…` but the correct SHA256
+output for password/salt/1iter is `120fb6cffcf8b32c…`).
+
+**Suite result:** 553/555, same pre-existing failures as before (parser deep-nest SIGABRT,
+dist link-reconnect flake).

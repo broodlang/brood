@@ -134,7 +134,7 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
       persisted in the mailbox (re-entry would else reset `after`). Live-migration
       regression test (`tests/live_migration.rs`, §7.6) green under GC-stress + verify;
       §6 plain-release KI-1 bar holds **flag on and off** (10/10 + `BROOD_GC_STRESS`).
-    - 🟡 §8.4 step 3 (in progress, 2026-06-08): **native-nested-receive footgun RESOLVED**
+    - ✅ §8.4 step 3 (2026-06-08): **native-nested-receive footgun RESOLVED**
       (the BEAM dirty-scheduler way, §7.4). A clean *top-level* `receive` captures and
       migrates as before; a *native-nested* `receive` (reached through `%isolate`/`%try`/
       a HOF callback — can't be captured through the native frame, and re-running the
@@ -456,7 +456,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     already reserves `:branch`/`:dir`/`:features`). Costs nothing now; lets
     ADR-071 slot in without reshaping the package format later.
 - 🟡 **`std/` = basic-language core; frameworks are packages; hierarchical module
-  names** (ADR-085). `std/` has grown to ~38 modules, most of which aren't what a
+  names** (ADR-085). `std/` has grown to ~42 modules, most of which aren't what a
   *normal language* ships — they're an editor/display **framework** (`buffer`,
   `display`, `face`, `highlight`, `keymap`, `layers`, `pane`, `ui`, `lineedit`,
   `ansi`), a net/web library + concurrency framework (`http`/`sse`/`tcp`,
@@ -464,7 +464,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   `test`, `docs`, `reload`, `mcp`, `observer`, `repl`, `sexp`). Three coupled moves:
   ✅ **(1)** curate `std/` — the **in-tree reorganization is done** (2026-06-01):
   core stays bare in `std/` (`prelude` + `io`/`file`/`set`/`regex`/`json`/`fuzzy`/
-  `format`/`task`/`log`); the **frameworks are namespaced** — `editor/*` (`ansi
+  `format`/`task`/`log` + ✅ `path`/`system`/`crypto`/`agent` added 2026-06-08); the **frameworks are namespaced** — `editor/*` (`ansi
   buffer display face highlight keymap layers lineedit pane ui`), `net/*`
   (`http sse tcp`), `proc/*` (`hatch supervisor`), files under
   `std/{editor,net,proc}/`; the **toolchain** (`test project package docs reload
@@ -735,8 +735,14 @@ the workaround available today.
     fallback. The only true gap is `def`/`quasiquote`/`binding` in a closure *body*
     (uncommon, low value). So the fallback stays; "retire the tree-walker" is a
     non-goal.
-  - ⬜ **Bytecode lowering** — explicitly deferred until a profile shows node-
-    dispatch dominating (ADR-076).
+  - ✅ **Bytecode lowering (done, ADR-100 §7/§8).** The closure-compiling VM's `Node`
+    IR is lowered to a flat bytecode `Chunk` (`compile_chunk`/`emit_node` cover every
+    `Node` variant), run by `vm_run_bc`/`exec_chunk` on an explicit heap frame stack;
+    the `Node`-walking executor (`exec_node`) was retired, so bytecode is the **sole**
+    VM engine. (Originally deferred under ADR-076 until a profile justified it; the
+    state-capture migration needed the reified frame stack, so it landed there.) The
+    only bodies that still defer to the tree-walker do so at the *Node* level
+    (`def`/`quasiquote`/`binding` in a body, an unexpanded macro, a movable-LOCAL body).
   - ✅ **VM perf round 1 / JIT runway** (ADR-096,
     [`vm-perf-and-jit-runway.md`](vm-perf-and-jit-runway.md), 2026-06-06) —
     call-site + global-read inline caches (one epoch-guarded mechanism), wider
