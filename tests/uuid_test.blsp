@@ -27,6 +27,32 @@
   (test "passes uuid? validation"
     (is (uuid/uuid? (uuid/uuid-nil)))))
 
+(describe "uuid-v7"
+  (test "produces a 36-character string"
+    (assert= 36 (string-length (uuid/uuid-v7))))
+  (test "has dashes at positions 8 13 18 23"
+    (let (u (uuid/uuid-v7))
+      (is (= (char-at u 8)  "-"))
+      (is (= (char-at u 13) "-"))
+      (is (= (char-at u 18) "-"))
+      (is (= (char-at u 23) "-"))))
+  (test "version nibble is 7"
+    (assert= "7" (char-at (uuid/uuid-v7) 14)))
+  (test "variant nibble is one of 8/9/a/b"
+    (let (vc (char-at (uuid/uuid-v7) 19))
+      (is (or (= vc "8") (= vc "9") (= vc "a") (= vc "b")))))
+  (test "passes uuid? validation"
+    (is (uuid/uuid? (uuid/uuid-v7))))
+  (test "timestamp prefix is all hex"
+    (let (u (uuid/uuid-v7)
+          ;; Timestamp in positions 0-7 (p0) and 9-12 (p1), skipping dash at 8
+          ts (str (substring u 0 8) (substring u 9 13)))
+      (assert= 12 (string-length ts))
+      (is (uuid/uuid--all-hex? ts 0 12))))
+  (test "generates unique values"
+    (let (a (uuid/uuid-v7) b (uuid/uuid-v7))
+      (is (not= a b)))))
+
 (describe "uuid?"
   (test "valid lowercase UUID"
     (is (uuid/uuid? "550e8400-e29b-41d4-a716-446655440000")))
