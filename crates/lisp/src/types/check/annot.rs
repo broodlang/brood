@@ -43,13 +43,24 @@ fn base_ty(name: &str) -> Option<Ty> {
     })
 }
 
-/// Parse a type-expression form to a [`Ty`]. Handles base names, arrows
-/// `(p… -> r)` (a function refinement), `(list E)` / `(vector E)`, and
-/// `(or A B …)`. `None` for anything unrecognised — the annotation is then
-/// dropped, never guessed.
+/// Parse a type-expression form to a [`Ty`]. Handles base names, type
+/// variables (`?A` → `Ty::ANY`), arrows `(p… -> r)`, `(list E)` /
+/// `(vector E)`, `(or A B …)`, `(and A B …)`, and `(map K V)` (flat
+/// `Ty::Map` in slice 1). `None` for anything unrecognised — the annotation
+/// is then dropped, never guessed.
 pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
     match form {
-        Value::Sym(s) => base_ty(&value::symbol_name(s)),
+        Value::Sym(s) => {
+            let name = value::symbol_name(s);
+            // Type variables (`?A`, `?el`, etc.) — static-only, no runtime meaning.
+            // Unknown to `type-matches?` → accepts everything (correct: it's a
+            // static constraint, not a runtime one). Resolve to ANY here so the
+            // checker uses the widest safe type at positions it can't unify.
+            if name.starts_with('?') {
+                return Some(Ty::ANY);
+            }
+            base_ty(&name)
+        }
         // `nil` reads as the literal `Value::Nil`, not a symbol — so a type-expr
         // like `(or int nil)` lands here, not in `base_ty`.
         Value::Nil => Some(Ty::of(Tag::Nil)),
@@ -81,6 +92,31 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                     });
                 }
                 return acc;
+            }
+            // (and A B …) — an intersection.  Ty::intersect is already
+            // well-tested set intersection; no new Ty variant needed.
+            // A bare (and) with no args is Ty::ANY (vacuously true).
+            if value::symbol_is(head, "and") {
+                if items.len() == 1 {
+                    return Some(Ty::ANY);
+                }
+                let mut acc: Option<Ty> = None;
+                for &it in &items[1..] {
+                    let t = parse_type(heap, it)?;
+                    acc = Some(match acc {
+                        Some(a) => a.intersect(t),
+                        None => t,
+                    });
+                }
+                return acc;
+            }
+            // (map K V) — key/value typed map.  Slice 1: parse and validate K/V
+            // annotations but produce a flat Ty::Map for the checker (refinement
+            // tracking deferred to slice 2 when a real consumer drives it).
+            if value::symbol_is(head, "map") && items.len() == 3 {
+                parse_type(heap, items[1])?;
+                parse_type(heap, items[2])?;
+                return Some(Ty::of(Tag::Map));
             }
             None
         }
