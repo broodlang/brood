@@ -403,9 +403,20 @@ pub(crate) fn name_for_pid(pid: u64) -> Option<Symbol> {
 /// and `(spawn :foo …)` (named-spawn) would mistake the stale entry for
 /// "already running" and never re-spawn the worker. Erlang's `register`
 /// semantics: a name lives only as long as its process does.
+///
+/// Also sweeps `NODE_MONITORS` so that dead pids don't accumulate as
+/// permanent watcher entries: without this, every future `fire_nodedown`
+/// for a peer the dead process watched would iterate and attempt delivery
+/// to a non-existent pid.
 pub(crate) fn unregister_dead_pid(pid: u64) {
     let mut names = crate::core::sync::write(&NAMES);
     names.retain(|_, &mut p| p != pid);
+    // Prune the dead pid from every NODE_MONITORS watcher list.
+    let mut monitors = crate::core::sync::write(&NODE_MONITORS);
+    for watchers in monitors.values_mut() {
+        watchers.retain(|&w| w != pid);
+    }
+    monitors.retain(|_, v| !v.is_empty());
 }
 
 /// Named-spawn's atomic check-or-spawn primitive. If `name` is registered
@@ -594,11 +605,32 @@ pub(crate) fn exit_remote(target_node: Symbol, target_pid: u64, reason: Message)
 /// already down and `[:nodedown]` is delivered immediately (Erlang's
 /// `monitor_node` semantics).
 pub(crate) fn monitor_node(name: Symbol, pid: u64) {
-    crate::core::sync::write(&NODE_MONITORS)
-        .entry(name)
-        .or_default()
-        .push(pid);
-    if !is_local(name) && !crate::core::sync::read(&NODES).contains_key(&name) {
+    // The watcher registration and the liveness check must be atomic with
+    // respect to `fire_nodedown` (which reads NODE_MONITORS, then delivers).
+    // Hold the NODE_MONITORS write lock across both steps: `fire_nodedown`
+    // blocks on that read until we've either registered or decided to deliver
+    // immediately, preventing the double-delivery race where fire_nodedown
+    // sees the new watcher AND monitor_node's fallback also fires.
+    //
+    // Lock order: NODE_MONITORS write → NODES read.  Safe because `drop_link`
+    // releases its NODES write lock *before* calling `fire_nodedown` — no
+    // thread ever holds NODES write while waiting for NODE_MONITORS.
+    let immediate = {
+        let mut monitors = crate::core::sync::write(&NODE_MONITORS);
+        if !is_local(name) && !crate::core::sync::read(&NODES).contains_key(&name) {
+            true // peer already down; deliver below, outside the lock
+        } else {
+            // Dedup: a process that calls (monitor-node name pid) multiple
+            // times across reconnect cycles should get exactly one delivery per
+            // down event, not one per registration.
+            let watchers = monitors.entry(name).or_default();
+            if !watchers.contains(&pid) {
+                watchers.push(pid);
+            }
+            false
+        }
+    };
+    if immediate {
         process::deliver(pid, nodedown_msg(name));
     }
 }
@@ -707,22 +739,24 @@ pub(crate) fn node_listen(name: Symbol, addr: &str, cookie: String) -> io::Resul
             ),
         ));
     }
-    // Guard against a second node-start, which would otherwise leak the previous
-    // listener + acceptor thread.
+    // Guard against a second node-start and publish identity atomically under
+    // the same write lock — closing the TOCTOU window a separate read-check
+    // + set_identity would leave. The acceptor reads identity lazily (at
+    // accept time), so the write happens before any peer is served; if the
+    // bind fails below, clear_identity rolls it back so node-start can retry.
     {
-        let n = crate::core::sync::read(&NODE);
+        let mut n = crate::core::sync::write(&NODE);
         if n.started {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "this runtime is already a node (node-start called twice)",
             ));
         }
+        n.name = name;
+        n.cookie = cookie;
+        n.started = true;
     }
-    // Publish identity, then bind the first listener. The acceptor reads identity
-    // lazily (at accept time), so it's set before any peer can be served; if the
-    // bind fails we roll the identity back, leaving the runtime a non-node so
-    // node-start can be retried.
-    set_identity(name, cookie);
+    LOCAL_NODE.store(name, Ordering::Release);
     if let Err(e) = start_listener(addr) {
         clear_identity();
         return Err(e);
@@ -772,23 +806,8 @@ fn start_listener(addr: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Publish this runtime's node identity: name + cookie under the `NODE` lock,
-/// then the lock-free name cache. `Release` so a reader on another core that
-/// loads `LOCAL_NODE` with `Acquire` is guaranteed to see the cookie + name too;
-/// the hot path (`local_node`) is the matched `Acquire`.
-fn set_identity(name: Symbol, cookie: String) {
-    {
-        let mut n = crate::core::sync::write(&NODE);
-        n.name = name;
-        n.cookie = cookie;
-        n.started = true;
-    }
-    LOCAL_NODE.store(name, Ordering::Release);
-}
-
-/// Roll back [`set_identity`] — used when the first listener's bind fails, so a
-/// failed `node-start` leaves the runtime a non-node (retryable) rather than a
-/// node with no listener.
+/// Roll back a failed `node-start` — used when the first listener's bind fails
+/// so the runtime stays a non-node (retryable) rather than a node with no listener.
 fn clear_identity() {
     {
         let mut n = crate::core::sync::write(&NODE);
@@ -888,11 +907,16 @@ fn prepare_unix_path(path: &str) -> io::Result<()> {
                     format!("node socket {path} is already in use by a live node"),
                 ));
             }
-            // Refused / no listener → a stale file from a dead node; clear it so
-            // `bind` can recreate it.
-            Err(_) => {
+            // ConnectionRefused → no listener; socket file is stale from a
+            // crashed node. Unlink it so `bind` can recreate it.
+            Err(ref e) if e.kind() == io::ErrorKind::ConnectionRefused => {
                 let _ = std::fs::remove_file(p);
             }
+            // Any other connect error (EACCES, ENOENT after a race, …) means
+            // we can't determine liveness. Leave the file alone and let `bind`
+            // fail with a clear OS error rather than destroying a potentially
+            // live peer's socket.
+            Err(_) => {}
         }
     }
     Ok(())
@@ -1050,7 +1074,10 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
     // slowloris peer from pinning the writer and ballooning `rx`; a timeout or a
     // seal failure is treated like any I/O error — fall through to shutdown.
     let writer_sock = Arc::clone(&sock);
-    let _ = writer_sock.set_write_timeout(Some(WRITE_TIMEOUT));
+    if let Err(e) = writer_sock.set_write_timeout(Some(WRITE_TIMEOUT)) {
+        eprintln!("dist: warning: could not set write timeout on link to {}: {e}",
+                  value::symbol_name(peer));
+    }
     std::thread::spawn(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             for payload in rx {
@@ -1178,18 +1205,42 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
 /// each join can't loop. Entries with no advertised address are skipped — a peer
 /// that isn't listening can't be dialed onward.
 fn broadcast_peer_table() {
-    let nodes = crate::core::sync::read(&NODES);
-    for (&recipient, conn) in nodes.iter() {
-        let peers: Vec<(Symbol, String)> = nodes
+    // Snapshot the peer table (cheap: Arc/channel clones) and release the
+    // NODES lock before encoding or enqueueing. `enqueue` calls
+    // `sock.shutdown()` when the writer queue is full — that syscall must not
+    // run while holding NODES or it delays concurrent link registration and
+    // teardown for the duration of every shutdown it triggers.
+    struct PeerSnap {
+        name: Symbol,
+        addr: String,
+        tx: SyncSender<Arc<[u8]>>,
+        sock: Arc<Stream>,
+    }
+    let snaps: Vec<PeerSnap> = {
+        let nodes = crate::core::sync::read(&NODES);
+        nodes
             .iter()
-            .filter(|(&name, c)| name != recipient && !c.addr.is_empty())
-            .map(|(&name, c)| (name, c.addr.clone()))
+            .map(|(&name, c)| PeerSnap {
+                name,
+                addr: c.addr.clone(),
+                tx: c.tx.clone(),
+                sock: Arc::clone(&c.sock),
+            })
+            .collect()
+    };
+    for s in &snaps {
+        let peers: Vec<(Symbol, String)> = snaps
+            .iter()
+            .filter(|p| p.name != s.name && !p.addr.is_empty())
+            .map(|p| (p.name, p.addr.clone()))
             .collect();
         if peers.is_empty() {
             continue;
         }
         if let Ok(bytes) = encode_payload(&Frame::Peers { peers }) {
-            let _ = conn.enqueue(Arc::from(bytes));
+            if s.tx.try_send(Arc::from(bytes)).is_err() {
+                let _ = s.sock.shutdown(Shutdown::Both);
+            }
         }
     }
 }
