@@ -346,6 +346,9 @@ argument to `gui-font!` for per-window fonts.
 - ~~**Plain-release segfault** under the multi-threaded scheduler on
   tail-recursive workers with heavy prelude churn.~~ **Fixed** by `2abf05e`
   (per-worker pinned queues — no cross-thread coroutine migration). See KI-1.
+  *(Superseded 2026-06-08: ADR-100 §8 replaced coroutines with heap-captured
+  continuations, so cross-thread migration is now safe and routine — the pinning
+  constraint these notes describe no longer applies.)*
 - ~~**`cargo test -p brood --test suite` segfault** in debug builds.~~
   **Fixed** (2026-05-29) — coroutine stack overflow, not a memory bug. Debug
   eval frames recurse deeper (no inlining) than release, and post-Phase-1

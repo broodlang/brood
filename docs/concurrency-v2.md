@@ -578,5 +578,16 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
 
 This is the scheduler core (the KI-1 subsystem) — run it as a focused effort, not
 folded into unrelated work.
-</content>
-</invoke>
+
+### 8.5 Status: COMPLETE (2026-06-08)
+
+All four rollout steps shipped. State capture is the **sole** scheduler engine;
+corosensei is deleted; work-stealing and live process migration are general (any
+process migrates — no native stack to pin). The §6 plain-release KI-1 bar holds
+(10/10 + `BROOD_GC_STRESS`), and the migration added zero correctness failures. The
+only deferred follow-ups are optional micro-optimisations of the capture hot path
+(per-spawn `Heap::with_regions`, the per-quantum `install`/`save_ctx` capture-stack
+clone) — low value now that the coroutine engine and its 16 MiB stacks are gone, and
+the main per-wake cost was already cut (the `assign_worker`-only-when-busy heuristic,
+~19%→~4% on ping-pong). The remaining work-stealing refinement (§1: re-balancing a
+process that turns long-running *after* placement) stays deferred — no observed need.
