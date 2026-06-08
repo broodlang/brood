@@ -21,3 +21,10 @@ serde_json = "1"
 # in crates/cli/Cargo.toml — `nest` has more surface (run/test/check/format/
 # new/doc/mcp/repl), so the win from derive-based subcommands is bigger.
 clap = { version = "4", features = ["derive"] }
+
+[features]
+# Mirror cli's passthrough: `cargo build -p nest --features perf-stats` arms the
+# VM work-attribution counters (`(vm-stats)` / `BROOD_PERF_STATS`) for profiling a
+# real project workload (e.g. brood-edit redisplay) through `nest test`/`run`.
+# Off by default — zero cost.
+perf-stats = ["brood/perf-stats"]
