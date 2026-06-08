@@ -448,7 +448,8 @@ pub(crate) fn in_capture_run() -> bool {
 }
 
 /// Set/clear the capture-run flag around a `run_process_body` call (`run_one`).
-pub(super) fn set_capture_run(on: bool) {
+/// `pub(crate)` so the JIT's tests can simulate a green-process (preemptible) context.
+pub(crate) fn set_capture_run(on: bool) {
     CAPTURE_RUN.with(|c| c.set(on));
 }
 

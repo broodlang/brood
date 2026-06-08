@@ -4169,17 +4169,17 @@ mod tests {
 
         // Preemption: a loop longer than the reduction budget yields at a back-edge —
         // the JIT'd arm returns 2 (preempt), with the frame slots left mid-computation
-        // in `roots` for the driver to resume on the VM.
+        // in `roots` for the driver to resume on the VM. `brood_rt_tick` only preempts in
+        // a capture-mode green process, so simulate one (set/clear `capture_run`).
+        crate::process::set_capture_run(true);
         crate::process::yield_now(); // budget = REDUCTION_BUDGET
         let mut heap = Heap::new();
         let base = heap.roots_len();
         heap.push_root(Value::Int(1_000_000)); // far more iterations than the budget
         heap.push_root(Value::Int(0));
-        assert_eq!(
-            f(&mut heap as *mut Heap, base as i64),
-            2,
-            "a loop exceeding the reduction budget must preempt (return 2)"
-        );
+        let outcome = f(&mut heap as *mut Heap, base as i64);
+        crate::process::set_capture_run(false); // restore (cargo test shares threads)
+        assert_eq!(outcome, 2, "a loop exceeding the budget must preempt (return 2) in a green process");
     }
 
     /// JIT Stage-1 1b: tiering. An arm invoked past the hotness threshold is compiled
@@ -4341,5 +4341,96 @@ mod tests {
             VmOutcome::Done(other) => panic!("Done non-int: tag {:?}", value::tag(other)),
             _ => panic!("expected Done(15) from the JIT hook"),
         }
+    }
+
+    /// JIT Stage-1.5: the actual speedup — JIT'd `sumto(N,0)` vs the interpreter, same
+    /// arm, run through `vm_run_bc`. The VM baseline forces BAILED so its hook stays on
+    /// the interpreter; the JIT arm is warmed so the hook runs native. Benchmark, not a
+    /// pass/fail test — run with `--ignored --nocapture`.
+    #[cfg(feature = "jit")]
+    #[test]
+    #[ignore = "benchmark — cargo test -p brood --features jit --lib jit_speedup -- --ignored --nocapture"]
+    fn jit_speedup_vs_vm() {
+        use std::time::Instant;
+        let prim2 = |op: PrimOp, head: &str| Inst::Prim2 {
+            op,
+            map: [0, 1],
+            head: value::intern(head),
+            guard: AtomicU64::new(0),
+            pos: None,
+        };
+        let mk = || CompiledArm {
+            nrequired: 2,
+            noptional: 0,
+            optional_defaults: Box::new([]),
+            rest_slot: None,
+            nslots: 2,
+            body: Node::Const(ConstVal::new(Value::Nil)),
+            chunk: Some(Chunk {
+                code: vec![
+                    Inst::Local(0),
+                    Inst::Const(ConstVal::new(Value::Int(1))),
+                    prim2(PrimOp::Lt, "<"),
+                    Inst::JumpIfFalse(6),
+                    Inst::Local(1),
+                    Inst::Jump(13),
+                    Inst::Local(0),
+                    Inst::Const(ConstVal::new(Value::Int(1))),
+                    prim2(PrimOp::Sub, "-"),
+                    Inst::Local(1),
+                    Inst::Local(0),
+                    prim2(PrimOp::Add, "+"),
+                    Inst::SelfCall { argc: 2 },
+                ],
+            }),
+            has_runtime_handles: false,
+            jit_code: AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: AtomicU32::new(0),
+        };
+        let n = 100_000i64; // iterations per sumto call
+        let reps = 300;
+        let run = |arm: &Arc<CompiledArm>| {
+            let mut h = Heap::new();
+            match vm_run_bc(&mut h, arm.clone(), &[Value::Int(n), Value::Int(0)], EnvId::GLOBAL, None, true)
+                .expect("run")
+            {
+                VmOutcome::Done(Value::Int(r)) => r,
+                _ => panic!("bad outcome"),
+            }
+        };
+
+        // VM baseline: BAILED forces the hook to stay on the interpreter.
+        let vm_arm = Arc::new(mk());
+        vm_arm.jit_code.store(crate::jit::BAILED, std::sync::atomic::Ordering::Release);
+        let r0 = run(&vm_arm); // warm caches / verify
+        let t = Instant::now();
+        for _ in 0..reps {
+            assert_eq!(run(&vm_arm), r0);
+        }
+        let vm = t.elapsed();
+
+        // JIT: warm the arm so it compiles, then the hook runs native.
+        let jit_arm = Arc::new(mk());
+        {
+            let mut h = Heap::new();
+            let b = h.roots_len();
+            h.push_root(Value::Int(5));
+            h.push_root(Value::Int(0));
+            for _ in 0..10 {
+                let _ = jit_tier(&jit_arm, &mut h, b);
+            }
+        }
+        let r1 = run(&jit_arm);
+        assert_eq!(r1, r0, "JIT must match the VM");
+        let t = Instant::now();
+        for _ in 0..reps {
+            assert_eq!(run(&jit_arm), r1);
+        }
+        let jit = t.elapsed();
+
+        eprintln!(
+            "sumto({n},0) x{reps}: VM {vm:?}  JIT {jit:?}  speedup {:.1}x",
+            vm.as_secs_f64() / jit.as_secs_f64().max(1e-9)
+        );
     }
 }
