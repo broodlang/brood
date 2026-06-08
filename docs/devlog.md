@@ -2139,9 +2139,40 @@ on a `sumto` int loop (`jit_speedup_vs_vm`, `#[ignore]` bench). Also forwarded t
 feature through the `cli` crate (`cargo run -p cli --features jit`) for single-file
 iteration.
 
-**Known timing sensitivity (not a correctness bug):** compilation holds `GLOBAL_JIT` on the
-worker thread running the hot process, so the suite's initial compile burst can briefly
-stall the pool — it surfaced once as a flaky miss on `dynamic_test`'s tight
-`(after 500 :timeout)` monitor wait, then passed on re-run (and the suite is green by
-default since the JIT is off). Moving compilation off the scheduler's critical path (a
-background compile thread) is the natural Stage-2 fix.
+**Speedup:** `jit_speedup_vs_vm` measures **~65×** on `sumto(100000,0)` (VM ~18s vs JIT
+~0.28s over 300 reps).
+
+## 2026-06-08 — JIT: compile on a background thread (scheduler-starvation fix)
+
+The first cut of Stage 1 compiled arms **synchronously on the worker thread**, holding
+`GLOBAL_JIT`. That surfaced as a flaky in-language-suite miss: a test would occasionally
+fail on a tight `(after ms …)` / monitor `:down` wait. "No stone unturned" — so I
+reproduced the root cause deterministically rather than bumping the timeout.
+
+**Repro:** an env-gated `BROOD_JIT_COMPILE_DELAY_MS` sleep inside the synchronous compile
+path. With 50ms, the full suite failed reliably — and *not always on the same test*
+(`dynamic_test` one run, `json across processes` the next). That's the tell: the bug is
+**general scheduler starvation**, not a JIT logic bug. Cranelift codegen is CPU-bound work
+of non-trivial duration; doing it inline under the lock means that during a compile burst
+the whole worker pool serializes on `GLOBAL_JIT`, and any process blocked on a tight timer
+misses its deadline. (The amplified run took 326s.)
+
+**Fix:** a single dedicated `brood-jit` background thread is now the *only* place arms are
+lowered — and the only holder of `GLOBAL_JIT`, so that lock is otherwise uncontended.
+Worker threads never compile: `jit_tier` counts calls, and on crossing the threshold a
+`null → QUEUED` CAS elects one thread to hand the `Arc<CompiledArm>` to a bounded channel
+(`sync_channel(256)`); everyone runs the VM until the background thread installs the native
+pointer (or `BAILED`). A full queue resets the arm to untried so it re-tiers later. New
+`QUEUED` (2) sentinel alongside `BAILED` (1).
+
+**Proof the fix addresses the mechanism (not luck):** move the same `BROOD_JIT_COMPILE_DELAY_MS=50`
+sleep onto the background thread and re-run — the suite passes 2/2 and finishes in ~55s
+(vs 326s + failures synchronously), because the delay no longer touches the workers. Then
+removed the knob.
+
+`jit_tier` now takes `&Arc<CompiledArm>` (both VM hooks already pass an `Arc`); the tiering
+unit tests poll for the now-async compile, and the speedup bench warms by polling — which
+also made it reliably catch the native path, so the measured speedup rose from ~27× to
+**~65×**. Verified post-fix (and after merging `main`, which brought the "emit `SelfCall`
+for `defn` tail self-calls" change the JIT lowers): differential 2/2, lib 259/259,
+in-language suite green across repeated runs, §6 KI-1 bar 10/10 + `GC_STRESS`.
