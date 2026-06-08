@@ -30,6 +30,8 @@ pub mod dist; // distributed nodes: connect two runtimes over TCP, route message
 pub mod error; // errors + source positions (cross-cutting)
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
 pub mod introspect; // tooling-facing queries on a live Interp (LSP today, MCP next)
+#[cfg(feature = "jit")]
+pub mod jit; // tier-1 template JIT via Cranelift (feature "jit") — ADR-101, docs/value-repr.md
 pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives in bundled std/net/* (ADR-097)
 pub mod perf; // VM work-attribution counters (feature "perf-stats") — docs/benchmarking.md
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
