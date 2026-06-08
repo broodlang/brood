@@ -1,0 +1,86 @@
+(defmodule queue-test (:use test))
+(require 'queue)
+
+(describe "FIFO queue"
+  (test "new queue is empty"
+    (is (queue/queue-empty? (queue/queue-new))))
+  (test "size 0 when empty"
+    (assert= 0 (queue/queue-size (queue/queue-new))))
+  (test "push increases size"
+    (assert= 1 (queue/queue-size (queue/queue-push (queue/queue-new) :a))))
+  (test "pop returns empty on empty queue"
+    (assert= :empty (queue/queue-pop (queue/queue-new))))
+  (test "peek returns empty on empty queue"
+    (assert= :empty (queue/queue-peek (queue/queue-new))))
+  (test "FIFO order preserved"
+    (let (q (-> (queue/queue-new)
+                (queue/queue-push 1)
+                (queue/queue-push 2)
+                (queue/queue-push 3)))
+      (let (r1 (queue/queue-pop q)
+            r2 (queue/queue-pop (second r1))
+            r3 (queue/queue-pop (second r2)))
+        (assert= 1 (first r1))
+        (assert= 2 (first r2))
+        (assert= 3 (first r3))
+        (is (queue/queue-empty? (second r3))))))
+  (test "peek does not remove"
+    (let (q (queue/queue-push (queue/queue-new) :x))
+      (assert= :x (queue/queue-peek q))
+      (assert= :x (queue/queue-peek q))
+      (assert= 1 (queue/queue-size q))))
+  (test "queue-to-list preserves order"
+    (let (q (-> (queue/queue-new)
+                (queue/queue-push :a)
+                (queue/queue-push :b)
+                (queue/queue-push :c)))
+      (assert= [:a :b :c] (into [] (queue/queue-to-list q)))))
+  (test "queue-from-list"
+    (let (q (queue/queue-from-list [10 20 30]))
+      (assert= 10 (queue/queue-peek q))
+      (assert= 3 (queue/queue-size q))))
+  (test "interleaved push/pop"
+    (let (q0 (queue/queue-new)
+          q1 (queue/queue-push q0 :a)
+          q2 (queue/queue-push q1 :b)
+          r1 (queue/queue-pop q2)
+          q3 (queue/queue-push (second r1) :c)
+          r2 (queue/queue-pop q3)
+          r3 (queue/queue-pop (second r2)))
+      (assert= :a (first r1))
+      (assert= :b (first r2))
+      (assert= :c (first r3)))))
+
+(describe "min-priority queue"
+  (test "new pq is empty"
+    (is (queue/pq-empty? (queue/pq-new))))
+  (test "size 0"
+    (assert= 0 (queue/pq-size (queue/pq-new))))
+  (test "pop empty returns :empty"
+    (assert= :empty (queue/pq-pop (queue/pq-new))))
+  (test "peek empty returns :empty"
+    (assert= :empty (queue/pq-peek (queue/pq-new))))
+  (test "min priority comes out first"
+    (let (pq (-> (queue/pq-new)
+                 (queue/pq-insert 3 :low)
+                 (queue/pq-insert 1 :high)
+                 (queue/pq-insert 2 :med)))
+      (assert= :high (queue/pq-peek pq))
+      (let (r1 (queue/pq-pop pq)
+            r2 (queue/pq-pop (second r1))
+            r3 (queue/pq-pop (second r2)))
+        (assert= :high (first r1))
+        (assert= :med  (first r2))
+        (assert= :low  (first r3))
+        (is (queue/pq-empty? (second r3))))))
+  (test "pq-to-list in priority order"
+    (let (pq (-> (queue/pq-new)
+                 (queue/pq-insert 5 :e)
+                 (queue/pq-insert 1 :a)
+                 (queue/pq-insert 3 :c)))
+      (assert= [:a :c :e] (into [] (queue/pq-to-list pq)))))
+  (test "equal priorities"
+    (let (pq (-> (queue/pq-new)
+                 (queue/pq-insert 1 :x)
+                 (queue/pq-insert 1 :y)))
+      (assert= 2 (queue/pq-size pq)))))

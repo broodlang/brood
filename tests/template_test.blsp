@@ -1,0 +1,41 @@
+(defmodule template-test (:use test))
+(require 'template)
+
+(describe "render"
+  (test "substitutes a string key"
+    (assert= "Hello, World!"
+             (template/render "Hello, {{name}}!" {"name" "World"})))
+  (test "substitutes a keyword key"
+    (assert= "Hi, Alice!"
+             (template/render "{{greeting}}, {{name}}!" {:greeting "Hi" :name "Alice"})))
+  (test "multiple substitutions"
+    (assert= "1 + 2 = 3"
+             (template/render "{{a}} + {{b}} = {{c}}" {"a" "1" "b" "2" "c" "3"})))
+  (test "unknown key renders as empty string"
+    (assert= "Hello, !"
+             (template/render "Hello, {{missing}}!" {})))
+  (test "no markers returns template unchanged"
+    (assert= "no markers here"
+             (template/render "no markers here" {})))
+  (test "spaces around key are trimmed"
+    (assert= "hello"
+             (template/render "{{ name }}" {"name" "hello"})))
+  (test "non-string value is coerced to string"
+    (assert= "count: 42"
+             (template/render "count: {{n}}" {"n" 42})))
+  (test "empty template"
+    (assert= "" (template/render "" {"x" "y"})))
+  (test "unclosed {{ is passed through unchanged"
+    (assert= "{{oops"
+             (template/render "{{oops" {"oops" "x"})))
+  (test "adjacent markers"
+    (assert= "ab"
+             (template/render "{{a}}{{b}}" {"a" "a" "b" "b"}))))
+
+(describe "render-all"
+  (test "maps template over a list of rows"
+    (assert= ["Hello, Alice!" "Hello, Bob!"]
+             (into [] (template/render-all "Hello, {{name}}!"
+                        [{"name" "Alice"} {"name" "Bob"}]))))
+  (test "empty list"
+    (is (nil? (template/render-all "{{x}}" nil)))))

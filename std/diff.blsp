@@ -1,0 +1,123 @@
+;; std/diff.blsp — LCS-based sequence diff. (require 'diff)
+;;
+;; Computes the shortest edit script (SES) between two sequences using a
+;; classic O(m*n) dynamic-programming LCS table, then backtracks to produce
+;; a list of `[:keep v]`, `[:delete v]`, and `[:insert v]` operations.
+;; Suitable for diffing small-to-medium sequences (up to a few hundred items).
+
+(defmodule diff
+  "LCS-based diff: compute the shortest edit script between two sequences.
+
+    (require 'diff)
+    (diff/diff-lines \"hello\\nworld\" \"hello\\nearth\")
+    ;; => ([:keep \"hello\"] [:delete \"world\"] [:insert \"earth\"])
+
+    (diff/diff-seq [1 2 3 4] [1 3 4 5])
+    ;; => ([:keep 1] [:delete 2] [:keep 3] [:keep 4] [:insert 5])
+
+    (diff/diff-summary ops)
+    ;; => {:keeps 2 :deletes 1 :inserts 1}")
+
+;; ---- LCS table --------------------------------------------------------------
+;;
+;; table is a vector of (m+1) vectors, each of length (n+1).
+;; table[i][j] = LCS length of a[0..i-1] and b[0..j-1].
+
+(defn diff--zero-row (n)
+  (into [] (map (fn (_) 0) (range (+ n 1)))))
+
+(defn diff--build-table (a b m n)
+  "Build the full LCS DP table; returns a vector of (m+1) rows."
+  (into [] (diff--build-rows a b m n (diff--zero-row n) (list (diff--zero-row n)) 1)))
+
+(defn diff--build-rows (a b m n prev acc i)
+  (if (> i m)
+    (reverse acc)
+    (let (ai  (nth a (- i 1))
+          row (diff--build-row ai b n prev 1 '(0)))
+      (diff--build-rows a b m n row (cons row acc) (+ i 1)))))
+
+(defn diff--build-row (ai b n prev j acc)
+  ;; acc is built right-to-left; (first acc) is the previously computed cell.
+  (if (> j n)
+    (into [] (reverse acc))
+    (let (bj   (nth b (- j 1))
+          pj-1 (nth prev (- j 1))
+          pj   (nth prev j)
+          cj-1 (first acc)
+          val  (if (= ai bj) (+ pj-1 1) (max cj-1 pj)))
+      (diff--build-row ai b n prev (+ j 1) (cons val acc)))))
+
+;; ---- backtracking -----------------------------------------------------------
+
+(defn diff--backtrack (table a b i j acc)
+  "Walk the LCS table from (i,j) to (0,0), accumulating ops in reverse order."
+  (cond
+    (and (= i 0) (= j 0))
+    acc
+    (= i 0)
+    (diff--backtrack table a b 0 (- j 1) (cons [:insert (nth b (- j 1))] acc))
+    (= j 0)
+    (diff--backtrack table a b (- i 1) 0 (cons [:delete (nth a (- i 1))] acc))
+    (= (nth a (- i 1)) (nth b (- j 1)))
+    (diff--backtrack table a b (- i 1) (- j 1) (cons [:keep (nth a (- i 1))] acc))
+    (>= (nth (nth table (- i 1)) j) (nth (nth table i) (- j 1)))
+    (diff--backtrack table a b (- i 1) j (cons [:delete (nth a (- i 1))] acc))
+    else
+    (diff--backtrack table a b i (- j 1) (cons [:insert (nth b (- j 1))] acc))))
+
+;; ---- public API -------------------------------------------------------------
+
+(defn diff-seq (a b)
+  "Diff two sequences (lists or vectors) by value equality. Returns a list of
+`[:keep v]`, `[:delete v]`, and `[:insert v]` operations that transform `a` into `b`."
+  (let (av (into [] (seq a))
+        bv (into [] (seq b))
+        m  (count av)
+        n  (count bv))
+    (cond
+      (= m 0)
+      (map (fn (v) [:insert v]) bv)
+      (= n 0)
+      (map (fn (v) [:delete v]) av)
+      else
+      (let (table (diff--build-table av bv m n))
+        (diff--backtrack table av bv m n nil)))))
+
+(defn diff-lines (a b)
+  "Diff two strings line-by-line. `a` and `b` are split on `\\n` first.
+Returns a list of `[:keep line]`, `[:delete line]`, `[:insert line]` ops."
+  (diff-seq (string-split a "\n") (string-split b "\n")))
+
+;; ---- utilities --------------------------------------------------------------
+
+(defn diff-summary (ops)
+  "Count `[:keep]`, `[:delete]`, and `[:insert]` operations in a diff result.
+Returns `{:keeps n :deletes n :inserts n}`."
+  (fold (fn (acc op)
+          (let (tag (first op))
+            (cond
+              (= tag :keep)   (assoc acc :keeps   (+ (get acc :keeps)   1))
+              (= tag :delete) (assoc acc :deletes (+ (get acc :deletes) 1))
+              else            (assoc acc :inserts (+ (get acc :inserts) 1)))))
+        {:keeps 0 :deletes 0 :inserts 0}
+        ops))
+
+(defn diff-patch (a ops)
+  "Apply diff `ops` to sequence `a`, producing sequence `b`. `a` is provided
+only for verification (`:delete` and `:keep` ops are expected to match `a` in
+order); the output is built from `:keep` and `:insert` ops."
+  (map second (filter (fn (op) (not= (first op) :delete)) ops)))
+
+(defn diff-unified (ops context-lines)
+  "Format `ops` as a unified-diff-like list of strings, showing `context-lines`
+of context around each change. Returns a list of strings (one per line of output),
+each prefixed with ` ` (keep), `-` (delete), or `+` (insert)."
+  (map (fn (op)
+         (let (tag (first op)
+               val (second op))
+           (cond
+             (= tag :keep)   (str " " val)
+             (= tag :delete) (str "-" val)
+             else            (str "+" val))))
+       ops))

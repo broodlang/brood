@@ -1,0 +1,117 @@
+;; Tests for std/csv.blsp — CSV parsing and emitting.
+
+(defmodule csv-test (:use test))
+(require 'csv)
+
+;; ---- csv-parse --------------------------------------------------------------
+
+(describe "csv-parse — basic"
+  (test "empty string"
+    (assert= nil (csv/csv-parse "")))
+  (test "single field"
+    (assert= (list ["a"]) (csv/csv-parse "a")))
+  (test "single row, multiple fields"
+    (assert= (list ["a" "b" "c"]) (csv/csv-parse "a,b,c")))
+  (test "two rows"
+    (assert= (list ["a" "b"] ["1" "2"]) (csv/csv-parse "a,b\n1,2")))
+  (test "trailing newline is ignored"
+    (assert= (list ["a" "b"]) (csv/csv-parse "a,b\n")))
+  (test "empty field"
+    (assert= (list ["a" "" "c"]) (csv/csv-parse "a,,c")))
+  (test "all empty fields"
+    (assert= (list ["" ""]) (csv/csv-parse ","))))
+
+(describe "csv-parse — quoted fields"
+  (test "quoted field with comma"
+    (assert= (list ["a,b" "c"]) (csv/csv-parse "\"a,b\",c")))
+  (test "quoted field with newline"
+    (assert= (list ["a\nb" "c"]) (csv/csv-parse "\"a\nb\",c")))
+  (test "quoted field with escaped quote"
+    (assert= (list ["say \"hi\""]) (csv/csv-parse "\"say \"\"hi\"\"\"")))
+  (test "empty quoted field"
+    (assert= (list [""]) (csv/csv-parse "\"\"")))
+  (test "quoted field with spaces"
+    (assert= (list [" hello "]) (csv/csv-parse "\" hello \""))))
+
+(describe "csv-parse — line endings"
+  (test "\\r\\n line endings"
+    (assert= (list ["a" "b"] ["1" "2"]) (csv/csv-parse "a,b\r\n1,2")))
+  (test "mixed line endings"
+    (assert= (list ["a"] ["b"] ["c"]) (csv/csv-parse "a\nb\r\nc")))
+  (test "\\r\\n trailing newline ignored"
+    (assert= (list ["a" "b"]) (csv/csv-parse "a,b\r\n"))))
+
+(describe "csv-parse — multiline"
+  (test "three rows"
+    (let (result (csv/csv-parse "h1,h2\nv1,v2\nv3,v4"))
+      (assert= 3 (count result))
+      (assert= ["h1" "h2"] (nth (into [] result) 0))
+      (assert= ["v1" "v2"] (nth (into [] result) 1))
+      (assert= ["v3" "v4"] (nth (into [] result) 2)))))
+
+;; ---- csv-parse-maps ---------------------------------------------------------
+
+(describe "csv-parse-maps"
+  (test "empty string"
+    (assert= nil (csv/csv-parse-maps "")))
+  (test "header only"
+    (assert= nil (csv/csv-parse-maps "name,age")))
+  (test "one data row"
+    (let (result (csv/csv-parse-maps "name,age\nAlice,30"))
+      (assert= 1 (count result))
+      (assert= "Alice" (get (first result) "name"))
+      (assert= "30"    (get (first result) "age"))))
+  (test "multiple data rows"
+    (let (result (csv/csv-parse-maps "x,y\n1,2\n3,4"))
+      (assert= 2 (count result))
+      (assert= "1" (get (first result) "x"))
+      (assert= "4" (get (second result) "y"))))
+  (test "quoted headers and values"
+    (let (result (csv/csv-parse-maps "\"first name\",age\n\"John Doe\",25"))
+      (assert= "John Doe" (get (first result) "first name")))))
+
+;; ---- csv-emit ---------------------------------------------------------------
+
+(describe "csv-emit"
+  (test "nil / empty"
+    (assert= "" (csv/csv-emit nil))
+    (assert= "" (csv/csv-emit nil)))
+  (test "single row"
+    (assert= "a,b,c" (csv/csv-emit [["a" "b" "c"]])))
+  (test "two rows"
+    (assert= "a,b\n1,2" (csv/csv-emit [["a" "b"] ["1" "2"]])))
+  (test "field with comma is quoted"
+    (assert= "\"a,b\",c" (csv/csv-emit [["a,b" "c"]])))
+  (test "field with newline is quoted"
+    (assert= "\"a\nb\",c" (csv/csv-emit [["a\nb" "c"]])))
+  (test "field with quote is quoted and escaped"
+    (assert= "\"say \"\"hi\"\"\"" (csv/csv-emit [["say \"hi\""]])))
+  (test "empty field"
+    (assert= ",b" (csv/csv-emit [["" "b"]])))
+  (test "roundtrip: parse then emit"
+    (let (original "name,age\nAlice,30\nBob,25")
+      (assert= original (csv/csv-emit (csv/csv-parse original))))))
+
+;; ---- csv-emit-maps ----------------------------------------------------------
+
+(describe "csv-emit-maps"
+  (test "single map"
+    (assert= "name,age\nAlice,30"
+      (csv/csv-emit-maps [{"name" "Alice" "age" "30"}] ["name" "age"])))
+  (test "multiple maps"
+    (assert= "x,y\n1,2\n3,4"
+      (csv/csv-emit-maps [{"x" "1" "y" "2"} {"x" "3" "y" "4"}] ["x" "y"])))
+  (test "column order follows headers"
+    (assert= "b,a\n2,1"
+      (csv/csv-emit-maps [{"a" "1" "b" "2"}] ["b" "a"])))
+  (test "missing key produces empty field"
+    (assert= "name,age\nAlice,"
+      (csv/csv-emit-maps [{"name" "Alice"}] ["name" "age"])))
+  (test "keyword keys"
+    (assert= "name,age\nAlice,30"
+      (csv/csv-emit-maps [{:name "Alice" :age "30"}] ["name" "age"])))
+  (test "roundtrip via parse-maps"
+    (let (original "name,age\nAlice,30\nBob,25")
+      (let (maps (csv/csv-parse-maps original))
+        (assert= original
+          (csv/csv-emit-maps maps ["name" "age"]))))))

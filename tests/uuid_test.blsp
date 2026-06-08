@@ -1,0 +1,42 @@
+(defmodule uuid-test (:use test))
+(require 'uuid)
+
+(describe "uuid-v4"
+  (test "produces a 36-character string"
+    (assert= 36 (string-length (uuid/uuid-v4))))
+  (test "has dashes at positions 8 13 18 23"
+    (let (u (uuid/uuid-v4))
+      (is (= (char-at u 8)  "-"))
+      (is (= (char-at u 13) "-"))
+      (is (= (char-at u 18) "-"))
+      (is (= (char-at u 23) "-"))))
+  (test "version nibble is 4"
+    (assert= "4" (char-at (uuid/uuid-v4) 14)))
+  (test "variant nibble is one of 8/9/a/b"
+    (let (vc (char-at (uuid/uuid-v4) 19))
+      (is (or (= vc "8") (= vc "9") (= vc "a") (= vc "b")))))
+  (test "passes uuid? validation"
+    (is (uuid/uuid? (uuid/uuid-v4))))
+  (test "generates unique values"
+    (let (a (uuid/uuid-v4) b (uuid/uuid-v4))
+      (is (not= a b)))))
+
+(describe "uuid-nil"
+  (test "is the zero UUID"
+    (assert= "00000000-0000-0000-0000-000000000000" (uuid/uuid-nil)))
+  (test "passes uuid? validation"
+    (is (uuid/uuid? (uuid/uuid-nil)))))
+
+(describe "uuid?"
+  (test "valid lowercase UUID"
+    (is (uuid/uuid? "550e8400-e29b-41d4-a716-446655440000")))
+  (test "valid uppercase UUID"
+    (is (uuid/uuid? "550E8400-E29B-41D4-A716-446655440000")))
+  (test "too short"
+    (is (not (uuid/uuid? "550e8400-e29b-41d4-a716"))))
+  (test "wrong separator positions"
+    (is (not (uuid/uuid? "550e840-0e29b-41d4-a716-446655440000"))))
+  (test "non-hex chars"
+    (is (not (uuid/uuid? "550e8400-e29b-41d4-a716-44665544000g"))))
+  (test "empty string"
+    (is (not (uuid/uuid? "")))))

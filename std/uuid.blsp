@@ -1,0 +1,78 @@
+;; std/uuid.blsp — UUID generation. (require 'uuid)
+;;
+;; Generates RFC 4122 version 4 (random) UUIDs using the OS CSPRNG
+;; via the `random-token` primitive.
+
+(defmodule uuid
+  "UUID generation.
+
+    (require 'uuid)
+    (uuid/uuid-v4)   ;; => \"550e8400-e29b-41d4-a716-446655440000\" (example)
+    (uuid/uuid? s)   ;; => true/false
+    (uuid/uuid-nil)  ;; => \"00000000-0000-0000-0000-000000000000\"")
+
+;; ---- UUID v4 ----------------------------------------------------------------
+;;
+;; Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+;;   position 12 (0-indexed in the hex string): must be '4' (version)
+;;   position 16: must be '8', '9', 'a', or 'b' (RFC 4122 variant bit = 10xx)
+
+(def uuid--variant-chars "89ab")
+
+(defn uuid--hex-nibble (c)
+  "Parse a lowercase hex char into 0–15."
+  (let (cp (char->int c))
+    (if (and (>= cp 48) (<= cp 57))
+      (- cp 48)
+      (+ (- cp 97) 10))))
+
+(defn uuid--variant-char (raw-hex-char)
+  "Map any hex char to one of 8/9/a/b for the RFC 4122 variant nibble."
+  (char-at uuid--variant-chars (rem (uuid--hex-nibble raw-hex-char) 4)))
+
+(defn uuid-v4 ()
+  "Generate a random RFC 4122 version 4 UUID string."
+  (let (raw  (random-token 16)
+        ;; raw is 32 lowercase hex chars; inject version (pos 12) and variant (pos 16)
+        p0   (substring raw 0 8)
+        p1   (substring raw 8 12)
+        p2   (str "4" (substring raw 13 16))
+        p3   (str (uuid--variant-char (char-at raw 16)) (substring raw 17 20))
+        p4   (substring raw 20 32))
+    (str p0 "-" p1 "-" p2 "-" p3 "-" p4)))
+
+(defn uuid-nil ()
+  "The nil UUID: all zeros."
+  "00000000-0000-0000-0000-000000000000")
+
+;; ---- validation -------------------------------------------------------------
+
+(defn uuid--hex? (c)
+  (let (cp (char->int c))
+    (or (and (>= cp 48) (<= cp 57))
+        (and (>= cp 97) (<= cp 102))
+        (and (>= cp 65) (<= cp 70)))))
+
+(defn uuid--valid-segment? (s expected-len)
+  (and (= (string-length s) expected-len)
+       (uuid--all-hex? s 0 expected-len)))
+
+(defn uuid--all-hex? (s i n)
+  (if (>= i n)
+    true
+    (if (uuid--hex? (char-at s i))
+      (uuid--all-hex? s (+ i 1) n)
+      false)))
+
+(defn uuid? (s)
+  "True if `s` is a well-formed UUID string (8-4-4-4-12 hex, any case, with dashes)."
+  (and (= (string-length s) 36)
+       (= (char-at s 8) "-")
+       (= (char-at s 13) "-")
+       (= (char-at s 18) "-")
+       (= (char-at s 23) "-")
+       (uuid--valid-segment? (substring s 0 8) 8)
+       (uuid--valid-segment? (substring s 9 13) 4)
+       (uuid--valid-segment? (substring s 14 18) 4)
+       (uuid--valid-segment? (substring s 19 23) 4)
+       (uuid--valid-segment? (substring s 24 36) 12)))

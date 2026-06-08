@@ -1,0 +1,55 @@
+;; std/template.blsp — simple {{var}} string templating. (require 'template)
+;;
+;; Substitutes `{{key}}` markers in a template string using values from a map.
+;; Keys are trimmed; both string and keyword map lookups are tried.
+
+(defmodule template
+  "Simple `{{var}}` string templating.
+
+    (require 'template)
+    (template/render \"Hello, {{name}}!\" {\"name\" \"World\"})
+    ;; => \"Hello, World!\"
+
+    (template/render \"{{greeting}}, {{name}}!\" {:greeting \"Hi\" :name \"Alice\"})
+    ;; => \"Hi, Alice!\"
+
+    ;; Unknown keys render as empty string:
+    (template/render \"{{missing}}\" {})
+    ;; => \"\"")
+
+;; ---- core render ------------------------------------------------------------
+
+(defn render (tmpl data)
+  "Substitute all `{{key}}` markers in `tmpl` with values from map `data`.
+Keys in the template are trimmed of whitespace; both string and keyword keys are
+tried. Unknown keys render as empty string. Nested `{{` are not supported."
+  (template--loop tmpl data ""))
+
+(defn template--loop (s data acc)
+  (let (open (index-of s "{{"))
+    (if (< open 0)
+      (str acc s)
+      (let (tail     (substring s (+ open 2) (string-length s))
+            close    (index-of tail "}}"))
+        (if (< close 0)
+          (str acc s)
+          (let (before (substring s 0 open)
+                key    (trim (substring tail 0 close))
+                after  (substring tail (+ close 2) (string-length tail))
+                val    (template--lookup data key))
+            (template--loop after data (str acc before val))))))))
+
+(defn template--lookup (data key)
+  "Look up `key` in `data`, trying string key then keyword key. Returns \"\" if absent."
+  (let (v (get data key))
+    (cond
+      (not (nil? v)) (str v)
+      else
+      (let (kv (get data (keyword key)))
+        (if (nil? kv) "" (str kv))))))
+
+;; ---- render-all -------------------------------------------------------------
+
+(defn render-all (tmpl rows)
+  "Apply `render` to `tmpl` for each map in list `rows`. Returns a list of strings."
+  (map (fn (row) (render tmpl row)) rows))

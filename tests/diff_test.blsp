@@ -1,0 +1,80 @@
+(defmodule diff-test (:use test))
+(require 'diff)
+
+(describe "diff-seq"
+  (test "identical sequences"
+    (assert= [[:keep 1] [:keep 2] [:keep 3]]
+             (into [] (diff/diff-seq [1 2 3] [1 2 3]))))
+  (test "empty first"
+    (assert= [[:insert :a] [:insert :b]]
+             (into [] (diff/diff-seq [] [:a :b]))))
+  (test "empty second"
+    (assert= [[:delete :a] [:delete :b]]
+             (into [] (diff/diff-seq [:a :b] []))))
+  (test "both empty"
+    (is (nil? (diff/diff-seq [] []))))
+  (test "single insertion"
+    (let (ops (diff/diff-seq [1 2 3] [1 2 99 3]))
+      (is (not= nil ops))
+      (assert= 1 (get (diff/diff-summary ops) :inserts))
+      (assert= 0 (get (diff/diff-summary ops) :deletes))))
+  (test "single deletion"
+    (let (ops (diff/diff-seq [1 2 3] [1 3]))
+      (assert= 0 (get (diff/diff-summary ops) :inserts))
+      (assert= 1 (get (diff/diff-summary ops) :deletes))
+      (assert= 2 (get (diff/diff-summary ops) :keeps))))
+  (test "substitution"
+    (let (ops (diff/diff-seq [:a :b :c] [:a :x :c]))
+      (assert= 1 (get (diff/diff-summary ops) :inserts))
+      (assert= 1 (get (diff/diff-summary ops) :deletes))
+      (assert= 2 (get (diff/diff-summary ops) :keeps))))
+  (test "works with lists"
+    (let (ops (diff/diff-seq '(1 2 3) '(1 3)))
+      (assert= 1 (get (diff/diff-summary ops) :deletes)))))
+
+(describe "diff-lines"
+  (test "same text"
+    (let (ops (diff/diff-lines "a\nb\nc" "a\nb\nc"))
+      (assert= 3 (get (diff/diff-summary ops) :keeps))
+      (assert= 0 (get (diff/diff-summary ops) :deletes))
+      (assert= 0 (get (diff/diff-summary ops) :inserts))))
+  (test "one line changed"
+    (let (ops (diff/diff-lines "hello\nworld" "hello\nearth"))
+      (assert= 1 (get (diff/diff-summary ops) :keeps))
+      (assert= 1 (get (diff/diff-summary ops) :deletes))
+      (assert= 1 (get (diff/diff-summary ops) :inserts))))
+  (test "empty strings"
+    (let (ops (diff/diff-lines "" ""))
+      (assert= 1 (get (diff/diff-summary ops) :keeps)))))
+
+(describe "diff-summary"
+  (test "counts all op types"
+    (let (ops '([:keep "a"] [:delete "b"] [:insert "c"] [:keep "d"] [:insert "e"])
+          s   (diff/diff-summary ops))
+      (assert= 2 (get s :keeps))
+      (assert= 1 (get s :deletes))
+      (assert= 2 (get s :inserts))))
+  (test "all keeps"
+    (let (s (diff/diff-summary '([:keep 1] [:keep 2])))
+      (assert= 2 (get s :keeps))
+      (assert= 0 (get s :deletes))
+      (assert= 0 (get s :inserts)))))
+
+(describe "diff-patch"
+  (test "applies ops to produce b"
+    (let (a   [1 2 3]
+          b   [1 99 3]
+          ops (diff/diff-seq a b)
+          out (diff/diff-patch a ops))
+      (assert= [1 99 3] (into [] out))))
+  (test "apply to get same sequence"
+    (let (a   [10 20 30]
+          ops (diff/diff-seq a a)
+          out (diff/diff-patch a ops))
+      (assert= [10 20 30] (into [] out)))))
+
+(describe "diff-unified"
+  (test "formats ops with prefixes"
+    (let (ops '([:keep "a"] [:delete "b"] [:insert "c"])
+          lines (diff/diff-unified ops 0))
+      (assert= [" a" "-b" "+c"] (into [] lines)))))

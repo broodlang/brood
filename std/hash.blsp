@@ -1,0 +1,90 @@
+;; std/hash.blsp — cryptographic and non-cryptographic hashing. (require 'hash)
+;;
+;; Exposes the `%sha256` primitive under a public name and adds convenience
+;; wrappers. HMAC-SHA256 is implemented in Brood over `%sha256` (RFC 2104).
+
+(defmodule hash
+  "Hashing utilities: SHA-256 and HMAC-SHA256.
+
+    (require 'hash)
+    (hash/sha256 \"hello\")
+    ;; => \"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\"
+
+    (hash/hmac-sha256 \"secret\" \"message\")
+    ;; => \"8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b\"")
+
+;; ---- SHA-256 ----------------------------------------------------------------
+
+(defn sha256 (s)
+  "Lowercase hex SHA-256 of string `s`'s UTF-8 bytes."
+  (%sha256 s))
+
+;; ---- HMAC-SHA256 (RFC 2104) -------------------------------------------------
+;;
+;; HMAC(K, m) = H((K XOR opad) ++ H((K XOR ipad) ++ m))
+;; where ipad = 0x36 repeated, opad = 0x5c repeated, block size = 64 bytes.
+;;
+;; We implement XOR over the UTF-8 bytes of the key using `string->utf8-bytes`
+;; and `int->char` / `utf8-bytes->string`. The result is the raw bytes of
+;; the padded key; we then feed them as a string into `%sha256`.
+
+(def hash--block-size 64)
+(def hash--ipad 54)  ;; 0x36
+(def hash--opad 92)  ;; 0x5c
+
+(defn hash--normalize-key (key-bytes)
+  "If the key is longer than 64 bytes, hash it; then pad to 64 bytes with 0x00."
+  (let (kb (if (> (count key-bytes) hash--block-size)
+              (seq (string->utf8-bytes (%sha256 (utf8-bytes->string (into [] key-bytes)))))
+              key-bytes)
+        n  (count kb))
+    (append (into [] kb) (into [] (map (fn (_) 0) (range (- hash--block-size n)))))))
+
+(defn hash--xor-pad (key-bytes pad-byte)
+  "XOR each byte of `key-bytes` (64-byte list) with `pad-byte`."
+  (map (fn (b) (bit-xor b pad-byte)) key-bytes))
+
+(defn hash--hex-nibble (c)
+  "Parse a hex character (0-9, a-f, A-F) into its 0–15 integer value."
+  (let (cp (char->int c))
+    (cond
+      (and (>= cp 48) (<= cp 57)) (- cp 48)
+      (and (>= cp 97) (<= cp 102)) (+ (- cp 97) 10)
+      else (+ (- cp 65) 10))))
+
+(defn hash--hex->bytes (hex)
+  "Decode a lowercase hex string to a list of byte ints."
+  (hash--hex->bytes-loop hex 0 (string-length hex) nil))
+
+(defn hash--hex->bytes-loop (hex i n acc)
+  (if (>= i n)
+    (reverse acc)
+    (let (hi (hash--hex-nibble (char-at hex i))
+          lo (hash--hex-nibble (char-at hex (+ i 1))))
+      (hash--hex->bytes-loop hex (+ i 2) n (cons (+ (* hi 16) lo) acc)))))
+
+(defn hmac-sha256 (key message)
+  "HMAC-SHA256 of `message` using `key`. Both are strings; result is a lowercase
+hex string. Implemented in Brood over `%sha256` / `%sha256-bytes` per RFC 2104."
+  (let (key-bytes   (seq (string->utf8-bytes key))
+        norm-key    (hash--normalize-key key-bytes)
+        ipad-key    (hash--xor-pad norm-key hash--ipad)
+        opad-key    (hash--xor-pad norm-key hash--opad)
+        ;; Inner: sha256(ipad || message) — message is a UTF-8 string, so we
+        ;; combine the ipad bytes with the message UTF-8 bytes into one byte list.
+        msg-bytes   (seq (string->utf8-bytes message))
+        inner-bytes (append (into [] ipad-key) (into [] msg-bytes))
+        inner-hex   (%sha256-bytes inner-bytes)
+        ;; Outer: sha256(opad || inner_raw_bytes)
+        inner-raw   (hash--hex->bytes inner-hex)
+        outer-bytes (append (into [] opad-key) (into [] inner-raw)))
+    (%sha256-bytes outer-bytes)))
+
+;; ---- simple non-crypto hash -------------------------------------------------
+
+(defn hash-string (s)
+  "A fast non-cryptographic integer hash of string `s` (djb2 variant).
+Suitable for hash tables and sharding; NOT cryptographically secure."
+  (fold (fn (h c) (bit-xor (* h 31) (char->int c)))
+        5381
+        (string->list s)))
