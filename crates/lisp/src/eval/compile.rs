@@ -3427,7 +3427,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     for inst in code {
         match inst {
             Inst::Const(cv) if matches!(cv.load(), Value::Int(_)) => {}
-            Inst::Local(_) | Inst::Jump(_) | Inst::JumpIfFalse(_) => {}
+            Inst::Local(_) | Inst::Jump(_) | Inst::JumpIfFalse(_) | Inst::SelfCall { .. } => {}
             Inst::Prim2 { op, .. }
                 if matches!(
                     op,
@@ -3443,11 +3443,21 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     is_leader[0] = true;
     is_leader[len] = true; // the implicit Done block
     for (ip, inst) in code.iter().enumerate() {
-        if let Inst::Jump(t) | Inst::JumpIfFalse(t) = inst {
-            is_leader[*t] = true;
-            if ip + 1 <= len {
-                is_leader[ip + 1] = true;
+        match inst {
+            Inst::Jump(t) | Inst::JumpIfFalse(t) => {
+                is_leader[*t] = true;
+                if ip + 1 <= len {
+                    is_leader[ip + 1] = true;
+                }
             }
+            // SelfCall jumps back to the loop header (block 0); the inst after it
+            // (if any) starts a new (unreachable) block boundary.
+            Inst::SelfCall { .. } => {
+                if ip + 1 <= len {
+                    is_leader[ip + 1] = true;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3475,6 +3485,11 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     cur -= 1; // pop the condition
                     work.push((*t, cur));
                     work.push((j + 1, cur));
+                    break;
+                }
+                Inst::SelfCall { argc } => {
+                    // Pops argc new args, jumps back to the loop header (block 0).
+                    work.push((0, cur - *argc as i32));
                     break;
                 }
                 Inst::Const(_) | Inst::Local(_) => cur += 1,
@@ -3589,6 +3604,31 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     }
                     let args = mkargs(&stack);
                     b.ins().jump(leader_block[*t]?, &args);
+                    break;
+                }
+                Inst::SelfCall { argc } => {
+                    // Tail self-call (the loop back-edge): the argc new args are on top
+                    // (arg0 deepest). Pop them, box each into its frame slot, and jump the
+                    // loop header (block 0). The frame slots live in `roots`, so they are
+                    // the loop-carried state — no SSA block params needed across the edge.
+                    let mut args = Vec::with_capacity(*argc);
+                    for _ in 0..*argc {
+                        args.push(stack.pop()?);
+                    }
+                    args.reverse(); // args[i] = the i-th positional arg → frame slot i
+                    if !stack.is_empty() || !args.iter().all(|&v| is_i64(&b, v)) {
+                        return None; // a non-empty residual stack / non-int arg: bail
+                    }
+                    for (i, &v) in args.iter().enumerate() {
+                        let addr = slot_addr(&mut b, i as i64);
+                        let tag_int = b.ins().iconst(types::I8, TAG_INT as i64);
+                        b.ins().store(MemFlags::new(), tag_int, addr, 0);
+                        b.ins().store(MemFlags::new(), v, addr, PAYLOAD_OFFSET as i32);
+                    }
+                    // TODO(1d): brood_rt_tick on this back-edge → deopt to the VM on yield,
+                    // so a JIT'd loop stays preemptible. Until then this arm must NOT be
+                    // wired into the scheduler's call path (tiering, 1b).
+                    b.ins().jump(leader_block[0]?, &[]);
                     break;
                 }
                 Inst::JumpIfFalse(t) => {
@@ -3956,6 +3996,68 @@ mod tests {
             match heap.root_at(base) {
                 Value::Int(n) => assert_eq!(n, want, "abs({x})"),
                 other => panic!("x={x}: expected Int({want}), got tag {:?}", value::tag(other)),
+            }
+        }
+    }
+
+    /// JIT Stage-1 Step C: the self-recursive **loop**. Lower
+    /// `(if (< i 1) acc (sumto (- i 1) (+ acc i)))` — `SelfCall` boxes the new args into
+    /// the frame slots and branches the loop header; the frame slots in `roots` carry the
+    /// loop state. A native int loop, no per-iteration dispatch. (No `tick` yet — tested
+    /// in isolation, not wired into the scheduler.)
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_lowers_and_runs_a_self_recursive_int_loop() {
+        let prim2 = |op: PrimOp, head: &str| Inst::Prim2 {
+            op,
+            map: [0, 1],
+            head: value::intern(head),
+            guard: AtomicU64::new(0),
+            pos: None,
+        };
+        // (defn sumto (i acc) (if (< i 1) acc (sumto (- i 1) (+ acc i)))) — i=slot0, acc=slot1.
+        let chunk = Chunk {
+            code: vec![
+                Inst::Local(0),                            // 0: i
+                Inst::Const(ConstVal::new(Value::Int(1))), // 1: 1
+                prim2(PrimOp::Lt, "<"),                    // 2: i < 1
+                Inst::JumpIfFalse(6),                      // 3: false → else (ip 6)
+                Inst::Local(1),                            // 4: then: acc
+                Inst::Jump(13),                            // 5: → done (len)
+                Inst::Local(0),                            // 6: else: i
+                Inst::Const(ConstVal::new(Value::Int(1))), // 7: 1
+                prim2(PrimOp::Sub, "-"),                   // 8: (- i 1)  = arg0
+                Inst::Local(1),                            // 9: acc
+                Inst::Local(0),                            // 10: i
+                prim2(PrimOp::Add, "+"),                   // 11: (+ acc i) = arg1
+                Inst::SelfCall { argc: 2 },                // 12: (sumto arg0 arg1)
+            ],
+        };
+        let arm = CompiledArm {
+            nrequired: 2,
+            noptional: 0,
+            optional_defaults: Box::new([]),
+            rest_slot: None,
+            nslots: 2,
+            body: Node::Const(ConstVal::new(Value::Nil)),
+            chunk: Some(chunk),
+            has_runtime_handles: false,
+        };
+
+        let mut jit = crate::jit::Jit::new();
+        let ptr = jit_lower_arm(&mut jit, &arm).expect("self-recursive int loop should JIT");
+        let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+
+        // sumto(n,0) = n+(n-1)+…+1; sumto(1,0)→sumto(0,1)→1; sumto(0,0)→0.
+        for (n, want) in [(5i64, 15i64), (100, 5050), (1, 1), (0, 0)] {
+            let mut heap = Heap::new();
+            let base = heap.roots_len();
+            heap.push_root(Value::Int(n)); // i = slot 0
+            heap.push_root(Value::Int(0)); // acc = slot 1
+            assert_eq!(f(&mut heap as *mut Heap, base as i64), 0, "Done for n={n}");
+            match heap.root_at(base) {
+                Value::Int(r) => assert_eq!(r, want, "sumto({n}, 0)"),
+                other => panic!("n={n}: expected Int({want}), got tag {:?}", value::tag(other)),
             }
         }
     }
