@@ -3509,19 +3509,25 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let mut sig = m.make_signature();
     sig.params.push(AbiParam::new(ptr_ty)); // heap
     sig.params.push(AbiParam::new(types::I64)); // base (frame index into roots)
-    sig.returns.push(AbiParam::new(types::I64)); // 0 = Done, 1 = deopt
+    sig.returns.push(AbiParam::new(types::I64)); // outcome: 0 = Done, 1 = deopt, 2 = preempt
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = m.declare_function(&format!("brood_jit_arm_{seq}"), Linkage::Export, &sig).ok()?;
     let mut rb_sig = m.make_signature();
     rb_sig.params.push(AbiParam::new(ptr_ty));
     rb_sig.returns.push(AbiParam::new(ptr_ty));
     let rb_id = m.declare_function("brood_rt_roots_base", Linkage::Import, &rb_sig).ok()?;
+    // brood_rt_tick(heap) -> u8  (nonzero = the process should yield)
+    let mut tick_sig = m.make_signature();
+    tick_sig.params.push(AbiParam::new(ptr_ty));
+    tick_sig.returns.push(AbiParam::new(types::I8));
+    let tick_id = m.declare_function("brood_rt_tick", Linkage::Import, &tick_sig).ok()?;
 
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
     let mut fbctx = FunctionBuilderContext::new();
     let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
+    let tick_ref = m.declare_func_in_func(tick_id, b.func);
 
     // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt.
     let leader_block: Vec<Option<cranelift_codegen::ir::Block>> = (0..=len)
@@ -3539,6 +3545,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         .collect();
     let entry = b.create_block();
     let deopt = b.create_block();
+    let preempt = b.create_block();
     b.append_block_params_for_function_params(entry);
     b.switch_to_block(entry);
     let heap = b.block_params(entry)[0];
@@ -3625,10 +3632,13 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                         b.ins().store(MemFlags::new(), tag_int, addr, 0);
                         b.ins().store(MemFlags::new(), v, addr, PAYLOAD_OFFSET as i32);
                     }
-                    // TODO(1d): brood_rt_tick on this back-edge → deopt to the VM on yield,
-                    // so a JIT'd loop stays preemptible. Until then this arm must NOT be
-                    // wired into the scheduler's call path (tiering, 1b).
-                    b.ins().jump(leader_block[0]?, &[]);
+                    // Preemption (ADR-027): poll the reduction budget on the back-edge. On
+                    // yield, deopt to `preempt` (return 2) — the frame slots already hold
+                    // the next iteration's args (in `roots`), so the driver resumes the
+                    // arm on the VM from exactly here. Otherwise loop.
+                    let tc = b.ins().call(tick_ref, &[heap]);
+                    let yld = b.inst_results(tc)[0];
+                    b.ins().brif(yld, preempt, &[], leader_block[0]?, &[]);
                     break;
                 }
                 Inst::JumpIfFalse(t) => {
@@ -3685,10 +3695,15 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     b.ins().store(MemFlags::new(), result, addr0, PAYLOAD_OFFSET as i32);
     let zero = b.ins().iconst(types::I64, 0);
     b.ins().return_(&[zero]);
-    // Deopt: an operand wasn't an Int — return 1, the caller runs the VM.
+    // Deopt: an operand wasn't an Int — return 1, the caller runs the arm on the VM.
     b.switch_to_block(deopt);
     let one = b.ins().iconst(types::I64, 1);
     b.ins().return_(&[one]);
+    // Preempt: the reduction budget was spent at a back-edge — return 2. The frame slots
+    // (in roots) hold the next iteration's args, so the driver resumes the arm on the VM.
+    b.switch_to_block(preempt);
+    let two = b.ins().iconst(types::I64, 2);
+    b.ins().return_(&[two]);
     b.seal_all_blocks();
     b.finalize();
 
@@ -4048,6 +4063,9 @@ mod tests {
         let ptr = jit_lower_arm(&mut jit, &arm).expect("self-recursive int loop should JIT");
         let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
+        // Prime the reduction budget so these short loops run to completion (the
+        // back-edge `brood_rt_tick` would otherwise yield at REDUCTIONS == 0).
+        crate::process::yield_now();
         // sumto(n,0) = n+(n-1)+…+1; sumto(1,0)→sumto(0,1)→1; sumto(0,0)→0.
         for (n, want) in [(5i64, 15i64), (100, 5050), (1, 1), (0, 0)] {
             let mut heap = Heap::new();
@@ -4060,5 +4078,19 @@ mod tests {
                 other => panic!("n={n}: expected Int({want}), got tag {:?}", value::tag(other)),
             }
         }
+
+        // Preemption: a loop longer than the reduction budget yields at a back-edge —
+        // the JIT'd arm returns 2 (preempt), with the frame slots left mid-computation
+        // in `roots` for the driver to resume on the VM.
+        crate::process::yield_now(); // budget = REDUCTION_BUDGET
+        let mut heap = Heap::new();
+        let base = heap.roots_len();
+        heap.push_root(Value::Int(1_000_000)); // far more iterations than the budget
+        heap.push_root(Value::Int(0));
+        assert_eq!(
+            f(&mut heap as *mut Heap, base as i64),
+            2,
+            "a loop exceeding the reduction budget must preempt (return 2)"
+        );
     }
 }
