@@ -2,9 +2,10 @@
 
 Brood is the **language and runtime** for a modern, Emacs-like editor — a fast
 native app locally, a server for remote instances. **The editor app itself is a
-separate project** that consumes this language and the `std/editor/*` framework;
-Brood's job is the language core, runtime, and that framework. We get there in
-milestones, each shippable and useful on its own.
+separate project — [`brood-edit`](../../brood-edit) — and it already exists**; it
+consumes this language and the `std/editor/*` framework. Brood's job here is the
+language core, runtime, and that framework. We get there in milestones, each
+shippable and useful on its own.
 
 Legend: ✅ done · 🟡 in progress · ⬜ not started
 
@@ -833,7 +834,7 @@ The text-editing substance, exposed to Brood. Built as a thin end-to-end
   the prelude, **zero new kernel surface** — the editor *framework*, not the
   language (ADR-045). `tests/buffer_test.blsp` 28/28 incl. GC-stress + actor.
 - ✅ Editing **commands** + **multiple buffers** + **selection/region** + **undo**
-  — belong in the **editor app** (`~/src/whk/myedit`, a `nest` project that
+  — belong in the **editor app** (`brood-edit`, a `nest` project that
   `(:use buffer)`s this framework), not here. The app is a `ui-run` client whose
   `update` dispatches keys through `std/keymap.blsp` (chords via `keymap-step`) to
   `model -> model` commands and whose pure `view` paints the buffer(s) + mode line
@@ -936,8 +937,9 @@ The seam that makes remoteability free later (see architecture.md).
   buffers would forfeit O(1) undo/snapshot/sharing for mutable identity nobody wants.
   `tests/ui_test.blsp` (new `describe`): view-rollback, update-drop, fatal-first-render
   + `:leave`-still-runs, stderr logging.
-_(Editor-app TODOs — keymaps/commands, minibuffer, multiple windows — live in the
-separate editor project that consumes this framework, not in Brood's roadmap.)_
+_(The editor app — keymaps/commands, minibuffer, multiple windows — lives in the
+separate **`brood-edit`** project (already built) that consumes this framework; it
+is not part of Brood's roadmap.)_
 
 ## M4 — Server / daemon mode
 
