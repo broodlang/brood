@@ -604,6 +604,31 @@ pub(super) fn set_capture_run(on: bool) {
     CAPTURE_RUN.with(|c| c.set(on));
 }
 
+thread_local! {
+    /// True while the **innermost** `vm_run_bc` is the *top-level* body driver — i.e.
+    /// the running `receive` is reached purely through bytecode, with no native frame
+    /// (a `%isolate`/`%try`/`map` callback) between it and the driver. A clean
+    /// top-level receive can capture its continuation (and migrate); a **native-nested**
+    /// receive cannot (the native frame can't be captured, and re-running it repeats
+    /// side effects — the §8.1 footgun), so it falls back to **blocking** its worker
+    /// like a BEAM dirty scheduler (§7.4). Set per `vm_run_bc` entry to that call's
+    /// `top_level` and restored on exit, so it reflects the innermost driver.
+    static CAPTURE_TOP_LEVEL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Is the innermost capture-mode VM driver the top-level body driver (so a `receive`
+/// here is bytecode-reachable and may capture), as opposed to nested under a native
+/// (must block instead)? See [`CAPTURE_TOP_LEVEL`].
+pub(crate) fn capture_top_level() -> bool {
+    CAPTURE_TOP_LEVEL.with(|c| c.get())
+}
+
+/// Set the top-level-driver flag, returning the previous value (so `vm_run_bc` can
+/// restore it on exit — nested runs set it `false`, the outer run restores `true`).
+pub(crate) fn set_capture_top_level(on: bool) -> bool {
+    CAPTURE_TOP_LEVEL.with(|c| c.replace(on))
+}
+
 /// Reduction tick for the capture-mode VM driver: like [`tick`] but **returns**
 /// whether the budget is exhausted (so the driver captures + yields a `Preempted`)
 /// instead of suspending a coroutine. Decrements otherwise. The budget is refreshed

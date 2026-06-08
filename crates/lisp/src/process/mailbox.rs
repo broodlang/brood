@@ -413,8 +413,15 @@ pub fn receive_match(
                 // signal up: it rides the error channel through `%receive` to `vm_run_bc`,
                 // which captures the VM continuation and returns it for `run_one` to park.
                 // A coroutine-mode process (flag off, or a tree-walked body) and the root
-                // thread fall through to the coroutine/condvar wait below.
-                if crate::process::in_capture_run() {
+                // thread fall through to the coroutine/condvar wait below — as does a
+                // **native-nested** capture receive (`in_capture_run` but not
+                // `capture_top_level`: a `%isolate`/`%try`/HOF callback sits between this
+                // receive and the body driver). Its continuation can't be captured across
+                // the native frame, and re-running the native repeats side effects (the
+                // §8.1 footgun), so it instead **blocks the worker** via the yielder-less
+                // root branch of `wait_for_message` — the dirty-scheduler carve-out (§7.4).
+                // Only a clean top-level receive captures (and can migrate).
+                if crate::process::in_capture_run() && crate::process::capture_top_level() {
                     crate::core::sync::lock(&ctx.mailbox.state).scanned = i;
                     set_self_status(&ctx, ST_WAITING);
                     if let Some(d) = deadline {

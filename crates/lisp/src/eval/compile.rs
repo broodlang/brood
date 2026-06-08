@@ -2947,11 +2947,21 @@ fn vm_run_bc(
     // per Brood call — runaway non-tail recursion is caught by `MAX_BC_FRAMES` below,
     // not the native-stack byte guard.
     let _gc_block = crate::process::GcBlockGuard::enter();
+    // Publish this driver's `top_level` to the `receive` gate (restored on exit, so the
+    // innermost driver wins): a top-level receive captures, a native-nested one blocks.
+    struct TopLevelGuard(bool);
+    impl Drop for TopLevelGuard {
+        fn drop(&mut self) {
+            crate::process::set_capture_top_level(self.0);
+        }
+    }
+    let _top_guard = TopLevelGuard(crate::process::set_capture_top_level(top_level));
     // Loop-top **preempt/kill capture** is done only by the *top-level* body driver
     // (`run_process_body`) of a capture-mode green process (ADR-100 §8). A nested
     // `vm_apply` run (a `map`/`try`/`binding` native callback) is NOT top-level: it
     // can't capture a `Preempted`/`Killed` across the native boundary, so it uses the
-    // normal `tick` and any `receive` suspend that surfaces re-raises (§8.1 re-run).
+    // normal `tick`; a `receive` suspend that surfaces there blocks the worker instead
+    // (the dirty-scheduler carve-out, §7.4) rather than re-running the native.
     let capture = top_level && crate::process::in_capture_run();
 
     // Entry marks for a one-shot unwind on error (truncate every frame's roots / env

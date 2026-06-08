@@ -69,8 +69,12 @@ pub use scheduler::{
     CORO_STACK_BYTES,
 };
 // State-capture driver helpers (ADR-100 §8): read by the bytecode VM driver to decide
-// when to capture a continuation (vs. yield the coroutine / block the root).
-pub(crate) use scheduler::{capture_hard_kill_pending, in_capture_run, tick_capture};
+// when to capture a continuation (vs. yield the coroutine / block the root), and by the
+// `receive` gate to tell a capturable top-level receive from a native-nested one.
+pub(crate) use scheduler::{
+    capture_hard_kill_pending, capture_top_level, in_capture_run, set_capture_top_level,
+    tick_capture,
+};
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};
 pub(crate) use monitor::{
