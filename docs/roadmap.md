@@ -786,15 +786,18 @@ the workaround available today.
     dispatch as the bottleneck — ✅ for **compute** (loop/pfib: 100% prim2-inline,
     ~100% IC hit, near-zero alloc → dispatch-bound, JIT-amenable), ✗ for **editor
     redisplay** (env/alloc/native-bound — JIT won't help there; profiled 2026-06-08);
-    (c) the `Value`-repr decision — ⬜ **the remaining gate**, planned in
-    [`value-repr.md`](value-repr.md) (NaN-box vs the 16-byte enum; Brood's wide
-    scalars — `Pid`/`Ref`/`Socket`/full `i64` — are the difficulty). Staged:
-    - ⬜ **Stage 0 — Cranelift plumbing** (`--features jit`): `build.rs`
-      compiles `trampoline_x86_64.s` / `trampoline_aarch64.s` via `cc` crate
-      (Layer 3); `extern "C"` runtime-callback table
-      (`brood_rt_alloc_pair`, `brood_rt_gc_safepoint`, `brood_rt_tick`,
-      `brood_rt_global_epoch`, `brood_rt_call_slow`); r15/x28-pinned `Heap`
-      context pointer; Cranelift dep behind the feature flag. No codegen yet.
+    (c) the `Value`-repr decision — ✅ **decided: keep the 16-byte enum** (D),
+    measured in [`value-repr.md`](value-repr.md) (a single-word `Value` gave ~zero
+    tier-1 speedup on the compute loops; build the JIT on the enum, revisit only if a
+    tier-2 register profile justifies NaN-boxing). Staged:
+    - 🟡 **Stage 0 — Cranelift plumbing** (`--features jit`): ✅ the `extern "C"`
+      runtime-callback table (`brood_rt_tick`/`gc_safepoint`/`global_epoch`/
+      `alloc_pair`/`call_slow`, ABI corrected for the enum — values stay in
+      `Heap::roots`, callbacks take `*mut Heap`), ✅ the Cranelift dep behind the flag
+      + the `JITModule` skeleton (`Jit::new` registers the callbacks; default builds
+      link zero cranelift). ⬜ the Layer-3 `build.rs` + `trampoline_{x86_64,aarch64}.s`
+      (r15/x28-pinned context) — **deferred to Stage 1**, where the first compiled arm
+      exercises them. No codegen yet.
     - ⬜ **Stage 1 — Arm compilation**: on call-count threshold crossing, compile
       a RUNTIME-region arm to Cranelift IR and atomically install it; trampoline
       in; epoch-guard deopt falls back to the VM. All GC-visible values in
