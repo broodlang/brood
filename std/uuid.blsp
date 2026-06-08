@@ -4,12 +4,38 @@
 ;; via the `random-token` primitive.
 
 (defmodule uuid
-  "UUID generation.
+  "UUID generation: v4 (random) and v7 (time-ordered random, RFC 9562).
 
     (require 'uuid)
     (uuid/uuid-v4)   ;; => \"550e8400-e29b-41d4-a716-446655440000\" (example)
+    (uuid/uuid-v7)   ;; => \"018f3a4b-5c6d-7e8f-9a0b-1c2d3e4f5060\" (timestamp prefix)
     (uuid/uuid? s)   ;; => true/false
-    (uuid/uuid-nil)  ;; => \"00000000-0000-0000-0000-000000000000\"")
+    (uuid/uuid-nil)  ;; => \"00000000-0000-0000-0000-000000000000\"
+
+v7 UUIDs sort chronologically (they share a common 48-bit ms timestamp prefix),
+making them suitable for database primary keys and ordered logs. v4 UUIDs are
+fully random and give better privacy.")
+
+;; ---- hex helpers ------------------------------------------------------------
+
+(def uuid--hex-digits "0123456789abcdef")
+
+(defn uuid--int->hex (n)
+  "Convert a non-negative integer to a lowercase hex string (no leading zeros)."
+  (if (= n 0) "0" (uuid--int->hex-loop n "")))
+
+(defn uuid--int->hex-loop (n acc)
+  (if (= n 0)
+    acc
+    (uuid--int->hex-loop
+      (quot n 16)
+      (str (char-at uuid--hex-digits (rem n 16)) acc))))
+
+(defn uuid--pad-hex (s n)
+  "Left-pad hex string `s` with zeros to exactly `n` characters."
+  (if (>= (string-length s) n)
+    (substring s (- (string-length s) n) (string-length s))
+    (uuid--pad-hex (str "0" s) n)))
 
 ;; ---- UUID v4 ----------------------------------------------------------------
 ;;
@@ -44,6 +70,37 @@
 (defn uuid-nil ()
   "The nil UUID: all zeros."
   "00000000-0000-0000-0000-000000000000")
+
+;; ---- UUID v7 ----------------------------------------------------------------
+;;
+;; RFC 9562 layout (128 bits):
+;;   bits  0-47: Unix timestamp in milliseconds (big-endian)
+;;   bits 48-51: version = 0111 (7)
+;;   bits 52-63: 12 random bits
+;;   bits 64-65: variant = 10
+;;   bits 66-127: 62 random bits
+;;
+;; Formatted as: XXXXXXXX-XXXX-7XXX-YXXX-XXXXXXXXXXXX
+;;   where Y ∈ {8,9,a,b} (variant nibble).
+
+(defn uuid-v7 ()
+  "Generate an RFC 9562 version 7 UUID. The first 48 bits encode the current
+Unix timestamp in milliseconds, giving chronological sort order. The rest is
+random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
+  (let (ms   (now)
+        rand (random-token 10)
+        ts   (uuid--pad-hex (uuid--int->hex ms) 12)
+        ;; p0 (8 hex = bytes 0-3): timestamp high 32 bits
+        ;; p1 (4 hex = bytes 4-5): timestamp low 16 bits
+        ;; p2 (4 hex = bytes 6-7): "7" + 1 rand nibble + rand byte
+        ;; p3 (4 hex = bytes 8-9): variant char + 3 rand hex chars
+        ;; p4 (12 hex = bytes 10-15): 6 random bytes
+        p0  (substring ts 0 8)
+        p1  (substring ts 8 12)
+        p2  (str "7" (char-at rand 1) (substring rand 2 4))
+        p3  (str (uuid--variant-char (char-at rand 4)) (substring rand 5 8))
+        p4  (substring rand 8 20))
+    (str p0 "-" p1 "-" p2 "-" p3 "-" p4)))
 
 ;; ---- validation -------------------------------------------------------------
 
