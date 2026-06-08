@@ -133,15 +133,22 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
       persisted in the mailbox (re-entry would else reset `after`). Live-migration
       regression test (`tests/live_migration.rs`, §7.6) green under GC-stress + verify;
       §6 plain-release KI-1 bar holds **flag on and off** (10/10 + `BROOD_GC_STRESS`).
-    - ⬜ §8.4 steps 3–4: flip the default → delete corosensei + generalize stealing to
-      running processes. **Blocker found (2026-06-08):** the flag-on full suite exposes
-      the §8.1 **native-nested-receive footgun** — a `receive` nested in a stateful
-      native (`%isolate`, or a gen-server `call` that mints a `ref`/spawns *before* its
-      reply-receive) re-runs the native on resume, so side-effects-before-receive repeat
-      (re-spawned/killed children, a fresh non-matching `ref` each resume → livelock).
-      The clean cases pass (plain spawn/receive, `%try`-nested, `after`, live migration);
-      resolving the footgun (so a native-nested receive captures *through* the native
-      frame instead of re-running) is the real step-3 work. Must hold the §6 bar.
+    - 🟡 §8.4 step 3 (in progress, 2026-06-08): **native-nested-receive footgun RESOLVED**
+      (the BEAM dirty-scheduler way, §7.4). A clean *top-level* `receive` captures and
+      migrates as before; a *native-nested* `receive` (reached through `%isolate`/`%try`/
+      a HOF callback — can't be captured through the native frame, and re-running the
+      native repeats side effects) instead **blocks its worker** (no capture, no re-run),
+      via the yielder-less root branch of `wait_for_message`. A `CAPTURE_TOP_LEVEL`
+      thread-local (set per `vm_run_bc` entry) lets the gate tell the two apart.
+      Flag-on: the previously-hanging files pass (`gen` 18/18, `concurrency` 33/33,
+      `pids`/`link`/`exit`), and **1852/1859** in-language tests pass; live migration +
+      §6 bar hold. **Still blocking the default flip:** 6 heavy **kill/monitor-of-parked-
+      processes-at-scale** tests time out flag-on (mass-kill 100 parked, 1000 monitored
+      → `:down`, `observer` process-info) — plain fan-out is identical flag-on/off, so it's
+      the `exit`→`wake_enqueue`→`Killed`-retire→`:down` path under load, not throughput.
+      Flag stays **off**.
+    - ⬜ §8.4 step 3 (rest) + step 4: debug the kill/monitor-at-scale hang → flip the
+      default → delete corosensei + generalize stealing to running processes. §6 bar.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
