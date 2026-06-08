@@ -27,8 +27,8 @@ use crate::eval;
 
 use super::message::{from_message, to_message, Message};
 use super::scheduler::{
-    enqueue, ensure_ctx, gc_block_save, gc_block_set, macro_block_save, macro_block_set,
-    stack_base_save, stack_base_set, state_capture_enabled, Ctx, Process, Suspend,
+    ensure_ctx, gc_block_save, gc_block_set, macro_block_save, macro_block_set, stack_base_save,
+    stack_base_set, wake_enqueue, Ctx, Process, Suspend,
 };
 use super::timer::arm_timer;
 
@@ -130,8 +130,19 @@ pub(super) struct MailboxState {
     /// `wait_for_message` just wrote — a stale value from a prior cycle can never be
     /// read, because a `Suspend::Receive` is unreachable without going through that
     /// write first. Don't add a `Suspend::Receive` path that skips the
-    /// `wait_for_message` write, or this read goes stale.
+    /// `wait_for_message` write, or this read goes stale. (The capture-mode suspend in
+    /// `receive_match` also writes it before returning the suspend signal, so the
+    /// invariant holds there too.)
     pub(super) scanned: usize,
+    /// **Capture-mode only** (`BROOD_STATE_CAPTURE`): the absolute deadline of the
+    /// `receive` currently in progress, or `None`. A capture-mode `receive` is
+    /// re-entered from scratch on each wake (the continuation replays the `%receive`
+    /// call), so recomputing `now + ms` every resume would reset — and never fire —
+    /// the `after` timeout. The first entry stores the absolute deadline here; resumes
+    /// reuse it; the matching/timeout exit clears it. (The coroutine path keeps the
+    /// deadline in its own `receive_match` stack frame — its loop never exits — so it
+    /// never touches this.) Single slot: one `receive` runs at a time per process.
+    pub(super) recv_deadline: Option<Instant>,
 }
 
 impl Mailbox {
@@ -142,6 +153,7 @@ impl Mailbox {
                 waiter: None,
                 scanned: 0,
                 kill: None,
+                recv_deadline: None,
             }),
             cv: Condvar::new(),
             // The root (which never goes through enqueue/run_one) keeps this; a
@@ -247,7 +259,7 @@ pub(crate) fn deliver(pid: u64, msg: Message) {
         st.queue.push_back(msg);
         if let Some(proc) = wake_parked(&mut st) {
             drop(st);
-            enqueue(proc); // wake a parked green process
+            wake_enqueue(proc); // wake a parked green process (capture-mode → may migrate)
         } else {
             mb.cv.notify_one(); // wake the root thread, if it's blocked in receive
         }
@@ -312,16 +324,35 @@ pub fn receive_match(
     timeout: Value,
     on_timeout: Value,
 ) -> LispResult {
+    let ctx = ensure_ctx();
+    // Whether this `receive` runs under state capture (a capture-mode green process):
+    // the receive is re-entered from scratch on every wake, so its deadline must be
+    // persisted across resumes rather than recomputed.
+    let capture = crate::process::in_capture_run();
     let deadline = match timeout {
         Value::Nil => None,
-        Value::Int(ms) if ms >= 0 => Some(Instant::now() + Duration::from_millis(ms as u64)),
+        Value::Int(ms) if ms >= 0 => {
+            if capture {
+                // Persist the absolute deadline in the mailbox: the FIRST entry stores
+                // it, later resumes reuse it — so `(after ms …)` is measured from when
+                // the receive was first entered (and actually fires), instead of being
+                // reset to `now + ms` on each wake. Cleared at every non-suspend exit.
+                let mut st = crate::core::sync::lock(&ctx.mailbox.state);
+                Some(*st.recv_deadline.get_or_insert_with(|| {
+                    Instant::now() + Duration::from_millis(ms as u64)
+                }))
+            } else {
+                // Coroutine/root: the `receive_match` loop holds the deadline across its
+                // waits (it never exits between scans), so compute it once here.
+                Some(Instant::now() + Duration::from_millis(ms as u64))
+            }
+        }
         _ => {
             return Err(LispError::type_err(
                 "receive: timeout must be an integer (milliseconds) or nil",
             ))
         }
     };
-    let ctx = ensure_ctx();
     // Republish this process's LOCAL footprint and mark it running (the root never
     // goes through `run_one`, so this is where its status flips back from waiting).
     ctx.mailbox.mem.store(heap.local_bytes(), Ordering::Relaxed);
@@ -347,6 +378,11 @@ pub fn receive_match(
         // *suspend signal* returned to the scheduler instead of a `wait_for_message`.
         match scan_mailbox(heap, &ctx, rbase, &mut i) {
             Ok(Some(thunk)) => {
+                // The receive completed (a clause matched) — clear any persisted
+                // capture-mode deadline so the next receive starts fresh.
+                if capture {
+                    crate::core::sync::lock(&ctx.mailbox.state).recv_deadline = None;
+                }
                 heap.truncate_roots(rbase);
                 return Ok(thunk);
             }
@@ -354,29 +390,49 @@ pub fn receive_match(
                 // Scanned every queued message with no match.
                 if let Some(d) = deadline {
                     if Instant::now() >= d {
-                        // Same trampoline: return the timeout thunk to be applied in
-                        // tail position (the `receive` macro always supplies a fn).
+                        // The receive completed via timeout — return the `on-timeout`
+                        // thunk (applied in tail position; the `receive` macro always
+                        // supplies a fn) and clear the persisted capture-mode deadline.
+                        if capture {
+                            crate::core::sync::lock(&ctx.mailbox.state).recv_deadline = None;
+                        }
                         let on_timeout = heap.root_at(rbase + 1);
                         heap.truncate_roots(rbase);
                         return Ok(on_timeout);
                     }
                 }
-                // State-capture path (ADR-100 §8): a clean no-match in a green process
-                // becomes a *suspend control signal* returned to the scheduler instead
-                // of freezing the coroutine in `wait_for_message`. It rides the error
-                // channel up through the `%receive` native to the bytecode driver
-                // (`vm_run_bc`), which captures the VM continuation as relocatable heap
-                // data and parks it. Drop this scan's operand roots first (the match /
-                // timeout returns do the same) so the driver's `%receive` `Inst::Call`
-                // re-runs against a clean operand stack on resume. Root thread (no
-                // yielder) and default-off builds fall through to the coroutine wait.
-                if state_capture_enabled() && ctx.yielder.is_some() {
+                // State-capture path (ADR-100 §8): a clean no-match in a **capture-mode**
+                // green process (no coroutine — `in_capture_run`) becomes a *suspend
+                // control signal* returned to the scheduler instead of freezing a
+                // coroutine in `wait_for_message`. Record the scan position (so the
+                // scheduler re-runs us only on a NEW message) and arm any deadline timer
+                // — the same park bookkeeping `wait_for_message`'s green branch does,
+                // minus the coroutine yield — then drop this scan's operand roots (as the
+                // match / timeout returns do, so the driver's `%receive` `Inst::Call`
+                // re-runs against a clean operand stack on resume) and hand the suspend
+                // signal up: it rides the error channel through `%receive` to `vm_run_bc`,
+                // which captures the VM continuation and returns it for `run_one` to park.
+                // A coroutine-mode process (flag off, or a tree-walked body) and the root
+                // thread fall through to the coroutine/condvar wait below.
+                if crate::process::in_capture_run() {
+                    crate::core::sync::lock(&ctx.mailbox.state).scanned = i;
+                    set_self_status(&ctx, ST_WAITING);
+                    if let Some(d) = deadline {
+                        let gen = ctx.mailbox.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                        arm_timer(ctx.pid, d, gen);
+                    }
                     heap.truncate_roots(rbase);
                     return Err(LispError::suspend(deadline));
                 }
                 wait_for_message(&ctx, i, deadline);
             }
             Err(e) => {
+                // A control signal (suspend) keeps the in-progress receive's persisted
+                // deadline; a real error (e.g. the matcher threw) ends this receive, so
+                // clear it lest a later receive in this process reuse a stale deadline.
+                if capture && !e.is_control() {
+                    crate::core::sync::lock(&ctx.mailbox.state).recv_deadline = None;
+                }
                 heap.truncate_roots(rbase);
                 return Err(e);
             }
@@ -529,7 +585,7 @@ pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
         let mut st = crate::core::sync::lock(&mb.state);
         if let Some(proc) = wake_parked(&mut st) {
             drop(st);
-            enqueue(proc);
+            wake_enqueue(proc); // timer wake (capture-mode → may migrate)
         }
     }
 }
@@ -671,41 +727,33 @@ mod tests {
         );
     }
 
-    /// State-capture seam (ADR-100 §8.4 step 1): under `BROOD_STATE_CAPTURE`, a green
-    /// process whose `receive` scans an empty mailbox with no match produces a
-    /// `Control::Suspend` *control signal* (to be captured by the VM driver and parked
-    /// by the scheduler) instead of blocking in `wait_for_message`. We model a green
-    /// process by installing a `CURRENT` ctx with a (dummy, never-dereferenced) yielder
-    /// and an empty mailbox, then assert `receive_match` returns that control signal —
+    /// State-capture seam (ADR-100 §8): in a **capture-mode** green process (no
+    /// coroutine — modelled by setting the `CAPTURE_RUN` flag `run_one` sets), a
+    /// `receive` that scans an empty mailbox with no match produces a `Control::Suspend`
+    /// *control signal* (for the VM driver to capture and the scheduler to park) instead
+    /// of blocking in `wait_for_message`. Assert `receive_match` returns that signal —
     /// not a real error, and never blocks (the test would hang if it took the wait path).
     #[test]
-    fn empty_receive_in_a_green_process_suspends_under_the_flag() {
-        // Arm the flag before the first `state_capture_enabled()` read (it caches). This
-        // is the only state-capture caller in the lib unit-test binary; nextest also
-        // isolates each test in its own process.
-        std::env::set_var("BROOD_STATE_CAPTURE", "1");
-        assert!(state_capture_enabled(), "the flag must be armed for this test");
-
-        // A green ctx: a yielder makes `ctx.yielder.is_some()` true (the greenness
-        // check); it is never dereferenced on the suspend path (no kill pending, and
-        // the suspend returns before any `(*yptr).suspend(..)`), so a dangling pointer
-        // is safe here.
+    fn empty_receive_in_a_capture_run_suspends() {
         let mailbox = Mailbox::new();
+        // A capture-mode green ctx has no yielder; greenness comes from `in_capture_run`.
         let ctx = Ctx {
             pid: 999_999,
             mailbox: Arc::clone(&mailbox),
-            yielder: Some(core::ptr::NonNull::dangling().as_ptr() as *const _),
+            yielder: None,
             capture: Vec::new(),
         };
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
+        crate::process::scheduler::set_capture_run(true);
 
         let mut heap = Heap::new();
-        // Empty mailbox, no timeout: the scan finds nothing and the green+flag branch
+        // Empty mailbox, no timeout: the scan finds nothing and the capture branch
         // returns the suspend signal. `matcher`/`on_timeout` are never applied (the
         // queue is empty), so plain `nil`s suffice.
         let r = receive_match(&mut heap, Value::Nil, Value::Nil, Value::Nil);
+        crate::process::scheduler::set_capture_run(false);
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx
-        let err = r.expect_err("an empty receive under the flag must signal a suspend, not return");
+        let err = r.expect_err("an empty receive in a capture run must signal a suspend, not return");
         assert!(err.is_control(), "the suspend must be a control signal, not a real error");
         assert!(
             matches!(err.control, Some(crate::error::Control::Suspend { deadline: None })),

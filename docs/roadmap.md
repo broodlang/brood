@@ -120,9 +120,28 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
       green + flag → `Err(LispError::suspend)`. Nested-under-a-native suspends
       re-raise (the §8.1 re-run case). Capture→resume unit test + the green-receive
       signal test; §6 plain-release KI-1 bar re-cleared (10/10 + GC_STRESS).
-    - ⬜ §8.4 steps 2–4 (the rest of the scheduler-core build):
-      `run_one` dual-mode behind the flag + live-migration regression → flip default
-      → delete corosensei + generalize stealing. Must hold the §6 plain-release bar.
+    - ✅ §8.4 step 2 — `run_one` **dual-mode** + **live process migration**. `Process`
+      now holds `Run::{Coro|Capture}`; under the flag a VM-eligible body runs in capture
+      mode (worker drives `vm_run_bc` directly, no coroutine), a tree-walked body keeps a
+      coroutine (§8.1 option a). `vm_run_bc` captures `Preempted`/`Killed` at its loop top
+      (the coroutine-yield analogue); `run_one` parks `Suspended`, re-queues `Preempted`,
+      retires `Done`/`Killed`/error. **Migration:** a woken capture process (no native
+      stack) re-routes to the least-loaded worker (`wake_enqueue`), so it resumes on a
+      *different* thread — what corosensei could never do (KI-1b); preempt re-enqueue
+      stays pinned for locality. Fixes: worker threads get a `CORO_STACK_BYTES` stack
+      under the flag (capture bodies run on them); capture-mode `receive` deadlines are
+      persisted in the mailbox (re-entry would else reset `after`). Live-migration
+      regression test (`tests/live_migration.rs`, §7.6) green under GC-stress + verify;
+      §6 plain-release KI-1 bar holds **flag on and off** (10/10 + `BROOD_GC_STRESS`).
+    - ⬜ §8.4 steps 3–4: flip the default → delete corosensei + generalize stealing to
+      running processes. **Blocker found (2026-06-08):** the flag-on full suite exposes
+      the §8.1 **native-nested-receive footgun** — a `receive` nested in a stateful
+      native (`%isolate`, or a gen-server `call` that mints a `ref`/spawns *before* its
+      reply-receive) re-runs the native on resume, so side-effects-before-receive repeat
+      (re-spawned/killed children, a fresh non-matching `ref` each resume → livelock).
+      The clean cases pass (plain spawn/receive, `%try`-nested, `after`, live migration);
+      resolving the footgun (so a native-nested receive captures *through* the native
+      frame instead of re-running) is the real step-3 work. Must hold the §6 bar.
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
