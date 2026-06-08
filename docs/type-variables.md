@@ -1,8 +1,10 @@
 # Type variables — parametric signatures for user-defined generic functions
 
-> Status: **design only**. Not yet started. This is Option A from
-> `parametric-result-types.md` — deferred until a real consumer exists. The
-> HOF cases (`map`/`filter`/`reduce`/`fold`) were already handled via per-HOF
+> Status: **slice 1 shipped** (grammar + parse). `parse_type` in `annot.rs`
+> recognises `?`-prefix symbols and returns `Ty::ANY`; `type-matches?` already
+> accepts unknown names (no runtime change needed). Slices 2–3 (`SigTerm`
+> unification, primitive migration) deferred until a real HOF consumer exists.
+> This is Option B from the design — HOF cases (`map`/`filter`/`reduce`/`fold`) were already handled via per-HOF
 > result rules (Option B) and don't need this.
 
 ## Problem

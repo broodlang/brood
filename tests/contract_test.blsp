@@ -74,3 +74,70 @@
     (assert-error (c-join-strs 42 "a" "b")))
   (test "fixed + rest: bad rest arg throws"
     (assert-error (c-join-strs ", " "a" 99 "c"))))
+
+;; --- intersection types (and A B …) --------------------------------------------
+
+(defn c-head (xs) (first xs))
+(sig! c-head ((and pair (list int)) -> int))
+
+(defn c-never (x) x)
+(sig! c-never ((and int string) -> int))  ; NEVER — nothing satisfies both
+
+(describe "intersection type checks (and)"
+  (test "(and pair (list int)) accepts a non-empty list of ints"
+    (assert= (c-head (list 1 2 3)) 1))
+  (test "(and pair (list int)) rejects nil (not pair?)"
+    (assert-error (c-head nil)))
+  (test "(and pair (list int)) rejects a list with a non-int element"
+    (assert-error (c-head (list "a" "b"))))
+  (test "(and int string) is NEVER — even an int is rejected"
+    (assert-error (c-never 1)))
+  (test "(and int string) is NEVER — even a string is rejected"
+    (assert-error (c-never "a"))))
+
+;; --- map key/value types (map K V) ---------------------------------------------
+
+(defn c-lookup (m k) (get m k 0))
+(sig! c-lookup ((map keyword int) keyword -> int))
+
+(describe "map key/value type checks (map K V)"
+  (test "(map keyword int) accepts a keyword-int map"
+    (assert= (c-lookup {:a 1 :b 2} :a) 1))
+  (test "(map keyword int) rejects a map with a string key"
+    (assert-error (c-lookup {"a" 1} :a)))
+  (test "(map keyword int) rejects a map with a non-int value"
+    (assert-error (c-lookup {:a "one"} :a)))
+  (test "(map keyword int) rejects a non-map argument"
+    (assert-error (c-lookup (list 1 2) :a)))
+  (test "(map keyword int) accepts an empty map"
+    (assert= (c-lookup {} :x) 0)))
+
+;; --- type variables (?A) --------------------------------------------------------
+;; Type variables are static-only constraints — `?A` is unknown to `type-matches?`
+;; so it accepts any value (correct: the static checker handles the precision).
+;; The sig! wrapper still enforces the non-variable parts (base types, shape).
+
+(defn c-identity (x) x)
+(sig! c-identity (?A -> ?A))
+
+(defn c-my-first (xs) (first xs))
+(sig! c-my-first ((list ?A) -> ?A))
+
+(defn c-const (x y) x)
+(sig! c-const (?A ?B -> ?A))
+
+(describe "type variable annotations (?A)"
+  (test "identity with ?A accepts an int"
+    (assert= (c-identity 42) 42))
+  (test "identity with ?A accepts a string"
+    (assert= (c-identity "hi") "hi"))
+  (test "identity with ?A accepts nil"
+    (assert= (c-identity nil) nil))
+  (test "(list ?A) accepts a list of ints"
+    (assert= (c-my-first (list 1 2 3)) 1))
+  (test "(list ?A) accepts a list of strings"
+    (assert= (c-my-first (list "a" "b")) "a"))
+  (test "(list ?A) still rejects a non-list"
+    (assert-error (c-my-first 42)))
+  (test "two vars ?A and ?B independently accept any types"
+    (assert= (c-const 1 "two") 1)))
