@@ -287,7 +287,13 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   and `first`/`last`/`nth` flow the element type out, so `(+ 1 (first ["a" "b"]))` is
   flagged. ✅ **Parametric HOF results**: `(map inc [1 2 3]) : list<number>`, `filter`
   preserves the element, `(reduce + 0 xs) : number` — element types flow *through*
-  `map`/`filter`/`reduce`/`fold` (per-HOF rules, no type variables). ⬜ Still:
+  `map`/`filter`/`reduce`/`fold` (per-HOF rules, no type variables). ✅ **Structural
+  combinators**: `reverse`/`sort`/`sort-by`/`take`/`drop`/`take-while`/`drop-while`/
+  `cons`/`append`/`concat` all preserve/propagate element types through
+  `seq_aware_call_ty`, so `(first (reverse [1 2 3])) : int | nil` and element types
+  don't drop at a `sort` or `take` boundary. ⬜ Still: expanded curated sigs
+  (`str`/`println`/… → their result types); rest-param notation in `(sig …)` arrows;
+  `sig!` runtime enforcement (slice 2); inference through simple let-aliases;
   intersections for overloaded fns; user-generic type variables.
   Additive; gated on real need (ADR-011). Advisory throughout — never gates, never
   inhibits the dynamic language; not the TypeScript route.
@@ -298,8 +304,10 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   "strong arrow", sound where you ask for it). All policy in Brood, never
   required, never gates. Plus soundness-oracle tests (results never
   under-approximate; correct programs never warn) and curated sigs for common
-  predicates. `docs/type-annotations.md`. ⬜ Future: a `BROOD_CONTRACTS=1`
-  enforce-every-`sig` switch; element-level `(list E)` runtime checks.
+  predicates. `docs/type-annotations.md`. ⬜ Future: expanded curated-sigs table
+  (`str`/`println`/`number->string`/… result types); rest-param notation in `(sig …)`;
+  `BROOD_CONTRACTS=1` enforce-every-`sig` switch; element-level `(list E)` runtime
+  checks.
 - ✅ **Maps** (ADR-030 + ADR-040) — immutable `{ }` literals + `get`/`assoc`/
   `dissoc`/`keys`/`vals`/`contains?`/`map?`. Structural-equality keys, order-
   independent `=`; every op returns a fresh map. Small `map-*` Rust kernel, the
