@@ -51,11 +51,15 @@ tag-check + load directly.
 
 ## 3. Staging (each step keeps the suite green)
 
-- **1a — Trampoline (Layer 3, deferred from Stage 0).** Write `trampoline_x86_64.s` /
-  `trampoline_aarch64.s` (~30 lines each) + the `build.rs` `cc` step under `--features
-  jit`. The trampoline saves callee-saved regs, pins r15/x28 = `*mut Heap`, calls the
-  JIT'd fn pointer, restores. Now exercisable — a tiny "return a constant" compiled stub
-  is the first thing it runs (the trampoline's own unit test).
+- **1a — Codegen pipeline smoke test (revised — no asm).** *Realization (2026-06-08):*
+  the pinned-register trampoline is **not needed for tier-1 correctness**. The runtime
+  callbacks already take `heap: *mut Heap` as their first arg, so JIT'd code receives
+  `heap` as a normal `extern "C"` argument and threads it through — no register pinning,
+  no hand-written assembly. (The pinned reg / trampoline of ADR-101 §6.2 is a perf
+  optimization, deferred to Stage 1.5/2.) So 1a becomes: compile a trivial
+  `extern "C" fn(heap: *mut Heap) -> i64 { 42 }` through Cranelift, finalize it, call the
+  resulting fn pointer, assert it returns 42 — validating the whole codegen pipeline
+  (build, `JITModule` define/finalize, fn-pointer call) with zero asm.
 - **1b — Tiering hook.** A per-arm call counter (reuse the call-site IC's epoch/`CompiledArm`
   machinery); on crossing a threshold, hand the arm to the JIT. Compiled code installed
   **atomically** (an `AtomicPtr` fn-pointer slot on the arm, read on entry); until set,
