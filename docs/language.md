@@ -1320,3 +1320,40 @@ in Brood on top of the Rust primitive kernel. It also adds `inc` `dec`
 `even?` `odd?` `sum` `product`. Because it's ordinary Brood, any of it can be redefined at
 runtime — and every function in it is defined with `defn`, exactly as you'd
 define your own.
+
+## Standard library (opt-in modules)
+
+These modules are baked into the binary but **not** loaded at startup — use
+`(require 'name)` or `(:use name)` in a `defmodule` header to load one.
+Run `nest doc <module>` for the full API of any module.
+
+| Module | `require` name | What it provides |
+|--------|---------------|-----------------|
+| `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
+| `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode: `hex-encode`, `hex-decode`, `base64-encode`, `base64-decode` |
+| `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `mode`, `frequencies`, `stats-min`, `stats-max` |
+| `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`stream-from-list`, `stream-range`, `stream-from-socket`), transformers (`stream-map`, `stream-filter`, `stream-chunk`, `stream-lines`), terminals (`stream-fold`, `stream-to-vector`, `stream-pipe`) |
+| `std/url.blsp` | `'url` | URL encoding/parsing: `percent-encode`, `percent-decode`, `query-encode`, `query-decode`, `parse-url`, `build-url` |
+| `std/csv.blsp` | `'csv` | CSV parse and emit: `csv-parse`, `csv-parse-maps`, `csv-emit`, `csv-emit-maps` |
+| `std/uuid.blsp` | `'uuid` | UUID generation: `uuid-v4` (random), `uuid-v7` (time-ordered, RFC 9562), `uuid-nil`, `uuid?` |
+| `std/template.blsp` | `'template` | `{{var}}` string templating: `render`, `render-all` |
+| `std/queue.blsp` | `'queue` | Purely functional FIFO queue and min-priority queue |
+| `std/multimap.blsp` | `'multimap` | Multi-valued map (one key → multiple values) |
+| `std/hash.blsp` | `'hash` | `sha256`, `hmac-sha256` (RFC 2104), `hash-string` (djb2) |
+| `std/diff.blsp` | `'diff` | LCS-based sequence diff: `diff-seq`, `diff-lines`, `diff-summary`, `diff-patch`, `diff-unified` |
+
+The following modules are also opt-in and live under `std/net/` and `std/tool/`:
+
+```clojure
+(require 'net/tcp)    ; tcp-listen / tcp-connect / tcp-send / tcp-close … (thin wrapper over the net primitives)
+(require 'net/http)   ; http-get / http-post / http-request / serve / stream-response
+(require 'net/sse)    ; Server-Sent Events helpers
+(require 'test)       ; describe / test / assert= / is — the test framework
+(require 'format)     ; printf-style string formatting
+(require 'json)       ; json-encode / json-decode
+(require 'regex)      ; re-match / re-find / re-replace (thin wrapper over the regex engine)
+(require 'set)        ; set operations over maps: set-new / set-add / set-member? / set-union …
+(require 'fuzzy)      ; fuzzy string matching
+(require 'log)        ; structured logging
+(require 'task)       ; promise-style async tasks over processes
+```
