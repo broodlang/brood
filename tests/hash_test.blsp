@@ -36,6 +36,86 @@
     (assert= "8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b"
              (hash/hmac-sha256 "secret" "message"))))
 
+(describe "md5"
+  (test "known digest for empty string"
+    (assert= "d41d8cd98f00b204e9800998ecf8427e"
+             (hash/md5 "")))
+  (test "known digest for hello"
+    (assert= "5d41402abc4b2a76b9719d911017c592"
+             (hash/md5 "hello")))
+  (test "output length is 32 hex chars"
+    (assert= 32 (string-length (hash/md5 "anything"))))
+  (test "deterministic"
+    (assert= (hash/md5 "test") (hash/md5 "test")))
+  (test "different inputs give different digests"
+    (is (not= (hash/md5 "a") (hash/md5 "b")))))
+
+(describe "sha1"
+  (test "known digest for empty string"
+    (assert= "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+             (hash/sha1 "")))
+  (test "known digest for hello"
+    (assert= "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+             (hash/sha1 "hello")))
+  (test "output length is 40 hex chars"
+    (assert= 40 (string-length (hash/sha1 "anything"))))
+  (test "deterministic"
+    (assert= (hash/sha1 "test") (hash/sha1 "test")))
+  (test "different inputs give different digests"
+    (is (not= (hash/sha1 "a") (hash/sha1 "b")))))
+
+(describe "sha384"
+  (test "known digest for empty string"
+    (assert= "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"
+             (hash/sha384 "")))
+  (test "output length is 96 hex chars"
+    (assert= 96 (string-length (hash/sha384 "anything"))))
+  (test "deterministic"
+    (assert= (hash/sha384 "test") (hash/sha384 "test")))
+  (test "different inputs give different digests"
+    (is (not= (hash/sha384 "a") (hash/sha384 "b")))))
+
+(describe "sha512"
+  (test "known digest for empty string"
+    (assert= "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+             (hash/sha512 "")))
+  (test "output length is 128 hex chars"
+    (assert= 128 (string-length (hash/sha512 "anything"))))
+  (test "deterministic"
+    (assert= (hash/sha512 "test") (hash/sha512 "test")))
+  (test "different inputs give different digests"
+    (is (not= (hash/sha512 "a") (hash/sha512 "b")))))
+
+(describe "hmac-sha1"
+  (test "output is 40 hex chars"
+    (assert= 40 (string-length (hash/hmac-sha1 "secret" "message"))))
+  (test "different keys give different HMACs"
+    (is (not= (hash/hmac-sha1 "key1" "msg") (hash/hmac-sha1 "key2" "msg"))))
+  (test "different messages give different HMACs"
+    (is (not= (hash/hmac-sha1 "key" "msg1") (hash/hmac-sha1 "key" "msg2"))))
+  (test "deterministic"
+    (assert= (hash/hmac-sha1 "k" "m") (hash/hmac-sha1 "k" "m")))
+  (test "known output: hmac-sha1(key, message)"
+    ;; echo -n "message" | openssl dgst -sha1 -hmac "key"
+    ;; = 2088df74d5f2146b48146caf4965377e9d0be3a4
+    (assert= "2088df74d5f2146b48146caf4965377e9d0be3a4"
+             (hash/hmac-sha1 "key" "message"))))
+
+(describe "hmac-sha512"
+  (test "output is 128 hex chars"
+    (assert= 128 (string-length (hash/hmac-sha512 "secret" "message"))))
+  (test "different keys give different HMACs"
+    (is (not= (hash/hmac-sha512 "key1" "msg") (hash/hmac-sha512 "key2" "msg"))))
+  (test "different messages give different HMACs"
+    (is (not= (hash/hmac-sha512 "key" "msg1") (hash/hmac-sha512 "key" "msg2"))))
+  (test "deterministic"
+    (assert= (hash/hmac-sha512 "k" "m") (hash/hmac-sha512 "k" "m")))
+  (test "known output: hmac-sha512(secret, message)"
+    ;; echo -n "message" | openssl dgst -sha512 -hmac "secret"
+    ;; = 1bba587c730eedba31f53abb0b6ca589e09de4e894ee455e6140807399759adaafa069eec7c01647bb173dcb17f55d22af49a18071b748c5c2edd7f7a829c632
+    (assert= "1bba587c730eedba31f53abb0b6ca589e09de4e894ee455e6140807399759adaafa069eec7c01647bb173dcb17f55d22af49a18071b748c5c2edd7f7a829c632"
+             (hash/hmac-sha512 "secret" "message"))))
+
 (describe "hash-string"
   (test "returns an integer"
     (is (int? (hash/hash-string "hello"))))
