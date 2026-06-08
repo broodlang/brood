@@ -1601,6 +1601,66 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
   "`coll` without its last `n` items (`()` if `n` >= its length)."
   (take (- (count coll) n) coll))
 
+;; ---- enum extras ------------------------------------------------------------
+;; (chunk-every n coll) — like partition but keeps the trailing partial chunk.
+(defn chunk-every--acc (n coll acc)
+  (if (empty? coll) (reverse acc)
+    (chunk-every--acc n (drop n coll) (cons (into [] (take n coll)) acc))))
+(defn chunk-every (n coll)
+  "Split `coll` into consecutive `n`-item vectors; unlike `partition`, a
+trailing partial chunk is kept. `n` must be positive."
+  (chunk-every--acc n (seq coll) nil))
+
+;; (chunk-by f coll) — consecutive runs where (f x) returns the same value.
+(defn chunk-by--acc (f coll key curr acc)
+  (if (empty? coll)
+    (reverse (cons (into [] (reverse curr)) acc))
+    (let (x (first coll) k (f x))
+      (if (= k key)
+        (chunk-by--acc f (rest coll) key (cons x curr) acc)
+        (chunk-by--acc f (rest coll) k (list x) (cons (into [] (reverse curr)) acc))))))
+(defn chunk-by (f coll)
+  "Split `coll` into consecutive vectors where `(f x)` returns the same value.
+A new chunk starts each time the return value of `f` changes."
+  (let (s (seq coll))
+    (if (empty? s) nil
+      (chunk-by--acc f (rest s) (f (first s)) (list (first s)) nil))))
+
+;; (scan f init coll) — running fold: returns a list of all intermediate values
+;; including the seed. Also exported as `reductions`.
+(defn scan--acc (f acc coll result)
+  (if (empty? coll) (reverse result)
+    (let (next (f acc (first coll)))
+      (scan--acc f next (rest coll) (cons next result)))))
+(defn scan (f init coll)
+  "Return a list of successively accumulated values of `(fold f init coll)`,
+starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`. Also `reductions`."
+  (scan--acc f init (seq coll) (list init)))
+(def reductions scan)
+
+;; (flat-map f coll) — alias for the existing `mapcat`.
+(def flat-map mapcat)
+
+;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
+(defn zip-with--acc (f a b acc)
+  (if (or (empty? a) (empty? b)) (reverse acc)
+    (zip-with--acc f (rest a) (rest b) (cons (f (first a) (first b)) acc))))
+(defn zip-with (f a b)
+  "Map `f` over corresponding pairs from `a` and `b`, stopping at the shorter
+input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
+  (zip-with--acc f (seq a) (seq b) nil))
+
+;; (intersperse x coll) — alias for the existing `interpose`.
+(def intersperse interpose)
+
+;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
+(defn min-by (f coll)
+  "The item in `coll` for which `(f item)` is smallest. Errors on empty input."
+  (fold (fn (best x) (if (< (f x) (f best)) x best)) (first coll) (rest coll)))
+(defn max-by (f coll)
+  "The item in `coll` for which `(f item)` is largest. Errors on empty input."
+  (fold (fn (best x) (if (> (f x) (f best)) x best)) (first coll) (rest coll)))
+
 (defn repeat--acc (n x acc) (if (<= n 0) acc (repeat--acc (dec n) x (cons x acc))))
 (defn repeat (n x)
   "A list of `x` repeated `n` times (empty if `n` <= 0)."

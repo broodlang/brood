@@ -1045,10 +1045,15 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 - `group-by` buckets items into a map from `(f x)` to the list of items that
   produced it. `flatten` splices nested lists into one flat list (vectors/maps
   are leaves).
-- `interpose` inserts a separator between adjacent items; `interleave` alternates
+- `interpose`/`intersperse` inserts a separator between adjacent items; `interleave` alternates
   two sequences, stopping at the shorter. `zip` pairs two sequences into `[x y]`
-  vectors, stopping at the shorter. `partition` chunks into `n`-sized groups,
-  dropping a trailing partial chunk.
+  vectors, stopping at the shorter. `zip-with` combines two sequences element-wise via a
+  binary function. `partition` chunks into `n`-sized groups, dropping a trailing partial
+  chunk; `chunk-every` keeps the remainder. `chunk-by` partitions consecutive equal-key runs.
+- `scan`/`reductions` is a running fold — returns a list of all intermediate accumulator
+  values starting with the initial value (like Haskell's `scanl`).
+- `flat-map`/`mapcat` maps a list-valued function and concatenates the results. `min-by`/`max-by`
+  select the extremum of a collection by a key function.
 - `repeat` builds a list of `n` copies of a value; `repeatedly` calls a
   zero-argument function `n` times and collects the results.
 - `sort` orders ascending (or with a strict less-than predicate:
@@ -1341,6 +1346,10 @@ Run `nest doc <module>` for the full API of any module.
 | `std/multimap.blsp` | `'multimap` | Multi-valued map (one key → multiple values) |
 | `std/hash.blsp` | `'hash` | `sha256`, `hmac-sha256` (RFC 2104), `hash-string` (djb2) |
 | `std/diff.blsp` | `'diff` | LCS-based sequence diff: `diff-seq`, `diff-lines`, `diff-summary`, `diff-patch`, `diff-unified` |
+| `std/path.blsp` | `'path` | Path string manipulation: `join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `with-extension` |
+| `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `working-dir`, `host`, `halt` |
+| `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2`, `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
+| `std/agent.blsp` | `'agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`:
 

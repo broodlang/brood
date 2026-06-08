@@ -1,0 +1,74 @@
+(defmodule agent-test (:use test))
+(require 'agent)
+
+(describe "agent/start + get"
+  (test "initial state via get identity"
+    (let (a (agent/start (fn () 42)))
+      (assert= 42 (agent/get a identity))
+      (agent/stop a)))
+  (test "get applies function to state"
+    (let (a (agent/start (fn () 10)))
+      (assert= 20 (agent/get a (fn (n) (* n 2))))
+      (agent/stop a)))
+  (test "get does not change state"
+    (let (a (agent/start (fn () 99)))
+      (agent/get a (fn (n) (* n 100)))
+      (assert= 99 (agent/get a identity))
+      (agent/stop a))))
+
+(describe "agent/update"
+  (test "update changes state"
+    (let (a (agent/start (fn () 0)))
+      (agent/update a inc)
+      (assert= 1 (agent/get a identity))
+      (agent/stop a)))
+  (test "multiple updates accumulate"
+    (let (a (agent/start (fn () 0)))
+      (agent/update a inc)
+      (agent/update a inc)
+      (agent/update a (fn (n) (* n 10)))
+      (assert= 20 (agent/get a identity))
+      (agent/stop a)))
+  (test "update returns :ok"
+    (let (a (agent/start (fn () nil)))
+      (assert= :ok (agent/update a identity))
+      (agent/stop a))))
+
+(describe "agent/get-and-update"
+  (test "returns old value and updates state"
+    (let (a (agent/start (fn () 5))
+          result (agent/get-and-update a (fn (n) [n (* n 2)])))
+      (assert= 5 result)
+      (assert= 10 (agent/get a identity))
+      (agent/stop a))))
+
+(describe "agent/cast"
+  (test "cast applies update asynchronously"
+    (let (a (agent/start (fn () 0)))
+      (agent/cast a inc)
+      ;; synchronise via get (which is synchronous — ensures cast has processed)
+      (assert= 1 (agent/get a identity))
+      (agent/stop a))))
+
+(describe "agent/stop"
+  (test "stop returns :ok"
+    (let (a (agent/start (fn () nil)))
+      (assert= :ok (agent/stop a)))))
+
+(describe "agent/start-link"
+  (test "start-link returns a pid"
+    (let (a (agent/start-link (fn () 0)))
+      (is (pid? a))
+      (agent/stop a)))
+  (test "start-link agent behaves like start"
+    (let (a (agent/start-link (fn () 10)))
+      (assert= 20 (agent/get a (fn (n) (* n 2))))
+      (agent/stop a))))
+
+(describe "agent with map state"
+  (test "counter map"
+    (let (a (agent/start (fn () {}))
+          _ (agent/update a (fn (m) (assoc m :x 1)))
+          _ (agent/update a (fn (m) (assoc m :y 2))))
+      (assert= {:x 1 :y 2} (agent/get a identity))
+      (agent/stop a))))

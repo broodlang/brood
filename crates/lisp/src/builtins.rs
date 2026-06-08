@@ -1400,6 +1400,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, seq], int),
         run_process,
     );
+    def(heap, "%env-all", Arity::exact(0), Sig::nullary(map_ty), env_all);
+    def(heap, "%argv",    Arity::exact(0), Sig::nullary(seq),    argv_builtin);
+    def(heap, "%os-type", Arity::exact(0), Sig::nullary(kw),     os_type_builtin);
+    def(heap, "%os-cmd",  Arity::at_least(1), Sig::new(vec![string, seq], map_ty), os_cmd);
+    def(heap, "%halt",    Arity::exact(1),    Sig::new(vec![int], nil_ty),          halt_builtin);
 
     // macros
     def(
@@ -1754,6 +1759,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], string),
         random_token,
     );
+    def(heap, "%random-bytes",     Arity::exact(1), Sig::new(vec![int], seq),                   random_bytes);
+    def(heap, "%chacha20-encrypt", Arity::exact(3), Sig::new(vec![any, any, any], seq),         chacha20_encrypt);
+    def(heap, "%chacha20-decrypt", Arity::exact(3), Sig::new(vec![any, any, any], any),         chacha20_decrypt);
+    def(heap, "%pbkdf2-sha256",    Arity::exact(4), Sig::new(vec![string, string, int, int], seq), pbkdf2_sha256_fn);
     def(
         heap,
         "spit-private",
@@ -1964,6 +1973,15 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("hostname", &[], "This machine's short hostname (no domain). Used to qualify a node name as name@host."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
+    ("%env-all", &[], "All environment variables as a map of string→string."),
+    ("%argv", &[], "Command-line arguments as a vector of strings (including argv[0])."),
+    ("%os-type", &[], "The host OS as a keyword: :linux, :macos, or :windows."),
+    ("%os-cmd", &["prog", "&", "args"], "Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}."),
+    ("%halt", &["code"], "Terminate the process with exit code. Never returns."),
+    ("%random-bytes", &["n"], "n cryptographically-strong random bytes as a vector of ints 0–255."),
+    ("%chacha20-encrypt", &["key-bytes", "nonce-bytes", "plaintext-bytes"], "Encrypt plaintext-bytes with ChaCha20-Poly1305 (AEAD). key-bytes must be 32 bytes; nonce-bytes must be 12 bytes. Returns ciphertext bytes (plaintext + 16-byte auth tag)."),
+    ("%chacha20-decrypt", &["key-bytes", "nonce-bytes", "ciphertext-bytes"], "Decrypt ciphertext-bytes with ChaCha20-Poly1305. Returns plaintext bytes, or :error if authentication fails."),
+    ("%pbkdf2-sha256", &["password", "salt", "iterations", "key-len"], "PBKDF2-HMAC-SHA256 key derivation. Returns a key-len-byte vector. Use iterations >= 600000 for password storage."),
     ("macroexpand-1", &["form"], "Expand form by a single macro step."),
     // `macroexpand` is a Brood prelude fn (ADR-064), documented via its docstring.
     ("gensym", &["prefix"], "A fresh, unique symbol, with an optional name prefix."),
@@ -3890,6 +3908,19 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // LCS-based sequence diff: diff-seq, diff-lines, diff-summary, diff-patch,
     // diff-unified. O(m*n) time/space; suitable for small-to-medium sequences.
     ("diff", include_str!("../../../std/diff.blsp")),
+    // Path string manipulation: join, split, basename, dirname, extension, stem,
+    // normalize, relative-to. Consolidates the prelude's path-* globals under
+    // a single path/ namespace with additional operations.
+    ("path", include_str!("../../../std/path.blsp")),
+    // OS/process interface: env vars, argv, subprocess execution, OS type, halt.
+    // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
+    ("system", include_str!("../../../std/system.blsp")),
+    // Authenticated encryption (ChaCha20-Poly1305), PBKDF2 key derivation, secure
+    // random bytes. Wraps the %chacha20-* and %pbkdf2-sha256 primitives.
+    ("crypto", include_str!("../../../std/crypto.blsp")),
+    // Process-backed state cell: start/get/update/get-and-update/cast/stop.
+    // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
+    ("agent", include_str!("../../../std/agent.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     ("editor/buffer", include_str!("../../../std/editor/buffer.blsp")),
@@ -6262,6 +6293,136 @@ fn git_or_err(args: &[&str], cwd: Option<&str>) -> Result<(), LispError> {
     }
 }
 
+/// `(%random-bytes n)` — `n` cryptographically-strong random bytes as a vector of
+/// ints 0–255. Useful for generating keys, nonces, and salts.
+fn random_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "%random-bytes", arg(args, 0))?;
+    if !(0..=65536).contains(&n) {
+        return Err(LispError::runtime(
+            "%random-bytes: byte count must be in 0..=65536",
+        ));
+    }
+    let mut bytes = vec![0u8; n as usize];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| LispError::runtime(format!("%random-bytes: OS RNG unavailable: {e}")))?;
+    let vals: Vec<Value> = bytes.iter().map(|&b| Value::Int(b as i64)).collect();
+    Ok(heap.alloc_vector(vals))
+}
+
+/// `(%chacha20-encrypt key-bytes nonce-bytes plaintext-bytes)` — authenticated
+/// encryption (ChaCha20-Poly1305). `key-bytes` must be exactly 32 bytes;
+/// `nonce-bytes` must be exactly 12 bytes. Returns the ciphertext (plaintext
+/// length + 16-byte Poly1305 authentication tag) as a byte vector.
+fn chacha20_encrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
+    let key_bytes = collect_bytes("%chacha20-encrypt", arg(args, 0), heap)?;
+    let nonce_bytes = collect_bytes("%chacha20-encrypt", arg(args, 1), heap)?;
+    let plaintext = collect_bytes("%chacha20-encrypt", arg(args, 2), heap)?;
+    if key_bytes.len() != 32 {
+        return Err(LispError::runtime(format!(
+            "%chacha20-encrypt: key must be 32 bytes, got {}",
+            key_bytes.len()
+        )));
+    }
+    if nonce_bytes.len() != 12 {
+        return Err(LispError::runtime(format!(
+            "%chacha20-encrypt: nonce must be 12 bytes, got {}",
+            nonce_bytes.len()
+        )));
+    }
+    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
+        .map_err(|e| LispError::runtime(format!("%chacha20-encrypt: {e}")))?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_slice())
+        .map_err(|e| LispError::runtime(format!("%chacha20-encrypt: {e}")))?;
+    let vals: Vec<Value> = ciphertext.iter().map(|&b| Value::Int(b as i64)).collect();
+    Ok(heap.alloc_vector(vals))
+}
+
+/// `(%chacha20-decrypt key-bytes nonce-bytes ciphertext-bytes)` — authenticated
+/// decryption (ChaCha20-Poly1305). Returns the plaintext as a byte vector, or
+/// `:error` if the authentication tag fails (tampered or wrong key/nonce).
+fn chacha20_decrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
+    let key_bytes = collect_bytes("%chacha20-decrypt", arg(args, 0), heap)?;
+    let nonce_bytes = collect_bytes("%chacha20-decrypt", arg(args, 1), heap)?;
+    let ciphertext = collect_bytes("%chacha20-decrypt", arg(args, 2), heap)?;
+    if key_bytes.len() != 32 {
+        return Err(LispError::runtime(format!(
+            "%chacha20-decrypt: key must be 32 bytes, got {}",
+            key_bytes.len()
+        )));
+    }
+    if nonce_bytes.len() != 12 {
+        return Err(LispError::runtime(format!(
+            "%chacha20-decrypt: nonce must be 12 bytes, got {}",
+            nonce_bytes.len()
+        )));
+    }
+    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
+        .map_err(|e| LispError::runtime(format!("%chacha20-decrypt: {e}")))?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    match cipher.decrypt(nonce, ciphertext.as_slice()) {
+        Ok(plaintext) => {
+            let vals: Vec<Value> = plaintext.iter().map(|&b| Value::Int(b as i64)).collect();
+            Ok(heap.alloc_vector(vals))
+        }
+        Err(_) => Ok(Value::Keyword(value::intern("error"))),
+    }
+}
+
+/// `(%pbkdf2-sha256 password salt iterations key-len)` — derive a key from a
+/// password using PBKDF2-HMAC-SHA256 (RFC 2898). Returns a byte vector of
+/// `key-len` bytes. Use `iterations` ≥ 600,000 for password storage
+/// (NIST SP 800-132 2023). Implemented over the `hmac` + `sha2` crates.
+fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let password = expect_string(heap, "%pbkdf2-sha256", arg(args, 0))?;
+    let salt = expect_string(heap, "%pbkdf2-sha256", arg(args, 1))?;
+    let iterations = expect_int(heap, "%pbkdf2-sha256", arg(args, 2))?;
+    let key_len = expect_int(heap, "%pbkdf2-sha256", arg(args, 3))?;
+    if iterations <= 0 {
+        return Err(LispError::runtime(
+            "%pbkdf2-sha256: iterations must be positive",
+        ));
+    }
+    if !(1..=512).contains(&key_len) {
+        return Err(LispError::runtime(
+            "%pbkdf2-sha256: key-len must be in 1..=512",
+        ));
+    }
+    let hlen = 32usize; // SHA-256 output bytes
+    let block_count = (key_len as usize + hlen - 1) / hlen;
+    let pw = password.as_bytes();
+    let mut dk = Vec::with_capacity(key_len as usize);
+    for i in 1u32..=(block_count as u32) {
+        // U_1 = HMAC(password, salt || INT(i))
+        let mut mac = HmacSha256::new_from_slice(pw)
+            .map_err(|e| LispError::runtime(format!("%pbkdf2-sha256: {e}")))?;
+        mac.update(salt.as_bytes());
+        mac.update(&i.to_be_bytes());
+        let mut u: Vec<u8> = mac.finalize().into_bytes().to_vec();
+        let mut t = u.clone();
+        // U_n = HMAC(password, U_{n-1}); T_i = XOR of all U_j
+        for _ in 1..(iterations as u32) {
+            let mut mac2 = HmacSha256::new_from_slice(pw)
+                .map_err(|e| LispError::runtime(format!("%pbkdf2-sha256: {e}")))?;
+            mac2.update(&u);
+            u = mac2.finalize().into_bytes().to_vec();
+            for j in 0..hlen {
+                t[j] ^= u[j];
+            }
+        }
+        dk.extend_from_slice(&t);
+    }
+    dk.truncate(key_len as usize);
+    let vals: Vec<Value> = dk.iter().map(|&b| Value::Int(b as i64)).collect();
+    Ok(heap.alloc_vector(vals))
+}
+
 /// `(%git-resolve-ref url ref)` — resolve `ref` (a tag, branch, or commit) at the
 /// remote `url` to a full commit hash via `git ls-remote`, or `nil` if no such
 /// ref exists. For an annotated tag, prefers the peeled `^{}` line (the commit the
@@ -6515,6 +6676,67 @@ fn hostname(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&h))
 }
 
+/// `(%env-all)` — all environment variables as a `{string → string}` map.
+fn env_all(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let pairs: Vec<(Value, Value)> = env
+        .iter()
+        .map(|(k, v)| (heap.alloc_string(k), heap.alloc_string(v)))
+        .collect();
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// `(%argv)` — command-line arguments as a vector of strings, including argv[0].
+fn argv_builtin(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let args: Vec<String> = std::env::args().collect();
+    let vals: Vec<Value> = args.iter().map(|a| heap.alloc_string(a)).collect();
+    Ok(heap.alloc_vector(vals))
+}
+
+/// `(%os-type)` — the current OS as a keyword: `:linux`, `:macos`, or `:windows`.
+fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    #[cfg(target_os = "linux")]
+    return Ok(Value::Keyword(value::intern("linux")));
+    #[cfg(target_os = "macos")]
+    return Ok(Value::Keyword(value::intern("macos")));
+    #[cfg(target_os = "windows")]
+    return Ok(Value::Keyword(value::intern("windows")));
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    return Ok(Value::Keyword(value::intern("unknown")));
+}
+
+/// `(%os-cmd prog args)` — run `prog` with `args` (list or vector of strings),
+/// capturing stdout and stderr. Returns `{:stdout s :stderr s :exit n}`.
+fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let prog = expect_string(heap, "%os-cmd", arg(args, 0))?;
+    let mut cmd = std::process::Command::new(&prog);
+    if args.len() > 1 {
+        let raw = heap.seq_items(arg(args, 1))?;
+        for a in &raw {
+            cmd.arg(expect_string(heap, "%os-cmd", *a)?);
+        }
+    }
+    let output = cmd.output().map_err(|e| {
+        LispError::runtime(format!("%os-cmd: {prog}: {e}"))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+    })?;
+    let stdout = heap.alloc_string(&String::from_utf8_lossy(&output.stdout));
+    let stderr = heap.alloc_string(&String::from_utf8_lossy(&output.stderr));
+    let exit_code = output.status.code().unwrap_or(-1) as i64;
+    let kw = |k: &'static str| Value::Keyword(value::intern(k));
+    Ok(heap.map_from_pairs(vec![
+        (kw("stdout"), stdout),
+        (kw("stderr"), stderr),
+        (kw("exit"),   Value::Int(exit_code)),
+    ]))
+}
+
+/// `(%halt code)` — terminate the process immediately with `code`.
+fn halt_builtin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let code = expect_int(heap, "%halt", arg(args, 0))?;
+    std::process::exit(code as i32);
+}
+
 /// `(run-process prog args)` — run external program `prog` with `args` (a list or
 /// vector of strings), inheriting stdio, and return its exit code as an integer
 /// (-1 if killed by a signal). The Emacs `call-process` analogue: the general
@@ -6564,14 +6786,18 @@ fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let f = args[0];
     let mut argv = args[1..last].to_vec();
     argv.extend(heap.seq_items(args[last])?);
-    // Intentionally stays on eval::apply (the tree-walker path), NOT apply_engine.
-    // The TW's eval_at dispatch loop has inline `apply` unfolding (a `continue 'tail`
-    // that reuses the Rust frame), giving O(1) stack for `(apply f …)`-driven
-    // recursion like `(def loop (fn (n) (apply loop (list (- n 1)))))`. Routing
-    // through apply_engine/apply_value creates a new vm_apply Rust frame per
-    // iteration — 100k calls → SIGABRT (the `apply_tail_recursion_does_not_overflow`
-    // regression). Callee bodies still run on the VM via the lazy-compile cache.
-    apply(heap, f, &argv, env)
+    // Run the target through the active engine (the VM when on), so `apply`-as-a-value
+    // — `(map apply …)`, `(reduce apply …)`, apply stored in data — runs its callee
+    // compiled, consistent with a direct `(apply f …)` call. This is safe against the
+    // `(apply f …)`-driven tail recursion that once forced the tree-walker here
+    // (`apply_tail_recursion_does_not_overflow`): a **direct** `apply` call is unfolded
+    // by the VM's `dispatch` (it matches the resolved callee, so even `apply` bound to
+    // another name unfolds) and TCO'd by the driver, so it never reaches this native;
+    // `apply_builtin` is now only hit when a *native* HOF invokes `apply` per element,
+    // which loops rather than tail-recurses — one `apply_engine` frame per call, never
+    // accumulating. (Deep non-tail recursion in the callee is bounded by the VM's
+    // `MAX_BC_FRAMES` guard, not the native stack.)
+    apply_engine(heap, f, &argv, env)
 }
 
 // ---------- macros ----------

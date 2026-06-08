@@ -1,0 +1,70 @@
+;; std/system.blsp — OS/process interface. (require 'system)
+
+(defmodule system
+  "OS and process utilities: environment, argv, subprocess execution, OS type.
+
+    (require 'system)
+    (system/env \"HOME\")               ;; => \"/home/alice\"
+    (system/env-all)                    ;; => {:HOME \"/home/alice\" ...}
+    (system/argv)                       ;; => [\"brood\" \"script.blsp\"]
+    (system/os-type)                    ;; => :linux
+    (system/cwd)                        ;; => \"/home/alice/project\"
+    (system/hostname)                   ;; => \"mymachine\"
+
+    (def r (system/cmd \"git\" [\"log\" \"--oneline\" \"-3\"]))
+    (get r :stdout)                     ;; => \"abc1234 ...\n...\"
+    (get r :exit)                       ;; => 0
+
+    (system/halt 0)                     ;; exit with code 0")
+
+;; ---- environment ------------------------------------------------------------
+
+(defn env (name)
+  "The value of environment variable `name` as a string, or nil if unset."
+  (getenv name))
+
+(defn env-all ()
+  "All environment variables as a `{string → string}` map."
+  (%env-all))
+
+;; ---- process identity -------------------------------------------------------
+
+(defn argv ()
+  "Command-line arguments as a vector of strings, including `argv[0]` (the binary)."
+  (%argv))
+
+(defn os-type ()
+  "The current OS as a keyword: `:linux`, `:macos`, or `:windows`."
+  (%os-type))
+
+;; `cwd` and `hostname` are already global builtins; expose them here under the
+;; system/ namespace too so they can be found alongside the other system functions.
+(def working-dir cwd)
+(def host hostname)
+
+;; ---- subprocess -------------------------------------------------------------
+
+(defn cmd (prog & rest)
+  "Run `prog` (a string) and return `{:stdout s :stderr s :exit n}`.
+An optional second argument is a list or vector of string arguments.
+
+    (system/cmd \"ls\" [\"-la\" \"/tmp\"])
+    (system/cmd \"date\")"
+  (let (args (if (nil? rest) nil (first rest)))
+    (if (nil? args)
+      (%os-cmd prog)
+      (%os-cmd prog args))))
+
+(defn cmd-ok? (result)
+  "True if the command result has exit code 0."
+  (= (get result :exit) 0))
+
+(defn cmd-out (result)
+  "The stdout string from a `cmd` result, trimmed."
+  (trim (get result :stdout "")))
+
+;; ---- process control --------------------------------------------------------
+
+(defn halt (& args)
+  "Exit the process. `(halt)` exits with code 0; `(halt n)` exits with code `n`."
+  (%halt (if (nil? args) 0 (first args))))

@@ -1,0 +1,81 @@
+;; std/agent.blsp — process-backed state cell. (require 'agent)
+;;
+;; An agent is a single green process that holds one immutable value as state.
+;; Callers send it messages to read or transform that value; the agent serialises
+;; all updates. Modelled after Elixir's Agent, built on Brood's spawn/send/receive.
+
+(defmodule agent
+  "A process-backed state cell: read or transform a value via message-passing.
+
+    (require 'agent)
+    (def a (agent/start (fn () 0)))
+    (agent/update a inc)          ;; state becomes 1
+    (agent/get    a identity)     ;; => 1
+    (agent/cast   a (fn (n) (* n 10))) ;; fire-and-forget update
+    (agent/stop   a)
+
+State is always passed through a function so callers never access the raw value
+directly, keeping access patterns explicit. `get-and-update` is the atomic
+read+write primitive for compare-and-swap-style patterns.")
+
+;; ---- receive loop -----------------------------------------------------------
+
+(defn agent--loop (state)
+  (receive
+    ([:get from r f]
+       (do (send from [:reply r (f state)]) (agent--loop state)))
+    ([:update from r f]
+       (do (send from [:reply r :ok]) (agent--loop (f state))))
+    ([:get-and-update from r f]
+       (let (res (f state))
+         (send from [:reply r (first res)])
+         (agent--loop (second res))))
+    ([:cast f]
+       (agent--loop (f state)))
+    ([:stop from r]
+       (send from [:reply r :ok]))))
+
+;; ---- public API -------------------------------------------------------------
+
+(defn start (init-fn)
+  "Spawn an agent whose initial state is `(init-fn)`. Returns the agent's pid."
+  (spawn (agent--loop (init-fn))))
+
+(defn start-link (init-fn)
+  "Like `start` but links the agent to the calling process — the agent crashes
+if its owner crashes and vice versa."
+  (spawn-link (agent--loop (init-fn))))
+
+(defn get (pid f)
+  "Call `(f state)` inside the agent and return the result. Blocks until the
+agent replies. Use `identity` to return the state as-is."
+  (let (r (ref))
+    (send pid [:get (self) r f])
+    (receive
+      ([:reply ~r val] val))))
+
+(defn update (pid f)
+  "Replace the agent's state with `(f state)`. Blocks until acknowledged."
+  (let (r (ref))
+    (send pid [:update (self) r f])
+    (receive
+      ([:reply ~r :ok] :ok))))
+
+(defn get-and-update (pid f)
+  "Atomically read and update: `f` must return a 2-vector `[result new-state]`.
+Returns `result` and leaves the agent with `new-state`."
+  (let (r (ref))
+    (send pid [:get-and-update (self) r f])
+    (receive
+      ([:reply ~r val] val))))
+
+(defn cast (pid f)
+  "Fire-and-forget update: apply `(f state)` asynchronously, no reply waited."
+  (send pid [:cast f]))
+
+(defn stop (pid)
+  "Ask the agent to exit its loop cleanly. Blocks until it acknowledges."
+  (let (r (ref))
+    (send pid [:stop (self) r])
+    (receive
+      ([:reply ~r :ok] :ok))))

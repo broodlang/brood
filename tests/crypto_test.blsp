@@ -1,0 +1,99 @@
+(defmodule crypto-test (:use test))
+(require 'crypto)
+(require 'encoding)
+
+(describe "crypto/random-bytes"
+  (test "returns a vector"
+    (is (vector? (crypto/random-bytes 16))))
+  (test "correct length"
+    (assert= 32 (count (crypto/random-bytes 32))))
+  (test "zero length"
+    (assert= 0 (count (crypto/random-bytes 0))))
+  (test "values are in 0-255"
+    (let (bs (crypto/random-bytes 16))
+      (is (every? (fn (b) (and (>= b 0) (<= b 255))) bs))))
+  (test "generates different values each time"
+    (is (not= (crypto/random-bytes 16) (crypto/random-bytes 16)))))
+
+(describe "crypto/str->bytes + bytes->str"
+  (test "str->bytes returns a vector"
+    (is (vector? (crypto/str->bytes "hello"))))
+  (test "bytes->str round-trips a string"
+    (assert= "hello, brood!" (crypto/bytes->str (crypto/str->bytes "hello, brood!"))))
+  (test "empty string round-trips"
+    (assert= "" (crypto/bytes->str (crypto/str->bytes ""))))
+  (test "UTF-8 multi-byte character"
+    (assert= "café" (crypto/bytes->str (crypto/str->bytes "café")))))
+
+(describe "crypto/encrypt + decrypt"
+  (test "round-trip: encrypt then decrypt returns original"
+    (let (key    (crypto/random-key)
+          nonce  (crypto/random-nonce)
+          plain  (crypto/str->bytes "hello, brood!")
+          ct     (crypto/encrypt key nonce plain)
+          pt     (crypto/decrypt key nonce ct))
+      (assert= plain pt)))
+  (test "ciphertext is longer than plaintext (auth tag)"
+    (let (key (crypto/random-key) nonce (crypto/random-nonce)
+          plain (crypto/str->bytes "test"))
+      (is (> (count (crypto/encrypt key nonce plain)) (count plain)))))
+  (test "wrong key returns :error"
+    (let (key1 (crypto/random-key) key2 (crypto/random-key)
+          nonce (crypto/random-nonce)
+          ct (crypto/encrypt key1 nonce (crypto/str->bytes "data")))
+      (assert= :error (crypto/decrypt key2 nonce ct))))
+  (test "wrong nonce returns :error"
+    (let (key (crypto/random-key) n1 (crypto/random-nonce) n2 (crypto/random-nonce)
+          ct (crypto/encrypt key n1 (crypto/str->bytes "data")))
+      (assert= :error (crypto/decrypt key n2 ct))))
+  (test "tampered ciphertext returns :error"
+    (let (key (crypto/random-key) nonce (crypto/random-nonce)
+          ct (into [] (crypto/encrypt key nonce (crypto/str->bytes "data")))
+          ;; flip a byte in the ciphertext
+          bad (assoc ct 0 (bit-xor (nth ct 0) 255)))
+      (assert= :error (crypto/decrypt key nonce bad)))))
+
+(describe "crypto/encrypt-str + decrypt-str"
+  (test "round-trip with strings"
+    (let (key (crypto/random-key) nonce (crypto/random-nonce))
+      (assert= "hello world"
+               (crypto/decrypt-str key nonce
+                 (crypto/encrypt-str key nonce "hello world")))))
+  (test "wrong key returns :error"
+    (let (k1 (crypto/random-key) k2 (crypto/random-key) nonce (crypto/random-nonce)
+          ct (crypto/encrypt-str k1 nonce "secret"))
+      (assert= :error (crypto/decrypt-str k2 nonce ct)))))
+
+(describe "crypto/pbkdf2"
+  (test "returns a vector of correct length"
+    (let (dk (crypto/pbkdf2 "password" "salt" 1000 32))
+      (is (vector? dk))
+      (assert= 32 (count dk))))
+  (test "bytes are in 0-255"
+    (let (dk (crypto/pbkdf2 "password" "salt" 1000 16))
+      (is (every? (fn (b) (and (>= b 0) (<= b 255))) dk))))
+  (test "deterministic — same inputs same output"
+    (assert= (crypto/pbkdf2 "pass" "salt" 1000 32)
+             (crypto/pbkdf2 "pass" "salt" 1000 32)))
+  (test "different passwords give different keys"
+    (is (not= (crypto/pbkdf2 "pass1" "salt" 1000 32)
+              (crypto/pbkdf2 "pass2" "salt" 1000 32))))
+  (test "different salts give different keys"
+    (is (not= (crypto/pbkdf2 "pass" "salt1" 1000 32)
+              (crypto/pbkdf2 "pass" "salt2" 1000 32))))
+  (test "known PBKDF2-SHA256 test vector"
+    ;; python: hashlib.pbkdf2_hmac('sha256', b'password', b'salt', 1, 32).hex()
+    ;; = 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+    (assert= [18 15 182 207 252 248 179 44 67 231 34 82 86 196 248 55
+              168 101 72 201 44 204 53 72 8 5 152 124 183 11 225 123]
+             (into [] (crypto/pbkdf2 "password" "salt" 1 32)))))
+
+(describe "crypto/secure=?"
+  (test "equal byte vectors"
+    (is (crypto/secure=? [1 2 3] [1 2 3])))
+  (test "different byte vectors"
+    (is (not (crypto/secure=? [1 2 3] [1 2 4]))))
+  (test "different lengths"
+    (is (not (crypto/secure=? [1 2] [1 2 3]))))
+  (test "empty vectors are equal"
+    (is (crypto/secure=? [] []))))
