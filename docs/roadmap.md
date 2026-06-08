@@ -782,10 +782,13 @@ the workaround available today.
     now-available profile.
   - ⬜ **JIT tier-1: template JIT via Cranelift** (ADR-101,
     [`vm-perf-and-jit-runway.md §6`](vm-perf-and-jit-runway.md)) —
-    **gated on all three**: (a) bytecode lowering done, (b) editor workload
-    profile confirms dispatch is the bottleneck, (c) `Value` repr decided
-    (NaN-box vs 16-byte enum — the JIT register model depends on it; pre-alpha
-    is the cheapest window). Staged:
+    **gated on three**: (a) bytecode lowering — ✅ done; (b) a profile naming
+    dispatch as the bottleneck — ✅ for **compute** (loop/pfib: 100% prim2-inline,
+    ~100% IC hit, near-zero alloc → dispatch-bound, JIT-amenable), ✗ for **editor
+    redisplay** (env/alloc/native-bound — JIT won't help there; profiled 2026-06-08);
+    (c) the `Value`-repr decision — ⬜ **the remaining gate**, planned in
+    [`value-repr.md`](value-repr.md) (NaN-box vs the 16-byte enum; Brood's wide
+    scalars — `Pid`/`Ref`/`Socket`/full `i64` — are the difficulty). Staged:
     - ⬜ **Stage 0 — Cranelift plumbing** (`--features jit`): `build.rs`
       compiles `trampoline_x86_64.s` / `trampoline_aarch64.s` via `cc` crate
       (Layer 3); `extern "C"` runtime-callback table
