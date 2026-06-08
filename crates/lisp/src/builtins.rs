@@ -1347,6 +1347,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![any], string),
         sha256_hex_bytes,
     );
+    // SHA-1, SHA-384, SHA-512, and MD5 — string and byte-vector variants.
+    // String variants hash UTF-8 bytes; -bytes variants hash arbitrary byte ints.
+    def(heap, "%sha1",        Arity::exact(1), Sig::new(vec![string], string), sha1_hex);
+    def(heap, "%sha1-bytes",  Arity::exact(1), Sig::new(vec![any], string),    sha1_hex_bytes);
+    def(heap, "%sha384",      Arity::exact(1), Sig::new(vec![string], string), sha384_hex);
+    def(heap, "%sha384-bytes",Arity::exact(1), Sig::new(vec![any], string),    sha384_hex_bytes);
+    def(heap, "%sha512",      Arity::exact(1), Sig::new(vec![string], string), sha512_hex);
+    def(heap, "%sha512-bytes",Arity::exact(1), Sig::new(vec![any], string),    sha512_hex_bytes);
+    def(heap, "%md5",         Arity::exact(1), Sig::new(vec![string], string), md5_hex);
+    def(heap, "%md5-bytes",   Arity::exact(1), Sig::new(vec![any], string),    md5_hex_bytes);
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
     // layout / lock file / conflict policy are all Brood (std/package.blsp).
@@ -1933,6 +1943,14 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
     ("%sha256", &["s"], "Lowercase hex SHA-256 of string s's bytes. The package manager's one hashing primitive (ADR-037); file/tree hashing is Brood over it."),
     ("%sha256-bytes", &["bytes"], "Lowercase hex SHA-256 of a vector (or list) of byte integers 0–255. Use this for hashing arbitrary binary data; %sha256 hashes UTF-8 string bytes."),
+    ("%sha1",         &["s"],     "Lowercase hex SHA-1 of string s's UTF-8 bytes. NOT collision-resistant; use sha256 for security-sensitive hashing."),
+    ("%sha1-bytes",   &["bytes"], "Lowercase hex SHA-1 of a vector (or list) of byte integers 0–255."),
+    ("%sha384",       &["s"],     "Lowercase hex SHA-384 of string s's UTF-8 bytes."),
+    ("%sha384-bytes", &["bytes"], "Lowercase hex SHA-384 of a vector (or list) of byte integers 0–255."),
+    ("%sha512",       &["s"],     "Lowercase hex SHA-512 of string s's UTF-8 bytes."),
+    ("%sha512-bytes", &["bytes"], "Lowercase hex SHA-512 of a vector (or list) of byte integers 0–255."),
+    ("%md5",          &["s"],     "Lowercase hex MD5 of string s's UTF-8 bytes. NOT collision-resistant; use sha256 for security-sensitive hashing."),
+    ("%md5-bytes",    &["bytes"], "Lowercase hex MD5 of a vector (or list) of byte integers 0–255."),
     ("%git-resolve-ref", &["url", "ref"], "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037)."),
     ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),
     ("%rm-rf", &["path"], "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037)."),
@@ -6102,28 +6120,20 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn sha256_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use sha2::{Digest, Sha256};
     let s = expect_string(heap, "%sha256", arg(args, 0))?;
-    let digest = Sha256::digest(s.as_bytes());
-    let mut hex = String::with_capacity(64);
-    for b in digest {
-        use std::fmt::Write;
-        let _ = write!(hex, "{:02x}", b);
-    }
-    Ok(heap.alloc_string(&hex))
+    Ok(heap.alloc_string(&digest_to_hex(Sha256::digest(s.as_bytes()))))
 }
 
-/// `(%sha256-bytes bytes)` — hex SHA-256 of a vector or list of byte integers.
-fn sha256_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha256};
-    let bv = arg(args, 0);
-    let bytes: Vec<u8> = match bv {
+/// Extract a vector or list of byte ints (0–255) from a `Value`.
+fn collect_bytes(name: &'static str, bv: Value, heap: &mut Heap) -> Result<Vec<u8>, LispError> {
+    match bv {
         Value::Vector(id) => {
             let vec = heap.vector(id).to_vec();
             vec.iter()
                 .map(|v| match v {
                     Value::Int(n) if *n >= 0 && *n <= 255 => Ok(*n as u8),
-                    other => Err(LispError::wrong_type(heap, "%sha256-bytes", "byte int (0-255)", *other)),
+                    other => Err(LispError::wrong_type(heap, name, "byte int (0-255)", *other)),
                 })
-                .collect::<Result<_, _>>()?
+                .collect::<Result<Vec<u8>, LispError>>()
         }
         Value::Pair(_) | Value::Nil => {
             let mut out = Vec::new();
@@ -6135,24 +6145,90 @@ fn sha256_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                         let (h, t) = heap.pair(id);
                         match h {
                             Value::Int(n) if n >= 0 && n <= 255 => out.push(n as u8),
-                            other => return Err(LispError::wrong_type(heap, "%sha256-bytes", "byte int (0-255)", other)),
+                            other => return Err(LispError::wrong_type(heap, name, "byte int (0-255)", other)),
                         }
                         cur = t;
                     }
-                    other => return Err(LispError::wrong_type(heap, "%sha256-bytes", "proper list", other)),
+                    other => return Err(LispError::wrong_type(heap, name, "proper list", other)),
                 }
             }
-            out
+            Ok(out)
         }
-        other => return Err(LispError::wrong_type(heap, "%sha256-bytes", "vector or list", other)),
-    };
-    let digest = Sha256::digest(&bytes);
-    let mut hex = String::with_capacity(64);
-    for b in digest {
+        other => Err(LispError::wrong_type(heap, name, "vector or list", other)),
+    }
+}
+
+fn digest_to_hex(digest: impl AsRef<[u8]>) -> String {
+    let bytes = digest.as_ref();
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
         use std::fmt::Write;
         let _ = write!(hex, "{:02x}", b);
     }
-    Ok(heap.alloc_string(&hex))
+    hex
+}
+
+/// `(%sha256-bytes bytes)` — hex SHA-256 of a vector or list of byte integers.
+fn sha256_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha256};
+    let bytes = collect_bytes("%sha256-bytes", arg(args, 0), heap)?;
+    Ok(heap.alloc_string(&digest_to_hex(Sha256::digest(&bytes))))
+}
+
+/// `(%sha1 s)` — lowercase hex SHA-1 of string `s`'s UTF-8 bytes.
+fn sha1_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha1::{Digest, Sha1};
+    let s = expect_string(heap, "%sha1", arg(args, 0))?;
+    Ok(heap.alloc_string(&digest_to_hex(Sha1::digest(s.as_bytes()))))
+}
+
+/// `(%sha1-bytes bytes)` — hex SHA-1 of a vector or list of byte integers.
+fn sha1_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha1::{Digest, Sha1};
+    let bytes = collect_bytes("%sha1-bytes", arg(args, 0), heap)?;
+    Ok(heap.alloc_string(&digest_to_hex(Sha1::digest(&bytes))))
+}
+
+/// `(%sha384 s)` — lowercase hex SHA-384 of string `s`'s UTF-8 bytes.
+fn sha384_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha384};
+    let s = expect_string(heap, "%sha384", arg(args, 0))?;
+    Ok(heap.alloc_string(&digest_to_hex(Sha384::digest(s.as_bytes()))))
+}
+
+/// `(%sha384-bytes bytes)` — hex SHA-384 of a vector or list of byte integers.
+fn sha384_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha384};
+    let bytes = collect_bytes("%sha384-bytes", arg(args, 0), heap)?;
+    Ok(heap.alloc_string(&digest_to_hex(Sha384::digest(&bytes))))
+}
+
+/// `(%sha512 s)` — lowercase hex SHA-512 of string `s`'s UTF-8 bytes.
+fn sha512_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha512};
+    let s = expect_string(heap, "%sha512", arg(args, 0))?;
+    Ok(heap.alloc_string(&digest_to_hex(Sha512::digest(s.as_bytes()))))
+}
+
+/// `(%sha512-bytes bytes)` — hex SHA-512 of a vector or list of byte integers.
+fn sha512_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha512};
+    let bytes = collect_bytes("%sha512-bytes", arg(args, 0), heap)?;
+    Ok(heap.alloc_string(&digest_to_hex(Sha512::digest(&bytes))))
+}
+
+/// `(%md5 s)` — lowercase hex MD5 of string `s`'s UTF-8 bytes.
+fn md5_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use md5::{Digest, Md5};
+    let s = expect_string(heap, "%md5", arg(args, 0))?;
+    Ok(heap.alloc_string(&digest_to_hex(Md5::digest(s.as_bytes()))))
+}
+
+/// `(%md5-bytes bytes)` — hex MD5 of a vector or list of byte integers.
+fn md5_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use md5::{Digest, Md5};
+    let bytes = collect_bytes("%md5-bytes", arg(args, 0), heap)?;
+    Ok(heap.alloc_string(&digest_to_hex(Md5::digest(&bytes))))
 }
 
 /// Run `git` with `args` (optionally in `cwd`), capturing stdout+stderr. The

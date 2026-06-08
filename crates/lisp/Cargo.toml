@@ -97,6 +97,8 @@ num-integer = "0.1"
 # this is exactly the "don't roll your own" case the dependency rule allows.
 hmac = "0.13"
 sha2 = "0.11"
+sha1 = "0.11"
+md-5 = "0.11"
 # Cryptographically-strong random nonces for the handshake. `getrandom` reads
 # the OS RNG directly — no allocator, no global state, just bytes.
 getrandom = "0.4"
