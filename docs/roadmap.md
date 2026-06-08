@@ -798,23 +798,26 @@ the workaround available today.
       link zero cranelift). ⬜ the Layer-3 `build.rs` + `trampoline_{x86_64,aarch64}.s`
       (r15/x28-pinned context) — **deferred to Stage 1**, where the first compiled arm
       exercises them. No codegen yet.
-    - 🟡 **Stage 1 — Arm compilation (done, on branch `worktree-jit-stage1`, 2026-06-08).**
-      A chunked arm's **dispatch-bound int subset** (`Const(Int)`/`Local`/
+    - ✅ **Stage 1 — Arm compilation (landed 2026-06-08; behind `--features jit`, off by
+      default).** A chunked arm's **dispatch-bound int subset** (`Const(Int)`/`Local`/
       `Prim2{Add,Sub,Mul,Lt,Le,Eq}`/`If`/`SelfCall`) lowers to Cranelift IR: operands in
       SSA registers (the operand stack virtualised at compile time, so `roots` never
       grows), a CFG with block-param merges, the self-loop as a back-edge with
       `brood_rt_tick` preemption (deopt codes 0=Done/1=non-int/2=preempt), and a tag-check
       `→` VM deopt on any non-`Int`. Tiering: a per-arm call counter compiles past a
       threshold under a process-wide `Mutex<Jit>`, installs the fn-pointer atomically on
-      the `CompiledArm`; `vm_run_bc`'s fresh-start hook runs it, falling back to the VM on
-      deopt/preempt/not-hot. The pinned-register trampoline (ADR-101 §6.2) was **not
-      needed** — callbacks take `heap` as a normal arg, so no asm. **Verified:** differential
-      JIT≡VM 2/2, lib 258/258, in-language suite 2039/2039, §6 KI-1 bar 10/10 +
-      `GC_STRESS`+`VERIFY` (GC-safe by construction — the int subset never allocates).
-      **Follow-up (Stage 1.5):** tune the tiering heuristic to catch recursive/nested hot
-      arms (today the counter fires at `vm_run_bc` fresh-start; recursion via `ChunkExit::Call`
-      isn't counted) + budget priming, to demonstrate the end-to-end compute speedup.
-      Repr was kept (`value-repr.md`): values live in `roots`, only unboxed `i64` in registers.
+      the `CompiledArm`. **Two VM hooks run it:** `vm_run_bc`'s fresh-start hook *and* the
+      `ChunkExit::Call` site (so a hot Brood→Brood callee runs native too), each falling
+      back to the VM on deopt/preempt/not-hot with the frame stack intact. The
+      pinned-register trampoline (ADR-101 §6.2) was **not needed** — callbacks take `heap`
+      as a normal arg, so no asm. **Verified:** differential JIT≡VM 2/2, lib 258/258
+      (+6 JIT tests), in-language suite 2039/2039, §6 KI-1 bar 10/10 + `GC_STRESS`
+      (GC-safe by construction — the int subset never allocates); **~27× speedup** on a
+      `sumto` int loop (`jit_speedup_vs_vm` bench). Repr was kept (`value-repr.md`): values
+      live in `roots`, only unboxed `i64` in registers. **Known timing sensitivity:**
+      compiling under the `GLOBAL_JIT` mutex briefly stalls the worker pool during a
+      compile burst (surfaced once as a flaky 500ms-monitor-timeout miss in the suite) —
+      moving compilation to a background thread is the Stage-2 fix.
     - ⬜ **Stage 2 — Inline primitives**: `cons` / arithmetic / `car` / `cdr` as
       Cranelift IR with inline tag checks; deopt to `brood_rt_call_slow` on
       mismatch.
