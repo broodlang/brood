@@ -23,7 +23,7 @@
 //! namespace-resolve), on the already-expanded, already-resolved form.
 
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
@@ -449,6 +449,12 @@ pub struct CompiledArm {
     /// `Arc::clone` on the hot call path, removing cross-worker cache-line contention
     /// on the shared refcount when many processes call the same function in parallel.
     pub has_runtime_handles: bool,
+    /// JIT tiering (ADR-101, feature "jit"): native code pointer for this arm —
+    /// null = not compiled, `1` (BAILED) = tried & out-of-subset, else a callable
+    /// `extern "C" fn(*mut Heap, base) -> i64`. `jit_calls` counts invocations to
+    /// trigger compilation past a threshold. Shared across `Arc<CompiledArm>` clones.
+    pub jit_code: std::sync::atomic::AtomicPtr<u8>,
+    pub jit_calls: std::sync::atomic::AtomicU32,
 }
 
 /// One arm of a closure: its arity shape plus the compiled body **if** it was
@@ -1257,6 +1263,8 @@ fn compile_arm(
         body,
         chunk,
         has_runtime_handles,
+        jit_code: AtomicPtr::new(std::ptr::null_mut()),
+        jit_calls: AtomicU32::new(0),
     })
 }
 
@@ -3335,6 +3343,8 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 // (Stage 1 bytecode is reached only through `vm_apply`); no chunk.
                 chunk: None,
                 has_runtime_handles,
+                jit_code: AtomicPtr::new(std::ptr::null_mut()),
+                jit_calls: AtomicU32::new(0),
             });
             let arm_slot = if arm.has_runtime_handles {
                 heap.live_arm_push(arm.clone())
@@ -3713,6 +3723,51 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     Some(m.get_finalized_function(id))
 }
 
+/// Tiering entry (ADR-101 1b): on an arm invocation whose frame is already set up at
+/// `roots[base..]`, decide whether to run the JIT'd code. Counts the call; once the arm
+/// crosses the hotness threshold it is compiled once (under the global JIT lock, with a
+/// re-check so two threads don't double-compile) and the fn-pointer cached on the arm.
+/// Returns `Some(outcome)` if JIT'd code ran (`0` = Done with the result in `roots[base]`,
+/// `1` = deopt — an operand wasn't an `Int`, `2` = preempt — the back-edge budget was
+/// spent), or `None` to run the arm on the VM (not hot yet, or out of the JIT's subset).
+#[cfg(feature = "jit")]
+pub(crate) fn jit_tier(arm: &CompiledArm, heap: &mut Heap, base: usize) -> Option<i64> {
+    use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+    const THRESHOLD: u32 = 8;
+
+    let code = arm.jit_code.load(Acquire);
+    if code == crate::jit::BAILED {
+        return None;
+    }
+    if code.is_null() {
+        // Count the invocation; only compile once the arm is hot.
+        if arm.jit_calls.fetch_add(1, Relaxed) + 1 < THRESHOLD {
+            return None;
+        }
+        let mut jit = crate::jit::GLOBAL_JIT.lock().unwrap_or_else(|e| e.into_inner());
+        if arm.jit_code.load(Acquire).is_null() {
+            // Still uncompiled (we won the race): compile or mark BAILED.
+            match jit_lower_arm(&mut jit, arm) {
+                Some(ptr) => arm.jit_code.store(ptr as *mut u8, Release),
+                None => {
+                    arm.jit_code.store(crate::jit::BAILED, Release);
+                    return None;
+                }
+            }
+        }
+    }
+    let code = arm.jit_code.load(Acquire);
+    if code.is_null() || code == crate::jit::BAILED {
+        return None;
+    }
+    // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base) -> i64` produced by
+    // `jit_lower_arm`, living in the process-lifetime GLOBAL_JIT module. The frame is set
+    // up at `roots[base..]`; the JIT'd arm keeps operands in registers (never grows
+    // `roots`), so `heap` stays valid for the call.
+    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code) };
+    Some(f(heap as *mut Heap, base as i64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3787,6 +3842,8 @@ mod tests {
             body,
             chunk: None,
             has_runtime_handles: true,
+            jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: std::sync::atomic::AtomicU32::new(0),
         };
 
         rewrite_arm_handles(&arm, &mut |v| bump(v, 100));
@@ -3872,6 +3929,8 @@ mod tests {
             body: Node::Const(ConstVal::new(Value::Nil)), // unused at runtime (chunk drives)
             chunk: Some(chunk),
             has_runtime_handles: false,
+            jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: std::sync::atomic::AtomicU32::new(0),
         });
 
         // First run: the native suspends, so the driver captures the continuation
@@ -3944,6 +4003,8 @@ mod tests {
             body: Node::Const(ConstVal::new(Value::Nil)),
             chunk: Some(chunk),
             has_runtime_handles: false,
+            jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: std::sync::atomic::AtomicU32::new(0),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -3997,6 +4058,8 @@ mod tests {
             body: Node::Const(ConstVal::new(Value::Nil)),
             chunk: Some(chunk),
             has_runtime_handles: false,
+            jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: std::sync::atomic::AtomicU32::new(0),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -4057,6 +4120,8 @@ mod tests {
             body: Node::Const(ConstVal::new(Value::Nil)),
             chunk: Some(chunk),
             has_runtime_handles: false,
+            jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: std::sync::atomic::AtomicU32::new(0),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -4092,5 +4157,86 @@ mod tests {
             2,
             "a loop exceeding the reduction budget must preempt (return 2)"
         );
+    }
+
+    /// JIT Stage-1 1b: tiering. An arm invoked past the hotness threshold is compiled
+    /// once and thereafter runs as native code (`jit_tier` returns `Some(0)` with the
+    /// result in `roots[base]`); below the threshold it returns `None` (run on the VM).
+    /// An arm out of the JIT subset is marked BAILED and always returns `None`.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_tier_compiles_a_hot_arm_then_runs_native() {
+        let prim2 = |op: PrimOp, head: &str| Inst::Prim2 {
+            op,
+            map: [0, 1],
+            head: value::intern(head),
+            guard: AtomicU64::new(0),
+            pos: None,
+        };
+        // sumto(i acc) = (if (< i 1) acc (sumto (- i 1) (+ acc i))).
+        let mk_arm = |chunk: Chunk, nreq: usize, nslots: usize| CompiledArm {
+            nrequired: nreq,
+            noptional: 0,
+            optional_defaults: Box::new([]),
+            rest_slot: None,
+            nslots,
+            body: Node::Const(ConstVal::new(Value::Nil)),
+            chunk: Some(chunk),
+            has_runtime_handles: false,
+            jit_code: AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: AtomicU32::new(0),
+        };
+        let sumto = mk_arm(
+            Chunk {
+                code: vec![
+                    Inst::Local(0),
+                    Inst::Const(ConstVal::new(Value::Int(1))),
+                    prim2(PrimOp::Lt, "<"),
+                    Inst::JumpIfFalse(6),
+                    Inst::Local(1),
+                    Inst::Jump(13),
+                    Inst::Local(0),
+                    Inst::Const(ConstVal::new(Value::Int(1))),
+                    prim2(PrimOp::Sub, "-"),
+                    Inst::Local(1),
+                    Inst::Local(0),
+                    prim2(PrimOp::Add, "+"),
+                    Inst::SelfCall { argc: 2 },
+                ],
+            },
+            2,
+            2,
+        );
+
+        crate::process::yield_now(); // prime the reduction budget (short loops)
+        let mut ran_native = 0;
+        for _ in 0..16 {
+            crate::process::yield_now(); // keep the budget topped up across calls
+            let mut heap = Heap::new();
+            let base = heap.roots_len();
+            heap.push_root(Value::Int(5)); // i
+            heap.push_root(Value::Int(0)); // acc
+            match jit_tier(&sumto, &mut heap, base) {
+                None => {} // not hot yet (below threshold)
+                Some(0) => {
+                    ran_native += 1;
+                    match heap.root_at(base) {
+                        Value::Int(r) => assert_eq!(r, 15, "JIT'd sumto(5,0)"),
+                        other => panic!("expected Int(15), got tag {:?}", value::tag(other)),
+                    }
+                }
+                Some(o) => panic!("unexpected JIT outcome {o}"),
+            }
+        }
+        assert!(ran_native > 0, "the hot arm should tier up to native code");
+
+        // An out-of-subset arm (a bare Global) is marked BAILED — never runs native.
+        let bailing = mk_arm(Chunk { code: vec![Inst::Global(value::intern("x"))] }, 0, 1);
+        for _ in 0..16 {
+            let mut heap = Heap::new();
+            let base = heap.roots_len();
+            heap.push_root(Value::Int(0));
+            assert_eq!(jit_tier(&bailing, &mut heap, base), None, "out-of-subset arm bails");
+        }
     }
 }

@@ -27,6 +27,22 @@ use crate::core::heap::Heap;
 
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::default_libcall_names;
+use std::sync::{LazyLock, Mutex};
+
+/// The process-wide JIT module (tiering, 1b). It owns every compiled arm's executable
+/// code, which must outlive all installed fn-pointers — hence a single process-lifetime
+/// instance. Compilation mutates it (`declare`/`define`/`finalize`), so it's behind a
+/// `Mutex`; the resulting machine code lives in a shared executable mmap and is callable
+/// from any worker thread once installed (`JITModule` is `Send`). For the int subset a
+/// compiled arm is self-contained (no globals), so a process-wide module is correct;
+/// arms that reference a runtime's globals bail today, so per-runtime isolation isn't
+/// needed yet.
+pub(crate) static GLOBAL_JIT: LazyLock<Mutex<Jit>> = LazyLock::new(|| Mutex::new(Jit::new()));
+
+/// Sentinel in [`crate::eval::compile::CompiledArm`]`::jit_code` for an arm that was
+/// tried and is out of the JIT's subset — distinct from null (untried) and a real,
+/// 8-aligned code pointer.
+pub(crate) const BAILED: *mut u8 = 1 as *mut u8;
 
 /// The JIT backend (ADR-101, Layer 1). Owns a Cranelift [`JITModule`] — the executable
 /// memory + symbol table that compiled arms live in.
