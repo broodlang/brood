@@ -55,6 +55,11 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; A value worth a full entry (signature + docstring): a function or a macro.
 (defn docs--documentable? (v) (or (fn? v) (= (type-of v) :macro)))
 
+;; Private by convention: names containing "--" (double-dash prefix).
+;; These are skipped by (:use) refer-all and omitted from generated docs.
+(defn docs--private? (sym)
+  (string-contains? (name sym) "--"))
+
 ;; One definition's Markdown: a `### (name args…)` heading (with a *(macro)* tag
 ;; for macros) followed by its docstring, or a placeholder when undocumented.
 (defn docs--entry (sym v)
@@ -63,16 +68,18 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
         suffix (if (= (type-of v) :macro) "  *(macro)*" ""))
     (str "### `" sig "`" suffix "\n\n" (if (nil? d) "_Undocumented._\n" (str d "\n")))))
 
-;; The "Definitions" section: every function/macro the module added.
+;; The "Definitions" section: every public function/macro the module added.
 (defn docs--section-defs (syms)
-  (let (defs (filter (fn (s) (docs--documentable? (eval s))) syms))
+  (let (defs (filter (fn (s) (and (docs--documentable? (eval s))
+                                  (not (docs--private? s)))) syms))
     (if (empty? defs)
       ""
       (str "## Definitions\n\n" (fold (fn (acc s) (str acc (docs--entry s (eval s)) "\n")) "" defs)))))
 
-;; The "Variables" section: names the module bound to non-function values.
+;; The "Variables" section: public names the module bound to non-function values.
 (defn docs--section-vars (syms)
-  (let (vars (filter (fn (s) (not (docs--documentable? (eval s)))) syms))
+  (let (vars (filter (fn (s) (and (not (docs--documentable? (eval s)))
+                                  (not (docs--private? s)))) syms))
     (if (empty? vars)
       ""
       (str "## Variables\n\n" (fold (fn (acc s) (str acc "- `" (name s) "`\n")) "" vars)))))
