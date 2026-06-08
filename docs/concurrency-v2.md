@@ -547,13 +547,34 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
      environmental (≈15 tree-sitter, needs native grammars; ≈5 package-`:git`, needs
      git/network and time out at 120 s). So capture mode adds **zero** failures. Timing
      218 s (off) vs 265 s (on) ≈ +22% (the deadlock/timeouts that made it 6× are gone).
-   - ⬜ **Flip the default** (the remaining decision): make `BROOD_STATE_CAPTURE` default
-     **on** (`=0` stays the escape hatch). Correctness is proven; the open question is the
-     ~22% overhead, which lands *before* its payoff (corosensei + the 16 MiB stacks only
-     go in step 4). Reasonable to flip now (prove default-on, then delete) or to optimise
-     the capture hot path (per-spawn heap, `install/save_ctx`, per-wake `assign_worker`)
-     first. Must hold the §6 plain-release bar (it does, flag on+off).
-4. Delete corosensei (8.3 last bullet); re-run the bar. Generalise stealing.
+   - ✅ **(2026-06-08)** **Default flipped.** State capture is now the **sole** scheduler
+     engine — the `BROOD_STATE_CAPTURE` flag and the `Run::{Coro|Capture}` split are gone,
+     and `run_one` always drives `vm_run_bc` (a body with no compiled 0-arg arm tree-walks
+     on the worker thread and its `receive`s block, the §7.4 dirty carve-out). §6
+     plain-release KI-1 bar holds.
+4. ✅ **(2026-06-08)** **Corosensei deleted** (8.3 last bullet) + **stealing generalised**.
+   The `corosensei` dependency, the coroutine plumbing (`Suspend`/`Yielder0`/`build_coro`/
+   `resume_coro`/`handle_coro_outcome`), and `unsafe impl Send for Process` are all removed;
+   `Process` collapsed to plain `Send` data (`{pid, mailbox, worker_id, heap, body, resume,
+   capture}`). Worker stacks renamed `CORO_STACK_BYTES` → `WORKER_STACK_BYTES`. Stealing is
+   no longer fresh-only: every process is captured-to-heap data with no native stack, so
+   `try_steal` takes **any** queued process (`pop_back`), `STEALABLE` counts all queued, and
+   the vestigial `fresh` flag is dropped. §6 plain-release KI-1 bar holds (10/10 +
+   `BROOD_GC_STRESS`); lib + differential (engines agree) + work-stealing + live-migration +
+   preemption all green via nextest; full suite unregressed (same pre-existing environmental
+   failures).
+   - **Regression found + fixed during validation:** a **self-recursive pass-through**
+     wrapper — `(defn hog () (hog))` — spun **un-preemptibly**. The pass-through optimisation
+     (ADR-069) classified it as a thin wrapper redirecting `hog → hog`, and the redirect loop
+     (in `compile::dispatch` and `eval::eval`) leaned on `tick()` → `preempt()` to yield —
+     which, with corosensei gone, is now a no-op (only the VM driver's loop-top `tick_capture`
+     can suspend). So the redirect spun forever below any captureable safepoint, monopolising
+     the worker (caught by `cpu_bound_process_does_not_starve_peers_on_one_worker`). Fix: both
+     redirect loops now **break a self-cycle** (a redirect resolving back to the same closure)
+     and fall through to the normal call path, so the call runs as a VM `SelfTail`/`Call`
+     whose loop-top reduction check preempts it. The closure's own global name isn't known at
+     `compute_passthrough` time (a `defn` closure is anonymous — `(def hog (fn …))`), so the
+     cycle is detected at the redirect site by closure identity.
 
 This is the scheduler core (the KI-1 subsystem) — run it as a focused effort, not
 folded into unrelated work.

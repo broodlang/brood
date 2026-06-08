@@ -1,145 +1,76 @@
-//! Green-process scheduler: the coroutine machinery, the shared run queue,
+//! Green-process scheduler: the state-capture driver, the shared run queue,
 //! the worker pool, and the public `spawn` / `self` / `pid-value` /
 //! `spawn-count` / `peak-threads` / `set-max-parallel` surface.
 //!
-//! Each green process is a [`corosensei`] stackful coroutine carrying its
-//! own parkable stack — `receive` on an empty mailbox suspends the
-//! coroutine instead of blocking a thread, so a small pool of worker OS
-//! threads (≈ `nproc`) multiplexes many processes. The root thread (REPL /
-//! file runner) is **not** a coroutine: it blocks on its mailbox condvar
-//! instead of yielding (see [`super::mailbox::wait_for_message`]).
+//! Each green process runs its 0-arg body's bytecode directly on a worker
+//! thread (ADR-100 §8.4 — corosensei removed). `receive` on an empty mailbox
+//! **captures** the process's continuation as relocatable heap data
+//! (`Suspended`) and returns the worker to the pool, so a small pool of worker
+//! OS threads (≈ `nproc`) multiplexes many processes — and a captured process,
+//! carrying no native stack, may resume on *any* worker (live migration, §7).
+//! The root thread (REPL / file runner) instead blocks on its mailbox condvar
+//! (see [`super::mailbox::wait_for_message`]).
 //!
 //! ## Thread-locals
-//! - [`CURRENT`] — the running process's [`Ctx`] (`pid`, `mailbox`,
-//!   `yielder`). Set by the coroutine at start and re-established after
-//!   every suspend, so `(self)` / `receive` can find their process even
-//!   after the worker has run others or migrated us.
+//! - [`CURRENT`] — the running process's [`Ctx`] (`pid`, `mailbox`, capture
+//!   stack). Installed by `run_one` at the start of each quantum and read back
+//!   after, so `(self)` / `receive` find their process even after the worker
+//!   has run others, and survive migration to another worker.
 //! - [`REDUCTIONS`] — countdown to the next preempt; [`tick`] decrements
 //!   it from inside `eval`'s loop.
 //! - [`GC_BLOCK`] — eval/macroexpand nesting depth; feeds the stack-overflow
 //!   byte guard (no longer the GC safepoint — ADR-061). [`MACRO_BLOCK`] —
 //!   compile-pass depth; the GC safepoint suppresses collection while it's
-//!   nonzero. Both saved/restored around every suspend so workers
-//!   multiplexing several processes don't leak each other's depths.
+//!   nonzero. Both reset per quantum (each quantum runs on a fresh worker
+//!   stack), so workers multiplexing several processes don't leak depths.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
-use corosensei::stack::DefaultStack;
-use corosensei::{Coroutine, CoroutineResult, Yielder};
-
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::process::keywords as pk;
 use crate::error::LispError;
-use crate::eval;
 
 use super::mailbox::{wake_parked, Mailbox, REGISTRY, ST_RUNNABLE, ST_RUNNING};
 use super::message::Message;
 use super::links;
 use super::monitor;
 
-/// Why a green process's coroutine yielded control back to its worker.
-pub(super) enum Suspend {
-    /// Blocked in `receive` on an empty mailbox — park until a message (or timer).
-    Receive,
-    /// Preempted by the reduction counter — still runnable, re-queue immediately.
-    Preempt,
-    /// An exit signal (`(exit pid reason)`) targeted this process. `run_one`
-    /// `deregister`s it with `reason` and drops it — corosensei force-unwinds the
-    /// suspended coroutine (running destructors), and it is never re-enqueued.
-    /// Untrappable **by construction**: it fires at the scheduler level, below
-    /// Brood's `%try`, so a `:kill` exit can't be caught.
-    Kill(Message),
-}
-
-pub(super) type Yielder0 = Yielder<(), Suspend>;
-type Coro = Coroutine<(), Suspend, ()>;
-
-/// A green process: its mailbox plus the coroutine carrying its computation
-/// (which owns its `Heap`). Pinned to a single worker thread once it has run
-/// (`worker_id`); the scheduler routes every re-enqueue back to that worker, so
-/// a coroutine is only ever *resumed* on one OS thread for its whole life.
-/// `Send` only via the hand-written `unsafe impl` below; see it for the
-/// one-owner-at-any-instant argument that keeps cross-thread resume from
-/// happening.
+/// A green process (ADR-100 §8.4 — state capture, corosensei removed): its own `Heap`,
+/// the 0-arg body thunk, and its parked/preempted continuation. The worker drives the
+/// body's bytecode (`vm_run_bc`) directly — no coroutine — so a paused process is
+/// **relocatable heap data** (`Suspended`), genuinely `Send`, and may resume on any
+/// worker (live migration, §7). It is owned by exactly one worker at any instant: the
+/// queue/waiter handoff serialises ownership (INV-2).
 pub(super) struct Process {
     pub(super) pid: u64,
     pub(super) mailbox: Arc<Mailbox>,
-    /// Which worker owns this process. Assigned at spawn (least-loaded —
-    /// `assign_worker`); preempt/receive re-enqueue routes back to the same
-    /// worker's queue. A **fresh** (never-resumed) process may be re-pinned once
-    /// by a steal (`try_steal` sets this to the thief), but only before its first
-    /// resume; once it has run, this is fixed for life. Pinning prevents the
-    /// corosensei cross-thread resume hazard (KI-1b in docs/known-issues.md —
-    /// clobbered return addresses when a coroutine suspended mid-computation is
-    /// resumed on another thread).
+    /// The worker currently owning this process. Re-assigned on a wake (`wake_enqueue`)
+    /// or steal — safe because a process has no native stack to migrate (§7).
     pub(super) worker_id: usize,
-    /// `true` until the first `resume` (cleared at the top of `run_one`). A fresh
-    /// process has no saved coroutine stack, so it is the *only* kind of **coroutine**
-    /// process safe to migrate across threads — `try_steal` moves fresh ones only. A
-    /// **capture-mode** process is safe to migrate at any time (no native stack), fresh
-    /// or not. See docs/concurrency-v2.md §3.1a / §7.
-    pub(super) fresh: bool,
-    /// How this process executes (ADR-100 §8.3). `Coro` is the corosensei path; under
-    /// `BROOD_STATE_CAPTURE` a VM-eligible body runs as `Capture` (no coroutine) so its
-    /// continuation is relocatable heap data and it can migrate across workers.
-    run: Run,
+    /// This process's LOCAL data heap — travels with it across workers.
+    heap: Heap,
+    /// The 0-arg body thunk (a shared-runtime `Fn` handle, valid in `heap`).
+    body: Value,
+    /// The parked/preempted VM continuation, or `None` if not yet started.
+    resume: Option<Box<crate::eval::compile::Suspended>>,
+    /// The output-capture stack snapshot (the process carries it — no coroutine holds a
+    /// `Ctx`). `run_one` installs it into `CURRENT` per quantum and reads it back after,
+    /// so `begin_capture`/`take_capture` persist across `receive` suspends.
+    capture: Vec<Arc<Mutex<String>>>,
 }
 
-/// A green process's execution mode (ADR-100 §8.3, the corosensei-removal migration).
-enum Run {
-    /// corosensei mode: a stackful coroutine owns the heap + body and drives
-    /// `receive`/`preempt` by yielding its native stack. The default, and the path a
-    /// **tree-walked** (non-VM-eligible) body takes even under the flag (§8.1 option a),
-    /// since it has no reified frame stack to capture.
-    Coro(Coro),
-    /// state-capture mode (`BROOD_STATE_CAPTURE`, VM-eligible body): the worker drives
-    /// `vm_run_bc` directly — no coroutine. The heap + body thunk travel with the
-    /// process; `resume` is the parked/preempted continuation (`None` = not yet
-    /// started). Because a `Suspended` has **no native stack**, this process is plain
-    /// `Send` and may resume on *any* worker — the live-migration enabler (§7).
-    Capture {
-        heap: Heap,
-        body: Value,
-        resume: Option<Box<crate::eval::compile::Suspended>>,
-        /// The output-capture stack snapshot (no coroutine holds the `Ctx`, so the
-        /// process carries it). `run_one` builds `CURRENT` from it before each quantum
-        /// and reads it back after, so `begin_capture`/`take_capture` inside a
-        /// capture-mode process persist across `receive` suspends.
-        capture: Vec<Arc<Mutex<String>>>,
-    },
-}
-
-// SAFETY: corosensei marks `Coroutine` `!Send` conservatively, so a `Process` holding a
-// `Run::Coro` is `!Send` without this impl. The one-owner-at-any-instant argument:
-//   - **Coroutine mode.** Owned by exactly one thread at any instant, and no
-//     cross-thread `resume` happens. At spawn the caller hands it to its assigned
-//     worker's queue (the queue mutex serialises the handoff). A **fresh** coroutine
-//     may be popped by a stealing worker (`try_steal`, under the victim queue's
-//     `try_lock`) and re-pinned — a serialised handoff *before its first resume*, so
-//     there is no saved native stack to migrate (proven safe, §3.1a). After the first
-//     resume it is pinned: preempt/receive re-enqueue to its owning worker only.
-//   - **Capture mode.** Genuinely `Send` — there is no coroutine, only a `Heap` +
-//     `Value` + `Suspended` (all `Send`). It may resume on any worker; the handoff is
-//     still serialised through the queue/waiter so exactly one thread owns it at a time
-//     (INV-2 holds). This is what `enqueue`'s migration re-assignment relies on.
-// So at every `resume` site the proc is owned exclusively by one thread.
-unsafe impl Send for Process {}
-
-/// What a running coroutine needs to find from deep inside `eval` (for
-/// `receive`/`self`). Stored in a thread-local, set by the coroutine at start and
-/// re-established after every suspend (so it survives the worker multiplexing
-/// other processes, and migration to another worker).
+/// What a running process needs to find from deep inside `eval` (for
+/// `receive`/`self`). Stored in a thread-local, installed by `run_one` at the start of
+/// each quantum and read back after (so it survives the worker multiplexing other
+/// processes, and migration to another worker).
 #[derive(Clone)]
 pub(super) struct Ctx {
     pub(super) pid: u64,
     pub(super) mailbox: Arc<Mailbox>,
-    /// `Some` for a green process (suspend via this yielder); `None` for the root
-    /// thread (block on the mailbox condvar instead).
-    pub(super) yielder: Option<*const Yielder0>,
     /// The **output-capture stack**. Empty means no capture; output goes to real
     /// stdout. When non-empty, this process's `print` / terminal output appends to
     /// the **top** buffer instead (see builtins' `capture_write`). It's a *stack*
@@ -185,18 +116,16 @@ thread_local! {
     /// in `eval::eval`); it survives only to feed the stack-overflow byte guard,
     /// which establishes its base at the outermost eval (`gc_block_depth() <= 1`).
     ///
-    /// Per-process: reset to 0 at coroutine entry and saved/restored around
-    /// suspend (see `spawn` / `preempt` / `wait_for_message`), so workers
+    /// Per-process: reset to 0 at the start of each quantum (`install_ctx`), so workers
     /// multiplexing several processes don't leak each other's depths. The root
     /// thread doesn't multiplex, so its depth flows naturally.
     static GC_BLOCK: Cell<u32> = const { Cell::new(0) };
 
     /// Stack-pointer base for the [`stack_overflow_check`] byte guard: the sp of
-    /// the *outermost* eval on this coroutine. `0` = unset (established by the
-    /// next eval). Reset to 0 at coroutine entry and saved/restored across every
-    /// suspend exactly like `GC_BLOCK`, because a stackful coroutine resumes on
-    /// its own stack — the base is constant for the coroutine's life, but a
-    /// worker running other coroutines in between must not clobber it.
+    /// the *outermost* eval in this quantum. `0` = unset (established by the next
+    /// eval). Reset to 0 at the start of each quantum (`install_ctx`): a captured
+    /// process resumes on a fresh worker stack, so the base is re-established by its
+    /// first eval rather than carried across the suspend.
     static STACK_BASE: Cell<usize> = const { Cell::new(0) };
 
     /// Compile-pass depth (ADR-061): bumped by `macroexpand_all`'s
@@ -205,9 +134,8 @@ thread_local! {
     /// which (unlike runtime eval) holds partially-built LOCAL forms in unrooted
     /// Rust locals. This is what lets the safepoint otherwise fire at ANY eval
     /// depth (the operand stack roots runtime transients; the compile pass opts
-    /// out instead of being rooted). Reset to 0 at coroutine entry and
-    /// saved/restored across suspend, exactly like `GC_BLOCK`/`STACK_BASE`, since
-    /// expansion can suspend (its inner evals `tick`).
+    /// out instead of being rooted). Reset to 0 at the start of each quantum
+    /// (`install_ctx`), exactly like `GC_BLOCK`/`STACK_BASE`.
     static MACRO_BLOCK: Cell<u32> = const { Cell::new(0) };
 }
 
@@ -219,15 +147,8 @@ pub fn gc_block_depth() -> u32 {
     GC_BLOCK.with(|d| d.get())
 }
 
-/// Read the GC-block depth for save/restore around a coroutine suspend (we want
-/// to capture this process's value so a resume on any worker restores it).
-#[inline]
-pub(super) fn gc_block_save() -> u32 {
-    GC_BLOCK.with(|d| d.get())
-}
-
-/// Write the GC-block depth — paired with `gc_block_save` around a suspend,
-/// and used by a fresh coroutine to wipe the residual value left on the worker.
+/// Write the GC-block depth — reset to 0 per quantum by `install_ctx` (each quantum
+/// runs on a fresh worker stack, so the depth is re-established by its first eval).
 #[inline]
 pub(super) fn gc_block_set(n: u32) {
     GC_BLOCK.with(|d| d.set(n));
@@ -248,14 +169,7 @@ pub fn macro_block_active() -> bool {
     MACRO_BLOCK.with(|d| d.get() > 0)
 }
 
-/// Read the compile-pass depth for save/restore around a coroutine suspend.
-#[inline]
-pub(super) fn macro_block_save() -> u32 {
-    MACRO_BLOCK.with(|d| d.get())
-}
-
-/// Write the compile-pass depth — paired with `macro_block_save` around a
-/// suspend, and used by a fresh coroutine to wipe the worker's residual value.
+/// Write the compile-pass depth — reset to 0 per quantum by `install_ctx`.
 #[inline]
 pub(super) fn macro_block_set(n: u32) {
     MACRO_BLOCK.with(|d| d.set(n));
@@ -336,10 +250,10 @@ impl Drop for GcBlockGuard {
 /// (cooperative fairness — the BEAM's mechanism). ~2000 ≈ the BEAM default; tunable.
 const REDUCTION_BUDGET: u32 = 2000;
 
-/// Stack size for each green-process coroutine. corosensei's `DefaultStack` is
-/// 128 KiB out of the box; the tree-walking eval recurses one Rust frame per
-/// combination, so a debug-build evaluator running the in-language test suite
-/// (which spawns processes that load many test files) can run close to that.
+/// Stack size for each worker thread. A green process runs its body directly on the
+/// worker thread (ADR-100 §8.4 — no coroutine stack), and the tree-walking eval recurses
+/// one Rust frame per combination, so a debug-build evaluator running the in-language test
+/// suite (which spawns processes that load many test files) needs a deep stack.
 /// **16 MiB**: debug eval frames are heavy (no inlining + poison checks) — one
 /// nested `eval` frame is several KiB, and non-tail recursion stacks ~2 of them
 /// per level, so a few hundred levels of legitimate non-tail recursion already
@@ -352,15 +266,15 @@ const REDUCTION_BUDGET: u32 = 2000;
 /// KiB; only deep recursion commits more, and a runaway is killed by the guard
 /// before it commits much past the budget). The `brood`/`nest` binaries re-home
 /// their root thread onto a stack of this same size (see `cli`/`nest` `main`), so
-/// the budget below is uniform and safe on both the root thread and coroutines.
+/// the budget below is uniform and safe on both the root thread and workers.
 /// Tunable; bump if a feature lands with heavier frames.
-pub const CORO_STACK_BYTES: usize = 16 * 1024 * 1024;
+pub const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stack-budget guard against runaway *non-tail* recursion (ADR-043). The
 /// evaluator is a native tree-walker: every nested `eval`/`macroexpand` frame
 /// (i.e. every level of non-tail recursion) consumes real Rust stack, and an
 /// unbounded one — `(defn boom (n) (+ 1 (boom (+ n 1))))` — would overflow the
-/// [`CORO_STACK_BYTES`] coroutine stack as a **`SIGSEGV` the host can't
+/// [`WORKER_STACK_BYTES`] worker stack as a **`SIGSEGV` the host can't
 /// `catch_unwind`**, taking down the whole REPL / `nest mcp` server. The guard
 /// turns that into a clean, catchable [`STACK_DEPTH_EXCEEDED`] error.
 ///
@@ -370,16 +284,16 @@ pub const CORO_STACK_BYTES: usize = 16 * 1024 * 1024;
 /// frame-count ceiling is simultaneously too low for legitimate deep recursion
 /// and too high to stop a heavy runaway before the real overflow. Bytes are the
 /// thing the stack actually runs out of, so a byte budget is both safe and
-/// permissive. See [`STACK_BASE`] for how the per-coroutine base is tracked.
+/// permissive. See [`STACK_BASE`] for how the per-quantum base is tracked.
 ///
-/// Default: [`CORO_STACK_BYTES`] minus a margin generous enough to absorb the
+/// Default: [`WORKER_STACK_BYTES`] minus a margin generous enough to absorb the
 /// frame we're in plus the error-construction path (`format!` + `LispError`)
 /// without itself overflowing. Override with `BROOD_STACK_BUDGET=<size>`
 /// (e.g. `6M`); `0` or malformed falls back to the default.
 const STACK_BUDGET_MARGIN: usize = 4 * 1024 * 1024;
 
 /// The active stack budget in bytes, read once from `BROOD_STACK_BUDGET` (or
-/// derived from [`CORO_STACK_BYTES`]). Cached so the per-`eval` check is a load
+/// derived from [`WORKER_STACK_BYTES`]). Cached so the per-`eval` check is a load
 /// + compare on the hot path.
 pub fn stack_budget() -> usize {
     use std::sync::LazyLock;
@@ -388,35 +302,34 @@ pub fn stack_budget() -> usize {
             .ok()
             .and_then(|s| crate::core::alloc::parse_size(&s))
             .filter(|&n| n > 0)
-            .unwrap_or(CORO_STACK_BYTES.saturating_sub(STACK_BUDGET_MARGIN))
+            .unwrap_or(WORKER_STACK_BYTES.saturating_sub(STACK_BUDGET_MARGIN))
     });
     *BUDGET
 }
 
 /// `Some(used_bytes)` when the current stack usage has crossed [`stack_budget`],
 /// else `None`. `sp` is the caller's stack-pointer probe (the address of a local
-/// in the `eval` frame); the per-coroutine base ([`STACK_BASE`]) is the sp of the
-/// *outermost* eval on this coroutine. Stack grows down, so `base - sp` is the
+/// in the `eval` frame); the per-quantum base ([`STACK_BASE`]) is the sp of the
+/// *outermost* eval in this quantum. Stack grows down, so `base - sp` is the
 /// bytes consumed by the nested-eval recursion since the outermost frame.
 ///
 /// Self-healing: the base is recorded the first time it's seen unset (`0`) and
-/// reset to `0` at coroutine entry, and saved/restored across every suspend (so
-/// a worker multiplexing coroutines never compares against another coroutine's
-/// base). As a final backstop, an implausibly large `used` (> a whole stack —
-/// impossible within one coroutine) is treated as a stale base from a missed
-/// switch and silently rebased rather than firing a false positive.
+/// reset to `0` at the start of each quantum (`install_ctx`), so a worker
+/// multiplexing processes never compares against another process's base. As a
+/// final backstop, an implausibly large `used` (> a whole stack — impossible
+/// within one quantum) is treated as a stale base from a missed switch and
+/// silently rebased rather than firing a false positive.
 #[inline]
 pub fn stack_overflow_check(sp: usize) -> Option<usize> {
     // Called from `eval` *after* its `GcBlockGuard` increment, so `gc_block_depth`
-    // is this frame's depth (1 = the outermost eval on this coroutine/thread).
+    // is this frame's depth (1 = the outermost eval in this quantum/thread).
     STACK_BASE.with(|b| {
         if gc_block_depth() <= 1 {
             // Outermost eval frame — (re)establish the base *here*, every time.
-            // This is what keeps the root thread honest: it never resets the base
-            // at a coroutine boundary (it isn't a coroutine), and the base set
-            // during prelude load would otherwise be stale by the time a user
-            // form runs. Re-stamping at every depth-1 entry fixes that, and is
-            // harmless in coroutines (their first eval is depth 1 anyway).
+            // This is what keeps the root thread honest: the base set during
+            // prelude load would otherwise be stale by the time a user form runs.
+            // Re-stamping at every depth-1 entry fixes that, and is harmless on a
+            // worker (its first eval each quantum is depth 1 anyway).
             b.set(sp);
             return None;
         }
@@ -427,8 +340,8 @@ pub fn stack_overflow_check(sp: usize) -> Option<usize> {
             return None;
         }
         let used = base - sp;
-        if used > CORO_STACK_BYTES {
-            // Larger than any single coroutine stack: the base must be stale (a
+        if used > WORKER_STACK_BYTES {
+            // Larger than any single worker stack: the base must be stale (a
             // suspend/resume path we didn't account for). Rebase rather than
             // reject a legitimate program.
             //
@@ -436,8 +349,8 @@ pub fn stack_overflow_check(sp: usize) -> Option<usize> {
             // stale base, so a genuine runaway that somehow overshot a full stack
             // between two depth-1 re-stamps would rebase here instead of raising the
             // clean `STACK_DEPTH_EXCEEDED`. In practice it can't reach this branch:
-            // `stack_budget()` (default `CORO_STACK_BYTES − 4 MiB`) is *below*
-            // `CORO_STACK_BYTES`, and the tree-walker grows the stack one combination
+            // `stack_budget()` (default `WORKER_STACK_BYTES − 4 MiB`) is *below*
+            // `WORKER_STACK_BYTES`, and the tree-walker grows the stack one combination
             // frame at a time, so a real runaway trips the `used > stack_budget()`
             // check below — firing the clean error — well before `used` could exceed
             // a full stack. The overshoot would need a single eval step to jump from
@@ -455,26 +368,18 @@ pub fn stack_overflow_check(sp: usize) -> Option<usize> {
     })
 }
 
-/// Read the per-coroutine stack base for save/restore around a suspend (paired
-/// with [`stack_base_set`], mirroring [`gc_block_save`]).
-#[inline]
-pub(super) fn stack_base_save() -> usize {
-    STACK_BASE.with(|b| b.get())
-}
-
-/// Write the per-coroutine stack base — paired with [`stack_base_save`] around a
-/// suspend, and called with `0` at coroutine entry so the coroutine's first eval
-/// establishes a fresh base instead of inheriting the worker's residual value.
+/// Write the stack base — reset to 0 per quantum by `install_ctx` so this quantum's
+/// first eval establishes a fresh base on the worker stack (the byte-guard reference).
 #[inline]
 pub(super) fn stack_base_set(n: usize) {
     STACK_BASE.with(|b| b.set(n));
 }
 
 /// Called once per `eval` `'tail:` iteration. Cheap: a thread-local decrement; only
-/// when the budget is exhausted does it touch `CURRENT` and (for a green process)
-/// suspend. Bounds the work any one process does before peers get the worker, so a
-/// CPU-bound process can't monopolise a core. The root thread is never preempted
-/// (it has no yielder) — it just refreshes the budget.
+/// when the budget is exhausted does it touch `CURRENT`. The top-level VM driver does
+/// its own capture-mode preemption (`tick_capture`); this `tick`/`preempt` path is the
+/// fallback for non-driver runs (nested native callbacks, the tree-walker, the root
+/// thread), which can't suspend, so it just refreshes the budget.
 #[inline]
 pub fn tick() {
     REDUCTIONS.with(|r| {
@@ -509,94 +414,30 @@ pub fn deadline_exceeded() -> bool {
     })
 }
 
-/// Budget exhausted: refresh it, then — if we're a green process — yield the worker
-/// (re-queued Ready by `run_one`). Re-establishes `CURRENT` after resume, since the
-/// worker may have run other processes meanwhile (cf. `receive`).
+/// Reduction budget exhausted at a `tick()` site. With no coroutine, there's nothing to
+/// yield to here: the **top-level** VM driver does capture-mode preemption itself
+/// (`tick_capture` → capture the continuation + re-enqueue). This path is reached only by
+/// runs that are *not* the body driver — a NESTED native callback's `vm_apply`, the
+/// tree-walker, the root thread, the prelude build — so it just accumulates the quantum's
+/// reductions into `process-info`'s `:reductions` (if a process ctx exists) and refreshes
+/// the budget so the caller keeps running. (A long native callback thus runs as a "dirty"
+/// section — not preempted mid-call — the §7.4 carve-out.)
 fn preempt() {
-    let ctx = match CURRENT.with(|c| c.borrow().clone()) {
-        Some(c) => {
-            // The budget is exhausted, so a full quantum's worth of reductions was
-            // consumed — accumulate it into the per-process `:reductions` total
-            // before refreshing. (`run_one` adds the *partial* final quantum for a
-            // `receive`/exit yield, where `preempt` isn't called; the two paths are
-            // mutually exclusive per quantum, so no double-count.) Without this the
-            // count stayed 0 for CPU-bound processes — exactly the ones the observer
-            // most wants to flag.
-            c.mailbox
-                .reductions
-                .fetch_add(REDUCTION_BUDGET as u64, Ordering::Relaxed);
-            c
-        }
-        None => {
-            // No process context (e.g. prelude build) — nothing to yield to; just
-            // refresh the budget so the caller keeps running.
-            REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
-            return;
-        }
-    };
-    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
-    if let Some(yptr) = ctx.yielder {
-        // Hard exit (`(exit pid :kill)`): die now, untrappably. Checked here at the
-        // reduction boundary so a tight CPU loop — which never reaches `receive` —
-        // still dies. (Soft exits wait for the next `receive`; see `receive_match`.)
-        // We never resume after a `Kill` suspend, so no thread-local save/restore.
-        if let Some(reason) = ctx.mailbox.pending_kill() {
-            if is_kill_reason(&reason) {
-                // SAFETY: same invariant as the `Preempt` suspend just below — the
-                // yielder is valid while this coroutine runs (tick → here, inside eval).
-                unsafe { (*yptr).suspend(Suspend::Kill(reason)) };
-            }
-        }
-        // Save this process's per-thread state before yielding: a worker may
-        // pick up another process whose eval/macroexpand changes these
-        // thread-locals, and we need ours back when we resume. GC-block
-        // depth is critical for safepoint correctness.
-        let saved_block = gc_block_save();
-        let saved_base = stack_base_save();
-        let saved_macro = macro_block_save();
-        // SAFETY: same invariant as `receive` — the yielder is valid while this
-        // coroutine is running, which is now (tick runs inside eval, inside the
-        // coroutine body). Suspending returns control to the worker (`run_one`).
-        unsafe { (*yptr).suspend(Suspend::Preempt) };
-        CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
-        gc_block_set(saved_block);
-        stack_base_set(saved_base);
-        macro_block_set(saved_macro);
+    if let Some(c) = CURRENT.with(|c| c.borrow().clone()) {
+        c.mailbox
+            .reductions
+            .fetch_add(REDUCTION_BUDGET as u64, Ordering::Relaxed);
     }
-    // Root thread (yielder None): budget refreshed, never suspends.
-}
-
-/// Is state-capture suspension armed (`BROOD_STATE_CAPTURE`)? The corosensei-removal
-/// migration (concurrency-v2.md §8, ADR-100): when on, a clean `receive` on an empty
-/// mailbox captures the VM continuation as relocatable heap data and parks it, rather
-/// than freezing a coroutine's native stack. **Default off** — `main` stays on
-/// corosensei until state-capture is proven across the §6 plain-release KI-1 bar, then
-/// corosensei is deleted (§8.4). Read once and cached; can't change mid-run. Truthy
-/// values: anything but `0`/`false`/`off`/`no`/empty.
-pub(crate) fn state_capture_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("BROOD_STATE_CAPTURE") {
-        // **Capture mode is the default engine** (ADR-100 §8.4 step 3, flipped 2026-06-08):
-        // a VM-eligible green-process body runs as relocatable heap data (migratable, no
-        // 16 MiB native stack), proven correctness-equivalent to the coroutine path (the
-        // full suite is identical both ways) and ~no slower on the hot receive path after
-        // the wake-migration heuristic. `BROOD_STATE_CAPTURE=0` (or `false`/`off`/`no`/
-        // empty) is the escape hatch back to corosensei for one release. corosensei still
-        // backs tree-walked bodies until step 4 deletes it.
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no"),
-        Err(_) => true,
-    })
+    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
 }
 
 thread_local! {
-    /// True while this worker is driving a **capture-mode** green process body
-    /// (`run_one`'s state-capture branch — no coroutine). The discriminator the
-    /// `receive` path and the VM driver use to decide "capture the continuation"
-    /// vs. "yield the coroutine"/"block the root": a capture-mode green process has
-    /// no yielder (so the old `ctx.yielder.is_some()` greenness test can't see it),
-    /// and the root thread never enters `run_one`. Set true around the
-    /// `run_process_body` call, restored after (the worker multiplexes other
-    /// processes — incl. coroutine-mode ones — between quanta).
+    /// True while this worker is driving a green process body (`run_one`). The
+    /// discriminator the `receive` path and the VM driver use to decide "capture the
+    /// continuation" vs. "block the root": a green process running here can capture,
+    /// while the root thread (which never enters `run_one`) must block on its mailbox.
+    /// Set true around the `run_process_body` call, restored after (the worker
+    /// multiplexes other processes between quanta).
     static CAPTURE_RUN: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -626,9 +467,9 @@ thread_local! {
 static WORKER_DIRTY: LazyLock<Vec<AtomicBool>> =
     LazyLock::new(|| (0..WORKERS.len()).map(|_| AtomicBool::new(false)).collect());
 
-/// Mark the current worker dirty-blocked and re-route its movable backlog, returning a
-/// guard that clears the flag on drop. A no-op off a worker thread (the root, which
-/// owns no queue). Called by the yielder-less `receive` block (`wait_for_message`).
+/// Mark the current worker dirty-blocked and re-route its backlog, returning a guard that
+/// clears the flag on drop. A no-op off a worker thread (the root, which owns no queue).
+/// Called by the native-nested `receive` block (`wait_for_message`).
 pub(crate) fn dirty_block() -> DirtyBlockGuard {
     match CURRENT_WORKER.with(|c| c.get()) {
         Some(wid) => {
@@ -651,28 +492,20 @@ impl Drop for DirtyBlockGuard {
     }
 }
 
-/// Re-route the genuinely-**stranded** processes off a dirty worker: a **non-fresh
-/// capture** process can't be stolen (`try_steal` is fresh-only) and has no native
-/// stack, so it must be moved by hand, or it sits forever on a worker stuck in a
-/// native-nested block (the mass-kill/monitor deadlock). A **fresh** process is left in
-/// place — an idle worker will steal it (`try_steal`); and a pinned **coroutine** must
-/// stay (moving it is the KI-1b hazard). Re-routing only the stranded set keeps the
-/// drain minimal, so it perturbs scheduling (and timing-sensitive tests) as little as
-/// possible. `assign_worker` already excludes `wid`, so they land elsewhere.
+/// Re-route **every** queued process off a dirty worker. A worker stuck in a native-nested
+/// block won't return to its run loop, so anything queued behind it is stranded — and
+/// since every process is now migratable (no native stack), the simplest correct move is
+/// to push them all elsewhere (the mass-kill/monitor deadlock fix). `assign_worker`
+/// already excludes `wid`, so they land on live workers.
 fn drain_worker_queue(wid: usize) {
-    let mut stranded: Vec<Box<Process>> = Vec::new();
-    {
-        let mut q = crate::core::sync::lock(&WORKERS[wid].0);
-        let mut keep: VecDeque<Box<Process>> = VecDeque::new();
-        while let Some(proc) = q.pop_front() {
-            if !proc.fresh && matches!(proc.run, Run::Capture { .. }) {
-                stranded.push(proc);
-            } else {
-                keep.push_back(proc);
-            }
-        }
-        *q = keep;
-    }
+    // Every queued process is stranded on this dirty worker (it won't return to its run
+    // loop) and is migratable (no native stack), so re-route them all off it.
+    let stranded: Vec<Box<Process>> =
+        crate::core::sync::lock(&WORKERS[wid].0).drain(..).collect();
+    // These left a queue without going through `run_one` (the usual decrement site), so
+    // account for the removal here; the `enqueue` below re-adds one each. Net zero — the
+    // `STEALABLE` count stays equal to the processes actually sitting in queues.
+    STEALABLE.fetch_sub(stranded.len(), Ordering::Relaxed);
     for mut proc in stranded {
         // Force off this (dirty) worker directly — `assign_worker` already excludes a
         // dirty worker, so this lands elsewhere. (Not `wake_enqueue`: its "migrate only
@@ -710,9 +543,8 @@ pub(crate) fn set_capture_top_level(on: bool) -> bool {
 }
 
 /// Reduction tick for the capture-mode VM driver: like [`tick`] but **returns**
-/// whether the budget is exhausted (so the driver captures + yields a `Preempted`)
-/// instead of suspending a coroutine. Decrements otherwise. The budget is refreshed
-/// by `run_one` at the next resume, exactly as the coroutine path's `preempt` reset.
+/// whether the budget is exhausted (so the driver captures + yields a `Preempted`).
+/// Decrements otherwise. The budget is refreshed by `run_one` at the next resume.
 pub(crate) fn tick_capture() -> bool {
     REDUCTIONS.with(|r| {
         let n = r.get();
@@ -725,10 +557,9 @@ pub(crate) fn tick_capture() -> bool {
     })
 }
 
-/// Is an untrappable hard `:kill` pending for the current capture-mode process? The
-/// driver checks this at a loop-top safepoint and stops (the analogue of the
-/// coroutine path's `preempt`-time `Suspend::Kill`). A *soft* exit isn't honoured
-/// here — it waits for the next `receive` (checked when `run_one` would park).
+/// Is an untrappable hard `:kill` pending for the current process? The driver checks this
+/// at a loop-top safepoint and stops. A *soft* exit isn't honoured here — it waits for
+/// the next `receive` (checked when `run_one` would park).
 pub(crate) fn capture_hard_kill_pending() -> bool {
     CURRENT.with(|c| {
         c.borrow()
@@ -738,52 +569,32 @@ pub(crate) fn capture_hard_kill_pending() -> bool {
     })
 }
 
-/// Cooperatively yield so other ready work can make progress, **without blocking a
-/// worker thread**. In a green process, suspend (re-enqueued behind peers, like
-/// `preempt`) so the worker runs other ready processes; on the root thread (no
-/// coroutine), sleep briefly so the background worker threads run. The green path
-/// saves/restores the same per-thread state `preempt` does, since the worker may
-/// run other processes (mutating those thread-locals) before we resume. Used by
-/// `%isolate`'s reap to wait for killed orphans without freezing their worker —
-/// `std::thread::sleep` here would starve any orphan pinned to the caller's worker.
+/// Cooperatively yield so other ready work can make progress (`(yield)` / used by
+/// `%isolate`'s reap to wait for killed orphans). A process can't free its worker
+/// mid-eval (the continuation is only captured at a `receive`), so this hints the OS
+/// scheduler (`std::thread::yield_now`) — the other worker threads run their processes,
+/// so work the caller is spinning on (e.g. orphans being reaped on other workers) makes
+/// progress — and refreshes the reduction budget so the caller isn't immediately
+/// preempted on return. Not `std::thread::sleep`: a busy spinner shouldn't add fixed
+/// latency per iteration.
 pub fn yield_now() {
-    let ctx = CURRENT.with(|c| c.borrow().clone());
-    if let Some(ctx) = ctx {
-        if let Some(yptr) = ctx.yielder {
-            let saved_block = gc_block_save();
-            let saved_base = stack_base_save();
-            let saved_macro = macro_block_save();
-            // SAFETY: same invariant as `preempt`/`receive` — the yielder is valid
-            // while this coroutine is running, which is now (we were called from
-            // within its eval). Suspending returns control to `run_one`, which
-            // re-enqueues us (the `Preempt` arm).
-            unsafe { (*yptr).suspend(Suspend::Preempt) };
-            CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
-            gc_block_set(saved_block);
-            stack_base_set(saved_base);
-            macro_block_set(saved_macro);
-            return;
-        }
-    }
-    // Root thread / no coroutine: nothing to yield to here, so let the worker
-    // threads run by sleeping briefly.
-    std::thread::sleep(std::time::Duration::from_micros(200));
+    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
+    std::thread::yield_now();
 }
 
 // ----- the run queue + worker pool -------------------------------------------
 
 pub(super) static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 static SPAWNED: AtomicU64 = AtomicU64::new(0);
-/// How many fresh processes have been work-stolen across worker threads since
-/// program start (read by `(steal-count)`). A diagnostic of how much rebalancing
-/// the scheduler actually did — 0 means placement-at-spawn kept the pool even and
-/// no thief ever needed to pull work.
+/// How many processes have been work-stolen across worker threads since program start
+/// (read by `(steal-count)`). A diagnostic of how much rebalancing the scheduler actually
+/// did — 0 means placement-at-spawn kept the pool even and no thief ever needed to pull
+/// work.
 static STOLEN: AtomicU64 = AtomicU64::new(0);
-/// How many times a **capture-mode** process was re-assigned to a *different* worker
-/// when re-enqueued (woken from `receive`, or preempted) — i.e. a live migration of a
-/// running process across worker threads (ADR-100 §7). 0 in corosensei mode (those
-/// stay pinned). Read by the live-migration regression test as direct evidence that
-/// mid-computation continuations actually crossed threads.
+/// How many times a process was re-assigned to a *different* worker when woken from a
+/// park (`receive`/timer/exit) — i.e. a live migration of a mid-computation continuation
+/// across worker threads (ADR-100 §7). Read by the live-migration regression test as
+/// direct evidence that captured continuations actually crossed threads.
 static MIGRATED: AtomicU64 = AtomicU64::new(0);
 /// child pid → the pid that `spawn`ed it. Populated at `spawn`, removed at
 /// `deregister` (a parent record lives only as long as the child). Backs
@@ -803,8 +614,8 @@ static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0); // worker threads actu
 static WORKERS_STARTED: Once = Once::new();
 
 thread_local! {
-    /// Set by a process's coroutine just before it returns, so `run_one` can read
-    /// the exit reason (for monitor `[:down …]` delivery) once `resume` returns on
+    /// Set by a process's body just before it returns, so `run_one` can read the
+    /// exit reason (for monitor `[:down …]` delivery) once the driver returns on
     /// this same worker thread. Cleared at the start of every scheduling quantum.
     static EXIT_REASON: RefCell<Option<Message>> = const { RefCell::new(None) };
 }
@@ -813,22 +624,22 @@ thread_local! {
 type WorkerQueue = (Mutex<VecDeque<Box<Process>>>, Condvar);
 
 /// Per-worker run queues. Index = `worker_id`. A worker drains its own queue
-/// first; when empty, it may **steal a fresh process** from a backed-up peer
-/// (`try_steal`) — the only migration the corosensei substrate tolerates (first
-/// resume on the thief, no saved stack). A process, once resumed, is pinned to
-/// its worker for life — preempt and receive re-enqueue to the same worker's
-/// queue. The Vec is sized once at the first `ensure_workers` from
-/// `worker_count()`, then never resized.
+/// first; when empty, it may **steal any queued process** from a backed-up peer
+/// (`try_steal`) — every process is migratable now that continuations are captured
+/// to the heap (ADR-100 §8.4), so there's no pinning. Preempt re-enqueues to the
+/// same worker (keep a hot process local); a wake may migrate (`wake_enqueue`). The
+/// Vec is sized once at the first `ensure_workers` from `worker_count()`, then never
+/// resized.
 static WORKERS: LazyLock<Vec<WorkerQueue>> = LazyLock::new(|| {
     (0..worker_count())
         .map(|_| (Mutex::new(VecDeque::new()), Condvar::new()))
         .collect()
 });
 
-/// Count of **fresh** (never-resumed) processes currently sitting in some
-/// worker's queue — i.e. the pool of stealable work. Incremented when a fresh
-/// process is enqueued (only happens at spawn; re-enqueues are non-fresh) and
-/// decremented when one is pulled to run (`run_one`, which clears `fresh`).
+/// Count of processes currently sitting in some worker's queue — i.e. the pool of
+/// stealable work. Incremented in `enqueue` (every queueing: spawn, wake, preempt)
+/// and decremented in `run_one` (the single pulled-to-run site, whether the owner
+/// drained it or a thief stole it).
 /// A cheap, relaxed atomic gate: an idle worker checks it before scanning peer
 /// queues, so a truly-idle pool (`STEALABLE == 0`) re-parks on one atomic load
 /// instead of an O(workers) scan. May briefly over-count a process popped but
@@ -838,16 +649,16 @@ static STEALABLE: AtomicUsize = AtomicUsize::new(0);
 
 /// How long an idle worker parks before re-attempting a steal, when it has no
 /// work of its own. A backstop, not the primary wakeup: a worker is woken
-/// immediately when a process is enqueued onto *its* queue (pinned re-enqueue or
-/// a fresh spawn placed here), but it is *not* notified when a **peer's** queue
+/// immediately when a process is enqueued onto *its* queue (a preempt re-enqueue
+/// or a spawn placed here), but it is *not* notified when a **peer's** queue
 /// grows — so it re-checks for stealable work every `STEAL_BACKOFF`. Short
 /// enough that a steal opportunity isn't missed for long; long enough that a
 /// genuinely idle pool wakes rarely (each wake is a single `STEALABLE` load when
 /// nothing is stealable). Tunable.
 const STEAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// Per-worker "is currently resuming a process" flag. Index = `worker_id`, sized
-/// to match `WORKERS`. A worker runs at most one coroutine at a time, so this is a
+/// Per-worker "is currently running a process" flag. Index = `worker_id`, sized
+/// to match `WORKERS`. A worker runs at most one process at a time, so this is a
 /// 0/1 gauge of in-flight work. `assign_worker` folds it into a worker's load:
 /// a worker draining one CPU-bound process has an *empty queue* yet is saturated,
 /// and queue length alone would wrongly read it as idle. Set/cleared around the
@@ -860,13 +671,12 @@ static WORKER_BUSY: LazyLock<Vec<AtomicBool>> =
 /// rotation; an occasional duplicate or skipped index is fine.
 static NEXT_WORKER: AtomicUsize = AtomicUsize::new(0);
 
-/// Pick the worker that a fresh `Process` should be pinned to (it stays there for
-/// life — no migration, so the KI-1b cross-thread-resume hazard never arises; see
-/// docs/concurrency-v2.md). **Least-loaded with a rotating start:** scan the
+/// Pick the worker a `Process` should be placed on — at spawn, on a wake migration, or
+/// when a thief re-homes a stolen process. **Least-loaded with a rotating start:** scan the
 /// queues beginning at a round-robin offset and choose the shortest, breaking
 /// ties toward the rotation. When load is even (the common case — most queues
 /// empty) this degrades to plain round-robin; when one worker is backed up (a
-/// spawn burst, or uneven drain) fresh processes steer to idle workers instead.
+/// spawn burst, or uneven drain) processes steer to idle workers instead.
 /// Queue lengths are sampled via `try_lock`, so a momentarily-contended queue is
 /// skipped rather than blocking the spawner. Validated clean (incl. under
 /// `BROOD_GC_STRESS`) in the Track-A experiment; replaces pure round-robin.
@@ -919,13 +729,13 @@ pub fn spawn_count() -> u64 {
     SPAWNED.load(Ordering::SeqCst)
 }
 
-/// Total fresh processes work-stolen across worker threads since program start
+/// Total processes work-stolen across worker threads since program start
 /// (read by `(steal-count)`). See [`STOLEN`].
 pub fn steal_count() -> u64 {
     STOLEN.load(Ordering::SeqCst)
 }
 
-/// Total live migrations of running capture-mode processes across worker threads since
+/// Total live migrations of running processes across worker threads since
 /// program start (ADR-100 §7). See [`MIGRATED`].
 pub fn migrate_count() -> u64 {
     MIGRATED.load(Ordering::SeqCst)
@@ -1042,82 +852,63 @@ pub fn exit(pid: u64, reason: Message) {
     };
     mailbox.request_kill(reason);
     // If the target is parked in `receive` it isn't running, so it'll never reach a
-    // `tick` (preempt) or re-enter `receive` on its own. Wake it by re-queueing onto
-    // **its own worker** (`enqueue` routes by `worker_id`) — exactly how `send`/the
-    // timer wake a parked process — and it self-kills at `receive_match`'s loop-top
-    // `kill_pending` check, on the worker that owns it. We must NOT drop it here:
-    // dropping force-unwinds its coroutine, and that would resume the coroutine on
-    // *this* (the exiter's) thread, not its owning worker — the cross-thread-resume
-    // hazard (KI-1b). Taking the waiter (via the shared `wake_parked` — the same
-    // step `deliver`/`wake_for_timeout` use) under the state lock serialises with
+    // `tick` (preempt) or re-enter `receive` on its own. Wake it by re-queueing it —
+    // exactly how `send`/the timer wake a parked process — and it self-kills at
+    // `receive_match`'s loop-top `kill_pending` check, on whichever worker runs it.
+    // Taking the waiter (via the shared `wake_parked` — the same step
+    // `deliver`/`wake_for_timeout` use) under the state lock serialises with
     // `run_one`'s park: either we take an already-parked process here, or `run_one`
     // sees `kill_pending` and retires it instead of parking (exactly one wins).
     let parked = wake_parked(&mut crate::core::sync::lock(&mailbox.state));
     if let Some(proc) = parked {
-        wake_enqueue(proc); // a wake (to deliver the kill) — migrate a capture-mode proc
+        wake_enqueue(proc); // a wake (to deliver the kill) — may migrate the process
     }
 }
 
 /// Push a ready process onto its owning worker's queue and wake that worker.
-/// Routing by `proc.worker_id` keeps a coroutine on the same OS thread for its
-/// lifetime — no cross-thread `resume`, no KI-1b migration hazard. Preempt re-enqueue
-/// also routes here so a hot process stays on its worker (cache locality); only a
-/// *woken-from-park* capture process migrates — see [`wake_enqueue`].
+/// Preempt re-enqueue routes here so a hot process stays on its worker (cache
+/// locality); a *woken-from-park* process may migrate instead — see [`wake_enqueue`].
 pub(super) fn enqueue(proc: Box<Process>) {
     let wid = proc.worker_id;
     proc.mailbox.status.store(ST_RUNNABLE, Ordering::Relaxed); // queued, awaiting a worker turn
-    if proc.fresh {
-        // A fresh process becomes stealable the moment it's queued. Only the
-        // spawn path enqueues a fresh process; preempt/receive re-enqueue one that
-        // has already run (`fresh == false`), so this is skipped there.
-        STEALABLE.fetch_add(1, Ordering::Relaxed);
-    }
+    // Count it as stealable runnable work (the `try_steal` fast-path hint). Balanced by
+    // the single decrement in `run_one` when it's pulled to run (by its owner or a thief).
+    STEALABLE.fetch_add(1, Ordering::Relaxed);
     let (lock, cv) = &WORKERS[wid];
     crate::core::sync::lock(lock).push_back(proc);
     cv.notify_one();
 }
 
 /// Enqueue a process that is **waking from a park** (a `receive`/timer/exit wake, or a
-/// message that raced its park). This is the **live-migration** point (ADR-100 §7): a
-/// capture-mode process was idle and carries no native stack, so resume it on the
-/// least-loaded worker rather than where it last ran — rebalancing toward idle cores.
-/// A coroutine-mode process stays pinned (KI-1b cross-thread-resume hazard); a fresh
-/// one keeps its placement. The queue handoff still serialises ownership (INV-2).
-/// (Preempt re-enqueue uses plain [`enqueue`] instead, to keep a hot process local.)
+/// message that raced its park). The **live-migration** point (ADR-100 §7): the process
+/// was idle and has no native stack, so it may resume on any worker. Migrate **only when
+/// the home worker is busy** — a single atomic load, vs an O(workers) `assign_worker`
+/// scan on every wake. If home is idle it runs the woken process right away, so keep it
+/// there (cache locality, and no scan on the hot receive/reply path — ~all of the per-wake
+/// cost). Migrate (to the least-loaded worker) only when home is busy: re-queueing there
+/// would sit behind the running process. This also covers a home worker stuck in a
+/// **dirty** block — it reads busy (its `run_one` hasn't returned) and `assign_worker`
+/// excludes it, so the woken process is moved off it. (Preempt re-enqueue uses plain
+/// [`enqueue`] instead, to keep a hot process local.)
 pub(super) fn wake_enqueue(mut proc: Box<Process>) {
-    if !proc.fresh && matches!(proc.run, Run::Capture { .. }) {
-        // Migrate **only when the home worker is busy** — a single atomic load, vs an
-        // O(workers) `assign_worker` scan on every wake. If the home worker is idle it
-        // will run the woken process right away, so keep it there (cache locality, and
-        // no scan on the hot receive/reply path — ~all of capture mode's per-wake cost).
-        // Migrate (to the least-loaded worker) only when home is busy: re-queueing there
-        // would sit behind the running process. This also covers a home worker stuck in
-        // a **dirty** native-nested block — it reads busy (its `run_one` hasn't returned)
-        // and `assign_worker` excludes it, so the woken process is moved off it.
-        if WORKER_BUSY[proc.worker_id].load(Ordering::Relaxed) {
-            let new_wid = assign_worker();
-            if new_wid != proc.worker_id {
-                MIGRATED.fetch_add(1, Ordering::Relaxed);
-            }
-            proc.worker_id = new_wid;
+    if WORKER_BUSY[proc.worker_id].load(Ordering::Relaxed) {
+        let new_wid = assign_worker();
+        if new_wid != proc.worker_id {
+            MIGRATED.fetch_add(1, Ordering::Relaxed);
         }
+        proc.worker_id = new_wid;
     }
     enqueue(proc);
 }
 
-/// Steal one **fresh** (never-resumed) process from a backed-up peer's queue,
-/// re-pinning it to `thief_wid`. Returns `None` if nothing is stealable.
-///
-/// Why fresh-only: a fresh process has never been `resume`d, so its first resume
-/// happens here on the thief with **no saved native stack to migrate** — the one
-/// migration shape proven safe in docs/concurrency-v2.md §3.1a. Stealing a
-/// *suspended* coroutine (deep saved stack) smashes return addresses on resume →
-/// segfault (KI-1b), so a non-fresh process is never touched. Re-pinning
-/// `worker_id` makes the thief the owner for life: every subsequent
-/// preempt/receive re-enqueue stays on the thief, so INV-2 ("one owner at any
-/// instant, resumed on one thread") holds.
+/// Steal one queued process from a backed-up peer's queue, re-assigning it to
+/// `thief_wid`. Returns `None` if nothing is stealable. Since a process has no native
+/// stack (state capture, ADR-100 §8.4), **any** process is safe to resume on the thief —
+/// the cross-thread-resume hazard (KI-1b) that once forced fresh-only stealing is gone.
+/// The queue handoff (`try_lock`) serialises ownership, so exactly one worker owns it at
+/// a time (INV-2).
 fn try_steal(thief_wid: usize) -> Option<Box<Process>> {
-    // Fast path: nothing fresh queued anywhere — re-park on one relaxed load.
+    // Fast path: nothing queued anywhere — re-park on one relaxed load.
     if STEALABLE.load(Ordering::Relaxed) == 0 {
         return None;
     }
@@ -1138,18 +929,16 @@ fn try_steal(thief_wid: usize) -> Option<Box<Process>> {
             Ok(q) => q,
             Err(_) => continue,
         };
-        // Scan from the back (the owner pops the front) for the first fresh
-        // process: take the one the owner is least likely to run next, and leave
-        // its pinned/suspended processes untouched. `STEALABLE` is only a hint, so
-        // a queue with no fresh process is normal here.
-        if let Some(idx) = q.iter().rposition(|p| p.fresh) {
-            let mut proc = q.remove(idx).expect("rposition returned an in-bounds index");
+        // Take from the back (the owner pops the front): the process the owner is
+        // least likely to run next. `STEALABLE` is only a hint, so an empty queue
+        // is normal here.
+        if let Some(mut proc) = q.pop_back() {
             drop(q);
-            proc.worker_id = thief_wid; // re-pin: the thief owns it from now on
+            proc.worker_id = thief_wid; // re-assign: the thief owns it from now on
             STOLEN.fetch_add(1, Ordering::Relaxed);
             // `STEALABLE` is decremented by `run_one` (the single pulled-to-run
             // site the caller invokes next), not here — so the count stays balanced
-            // whether a fresh process is drained by its owner or stolen.
+            // whether a process is drained by its owner or stolen.
             return Some(proc);
         }
     }
@@ -1164,25 +953,16 @@ fn ensure_workers() {
         // A later `set_max_parallel` won't resize the pool — sized once.
         let n = WORKERS.len();
         ACTIVE_WORKERS.store(n, Ordering::SeqCst);
-        // In **capture mode** (ADR-100 §8) a process body runs directly on the worker
-        // thread (not on a 16 MiB coroutine stack), and nested native / tree-walked
-        // sub-calls recurse here — so the worker stack must be at least as large as the
-        // `stack_budget` byte guard assumes (`CORO_STACK_BYTES`), else a deep native
-        // recursion would overflow the default ~2 MiB thread stack *before* the guard
-        // trips a clean error. Only pay that reservation when the flag is on; with it
-        // off, workers just resume coroutines (which own their stacks) and the default
-        // thread stack is plenty. (The reservation is virtual/lazy, but a large one
-        // across many workers still adds address-space pressure under heavy test fan-out.)
-        let big_stack = state_capture_enabled();
+        // A process body runs directly on its worker thread (ADR-100 §8.4 — no coroutine
+        // stack), and nested native / tree-walked sub-calls recurse here, so the worker
+        // stack must be at least `stack_budget`'s reference size (`WORKER_STACK_BYTES`),
+        // else a deep native recursion would overflow the default ~2 MiB thread stack
+        // *before* the guard trips a clean error. The reservation is virtual/lazy.
         for wid in 0..n {
-            let started = if big_stack {
-                std::thread::Builder::new()
-                    .stack_size(CORO_STACK_BYTES)
-                    .spawn(move || worker_loop(wid))
-                    .is_ok()
-            } else {
-                false
-            };
+            let started = std::thread::Builder::new()
+                .stack_size(WORKER_STACK_BYTES)
+                .spawn(move || worker_loop(wid))
+                .is_ok();
             if !started {
                 std::thread::spawn(move || worker_loop(wid));
             }
@@ -1193,23 +973,21 @@ fn ensure_workers() {
 fn worker_loop(wid: usize) {
     CURRENT_WORKER.with(|c| c.set(Some(wid)));
     loop {
-        // 1. Our own queue first (FIFO). Pinned, possibly-suspended coroutines
-        //    live only here and must resume on this thread (INV-2).
+        // 1. Our own queue first (FIFO).
         //
         //    Bind the pop to a `let` so the queue `MutexGuard` is dropped at the
         //    end of *this statement*, BEFORE `run_one`. In edition 2021 a guard
         //    held in an `if let` scrutinee lives to the end of the whole block, so
         //    `if let Some(p) = lock(..).pop_front() { run_one(p) }` would hold the
-        //    queue lock across the resume — and the running coroutine's
-        //    preempt/receive re-enqueue (which re-locks this same queue) would
-        //    deadlock the worker.
+        //    queue lock across the run — and the running process's preempt/receive
+        //    re-enqueue (which re-locks this same queue) would deadlock the worker.
         let own = crate::core::sync::lock(&WORKERS[wid].0).pop_front();
         if let Some(p) = own {
             run_one(p);
             continue;
         }
-        // 2. Nothing of our own: steal a fresh process from a backed-up peer
-        //    (safe migration — first resume on us, no saved stack). See `try_steal`.
+        // 2. Nothing of our own: steal any queued process from a backed-up peer
+        //    (every process is migratable — no native stack). See `try_steal`.
         if let Some(p) = try_steal(wid) {
             run_one(p);
             continue;
@@ -1232,49 +1010,33 @@ fn worker_loop(wid: usize) {
 fn run_one(mut proc: Box<Process>) {
     let mailbox = Arc::clone(&proc.mailbox);
     let wid = proc.worker_id;
-    if proc.fresh {
-        // First (and only first) resume: this process is no longer stealable —
-        // from here it carries a saved coroutine stack and is pinned to `wid`.
-        // Single decrement site for `STEALABLE`, paired with the increment in
-        // `enqueue`, regardless of whether its owner drained it or a thief stole it.
-        proc.fresh = false;
-        STEALABLE.fetch_sub(1, Ordering::Relaxed);
-    }
+    // Pulled to run: the single `STEALABLE` decrement site, paired with the increment in
+    // `enqueue`, whether its owner drained it or a thief stole it.
+    STEALABLE.fetch_sub(1, Ordering::Relaxed);
     mailbox.status.store(ST_RUNNING, Ordering::Relaxed); // about to resume on this worker
 
     let live = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
     PEAK_RUNNING.fetch_max(live, Ordering::SeqCst);
-    // Mark this worker busy for `assign_worker`'s load metric while we're inside
-    // `resume` (cleared below, after `catch_unwind`, on every return path).
+    // Mark this worker busy for `assign_worker`'s load metric while we're inside the run
+    // (cleared in `finish_quantum`).
     WORKER_BUSY[wid].store(true, Ordering::Relaxed);
-    // Fresh reduction budget for this scheduling quantum (decremented in eval's loop
-    // via `tick`; at zero the process preempts itself — see `tick`/`preempt`).
+    // Fresh reduction budget for this scheduling quantum (decremented in the VM driver's
+    // loop top via `tick_capture`; at zero the process captures + re-enqueues — preempt).
     REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
     EXIT_REASON.with(|r| *r.borrow_mut() = None); // stale from a prior process on this worker
 
-    // Dual-mode resume (ADR-100 §8.3). corosensei mode resumes the coroutine; capture
-    // mode drives `vm_run_bc` directly on this worker's native stack (no coroutine), so
-    // the `receive`/preempt path can capture the continuation as `Send` data — which is
-    // what lets a capture-mode process resume on whichever worker `wake_enqueue` next
-    // routes it to (live migration). The shared post-quantum bookkeeping (RUNNING gauge, worker
-    // busy flag, reduction tally) runs the same in both before the outcome is handled.
-    let is_capture = matches!(proc.run, Run::Capture { .. });
-    if is_capture {
-        // No coroutine holds the `Ctx`, so the worker installs it for the quantum
-        // (rebuilt each resume — the worker multiplexes processes) and reads any
-        // capture-stack changes back afterwards.
-        proc.install_ctx();
-        set_capture_run(true);
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.drive_capture()));
-        set_capture_run(false);
-        proc.save_ctx();
-        finish_quantum(&mailbox, wid);
-        handle_capture_outcome(proc, &mailbox, outcome);
-    } else {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.resume_coro()));
-        finish_quantum(&mailbox, wid);
-        handle_coro_outcome(proc, &mailbox, outcome);
-    }
+    // The worker drives the body's bytecode (`vm_run_bc`) directly — no coroutine — so a
+    // paused process's continuation is relocatable heap data (`Suspended`) and can resume
+    // on whichever worker `wake_enqueue` routes it to (live migration). No coroutine holds
+    // the `Ctx`, so the worker installs it for the quantum (rebuilt each resume — the
+    // worker multiplexes processes) and reads any capture-stack changes back afterwards.
+    proc.install_ctx();
+    set_capture_run(true);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.drive()));
+    set_capture_run(false);
+    proc.save_ctx();
+    finish_quantum(&mailbox, wid);
+    handle_capture_outcome(proc, &mailbox, outcome);
 }
 
 /// Shared post-quantum bookkeeping: drop the live-process gauge + worker-busy flag and
@@ -1289,42 +1051,7 @@ fn finish_quantum(mailbox: &Arc<Mailbox>, wid: usize) {
     mailbox.reductions.fetch_add(used as u64, Ordering::Relaxed);
 }
 
-/// Handle a coroutine-mode quantum's outcome: retire on return/kill/panic, re-queue on
-/// preempt, park (or re-queue on a raced message) on `receive`.
-fn handle_coro_outcome(
-    proc: Box<Process>,
-    mailbox: &Arc<Mailbox>,
-    outcome: std::thread::Result<CoroutineResult<Suspend, ()>>,
-) {
-    match outcome {
-        Ok(CoroutineResult::Return(())) => {
-            // The coroutine set its exit reason just before returning (see `spawn`).
-            let reason = EXIT_REASON
-                .with(|r| r.borrow_mut().take())
-                .unwrap_or_else(|| Message::Keyword(value::intern(pk::NORMAL)));
-            deregister(proc.pid, reason);
-        }
-        Ok(CoroutineResult::Yield(Suspend::Receive)) => park_on_receive(proc, mailbox),
-        Ok(CoroutineResult::Yield(Suspend::Preempt)) => {
-            // Preempted mid-computation (reduction budget hit). Still runnable —
-            // re-queue at the back so peers get a turn on this worker (fairness).
-            enqueue(proc);
-        }
-        Ok(CoroutineResult::Yield(Suspend::Kill(reason))) => {
-            // `(exit pid reason)` fired at a reduction (`preempt`) or `receive`
-            // safepoint. Retire the process with `reason`; dropping `proc` at the end
-            // of this arm force-unwinds its suspended coroutine (runs destructors).
-            deregister(proc.pid, reason);
-        }
-        Err(_) => {
-            eprintln!("process {} panicked", proc_descr(proc.pid));
-            deregister(proc.pid, Message::Keyword(value::intern(pk::KILLED)));
-        }
-    }
-}
-
-/// Handle a capture-mode quantum's outcome (ADR-100 §8.3). The state-capture analogue
-/// of [`handle_coro_outcome`]: `Done` retires `:normal`, an `Err` retires `[:error …]`,
+/// Handle a quantum's outcome (ADR-100 §8.3): `Done` retires `:normal`, an `Err` retires `[:error …]`,
 /// `Killed` retires with the pending kill reason, `Preempted` stores the continuation
 /// and re-queues (migrating), `Suspended` stores it and parks on the mailbox.
 fn handle_capture_outcome(
@@ -1338,9 +1065,9 @@ fn handle_capture_outcome(
             deregister(proc.pid, Message::Keyword(value::intern(pk::NORMAL)));
         }
         Ok(Ok(VmOutcome::Suspended(s))) => {
-            // Store the parked continuation in the process, then park exactly as the
-            // coroutine path does (the `receive`-boundary kill check + raced-message
-            // recheck). `receive_match` already set `scanned` and armed any timer.
+            // Store the parked continuation in the process, then park (the
+            // `receive`-boundary kill check + raced-message recheck).
+            // `receive_match` already set `scanned` and armed any timer.
             proc.store_resume(s);
             park_on_receive(proc, mailbox);
         }
@@ -1390,10 +1117,10 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
             .unwrap_or_else(|| Message::Keyword(value::intern(pk::KILLED)));
         drop(st);
         deregister(proc.pid, reason);
-        // `proc` dropped here → a coroutine is force-unwound; a capture heap is freed.
+        // `proc` dropped here → its captured continuation + LOCAL heap are freed.
     } else if st.queue.len() > st.scanned {
         // A message raced in during the park — resume instead of parking. This is a
-        // wake, so a capture-mode process may migrate (`wake_enqueue`).
+        // wake, so the process may migrate (`wake_enqueue`).
         drop(st);
         wake_enqueue(proc);
     } else {
@@ -1402,52 +1129,30 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
 }
 
 impl Process {
-    /// Drive a capture-mode body one quantum: run fresh, or resume the parked
-    /// continuation (`resume` is taken). The `&mut self` borrow ends when this returns,
-    /// so `run_one` is then free to move/park/re-queue `self` on the outcome.
-    fn drive_capture(&mut self) -> Result<crate::eval::compile::VmOutcome, LispError> {
-        match &mut self.run {
-            Run::Capture { heap, body, resume, .. } => {
-                let body = *body;
-                let resume = resume.take().map(|b| *b);
-                crate::eval::compile::run_process_body(heap, body, resume)
-            }
-            Run::Coro(_) => unreachable!("drive_capture on a coroutine-mode process"),
-        }
+    /// Drive the body one quantum: run fresh, or resume the parked continuation
+    /// (`resume` is taken). The `&mut self` borrow ends when this returns, so `run_one`
+    /// is then free to move/park/re-queue `self` on the outcome.
+    fn drive(&mut self) -> Result<crate::eval::compile::VmOutcome, LispError> {
+        let resume = self.resume.take().map(|b| *b);
+        crate::eval::compile::run_process_body(&mut self.heap, self.body, resume)
     }
 
-    /// Resume a coroutine-mode process for one quantum.
-    fn resume_coro(&mut self) -> CoroutineResult<Suspend, ()> {
-        match &mut self.run {
-            Run::Coro(coro) => coro.resume(()),
-            Run::Capture { .. } => unreachable!("resume_coro on a capture-mode process"),
-        }
-    }
-
-    /// Stash a captured continuation back into a capture-mode process before it parks
-    /// or re-queues (so the next `run_one` resumes from it).
+    /// Stash a captured continuation back into the process before it parks or re-queues
+    /// (so the next `run_one` resumes from it).
     fn store_resume(&mut self, s: crate::eval::compile::Suspended) {
-        match &mut self.run {
-            Run::Capture { resume, .. } => *resume = Some(Box::new(s)),
-            Run::Coro(_) => unreachable!("store_resume on a coroutine-mode process"),
-        }
+        self.resume = Some(Box::new(s));
     }
 
-    /// Establish `CURRENT` for a capture-mode quantum (no coroutine does it), with a
-    /// `None` yielder — `receive`/preempt capture the continuation instead of yielding.
-    /// Resets the per-quantum thread-locals (GC-block depth, stack base, macro block) to
-    /// 0: each quantum runs on a fresh native stack, so unlike the coroutine path they
-    /// are re-established here, not saved/restored.
+    /// Establish `CURRENT` for this quantum. Resets the per-quantum thread-locals
+    /// (GC-block depth, stack base, macro block) to 0: each quantum runs on a fresh
+    /// worker stack, so they are re-established here.
     fn install_ctx(&self) {
-        if let Run::Capture { capture, .. } = &self.run {
-            let ctx = Ctx {
-                pid: self.pid,
-                mailbox: Arc::clone(&self.mailbox),
-                yielder: None,
-                capture: capture.clone(),
-            };
-            CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
-        }
+        let ctx = Ctx {
+            pid: self.pid,
+            mailbox: Arc::clone(&self.mailbox),
+            capture: self.capture.clone(),
+        };
+        CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         gc_block_set(0);
         stack_base_set(0);
         macro_block_set(0);
@@ -1458,9 +1163,8 @@ impl Process {
     /// across the next `receive` suspend, and the worker's TLS doesn't leak this
     /// process's ctx into the next one it runs.
     fn save_ctx(&mut self) {
-        let cap = CURRENT.with(|c| c.borrow().as_ref().map(|ctx| ctx.capture.clone()));
-        if let (Run::Capture { capture, .. }, Some(cap)) = (&mut self.run, cap) {
-            *capture = cap;
+        if let Some(cap) = CURRENT.with(|c| c.borrow().as_ref().map(|ctx| ctx.capture.clone())) {
+            self.capture = cap;
         }
         CURRENT.with(|c| *c.borrow_mut() = None);
     }
@@ -1502,109 +1206,42 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     let mailbox = Mailbox::new();
     crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
 
-    // Decide execution mode (ADR-100 §8.3). Under `BROOD_STATE_CAPTURE` a VM-eligible
-    // 0-arg body runs in **capture mode** — no coroutine, the worker drives `vm_run_bc`
-    // directly, so the process is migratable across workers (§7). Everything else (the
-    // flag off, or a body that defers to the tree-walker) stays on a coroutine, which
-    // yields its native stack at `receive`/preempt (§8.1 option a). Eligibility is
-    // resolved on the parent heap; `f` is a shared-runtime handle valid in the child.
-    let run = if state_capture_enabled() && eval::compile::process_body_vm_eligible(heap, f) {
-        let mut child = Heap::with_regions(Arc::clone(&prelude), Arc::clone(&runtime));
-        child.set_global(EnvId::GLOBAL);
-        Run::Capture { heap: child, body: f, resume: None, capture: inherited_capture }
-    } else {
-        Run::Coro(build_coro(pid, Arc::clone(&mailbox), prelude, runtime, f, inherited_capture))
-    };
+    // State capture is the only engine now (ADR-100 §8.4 step 4 — corosensei removed):
+    // the worker drives `vm_run_bc` directly, so a paused process is relocatable heap
+    // data (migratable, no native stack). A VM-eligible body captures + migrates; a body
+    // that defers to the tree-walker (vanishingly rare) runs tree-walked on the worker
+    // with blocking `receive`s (`run_process_body`). `f` is a shared-runtime handle valid
+    // in the child heap (same `runtime` Arc).
+    let mut child = Heap::with_regions(prelude, runtime);
+    child.set_global(EnvId::GLOBAL);
 
     ensure_workers();
     let worker_id = assign_worker();
-    enqueue(Box::new(Process { pid, mailbox, worker_id, fresh: true, run }));
+    enqueue(Box::new(Process {
+        pid,
+        mailbox,
+        worker_id,
+        heap: child,
+        body: f,
+        resume: None,
+        capture: inherited_capture,
+    }));
     Ok(pid)
 }
 
-/// Build the corosensei coroutine that runs a green process's body (the path used when
-/// `BROOD_STATE_CAPTURE` is off, or for a tree-walked body). Establishes the process
-/// `Ctx`, builds its heap on the coroutine's own stack, runs the body, and records the
-/// exit reason for `run_one`.
-fn build_coro(
-    pid: u64,
-    coro_mailbox: Arc<Mailbox>,
-    prelude: Arc<crate::core::heap::SharedCode>,
-    runtime: Arc<crate::core::heap::RuntimeCode>,
-    f: Value,
-    inherited_capture: Vec<Arc<Mutex<String>>>,
-) -> Coro {
-    // SAFETY: `DefaultStack::new` rejects only an unreasonable size; our
-    // constant is well within `usize` and the OS' anonymous-mmap limit.
-    // The expect message names the constant so the failure is debuggable.
-    let stack = DefaultStack::new(CORO_STACK_BYTES).expect("DefaultStack::new(CORO_STACK_BYTES)");
-    Coroutine::with_stack(stack, move |yielder: &Yielder0, _input: ()| {
-        // Establish this process's context so `receive`/`self` can find it.
-        CURRENT.with(|c| {
-            *c.borrow_mut() = Some(Ctx {
-                pid,
-                mailbox: Arc::clone(&coro_mailbox),
-                yielder: Some(yielder as *const Yielder0),
-                capture: inherited_capture,
-            });
-        });
-        // Wipe the worker's residual GC-block depth and stack base — a previous
-        // coroutine on this worker may have left them nonzero. Our depth starts
-        // fresh at 0 (incremented by the eval guard below), and our stack base is
-        // re-established by this coroutine's first `eval` (it runs on our own
-        // freshly-allocated coroutine stack, not the worker's).
-        gc_block_set(0);
-        stack_base_set(0);
-        macro_block_set(0);
-        let mut heap = Heap::with_regions(prelude, runtime);
-        heap.set_global(EnvId::GLOBAL);
-        // Run the process body. Its memory stays bounded with no help from the
-        // author: the body runs at the depth-1 eval safepoint where Stage B's
-        // automatic copying GC fires (ADR-055), so a long-running tail / receive
-        // loop reclaims its per-iteration garbage. (Pre-ADR-055 a `(hibernate)`
-        // sentinel was caught here and flushed the arena manually; automatic GC
-        // made it redundant and the primitive was removed — docs/memory-review.md.)
-        //
-        // Route through the VM when enabled (ADR-076): `eval::apply` is the
-        // tree-walk entry, so without this a green process ran its whole body
-        // tree-walked even under `BROOD_VM=1` — ~4–5× slower than the same code at
-        // top level (which goes through the VM). `apply_value` runs a VM-eligible
-        // body on the bytecode engine and falls back to `eval::apply` otherwise.
-        let body = if eval::compile::vm_enabled() {
-            eval::compile::apply_value(&mut heap, f, &[], EnvId::GLOBAL)
-        } else {
-            eval::apply(&mut heap, f, &[], EnvId::GLOBAL)
-        };
-        let reason = match body {
-            Ok(_) => Message::Keyword(value::intern(pk::NORMAL)),
-            Err(e) => {
-                eprintln!("process {} died: {}", proc_descr(pid), e.located());
-                Message::Vector(vec![
-                    Message::Keyword(value::intern(pk::ERROR)),
-                    Message::Str(e.to_string()),
-                ])
-            }
-        };
-        EXIT_REASON.with(|r| *r.borrow_mut() = Some(reason));
-        CURRENT.with(|c| *c.borrow_mut() = None);
-    })
-}
 
 /// `(self)` — this process's pid.
 pub fn self_pid() -> u64 {
     ensure_ctx().pid
 }
 
-/// Are we currently running inside a **green** (spawned) process — as opposed
-/// to the *root* thread (the REPL / file runner / MCP dispatcher)? True for a
-/// coroutine-mode process (`CURRENT` has a yielder) or a capture-mode one
-/// (no yielder, but [`in_capture_run`] is set). Used by the eval-time `unbound`
-/// raise to attach a scheduler-race hint (the under-load failure mode
+/// Are we currently running inside a **green** (spawned) process — as opposed to the
+/// *root* thread (the REPL / file runner / MCP dispatcher)? True when [`in_capture_run`]
+/// is set (the worker is driving a process body). Used by the eval-time `unbound` raise
+/// to attach a scheduler-race hint (the under-load failure mode
 /// `docs/claude-demo-findings.md` flagged — concurrent prelude lookups racing).
-/// Never panics; returns `false` if `CURRENT` is unset.
 pub fn in_green_process() -> bool {
     in_capture_run()
-        || CURRENT.with(|c| c.borrow().as_ref().map(|ctx| ctx.yielder.is_some()).unwrap_or(false))
 }
 
 /// Wrap a local process id in a [`Value::Pid`] tagged with this runtime's node
@@ -1617,9 +1254,9 @@ pub fn pid_value(id: u64) -> Value {
     }
 }
 
-/// The current process's context. A coroutine sets this itself; the first time a
-/// *root* thread (the REPL / file runner) uses `self`/`receive`, register it as a
-/// blocking-mailbox process so it can participate in message passing.
+/// The current process's context. A green process has it installed by `run_one` each
+/// quantum; the first time a *root* thread (the REPL / file runner) uses `self`/`receive`,
+/// register it as a blocking-mailbox process so it can participate in message passing.
 pub(super) fn ensure_ctx() -> Ctx {
     CURRENT.with(|c| {
         if let Some(ctx) = c.borrow().as_ref() {
@@ -1628,12 +1265,7 @@ pub(super) fn ensure_ctx() -> Ctx {
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let mailbox = Mailbox::new();
         crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
-        let ctx = Ctx {
-            pid,
-            mailbox,
-            yielder: None,
-            capture: Vec::new(),
-        };
+        let ctx = Ctx { pid, mailbox, capture: Vec::new() };
         *c.borrow_mut() = Some(ctx.clone());
         ctx
     })

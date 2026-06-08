@@ -173,13 +173,13 @@ pub fn parse_jobs_args(prog: &str, args: Vec<String>) -> (Vec<String>, Option<us
     (files, max_parallel)
 }
 
-/// Run `f` on a freshly-spawned thread sized to `process::CORO_STACK_BYTES`,
+/// Run `f` on a freshly-spawned thread sized to `process::WORKER_STACK_BYTES`,
 /// and join it. Both binaries' `main` need this: the tree-walking evaluator
 /// recurses one (heavy, in debug) Rust frame per non-tail call, and the OS
 /// default main-thread stack (~8 MiB) is too small for the stack-budget guard
-/// (ADR-043) to be *uniform* with the coroutine stacks — deep non-tail
+/// (ADR-043) to be *uniform* with the worker stacks — deep non-tail
 /// recursion on the root thread would overflow before the guard fires. Sizing
-/// the root thread to `CORO_STACK_BYTES` makes the guard behave identically on
+/// the root thread to `WORKER_STACK_BYTES` makes the guard behave identically on
 /// the root thread and inside spawned processes.
 ///
 /// `f` typically calls `std::process::exit` itself (the exit-code path), so
@@ -195,7 +195,7 @@ where
 {
     let handle = std::thread::Builder::new()
         .name(name.to_string())
-        .stack_size(crate::process::CORO_STACK_BYTES)
+        .stack_size(crate::process::WORKER_STACK_BYTES)
         .spawn(f)
         .unwrap_or_else(|e| panic!("spawn {name} thread: {e}"));
     handle

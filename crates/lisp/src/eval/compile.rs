@@ -525,8 +525,8 @@ enum ChunkExit {
     /// `%receive` native (state-capture path, ADR-100 §8). `exec_chunk` rewound `ip`
     /// so re-entry re-runs the suspending `Inst::Call`, leaving the callee + args on
     /// the operand stack untouched; the driver ([`vm_run_bc`]) captures the whole
-    /// frame stack as a [`Suspended`] and returns it to the scheduler to park. Only
-    /// reachable under `BROOD_STATE_CAPTURE` (default off).
+    /// frame stack as a [`Suspended`] and returns it to the scheduler to park. Produced
+    /// only by a clean top-level `receive` (a native-nested one blocks the worker, §7.4).
     Suspend { deadline: Option<std::time::Instant> },
 }
 
@@ -2067,6 +2067,14 @@ fn dispatch(
                 other => Some(other),
             };
             let Some(inner) = inner else { break };
+            // A redirect back to the *same* closure is direct self-recursion
+            // (`(defn hog () (hog))`), not a thin wrapper: looping it here would spin
+            // un-preemptibly (this redirect path has no captureable safepoint). Break
+            // so it dispatches as a normal call → its VM arm, whose loop-top reduction
+            // check preempts it (ADR-100 §8.1).
+            if matches!(inner, Value::Fn(iid) if iid.0 == id.0) {
+                break;
+            }
             if !crate::eval::passthrough_redirect_ok(inner)? {
                 break;
             }
@@ -2190,8 +2198,9 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
         // the entry mark) and re-raise the `Control::Suspend` so the enclosing native
         // re-raises it untouched. The *outer* `vm_run_bc` then re-runs this native's
         // `Inst::Call` on resume — correct because the only shape that occurs has no
-        // irreversible side effect before the `receive`. With `BROOD_STATE_CAPTURE` off
-        // this is unreachable (no suspend is ever produced).
+        // irreversible side effect before the `receive`. (A native-nested receive that
+        // *would* repeat a side effect is gated off this path by `capture_top_level()`
+        // and blocks its worker instead — the §7.4 dirty carve-out.)
         VmOutcome::Suspended(s) => {
             let deadline = s.deadline;
             heap.truncate_roots(s.entry_roots);
@@ -2208,13 +2217,14 @@ fn vm_apply(heap: &mut Heap, compiled0: Arc<CompiledArm>, args: &[Value], genv0:
 }
 
 /// Run a green process's body thunk on the bytecode driver as the **top-level**
-/// state-capture run (ADR-100 §8.3) — the entry `run_one` uses in capture mode. A
-/// `None` `resume` starts the body fresh (resolving `body`'s 0-arg compiled arm); a
-/// `Some` replays a parked continuation. Unlike [`apply_value`]/[`vm_apply`], a
+/// state-capture run (ADR-100 §8.3) — the entry `run_one` uses. A `None` `resume`
+/// starts the body fresh (resolving `body`'s 0-arg compiled arm); a `Some` replays a
+/// parked continuation. Unlike [`apply_value`]/[`vm_apply`], a
 /// `Suspended`/`Preempted`/`Killed` outcome is **returned** (the scheduler parks /
 /// re-enqueues / retires it) rather than re-raised — this is the body driver, so its
-/// continuation is the process's continuation. `body` must be VM-eligible
-/// ([`process_body_vm_eligible`]); the scheduler keeps a coroutine for any that isn't.
+/// continuation is the process's continuation. A body with a compiled 0-arg arm runs on
+/// the capture driver; one without (vanishingly rare) tree-walks on the worker thread
+/// and its `receive`s block (the §7.4 dirty carve-out).
 pub(crate) fn run_process_body(
     heap: &mut Heap,
     body: Value,
@@ -2227,27 +2237,23 @@ pub(crate) fn run_process_body(
             let arm = s.cur.arm.clone();
             vm_run_bc(heap, arm, &[], EnvId::GLOBAL, Some(s), true)
         }
-        // Fresh: resolve the 0-arg body arm and run it as the top-level driver.
-        None => {
-            let id = match body {
-                Value::Fn(id) => id,
-                _ => return Err(LispError::type_err("process body must be a function")),
-            };
-            let arm = compiled_arm_for(heap, id, 0)
-                .expect("capture mode is selected only for a VM-eligible body");
-            let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
-            vm_run_bc(heap, arm, &[], cenv, None, true)
-        }
+        // Fresh: run the 0-arg body. A VM-eligible body (the overwhelming case — every
+        // body in the whole suite is) runs on the capture driver, so its `receive`s
+        // capture + migrate. A body that defers to the tree-walker (no compiled 0-arg
+        // arm — vanishingly rare; zero across the suite) has no reified frame stack to
+        // capture, so it runs tree-walked **on this worker thread** and its `receive`s
+        // **block** the worker (the dirty-scheduler carve-out, §7.4); it returns Done/
+        // Err and never suspends. Either way: no coroutine.
+        None => match body {
+            Value::Fn(id) if compiled_arm_for(heap, id, 0).is_some() => {
+                let arm = compiled_arm_for(heap, id, 0).expect("just checked is_some");
+                let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                vm_run_bc(heap, arm, &[], cenv, None, true)
+            }
+            Value::Fn(_) => crate::eval::apply(heap, body, &[], EnvId::GLOBAL).map(VmOutcome::Done),
+            _ => Err(LispError::type_err("process body must be a function")),
+        },
     }
-}
-
-/// Is `f` a 0-arg thunk the bytecode driver can run end-to-end (so the scheduler can
-/// pick state-capture mode for it)? A closure whose 0-arity arm compiled to a chunk.
-/// Anything else (a non-`fn`, or a body that defers to the tree-walker — e.g. one
-/// carrying a `def`) stays on a coroutine, where `receive` yields the native stack
-/// (ADR-100 §8.1 option a: corosensei remains only for tree-walked process bodies).
-pub(crate) fn process_body_vm_eligible(heap: &Heap, f: Value) -> bool {
-    matches!(f, Value::Fn(id) if compiled_arm_for(heap, id, 0).is_some())
 }
 
 // ===================== bytecode stepping engine (ADR-100, Stage 1) =====================
@@ -2262,10 +2268,10 @@ pub(crate) fn process_body_vm_eligible(heap: &Heap, f: Value) -> bool {
 // Why this shape: the endgame (concurrency-v2.md §7) needs a process's continuation
 // to be relocatable heap data rather than a native Rust stack. Reifying the operand
 // state was already done (it lives on `Heap::roots`); this reifies the *control*
-// state (the instruction pointer) for a single arm. Later stages add `Call`/`Return`
-// as explicit frame push/pop — at which point the cross-arm call stack is data too,
-// and corosensei can go. For now this is a behaviour-preserving second engine, kept
-// bit-identical to the `Node` interpreter by the differential test.
+// state (the instruction pointer) for a single arm. Later stages added `Call`/`Return`
+// as explicit frame push/pop — so the cross-arm call stack is data too, and corosensei
+// is gone (ADR-100 §8.4). The driver stays bit-identical to the `Node` interpreter,
+// guarded by the differential test.
 
 /// One bytecode instruction. A **stack machine**: each instruction pushes/pops on
 /// the operand region of `Heap::roots` that sits just above the activation frame's
@@ -2896,9 +2902,10 @@ pub(crate) struct Suspended {
 }
 
 /// What a [`vm_run_bc`] call produced (ADR-100 §8). A real error is the `Err` of the
-/// enclosing `Result`. With `BROOD_STATE_CAPTURE` off — or for any run not driving a
-/// capture-mode green process — only `Done` is produced; the other three are the
-/// state-capture scheduler outcomes the driver reifies in place of a coroutine yield.
+/// enclosing `Result`. A **nested** run (`vm_apply`, `top_level=false`) only ever
+/// produces `Done` (it can't capture across the native boundary); the other three are
+/// the scheduler outcomes the **top-level body driver** reifies at its loop-top
+/// safepoint in place of a coroutine yield.
 pub(crate) enum VmOutcome {
     /// The body finished with this value.
     Done(Value),
@@ -2926,13 +2933,13 @@ pub(crate) enum VmOutcome {
 ///
 /// This is what makes a paused process's continuation **relocatable heap data** — the
 /// prerequisite for migrating a running process (concurrency-v2.md §7). `resume` drives
-/// the corosensei-removal migration (§8): `None` starts `arm0` fresh; `Some(s)` replays
-/// a previously [`VmOutcome::Suspended`] continuation from the `%receive` call it parked
-/// at, re-entering the loop with `s`'s frame stack (and the operand stack it left on the
-/// heap) intact — on **any** worker, no coroutine. A clean `receive` suspend returns
-/// `Ok(VmOutcome::Suspended(..))` *without unwinding* (the roots must survive for the
-/// resume); the corosensei stack still wraps this today, but the call continuation no
-/// longer lives there.
+/// state capture (§8, the engine that replaced corosensei): `None` starts `arm0` fresh;
+/// `Some(s)` replays a previously [`VmOutcome::Suspended`] continuation from the
+/// `%receive` call it parked at, re-entering the loop with `s`'s frame stack (and the
+/// operand stack it left on the heap) intact — on **any** worker, no coroutine. A clean
+/// `receive` suspend returns `Ok(VmOutcome::Suspended(..))` *without unwinding* (the roots
+/// must survive for the resume). The driver runs directly on the worker thread; the
+/// continuation lives entirely in `s`, no native stack involved.
 fn vm_run_bc(
     heap: &mut Heap,
     arm0: Arc<CompiledArm>,
@@ -3383,9 +3390,9 @@ mod tests {
     }
 
     /// A stand-in for the `%receive` native: the **first** call raises a
-    /// `Control::Suspend` (as a clean `receive` on an empty mailbox would under
-    /// `BROOD_STATE_CAPTURE`); the **second** returns a value (as it would once a
-    /// message arrived). Lets the capture→resume round-trip be tested in isolation
+    /// `Control::Suspend` (as a clean `receive` on an empty mailbox would); the
+    /// **second** returns a value (as it would once a message arrived). Lets the
+    /// capture→resume round-trip be tested in isolation
     /// from the mailbox/scheduler plumbing — the machinery under test is the driver's
     /// capture + replay, identical for any native that suspends mid-call.
     fn suspend_once_native(_args: &[Value], _env: EnvId, _heap: &mut Heap) -> LispResult {

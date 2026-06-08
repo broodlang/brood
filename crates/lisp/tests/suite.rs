@@ -16,13 +16,13 @@ fn brood_suite_passes() {
     // (see `crates/cli/src/main.rs`). The in-language suite runs its `:isolated`
     // units *on the runner thread*, and some legitimately recurse non-tail a few
     // hundred frames (heavy in a debug build); the stack-budget guard (ADR-043)
-    // is sized for a `CORO_STACK_BYTES` stack, so the cargo test-harness thread's
+    // is sized for a `WORKER_STACK_BYTES` stack, so the cargo test-harness thread's
     // small default stack would overflow before the guard could fire a clean
     // error. Sizing this thread to match makes the guard behave as it does under
     // the real binaries. The body runs entirely inside this thread.
     let handle = std::thread::Builder::new()
         .name("brood-suite".into())
-        .stack_size(brood::process::CORO_STACK_BYTES)
+        .stack_size(brood::process::WORKER_STACK_BYTES)
         .spawn(run_suite)
         .expect("spawn brood-suite thread");
     handle.join().expect("brood-suite thread panicked");

@@ -48,16 +48,17 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   the per-spawn `BROOD_J` env read (+ env lock) and the latent OOB when
   `set_max_parallel` lands after the pool starts. Regression test
   `tests/pool_resize_after_start.rs`.
-- ✅ **scheduler: fresh-only work-stealing (ADR-100)** — an idle worker steals a
-  *never-resumed* process from a backed-up peer (`try_steal`, re-pins `worker_id`;
-  first resume on the thief, no saved native stack — safe per `concurrency-v2.md`
-  §3.1a). Rebalances spawn-burst backlog that placement didn't spread; new
-  `(steal-count)` builtin. `tests/work_stealing.rs`; KI-1 bar clean plain-release.
-  ⬜ **In progress — full live-process migration (the stepping-VM endgame).** Moving
-  an *already-running* process off a hot worker (BEAM-style rebalancing) needs the
-  call continuation reified off the native stack — reify the VM's call/frame stack
-  (a `Vec<Frame>` + flat dispatch loop), which also unlocks fully-precise mid-eval
-  GC and removes corosensei. **Not** a corosensei swap. Full design/staging:
+- ✅ **scheduler: work-stealing + full live-process migration (ADR-100)** — an idle
+  worker steals **any** queued process from a backed-up peer (`try_steal`, re-homes
+  `worker_id`); `(steal-count)` builtin. Originally fresh-only (corosensei couldn't
+  resume a saved native stack cross-thread); now that the continuation is heap-captured
+  (state capture, §8.4), **any** process migrates — a woken process re-routes to the
+  least-loaded worker and resumes on a *different* thread (`(migrate-count)`), the
+  BEAM-style rebalancing corosensei's KI-1b pinning forbade. `tests/work_stealing.rs`
+  + `tests/live_migration.rs`; KI-1 bar clean plain-release. The reification that
+  unlocked this (the VM's call/frame stack as a `Vec<BcFrame>` + flat dispatch loop)
+  also gives fully-precise mid-eval GC and **removed corosensei**. **Not** a corosensei
+  swap. Full design/staging:
   `concurrency-v2.md` §7, ADR-100.
   - ✅ **Stage 1 — bytecode stepping engine scaffolding.** A compiled arm's body
     also lowers to a flat bytecode `Chunk` run by a non-recursive loop
@@ -99,7 +100,7 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     stays as the lowering source (`compile_chunk`); `exec_value`/`exec_call` survive
     only for `push_frame`'s `&optional` defaults + top-level `run`; the tree-walker
     (`BROOD_VM=0`) is the remaining fallback. Full `make test` (550) green.
-  - 🟡 **In progress — the actual migration → corosensei removal (architecture B).**
+  - ✅ **Done (2026-06-08) — the migration → corosensei removal (architecture B).**
     Replace coroutine suspension with **state capture**: `receive`-on-empty unwinds
     `vm_run_bc` carrying `(frames, cur_*, ip)` as a heap struct in the `Process`;
     re-enter on any worker; generalize stealing to *running* processes; **delete
@@ -155,10 +156,24 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
       coroutine mode**: full suite both ways = 1882/1902, the *same* 20 failures (all
       environmental — tree-sitter grammars + package `:git`), so capture adds zero; ~22%
       slower (was 6× before the deadlock fix). §6 bar holds flag on+off.
-    - ⬜ §8.4 step 3 (flip the default) + step 4: make `BROOD_STATE_CAPTURE` default on
-      (`=0` = escape hatch) — correctness proven; open question is the ~22% overhead (lands
-      before its payoff, which is step 4's corosensei deletion). Then delete corosensei +
-      generalize stealing. Flag stays **off** until the flip decision.
+    - ✅ §8.4 step 3-flip + step 4 (2026-06-08): **corosensei is gone.** Flipped the default
+      and **deleted corosensei** together — the `BROOD_STATE_CAPTURE` flag, the
+      `Run::{Coro|Capture}` split, the `corosensei` dep, all the coroutine plumbing
+      (`Suspend`/`Yielder0`/`build_coro`/`resume_coro`/`handle_coro_outcome`), and
+      `unsafe impl Send for Process` removed. State capture is the **sole** engine; `Process`
+      is plain `Send` data; `run_one` always drives `vm_run_bc` (a body with no compiled
+      0-arg arm tree-walks on the worker, its `receive`s block — §7.4 carve-out). **Stealing
+      generalised:** every process is heap-captured (no native stack), so `try_steal` takes
+      any queued process (`pop_back`), `STEALABLE` counts all queued, the `fresh` flag is
+      dropped; `CORO_STACK_BYTES` → `WORKER_STACK_BYTES`. **Regression caught + fixed:** a
+      self-recursive pass-through `(defn hog () (hog))` spun un-preemptibly — ADR-069's opt
+      redirected `hog → hog` in a loop that leaned on the (now no-op) `preempt()` to yield;
+      both redirect loops (`compile::dispatch` + `eval::eval`) now break a self-cycle and
+      fall through to the VM `SelfTail`/`Call` path, which preempts at the loop top. §6
+      plain-release KI-1 bar 10/10 + GC_STRESS; lib + differential + work-stealing +
+      live-migration + preemption green via nextest; full suite unregressed. Suite runtime
+      back to ~25 s (the +22% capture overhead is moot now that the coroutine engine + its
+      16 MiB stacks are gone). **M-scheduler (ADR-100) complete.**
 - ✅ **[perf] gc: de-dup the write-barrier `remembered` set** — repeated binds
   into one tenured frame pushed a duplicate entry each time; now one entry per
   distinct old frame. White-box regression test.
