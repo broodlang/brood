@@ -1,20 +1,22 @@
 ;; std/uuid.blsp — UUID generation. (require 'uuid)
 ;;
-;; Generates RFC 4122 version 4 (random) UUIDs using the OS CSPRNG
-;; via the `random-token` primitive.
+;; Versions: v3 (MD5 name-based), v4 (random), v5 (SHA-1 name-based),
+;;           v7 (time-ordered random, RFC 9562).
 
 (defmodule uuid
-  "UUID generation: v4 (random) and v7 (time-ordered random, RFC 9562).
+  "UUID generation: v3 (MD5), v4 (random), v5 (SHA-1), v7 (time-ordered).
 
     (require 'uuid)
-    (uuid/uuid-v4)   ;; => \"550e8400-e29b-41d4-a716-446655440000\" (example)
-    (uuid/uuid-v7)   ;; => \"018f3a4b-5c6d-7e8f-9a0b-1c2d3e4f5060\" (timestamp prefix)
-    (uuid/uuid? s)   ;; => true/false
-    (uuid/uuid-nil)  ;; => \"00000000-0000-0000-0000-000000000000\"
+    (uuid/uuid-v4)                          ;; random
+    (uuid/uuid-v7)                          ;; time-ordered random (RFC 9562)
+    (uuid/uuid-v5 uuid/ns-dns \"example.com\") ;; deterministic from a name
+    (uuid/uuid-v3 uuid/ns-url \"https://x\")  ;; same, using MD5
+    (uuid/uuid? s)                          ;; => true/false
+    (uuid/uuid-nil)                         ;; => \"00000000-0000-0000-0000-000000000000\"
 
-v7 UUIDs sort chronologically (they share a common 48-bit ms timestamp prefix),
-making them suitable for database primary keys and ordered logs. v4 UUIDs are
-fully random and give better privacy.")
+v4 and v7 are random; v7 also embeds a ms timestamp prefix for chronological
+sort order. v3 and v5 are deterministic: same namespace + name → same UUID,
+always — useful for content-based IDs and idempotent generation.")
 
 ;; ---- hex helpers ------------------------------------------------------------
 
@@ -133,3 +135,77 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
        (uuid--valid-segment? (substring s 14 18) 4)
        (uuid--valid-segment? (substring s 19 23) 4)
        (uuid--valid-segment? (substring s 24 36) 12)))
+
+;; ---- name-based UUIDs (v3 and v5) -------------------------------------------
+;;
+;; v3 uses MD5; v5 uses SHA-1. Both take a namespace UUID + a name string and
+;; produce the same UUID deterministically every time.
+;;
+;; RFC 4122 §4.3 algorithm:
+;;   1. Convert namespace UUID to 16 bytes
+;;   2. Hash: hash(namespace_bytes || name_utf8_bytes)
+;;   3. Take the first 16 bytes of the hash output
+;;   4. Set version nibble (byte 6 high nibble)
+;;   5. Set variant bits (byte 8 high 2 bits = 10)
+;;   6. Format as UUID string
+;;
+;; Standard namespace UUIDs (RFC 4122 appendix C):
+
+(def ns-dns  "6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+(def ns-url  "6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+(def ns-oid  "6ba7b812-9dad-11d1-80b4-00c04fd430c8")
+(def ns-x500 "6ba7b814-9dad-11d1-80b4-00c04fd430c8")
+
+(defn uuid--str->bytes (s)
+  "Parse a UUID string (with dashes) into a list of 16 byte ints."
+  (uuid--parse-bytes (replace s "-" "") 0 nil))
+
+(defn uuid--parse-bytes (hex i acc)
+  (if (>= i (string-length hex))
+    (reverse acc)
+    (let (hi (uuid--hex-nibble (char-at hex i))
+          lo (uuid--hex-nibble (char-at hex (+ i 1))))
+      (uuid--parse-bytes hex (+ i 2) (cons (+ (* hi 16) lo) acc)))))
+
+(defn uuid--bytes->str (bytes version-nibble)
+  "Format 16 byte ints as a UUID string, setting version nibble and variant bits."
+  (let (bv    (into [] bytes)
+        ;; Set version in byte 6: high nibble = version, low nibble kept
+        b6    (bit-or (* version-nibble 16) (bit-and (nth bv 6) 15))
+        ;; Set variant in byte 8: high 2 bits = 10, rest kept
+        b8    (bit-or 128 (bit-and (nth bv 8) 63))
+        ;; Build hex
+        hex   (fold (fn (acc i)
+                      (let (b (if (= i 6) b6 (if (= i 8) b8 (nth bv i))))
+                        (str acc (char-at uuid--hex-digits (quot b 16))
+                                 (char-at uuid--hex-digits (rem b 16)))))
+                    ""
+                    (range 16)))
+    (str (substring hex 0 8)  "-"
+         (substring hex 8 12) "-"
+         (substring hex 12 16) "-"
+         (substring hex 16 20) "-"
+         (substring hex 20 32))))
+
+(defn uuid--name-based (ns-uuid name hash-fn version)
+  "Generic name-based UUID: hash(namespace_bytes || name_bytes), set version."
+  (let (ns-bytes  (uuid--str->bytes ns-uuid)
+        name-bytes (seq (string->utf8-bytes name))
+        input      (append (into [] ns-bytes) (into [] name-bytes))
+        digest-hex (hash-fn input)
+        ;; Take first 16 bytes (32 hex chars) of the hash output
+        digest-16  (uuid--parse-bytes (substring digest-hex 0 32) 0 nil))
+    (uuid--bytes->str digest-16 version)))
+
+(defn uuid-v3 (ns-uuid name)
+  "Generate a name-based UUID v3 (MD5). Given the same `ns-uuid` and `name`,
+always returns the same UUID. Use `uuid/ns-dns`, `uuid/ns-url`, `uuid/ns-oid`,
+or `uuid/ns-x500` as the namespace, or supply your own UUID string."
+  (uuid--name-based ns-uuid name %md5-bytes 3))
+
+(defn uuid-v5 (ns-uuid name)
+  "Generate a name-based UUID v5 (SHA-1). Given the same `ns-uuid` and `name`,
+always returns the same UUID. Prefer v5 over v3 (SHA-1 > MD5). Use
+`uuid/ns-dns`, `uuid/ns-url`, `uuid/ns-oid`, or `uuid/ns-x500` as the
+namespace, or supply your own UUID string."
+  (uuid--name-based ns-uuid name %sha1-bytes 5))
