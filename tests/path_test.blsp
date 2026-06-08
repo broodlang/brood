@@ -1,0 +1,114 @@
+(defmodule path-test (:use test))
+(require 'path)
+
+(describe "path/basename"
+  (test "simple file"
+    (assert= "file.txt" (path/basename "/usr/local/file.txt")))
+  (test "no directory"
+    (assert= "file.txt" (path/basename "file.txt")))
+  (test "trailing slash ignored"
+    (assert= "bin" (path/basename "/usr/local/bin/")))
+  (test "root"
+    (assert= "/" (path/basename "/")))
+  (test "nested"
+    (assert= "c" (path/basename "a/b/c"))))
+
+(describe "path/dirname"
+  (test "simple"
+    (assert= "/usr/local" (path/dirname "/usr/local/file.txt")))
+  (test "top-level"
+    (assert= "/" (path/dirname "/file.txt")))
+  (test "bare name gives ."
+    (assert= "." (path/dirname "file.txt")))
+  (test "trailing slash"
+    (assert= "/usr" (path/dirname "/usr/bin/")))
+  (test "nested"
+    (assert= "a/b" (path/dirname "a/b/c"))))
+
+(describe "path/extension"
+  (test "simple extension"
+    (assert= ".txt" (path/extension "file.txt")))
+  (test "compound extension takes last"
+    (assert= ".gz" (path/extension "report.tar.gz")))
+  (test "no extension"
+    (assert= "" (path/extension "Makefile")))
+  (test "hidden file no extension"
+    (assert= "" (path/extension ".gitignore")))
+  (test "hidden file with extension"
+    (assert= ".toml" (path/extension ".cargo.toml")))
+  (test "path with directory"
+    (assert= ".rs" (path/extension "/src/main.rs"))))
+
+(describe "path/stem"
+  (test "simple"
+    (assert= "file" (path/stem "file.txt")))
+  (test "compound — keeps all but last extension"
+    (assert= "report.tar" (path/stem "report.tar.gz")))
+  (test "no extension"
+    (assert= "Makefile" (path/stem "Makefile")))
+  (test "hidden file"
+    (assert= ".gitignore" (path/stem ".gitignore"))))
+
+(describe "path/join"
+  (test "two absolute parts"
+    (assert= "/usr/local" (path/join "/usr" "local")))
+  (test "absolute resets"
+    (assert= "/b/c" (path/join "a" "/b" "c")))
+  (test "trailing slash in segment"
+    (assert= "/usr/local/bin" (path/join "/usr/local" "bin")))
+  (test "no args gives ."
+    (assert= "." (path/join)))
+  (test "single absolute"
+    (assert= "/" (path/join "/")))
+  (test "relative components"
+    (assert= "a/b/c" (path/join "a" "b" "c"))))
+
+(describe "path/split"
+  (test "absolute path"
+    (assert= '("/" "usr" "local" "bin") (path/split "/usr/local/bin")))
+  (test "relative path"
+    (assert= '("a" "b" "c") (path/split "a/b/c")))
+  (test "double slash collapsed"
+    (assert= '("/" "usr" "bin") (path/split "/usr//bin")))
+  (test "single slash"
+    (assert= '("/") (path/split "/"))))
+
+(describe "path/normalize"
+  (test "removes dot"
+    (assert= "a/c" (path/normalize "a/./c")))
+  (test "removes double-dot"
+    (assert= "a/c" (path/normalize "a/b/../c")))
+  (test "absolute with .."
+    (assert= "/a/c" (path/normalize "/a/b/../c")))
+  (test "multiple .."
+    (assert= "c" (path/normalize "a/b/../../c")))
+  (test "already clean"
+    (assert= "a/b/c" (path/normalize "a/b/c")))
+  (test "empty becomes ."
+    (assert= "." (path/normalize "a/.."))))
+
+(describe "path/relative-to"
+  (test "child path"
+    (assert= "c" (path/relative-to "/a/b/c" "/a/b")))
+  (test "same path"
+    (assert= "." (path/relative-to "/a/b" "/a/b")))
+  (test "sibling"
+    (assert= "../d" (path/relative-to "/a/d" "/a/b")))
+  (test "deeper sibling"
+    (assert= "../../x/y" (path/relative-to "/a/x/y" "/a/b/c"))))
+
+(describe "path/absolute?"
+  (test "absolute"
+    (is (path/absolute? "/usr/local")))
+  (test "relative"
+    (is (not (path/absolute? "usr/local"))))
+  (test "dot"
+    (is (not (path/absolute? ".")))))
+
+(describe "path/with-extension"
+  (test "replace extension"
+    (assert= "foo.md" (path/with-extension "foo.txt" ".md")))
+  (test "remove extension"
+    (assert= "foo" (path/with-extension "foo.txt" "")))
+  (test "add extension"
+    (assert= "Makefile.bak" (path/with-extension "Makefile" ".bak"))))

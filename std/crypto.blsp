@@ -1,0 +1,107 @@
+;; std/crypto.blsp — symmetric encryption, key derivation, secure random bytes.
+;; (require 'crypto)
+;;
+;; All operations work with byte vectors (lists or vectors of ints 0–255).
+;; Use `encoding/base64-encode` / `encoding/hex-encode` to serialise keys/nonces.
+
+(defmodule crypto
+  "Authenticated encryption (ChaCha20-Poly1305), PBKDF2 key derivation, and
+cryptographically secure random bytes.
+
+    (require 'crypto)
+    (require 'encoding)
+
+    ;; generate a random 32-byte key and 12-byte nonce
+    (def key   (crypto/random-bytes 32))
+    (def nonce (crypto/random-bytes 12))
+
+    ;; encrypt/decrypt
+    (def ct (crypto/encrypt key nonce (crypto/str->bytes \"hello\")))
+    (def pt (crypto/decrypt key nonce ct))
+    (crypto/bytes->str pt)   ;; => \"hello\"
+
+    ;; derive a key from a password + salt
+    (def salt   (crypto/random-bytes 16))
+    (def dk     (crypto/pbkdf2 \"my-password\" salt 600000 32))
+
+    ;; constant-time equality check (for HMACs/tags)
+    (crypto/secure=? tag1 tag2)")
+
+;; ---- random bytes -----------------------------------------------------------
+
+(defn random-bytes (n)
+  "Return `n` cryptographically secure random bytes as a vector of ints 0–255."
+  (%random-bytes n))
+
+(defn random-key ()
+  "Generate a random 32-byte key suitable for ChaCha20-Poly1305."
+  (%random-bytes 32))
+
+(defn random-nonce ()
+  "Generate a random 12-byte nonce suitable for ChaCha20-Poly1305."
+  (%random-bytes 12))
+
+;; ---- byte/string conversion -------------------------------------------------
+
+(defn str->bytes (s)
+  "Encode string `s` as a vector of UTF-8 byte ints."
+  (into [] (string->utf8-bytes s)))
+
+(defn bytes->str (bytes)
+  "Decode a vector of UTF-8 byte ints to a string."
+  (utf8-bytes->string bytes))
+
+;; ---- ChaCha20-Poly1305 AEAD -------------------------------------------------
+;;
+;; ChaCha20-Poly1305 is an authenticated encryption with additional data (AEAD)
+;; cipher. It provides both confidentiality and integrity. A failed decryption
+;; means the ciphertext was tampered with or the wrong key/nonce was used.
+;;
+;; Key: exactly 32 bytes. Nonce: exactly 12 bytes.
+;; Ciphertext length = plaintext length + 16 (Poly1305 authentication tag).
+;; NEVER reuse the same (key, nonce) pair — use a fresh random nonce each time.
+
+(defn encrypt (key nonce plaintext-bytes)
+  "Encrypt `plaintext-bytes` with ChaCha20-Poly1305. `key` must be 32 bytes;
+`nonce` must be 12 bytes. Returns ciphertext as a byte vector (plaintext +
+16-byte auth tag). Never reuse a (key, nonce) pair."
+  (%chacha20-encrypt key nonce plaintext-bytes))
+
+(defn decrypt (key nonce ciphertext-bytes)
+  "Decrypt `ciphertext-bytes` with ChaCha20-Poly1305. Returns the plaintext
+byte vector on success, or `:error` if authentication fails (wrong key/nonce
+or tampered ciphertext)."
+  (%chacha20-decrypt key nonce ciphertext-bytes))
+
+(defn encrypt-str (key nonce s)
+  "Encrypt the UTF-8 bytes of string `s`. Returns ciphertext byte vector."
+  (encrypt key nonce (str->bytes s)))
+
+(defn decrypt-str (key nonce ciphertext-bytes)
+  "Decrypt to a string. Returns the decoded string, or `:error` on failure."
+  (let (pt (decrypt key nonce ciphertext-bytes))
+    (if (= pt :error) :error (bytes->str pt))))
+
+;; ---- PBKDF2-HMAC-SHA256 key derivation --------------------------------------
+;;
+;; Derive a fixed-length key from a password + random salt. The salt must be
+;; stored alongside the derived key (it's not secret). Use iterations ≥ 600,000
+;; for password storage (NIST SP 800-132 2023 recommendation).
+
+(defn pbkdf2 (password salt iterations key-len)
+  "Derive a `key-len`-byte key from `password` (string) and `salt` (string or
+byte vector) using PBKDF2-HMAC-SHA256. Higher `iterations` = slower brute force.
+Use ≥ 600,000 iterations for password storage."
+  (let (salt-str (if (string? salt) salt (bytes->str salt)))
+    (%pbkdf2-sha256 password salt-str iterations key-len)))
+
+;; ---- utilities --------------------------------------------------------------
+
+(defn secure=? (a b)
+  "Constant-time equality check for byte vectors (prevents timing attacks).
+Returns true if `a` and `b` are identical, false otherwise."
+  (and (= (count a) (count b))
+       (= 0 (fold (fn (acc pair)
+                    (bit-or acc (bit-xor (first pair) (second pair))))
+                  0
+                  (zip (seq a) (seq b))))))

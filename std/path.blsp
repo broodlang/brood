@@ -1,0 +1,179 @@
+;; std/path.blsp — path string manipulation. (require 'path)
+
+(defmodule path
+  "Path string manipulation: join, split, basename, dirname, extension, stem, normalize.
+
+    (require 'path)
+    (path/join \"/usr\" \"local\" \"bin\")   ;; => \"/usr/local/bin\"
+    (path/basename \"/usr/local/bin/ls\")    ;; => \"ls\"
+    (path/dirname \"/usr/local/bin/ls\")     ;; => \"/usr/local/bin\"
+    (path/extension \"report.tar.gz\")       ;; => \".gz\"
+    (path/stem \"report.tar.gz\")            ;; => \"report.tar\"
+    (path/split \"/usr/local\")             ;; => (\"/\" \"usr\" \"local\")
+    (path/normalize \"a/b/../c\")           ;; => \"a/c\"
+    (path/relative-to \"/a/b/c\" \"/a/b\") ;; => \"c\"
+    (path/with-extension \"foo.txt\" \".md\") ;; => \"foo.md\"")
+
+;; ---- internal helpers -------------------------------------------------------
+
+(defn path--last-sep (s i)
+  (if (< i 0) -1
+    (if (= (char-at s i) "/") i
+      (path--last-sep s (- i 1)))))
+
+(defn path--last-dot (s i)
+  (if (< i 0) -1
+    (if (= (char-at s i) ".") i
+      (path--last-dot s (- i 1)))))
+
+;; Join a non-empty list of components in order, inserting / between them.
+(defn path--glue (head rest-parts)
+  (if (nil? rest-parts)
+    head
+    (let (p (first rest-parts)
+          sep (if (or (ends-with? head "/") (starts-with? p "/")) "" "/"))
+      (path--glue (str head sep p) (rest rest-parts)))))
+
+;; ---- components -------------------------------------------------------------
+
+(defn basename (p)
+  "The last path component — everything after the final /. A trailing slash is
+ignored so `(basename \"/usr/bin/\")` returns `\"bin\"`. `(basename \"/\")` returns `\"/\"`."
+  (let (n (string-length p)
+        e (if (and (> n 1) (= (char-at p (- n 1)) "/")) (- n 1) n)
+        i (path--last-sep p (- e 1)))
+    (cond
+      (< i 0)  (substring p 0 e)
+      (= e 1)  "/"          ;; path is exactly "/"
+      else     (substring p (+ i 1) e))))
+
+(defn dirname (p)
+  "The directory part of `p` — everything up to but not including the final /.
+Returns `\".\"` for a bare name, `\"/\"` for the root."
+  (let (n (string-length p)
+        e (if (and (> n 1) (= (char-at p (- n 1)) "/")) (- n 1) n)
+        i (path--last-sep p (- e 1)))
+    (cond
+      (< i 0) "."
+      (= i 0) "/"
+      else (substring p 0 i))))
+
+(defn extension (p)
+  "The extension of `p`'s basename including the dot (e.g. `\".txt\"`), or `\"\"`."
+  (let (b (basename p)
+        n (string-length b)
+        i (path--last-dot b (- n 1)))
+    (if (<= i 0) "" (substring b i n))))
+
+(defn stem (p)
+  "The basename of `p` without its extension (`\"foo.tar.gz\"` → `\"foo.tar\"`)."
+  (let (b (basename p)
+        n (string-length b)
+        i (path--last-dot b (- n 1)))
+    (if (<= i 0) b (substring b 0 i))))
+
+(defn with-extension (p ext)
+  "Return `p` with its extension replaced by `ext` (which should include the dot,
+or be `\"\"` to remove the extension entirely)."
+  (let (d (dirname p) base (str (stem p) ext))
+    (if (= d ".") base (str d "/" base))))
+
+;; ---- join -------------------------------------------------------------------
+
+(defn join (& parts)
+  "Join path components with `/`. An absolute component (starting with `/`)
+resets the path from that point, discarding everything before it. Returns `\".\"` for
+an empty argument list."
+  (join--loop (seq parts) nil))
+
+;; acc is built in reverse (cons prepends); reverse before gluing.
+(defn join--loop (parts acc)
+  (if (nil? parts)
+    (if (nil? acc) "."
+      (let (rev (reverse acc))
+        (path--glue (first rev) (rest rev))))
+    (let (p (first parts))
+      (cond
+        (= p "") (join--loop (rest parts) acc)
+        (and (> (string-length p) 0) (= (char-at p 0) "/"))
+          (join--loop (rest parts) (list p))
+        else
+          (join--loop (rest parts) (cons p acc))))))
+
+;; ---- split ------------------------------------------------------------------
+
+(defn split (p)
+  "Split `p` into a list of components, dropping empty segments from
+redundant slashes. An absolute path starts with the `\"/\"` component."
+  (let (parts (filter (fn (s) (not (= s ""))) (string-split p "/")))
+    (if (starts-with? p "/") (cons "/" parts) parts)))
+
+;; ---- normalize --------------------------------------------------------------
+
+(defn normalize (p)
+  "Resolve `.` and `..` components in `p`. Does not touch the filesystem.
+`\"a/b/../c\"` → `\"a/c\"`;  `\"/a/b/../../c\"` → `\"/c\"`."
+  (let (absolute (starts-with? p "/")
+        parts    (filter (fn (s) (not (or (= s "") (= s ".")))) (string-split p "/"))
+        resolved (normalize--reduce parts nil))
+    (cond
+      (nil? resolved) (if absolute "/" ".")
+      absolute        (str "/" (path--glue (first resolved) (rest resolved)))
+      else            (path--glue (first resolved) (rest resolved)))))
+
+(defn normalize--reduce (parts stack)
+  (if (nil? parts) (reverse stack)
+    (let (p (first parts))
+      (cond
+        (and (= p "..") (not (nil? stack)) (not (= (first stack) "..")))
+          (normalize--reduce (rest parts) (rest stack))
+        else
+          (normalize--reduce (rest parts) (cons p stack))))))
+
+;; ---- relative-to ------------------------------------------------------------
+
+(defn relative-to (p base)
+  "Express absolute path `p` relative to absolute `base`. Returns `p` unchanged
+if the two share no common prefix."
+  (let (p-parts    (filter (fn (s) (not (= s ""))) (string-split p "/"))
+        base-parts (filter (fn (s) (not (= s ""))) (string-split base "/")))
+    (relative--strip p-parts base-parts)))
+
+(defn relative--strip (p-parts base-parts)
+  (cond
+    ;; consumed all of base — what remains of p is the relative path
+    (nil? base-parts)
+      (if (nil? p-parts) "."
+        (path--glue (first p-parts) (rest p-parts)))
+    ;; consumed all of p — need to go up for each remaining base component
+    (nil? p-parts)
+      (path--glue ".." (map (fn (_) "..") (rest base-parts)))
+    ;; common prefix: keep stripping
+    (= (first p-parts) (first base-parts))
+      (relative--strip (rest p-parts) (rest base-parts))
+    ;; diverged: one `..` per remaining base component, then p
+    else
+      (let (ups (map (fn (_) "..") base-parts))
+        (path--glue (first ups) (append (rest ups) p-parts)))))
+
+;; ---- predicates -------------------------------------------------------------
+
+(defn absolute? (p)
+  "True if `p` is an absolute path (starts with `/`)."
+  (starts-with? p "/"))
+
+(defn relative? (p)
+  "True if `p` is a relative path (does not start with `/`)."
+  (not (starts-with? p "/")))
+
+(defn exists? (p)
+  "True if `p` exists (file or directory)."
+  (file-exists? p))
+
+(defn is-file? (p)
+  "True if `p` exists and is a regular file (not a directory)."
+  (and (file-exists? p) (not (dir? p))))
+
+(defn is-dir? (p)
+  "True if `p` exists and is a directory."
+  (dir? p))

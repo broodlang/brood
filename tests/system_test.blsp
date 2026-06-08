@@ -1,0 +1,73 @@
+(defmodule system-test (:use test))
+(require 'system)
+
+(describe "system/env"
+  (test "PATH is set"
+    (is (string? (system/env "PATH"))))
+  (test "missing var returns nil"
+    (is (nil? (system/env "BROOD_SURELY_MISSING_VAR_XYZ"))))
+  (test "HOME is a string"
+    (is (string? (system/env "HOME")))))
+
+(describe "system/env-all"
+  (test "returns a map"
+    (is (map? (system/env-all))))
+  (test "contains PATH"
+    (is (contains? (system/env-all) "PATH")))
+  (test "values are strings"
+    (is (string? (get (system/env-all) "PATH")))))
+
+(describe "system/argv"
+  (test "returns a vector"
+    (is (vector? (system/argv))))
+  (test "argv has at least one element"
+    (is (>= (count (system/argv)) 1)))
+  (test "argv[0] is a string"
+    (is (string? (nth (system/argv) 0)))))
+
+(describe "system/os-type"
+  (test "returns a keyword"
+    (is (keyword? (system/os-type))))
+  (test "is one of the known platforms"
+    (is (member? (system/os-type) [:linux :macos :windows :unknown]))))
+
+(describe "system/cmd"
+  (test "echo returns stdout"
+    (let (r (system/cmd "echo" ["hello"]))
+      (assert= "hello" (trim (get r :stdout)))))
+  (test "exit code 0 for success"
+    (let (r (system/cmd "true"))
+      (assert= 0 (get r :exit))))
+  (test "exit code 1 for failure"
+    (let (r (system/cmd "false"))
+      (assert= 1 (get r :exit))))
+  (test "stderr is captured"
+    (let (r (system/cmd "sh" ["-c" "echo err >&2"]))
+      (assert= "err" (trim (get r :stderr)))))
+  (test "result has :stdout :stderr :exit"
+    (let (r (system/cmd "true"))
+      (is (contains? r :stdout))
+      (is (contains? r :stderr))
+      (is (contains? r :exit)))))
+
+(describe "system/cmd-ok?"
+  (test "true for exit 0"
+    (is (system/cmd-ok? (system/cmd "true"))))
+  (test "false for exit 1"
+    (is (not (system/cmd-ok? (system/cmd "false"))))))
+
+(describe "system/cmd-out"
+  (test "trims trailing newline"
+    (assert= "hello" (system/cmd-out (system/cmd "echo" ["hello"])))))
+
+(describe "system/working-dir"
+  (test "returns a string"
+    (is (string? (system/working-dir))))
+  (test "is an absolute path"
+    (is (starts-with? (system/working-dir) "/"))))
+
+(describe "system/host"
+  (test "returns a string"
+    (is (string? (system/host))))
+  (test "is non-empty"
+    (is (> (string-length (system/host)) 0))))

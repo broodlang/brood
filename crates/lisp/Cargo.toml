@@ -172,3 +172,7 @@ harness = false
 [[bench]]
 name = "library"
 harness = false
+
+[[bench]]
+name = "stdlib"
+harness = false
