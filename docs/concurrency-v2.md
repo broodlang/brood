@@ -519,11 +519,20 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
    re-entered receive doesn't reset `after`. `tests/live_migration.rs` (§7.6) is green
    under GC-stress + heap-verify; the §6 plain-release KI-1 bar holds **flag on and off**.
 3. Flip the default; full `make test` + the §6 plain-release KI-1 bar green.
-   **Gated on the §8.1 native-nested-receive footgun** (found in step-2 flag-on
-   bring-up): the flag-on suite hangs/fails where a `receive` nests in `%isolate` or a
-   gen-server `call` (side effects before the receive → the re-run repeats them). The
-   clean cases pass; this step is mostly *resolving that footgun* (capture through the
-   native frame, or run such a body on a coroutine), not a mere default flip.
+   - ✅ **(2026-06-08)** The §8.1 native-nested-receive footgun is **resolved** the BEAM
+     dirty-scheduler way (§7.4): a clean *top-level* `receive` captures + migrates; a
+     *native-nested* `receive` (through `%isolate`/`%try`/a HOF — uncapturable through the
+     native frame, re-run repeats side effects) **blocks its worker** instead (no capture,
+     no re-run), via `wait_for_message`'s yielder-less root branch. A `CAPTURE_TOP_LEVEL`
+     thread-local (set per `vm_run_bc` entry, restored on exit → innermost driver wins)
+     lets the `receive` gate distinguish the two. Flag-on: 1852/1859 in-language tests
+     pass; the previously-hanging files (`gen`/`concurrency`/`pids`/`link`/`exit`) pass;
+     live migration + §6 bar hold.
+   - ⬜ **Still blocking the flip:** 6 heavy **kill/monitor-of-parked-processes-at-scale**
+     tests time out flag-on (mass-kill 100 parked, 1000 monitored → `:down`, `observer`
+     process-info). Plain 1000-process fan-out is identical flag-on/off (41 ms), so the
+     hang is in the `exit`→`wake_enqueue`→`Killed`-retire→`:down` path under load, not
+     throughput — to debug next.
 4. Delete corosensei (8.3 last bullet); re-run the bar. Generalise stealing.
 
 This is the scheduler core (the KI-1 subsystem) — run it as a focused effort, not
