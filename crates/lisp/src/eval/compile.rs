@@ -519,7 +519,6 @@ enum Step {
 enum ChunkExit {
     Done(Value),
     Tail { arm: Arc<CompiledArm>, args: SmallVec<[Value; 4]>, genv: EnvId },
-    SelfTail { args: SmallVec<[Value; 4]> },
     Call { arm: Arc<CompiledArm>, args: SmallVec<[Value; 4]>, genv: EnvId },
     /// A clean `receive` on an empty mailbox raised `Control::Suspend` through the
     /// `%receive` native (state-capture path, ADR-100 §8). `exec_chunk` rewound `ip`
@@ -528,6 +527,12 @@ enum ChunkExit {
     /// frame stack as a [`Suspended`] and returns it to the scheduler to park. Produced
     /// only by a clean top-level `receive` (a native-nested one blocks the worker, §7.4).
     Suspend { deadline: Option<std::time::Instant> },
+    /// Hard `:kill` was pending at the inline `SelfCall` safepoint. The frame is already
+    /// reset (ip=0, new args in slots); the driver retires the process.
+    Killed,
+    /// Reduction budget exhausted at the inline `SelfCall` safepoint (capture mode). The
+    /// frame is already reset (ip=0, new args in slots); the driver captures as usual.
+    Preempt,
 }
 
 // ===================== compiler (form → Node) =====================
@@ -2492,11 +2497,13 @@ fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
 /// frame (TCO). A single pass to the next call/return is bounded by the chunk length.
 fn exec_chunk(
     heap: &mut Heap,
-    chunk: &Chunk,
+    arm: &CompiledArm,
     ip: &mut usize,
     base: usize,
     genv: EnvRoot,
+    capture: bool,
 ) -> Result<ChunkExit, LispError> {
+    let chunk = arm.chunk.as_ref().expect("exec_chunk: arm has no chunk");
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
         *ip += 1;
@@ -2759,6 +2766,57 @@ fn exec_chunk(
                         }
                     }
                 }
+                // Inline fast-path: IC hit for the exact same arm, same captured env, no
+                // optional/rest params, and GC is not yet due. Covers the common
+                // `(defn f (x) … (f …))` self-tail pattern (which uses `Inst::Call` via
+                // a global, unlike `letrec` self-recursion which emits `Inst::SelfCall`).
+                // This is the main speedup for loop/collatz/fib/reduce.
+                //
+                // We check the inline condition here — using borrows only — before the
+                // `match fast` below consumes `argv` and `fast`. If the check passes we
+                // reset the frame and `continue` the inner loop without ever returning to
+                // `vm_run_bc`. If it doesn't, we fall through to the normal dispatch path.
+                //
+                // GC guard: `argv` was read from roots just above, with no allocation in
+                // between, so the values are still valid. We skip the inline if GC is due
+                // so the outer loop can collect (and can't have stale off-heap SmallVec).
+                if *tail {
+                    if let Some((ref compiled, cenv)) = fast {
+                        if std::ptr::eq(compiled.as_ref(), arm)
+                            && arm.noptional == 0
+                            && arm.rest_slot.is_none()
+                            && cur_env == cenv
+                            && !heap.gc_due()
+                        {
+                            crate::perf_bump!(self_tail);
+                            heap.truncate_roots(base + arm.nslots);
+                            for i in 0..arm.nslots {
+                                heap.set_root_at(base + i, Value::Nil);
+                            }
+                            for i in 0..arm.nrequired {
+                                heap.set_root_at(base + i, argv[i]);
+                            }
+                            *ip = 0;
+                            if let Some(used) = crate::core::alloc::soft_limit_hit() {
+                                return Err(crate::eval::memory_limit_error(used));
+                            }
+                            if capture {
+                                if crate::process::capture_hard_kill_pending() {
+                                    return Ok(ChunkExit::Killed);
+                                }
+                                if crate::process::tick_capture() {
+                                    return Ok(ChunkExit::Preempt);
+                                }
+                            } else {
+                                crate::process::tick();
+                            }
+                            if crate::process::deadline_exceeded() {
+                                return Err(crate::eval::deadline_error());
+                            }
+                            continue;
+                        }
+                    }
+                }
                 // IC hit with a VM arm → skip `dispatch` entirely; else resolve with
                 // `tail = true` so a VM-closure callee comes back as `Step::Tail` (the
                 // resolved arm + args + env, **un-run**) and a native / tree-walked
@@ -2811,15 +2869,52 @@ fn exec_chunk(
                 }
             }
             Inst::SelfCall { argc } => {
-                // Direct `letrec` self-tail-call (always tail position, emitted last):
-                // args are already on the operand stack; hand the driver a `SelfTail`
-                // to reset THIS frame in place. Mirrors `Node::SelfCall`.
+                crate::perf_bump!(self_tail);
+                // Direct `letrec` self-tail-call: inline the frame reset and all
+                // safepoints so we stay inside this `while` loop instead of
+                // round-tripping through `vm_run_bc` on every iteration. Critical for
+                // tight tail-recursive loops (loop/collatz/fib): eliminates one Rust
+                // call-return and a `SmallVec` construction per iteration.
+                //
+                // Safety ordering: GC runs first (args still rooted on the operand
+                // stack), then args are read (relocated values used), then the frame is
+                // reset. No collection fires after the args leave the root stack.
+                if !crate::process::macro_block_active() && heap.gc_due() {
+                    heap.collect(&mut [], &mut []);
+                }
                 let n = heap.roots_len();
                 let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(*argc);
                 for k in 0..*argc {
                     argv.push(heap.root_at(n - argc + k));
                 }
-                return Ok(ChunkExit::SelfTail { args: argv });
+                // Reset frame in place (same as the old outer-loop SelfTail handler).
+                heap.truncate_roots(base + arm.nslots);
+                for i in 0..arm.nslots {
+                    heap.set_root_at(base + i, Value::Nil);
+                }
+                for i in 0..arm.nrequired {
+                    heap.set_root_at(base + i, argv[i]);
+                }
+                *ip = 0;
+                if let Some(used) = crate::core::alloc::soft_limit_hit() {
+                    return Err(crate::eval::memory_limit_error(used));
+                }
+                if capture {
+                    if crate::process::capture_hard_kill_pending() {
+                        return Ok(ChunkExit::Killed);
+                    }
+                    if crate::process::tick_capture() {
+                        // Frame already reset; driver captures the continuation as-is.
+                        return Ok(ChunkExit::Preempt);
+                    }
+                } else {
+                    crate::process::tick();
+                }
+                if crate::process::deadline_exceeded() {
+                    return Err(crate::eval::deadline_error());
+                }
+                // Stay in the inner dispatch loop — no function-call round-trip.
+                continue;
             }
             Inst::MakeClosure { fn_rest, names, self_name } => {
                 // Mirrors `exec_value`'s `Node::MakeClosure`. The capture values are on
@@ -3079,8 +3174,7 @@ fn vm_run_bc(
             return Err(crate::eval::deadline_error());
         }
 
-        let chunk = cur_arm.chunk.as_ref().expect("vm_run_bc runs only chunked arms");
-        match exec_chunk(heap, chunk, &mut cur_ip, cur_base, cur_env) {
+        match exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture) {
             Ok(ChunkExit::Done(v)) => {
                 // Retire the current frame, then either finish or hand `v` to the caller.
                 heap.truncate_roots(cur_base);
@@ -3153,18 +3247,29 @@ fn vm_run_bc(
                 cur_arm = arm;
                 cur_ip = 0;
             }
-            Ok(ChunkExit::SelfTail { args }) => {
-                crate::perf_bump!(self_tail);
-                // Same arm, same env: reset the frame in place (re-nil the slots, rebind
-                // the required params). Mirrors the `Node` trampoline's `SelfTail`.
-                heap.truncate_roots(cur_base + cur_arm.nslots);
-                for i in 0..cur_arm.nslots {
-                    heap.set_root_at(cur_base + i, Value::Nil);
-                }
-                for i in 0..cur_arm.nrequired {
-                    heap.set_root_at(cur_base + i, args[i]);
-                }
-                cur_ip = 0;
+            Ok(ChunkExit::Killed) => {
+                // Hard kill fired at the inline SelfCall safepoint.
+                return Ok(VmOutcome::Killed);
+            }
+            Ok(ChunkExit::Preempt) => {
+                // Reduction budget exhausted at the inline SelfCall safepoint. The frame
+                // is already reset (ip=0 inside exec_chunk); capture and re-enqueue.
+                let cur = BcFrame {
+                    arm: cur_arm,
+                    ip: cur_ip,
+                    base: cur_base,
+                    env: cur_env,
+                    env_base: cur_env_base,
+                    arm_slot: cur_arm_slot,
+                };
+                return Ok(VmOutcome::Preempted(Suspended {
+                    frames,
+                    cur,
+                    entry_roots,
+                    entry_env,
+                    entry_arms,
+                    deadline: None,
+                }));
             }
             Ok(ChunkExit::Suspend { deadline }) => {
                 // A clean `receive` parked (ADR-100 §8). `exec_chunk` rewound `cur_ip`
