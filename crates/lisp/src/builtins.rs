@@ -1146,6 +1146,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], map_ty),
         parse_source_positioned,
     );
+    // Foreign-language CST via tree-sitter (feature "treesit"), in the SAME node
+    // shape as `parse-source-positioned` so std/sexp + the editor modes navigate
+    // it unchanged. Always registered; errors if built without the feature. §C.
+    def(
+        heap,
+        "tree-sitter-parse",
+        Arity::exact(2),
+        Sig::new(vec![string, kw], map_ty),
+        tree_sitter_parse,
+    );
     def(
         heap,
         "load",
@@ -1904,6 +1914,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("clipboard-get", &[], "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."),
     ("clipboard-set!", &["s"], "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."),
     ("parse-source-positioned", &["s"], "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."),
+    ("tree-sitter-parse", &["source", "lang"], "Parse source (a string) with the tree-sitter grammar named by keyword lang (:ruby, :elixir) into a positioned CST — the SAME node-map shape as parse-source-positioned (`{:kind :start :end :named}`; leaves add :text, nodes with children add :kids), :kind a keyword of the tree-sitter node type and :named false for anonymous tokens (keywords/punctuation). Char offsets, so std/sexp + the editor's fontify navigate it unchanged. Errors on an unknown language, or if the runtime was built without --features treesit."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
     ("reload-defs", &["path"], "Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil."),
@@ -3505,6 +3516,18 @@ fn cst_to_positioned(heap: &mut Heap, node: &cst::Node, src: &str, b2c: &[u32]) 
     heap.map_from_pairs(pairs)
 }
 
+/// `(tree-sitter-parse source lang)` — parse a foreign language into the same
+/// positioned-CST node shape as `parse-source-positioned`. Mechanism lives in
+/// `crate::treesit` (feature-gated); this just unwraps the args. See §C.
+fn tree_sitter_parse(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "tree-sitter-parse", arg(args, 0))?;
+    let lang = match arg(args, 1) {
+        Value::Keyword(s) => value::symbol_name(s),
+        v => return Err(LispError::wrong_type(heap, "tree-sitter-parse", "keyword", v)),
+    };
+    crate::treesit::parse(heap, &src, &lang)
+}
+
 /// `(reload-defs path)` — like `load`, but only re-evaluates **definitions**
 /// (`def`/`defmacro` and `def…`-named macros: `defn`, `defmodule`, `defdyn`,
 /// `defonce`, user definers). All other top-level forms — `(require …)`,
@@ -3901,6 +3924,11 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // `require` (the editor's minibuffer reuses `std/lineedit`'s core), not just
     // REPL plumbing — so a lean release keeps them.
     ("editor/highlight", include_str!("../../../std/editor/highlight.blsp")),
+    // Generic tree-sitter language services (`fontify` + structural motions) over
+    // the `tree-sitter-parse` builtin's positioned CST — the foreign-language
+    // analogue of `sexp`+`highlight`. Pure UI a shipped editor `require`s for its
+    // ruby/elixir/… modes (ROADMAP §C), so it stays in CORE; opt-in, never prelude.
+    ("editor/treesit", include_str!("../../../std/editor/treesit.blsp")),
     // Lexical Markdown highlighter — the `highlight` analogue for `.md` buffers
     // (`markdown-spans` → `[start end face]` spans, ADR-092). Pure UI a shipped app
     // may `require` (myedit's markdown-mode), so it stays in CORE alongside

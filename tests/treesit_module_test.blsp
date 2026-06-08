@@ -1,0 +1,79 @@
+;; std/editor/treesit.blsp (ROADMAP §C): the language-agnostic services over
+;; `tree-sitter-parse`'s positioned CST — `fontify` (kind→face colour spans) and
+;; the pure structural motions. Requires `editor/highlight` for the shared
+;; `:syntax/*` face registry (the editor always loads it).
+;;
+;; Register-only — discovered and run by `nest test` (and `brood --test`).
+
+(defmodule treesit-module-test
+  (:use test)
+  (:use editor/treesit))
+
+(require 'editor/highlight)   ; registers the :syntax/* faces fontify resolves
+(require 'editor/treesit)
+
+;; A small Ruby method, used across the navigation tests. Offsets:
+;;   0       8         18  22
+;;   def foo\n  x = 1\nend\n
+(def rb "def foo\n  x = 1\nend\n")
+
+(def rb-faces {:comment :syntax/comment :string :syntax/string :integer :syntax/number
+               :def :syntax/keyword :end :syntax/keyword :identifier :syntax/function})
+
+(describe "treesit fontify"
+  (test "produces ascending, non-overlapping [start end face] spans"
+    (let (spans (treesit/fontify rb :ruby (treesit/face-of-kinds rb-faces)))
+      (is (not (empty? spans)))
+      ;; every span is [start end face] with start < end, and starts ascend
+      (is (every? (fn (s) (< (first s) (second s))) spans))
+      (is (= spans (sort-by first spans)))))
+
+  (test "colours a whole comment node (delimiter + content) as one span"
+    (let (src "x = 1 # note\n"
+          spans (treesit/fontify src :ruby (treesit/face-of-kinds rb-faces))
+          cspan (first (filter (fn (s) (= (nth s 2) (editor/face/face :syntax/comment))) spans)))
+      (refute (nil? cspan))
+      (assert= (first cspan) 6)        ; "# note" starts at col 6
+      (assert= (second cspan) 12)))
+
+  (test "an unmapped kind yields no span for that node (descends instead)"
+    ;; with an empty table nothing is coloured
+    (let (spans (treesit/fontify rb :ruby (treesit/face-of-kinds {})))
+      (is (empty? spans))))
+
+  (test "face-of-syntax colours keywords via the anonymous-token heuristic"
+    ;; the table names NO keywords; `def`/`end` (anonymous alphabetic tokens) are
+    ;; coloured :syntax/keyword by `face-of-syntax` — the path the editor modes use.
+    (let (spans (treesit/fontify rb :ruby (treesit/face-of-syntax {}))
+          kw (editor/face/face :syntax/keyword)
+          kw-spans (filter (fn (s) (= (nth s 2) kw)) spans))
+      (is (>= (count kw-spans) 2))                ; def + end
+      (assert= (first (first kw-spans)) 0)        ; "def" at col 0
+      (assert= (second (first kw-spans)) 3)))
+
+  (test "anonymous-keyword? distinguishes alphabetic tokens from punctuation"
+    (is (treesit/anonymous-keyword? {:named false :text "def"}))
+    (is (treesit/anonymous-keyword? {:named false :text "end"}))
+    (refute (treesit/anonymous-keyword? {:named false :text "("}))
+    (refute (treesit/anonymous-keyword? {:named false :text "="}))
+    (refute (treesit/anonymous-keyword? {:named true :text "foo"}))))   ; named ⇒ not a keyword
+
+(describe "treesit structural navigation"
+  (test "point-forward lands at the end of the next named node"
+    ;; from col 0 the next top-level node is the whole `def…end` method
+    (let (end (treesit/point-forward rb :ruby 0))
+      (is (> end 0))
+      (assert= (substring rb 0 3) "def")))
+
+  (test "point-defun-start finds the enclosing top-level node"
+    ;; col 11 is inside the body; the method begins at 0
+    (assert= (treesit/point-defun-start rb :ruby 11) 0))
+
+  (test "point-up rises to the enclosing node's start"
+    (let (up (treesit/point-up rb :ruby 11))
+      (is (>= up 0))
+      (is (< up 11))))
+
+  (test "motions are no-ops with nothing to move to"
+    ;; past the end, forward stays put
+    (assert= (treesit/point-forward rb :ruby (string-length rb)) (string-length rb))))
