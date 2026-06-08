@@ -34,6 +34,7 @@ pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives i
 pub mod perf; // VM work-attribution counters (feature "perf-stats") — docs/benchmarking.md
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 pub mod text_width; // grapheme-cluster display-cell width (the `display-width` builtin + the GUI grid)
+pub mod treesit; // optional tree-sitter parsing for foreign languages (feature "treesit") — ROADMAP §C
 
 use std::sync::{Arc, LazyLock};
 
