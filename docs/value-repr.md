@@ -102,7 +102,38 @@ would actually buy** over tier-1-in-roots:
 The decision criterion: pick the repr that maximizes the JIT compute win **without
 regressing** the immediate-scalar concurrency/dist paths or the float kernels.
 
-## 5. Recommended path (subject to the §4 measurement)
+### Measurement result (2026-06-08) — the operand-traffic upside is ~zero
+
+Measured factor 1 directly with an isolated A/B: the operand-stack element (`heap.rs`
+`roots: Vec<Value>`) was padded from 16 → 32 bytes (a clean revertable change, not
+touching `Value` or any match site) to size how sensitive compute is to slot size.
+Best-of-3, release, on the brood-benchmarks compute loops:
+
+| benchmark | 16-byte slot (baseline) | 32-byte slot (padded) |
+|---|--:|--:|
+| `loop` (3M) | 0.22 s | 0.21 s |
+| `fib(30)` | 0.27 s | 0.25 s |
+| `pfib(28)` | 2.00 s | 2.01 s |
+
+**Doubling the slot made no difference** (all within noise). Compute loops are
+CPU/dispatch-bound and their operand stacks stay L1-resident regardless of element
+size, so a *single-word* `Value` (halving the slot) would give ≈**zero** tier-1
+speedup. The only real 1-word benefit is **tier-2 register-passing**, which is deferred.
+Since the upside is ~zero, any NaN-box downside (factors 2–3: boxing the immediate
+`Pid`/`Ref`/`Socket`/`i64` scalars, penalizing floats) makes it **net-negative now** —
+no need to measure those precisely.
+
+## 5. Decision: **D — keep the 16-byte enum; build the JIT on it** (2026-06-08)
+
+The §4 measurement settles it: the operand-traffic upside of a single-word `Value` is
+~zero for tier-1, so NaN-boxing is net-negative now (zero upside, real wide-scalar
+downside). **Build the JIT Stage 0–1 on the current 16-byte enum** (values in
+`Heap::roots`). Revisit the repr only if a future tier-2 (values-in-registers) profile —
+taken *with a real JIT in hand* — shows register-passing is worth it; the NaN-box option
+(A) stays on the table for that, behind the `value.rs` accessor migration (§6). This is
+the original "lead with D" recommendation, now confirmed by data rather than assumed.
+
+### Original framing (kept for context)
 
 **Lead with D, keep A on the table.** Build the JIT Stage 0–1 on the current 16-byte enum
 (values in `Heap::roots`) to capture the large compute win that needs no repr change, and
