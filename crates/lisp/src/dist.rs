@@ -605,30 +605,30 @@ pub(crate) fn exit_remote(target_node: Symbol, target_pid: u64, reason: Message)
 /// already down and `[:nodedown]` is delivered immediately (Erlang's
 /// `monitor_node` semantics).
 pub(crate) fn monitor_node(name: Symbol, pid: u64) {
-    // The watcher registration and the liveness check must be atomic with
-    // respect to `fire_nodedown` (which reads NODE_MONITORS, then delivers).
-    // Hold the NODE_MONITORS write lock across both steps: `fire_nodedown`
-    // blocks on that read until we've either registered or decided to deliver
-    // immediately, preventing the double-delivery race where fire_nodedown
-    // sees the new watcher AND monitor_node's fallback also fires.
+    // Registration and the liveness check must be atomic w.r.t. `fire_nodedown`
+    // (which reads NODE_MONITORS then delivers). Holding the write lock across
+    // both prevents the race where fire_nodedown sees a new watcher AND our
+    // own fallback also fires.
     //
-    // Lock order: NODE_MONITORS write → NODES read.  Safe because `drop_link`
-    // releases its NODES write lock *before* calling `fire_nodedown` — no
-    // thread ever holds NODES write while waiting for NODE_MONITORS.
+    // Always register — monitor_node is persistent (Erlang semantics): fires on
+    // every future down event until the process exits. Dedup so a pid calling
+    // (monitor-node name) again after a reconnect doesn't double-fire per down.
+    //
+    // Lock order: NODE_MONITORS write → NODES read. Safe: drop_link releases
+    // NODES write *before* calling fire_nodedown, so no thread holds NODES write
+    // while waiting for NODE_MONITORS.
     let immediate = {
         let mut monitors = crate::core::sync::write(&NODE_MONITORS);
-        if !is_local(name) && !crate::core::sync::read(&NODES).contains_key(&name) {
-            true // peer already down; deliver below, outside the lock
-        } else {
-            // Dedup: a process that calls (monitor-node name pid) multiple
-            // times across reconnect cycles should get exactly one delivery per
-            // down event, not one per registration.
-            let watchers = monitors.entry(name).or_default();
-            if !watchers.contains(&pid) {
-                watchers.push(pid);
-            }
-            false
+        let watchers = monitors.entry(name).or_default();
+        if !watchers.contains(&pid) {
+            watchers.push(pid);
         }
+        // If the peer is already down, deliver immediately as well as register.
+        // A tiny residual race: if fire_nodedown was blocked on our write lock
+        // (peer died in this same instant), it will also deliver to our new
+        // watcher once we release → two [:nodedown] messages possible in that
+        // sub-microsecond window. Receivers must tolerate duplicate nodedowns.
+        !is_local(name) && !crate::core::sync::read(&NODES).contains_key(&name)
     };
     if immediate {
         process::deliver(pid, nodedown_msg(name));
