@@ -635,6 +635,19 @@ pub(crate) fn monitor_node(name: Symbol, pid: u64) {
     }
 }
 
+/// Cancel `pid`'s node monitor for `name`. A no-op if no monitor is registered.
+/// Needed when a live process wants to stop watching a node before it exits;
+/// `unregister_dead_pid` handles the death case automatically.
+pub(crate) fn demonitor_node(name: Symbol, pid: u64) {
+    let mut monitors = crate::core::sync::write(&NODE_MONITORS);
+    if let Some(watchers) = monitors.get_mut(&name) {
+        watchers.retain(|&w| w != pid);
+        if watchers.is_empty() {
+            monitors.remove(&name);
+        }
+    }
+}
+
 /// The `[:nodedown <name>]` message a downed link delivers to its watchers.
 fn nodedown_msg(name: Symbol) -> Message {
     Message::Vector(vec![
@@ -942,9 +955,10 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
             format!("cannot connect to self ({})", value::symbol_name(peer)),
         ));
     }
-    // Best-effort de-dup: if we already have a link to the named node, reuse it
-    // instead of dialing a redundant one. (A genuine simultaneous-connect race is
-    // still resolved by the tie-break in `establish`.)
+    // Pre-dial de-dup: if we already have a link to the named node, reuse it
+    // without dialing. The caller may supply a stale/wrong symbol (e.g. from
+    // gossip lag), so we do a second check with the *authenticated* name after
+    // the handshake too.
     if crate::core::sync::read(&NODES).contains_key(&peer) {
         return Ok(peer);
     }
@@ -952,6 +966,14 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let (peer, peer_addr, session) = handshake(&mut stream, Role::Initiator)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
+    // Post-handshake de-dup on the authenticated name: if the caller supplied a
+    // stale/wrong symbol but we're already connected under the real name, close
+    // our redundant socket rather than handing it to `establish` where the
+    // tie-break could evict a healthy existing link.
+    if crate::core::sync::read(&NODES).contains_key(&peer) {
+        let _ = stream.shutdown(Shutdown::Both);
+        return Ok(peer);
+    }
     establish(peer, peer_addr, stream, Role::Initiator, session);
     Ok(peer)
 }
