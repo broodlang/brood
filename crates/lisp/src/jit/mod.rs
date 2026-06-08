@@ -136,11 +136,19 @@ mod smoke {
 }
 
 /// Preemption poll (ADR-027). JIT'd loop back-edges call this; returns nonzero when the
-/// process has spent its reduction budget and should yield. Mirrors the interpreter's
-/// `tick_capture` at the bytecode loop top.
+/// process should yield. Mirrors the VM's loop-top exactly: only a **capture-mode green
+/// process** is preemptible (`tick_capture` decrements the reduction budget and yields at
+/// zero); the root/eval thread (and any non-capture run) never preempts — it just keeps
+/// going, like the VM's `tick()` else-branch. Gating here is load-bearing: without it a
+/// JIT'd loop on the root thread would yield on its first iteration and bail to the VM,
+/// so the JIT could never actually run the loop.
 #[no_mangle]
 pub extern "C" fn brood_rt_tick(_heap: *mut Heap) -> u8 {
-    crate::process::tick_capture() as u8
+    if crate::process::in_capture_run() {
+        crate::process::tick_capture() as u8
+    } else {
+        0 // root / non-capture: never preempt (matches the VM)
+    }
 }
 
 /// GC safepoint check. JIT'd code calls this where the interpreter would collect (a

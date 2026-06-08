@@ -74,7 +74,7 @@ pub use scheduler::{
 // when to capture a continuation (vs. yield the coroutine / block the root), and by the
 // `receive` gate to tell a capturable top-level receive from a native-nested one.
 pub(crate) use scheduler::{
-    capture_hard_kill_pending, capture_top_level, dirty_block, in_capture_run,
+    capture_hard_kill_pending, capture_top_level, dirty_block, in_capture_run, set_capture_run,
     set_capture_top_level, tick_capture,
 };
 
