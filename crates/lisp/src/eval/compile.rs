@@ -455,6 +455,17 @@ pub struct CompiledArm {
     /// trigger compilation past a threshold. Shared across `Arc<CompiledArm>` clones.
     pub jit_code: std::sync::atomic::AtomicPtr<u8>,
     pub jit_calls: std::sync::atomic::AtomicU32,
+    /// The [`Heap::global_epoch`] at which this arm was last compiled to native code —
+    /// the inline-cache epoch guard (ADR-096 §4.A) for the JIT'd arm. The lowered code
+    /// inlines arithmetic operators (`+`/`<`/…) as raw machine ops, valid only while
+    /// those globals still resolve to their native primitives. A `def` rebinding any
+    /// global bumps `global_epoch`; [`jit_tier`] compares it against this before each
+    /// native entry, and on a mismatch invalidates the arm so it re-validates its
+    /// operators and re-tiers (or bails if one was genuinely redefined). A JIT'd arm
+    /// never evaluates Brood, so no `def` can occur *during* a native run — checking
+    /// once per activation (not per loop iteration) is sufficient and keeps hot loops
+    /// fast. Only meaningful once `jit_code` holds a real pointer.
+    pub compile_epoch: std::sync::atomic::AtomicU64,
 }
 
 /// One arm of a closure: its arity shape plus the compiled body **if** it was
@@ -1274,6 +1285,7 @@ fn compile_arm(
         has_runtime_handles,
         jit_code: AtomicPtr::new(std::ptr::null_mut()),
         jit_calls: AtomicU32::new(0),
+        compile_epoch: AtomicU64::new(0),
     })
 }
 
@@ -2454,7 +2466,12 @@ enum Inst {
     /// Covers the very common `(+ slot 1)` / `(- slot 1)` / `(< slot k)` shape.
     /// Uses i64 directly (not ConstVal) so this variant stays under MakeClosure's
     /// size, avoiding Inst enum bloat that would widen every instruction.
-    Prim2SlotInt { op: PrimOp, map: [u8; 2], slot_a: usize, int_b: i64, head: Symbol, guard: AtomicU64, pos: Option<Pos> },
+    /// `swapped` records that the operands came from `(op Const Local)` — the fusion
+    /// stored the *local* as `slot_a` and the *const* as `int_b` (with an inverted `map`
+    /// so the inline path still routes correctly). The slow-path dispatch fallback calls
+    /// the user `head`, which needs the **original** call order `(head Const Local)`, so
+    /// it must un-swap. `false` for the `(op Local Const)` case (already in order).
+    Prim2SlotInt { op: PrimOp, map: [u8; 2], slot_a: usize, int_b: i64, swapped: bool, head: Symbol, guard: AtomicU64, pos: Option<Pos> },
     /// A combination. The callee then each argument have been pushed (operand layout
     /// `[.., callee, arg0 .. arg_{argc-1}]` — callee resolved *before* the args, the
     /// tree-walker's order). A **non-tail** call to a chunked VM arm becomes a frame
@@ -2583,7 +2600,7 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 (Node::Local(sa), Node::Const(cv)) => {
                     if let Value::Int(n) = cv.load() {
                         code.push(Inst::Prim2SlotInt {
-                            op: *op, map: *map, slot_a: *sa, int_b: n,
+                            op: *op, map: *map, slot_a: *sa, int_b: n, swapped: false,
                             head: *head, guard: AtomicU64::new(gv), pos: *pos,
                         });
                         true
@@ -2591,10 +2608,12 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 }
                 (Node::Const(cv), Node::Local(sb)) => {
                     if let Value::Int(n) = cv.load() {
-                        // Slot goes to src[0], const to src[1] — invert the map.
+                        // Slot goes to src[0], const to src[1] — invert the map. `swapped`
+                        // so the dispatch fallback restores the original `(op Const Local)`
+                        // order when it calls the user `head` (the inline path uses `map`).
                         let new_map = [1u8 - map[0], 1u8 - map[1]];
                         code.push(Inst::Prim2SlotInt {
-                            op: *op, map: new_map, slot_a: *sb, int_b: n,
+                            op: *op, map: new_map, slot_a: *sb, int_b: n, swapped: true,
                             head: *head, guard: AtomicU64::new(gv), pos: *pos,
                         });
                         true
@@ -2857,7 +2876,7 @@ fn exec_chunk(
                 };
                 heap.push_root(v);
             }
-            Inst::Prim2SlotInt { op, map, slot_a, int_b, head, guard, pos } => {
+            Inst::Prim2SlotInt { op, map, slot_a, int_b, swapped, head, guard, pos } => {
                 let sa = heap.root_at(base + slot_a);
                 let sb = Value::Int(*int_b);
                 let x = [sa, sb][map[0] as usize];
@@ -2865,9 +2884,16 @@ fn exec_chunk(
                 let v = match prim2_inline_exec(heap, *op, *map, *head, guard, x, y)? {
                     Some(v) => v,
                     None => {
+                        // Dispatch to the user `head` in the ORIGINAL call order. For the
+                        // `(op Const Local)` fusion (`swapped`) that's `[const, local]` =
+                        // `[sb, sa]`; otherwise `[sa, sb]`. (The inline path above used the
+                        // map; this slow path must reconstruct the source order — a
+                        // mismatch silently mis-ordered non-commutative ops, e.g.
+                        // `(/ 24 x)` ran as `(/ x 24)`.)
                         let save = heap.roots_len();
-                        heap.push_root(sa);
-                        heap.push_root(sb);
+                        let (first, second) = if *swapped { (sb, sa) } else { (sa, sb) };
+                        heap.push_root(first);
+                        heap.push_root(second);
                         prim2_dispatch_rooted(heap, *head, save, *pos, genv)?
                     }
                 };
@@ -3552,6 +3578,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 has_runtime_handles,
                 jit_code: AtomicPtr::new(std::ptr::null_mut()),
                 jit_calls: AtomicU32::new(0),
+                compile_epoch: AtomicU64::new(0),
             });
             let arm_slot = if arm.has_runtime_handles {
                 heap.live_arm_push(arm.clone())
@@ -3639,17 +3666,34 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
 
     // ---- Pre-bail on any out-of-subset instruction (so we never half-build) ----
-    // Subset: Const(Int) / Local / Prim2(Add,Sub,Mul,Lt,Le,Eq) / Jump / JumpIfFalse.
-    // (SelfCall/loop, Call, Global, etc. come in later increments.)
+    // Subset: Const(Int) / Local / Prim2{,SlotSlot,SlotInt}(Add,Sub,Mul,Lt,Le,Eq) /
+    // Jump / JumpIfFalse / SelfCall. The fused `Prim2Slot*` variants are what
+    // `emit_node` actually produces for the common `(- i 1)` / `(+ acc i)` loop body
+    // (operands that are frame locals or int literals), so the JIT must lower them or
+    // it never fires on real compiled code. (Call, Global, the division family, etc.
+    // come in later increments.)
+    let in_subset_op = |op: &PrimOp| {
+        matches!(
+            op,
+            PrimOp::Add
+                | PrimOp::Sub
+                | PrimOp::Mul
+                | PrimOp::Lt
+                | PrimOp::Le
+                | PrimOp::Eq
+                | PrimOp::Rem
+                | PrimOp::Quot
+                | PrimOp::Div
+        )
+    };
     for inst in code {
         match inst {
             Inst::Const(cv) if matches!(cv.load(), Value::Int(_)) => {}
             Inst::Local(_) | Inst::Jump(_) | Inst::JumpIfFalse(_) | Inst::SelfCall { .. } => {}
             Inst::Prim2 { op, .. }
-                if matches!(
-                    op,
-                    PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Lt | PrimOp::Le | PrimOp::Eq
-                ) => {}
+            | Inst::Prim2SlotSlot { op, .. }
+            | Inst::Prim2SlotInt { op, .. }
+                if in_subset_op(op) => {}
             _ => return None,
         }
     }
@@ -3710,6 +3754,9 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     break;
                 }
                 Inst::Const(_) | Inst::Local(_) => cur += 1,
+                // Fused prims read their operands from frame slots / a literal, not the
+                // operand stack: net push of 1 (unlike the generic `Prim2`'s pop-2-push-1).
+                Inst::Prim2SlotSlot { .. } | Inst::Prim2SlotInt { .. } => cur += 1,
                 Inst::Prim2 { .. } => cur -= 1, // pop 2, push 1
                 _ => break,                     // unreachable (pre-bailed)
             }
@@ -3783,6 +3830,98 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let mkargs = |s: &[cranelift_codegen::ir::Value]| -> Vec<BlockArg> {
         s.iter().map(|&v| BlockArg::Value(v)).collect()
     };
+    // Load frame slot `k` as an unboxed `i64`, tag-checking `Int` first: a non-`Int`
+    // operand branches to `deopt` (the VM then runs the arm, where the inline path
+    // handles the real shape). Leaves `b` switched to the post-check block. Used by
+    // `Local` and the fused `Prim2Slot*` operands alike.
+    let load_slot_int = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
+        let idx = b.ins().iadd_imm(base, k);
+        let off = b.ins().imul_imm(idx, STRIDE);
+        let addr = b.ins().iadd(roots_base, off);
+        let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+        let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+        let cont = b.create_block();
+        b.ins().brif(is_int, cont, &[], deopt, &[]);
+        b.switch_to_block(cont);
+        b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32)
+    };
+    // `map` reorders the two operands into the primitive's `(x, y)` argument order —
+    // e.g. `>` is `%lt` with `map = [1, 0]` (operands swapped), so the JIT must apply
+    // it or `(> a b)` would compute `a < b`. `m == 0` picks the first source, else the
+    // second. (`emit_node` only ever produces `[0,1]` or `[1,0]` for these prims.)
+    let pick = |s0, s1, m: u8| if m == 0 { s0 } else { s1 };
+    // Emit `op` on two unboxed `i64` operands already in `(x, y)` order. Add/Sub/Mul use
+    // the overflow-checked Cranelift ops and branch to `deopt` on signed overflow — the
+    // VM's inline path defers an overflowing `i64` op to the native, which promotes to a
+    // BigInt (ADR bignums), so deopting here keeps the JIT bit-identical to the VM
+    // instead of silently wrapping. Comparisons yield an `I8` 0/1. Leaves `b` switched
+    // to the post-check block for the arithmetic ops.
+    let emit_arith = |b: &mut FunctionBuilder,
+                      op: PrimOp,
+                      x: cranelift_codegen::ir::Value,
+                      y: cranelift_codegen::ir::Value|
+     -> Option<cranelift_codegen::ir::Value> {
+        let checked = |b: &mut FunctionBuilder, r: cranelift_codegen::ir::Value, ov| {
+            let cont = b.create_block();
+            b.ins().brif(ov, deopt, &[], cont, &[]);
+            b.switch_to_block(cont);
+            r
+        };
+        Some(match op {
+            PrimOp::Add => {
+                let (r, ov) = b.ins().sadd_overflow(x, y);
+                checked(b, r, ov)
+            }
+            PrimOp::Sub => {
+                let (r, ov) = b.ins().ssub_overflow(x, y);
+                checked(b, r, ov)
+            }
+            PrimOp::Mul => {
+                let (r, ov) = b.ins().smul_overflow(x, y);
+                checked(b, r, ov)
+            }
+            PrimOp::Lt => b.ins().icmp(IntCC::SignedLessThan, x, y),
+            PrimOp::Le => b.ins().icmp(IntCC::SignedLessThanOrEqual, x, y),
+            PrimOp::Eq => b.ins().icmp(IntCC::Equal, x, y),
+            // Integer division family (`rem`/`quot`/`%div`). Cranelift's `sdiv`/`srem`
+            // *trap* on a zero divisor and on the `i64::MIN / -1` overflow, so both must
+            // be guarded → deopt before the op (the VM's inline path defers exactly these
+            // edges to the native, matching). `%div` additionally yields an `Int` only on
+            // an exact quotient — a nonzero remainder means a `Float` the native builds,
+            // so deopt then too. Operand order is already `(x, y)` (map applied).
+            PrimOp::Rem | PrimOp::Quot | PrimOp::Div => {
+                let zero = b.ins().iconst(types::I64, 0);
+                let div0 = b.ins().icmp(IntCC::Equal, y, zero);
+                let c0 = b.create_block();
+                b.ins().brif(div0, deopt, &[], c0, &[]);
+                b.switch_to_block(c0);
+                // (x == i64::MIN) && (y == -1) — the one signed-division overflow.
+                let min = b.ins().iconst(types::I64, i64::MIN);
+                let neg1 = b.ins().iconst(types::I64, -1);
+                let x_min = b.ins().icmp(IntCC::Equal, x, min);
+                let y_m1 = b.ins().icmp(IntCC::Equal, y, neg1);
+                let ov = b.ins().band(x_min, y_m1);
+                let c1 = b.create_block();
+                b.ins().brif(ov, deopt, &[], c1, &[]);
+                b.switch_to_block(c1);
+                match op {
+                    PrimOp::Rem => b.ins().srem(x, y),
+                    PrimOp::Quot => b.ins().sdiv(x, y),
+                    PrimOp::Div => {
+                        // Exact only: a nonzero remainder → Float → deopt to the native.
+                        let r = b.ins().srem(x, y);
+                        let inexact = b.ins().icmp(IntCC::NotEqual, r, zero);
+                        let c2 = b.create_block();
+                        b.ins().brif(inexact, deopt, &[], c2, &[]);
+                        b.switch_to_block(c2);
+                        b.ins().sdiv(x, y)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            PrimOp::Cons => return None, // allocates — never in the JIT subset
+        })
+    };
 
     // Translate each leader block in ip order.
     for ip in 0..len {
@@ -3798,27 +3937,35 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     stack.push(v);
                 }
                 Inst::Local(i) => {
-                    let addr = slot_addr(&mut b, *i as i64);
-                    let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
-                    let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
-                    let cont = b.create_block();
-                    b.ins().brif(is_int, cont, &[], deopt, &[]);
-                    b.switch_to_block(cont);
-                    let payload =
-                        b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
-                    stack.push(payload);
+                    let v = load_slot_int(&mut b, *i as i64);
+                    stack.push(v);
                 }
-                Inst::Prim2 { op, .. } => {
+                Inst::Prim2 { op, map, .. } => {
+                    // Operands were pushed in source order: `aa` (deeper) is source 0,
+                    // `bb` (top) is source 1. Apply `map` before the op.
                     let (bb, aa) = (stack.pop()?, stack.pop()?);
-                    let r = match op {
-                        PrimOp::Add => b.ins().iadd(aa, bb),
-                        PrimOp::Sub => b.ins().isub(aa, bb),
-                        PrimOp::Mul => b.ins().imul(aa, bb),
-                        PrimOp::Lt => b.ins().icmp(IntCC::SignedLessThan, aa, bb),
-                        PrimOp::Le => b.ins().icmp(IntCC::SignedLessThanOrEqual, aa, bb),
-                        PrimOp::Eq => b.ins().icmp(IntCC::Equal, aa, bb),
-                        _ => return None,
-                    };
+                    let x = pick(aa, bb, map[0]);
+                    let y = pick(aa, bb, map[1]);
+                    let r = emit_arith(&mut b, *op, x, y)?;
+                    stack.push(r);
+                }
+                Inst::Prim2SlotSlot { op, map, slot_a, slot_b, .. } => {
+                    // Source 0 = slot_a, source 1 = slot_b (the VM's `[sa, sb]` order).
+                    let sa = load_slot_int(&mut b, *slot_a as i64);
+                    let sb = load_slot_int(&mut b, *slot_b as i64);
+                    let x = pick(sa, sb, map[0]);
+                    let y = pick(sa, sb, map[1]);
+                    let r = emit_arith(&mut b, *op, x, y)?;
+                    stack.push(r);
+                }
+                Inst::Prim2SlotInt { op, map, slot_a, int_b, .. } => {
+                    // Source 0 = slot_a, source 1 = the literal `int_b` (the fusion of
+                    // `(Const, Local)` already inverted `map` so the slot is source 0).
+                    let sa = load_slot_int(&mut b, *slot_a as i64);
+                    let sb = b.ins().iconst(types::I64, *int_b);
+                    let x = pick(sa, sb, map[0]);
+                    let y = pick(sa, sb, map[1]);
+                    let r = emit_arith(&mut b, *op, x, y)?;
                     stack.push(r);
                 }
                 Inst::Jump(t) => {
@@ -3969,6 +4116,30 @@ static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<Arc<Compile
         tx
     });
 
+/// Are all the arm chunk's inlined 2-ary primitives still bound to their native
+/// implementations (ADR-096 §4.A epoch-guard, evaluated eagerly)? The JIT lowers
+/// `+`/`<`/… to raw machine ops, which is sound only while the head symbol resolves to
+/// the matching `%`-native (and arg-map). A `(def + …)` rebinds it; [`resolve_prim`]
+/// reads the live global env, so this returns `false` for the redefined operator and
+/// the arm must stay on the VM (which dispatches to the new definition). Non-prim
+/// instructions can't be invalidated, so they pass. A chunkless arm passes here and is
+/// bailed by [`jit_lower_arm`] instead.
+#[cfg(feature = "jit")]
+fn chunk_ops_all_native(heap: &Heap, arm: &CompiledArm) -> bool {
+    let Some(chunk) = arm.chunk.as_ref() else { return true };
+    chunk.code.iter().all(|inst| match inst {
+        Inst::Prim2 { op, map, head, .. }
+        | Inst::Prim2SlotSlot { op, map, head, .. }
+        | Inst::Prim2SlotInt { op, map, head, .. } => {
+            matches!(
+                resolve_prim(heap, *head),
+                Some((o, m)) if o == *op && m == [map[0] as usize, map[1] as usize]
+            )
+        }
+        _ => true,
+    })
+}
+
 /// Tiering entry (ADR-101 1b): on an arm invocation whose frame is already set up at
 /// `roots[base..]`, decide whether to run the JIT'd code. Counts the call; once the arm
 /// crosses the hotness threshold it is handed to the [background compiler](JIT_COMPILER)
@@ -3978,6 +4149,17 @@ static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<Arc<Compile
 /// `1` = deopt — an operand wasn't an `Int`, `2` = preempt — the back-edge budget was
 /// spent), or `None` to run the arm on the VM (not hot yet, compile in flight, or out of
 /// the JIT's subset). **Never blocks on compilation** — that's the whole point.
+///
+/// **Hot-reload safety (the epoch guard).** A JIT'd arm inlines its arithmetic operators
+/// as raw machine ops, so it must be invalidated if a `def` rebinds one. The arm carries
+/// the [`global_epoch`](Heap::global_epoch) it was compiled at; a `def` bumps that epoch.
+/// Before each native entry we compare the two — on a mismatch the arm is reset to
+/// untried, so the next call re-validates its operators ([`chunk_ops_all_native`]) and
+/// either recompiles (the rebind was of some *other* global) or bails (the operator
+/// itself was redefined, so it stays on the VM forever, dispatching to the new
+/// definition). The check is per *activation*, not per loop iteration: a JIT'd arm
+/// evaluates no Brood, so no `def` can land mid-run, and the redefinition therefore takes
+/// effect at the next arm entry — the standard safepoint granularity for a JIT.
 #[cfg(feature = "jit")]
 pub(crate) fn jit_tier(arm: &Arc<CompiledArm>, heap: &mut Heap, base: usize) -> Option<i64> {
     use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
@@ -3992,9 +4174,17 @@ pub(crate) fn jit_tier(arm: &Arc<CompiledArm>, heap: &mut Heap, base: usize) -> 
         if arm.jit_calls.fetch_add(1, Relaxed) + 1 < THRESHOLD {
             return None;
         }
-        // Hot. Elect a single enqueuer via CAS (others see QUEUED and run the VM), then
-        // hand the arm to the background compiler. A full queue → back off: reset to
-        // untried so a later hot call re-attempts (the arm just stays on the VM longer).
+        // Hot. Refuse to JIT an arm whose inlined operators are no longer native (a `def`
+        // redefined one): mark it BAILED so it stays on the VM, where the operator's
+        // epoch guard dispatches to the new definition. Otherwise record the epoch the
+        // arm is being compiled at (the hot-reload guard, read on each native entry below)
+        // and elect a single enqueuer via CAS (others see QUEUED and run the VM). A full
+        // queue → back off: reset to untried so a later hot call re-attempts.
+        if !chunk_ops_all_native(heap, arm) {
+            arm.jit_code.store(crate::jit::BAILED, Release);
+            return None;
+        }
+        arm.compile_epoch.store(heap.global_epoch(), Release);
         if arm
             .jit_code
             .compare_exchange(std::ptr::null_mut(), crate::jit::QUEUED, AcqRel, Acquire)
@@ -4003,6 +4193,15 @@ pub(crate) fn jit_tier(arm: &Arc<CompiledArm>, heap: &mut Heap, base: usize) -> 
         {
             arm.jit_code.store(std::ptr::null_mut(), Release);
         }
+        return None;
+    }
+    // A real, installed code pointer. Hot-reload guard: if the global epoch moved since
+    // the arm was compiled, some `def` happened — invalidate the arm (reset to untried)
+    // and run the VM this activation. The next call re-tiers, re-validating operators and
+    // recompiling at the new epoch, or bailing if one was genuinely redefined.
+    if arm.compile_epoch.load(Acquire) != heap.global_epoch() {
+        arm.jit_code.store(std::ptr::null_mut(), Release);
+        arm.jit_calls.store(THRESHOLD, Release); // re-tier promptly (already proven hot)
         return None;
     }
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base) -> i64` produced by
@@ -4089,6 +4288,7 @@ mod tests {
             has_runtime_handles: true,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            compile_epoch: std::sync::atomic::AtomicU64::new(0),
         };
 
         rewrite_arm_handles(&arm, &mut |v| bump(v, 100));
@@ -4176,6 +4376,7 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            compile_epoch: std::sync::atomic::AtomicU64::new(0),
         });
 
         // First run: the native suspends, so the driver captures the continuation
@@ -4250,6 +4451,7 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            compile_epoch: std::sync::atomic::AtomicU64::new(0),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -4305,6 +4507,7 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            compile_epoch: std::sync::atomic::AtomicU64::new(0),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -4367,6 +4570,7 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            compile_epoch: std::sync::atomic::AtomicU64::new(0),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -4404,6 +4608,116 @@ mod tests {
         assert_eq!(outcome, 2, "a loop exceeding the budget must preempt (return 2) in a green process");
     }
 
+    /// JIT Stage-1.5: the **fused** `Prim2Slot*` variants — which `emit_node` actually
+    /// produces for real loop bodies (`(- i 1)`, `(+ acc i)`, `(< i 1)`) — lower and run.
+    /// Before this, the JIT bailed on every fused prim, so it never fired on real
+    /// compiled code. Also pins the two correctness fixes that came with the coverage:
+    /// `map` (the `>`/swapped-operand case) and overflow → deopt (so the JIT matches the
+    /// VM's BigInt promotion instead of silently wrapping).
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_lowers_fused_prims_map_and_overflow() {
+        // All uses here are the `(op Local Const)` form, so `swapped: false`.
+        let slot_int = |op: PrimOp, map: [u8; 2], slot_a: usize, int_b: i64, head: &str| {
+            Inst::Prim2SlotInt {
+                op, map, slot_a, int_b, swapped: false,
+                head: value::intern(head), guard: AtomicU64::new(0), pos: None,
+            }
+        };
+        let slot_slot = |op: PrimOp, slot_a: usize, slot_b: usize, head: &str| Inst::Prim2SlotSlot {
+            op, map: [0, 1], slot_a, slot_b,
+            head: value::intern(head), guard: AtomicU64::new(0), pos: None,
+        };
+        let mk_arm = |chunk: Chunk, nreq: usize, nslots: usize| CompiledArm {
+            nrequired: nreq, noptional: 0, optional_defaults: Box::new([]), rest_slot: None,
+            nslots, body: Node::Const(ConstVal::new(Value::Nil)), chunk: Some(chunk),
+            has_runtime_handles: false,
+            jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: std::sync::atomic::AtomicU32::new(0),
+            compile_epoch: std::sync::atomic::AtomicU64::new(0),
+        };
+        let mut jit = crate::jit::Jit::new();
+
+        // (a) sumto with the REAL fused shape: `(< i 1)`/`(- i 1)` → Prim2SlotInt,
+        // `(+ acc i)` → Prim2SlotSlot. i = slot0, acc = slot1.
+        let sumto = mk_arm(
+            Chunk {
+                code: vec![
+                    slot_int(PrimOp::Lt, [0, 1], 0, 1, "<"),  // 0: (< i 1)
+                    Inst::JumpIfFalse(4),                     // 1: false → else
+                    Inst::Local(1),                           // 2: then: acc
+                    Inst::Jump(7),                            // 3: → done
+                    slot_int(PrimOp::Sub, [0, 1], 0, 1, "-"), // 4: (- i 1) = arg0
+                    slot_slot(PrimOp::Add, 1, 0, "+"),        // 5: (+ acc i) = arg1
+                    Inst::SelfCall { argc: 2 },               // 6: (sumto arg0 arg1)
+                ],
+            },
+            2, 2,
+        );
+        let f: extern "C" fn(*mut Heap, i64) -> i64 =
+            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &sumto).expect("fused sumto JITs")) };
+        crate::process::yield_now(); // prime the reduction budget so the loop completes
+        for (n, want) in [(5i64, 15i64), (100, 5050), (1, 1), (0, 0)] {
+            let mut heap = Heap::new();
+            let base = heap.roots_len();
+            heap.push_root(Value::Int(n));
+            heap.push_root(Value::Int(0));
+            assert_eq!(f(&mut heap as *mut Heap, base as i64), 0, "Done for sumto({n})");
+            match heap.root_at(base) {
+                Value::Int(r) => assert_eq!(r, want, "fused sumto({n}, 0)"),
+                other => panic!("expected Int, got tag {:?}", value::tag(other)),
+            }
+        }
+
+        // (b) `map` — `>` lowers to `%lt` with `map = [1, 0]` (operands swapped). The JIT
+        // must apply it: `(if (> x 5) 100 200)` is 100 for x=10 and 200 for x=3. Ignoring
+        // `map` would compute `x < 5` and flip both answers.
+        let gt = mk_arm(
+            Chunk {
+                code: vec![
+                    slot_int(PrimOp::Lt, [1, 0], 0, 5, ">"), // 0: (> x 5)  [swapped]
+                    Inst::JumpIfFalse(4),                    // 1
+                    Inst::Const(ConstVal::new(Value::Int(100))), // 2: then
+                    Inst::Jump(5),                           // 3
+                    Inst::Const(ConstVal::new(Value::Int(200))), // 4: else
+                ],
+            },
+            1, 1,
+        );
+        let g: extern "C" fn(*mut Heap, i64) -> i64 =
+            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &gt).expect("(> x 5) JITs")) };
+        for (x, want) in [(10i64, 100i64), (3, 200)] {
+            let mut heap = Heap::new();
+            let base = heap.roots_len();
+            heap.push_root(Value::Int(x));
+            assert_eq!(g(&mut heap as *mut Heap, base as i64), 0, "Done for (> {x} 5)");
+            match heap.root_at(base) {
+                Value::Int(r) => assert_eq!(r, want, "(if (> {x} 5) 100 200) — map must be applied"),
+                other => panic!("expected Int, got tag {:?}", value::tag(other)),
+            }
+        }
+
+        // (c) overflow → deopt. `(* x x)` for a huge x overflows i64; the VM defers such
+        // an op to the native, which promotes to a BigInt, so the JIT must deopt (return
+        // 1) rather than store a wrapped i64. A non-overflowing x runs to Done (0).
+        let sq = mk_arm(Chunk { code: vec![slot_slot(PrimOp::Mul, 0, 0, "*")] }, 1, 1);
+        let s: extern "C" fn(*mut Heap, i64) -> i64 =
+            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &sq).expect("(* x x) JITs")) };
+        let mut heap = Heap::new();
+        let base = heap.roots_len();
+        heap.push_root(Value::Int(3));
+        assert_eq!(s(&mut heap as *mut Heap, base as i64), 0, "(* 3 3) is in range");
+        assert!(matches!(heap.root_at(base), Value::Int(9)), "(* 3 3) = 9");
+        let mut heap = Heap::new();
+        let base = heap.roots_len();
+        heap.push_root(Value::Int(4_000_000_000)); // 4e9 * 4e9 = 1.6e19 > i64::MAX
+        assert_eq!(
+            s(&mut heap as *mut Heap, base as i64),
+            1,
+            "an overflowing (* x x) must deopt to the VM (BigInt), not wrap"
+        );
+    }
+
     /// JIT Stage-1 1b: tiering. An arm invoked past the hotness threshold is compiled
     /// once and thereafter runs as native code (`jit_tier` returns `Some(0)` with the
     /// result in `roots[base]`); below the threshold it returns `None` (run on the VM).
@@ -4430,6 +4744,7 @@ mod tests {
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
+            compile_epoch: AtomicU64::new(0),
         };
         let sumto = Arc::new(mk_arm(
             Chunk {
@@ -4453,6 +4768,11 @@ mod tests {
             2,
         ));
 
+        // A prelude-loaded heap, so `jit_tier`'s operator-validation (`+`/`-`/`<` must
+        // still resolve to their natives — the hot-reload guard) sees the live globals; a
+        // bare `Heap::new()` has no global env. One heap, reused across poll iterations
+        // (truncate the frame each time), keeps the epoch stable so the arm stays tiered.
+        let mut interp = crate::Interp::new();
         // Compilation is async now (the background compiler thread), so a hot arm returns
         // None until the native pointer is installed. Poll past the threshold, giving the
         // compiler time to land the code, and assert it eventually runs native.
@@ -4460,18 +4780,22 @@ mod tests {
         let mut ran_native = 0;
         for _ in 0..400 {
             crate::process::yield_now(); // keep the budget topped up across calls
-            let mut heap = Heap::new();
-            let base = heap.roots_len();
-            heap.push_root(Value::Int(5)); // i
-            heap.push_root(Value::Int(0)); // acc
-            match jit_tier(&sumto, &mut heap, base) {
-                None => std::thread::sleep(std::time::Duration::from_millis(2)), // not hot / compile in flight
+            let base = interp.heap.roots_len();
+            interp.heap.push_root(Value::Int(5)); // i
+            interp.heap.push_root(Value::Int(0)); // acc
+            let outcome = jit_tier(&sumto, &mut interp.heap, base);
+            match outcome {
+                None => {
+                    interp.heap.truncate_roots(base);
+                    std::thread::sleep(std::time::Duration::from_millis(2)); // not hot / compile in flight
+                }
                 Some(0) => {
                     ran_native += 1;
-                    match heap.root_at(base) {
+                    match interp.heap.root_at(base) {
                         Value::Int(r) => assert_eq!(r, 15, "JIT'd sumto(5,0)"),
                         other => panic!("expected Int(15), got tag {:?}", value::tag(other)),
                     }
+                    interp.heap.truncate_roots(base);
                     if ran_native >= 3 {
                         break;
                     }
@@ -4484,10 +4808,10 @@ mod tests {
         // An out-of-subset arm (a bare Global) is marked BAILED — never runs native.
         let bailing = Arc::new(mk_arm(Chunk { code: vec![Inst::Global(value::intern("x"))] }, 0, 1));
         for _ in 0..400 {
-            let mut heap = Heap::new();
-            let base = heap.roots_len();
-            heap.push_root(Value::Int(0));
-            assert_eq!(jit_tier(&bailing, &mut heap, base), None, "out-of-subset arm bails");
+            let base = interp.heap.roots_len();
+            interp.heap.push_root(Value::Int(0));
+            assert_eq!(jit_tier(&bailing, &mut interp.heap, base), None, "out-of-subset arm bails");
+            interp.heap.truncate_roots(base);
             if bailing.jit_code.load(std::sync::atomic::Ordering::Acquire) == crate::jit::BAILED {
                 break;
             }
@@ -4542,20 +4866,23 @@ mod tests {
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
+            compile_epoch: AtomicU64::new(0),
         });
 
         // Warm it past the threshold so jit_tier hands it to the background compiler;
-        // poll until the native pointer is installed (compilation is async now).
+        // poll until the native pointer is installed (compilation is async now). A
+        // prelude-loaded heap, so the operator-validation in `jit_tier` resolves `+`/`-`/`<`.
         use std::sync::atomic::Ordering::Acquire;
+        let mut interp = crate::Interp::new();
         crate::process::yield_now();
         let mut tiered = false;
         for _ in 0..400 {
             crate::process::yield_now();
-            let mut h = Heap::new();
-            let base = h.roots_len();
-            h.push_root(Value::Int(5));
-            h.push_root(Value::Int(0));
-            let _ = jit_tier(&arm, &mut h, base);
+            let base = interp.heap.roots_len();
+            interp.heap.push_root(Value::Int(5));
+            interp.heap.push_root(Value::Int(0));
+            let _ = jit_tier(&arm, &mut interp.heap, base);
+            interp.heap.truncate_roots(base);
             let code = arm.jit_code.load(Acquire);
             if !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED {
                 tiered = true;
@@ -4567,9 +4894,8 @@ mod tests {
 
         // Now run it through vm_run_bc — its fresh-start hook should call the native code.
         crate::process::yield_now();
-        let mut heap = Heap::new();
         let outcome = vm_run_bc(
-            &mut heap,
+            &mut interp.heap,
             arm,
             &[Value::Int(5), Value::Int(0)],
             EnvId::GLOBAL,
@@ -4627,12 +4953,16 @@ mod tests {
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
+            compile_epoch: AtomicU64::new(0),
         };
         let n = 100_000i64; // iterations per sumto call
         let reps = 300;
-        let run = |arm: &Arc<CompiledArm>| {
-            let mut h = Heap::new();
-            match vm_run_bc(&mut h, arm.clone(), &[Value::Int(n), Value::Int(0)], EnvId::GLOBAL, None, true)
+        // A prelude-loaded heap, reused across reps (vm_run_bc unwinds to entry on Done, so
+        // roots stay clean): needed so the JIT tiering hook's operator-validation resolves
+        // `+`/`-`/`<`, and so the per-rep cost is the loop, not a prelude load.
+        let mut interp = crate::Interp::new();
+        let run = |h: &mut Heap, arm: &Arc<CompiledArm>| -> i64 {
+            match vm_run_bc(h, arm.clone(), &[Value::Int(n), Value::Int(0)], EnvId::GLOBAL, None, true)
                 .expect("run")
             {
                 VmOutcome::Done(Value::Int(r)) => r,
@@ -4643,10 +4973,10 @@ mod tests {
         // VM baseline: BAILED forces the hook to stay on the interpreter.
         let vm_arm = Arc::new(mk());
         vm_arm.jit_code.store(crate::jit::BAILED, std::sync::atomic::Ordering::Release);
-        let r0 = run(&vm_arm); // warm caches / verify
+        let r0 = run(&mut interp.heap, &vm_arm); // warm caches / verify
         let t = Instant::now();
         for _ in 0..reps {
-            assert_eq!(run(&vm_arm), r0);
+            assert_eq!(run(&mut interp.heap, &vm_arm), r0);
         }
         let vm = t.elapsed();
 
@@ -4656,22 +4986,22 @@ mod tests {
         let jit_arm = Arc::new(mk());
         crate::process::yield_now();
         for _ in 0..1000 {
-            let mut h = Heap::new();
-            let b = h.roots_len();
-            h.push_root(Value::Int(5));
-            h.push_root(Value::Int(0));
-            let _ = jit_tier(&jit_arm, &mut h, b);
+            let b = interp.heap.roots_len();
+            interp.heap.push_root(Value::Int(5));
+            interp.heap.push_root(Value::Int(0));
+            let _ = jit_tier(&jit_arm, &mut interp.heap, b);
+            interp.heap.truncate_roots(b);
             let c = jit_arm.jit_code.load(Acquire);
             if !c.is_null() && c != crate::jit::BAILED && c != crate::jit::QUEUED {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let r1 = run(&jit_arm);
+        let r1 = run(&mut interp.heap, &jit_arm);
         assert_eq!(r1, r0, "JIT must match the VM");
         let t = Instant::now();
         for _ in 0..reps {
-            assert_eq!(run(&jit_arm), r1);
+            assert_eq!(run(&mut interp.heap, &jit_arm), r1);
         }
         let jit = t.elapsed();
 

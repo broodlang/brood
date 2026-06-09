@@ -2176,3 +2176,54 @@ also made it reliably catch the native path, so the measured speedup rose from ~
 **~65×**. Verified post-fix (and after merging `main`, which brought the "emit `SelfCall`
 for `defn` tail self-calls" change the JIT lowers): differential 2/2, lib 259/259,
 in-language suite green across repeated runs, §6 KI-1 bar 10/10 + `GC_STRESS`.
+
+## 2026-06-09 — JIT Stage 1.5/2: fire on real fused code, + 4 correctness fixes
+
+`jit_lower_arm` only handled the *unfused* `Inst::Prim2`, but `emit_node` fuses the
+common loop-body shapes — `(- i 1)` → `Prim2SlotInt`, `(+ acc i)` → `Prim2SlotSlot` — so
+the JIT **never fired on a real compiled int loop** (every realistic arm bailed). Lowered
+both fused variants (read the operands from frame slots / a literal instead of the operand
+stack; net +1 stack depth) so the JIT now tiers `sumto`/`down`/collatz/fib-accumulator
+bodies. Confirmed end-to-end with a compile trace: real `prod`/`classify` arms tier and run
+native.
+
+Four correctness fixes came with the wider coverage (the JIT now fires far more, so latent
+edges became reachable):
+
+1. **`map` was ignored.** The old lowering did `iadd(aa, bb)` without applying the
+   passthrough arg-map, so `(> a b)` (`%lt`, `map = [1,0]`) computed `a < b`. Now `map` is
+   applied for both fused and unfused prims (the `pick` helper).
+2. **Arithmetic wrapped instead of promoting.** `iadd`/`isub`/`imul` silently wrapped on
+   i64 overflow, where the VM defers to the native and promotes to a BigInt. Now uses
+   `sadd_overflow`/`ssub_overflow`/`smul_overflow` and **deopts** to the VM on overflow, so
+   an accumulating product yields the same BigInt (`(prod 30 1)` → `30!`).
+3. **Operator redefinition after tiering diverged.** A tiered arm inlines `+`/`<`/… as raw
+   machine ops; a `(def + …)` afterwards left it computing the old op (JIT gave 6, VM 5).
+   Added the epoch-guard: `CompiledArm` carries the `global_epoch` it was compiled at; a
+   JIT'd arm evaluates no Brood so no `def` can land mid-run, so `jit_tier` compares the
+   live epoch once per *activation* and, on a mismatch, invalidates + re-tiers
+   (re-validating operators via `chunk_ops_all_native` — recompiles if an unrelated global
+   moved, bails permanently if the operator itself was redefined). Self-heals after an
+   unrelated `def`; honors a real redefinition.
+4. **Pre-existing VM bug, surfaced while testing.** The fused `Prim2SlotInt` `(op Const
+   Local)` case stores the operands swapped (local as `slot_a`, const as `int_b`, inverted
+   `map`); the *inline* path uses `map` correctly, but the slow-path **dispatch fallback**
+   pushed `[sa, sb]` raw, so `(/ 24 x)` (x=5, inexact → dispatch) silently ran as `(/ 5 24)`
+   = `5/24` on the VM (the tree-walker gave the right `24/5`). Added a `swapped` flag (free —
+   `Inst` stays 56 bytes) and the fallback un-swaps to the original call order. This was a
+   VM≠tree-walker divergence the differential corpus missed; added regression entries.
+
+Also extended the int subset with the **integer division family** (`rem`/`quot`/`%div`):
+Cranelift `sdiv`/`srem` *trap* on a zero divisor and on `i64::MIN / -1`, so both are guarded
+→ deopt before the op (matching the VM's defer-to-native), and `%div` deopts on a non-exact
+quotient (the VM returns a Float there). Enables native collatz/`mod` loops.
+
+**Tests:** +1 unit test (fused/map/overflow lowering), the two tier tests + the speedup
+bench reworked to use a prelude-loaded heap (so the new operator-validation resolves
+`+`/`-`/`<`), a new `tests/jit.rs` (13 end-to-end cases: fused loops, overflow→BigInt,
+every comparison + map, negatives, non-int deopt, redefinition, self-heal, nested ifs,
+division family, div-by-zero/MIN-overflow deopt), and 5 differential-corpus regression
+entries for the `Prim2SlotInt` order bug. Full suite green: 411/411 with `--features jit`
+(incl. the in-language suite, GC-stress, concurrency_race), 391/391 default;
+`tests/jit.rs` green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. `make install` already
+defaults the JIT on (`WITH_JIT ?= 1`, `./configure --without-jit` to opt out).

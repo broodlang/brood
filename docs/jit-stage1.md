@@ -153,3 +153,24 @@ debug-assertions=on" --release`. Demonstrated **~27× speedup** on a `sumto` int
 **Speedup** — `jit_speedup_vs_vm` measures **~65×** on `sumto(100000,0)` (VM ~18s vs JIT
 ~0.28s over 300 reps): the native loop replaces the whole bytecode dispatch/IC/env-hop
 chain with a register-resident integer loop.
+
+## 8. Follow-up — fire on real code + correctness (2026-06-09)
+
+Stage 1 as landed only lowered the **unfused** `Prim2`, but `emit_node` fuses the actual
+loop-body shapes (`(- i 1)` → `Prim2SlotInt`, `(+ acc i)` → `Prim2SlotSlot`), so the JIT
+never fired on a real compiled int loop. The follow-up (see `devlog.md` 2026-06-09) lowers
+both fused variants and closes four correctness gaps the wider coverage exposed:
+
+- **`map`** is now applied (the unfused path ignored it, so `(> a b)` computed `a < b`).
+- **Overflow** deopts via `sadd/ssub/smul_overflow` instead of wrapping, matching the VM's
+  BigInt promotion.
+- **Hot-reload**: an epoch guard in `jit_tier` (`CompiledArm::compile_epoch`) invalidates +
+  re-tiers a JIT'd arm when a `def` rebinds an inlined operator — the Stage-3 idea at arm
+  granularity (a per-activation Rust check; the *native* epoch-guarded IC is still Stage 3).
+- **Integer division family** (`rem`/`quot`/`%div`) added with div-by-zero / `i64::MIN/-1` /
+  non-exact-`%div` deopt guards (Cranelift `sdiv`/`srem` trap on those edges).
+
+Coverage: `tests/jit.rs` (13 end-to-end JIT≡VM cases) + the fused/map/overflow lowering unit
+test, all green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. Still deferred to Stage 2/3/4:
+`cons`/`car`/`cdr` + float arithmetic as native IR, the native-code IC, and RUNTIME-compaction
+survival.

@@ -59,6 +59,15 @@ const CORPUS: &[&str] = &[
     "(and (< 1 2) (= 2 2) 7)",
     "(or false nil 5)",
     "(if (< 3 2) :a :b)",
+    // `(op Const Local)` fused to `Prim2SlotInt` (the const is operand 0): the slow-path
+    // dispatch must restore the original operand order for non-commutative ops, or the VM
+    // silently mis-orders them. `(/ 24 x)` x=5 is inexact → dispatch → must be 24/5, not
+    // 5/24 (the regression this guards). The exact case stays inline; both must agree.
+    "(defn d (x) (/ 24 x)) (d 5)",
+    "(defn d (x) (/ 24 x)) (d 4)",
+    "(defn q (x) (quot 17 x)) (q 5)",
+    "(defn r (x) (rem 17 x)) (r 5)",
+    "(defn sub (x) (- 3 x)) (sub 10)",
     // let (sequential) / letrec / cond / when
     "(let (a 1 b 2) (+ a b))",
     "(let (a 1 b (+ a 10)) (* a b))",
