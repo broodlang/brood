@@ -853,20 +853,47 @@ mod tests {
 
     #[test]
     fn does_not_infer_through_branches_or_lets() {
-        // A body with `if`/`let` is *not* a single straight-line expression —
-        // inference must skip it, leaving the closure as untyped (no warning).
-        // The point: zero false positives from inference's lack of control flow.
-        for (defs, call) in &[
-            ("(defn maybe (x) (if (int? x) (+ x 1) x))", "(maybe :k)"),
-            ("(defn shadow (x) (let (y x) (+ y 1)))", "(shadow :k)"),
-        ] {
-            let w = check_with_defs(&[defs], call);
-            assert!(
-                w.is_empty(),
-                "branchy / binding bodies must not infer (so no warning): {:?}",
-                w
-            );
-        }
+        // A body with `if`/complex `let` is *not* a single straight-line expression
+        // — inference must skip it, leaving the closure untyped (no warning).
+        // (A plain let-alias `(let (y x) call)` IS inferred — see below.)
+        let w = check_with_defs(&["(defn maybe (x) (if (int? x) (+ x 1) x))"], "(maybe :k)");
+        assert!(
+            w.is_empty(),
+            "if-branching bodies must not infer (so no warning): {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn infers_through_let_alias() {
+        // `(let (y x) call)` where y is just a rename of closure param x:
+        // the body is still one straight-line call — inference should work.
+        let w = check_with_defs(
+            &["(defn double (x) (let (y x) (* y 2)))"],
+            "(string-length (double 3))",
+        );
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "let-alias wrapper should not block infer_sig: {:?}",
+            w
+        );
+        // The param type is also inferred: `y` at number position → x : number.
+        let w = check_with_defs(&["(defn double (x) (let (y x) (* y 2)))"], "(double :k)");
+        assert!(
+            w.iter().any(|s| s.contains("double") && s.contains("number")),
+            "let-alias: param type should propagate from callee: {:?}",
+            w
+        );
+        // A non-param let (binding a computed value, not a param rename) is NOT peeled.
+        let w = check_with_defs(
+            &["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"],
+            "(string-length (wrap 3))",
+        );
+        assert!(
+            w.is_empty(),
+            "let with non-param RHS must not be peeled — no inference: {:?}",
+            w
+        );
     }
 
     #[test]

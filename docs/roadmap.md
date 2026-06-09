@@ -842,7 +842,18 @@ the workaround available today.
       (re-validating operators, bailing if one was redefined). 13 e2e tests in
       `tests/jit.rs`; also fixed a pre-existing VM `Prim2SlotInt` `(Const,Local)`
       dispatch operand-order bug surfaced by the division tests (`swapped` flag).
-      Still ⬜: `cons`/`car`/`cdr` (allocating / handle-reading) as native IR.
+    - 🟡 **Stage 2 — hybrid operand model (handles in roots) (2026-06-09).** The
+      operand stack became `Vec<Op>` (`Int(reg) | Slot(k)`): handles ride in `roots`
+      (GC-visible), ints in registers; `Done` returns via `roots[base]`. So
+      handle-carrying / -returning / -`let` arms JIT (`let`-bindings, return-via-roots,
+      and the `Op` model landed + GC-stress-verified). Also fixed a 24-byte-`Value`
+      handle-copy bug (`Pid` needs a third word at offset 16) + pinned `size==24` /
+      `TAG_PAIR==9` in the layout test. **Still ⬜** (the next focused step — design
+      worked out, see devlog 2026-06-09): `cons`/`car`/`cdr` and Brood→Brood **calls**
+      via an **out-pointer callback ABI** (a `Value` is 24 bytes, so it can't be a
+      register-pair return), `Op::Handle(w0,w1,w2)`, a `Pair` tag-check before car/cdr,
+      and a back-edge `gc_safepoint` for cons loops. Calls are the real payoff (most real
+      bodies call a helper → currently bail).
     - ⬜ **Stage 3 — IC in native code**: epoch-guarded call-site IC compiles to
       `cmp [EPOCH_SLOT], r_epoch; jne slow_path` *inside* the JIT'd code (the
       Stage-1.5 guard is a per-activation Rust check in `jit_tier`); global-read

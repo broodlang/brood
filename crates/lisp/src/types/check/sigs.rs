@@ -17,6 +17,7 @@
 //! `arity_of` is independent: it works for any callable (primitive or
 //! closure) without needing a sig.
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::core::heap::{Heap, SymbolMap};
@@ -56,6 +57,12 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // dispatches string?/map?/else-fold) — but not a number/keyword/etc.
     #[allow(non_upper_case_globals)]
     const countable: Ty = Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector]);
+    #[allow(non_upper_case_globals)]
+    const str_ty: Ty = Ty::of(Tag::Str);
+    #[allow(non_upper_case_globals)]
+    const sym_ty: Ty = Ty::of(Tag::Sym);
+    #[allow(non_upper_case_globals)]
+    const map_ty: Ty = Ty::of(Tag::Map);
     let mut m: SymbolMap<Sig> = SymbolMap::default();
     let mut put = |name: &str, sig: Sig| {
         m.insert(value::intern(name), sig);
@@ -109,6 +116,34 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     put("reduce", Sig::new(vec![cb2.clone(), any, seq], any));
     put("fold", Sig::new(vec![cb2, any, seq], any));
+    // Predicates: branchy / `or`-expanded bodies that infer_sig can't walk.
+    // All are widest-safe domains (any/any) so a tighter call never warns falsely.
+    //   number? — body is (or (int? x) (float? x)); or-expansion hides the pattern.
+    //   empty?  — cascading if chain over type-of.
+    //   list?   — body is (or (nil? x) (pair? x)).
+    for n in ["number?", "empty?", "list?"] {
+        put(n, Sig::new(vec![any], bool_ty));
+    }
+    //   contains? — map-key probe (map-specific, so pin the domain to map); bool result.
+    //   member?   — linear scan over a sequence; first arg is the needle.
+    put("contains?", Sig::new(vec![map_ty, any], bool_ty));
+    put("member?", Sig::new(vec![any, seq], bool_ty));
+    // some?/every?: both take a 1-ary callback and a sequence, return bool.
+    // Curated because the body is a cond-recursive closure; infer_sig bails.
+    for n in ["some?", "every?"] {
+        put(n, Sig::new(vec![cb1.clone(), seq], bool_ty));
+    }
+    // String operations: branchy or `apply`-based bodies; infer_sig bails.
+    //   symbol->string — branches on (symbol? s), returns (name s) which is string.
+    //                    Domain is `symbol` so (symbol->string "x") is catchable.
+    //   join           — complex if/apply body; always returns a string.
+    //   string-capitalize — if-branches, both arms produce strings.
+    //   string-split   — accumulator recursion; returns a list of strings
+    //                    (unrefined list — list<string> would warn on (first …) = nil).
+    put("symbol->string", Sig::new(vec![sym_ty], str_ty));
+    put("join", Sig::new(vec![any, seq], str_ty));
+    put("string-capitalize", Sig::new(vec![str_ty], str_ty));
+    put("string-split", Sig::new(vec![str_ty, str_ty], Ty::LIST));
     m
 });
 
@@ -136,19 +171,61 @@ pub(super) fn curated_sig(sym: Symbol) -> Option<Sig> {
     CURATED_SIGS.get(&sym).cloned()
 }
 
+/// Try to peel a `(let (alias orig) inner)` wrapper where `orig` is a closure
+/// parameter. Returns the inner body and a one-entry `{alias → orig}` map on
+/// success, or the original body with an empty map. One level only.
+fn unwrap_let_alias(
+    heap: &Heap,
+    body: Value,
+    params: &[Symbol],
+) -> (Value, HashMap<Symbol, Symbol>) {
+    let empty: HashMap<Symbol, Symbol> = HashMap::new();
+    let Some(items) = list_items(heap, body) else {
+        return (body, empty);
+    };
+    // Must be exactly (let <bindings> <inner>).
+    if items.len() != 3 {
+        return (body, empty);
+    }
+    let Value::Sym(head) = items[0] else {
+        return (body, empty);
+    };
+    if !value::symbol_is(head, "let") {
+        return (body, empty);
+    }
+    // Bindings must be a single (alias orig) pair.
+    let Some(binding) = list_items(heap, items[1]) else {
+        return (body, empty);
+    };
+    if binding.len() != 2 {
+        return (body, empty);
+    }
+    let (Value::Sym(alias), Value::Sym(orig)) = (binding[0], binding[1]) else {
+        return (body, empty);
+    };
+    // `orig` must be a closure param; `alias` must not be (else it's a re-bind).
+    if !params.contains(&orig) || params.contains(&alias) {
+        return (body, empty);
+    }
+    let mut map = HashMap::new();
+    map.insert(alias, orig);
+    (items[2], map)
+}
+
 /// Inferred signature for a **user closure** named `sym` whose body is one
 /// straight-line expression — a single call to a callee with a known
 /// primitive/curated sig. Each closure parameter inherits the type the callee
 /// expects at the position(s) where the parameter is passed directly; the
 /// closure's return is the callee's.
 ///
+/// Also handles a single let-alias wrapper: `(let (y x) (callee y))` is treated
+/// as `(callee x)` — the alias is resolved back to the closure parameter before
+/// matching. One level only; deeper nesting isn't worth the complexity.
+///
 /// Deliberately *narrow*. Skipped when:
-/// - the body isn't exactly one expression (branches, lets, multi-step bodies);
-/// - the closure takes `&optional` / rest params (the call's positional arity is
-///   already past where the simple rule pays off);
-/// - the body isn't a call (a lone literal/variable doesn't pay for itself);
-/// - the head is anything but a primitive or curated stdlib closure (in
-///   particular, the closure's own name → recursion is ignored, per the rule).
+/// - the body isn't exactly one expression (branches, multi-step bodies);
+/// - the closure takes `&optional` / rest params;
+/// - the body isn't a known-callee call (literal/variable / macro head / recursion).
 ///
 /// Sound because a straight-line use is unconditional — no false positives.
 fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
@@ -170,7 +247,11 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let params: Vec<Symbol> = arm.params.clone();
     let self_name = closure.name;
 
-    let items = list_items(heap, body)?;
+    // Optionally unwrap a single let-alias: `(let (y x) call)` where `x` is a
+    // closure param.  The alias `y` is resolved back to `x` in the arg loop.
+    let (call_form, alias_map) = unwrap_let_alias(heap, body, &params);
+
+    let items = list_items(heap, call_form)?;
     let Value::Sym(callee) = items.first().copied()? else {
         return None;
     };
@@ -188,6 +269,8 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let mut param_tys = vec![Ty::ANY; params.len()];
     for (i, &arg) in items[1..].iter().enumerate() {
         let Value::Sym(arg_sym) = arg else { continue };
+        // Resolve alias → original closure param (identity if not aliased).
+        let arg_sym = alias_map.get(&arg_sym).copied().unwrap_or(arg_sym);
         let Some(pos) = params.iter().position(|&p| p == arg_sym) else {
             continue;
         };
