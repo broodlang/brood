@@ -1,11 +1,11 @@
 # Type variables — parametric signatures for user-defined generic functions
 
-> Status: **slice 1 shipped** (grammar + parse). `parse_type` in `annot.rs`
-> recognises `?`-prefix symbols and returns `Ty::ANY`; `type-matches?` already
-> accepts unknown names (no runtime change needed). Slices 2–3 (`SigTerm`
-> unification, primitive migration) deferred until a real HOF consumer exists.
-> This is Option B from the design — HOF cases (`map`/`filter`/`reduce`/`fold`) were already handled via per-HOF
-> result rules (Option B) and don't need this.
+> Status: **slices 1–2 shipped**. Slice 1: grammar + parse (`parse_type`
+> recognises `?`-prefix symbols, `type-matches?` accepts unknown names).
+> Slice 2: `SigTerm`/`SigWithVars` unification — `parse_sig_decl_with_vars`
+> in `annot.rs` parses variable-bearing sigs; `expr_ty` in `guards.rs`
+> resolves return types at call sites. Slice 3 (primitive migration) is
+> deferred — HOF cases are handled via per-HOF result rules (Option B).
 
 ## Problem
 

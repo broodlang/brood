@@ -3,9 +3,10 @@
 **Status:** steps 0–4 done; Step 5+ well underway (ADR-078) — function **arrow**
 types, sequence **element** types, **parametric HOF results**
 (`map`/`filter`/`reduce`/`fold` flow element types through), **`(and …)`
-intersections**, **`(map K V)` key/value contracts** (runtime), and **`?A` type
-variable grammar** all shipped. Deferred: map K/V full checker refinement;
-`SigTerm` unification for type variables. The
+intersections**, **`(map K V)` key/value contracts** (runtime + checker
+refinements for `get`/`keys`/`vals`/`assoc`), and **`?A` type variable
+unification** (user-declared sigs: `SigTerm`/`SigWithVars` resolve return
+types per-call from arg types) all shipped. The
 advisory checker (`(check 'form)`)
 is the lattice's first consumer (`crates/lisp/src/types/{mod,check}.rs`). This doc is the
 plan *and* the compatibility contract: the staircase says what to build next, the
@@ -375,15 +376,14 @@ fallback. Zero new false positives across `std/` + `tests/`.
 - ✅ **Intersections** `(and TypeA TypeB)` — shipped: `type-matches?` handles `(and …)`
   via `every?` (one line); `parse_type` in `annot.rs` produces `Ty::intersect` for
   the static checker. See [`docs/type-intersections.md`](type-intersections.md).
-- ✅ **Map key/value types** `(map K V)` — runtime slice shipped: `type-matches?`
-  walks `entries` to check each key/value pair; checker accepts `(map K V)` as flat
-  `Ty::Map` (slice 1). Full checker refinement (`map_kv` field on `Ty`) and derived
-  `get`/`keys`/`vals` result rules deferred to when a real consumer drives it.
+- ✅ **Map key/value types** `(map K V)` — fully shipped: `type-matches?` walks
+  `entries` for runtime contracts; `Ty::map_of` carries `map_kv` refinement in
+  the checker; `get`/`keys`/`vals`/`assoc` derive precise result types.
   See [`docs/type-map-kv.md`](type-map-kv.md).
-- ✅ **Type variables** `?A` — grammar shipped: `parse_type` recognises `?` prefix
-  and returns `Ty::ANY`; `type-matches?` passes through unknown names (accepts).
-  `SigTerm` unification at call sites and `SigWithVars` in user-declared sigs
-  deferred until a real HOF consumer needs per-call element inference.
+- ✅ **Type variables** `?A` — fully shipped: grammar (`parse_type`), runtime
+  (`type-matches?` passes unknown names), and static unification
+  (`SigWithVars`/`SigTerm` in `ctx.rs`; `parse_sig_decl_with_vars` in
+  `annot.rs`; `expr_ty` resolves return types per-call from arg types).
   See [`docs/type-variables.md`](type-variables.md).
 
 ## How it runs — and why it's outside the runtime
