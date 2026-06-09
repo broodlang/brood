@@ -642,6 +642,42 @@ mod tests {
     }
 
     #[test]
+    fn curated_output_and_numeric_sigs() {
+        // println/eprintln/eprint return nil — feeding to a numeric sink is caught.
+        for f in ["println", "eprintln", "eprint"] {
+            let w = warnings(&format!("(+ 1 ({f} \"hi\"))"));
+            assert!(
+                w.iter().any(|s| s.contains('+') && s.contains("nil")),
+                "{f}: expected '+' nil-result warning, got {w:?}"
+            );
+        }
+        // min/max require at least one number.
+        assert!(warnings("(min \"a\" 2)")
+            .iter()
+            .any(|w| w.contains("min") && w.contains("number")));
+        assert!(warnings("(max 1 :k)")
+            .iter()
+            .any(|w| w.contains("max") && w.contains("number")));
+        // min/max return a number — feeding to a string sink is caught.
+        assert!(warnings("(string-length (min 1 2))")
+            .iter()
+            .any(|w| w.contains("string-length")));
+        // Correct uses stay silent.
+        for ok in [
+            "(println \"hi\")",
+            "(min 1 2 3)",
+            "(max 0.5 1.5)",
+            "(+ 1 (min 2 3))",
+        ] {
+            assert!(
+                warnings(ok).iter().all(|w| !w.contains("expects")),
+                "{ok} should be silent: {:?}",
+                warnings(ok)
+            );
+        }
+    }
+
+    #[test]
     fn skips_error_testing_forms() {
         // `try` and the error-asserting helpers deliberately exercise failures,
         // so misuse inside them is not flagged.
