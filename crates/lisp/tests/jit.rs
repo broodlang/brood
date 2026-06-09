@@ -279,6 +279,34 @@ fn do_sequencing_under_jit() {
 }
 
 #[test]
+fn handle_locals_carry_and_return_through_the_jit() {
+    // The hybrid operand model: a *handle* (a list) lives in a frame slot and rides
+    // through the loop (slot-copy on the self-call) and back out (slot → roots return).
+    // Before this, `(Local xs)` eagerly tag-checked Int and deopted on a list, so any
+    // handle-touching arm bailed; now it stays native. Result must match the VM.
+    is(
+        "(defn carry (xs n) (if (< n 1) xs (carry xs (- n 1))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (carry (list 1 2 3) 20))))
+         (run 50000 nil)",
+        "(1 2 3)",
+    );
+    // Returning one of two handle arguments (a Slot return, no arithmetic on the handle).
+    is(
+        "(defn pick3 (c x y) (if (< c 0) x y))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (pick3 5 (list :a) (list :b :c)))))
+         (run 50000 nil)",
+        "(:b :c)",
+    );
+    // A handle bound by `let` and returned (SetLocal copies the handle verbatim).
+    is(
+        "(defn f (xs n) (if (< n 1) (let (keep xs) keep) (f xs (- n 1))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (f (list 7 8) 10))))
+         (run 50000 nil)",
+        "(7 8)",
+    );
+}
+
+#[test]
 fn jit_result_matches_a_known_fib_style_accumulator() {
     // A two-accumulator tail loop (the classic iterative fib), fully in the int subset.
     is(
