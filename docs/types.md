@@ -358,21 +358,20 @@ type to be known (either unknown → unrefined `pair`). `append`/`concat` union 
 element types of all arguments; any argument with an unknown element type → flat
 fallback. Zero new false positives across `std/` + `tests/`.
 
-**Still deferred / in progress (ADR-011).**
+**All previously-deferred items shipped (ADR-011).**
 
-- **Expanded curated sigs** — `str`/`pr-str` → `string`, `println`/`print` → `nil`,
-  `number->string` → `string`, etc. Small table additions that catch a specific class
-  of silent bugs (`(+ 1 (println x))`, `(first (str …))`).
+- ✅ **Expanded curated sigs** — shipped: predicate group (`number?`/`empty?`/`list?`/
+  `contains?`/`member?`/`some?`/`every?` → `bool`) and string-converter group
+  (`symbol->string`/`join`/`string-capitalize`/`string-split` → `string`/`list`).
+  Catches `(+ 1 (number? x))`, `(+ 1 (join …))`, etc.
 - ✅ **Rest/variadic in `(sig …)` annotations** — shipped: `(sig f (int & number -> int))`
   wires `Sig::rest` and the `sig!` macro generates a rest-checking wrapper.
 - ✅ **`sig!` runtime enforcement** — shipped: `sig!` wraps the target function with a
   per-argument and per-result runtime check; `BROOD_CONTRACTS=1` enforces every
   `(sig …)` the same way. See `docs/type-annotations.md`.
-- **Inference through simple let-aliases** — `infer_sig` bails on any body with a
-  `let`. A `(defn f (x) (let (y x) (callee y)))` is logically a straight-line wrapper;
-  the alias machinery in `Ctx` already handles narrowing through this shape at
-  check-time, so extending `infer_sig` to recognise a single-alias body is bounded
-  and sound.
+- ✅ **Inference through simple let-aliases** — shipped: `infer_sig` now peels a single
+  `(let (alias param) call)` wrapper via `unwrap_let_alias`, so `(defn f (x) (let (y x) (+ y 1)))`
+  infers `number -> number`. Multi-binding or computed RHS lets are not peeled (sound).
 - ✅ **Intersections** `(and TypeA TypeB)` — shipped: `type-matches?` handles `(and …)`
   via `every?` (one line); `parse_type` in `annot.rs` produces `Ty::intersect` for
   the static checker. See [`docs/type-intersections.md`](type-intersections.md).
