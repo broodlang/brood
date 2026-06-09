@@ -3689,7 +3689,12 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     for inst in code {
         match inst {
             Inst::Const(cv) if matches!(cv.load(), Value::Int(_)) => {}
-            Inst::Local(_) | Inst::Jump(_) | Inst::JumpIfFalse(_) | Inst::SelfCall { .. } => {}
+            Inst::Local(_)
+            | Inst::Jump(_)
+            | Inst::JumpIfFalse(_)
+            | Inst::SelfCall { .. }
+            | Inst::Pop
+            | Inst::SetLocal(_) => {}
             Inst::Prim2 { op, .. }
             | Inst::Prim2SlotSlot { op, .. }
             | Inst::Prim2SlotInt { op, .. }
@@ -3758,7 +3763,10 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 // operand stack: net push of 1 (unlike the generic `Prim2`'s pop-2-push-1).
                 Inst::Prim2SlotSlot { .. } | Inst::Prim2SlotInt { .. } => cur += 1,
                 Inst::Prim2 { .. } => cur -= 1, // pop 2, push 1
-                _ => break,                     // unreachable (pre-bailed)
+                // `let`/`do` plumbing: a binder stores the top into a frame slot, a
+                // non-final `do` form discards it — both pop one.
+                Inst::Pop | Inst::SetLocal(_) => cur -= 1,
+                _ => break, // unreachable (pre-bailed)
             }
             j += 1;
             if is_leader[j] {
@@ -3939,6 +3947,29 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 Inst::Local(i) => {
                     let v = load_slot_int(&mut b, *i as i64);
                     stack.push(v);
+                }
+                Inst::Pop => {
+                    // A non-final `do` form, evaluated for effect: drop its value. (The
+                    // int subset is pure, so the value can simply be discarded.)
+                    stack.pop()?;
+                }
+                Inst::SetLocal(i) => {
+                    // A `let`/`letrec` binder: box the top operand into frame slot `i`.
+                    // Only an unboxed `i64` (an `Int`) can be stored as one — a comparison
+                    // result (`I8` bool) can't, so bail (the VM runs the arm, binding the
+                    // bool correctly). Later `Local(i)` reads it back with a tag-check.
+                    // `let`-slots are scratch and distinct from the param slots that carry
+                    // loop state, and every read is dominated by this store, so a deopt's
+                    // re-run from ip 0 recomputes the binding before use — the slot's stale
+                    // value is never observed.
+                    let v = stack.pop()?;
+                    if !is_i64(&b, v) {
+                        return None;
+                    }
+                    let addr = slot_addr(&mut b, *i as i64);
+                    let tag_int = b.ins().iconst(types::I8, TAG_INT as i64);
+                    b.ins().store(MemFlags::new(), tag_int, addr, 0);
+                    b.ins().store(MemFlags::new(), v, addr, PAYLOAD_OFFSET as i32);
                 }
                 Inst::Prim2 { op, map, .. } => {
                     // Operands were pushed in source order: `aa` (deeper) is source 0,
