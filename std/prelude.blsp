@@ -257,6 +257,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
     (pair? t) (let (h (first t))
                 (cond
                   (%eq h 'or) (some? (fn (s) (type-matches? s v)) (rest t))
+                  (%eq h 'and) (every? (fn (s) (type-matches? s v)) (rest t))
                   (%eq h 'list)
                     (and (list? v)
                          (let (elem (first (rest t)))
@@ -267,6 +268,15 @@ names accept anything, so a contract never throws on a type it can't interpret."
                          (let (elem (first (rest t)))
                            (or (nil? elem)
                                (every? (fn (x) (type-matches? elem x)) v))))
+                  (%eq h 'map)
+                    (and (map? v)
+                         (let (ktype (first (rest t))
+                               vtype (first (rest (rest t))))
+                           (or (and (nil? ktype) (nil? vtype))
+                               (every? (fn (kv)
+                                         (and (type-matches? ktype (first kv))
+                                              (type-matches? vtype (second kv))))
+                                       (entries v)))))
                   else true))          ; arrow param / unknown compound → accept
     (%eq t 'any) true
     (%eq t 'number) (number? v)

@@ -43,6 +43,8 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     const num: Ty = Ty::NUMBER;
     #[allow(non_upper_case_globals)]
     const any: Ty = Ty::ANY;
+    #[allow(non_upper_case_globals)]
+    const nil_ty: Ty = Ty::of(Tag::Nil);
     // Maps are seqable in the stdlib (`seq`/`fold` coerce them via `map-pairs`),
     // so the higher-order combinators accept maps too — without this the
     // checker would warn on `(map f some-map)` even though it runs fine.
@@ -84,6 +86,16 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("zero?", Sig::new(vec![any], bool_ty));
     put("count", Sig::new(vec![countable], int));
     put("length", Sig::new(vec![countable], int));
+    // Output fns: println/eprintln/eprint are Brood closures with rest params,
+    // so infer_sig bails — pin their nil result so `(+ 1 (println x))` is caught.
+    for n in ["println", "eprintln", "eprint"] {
+        put(n, Sig::variadic(any, nil_ty));
+    }
+    // min/max: at least one number arg (fixed) plus variadic number rest → number.
+    // Variadic via rest; infer_sig bails on rest-param closures, so curate.
+    for n in ["min", "max"] {
+        put(n, Sig::with_rest(vec![num], num, num));
+    }
     // higher-order: the first arg is a callback of a *known arity* — what the
     // combinator calls it with. The arrow's parameter count drives the
     // callback-arity check (ADR-078): `(map f xs)` calls `(f x)` → 1-ary;

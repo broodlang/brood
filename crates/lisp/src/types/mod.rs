@@ -87,6 +87,9 @@ const FN_BITS: u32 = (1u32 << bit(Tag::Fn)) | (1u32 << bit(Tag::Native));
 /// `nil` is the empty list, no elements) or a `vector`.
 const SEQ_BITS: u32 = (1u32 << bit(Tag::Pair)) | (1u32 << bit(Tag::Vector));
 
+/// The map tag — the one tag a key/value refinement applies to.
+const MAP_BIT: u32 = 1u32 << bit(Tag::Map);
+
 /// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
 /// *structured refinements* on its function and sequence members (Step 5+,
 /// ADR-078).
@@ -119,6 +122,9 @@ pub struct Ty {
     /// Refinement of the sequence members (`pair`/`vector`) — the element type,
     /// when statically known. `None` means "elements of any type".
     elem: Option<Arc<Ty>>,
+    /// Refinement of the map member (`map`) — `(key-type, val-type)`, when
+    /// statically known.  `None` means "keys and values of any type".
+    map_kv: Option<Arc<(Ty, Ty)>>,
 }
 
 impl Ty {
@@ -139,6 +145,7 @@ impl Ty {
             tags,
             arrow: None,
             elem: None,
+            map_kv: None,
         }
     }
 
@@ -168,6 +175,7 @@ impl Ty {
             tags: FN_BITS,
             arrow: Some(Arc::new(sig)),
             elem: None,
+            map_kv: None,
         }
     }
 
@@ -185,7 +193,24 @@ impl Ty {
             tags: tags & SEQ_BITS,
             arrow: None,
             elem: Some(Arc::new(elem)),
+            map_kv: None,
         }
+    }
+
+    /// `map<K, V>` — a map whose keys have type `K` and values have type `V`.
+    pub fn map_of(key: Ty, val: Ty) -> Ty {
+        Ty {
+            tags: MAP_BIT,
+            arrow: None,
+            elem: None,
+            map_kv: Some(Arc::new((key, val))),
+        }
+    }
+
+    /// The key/value refinement, if this map type carries one. The bridge the
+    /// checker reads to flow `(get m k)` → `V | nil`, `(keys m)` → `list<K>`, etc.
+    pub fn map_kv(&self) -> Option<(&Ty, &Ty)> {
+        self.map_kv.as_deref().map(|(k, v)| (k, v))
     }
 
     /// `vector<elem>` — a vector whose elements have type `elem`.
@@ -265,7 +290,13 @@ impl Ty {
             other.tags & SEQ_BITS != 0,
             &other.elem,
         );
-        Ty { tags, arrow, elem }
+        let map_kv = merge_union(
+            self.tags & MAP_BIT != 0,
+            &self.map_kv,
+            other.tags & MAP_BIT != 0,
+            &other.map_kv,
+        );
+        Ty { tags, arrow, elem, map_kv }
     }
 
     /// `self ∩ other` — values in both. When the relevant bit survives and one
@@ -285,7 +316,12 @@ impl Ty {
         } else {
             None
         };
-        Ty { tags, arrow, elem }
+        let map_kv = if tags & MAP_BIT != 0 {
+            merge_intersect(&self.map_kv, &other.map_kv)
+        } else {
+            None
+        };
+        Ty { tags, arrow, elem, map_kv }
     }
 
     /// `¬self` — every value *not* in `self`, as a **sound over-approximation**:
@@ -311,6 +347,9 @@ impl Ty {
         }
         if self.elem.is_some() {
             tags |= self.tags & SEQ_BITS;
+        }
+        if self.map_kv.is_some() {
+            tags |= self.tags & MAP_BIT;
         }
         Ty::flat(tags)
     }
@@ -352,6 +391,19 @@ impl Ty {
                         }
                     }
                     None => return false, // self = "any elements" ⊄ a specific elem
+                }
+            }
+        }
+        if self.tags & MAP_BIT != 0 {
+            if let Some(b) = &other.map_kv {
+                match &self.map_kv {
+                    Some(a) => {
+                        // Covariant in both K and V — maps are immutable in Brood.
+                        if !a.0.is_subtype(&b.0) || !a.1.is_subtype(&b.1) {
+                            return false;
+                        }
+                    }
+                    None => return false, // self = "any map" ⊄ a specific map<K,V>
                 }
             }
         }
@@ -443,6 +495,12 @@ impl fmt::Display for Ty {
         // — with a leading `nil | ` when the empty/empty-list case rides along
         // (e.g. a `(map …)` result is `nil | list<E>`), so the rendering names
         // every tag the value can actually have.
+        // A pure map type with a known key/value type: `map<K, V>`.
+        if let Some((k, v)) = self.map_kv() {
+            if self.tags == MAP_BIT {
+                return write!(f, "map<{k}, {v}>");
+            }
+        }
         if let Some(elem) = self.elem_ty() {
             if self.tags & !(SEQ_BITS | (1u32 << bit(Tag::Nil))) == 0 {
                 let has_vec = self.contains_tag(Tag::Vector);

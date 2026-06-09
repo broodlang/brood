@@ -1,11 +1,15 @@
 # Type annotations — `(sig …)` and the road to sound gradual typing
 
-**Status:** slice 1 (`(sig …)`, checker-facing), slice 2 (`(sig! …)`, runtime
-enforcement — the soundness step), slice 3 (`BROOD_CONTRACTS=1` bulk-enforce
-switch), slice 4 (element-level `(list E)`/`(vector E)` checks), and slice 5
-(`&` rest params in the type grammar) all shipped. Deferred (designed):
-[intersections](type-intersections.md), [map key/value types](type-map-kv.md),
-[type variables](type-variables.md).
+**Status:** slices 1–8 shipped — slice 1 (`(sig …)`, checker-facing), slice 2
+(`(sig! …)`, runtime enforcement — the soundness step), slice 3
+(`BROOD_CONTRACTS=1` bulk-enforce switch), slice 4 (element-level
+`(list E)`/`(vector E)` checks), slice 5 (`&` rest params in the type grammar),
+slice 6 (`(and A B …)` intersections — runtime + checker), slice 7
+(`(map K V)` key/value contracts — runtime; checker flat-accepts), slice 8
+(`?A` type variables — grammar + checker parse; runtime accepts via
+unknown-type passthrough).
+Deferred: map K/V full checker refinement (`map_kv` in `Ty`); `SigTerm`
+unification for type variables at call sites (see [type-variables.md](type-variables.md)).
 
 This is Brood's answer to "can we be *more sound* given our parameters?"
 (advisory, never-gate, zero-false-positive, hot-reload, policy-in-Brood). The
@@ -33,19 +37,23 @@ ordinary symbol, so `(number -> number)` is a plain list the parser splits on
 ### Type-expression grammar (slice 1)
 
 ```
-type   ::= base | arrow | seq | union
+type   ::= base | typevar | arrow | seq | map-kv | union | inter
 base   ::= any | never | int | float | number | string | symbol
          | keyword | bool | nil | pair | vector | list | map | fn
          | rope | pid | ref | socket
+typevar ::= ? <name>                           ; e.g. ?A, ?el — static only
 arrow  ::= ( type* -> type )                   ; fixed arity
          | ( type* & type -> type )            ; fixed leading params + variadic rest
 seq    ::= (list type) | (vector type)         ; element type checked at runtime
+map-kv ::= (map key-type val-type)             ; key/val checked at runtime
 union  ::= (or type type+)
+inter  ::= (and type+)                         ; intersection; (and) = any
 ```
 
 Base names map to the same lattice points the predicates imply (`number` =
-`int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …). Deferred (ADR-011, add
-on demand): intersections, map key/value types, type variables.
+`int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …). Deferred: map K/V
+full checker refinement (`map_kv` in `Ty`); type variable unification at call
+sites (`SigTerm` route — see [type-variables.md](type-variables.md)).
 
 A `(sig name (… -> …))` whose type-expr is an **arrow** declares a function
 signature. Non-arrow `(sig x int)` (a value's type) is accepted by the grammar
@@ -106,11 +114,16 @@ Verified by `tests/contract_test.blsp`: a correct call passes; a bad argument,
 a bad *result* (a fn that lies about its return type), and a union-type
 non-member all throw.
 
-**Also shipped (slice 3–5):** `BROOD_CONTRACTS=1` enforces every `(sig …)` as
+**Also shipped (slices 3–8):** `BROOD_CONTRACTS=1` enforces every `(sig …)` as
 a runtime contract (same as `sig!`) for a dev/test run; element-level checks
-walk `(list E)` / `(vector E)` arguments at call time; and `&` rest params in
-the type grammar let `(sig! f (int & number -> int))` check both fixed and
-variadic arguments. See `tests/contract_test.blsp` for coverage.
+walk `(list E)` / `(vector E)` arguments at call time; `&` rest params let
+`(sig! f (int & number -> int))` check both fixed and variadic arguments;
+`(and A B …)` intersections are enforced at runtime and parsed by the static
+checker (`Ty::intersect`); `(map K V)` checks every key/value pair at runtime
+and the checker flat-accepts the annotation as `Ty::Map`; and `?A` type
+variables are parsed by both runtime and checker (resolved to `any` / `Ty::ANY`
+— the static-only constraint is not yet unified at call sites). See
+`tests/contract_test.blsp` for coverage.
 
 ## Why this is the right "more sound" move for Brood
 

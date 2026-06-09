@@ -280,6 +280,9 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         if let Some((name, sig)) = annot::parse_sig_decl(heap, form) {
             ctx.add_declared_sig(name, sig);
         }
+        if let Some((name, sv)) = annot::parse_sig_decl_with_vars(heap, form) {
+            ctx.add_declared_sig_with_vars(name, sv);
+        }
     }
     // Pass 3: check each expanded form with the accumulated file-globals.
     for &form in &expanded {
@@ -642,6 +645,42 @@ mod tests {
     }
 
     #[test]
+    fn curated_output_and_numeric_sigs() {
+        // println/eprintln/eprint return nil — feeding to a numeric sink is caught.
+        for f in ["println", "eprintln", "eprint"] {
+            let w = warnings(&format!("(+ 1 ({f} \"hi\"))"));
+            assert!(
+                w.iter().any(|s| s.contains('+') && s.contains("nil")),
+                "{f}: expected '+' nil-result warning, got {w:?}"
+            );
+        }
+        // min/max require at least one number.
+        assert!(warnings("(min \"a\" 2)")
+            .iter()
+            .any(|w| w.contains("min") && w.contains("number")));
+        assert!(warnings("(max 1 :k)")
+            .iter()
+            .any(|w| w.contains("max") && w.contains("number")));
+        // min/max return a number — feeding to a string sink is caught.
+        assert!(warnings("(string-length (min 1 2))")
+            .iter()
+            .any(|w| w.contains("string-length")));
+        // Correct uses stay silent.
+        for ok in [
+            "(println \"hi\")",
+            "(min 1 2 3)",
+            "(max 0.5 1.5)",
+            "(+ 1 (min 2 3))",
+        ] {
+            assert!(
+                warnings(ok).iter().all(|w| !w.contains("expects")),
+                "{ok} should be silent: {:?}",
+                warnings(ok)
+            );
+        }
+    }
+
+    #[test]
     fn skips_error_testing_forms() {
         // `try` and the error-asserting helpers deliberately exercise failures,
         // so misuse inside them is not flagged.
@@ -650,6 +689,53 @@ mod tests {
         assert!(warnings("(assert-error (first 5))").is_empty());
         // ...but a sibling form outside the skipped one is still checked.
         assert!(!warnings("(do (first 5) (try (first 6) (catch e e)))").is_empty());
+    }
+
+    #[test]
+    fn map_kv_refinement_flows_through_checker() {
+        // (sig f ((map keyword int) -> int)): the get result is int | nil.
+        // Feeding that to string-length should warn.
+        let w = check_with_defs(
+            &["(defn f (m) (get m :k))"],
+            "(string-length (f {:a 1}))",
+        );
+        // Without the sig the result type is unknown → no warning — so we need
+        // the sig to be declared. Use file_warnings to get the sig parsed.
+        let src = "
+(defn f (m) (get m :k))
+(sig f ((map keyword int) -> int))
+(string-length (f {:a 1}))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "expected string-length warning for int|nil arg, got {w:?}"
+        );
+
+        // `(keys m)` where m : map<keyword, int> → nil | list<keyword>.
+        // Feeding to string-length warns (list is not a string).
+        let src2 = "
+(defn g (m) (keys m))
+(sig g ((map keyword int) -> (list keyword)))
+(string-length (g {:a 1}))
+";
+        let w2 = file_warnings(src2);
+        assert!(
+            w2.iter().any(|s| s.contains("string-length")),
+            "expected string-length warning for list<keyword> arg, got {w2:?}"
+        );
+
+        // Correct uses stay silent.
+        for ok in [
+            "(get {:a 1} :a)",  // any map get — flat result, no warning
+            "(keys {:a 1})",
+            "(vals {:a 1})",
+        ] {
+            assert!(
+                warnings(ok).iter().all(|w| !w.contains("expects")),
+                "{ok} should be silent: {:?}", warnings(ok)
+            );
+        }
     }
 
     #[test]
