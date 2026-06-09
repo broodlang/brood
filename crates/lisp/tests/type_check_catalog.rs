@@ -74,6 +74,18 @@ const SHOULD_WARN: &[(&str, &str)] = &[
         r#"(sig const (?A ?B -> ?A)) (defn const (x y) x) (string-length (const 42 "x"))"#,
         "string-length",
     ), // const(?A ?B → ?A) on (int str) → int
+    // ---- expanded curated sigs: predicates return bool ----
+    ("(+ 1 (number? 42))", "+"),              // number? → bool, not number
+    ("(+ 1 (empty? (list)))", "+"),           // empty? → bool
+    ("(+ 1 (list? (list 1 2)))", "+"),        // list? → bool
+    ("(+ 1 (contains? {:a 1} :a))", "+"),     // contains? → bool
+    ("(+ 1 (member? 1 (list 1 2)))", "+"),    // member? → bool
+    ("(+ 1 (some? int? (list 1 2)))", "+"),   // some? → bool
+    ("(+ 1 (every? int? (list 1 2)))", "+"),  // every? → bool
+    // ---- expanded curated sigs: string converters ----
+    (r#"(+ 1 (symbol->string 'foo))"#, "+"),  // symbol->string → string
+    (r#"(+ 1 (join ", " (list "a" "b")))"#, "+"), // join → string
+    (r#"(+ 1 (string-capitalize "hello"))"#, "+"), // string-capitalize → string
 ];
 
 /// Each snippet must produce **zero** warnings — the false-positive guards.
@@ -115,6 +127,12 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(match (list 1 2) ([a b] :vec) (_ :not-vec))",
     // ---- correct occurrence typing (then-branch narrowing is sound) ----
     "(fn (x) (if (int? x) (+ x 1) 0))",
+    // ---- expanded curated sigs: correct uses stay silent ----
+    "(if (number? 42) :yes :no)",             // number? used as a predicate (bool is fine)
+    "(if (empty? (list)) :yes :no)",          // empty? as predicate
+    r#"(if (contains? {:a 1} :a) :yes :no)"#, // contains? as predicate
+    r#"(string-length (symbol->string 'foo))"#, // symbol→string→length is fine
+    r#"(string-length (join ", " (list "a")))"#, // join→string→length fine
     // ---- type-variable sigs: correct uses stay silent ----
     "(sig identity (?A -> ?A)) (defn identity (x) x) (+ 1 (identity 42))",
     "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (+ 1 (my-first (list 1 2 3)))",

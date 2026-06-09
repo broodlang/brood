@@ -2227,3 +2227,46 @@ entries for the `Prim2SlotInt` order bug. Full suite green: 411/411 with `--feat
 (incl. the in-language suite, GC-stress, concurrency_race), 391/391 default;
 `tests/jit.rs` green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. `make install` already
 defaults the JIT on (`WITH_JIT ?= 1`, `./configure --without-jit` to opt out).
+
+## 2026-06-09 — JIT tier-2 foundation: hybrid operand model (handles in roots)
+
+Toward making the JIT fire on *real* code (which is full of function calls and list
+ops, not just self-contained arithmetic loops). The keystone is letting an operand-stack
+slot hold a **heap handle** in `roots` (GC-visible), not just an unboxed `i64` in a
+register. Landed and committed (each green + `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`):
+
+- **let-bindings** (`SetLocal`/`Pop`): `(let …)`/`(do …)` bodies JIT (lazy slot store +
+  a copy/tag-check on read; deopt-re-run-from-ip-0 stays correct because let-slots are
+  scratch, recomputed before use, distinct from the loop-carried param slots).
+- **return-via-roots**: the `Done` block returns through `roots[base]` (each exit stores
+  its result there) instead of an `i64` block param — so a returned value can be a handle.
+- **hybrid operand model**: the operand stack is `Vec<Op>` with `Op = Int(reg) | Slot(k)`.
+  `Local` pushes a lazy `Slot`; arithmetic/branches tag-check it to an int, while a binder
+  / self-call arg / return copies the whole `Value` verbatim, so a handle round-trips
+  untouched and stays in `roots` where the moving GC sees it. SelfCall reads all args into
+  registers before storing (so `(f b a)` doesn't alias). Handle-carrying / -returning /
+  -`let` arms now JIT (verified: a loop carrying a list through and returning it runs
+  native and matches the VM).
+- **24-byte-`Value` bugfix**: `Value` is **24 bytes**, not 16 — `Pid { node, id }` needs
+  two payload words (`id` at offset 16). The first cut of the handle copy moved only
+  tag+payload (offsets 0/8), so it would corrupt a `Pid` moved between slots or returned
+  (the Pair-based tests passed because a Pair only uses offset 8). Now copies every word;
+  layout test pins `size == 24` and `Value::Pair`'s discriminant `== 9` (`TAG_PAIR`; note
+  it's 9, not `Tag::Pair`'s 7 — `Value` has an extra `BigInt` after `Int` and a `Rope`
+  before `Pair`).
+
+GC discipline that makes this sound: a handle lives in `roots` (a frame slot) across the
+only safepoint (the loop back-edge), and `collect` relocates roots **in place** (never
+reallocates the Vec), so the JIT's cached `roots_base` stays valid.
+
+**Next (cons/car/cdr, then calls) — the worked-out plan.** These produce/consume *new*
+handles, so they need an `Op::Handle(w0,w1,w2)` (a `Value` as three registers). Because a
+`Value` is 24 bytes it can't be a register-pair return, so the runtime callbacks
+(`brood_rt_cons`/`car`/`cdr`, and later `call_slow`) use an **out-pointer ABI**: the JIT
+passes a stack-slot address, the callback writes the result `Value` there, the JIT reads
+the 3 words back. `car`/`cdr` tag-check `Pair` first (deopt on non-pair, incl. nil).
+cons-allocating loops emit a back-edge `brood_rt_gc_safepoint` to bound the nursery (safe:
+the operand stack is empty there, so no handle is in a register across the collection).
+A fresh handle never crosses a block boundary in the target patterns (it's consumed
+in-block by SelfCall/Done), so bail if one would. `alloc_pair` only grows the nursery
+(never collects), so reconstructed operand `Value`s can't go stale mid-`cons`.
