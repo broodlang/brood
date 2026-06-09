@@ -174,3 +174,8 @@ Coverage: `tests/jit.rs` (13 end-to-end JIT≡VM cases) + the fused/map/overflow
 test, all green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. Still deferred to Stage 2/3/4:
 `cons`/`car`/`cdr` + float arithmetic as native IR, the native-code IC, and RUNTIME-compaction
 survival.
+
+**Tier-2 followed (2026-06-09): the hybrid operand model + `cons`/`car`/`cdr` landed** —
+handles ride in `roots`/registers so the JIT fires on list code, not just arithmetic. See
+[`jit-tier2.md`](jit-tier2.md) for the operand model, the handle out-pointer ABI, the GC
+discipline, and the plan for the one remaining payoff (Brood→Brood calls).
