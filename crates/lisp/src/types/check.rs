@@ -689,6 +689,53 @@ mod tests {
     }
 
     #[test]
+    fn map_kv_refinement_flows_through_checker() {
+        // (sig f ((map keyword int) -> int)): the get result is int | nil.
+        // Feeding that to string-length should warn.
+        let w = check_with_defs(
+            &["(defn f (m) (get m :k))"],
+            "(string-length (f {:a 1}))",
+        );
+        // Without the sig the result type is unknown → no warning — so we need
+        // the sig to be declared. Use file_warnings to get the sig parsed.
+        let src = "
+(defn f (m) (get m :k))
+(sig f ((map keyword int) -> int))
+(string-length (f {:a 1}))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "expected string-length warning for int|nil arg, got {w:?}"
+        );
+
+        // `(keys m)` where m : map<keyword, int> → nil | list<keyword>.
+        // Feeding to string-length warns (list is not a string).
+        let src2 = "
+(defn g (m) (keys m))
+(sig g ((map keyword int) -> (list keyword)))
+(string-length (g {:a 1}))
+";
+        let w2 = file_warnings(src2);
+        assert!(
+            w2.iter().any(|s| s.contains("string-length")),
+            "expected string-length warning for list<keyword> arg, got {w2:?}"
+        );
+
+        // Correct uses stay silent.
+        for ok in [
+            "(get {:a 1} :a)",  // any map get — flat result, no warning
+            "(keys {:a 1})",
+            "(vals {:a 1})",
+        ] {
+            assert!(
+                warnings(ok).iter().all(|w| !w.contains("expects")),
+                "{ok} should be silent: {:?}", warnings(ok)
+            );
+        }
+    }
+
+    #[test]
     fn covers_the_other_signed_primitives() {
         assert!(warnings("(mod 7 3)").is_empty());
         assert!(warnings("(mod 7 \"x\")").iter().any(|w| w.contains("mod")));

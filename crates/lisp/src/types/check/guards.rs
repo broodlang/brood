@@ -374,6 +374,40 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         }
         return list_result(acc);
     }
+    // Map K/V refinement rules — derive result types when the first argument is a
+    // `map<K, V>`.  Sound by the usual "widening is conservative" rule: these rules
+    // only fire when K/V are known; unknown → fall through to the curated flat result.
+    //
+    // `(get m k [default])` → `V | nil` (nil = key absent or default not given).
+    if value::symbol_is(head, "get") && items.len() >= 3 {
+        let map_arg = *items.get(1)?;
+        if let Some((_, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
+            return Some(v.clone().union(Ty::of(Tag::Nil)));
+        }
+    }
+    // `(keys m)` → `nil | list<K>`.
+    if value::symbol_is(head, "keys") && items.len() == 2 {
+        let map_arg = *items.get(1)?;
+        if let Some((k, _)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
+            return Some(Ty::list_of(k.clone()).union(Ty::of(Tag::Nil)));
+        }
+    }
+    // `(vals m)` → `nil | list<V>`.
+    if value::symbol_is(head, "vals") && items.len() == 2 {
+        let map_arg = *items.get(1)?;
+        if let Some((_, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
+            return Some(Ty::list_of(v.clone()).union(Ty::of(Tag::Nil)));
+        }
+    }
+    // `(assoc m k1 v1 …)` → `map<K, V>`, preserving the input's refinement.
+    // We only carry the refinement forward; we don't try to refine based on the
+    // new k/v arguments (too expensive, no false-positive risk either way).
+    if value::symbol_is(head, "assoc") && items.len() >= 4 && (items.len() - 2) % 2 == 0 {
+        let map_arg = *items.get(1)?;
+        if let Some((k, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
+            return Some(Ty::map_of(k.clone(), v.clone()));
+        }
+    }
     // `(map f coll)` → `nil | list<B>`, `B` = the callback's return type applied
     // to `coll`'s element type. Unknown callback / element → flat `list`.
     if value::symbol_is(head, "map") {

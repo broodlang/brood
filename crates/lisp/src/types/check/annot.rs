@@ -110,13 +110,12 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                 }
                 return acc;
             }
-            // (map K V) — key/value typed map.  Slice 1: parse and validate K/V
-            // annotations but produce a flat Ty::Map for the checker (refinement
-            // tracking deferred to slice 2 when a real consumer drives it).
+            // (map K V) — key/value typed map.  Full refinement: produce Ty::map_of
+            // so the checker can derive `get`/`keys`/`vals`/`assoc` result types.
             if value::symbol_is(head, "map") && items.len() == 3 {
-                parse_type(heap, items[1])?;
-                parse_type(heap, items[2])?;
-                return Some(Ty::of(Tag::Map));
+                let k = parse_type(heap, items[1])?;
+                let v = parse_type(heap, items[2])?;
+                return Some(Ty::map_of(k, v));
             }
             None
         }
