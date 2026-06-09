@@ -61,6 +61,19 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(string-length (first (cons 1 (list 2 3))))", "string-length"),    // cons: int | int = int
     ("(string-length (first (append [1 2] [3 4])))", "string-length"),   // append: int ∪ int = int
     ("(string-length (first (concat [1 2] [3 4])))", "string-length"),   // concat: same
+    // ---- type-variable sigs: return type resolved from argument types ----
+    (
+        "(sig identity (?A -> ?A)) (defn identity (x) x) (string-length (identity 42))",
+        "string-length",
+    ), // identity(?A → ?A) on int → int, not a string
+    (
+        "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (string-length (my-first (list 1 2 3)))",
+        "string-length",
+    ), // my-first on list<int> → int
+    (
+        r#"(sig const (?A ?B -> ?A)) (defn const (x y) x) (string-length (const 42 "x"))"#,
+        "string-length",
+    ), // const(?A ?B → ?A) on (int str) → int
 ];
 
 /// Each snippet must produce **zero** warnings — the false-positive guards.
@@ -102,6 +115,10 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(match (list 1 2) ([a b] :vec) (_ :not-vec))",
     // ---- correct occurrence typing (then-branch narrowing is sound) ----
     "(fn (x) (if (int? x) (+ x 1) 0))",
+    // ---- type-variable sigs: correct uses stay silent ----
+    "(sig identity (?A -> ?A)) (defn identity (x) x) (+ 1 (identity 42))",
+    "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (+ 1 (my-first (list 1 2 3)))",
+    r#"(sig const (?A ?B -> ?A)) (defn const (x y) x) (+ 1 (const 42 "x"))"#,
 ];
 
 #[test]

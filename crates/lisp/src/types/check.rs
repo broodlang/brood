@@ -280,6 +280,9 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         if let Some((name, sig)) = annot::parse_sig_decl(heap, form) {
             ctx.add_declared_sig(name, sig);
         }
+        if let Some((name, sv)) = annot::parse_sig_decl_with_vars(heap, form) {
+            ctx.add_declared_sig_with_vars(name, sv);
+        }
     }
     // Pass 3: check each expanded form with the accumulated file-globals.
     for &form in &expanded {
