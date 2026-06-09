@@ -255,6 +255,15 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     // shadows the name. (A file-global with a declared sig is the
                     // target, so guard on `is_lexical_local`, not `is_local`.)
                     if !ctx.is_lexical_local(s) {
+                        // Type-variable sig: resolve the return type from arg types
+                        // (e.g. `(sig identity (?A -> ?A))` → result = arg type).
+                        if let Some(sv) = ctx.declared_sig_with_vars(s) {
+                            let arg_tys: Vec<Option<Ty>> = items[1..]
+                                .iter()
+                                .map(|&a| expr_ty(heap, a, ctx))
+                                .collect();
+                            return Some(sv.resolve_ret(&arg_tys));
+                        }
                         if let Some(sg) = ctx.declared_sig(s) {
                             return Some(sg.ret);
                         }
