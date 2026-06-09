@@ -828,12 +828,25 @@ the workaround available today.
       (GC-safe by construction — the int subset never allocates); **~65× speedup** on a
       `sumto` int loop (`jit_speedup_vs_vm` bench). Repr was kept (`value-repr.md`): values
       live in `roots`, only unboxed `i64` in registers.
-    - ⬜ **Stage 2 — Inline primitives**: `cons` / arithmetic / `car` / `cdr` as
-      Cranelift IR with inline tag checks; deopt to `brood_rt_call_slow` on
-      mismatch.
+    - 🟡 **Stage 1.5/2 — fire on real code + full int arithmetic (2026-06-09).**
+      The Stage-1 lowering only handled the *unfused* `Prim2`, but `emit_node`
+      fuses real loop bodies (`(- i 1)` → `Prim2SlotInt`, `(+ acc i)` →
+      `Prim2SlotSlot`), so the JIT never fired on a compiled int loop. Now lowers
+      both fused variants, applies the passthrough `map` (fixing `(> a b)`), and
+      uses overflow-checked `sadd/ssub/smul` that **deopt** to the VM's BigInt
+      promotion. Added the **integer division family** (`rem`/`quot`/`%div`) with
+      div-by-zero / `i64::MIN/-1` / non-exact-`%div` deopt guards (Cranelift
+      `sdiv`/`srem` trap otherwise). **Hot-reload epoch guard** landed here too
+      (the Stage-3 idea, at arm granularity, in `jit_tier` Rust — no native IC
+      yet): a tiered arm records its compile epoch; a `def` invalidates + re-tiers
+      (re-validating operators, bailing if one was redefined). 13 e2e tests in
+      `tests/jit.rs`; also fixed a pre-existing VM `Prim2SlotInt` `(Const,Local)`
+      dispatch operand-order bug surfaced by the division tests (`swapped` flag).
+      Still ⬜: `cons`/`car`/`cdr` (allocating / handle-reading) as native IR.
     - ⬜ **Stage 3 — IC in native code**: epoch-guarded call-site IC compiles to
-      `cmp [EPOCH_SLOT], r_epoch; jne slow_path`; global-read IC same. `def`
-      hot-reload invalidates via the existing epoch bump.
+      `cmp [EPOCH_SLOT], r_epoch; jne slow_path` *inside* the JIT'd code (the
+      Stage-1.5 guard is a per-activation Rust check in `jit_tier`); global-read
+      IC same.
     - ⬜ **Stage 4 — RUNTIME compaction survival** (ADR-091): constant pool
       (indirection table per ADR-096 §4.C) lets `runtime_collect` rewrite
       handles without invalidating machine code.
