@@ -72,6 +72,9 @@ impl Jit {
         builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
         builder.symbol("brood_rt_alloc_pair", brood_rt_alloc_pair as *const u8);
+        builder.symbol("brood_rt_cons", brood_rt_cons as *const u8);
+        builder.symbol("brood_rt_car", brood_rt_car as *const u8);
+        builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         Jit { module: JITModule::new(builder) }
@@ -197,6 +200,82 @@ pub unsafe extern "C" fn brood_rt_alloc_pair(heap: *mut Heap) {
     let car = h.pop_root().expect("brood_rt_alloc_pair: operand-stack underflow (car)");
     let pair = h.alloc_pair(car, cdr);
     h.push_root(pair);
+}
+
+// ---- The handle ops: cons / car / cdr, by-value with an out-pointer. ----
+//
+// A `Value` is 24 bytes (3 i64 words: tag at 0, payload words at 8 and 16 — the layout
+// the JIT reads/writes a roots slot through), so it can't be a C register-pair return.
+// Instead the JIT passes an `out: *mut Value` (a stack slot it owns) and the callback
+// writes the result there; the JIT reads the three words back into an `Op::Handle`. The
+// operands likewise arrive as word triples the JIT read out of real `Value`s (a slot, an
+// `Int` box, or a previous handle result), so `words_to_val` is the identity on their
+// bytes. `alloc_pair` only grows the nursery (never collects), so a reconstructed operand
+// can't go stale mid-`cons`; no `roots` is touched, so `roots_base` stays valid.
+#[inline]
+unsafe fn words_to_val(w0: i64, w1: i64, w2: i64) -> crate::core::value::Value {
+    std::mem::transmute::<[i64; 3], crate::core::value::Value>([w0, w1, w2])
+}
+
+/// `cons` two `Value`s (each by word-triple), writing the fresh pair to `*out`.
+///
+/// # Safety
+/// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_cons(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    c0: i64,
+    c1: i64,
+    c2: i64,
+    d0: i64,
+    d1: i64,
+    d2: i64,
+) {
+    let h = &mut *heap;
+    let car = words_to_val(c0, c1, c2);
+    let cdr = words_to_val(d0, d1, d2);
+    *out = h.alloc_pair(car, cdr);
+}
+
+/// `first` of a `Value` (by word-triple), writing its car to `*out`. The JIT **tag-checks
+/// for `Pair` and deopts before calling**, so a non-pair (impossible by that contract)
+/// yields `nil` rather than UB.
+///
+/// # Safety
+/// `heap`/`out` live; the word triple is a real `Value::Pair`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_car(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+) {
+    let h = &mut *heap;
+    *out = match words_to_val(w0, w1, w2) {
+        crate::core::value::Value::Pair(id) => h.pair(id).0,
+        _ => crate::core::value::Value::Nil,
+    };
+}
+
+/// `rest` counterpart of [`brood_rt_car`] — writes the pair's cdr to `*out`.
+///
+/// # Safety
+/// `heap`/`out` live; the word triple is a real `Value::Pair`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_cdr(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+) {
+    let h = &mut *heap;
+    *out = match words_to_val(w0, w1, w2) {
+        crate::core::value::Value::Pair(id) => h.pair(id).1,
+        _ => crate::core::value::Value::Nil,
+    };
 }
 
 /// Base pointer of the operand-stack/`roots` buffer. JIT'd code calls this once at
