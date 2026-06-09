@@ -3801,12 +3801,16 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
     let tick_ref = m.declare_func_in_func(tick_id, b.func);
 
-    // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt.
+    // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt. The
+    // Done block (`ip == len`) takes **no** params: the result is returned via
+    // `roots[base]` (each exit stores it there), so it can be a handle, not just an
+    // `i64` block arg. Every other block carries its operand-stack depth as I64 params.
     let leader_block: Vec<Option<cranelift_codegen::ir::Block>> = (0..=len)
         .map(|ip| {
             if is_leader[ip] {
                 let blk = b.create_block();
-                for _ in 0..depth[ip].unwrap_or(0) {
+                let nparams = if ip == len { 0 } else { depth[ip].unwrap_or(0) };
+                for _ in 0..nparams {
                     b.append_block_param(blk, types::I64);
                 }
                 Some(blk)
@@ -3931,6 +3935,22 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         })
     };
 
+    // Return-via-roots: store the single result `v` into `roots[base]` (boxed as an Int)
+    // and jump to the param-less Done block, which just returns 0. Routing the result
+    // through `roots` rather than an `i64` block arg is what lets a Done value be a
+    // handle later (the hybrid operand model); for the int subset it's the same store the
+    // old Done block did, moved to the exit site.
+    let done_block = leader_block[len]?;
+    let exit_done_int = |b: &mut FunctionBuilder, v: cranelift_codegen::ir::Value| {
+        let idx = b.ins().iadd_imm(base, 0);
+        let off = b.ins().imul_imm(idx, STRIDE);
+        let addr = b.ins().iadd(roots_base, off);
+        let tag = b.ins().iconst(types::I8, TAG_INT as i64);
+        b.ins().store(MemFlags::new(), tag, addr, 0);
+        b.ins().store(MemFlags::new(), v, addr, PAYLOAD_OFFSET as i32);
+        b.ins().jump(done_block, &[]);
+    };
+
     // Translate each leader block in ip order.
     for ip in 0..len {
         let Some(blk) = leader_block[ip] else { continue };
@@ -4000,12 +4020,20 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     stack.push(r);
                 }
                 Inst::Jump(t) => {
-                    // All boundary-crossing values must be I64 (no bool across a join).
-                    if !stack.iter().all(|&v| is_i64(&b, v)) {
-                        return None;
+                    if *t == len {
+                        // Jump straight to Done: return the single result via roots[base].
+                        if stack.len() != 1 || !is_i64(&b, stack[0]) {
+                            return None;
+                        }
+                        exit_done_int(&mut b, stack[0]);
+                    } else {
+                        // All boundary-crossing values must be I64 (no bool across a join).
+                        if !stack.iter().all(|&v| is_i64(&b, v)) {
+                            return None;
+                        }
+                        let args = mkargs(&stack);
+                        b.ins().jump(leader_block[*t]?, &args);
                     }
-                    let args = mkargs(&stack);
-                    b.ins().jump(leader_block[*t]?, &args);
                     break;
                 }
                 Inst::SelfCall { argc } => {
@@ -4058,12 +4086,11 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
             }
             j += 1;
             if j == len {
-                // Fall off the end into Done with the result on top.
-                if !stack.iter().all(|&v| is_i64(&b, v)) {
+                // Fall off the end into Done: return the single result via roots[base].
+                if stack.len() != 1 || !is_i64(&b, stack[0]) {
                     return None;
                 }
-                let args = mkargs(&stack);
-                b.ins().jump(leader_block[len]?, &args);
+                exit_done_int(&mut b, stack[0]);
                 break;
             }
             if is_leader[j] {
@@ -4077,17 +4104,9 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         }
     }
 
-    // Done block: box the single result into roots[base], return 0.
-    let done = leader_block[len]?;
-    b.switch_to_block(done);
-    if b.block_params(done).len() != 1 {
-        return None; // arm doesn't leave exactly one value (unexpected shape)
-    }
-    let result = b.block_params(done)[0];
-    let addr0 = slot_addr(&mut b, 0);
-    let tag_int = b.ins().iconst(types::I8, TAG_INT as i64);
-    b.ins().store(MemFlags::new(), tag_int, addr0, 0);
-    b.ins().store(MemFlags::new(), result, addr0, PAYLOAD_OFFSET as i32);
+    // Done block: the result was already stored into `roots[base]` by the exiting block
+    // (return-via-roots, see `exit_done_int`), so this just signals normal completion.
+    b.switch_to_block(done_block);
     let zero = b.ins().iconst(types::I64, 0);
     b.ins().return_(&[zero]);
     // Deopt: an operand wasn't an Int — return 1, the caller runs the arm on the VM.
