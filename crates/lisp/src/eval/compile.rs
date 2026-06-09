@@ -3830,17 +3830,8 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let roots_base = b.inst_results(call)[0];
     b.ins().jump(leader_block[0].unwrap(), &[]);
 
-    let slot_addr = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
-        let idx = b.ins().iadd_imm(base, k);
-        let off = b.ins().imul_imm(idx, STRIDE);
-        b.ins().iadd(roots_base, off)
-    };
     let is_i64 = |b: &FunctionBuilder, v: cranelift_codegen::ir::Value| {
         b.func.dfg.value_type(v) == types::I64
-    };
-    // Cranelift block edges carry `BlockArg`s; wrap our operand-stack SSA values.
-    let mkargs = |s: &[cranelift_codegen::ir::Value]| -> Vec<BlockArg> {
-        s.iter().map(|&v| BlockArg::Value(v)).collect()
     };
     // Load frame slot `k` as an unboxed `i64`, tag-checking `Int` first: a non-`Int`
     // operand branches to `deopt` (the VM then runs the arm, where the inline path
@@ -3935,19 +3926,70 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         })
     };
 
-    // Return-via-roots: store the single result `v` into `roots[base]` (boxed as an Int)
-    // and jump to the param-less Done block, which just returns 0. Routing the result
-    // through `roots` rather than an `i64` block arg is what lets a Done value be a
-    // handle later (the hybrid operand model); for the int subset it's the same store the
-    // old Done block did, moved to the exit site.
+    // ---- The hybrid operand model. ----
+    //
+    // A logical operand-stack entry is either an unboxed `i64` in an SSA register
+    // (`Int` — an arithmetic/const/comparison result, the fast path that keeps tight
+    // numeric loops register-resident), or a reference to a frame slot `Slot(k)` whose
+    // `Value` lives in `roots[base+k]` — read lazily, type unknown. A `Slot` is the only
+    // way a *handle* (a Pair, etc.) can sit on the operand stack: handles must stay in
+    // `roots` so the moving collector can see and relocate them (a handle in a register
+    // would go stale across a safepoint). Consumers that need an `i64` (arithmetic, a
+    // branch condition, a block-arg) materialise a `Slot` with a tag-checked load; ones
+    // that move a whole `Value` (a binder, a self-call arg, the return) copy the 16-byte
+    // slot verbatim, so a handle round-trips untouched.
+    #[derive(Clone, Copy)]
+    enum Op {
+        Int(cranelift_codegen::ir::Value),
+        Slot(usize),
+    }
     let done_block = leader_block[len]?;
-    let exit_done_int = |b: &mut FunctionBuilder, v: cranelift_codegen::ir::Value| {
-        let idx = b.ins().iadd_imm(base, 0);
+    // Store an unboxed `i64` into frame slot `k`, tagged `Int`.
+    let store_int = |b: &mut FunctionBuilder, k: i64, v: cranelift_codegen::ir::Value| {
+        let idx = b.ins().iadd_imm(base, k);
         let off = b.ins().imul_imm(idx, STRIDE);
         let addr = b.ins().iadd(roots_base, off);
         let tag = b.ins().iconst(types::I8, TAG_INT as i64);
         b.ins().store(MemFlags::new(), tag, addr, 0);
         b.ins().store(MemFlags::new(), v, addr, PAYLOAD_OFFSET as i32);
+    };
+    // Copy the whole 16-byte `Value` from frame slot `src` to slot `dst` (handle-safe —
+    // moves the tag + payload verbatim, no interpretation). Two i64 word copies cover
+    // the `#[repr(C, u8)]` layout (tag+padding at 0, payload at PAYLOAD_OFFSET=8).
+    let copy_value = |b: &mut FunctionBuilder, src: i64, dst: i64| {
+        let saddr = {
+            let i = b.ins().iadd_imm(base, src);
+            let o = b.ins().imul_imm(i, STRIDE);
+            b.ins().iadd(roots_base, o)
+        };
+        let daddr = {
+            let i = b.ins().iadd_imm(base, dst);
+            let o = b.ins().imul_imm(i, STRIDE);
+            b.ins().iadd(roots_base, o)
+        };
+        let lo = b.ins().load(types::I64, MemFlags::new(), saddr, 0);
+        let hi = b.ins().load(types::I64, MemFlags::new(), saddr, PAYLOAD_OFFSET as i32);
+        b.ins().store(MemFlags::new(), lo, daddr, 0);
+        b.ins().store(MemFlags::new(), hi, daddr, PAYLOAD_OFFSET as i32);
+    };
+    // Materialise an operand to an unboxed `i64`: a register value as-is, or a tag-checked
+    // load of a frame slot (deopt on a non-`Int` slot).
+    let as_int = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+        match op {
+            Op::Int(v) => v,
+            Op::Slot(k) => load_slot_int(b, k as i64),
+        }
+    };
+    // Store an operand into frame slot `dst`: an `Int` is boxed; a `Slot` is copied
+    // verbatim (so a handle binder / self-call arg keeps its type).
+    let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| match op {
+        Op::Int(v) => store_int(b, dst, v),
+        Op::Slot(k) => copy_value(b, k as i64, dst),
+    };
+    // Return-via-roots: place the single result in `roots[base]` and jump to the
+    // param-less Done block. The result is a whole `Value`, so it can be a handle.
+    let exit_done = |b: &mut FunctionBuilder, op: Op| {
+        store_op(b, 0, op);
         b.ins().jump(done_block, &[]);
     };
 
@@ -3955,50 +3997,45 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     for ip in 0..len {
         let Some(blk) = leader_block[ip] else { continue };
         b.switch_to_block(blk);
-        let mut stack: Vec<cranelift_codegen::ir::Value> = b.block_params(blk).to_vec();
+        let mut stack: Vec<Op> = b.block_params(blk).iter().map(|&v| Op::Int(v)).collect();
         let mut j = ip;
         loop {
             match &code[j] {
                 Inst::Const(cv) => {
                     let Value::Int(n) = cv.load() else { return None };
-                    let v = b.ins().iconst(types::I64, n);
-                    stack.push(v);
+                    stack.push(Op::Int(b.ins().iconst(types::I64, n)));
                 }
-                Inst::Local(i) => {
-                    let v = load_slot_int(&mut b, *i as i64);
-                    stack.push(v);
-                }
+                // Lazy: push a reference to the frame slot. Consumers tag-check it to an int
+                // (arithmetic / a branch) or copy it whole (a binder / arg / return), so a
+                // handle in the slot rides along untouched.
+                Inst::Local(i) => stack.push(Op::Slot(*i)),
                 Inst::Pop => {
-                    // A non-final `do` form, evaluated for effect: drop its value. (The
-                    // int subset is pure, so the value can simply be discarded.)
+                    // A non-final `do` form, evaluated for effect: drop its value.
                     stack.pop()?;
                 }
                 Inst::SetLocal(i) => {
-                    // A `let`/`letrec` binder: box the top operand into frame slot `i`.
-                    // Only an unboxed `i64` (an `Int`) can be stored as one — a comparison
-                    // result (`I8` bool) can't, so bail (the VM runs the arm, binding the
-                    // bool correctly). Later `Local(i)` reads it back with a tag-check.
-                    // `let`-slots are scratch and distinct from the param slots that carry
-                    // loop state, and every read is dominated by this store, so a deopt's
-                    // re-run from ip 0 recomputes the binding before use — the slot's stale
-                    // value is never observed.
-                    let v = stack.pop()?;
-                    if !is_i64(&b, v) {
-                        return None;
+                    // A `let`/`letrec` binder → frame slot `i`. A `Slot` operand (possibly a
+                    // handle) is copied verbatim; an `Int` is boxed (a comparison `I8` can't
+                    // be a boxed Int — bail). let-slots are scratch, distinct from the
+                    // loop-carried param slots and dominated by this store, so a deopt's VM
+                    // re-run recomputes the binding before any read sees a stale slot.
+                    let op = stack.pop()?;
+                    if let Op::Int(v) = op {
+                        if !is_i64(&b, v) {
+                            return None;
+                        }
                     }
-                    let addr = slot_addr(&mut b, *i as i64);
-                    let tag_int = b.ins().iconst(types::I8, TAG_INT as i64);
-                    b.ins().store(MemFlags::new(), tag_int, addr, 0);
-                    b.ins().store(MemFlags::new(), v, addr, PAYLOAD_OFFSET as i32);
+                    store_op(&mut b, *i as i64, op);
                 }
                 Inst::Prim2 { op, map, .. } => {
                     // Operands were pushed in source order: `aa` (deeper) is source 0,
-                    // `bb` (top) is source 1. Apply `map` before the op.
-                    let (bb, aa) = (stack.pop()?, stack.pop()?);
+                    // `bb` (top) is source 1. Materialise to int, then apply `map`.
+                    let (bb_op, aa_op) = (stack.pop()?, stack.pop()?);
+                    let aa = as_int(&mut b, aa_op);
+                    let bb = as_int(&mut b, bb_op);
                     let x = pick(aa, bb, map[0]);
                     let y = pick(aa, bb, map[1]);
-                    let r = emit_arith(&mut b, *op, x, y)?;
-                    stack.push(r);
+                    stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
                 }
                 Inst::Prim2SlotSlot { op, map, slot_a, slot_b, .. } => {
                     // Source 0 = slot_a, source 1 = slot_b (the VM's `[sa, sb]` order).
@@ -4006,8 +4043,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     let sb = load_slot_int(&mut b, *slot_b as i64);
                     let x = pick(sa, sb, map[0]);
                     let y = pick(sa, sb, map[1]);
-                    let r = emit_arith(&mut b, *op, x, y)?;
-                    stack.push(r);
+                    stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
                 }
                 Inst::Prim2SlotInt { op, map, slot_a, int_b, .. } => {
                     // Source 0 = slot_a, source 1 = the literal `int_b` (the fusion of
@@ -4016,49 +4052,68 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     let sb = b.ins().iconst(types::I64, *int_b);
                     let x = pick(sa, sb, map[0]);
                     let y = pick(sa, sb, map[1]);
-                    let r = emit_arith(&mut b, *op, x, y)?;
-                    stack.push(r);
+                    stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
                 }
                 Inst::Jump(t) => {
                     if *t == len {
                         // Jump straight to Done: return the single result via roots[base].
-                        if stack.len() != 1 || !is_i64(&b, stack[0]) {
+                        if stack.len() != 1 {
                             return None;
                         }
-                        exit_done_int(&mut b, stack[0]);
+                        exit_done(&mut b, stack[0]);
                     } else {
-                        // All boundary-crossing values must be I64 (no bool across a join).
-                        if !stack.iter().all(|&v| is_i64(&b, v)) {
-                            return None;
-                        }
-                        let args = mkargs(&stack);
+                        let args: Vec<BlockArg> =
+                            stack.iter().map(|&op| BlockArg::Value(as_int(&mut b, op))).collect();
                         b.ins().jump(leader_block[*t]?, &args);
                     }
                     break;
                 }
                 Inst::SelfCall { argc } => {
-                    // Tail self-call (the loop back-edge): the argc new args are on top
-                    // (arg0 deepest). Pop them, box each into its frame slot, and jump the
-                    // loop header (block 0). The frame slots live in `roots`, so they are
-                    // the loop-carried state — no SSA block params needed across the edge.
-                    let mut args = Vec::with_capacity(*argc);
+                    // Tail self-call (loop back-edge): pop the argc new args and write them
+                    // into frame slots `0..argc`. Read every arg's `Value` into registers
+                    // FIRST, then store — an arg may reference a slot being overwritten
+                    // (e.g. `(f b a)`), so a read-as-you-store would alias. The reads are
+                    // safepoint-free, so even a handle's bits are safe in a register here.
+                    let mut ops = Vec::with_capacity(*argc);
                     for _ in 0..*argc {
-                        args.push(stack.pop()?);
+                        ops.push(stack.pop()?);
                     }
-                    args.reverse(); // args[i] = the i-th positional arg → frame slot i
-                    if !stack.is_empty() || !args.iter().all(|&v| is_i64(&b, v)) {
-                        return None; // a non-empty residual stack / non-int arg: bail
+                    ops.reverse(); // ops[i] = the i-th positional arg → frame slot i
+                    if !stack.is_empty() {
+                        return None;
                     }
-                    for (i, &v) in args.iter().enumerate() {
-                        let addr = slot_addr(&mut b, i as i64);
-                        let tag_int = b.ins().iconst(types::I8, TAG_INT as i64);
-                        b.ins().store(MemFlags::new(), tag_int, addr, 0);
-                        b.ins().store(MemFlags::new(), v, addr, PAYLOAD_OFFSET as i32);
+                    let mut vals: Vec<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> =
+                        Vec::with_capacity(*argc);
+                    for &op in &ops {
+                        match op {
+                            Op::Int(v) => {
+                                if !is_i64(&b, v) {
+                                    return None;
+                                }
+                                let tag = b.ins().iconst(types::I8, TAG_INT as i64);
+                                vals.push((tag, v));
+                            }
+                            Op::Slot(k) => {
+                                let i = b.ins().iadd_imm(base, k as i64);
+                                let o = b.ins().imul_imm(i, STRIDE);
+                                let addr = b.ins().iadd(roots_base, o);
+                                let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+                                let pay =
+                                    b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                                vals.push((tag, pay));
+                            }
+                        }
+                    }
+                    for (i, &(tag, pay)) in vals.iter().enumerate() {
+                        let idx = b.ins().iadd_imm(base, i as i64);
+                        let o = b.ins().imul_imm(idx, STRIDE);
+                        let addr = b.ins().iadd(roots_base, o);
+                        b.ins().store(MemFlags::new(), tag, addr, 0);
+                        b.ins().store(MemFlags::new(), pay, addr, PAYLOAD_OFFSET as i32);
                     }
                     // Preemption (ADR-027): poll the reduction budget on the back-edge. On
-                    // yield, deopt to `preempt` (return 2) — the frame slots already hold
-                    // the next iteration's args (in `roots`), so the driver resumes the
-                    // arm on the VM from exactly here. Otherwise loop.
+                    // yield, deopt to `preempt` (return 2) — the frame slots already hold the
+                    // next iteration's args (in `roots`), so the driver resumes on the VM.
                     let tc = b.ins().call(tick_ref, &[heap]);
                     let yld = b.inst_results(tc)[0];
                     b.ins().brif(yld, preempt, &[], leader_block[0]?, &[]);
@@ -4066,19 +4121,29 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 }
                 Inst::JumpIfFalse(t) => {
                     let cond = stack.pop()?;
-                    if !stack.iter().all(|&v| is_i64(&b, v)) {
-                        return None;
-                    }
                     let tgt = leader_block[*t]?; // falsy → else
                     let fall = leader_block[j + 1]?; // truthy → fall-through
-                    let args = mkargs(&stack);
-                    if is_i64(&b, cond) {
-                        // A raw Int is *always truthy* in Brood (even 0) — never branch on
-                        // it; take the truthy path unconditionally.
-                        b.ins().jump(fall, &args);
-                    } else {
-                        // A comparison result (I8 0/1): nonzero = true = fall-through.
-                        b.ins().brif(cond, fall, &args, tgt, &args);
+                    // A comparison `I8` branches; any other value is always truthy in Brood
+                    // — but a `Slot` condition must still be tag-checked to an `Int` (a
+                    // non-int local condition, e.g. `nil`/`false`, deopts to the VM, matching
+                    // the eager-int behaviour the JIT had before lazy slots).
+                    let brif_cond = match cond {
+                        Op::Int(v) if !is_i64(&b, v) => Some(v),
+                        Op::Int(_) => None,
+                        Op::Slot(k) => {
+                            let _ = load_slot_int(&mut b, k as i64);
+                            None
+                        }
+                    };
+                    let args: Vec<BlockArg> =
+                        stack.iter().map(|&op| BlockArg::Value(as_int(&mut b, op))).collect();
+                    match brif_cond {
+                        Some(c) => {
+                            b.ins().brif(c, fall, &args, tgt, &args);
+                        }
+                        None => {
+                            b.ins().jump(fall, &args);
+                        }
                     }
                     break;
                 }
@@ -4087,17 +4152,15 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
             j += 1;
             if j == len {
                 // Fall off the end into Done: return the single result via roots[base].
-                if stack.len() != 1 || !is_i64(&b, stack[0]) {
+                if stack.len() != 1 {
                     return None;
                 }
-                exit_done_int(&mut b, stack[0]);
+                exit_done(&mut b, stack[0]);
                 break;
             }
             if is_leader[j] {
-                if !stack.iter().all(|&v| is_i64(&b, v)) {
-                    return None;
-                }
-                let args = mkargs(&stack);
+                let args: Vec<BlockArg> =
+                    stack.iter().map(|&op| BlockArg::Value(as_int(&mut b, op))).collect();
                 b.ins().jump(leader_block[j]?, &args);
                 break;
             }
@@ -4105,7 +4168,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     }
 
     // Done block: the result was already stored into `roots[base]` by the exiting block
-    // (return-via-roots, see `exit_done_int`), so this just signals normal completion.
+    // (return-via-roots, see `exit_done`), so this just signals normal completion.
     b.switch_to_block(done_block);
     let zero = b.ins().iconst(types::I64, 0);
     b.ins().return_(&[zero]);
