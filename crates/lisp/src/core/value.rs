@@ -724,6 +724,14 @@ pub(crate) mod jit_layout {
     pub const PAYLOAD_OFFSET: usize = 8;
     /// `Value::Int`'s discriminant (declaration order: `Nil`=0, `Bool`=1, `Int`=2).
     pub const TAG_INT: u8 = 2;
+    /// `Value::Pair`'s discriminant. Note this is **not** `Tag::Pair` (7): `Value` has an
+    /// extra `BigInt` after `Int` (folded into `int` by `Tag`) *and* a `Rope` before
+    /// `Pair`, so `Value`'s discriminants run `… Int=2, BigInt=3, Float=4, …, Str=7,
+    /// Rope=8, Pair=9`. A `car`/`cdr` tag-check compares a slot's discriminant byte
+    /// against this. Pinned by the layout test. (Used by the upcoming car/cdr lowering;
+    /// the layout test already pins it.)
+    #[allow(dead_code)]
+    pub const TAG_PAIR: u8 = 9;
 }
 
 #[cfg(test)]
@@ -736,6 +744,19 @@ mod jit_layout_tests {
     #[test]
     fn value_layout_is_stable_for_the_jit() {
         assert_eq!(std::mem::align_of::<Value>(), 8, "Value must stay 8-aligned");
+        // The JIT addresses a roots slot as `roots_base + k * size_of::<Value>()` (its
+        // `STRIDE`) and copies a whole handle word-by-word across all `size_of` bytes — a
+        // change here is an ABI break the JIT codegen must follow. It is **not** 16: the
+        // `Pid { node, id }` variant needs two payload words (the second at offset 16),
+        // which a tag+payload-only copy would drop.
+        assert_eq!(std::mem::size_of::<Value>(), 24, "Value size (the JIT's STRIDE) drifted");
+        // `Value::Pair`'s discriminant byte must match `TAG_PAIR` (the JIT's car/cdr
+        // tag-check); a variant reorder breaks it.
+        let p = Value::Pair(PairId::local_gen(0, 0));
+        let pbytes = unsafe {
+            std::slice::from_raw_parts(&p as *const Value as *const u8, std::mem::size_of::<Value>())
+        };
+        assert_eq!(pbytes[0], jit_layout::TAG_PAIR, "Value::Pair discriminant drifted");
         let v = Value::Int(0x0123_4567_89ab_cdef_u64 as i64);
         // Read the raw bytes (no transmute size constraint).
         let bytes = unsafe {
@@ -753,3 +774,4 @@ mod jit_layout_tests {
         );
     }
 }
+

@@ -3953,9 +3953,11 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         b.ins().store(MemFlags::new(), tag, addr, 0);
         b.ins().store(MemFlags::new(), v, addr, PAYLOAD_OFFSET as i32);
     };
-    // Copy the whole 16-byte `Value` from frame slot `src` to slot `dst` (handle-safe —
-    // moves the tag + payload verbatim, no interpretation). Two i64 word copies cover
-    // the `#[repr(C, u8)]` layout (tag+padding at 0, payload at PAYLOAD_OFFSET=8).
+    // Copy the whole `Value` from frame slot `src` to slot `dst` (handle-safe — moves the
+    // bytes verbatim, no interpretation). A `Value` is `STRIDE` bytes (`#[repr(C, u8)]`):
+    // it must copy **every** i64 word, not just tag+payload — `Value::Pid { node, id }`
+    // (and any future 2-word-payload variant) carries `id` in the third word at offset 16,
+    // which a tag+payload-only copy would drop and corrupt.
     let copy_value = |b: &mut FunctionBuilder, src: i64, dst: i64| {
         let saddr = {
             let i = b.ins().iadd_imm(base, src);
@@ -3967,10 +3969,12 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
             let o = b.ins().imul_imm(i, STRIDE);
             b.ins().iadd(roots_base, o)
         };
-        let lo = b.ins().load(types::I64, MemFlags::new(), saddr, 0);
-        let hi = b.ins().load(types::I64, MemFlags::new(), saddr, PAYLOAD_OFFSET as i32);
-        b.ins().store(MemFlags::new(), lo, daddr, 0);
-        b.ins().store(MemFlags::new(), hi, daddr, PAYLOAD_OFFSET as i32);
+        let mut off = 0i32;
+        while (off as i64) < STRIDE {
+            let w = b.ins().load(types::I64, MemFlags::new(), saddr, off);
+            b.ins().store(MemFlags::new(), w, daddr, off);
+            off += 8;
+        }
     };
     // Materialise an operand to an unboxed `i64`: a register value as-is, or a tag-checked
     // load of a frame slot (deopt on a non-`Int` slot).
@@ -4082,7 +4086,12 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     if !stack.is_empty() {
                         return None;
                     }
-                    let mut vals: Vec<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> =
+                    // Each arg becomes a list of (byte-offset, word) stores. An `Int` is
+                    // boxed (tag at 0, payload at PAYLOAD_OFFSET — the third word is left
+                    // alone, irrelevant to an Int). A `Slot` copies **every** word of the
+                    // `Value` (tag/payload/…) so a handle — including a `Pid` whose `id` is
+                    // the third word at offset 16 — moves intact.
+                    let mut vals: Vec<Vec<(i32, cranelift_codegen::ir::Value)>> =
                         Vec::with_capacity(*argc);
                     for &op in &ops {
                         match op {
@@ -4091,25 +4100,29 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                                     return None;
                                 }
                                 let tag = b.ins().iconst(types::I8, TAG_INT as i64);
-                                vals.push((tag, v));
+                                vals.push(vec![(0, tag), (PAYLOAD_OFFSET as i32, v)]);
                             }
                             Op::Slot(k) => {
                                 let i = b.ins().iadd_imm(base, k as i64);
                                 let o = b.ins().imul_imm(i, STRIDE);
                                 let addr = b.ins().iadd(roots_base, o);
-                                let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
-                                let pay =
-                                    b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
-                                vals.push((tag, pay));
+                                let mut words = Vec::new();
+                                let mut off = 0i32;
+                                while (off as i64) < STRIDE {
+                                    words.push((off, b.ins().load(types::I64, MemFlags::new(), addr, off)));
+                                    off += 8;
+                                }
+                                vals.push(words);
                             }
                         }
                     }
-                    for (i, &(tag, pay)) in vals.iter().enumerate() {
+                    for (i, words) in vals.iter().enumerate() {
                         let idx = b.ins().iadd_imm(base, i as i64);
                         let o = b.ins().imul_imm(idx, STRIDE);
                         let addr = b.ins().iadd(roots_base, o);
-                        b.ins().store(MemFlags::new(), tag, addr, 0);
-                        b.ins().store(MemFlags::new(), pay, addr, PAYLOAD_OFFSET as i32);
+                        for &(off, w) in words {
+                            b.ins().store(MemFlags::new(), w, addr, off);
+                        }
                     }
                     // Preemption (ADR-027): poll the reduction budget on the back-edge. On
                     // yield, deopt to `preempt` (return 2) — the frame slots already hold the
