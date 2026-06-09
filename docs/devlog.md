@@ -2270,3 +2270,35 @@ the operand stack is empty there, so no handle is in a register across the colle
 A fresh handle never crosses a block boundary in the target patterns (it's consumed
 in-block by SelfCall/Done), so bail if one would. `alloc_pair` only grows the nursery
 (never collects), so reconstructed operand `Value`s can't go stale mid-`cons`.
+
+## 2026-06-09 — JIT: cons / car / cdr land (the JIT fires on list code)
+
+Built on the hybrid-operand-model foundation: `cons`/`first`/`rest` now compile, so the
+JIT accelerates real list code, not just arithmetic. These produce/consume heap handles,
+which can't ride in a register across a safepoint, so they use runtime callbacks with a
+by-value **out-pointer ABI** (a `Value` is 24 bytes → can't be a C register-pair return):
+the JIT passes a scratch stack-slot address, the callback writes the result `Value` there,
+and the JIT reads the three words back into a new `Op::Handle(w0,w1,w2)`.
+
+- `cons` (generic `Prim2{Cons}` + `(Local,Local)`-fused `Prim2SlotSlot{Cons}`): car =
+  source 0, cdr = source 1. It allocates, so cons arms emit a back-edge
+  `brood_rt_gc_safepoint` to bound the nursery — safe there because the operand stack is
+  empty (no handle in a register across the collection) and `collect` relocates the frame
+  slots in place, so `roots_base` stays valid. `(_,Const)`-fused `Prim2SlotInt{Cons}` bails.
+- `first`/`rest` (`Prim1`): tag-check the operand is a `Pair` (`TAG_PAIR` = 9; deopt to the
+  VM on a non-pair — nil, type error), then read car/cdr via the callback.
+- `Op::Handle` is transient: produced and consumed within a block (stored whole — 3 words —
+  into a slot by a self-call arg / binder / return, or tag-checked back to an int when used
+  as a number), never crossing the loop back-edge live, so the GC never sees a handle in a
+  register. `alloc_pair` only grows the nursery (never collects), so reconstructed operand
+  `Value`s can't go stale mid-`cons`.
+
+Verified: list build, computed-car cons, `nth` via first/rest, `(+ (first xs) …)`,
+walk-to-nil, build-then-traverse — all match the VM and pass under `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1` (the cons loops allocate a pair per iteration, so the verifier walks the
+live graph at every collection — the real proof the handles-in-roots / handles-only-
+transiently-in-registers discipline holds). Commits `08844a4`/`b6ba590`/`3564a39`/`19c4333`.
+
+**Remaining JIT payoff: Brood→Brood calls** (`Inst::Call` via `brood_rt_call_slow`) — so a
+body that calls a *helper* JITs (the common real-code shape). Reuses `Op::Handle` for the
+result + the out-pointer ABI pattern; needs deopt/preempt/error handling across the call.
