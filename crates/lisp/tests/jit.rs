@@ -307,6 +307,65 @@ fn handle_locals_carry_and_return_through_the_jit() {
 }
 
 #[test]
+fn cons_builds_lists_under_jit() {
+    // A cons in a hot loop allocates a pair per iteration — exercising the handle's
+    // out-pointer ABI, `Op::Handle`, and the back-edge gc_safepoint that bounds the
+    // nursery. `(cons n acc)` fuses to Prim2SlotSlot{Cons}; the result must match the VM.
+    is(
+        "(defn build (n acc) (if (< n 1) acc (build (- n 1) (cons n acc))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (build 5 nil))))
+         (run 100000 nil)",
+        "(1 2 3 4 5)",
+    );
+    // cons of a *computed* car (generic Prim2{Cons}), longer list = more GC pressure.
+    is(
+        "(defn sq-down (n acc) (if (< n 1) acc (sq-down (- n 1) (cons (* n n) acc))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (sq-down 6 nil))))
+         (run 100000 nil)",
+        "(1 4 9 16 25 36)",
+    );
+}
+
+#[test]
+fn car_cdr_traverse_lists_under_jit() {
+    // `first`/`rest` via the handle ops, with a tag-check → deopt on a non-pair. nth
+    // element of a list, traversed with rest, returned with first.
+    is(
+        "(defn elt (xs n) (if (< n 1) (first xs) (elt (rest xs) (- n 1))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (elt (list 10 20 30 40 50) 3))))
+         (run 100000 0)",
+        "40",
+    );
+    // first/rest then arithmetic on the element (a Handle used as an int → tag-check).
+    is(
+        "(defn sum2 (xs) (+ (first xs) (first (rest xs))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (sum2 (list 11 22 33)))))
+         (run 100000 0)",
+        "33",
+    );
+    // Walk a list down to its empty tail with `rest` — the cdr of the last pair is nil,
+    // returned through the JIT; matches the VM (nil prints as `nil`).
+    is(
+        "(defn walk (xs n) (if (< n 1) xs (walk (rest xs) (- n 1))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (walk (list 1 2) 2))))
+         (run 100000 nil)",
+        "nil",
+    );
+}
+
+#[test]
+fn cons_then_traverse_round_trips_under_jit() {
+    // Build a list with cons, then read it back with first/rest — both halves native.
+    is(
+        "(defn build (n acc) (if (< n 1) acc (build (- n 1) (cons n acc))))
+         (defn elt (xs n) (if (< n 1) (first xs) (elt (rest xs) (- n 1))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (elt (build 8 nil) 5))))
+         (run 100000 0)",
+        "6", // build 8 → (1..8); elt …5 → the 6th element = 6
+    );
+}
+
+#[test]
 fn jit_result_matches_a_known_fib_style_accumulator() {
     // A two-accumulator tail loop (the classic iterative fib), fully in the int subset.
     is(

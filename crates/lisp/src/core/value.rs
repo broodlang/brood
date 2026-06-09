@@ -728,9 +728,7 @@ pub(crate) mod jit_layout {
     /// extra `BigInt` after `Int` (folded into `int` by `Tag`) *and* a `Rope` before
     /// `Pair`, so `Value`'s discriminants run `… Int=2, BigInt=3, Float=4, …, Str=7,
     /// Rope=8, Pair=9`. A `car`/`cdr` tag-check compares a slot's discriminant byte
-    /// against this. Pinned by the layout test. (Used by the upcoming car/cdr lowering;
-    /// the layout test already pins it.)
-    #[allow(dead_code)]
+    /// against this. Pinned by the layout test.
     pub const TAG_PAIR: u8 = 9;
 }
 

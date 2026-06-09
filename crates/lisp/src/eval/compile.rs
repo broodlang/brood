@@ -3654,8 +3654,11 @@ static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// The returned pointer is valid for the life of `jit` (its module owns the code).
 #[cfg(feature = "jit")]
 pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*const u8> {
-    use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_INT};
-    use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags};
+    use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_INT, TAG_PAIR};
+    use cranelift_codegen::ir::{
+        condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, StackSlotData,
+        StackSlotKind,
+    };
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use cranelift_module::{Linkage, Module};
     use std::sync::atomic::Ordering;
@@ -3684,6 +3687,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 | PrimOp::Rem
                 | PrimOp::Quot
                 | PrimOp::Div
+                | PrimOp::Cons
         )
     };
     for inst in code {
@@ -3694,7 +3698,12 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
             | Inst::JumpIfFalse(_)
             | Inst::SelfCall { .. }
             | Inst::Pop
-            | Inst::SetLocal(_) => {}
+            | Inst::SetLocal(_)
+            // `first`/`rest` (PrimOp1 is only First/Rest, both lowered).
+            | Inst::Prim1 { .. } => {}
+            // `cons` is supported as the generic `Prim2` and the `(Local, Local)`-fused
+            // `Prim2SlotSlot`; the rarer `(_, Const)`-fused `Prim2SlotInt{Cons}` bails at
+            // translation (it would need const-operand word materialisation).
             Inst::Prim2 { op, .. }
             | Inst::Prim2SlotSlot { op, .. }
             | Inst::Prim2SlotInt { op, .. }
@@ -3763,6 +3772,8 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 // operand stack: net push of 1 (unlike the generic `Prim2`'s pop-2-push-1).
                 Inst::Prim2SlotSlot { .. } | Inst::Prim2SlotInt { .. } => cur += 1,
                 Inst::Prim2 { .. } => cur -= 1, // pop 2, push 1
+                // `first`/`rest`: pop the list operand, push the car/cdr — net 0.
+                Inst::Prim1 { .. } => {}
                 // `let`/`do` plumbing: a binder stores the top into a frame slot, a
                 // non-final `do` form discards it — both pop one.
                 Inst::Pop | Inst::SetLocal(_) => cur -= 1,
@@ -3793,6 +3804,28 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     tick_sig.params.push(AbiParam::new(ptr_ty));
     tick_sig.returns.push(AbiParam::new(types::I8));
     let tick_id = m.declare_function("brood_rt_tick", Linkage::Import, &tick_sig).ok()?;
+    // The handle ops, by-value with an out-pointer (a `Value` is 24 bytes → no register-pair
+    // return): brood_rt_cons(heap, out, car0,car1,car2, cdr0,cdr1,cdr2);
+    // brood_rt_{car,cdr}(heap, out, w0,w1,w2). They write the result `Value` to `*out`.
+    let mut car_sig = m.make_signature();
+    car_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    car_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
+    for _ in 0..3 {
+        car_sig.params.push(AbiParam::new(types::I64)); // the operand's 3 words
+    }
+    let car_id = m.declare_function("brood_rt_car", Linkage::Import, &car_sig).ok()?;
+    let cdr_id = m.declare_function("brood_rt_cdr", Linkage::Import, &car_sig).ok()?;
+    let mut cons_sig = m.make_signature();
+    cons_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    cons_sig.params.push(AbiParam::new(ptr_ty)); // out
+    for _ in 0..6 {
+        cons_sig.params.push(AbiParam::new(types::I64)); // car 3 words + cdr 3 words
+    }
+    let cons_id = m.declare_function("brood_rt_cons", Linkage::Import, &cons_sig).ok()?;
+    // brood_rt_gc_safepoint(heap): collect if due (bounds the nursery for cons loops).
+    let mut sp_sig = m.make_signature();
+    sp_sig.params.push(AbiParam::new(ptr_ty));
+    let sp_id = m.declare_function("brood_rt_gc_safepoint", Linkage::Import, &sp_sig).ok()?;
 
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
@@ -3800,6 +3833,20 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
     let tick_ref = m.declare_func_in_func(tick_id, b.func);
+    let car_ref = m.declare_func_in_func(car_id, b.func);
+    let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
+    let cons_ref = m.declare_func_in_func(cons_id, b.func);
+    let sp_ref = m.declare_func_in_func(sp_id, b.func);
+    // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
+    // the nursery. (`car`/`rest` don't allocate.)
+    let has_cons = code.iter().any(|i| {
+        matches!(
+            i,
+            Inst::Prim2 { op: PrimOp::Cons, .. }
+                | Inst::Prim2SlotSlot { op: PrimOp::Cons, .. }
+                | Inst::Prim2SlotInt { op: PrimOp::Cons, .. }
+        )
+    });
 
     // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt. The
     // Done block (`ip == len`) takes **no** params: the result is returned via
@@ -3828,6 +3875,11 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let base = b.block_params(entry)[1];
     let call = b.ins().call(rb_ref, &[heap]);
     let roots_base = b.inst_results(call)[0];
+    // A scratch `Value`-sized stack slot the handle ops write their result into (the
+    // out-pointer ABI). One per arm, reused: each handle result is read straight back into
+    // registers before the next op. (`roots_base` stays valid across `cons` — `cons` writes
+    // here, not `roots`, and `collect` rewrites `roots` in place — so no re-fetch needed.)
+    let out_slot = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, STRIDE as u32, 3));
     b.ins().jump(leader_block[0].unwrap(), &[]);
 
     let is_i64 = |b: &FunctionBuilder, v: cranelift_codegen::ir::Value| {
@@ -3938,10 +3990,20 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     // branch condition, a block-arg) materialise a `Slot` with a tag-checked load; ones
     // that move a whole `Value` (a binder, a self-call arg, the return) copy the 16-byte
     // slot verbatim, so a handle round-trips untouched.
+    // A third form, `Handle(w0,w1,w2)`, holds a freshly-produced `Value` (a `cons` pair, a
+    // `car`/`cdr` result) as its three 24-byte words in registers. It's **transient** —
+    // produced and consumed within a block (stored to a slot by a self-call/binder, returned,
+    // or tag-checked back to an int), never crossing the loop back-edge live, which is the
+    // only safepoint — so the moving GC never sees a handle in a register.
     #[derive(Clone, Copy)]
     enum Op {
         Int(cranelift_codegen::ir::Value),
         Slot(usize),
+        Handle(
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+        ),
     }
     let done_block = leader_block[len]?;
     // Store an unboxed `i64` into frame slot `k`, tagged `Int`.
@@ -3976,25 +4038,87 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
             off += 8;
         }
     };
-    // Materialise an operand to an unboxed `i64`: a register value as-is, or a tag-checked
-    // load of a frame slot (deopt on a non-`Int` slot).
+    // Read an operand as its three `Value` words `[w0, w1, w2]` — for a self-call arg, a
+    // binder, a return, or a `cons`/`car`/`cdr` operand. An `Int` boxes to `[Int-tag, v, 0]`
+    // (the third word is irrelevant to an Int); a `Slot` loads all three; a `Handle` is
+    // already those registers. No tag-check — this moves a whole `Value` verbatim.
+    let read_words = |b: &mut FunctionBuilder, op: Op| -> [cranelift_codegen::ir::Value; 3] {
+        match op {
+            Op::Int(v) => {
+                let tag = b.ins().iconst(types::I64, TAG_INT as i64);
+                let zero = b.ins().iconst(types::I64, 0);
+                [tag, v, zero]
+            }
+            Op::Slot(k) => {
+                let i = b.ins().iadd_imm(base, k as i64);
+                let o = b.ins().imul_imm(i, STRIDE);
+                let addr = b.ins().iadd(roots_base, o);
+                let w0 = b.ins().load(types::I64, MemFlags::new(), addr, 0);
+                let w1 = b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                let w2 = b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8);
+                [w0, w1, w2]
+            }
+            Op::Handle(w0, w1, w2) => [w0, w1, w2],
+        }
+    };
+    // Store the three words of a `Value` into frame slot `dst`.
+    let store_words = |b: &mut FunctionBuilder, dst: i64, w: [cranelift_codegen::ir::Value; 3]| {
+        let i = b.ins().iadd_imm(base, dst);
+        let o = b.ins().imul_imm(i, STRIDE);
+        let addr = b.ins().iadd(roots_base, o);
+        b.ins().store(MemFlags::new(), w[0], addr, 0);
+        b.ins().store(MemFlags::new(), w[1], addr, PAYLOAD_OFFSET as i32);
+        b.ins().store(MemFlags::new(), w[2], addr, PAYLOAD_OFFSET as i32 + 8);
+    };
+    // Materialise an operand to an unboxed `i64`: a register value as-is, a tag-checked
+    // load of a frame slot, or a tag-checked extract of a `Handle`'s payload (a `Handle`
+    // used as a number — e.g. `(+ (first xs) 1)` — must be an `Int` at runtime or deopt).
     let as_int = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
         match op {
             Op::Int(v) => v,
             Op::Slot(k) => load_slot_int(b, k as i64),
+            Op::Handle(w0, w1, _) => {
+                let tagb = b.ins().band_imm(w0, 0xff);
+                let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
+                let cont = b.create_block();
+                b.ins().brif(is_int, cont, &[], deopt, &[]);
+                b.switch_to_block(cont);
+                w1
+            }
         }
     };
     // Store an operand into frame slot `dst`: an `Int` is boxed; a `Slot` is copied
-    // verbatim (so a handle binder / self-call arg keeps its type).
+    // verbatim; a `Handle` stores its three words (so a handle binder / self-call arg /
+    // return keeps its type).
     let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| match op {
         Op::Int(v) => store_int(b, dst, v),
         Op::Slot(k) => copy_value(b, k as i64, dst),
+        Op::Handle(w0, w1, w2) => store_words(b, dst, [w0, w1, w2]),
     };
     // Return-via-roots: place the single result in `roots[base]` and jump to the
     // param-less Done block. The result is a whole `Value`, so it can be a handle.
     let exit_done = |b: &mut FunctionBuilder, op: Op| {
         store_op(b, 0, op);
         b.ins().jump(done_block, &[]);
+    };
+    // Call a handle op (`brood_rt_{cons,car,cdr}`) with the out-pointer ABI: pass the
+    // scratch slot's address + the operand words, then read the result `Value`'s three
+    // words back into a `Handle`. The result rides in registers only until it's consumed
+    // (a store / return) — no safepoint in between — so the GC never sees it.
+    let call_handle = |b: &mut FunctionBuilder,
+                       fref: cranelift_codegen::ir::FuncRef,
+                       operands: &[cranelift_codegen::ir::Value]|
+     -> Op {
+        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+        let mut args = Vec::with_capacity(operands.len() + 2);
+        args.push(heap);
+        args.push(out_addr);
+        args.extend_from_slice(operands);
+        b.ins().call(fref, &args);
+        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let w1 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+        let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+        Op::Handle(w0, w1, w2)
     };
 
     // Translate each leader block in ip order.
@@ -4031,23 +4155,68 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     }
                     store_op(&mut b, *i as i64, op);
                 }
+                Inst::Prim1 { op, .. } => {
+                    // `first`/`rest`: pop the list operand, tag-check it's a `Pair` (deopt to
+                    // the VM otherwise — which handles `first`/`rest` of nil / a non-list /
+                    // the type error), then read its car/cdr via the runtime op. The result
+                    // is an arbitrary `Value`, so it's a `Handle`.
+                    let operand = stack.pop()?;
+                    let [w0, w1, w2] = read_words(&mut b, operand);
+                    let tagb = b.ins().band_imm(w0, 0xff);
+                    let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
+                    let cont = b.create_block();
+                    b.ins().brif(is_pair, cont, &[], deopt, &[]);
+                    b.switch_to_block(cont);
+                    let fref = match op {
+                        PrimOp1::First => car_ref,
+                        PrimOp1::Rest => cdr_ref,
+                    };
+                    let h = call_handle(&mut b, fref, &[w0, w1, w2]);
+                    stack.push(h);
+                }
                 Inst::Prim2 { op, map, .. } => {
                     // Operands were pushed in source order: `aa` (deeper) is source 0,
-                    // `bb` (top) is source 1. Materialise to int, then apply `map`.
+                    // `bb` (top) is source 1.
                     let (bb_op, aa_op) = (stack.pop()?, stack.pop()?);
-                    let aa = as_int(&mut b, aa_op);
-                    let bb = as_int(&mut b, bb_op);
-                    let x = pick(aa, bb, map[0]);
-                    let y = pick(aa, bb, map[1]);
-                    stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                    if matches!(op, PrimOp::Cons) {
+                        // `cons` takes any operands and allocates: car = source 0, cdr =
+                        // source 1 (cons's `map` is `[0,1]`). Read each as words, alloc.
+                        let car = read_words(&mut b, aa_op);
+                        let cdr = read_words(&mut b, bb_op);
+                        let h = call_handle(
+                            &mut b,
+                            cons_ref,
+                            &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
+                        );
+                        stack.push(h);
+                    } else {
+                        // Arithmetic/comparison: materialise to int, apply `map`.
+                        let aa = as_int(&mut b, aa_op);
+                        let bb = as_int(&mut b, bb_op);
+                        let x = pick(aa, bb, map[0]);
+                        let y = pick(aa, bb, map[1]);
+                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                    }
                 }
                 Inst::Prim2SlotSlot { op, map, slot_a, slot_b, .. } => {
-                    // Source 0 = slot_a, source 1 = slot_b (the VM's `[sa, sb]` order).
-                    let sa = load_slot_int(&mut b, *slot_a as i64);
-                    let sb = load_slot_int(&mut b, *slot_b as i64);
-                    let x = pick(sa, sb, map[0]);
-                    let y = pick(sa, sb, map[1]);
-                    stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                    if matches!(op, PrimOp::Cons) {
+                        // `(cons slot_a slot_b)`: car = slot_a, cdr = slot_b (map `[0,1]`).
+                        let car = read_words(&mut b, Op::Slot(*slot_a));
+                        let cdr = read_words(&mut b, Op::Slot(*slot_b));
+                        let h = call_handle(
+                            &mut b,
+                            cons_ref,
+                            &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
+                        );
+                        stack.push(h);
+                    } else {
+                        // Source 0 = slot_a, source 1 = slot_b (the VM's `[sa, sb]` order).
+                        let sa = load_slot_int(&mut b, *slot_a as i64);
+                        let sb = load_slot_int(&mut b, *slot_b as i64);
+                        let x = pick(sa, sb, map[0]);
+                        let y = pick(sa, sb, map[1]);
+                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                    }
                 }
                 Inst::Prim2SlotInt { op, map, slot_a, int_b, .. } => {
                     // Source 0 = slot_a, source 1 = the literal `int_b` (the fusion of
@@ -4114,6 +4283,15 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                                 }
                                 vals.push(words);
                             }
+                            // A freshly-produced handle (cons/car/cdr result): its three
+                            // words are already in registers — store all three.
+                            Op::Handle(w0, w1, w2) => {
+                                vals.push(vec![
+                                    (0, w0),
+                                    (PAYLOAD_OFFSET as i32, w1),
+                                    (PAYLOAD_OFFSET as i32 + 8, w2),
+                                ]);
+                            }
                         }
                     }
                     for (i, words) in vals.iter().enumerate() {
@@ -4123,6 +4301,14 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                         for &(off, w) in words {
                             b.ins().store(MemFlags::new(), w, addr, off);
                         }
+                    }
+                    // GC safepoint (cons-allocating arms only): bound the nursery over loop
+                    // iterations. Placed here — args already stored to slots, operand stack
+                    // empty — so no handle is live in a register across the collection; the
+                    // collector relocates the frame slots in place, leaving `roots_base`
+                    // valid. (`car`/`rest` don't allocate, so non-cons arms skip it.)
+                    if has_cons {
+                        b.ins().call(sp_ref, &[heap]);
                     }
                     // Preemption (ADR-027): poll the reduction budget on the back-edge. On
                     // yield, deopt to `preempt` (return 2) — the frame slots already hold the
@@ -4141,10 +4327,14 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     // non-int local condition, e.g. `nil`/`false`, deopts to the VM, matching
                     // the eager-int behaviour the JIT had before lazy slots).
                     let brif_cond = match cond {
+                        // A comparison result (`I8`) is the only thing we branch on.
                         Op::Int(v) if !is_i64(&b, v) => Some(v),
-                        Op::Int(_) => None,
-                        Op::Slot(k) => {
-                            let _ = load_slot_int(&mut b, k as i64);
+                        // Anything else is a raw value, always truthy in Brood — but a
+                        // `Slot`/`Handle` is tag-checked to an `Int` first (a non-int local
+                        // condition, e.g. `nil`/`false`, deopts to the VM, matching the
+                        // eager-int behaviour the JIT had before lazy slots).
+                        other => {
+                            let _ = as_int(&mut b, other);
                             None
                         }
                     };
