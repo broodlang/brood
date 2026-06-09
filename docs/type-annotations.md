@@ -1,15 +1,13 @@
 # Type annotations — `(sig …)` and the road to sound gradual typing
 
-**Status:** slices 1–8 shipped — slice 1 (`(sig …)`, checker-facing), slice 2
-(`(sig! …)`, runtime enforcement — the soundness step), slice 3
-(`BROOD_CONTRACTS=1` bulk-enforce switch), slice 4 (element-level
-`(list E)`/`(vector E)` checks), slice 5 (`&` rest params in the type grammar),
+**Status:** slices 1–10 shipped — slice 1 (`(sig …)`, checker-facing), slice 2
+(`(sig! …)`, runtime enforcement), slice 3 (`BROOD_CONTRACTS=1`), slice 4
+(element-level `(list E)`/`(vector E)` checks), slice 5 (`&` rest params),
 slice 6 (`(and A B …)` intersections — runtime + checker), slice 7
-(`(map K V)` key/value contracts — runtime; checker flat-accepts), slice 8
-(`?A` type variables — grammar + checker parse; runtime accepts via
-unknown-type passthrough).
-Deferred: map K/V full checker refinement (`map_kv` in `Ty`); `SigTerm`
-unification for type variables at call sites (see [type-variables.md](type-variables.md)).
+(`(map K V)` key/value contracts — runtime), slice 8 (`?A` type variables —
+grammar + runtime passthrough), slice 9 (`(map K V)` full checker refinement
+— `Ty::map_of`, `get`/`keys`/`vals`/`assoc` result rules), slice 10
+(`?A` `SigTerm`/`SigWithVars` unification — per-call return-type resolution).
 
 This is Brood's answer to "can we be *more sound* given our parameters?"
 (advisory, never-gate, zero-false-positive, hot-reload, policy-in-Brood). The
