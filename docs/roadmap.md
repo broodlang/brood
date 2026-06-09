@@ -852,7 +852,7 @@ the workaround available today.
       worked out, see devlog 2026-06-09): `cons`/`car`/`cdr` and Brood→Brood **calls**
       via an **out-pointer callback ABI** (a `Value` is 24 bytes, so it can't be a
       register-pair return), `Op::Handle(w0,w1,w2)`, a `Pair` tag-check before car/cdr,
-      and a back-edge `gc_safepoint` for cons loops. Calls are the real payoff (most real
+      and a back-edge `gc_safepoint` for cons loops — DONE 2026-06-09. Calls are the real payoff (most real
       bodies call a helper → currently bail).
     - ⬜ **Stage 3 — IC in native code**: epoch-guarded call-site IC compiles to
       `cmp [EPOCH_SLOT], r_epoch; jne slow_path` *inside* the JIT'd code (the
