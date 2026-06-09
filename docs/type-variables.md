@@ -1,9 +1,11 @@
 # Type variables — parametric signatures for user-defined generic functions
 
-> Status: **design only**. Not yet started. This is Option A from
-> `parametric-result-types.md` — deferred until a real consumer exists. The
-> HOF cases (`map`/`filter`/`reduce`/`fold`) were already handled via per-HOF
-> result rules (Option B) and don't need this.
+> Status: **slices 1–2 shipped**. Slice 1: grammar + parse (`parse_type`
+> recognises `?`-prefix symbols, `type-matches?` accepts unknown names).
+> Slice 2: `SigTerm`/`SigWithVars` unification — `parse_sig_decl_with_vars`
+> in `annot.rs` parses variable-bearing sigs; `expr_ty` in `guards.rs`
+> resolves return types at call sites. Slice 3 (primitive migration) is
+> deferred — HOF cases are handled via per-HOF result rules (Option B).
 
 ## Problem
 

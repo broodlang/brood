@@ -8,10 +8,13 @@
 //! scan runs over the *un-expanded* forms — like the hygiene lint. Nothing here
 //! enforces the declaration at run time yet; that is slice 2 (the strong arrow).
 
+use std::collections::HashMap;
+
 use crate::core::heap::Heap;
 use crate::core::value::{self, Symbol, Tag, Value};
 use crate::types::{Sig, Ty};
 
+use super::ctx::{SigTerm, SigWithVars};
 use super::walk::list_items;
 
 /// The lattice point a base type *name* denotes — the spellings `type-of`
@@ -43,13 +46,24 @@ fn base_ty(name: &str) -> Option<Ty> {
     })
 }
 
-/// Parse a type-expression form to a [`Ty`]. Handles base names, arrows
-/// `(p… -> r)` (a function refinement), `(list E)` / `(vector E)`, and
-/// `(or A B …)`. `None` for anything unrecognised — the annotation is then
-/// dropped, never guessed.
+/// Parse a type-expression form to a [`Ty`]. Handles base names, type
+/// variables (`?A` → `Ty::ANY`), arrows `(p… -> r)`, `(list E)` /
+/// `(vector E)`, `(or A B …)`, `(and A B …)`, and `(map K V)` (flat
+/// `Ty::Map` in slice 1). `None` for anything unrecognised — the annotation
+/// is then dropped, never guessed.
 pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
     match form {
-        Value::Sym(s) => base_ty(&value::symbol_name(s)),
+        Value::Sym(s) => {
+            let name = value::symbol_name(s);
+            // Type variables (`?A`, `?el`, etc.) — static-only, no runtime meaning.
+            // Unknown to `type-matches?` → accepts everything (correct: it's a
+            // static constraint, not a runtime one). Resolve to ANY here so the
+            // checker uses the widest safe type at positions it can't unify.
+            if name.starts_with('?') {
+                return Some(Ty::ANY);
+            }
+            base_ty(&name)
+        }
         // `nil` reads as the literal `Value::Nil`, not a symbol — so a type-expr
         // like `(or int nil)` lands here, not in `base_ty`.
         Value::Nil => Some(Ty::of(Tag::Nil)),
@@ -81,6 +95,30 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                     });
                 }
                 return acc;
+            }
+            // (and A B …) — an intersection.  Ty::intersect is already
+            // well-tested set intersection; no new Ty variant needed.
+            // A bare (and) with no args is Ty::ANY (vacuously true).
+            if value::symbol_is(head, "and") {
+                if items.len() == 1 {
+                    return Some(Ty::ANY);
+                }
+                let mut acc: Option<Ty> = None;
+                for &it in &items[1..] {
+                    let t = parse_type(heap, it)?;
+                    acc = Some(match acc {
+                        Some(a) => a.intersect(t),
+                        None => t,
+                    });
+                }
+                return acc;
+            }
+            // (map K V) — key/value typed map.  Full refinement: produce Ty::map_of
+            // so the checker can derive `get`/`keys`/`vals`/`assoc` result types.
+            if value::symbol_is(head, "map") && items.len() == 3 {
+                let k = parse_type(heap, items[1])?;
+                let v = parse_type(heap, items[2])?;
+                return Some(Ty::map_of(k, v));
             }
             None
         }
@@ -126,6 +164,116 @@ fn parse_arrow(heap: &Heap, items: &[Value], pos: usize) -> Option<Sig> {
         }
         Some(Sig::new(params, ret))
     }
+}
+
+/// Parse a type-expression form into a [`SigTerm`], tracking type-variable
+/// assignments in `vars` (variable name → sequential index). Every `?`-prefixed
+/// symbol that hasn't been seen before gets the next index.
+fn parse_type_term(
+    heap: &Heap,
+    form: Value,
+    vars: &mut HashMap<String, u32>,
+) -> Option<SigTerm> {
+    match form {
+        Value::Sym(s) => {
+            let name = value::symbol_name(s);
+            if name.starts_with('?') {
+                let next = vars.len() as u32;
+                let idx = *vars.entry(name.to_owned()).or_insert(next);
+                return Some(SigTerm::Var(idx));
+            }
+            base_ty(&name).map(SigTerm::Ty)
+        }
+        Value::Nil => Some(SigTerm::Ty(Ty::of(Tag::Nil))),
+        Value::Pair(_) => {
+            let items = list_items(heap, form)?;
+            // Arrow markers are only valid at top level — skip nested arrows.
+            if items.iter().any(|v| is_arrow_marker(*v)) {
+                return None;
+            }
+            let Value::Sym(head) = *items.first()? else {
+                return None;
+            };
+            if value::symbol_is(head, "list") && items.len() == 2 {
+                let inner = parse_type_term(heap, items[1], vars)?;
+                return Some(SigTerm::ListOf(Box::new(inner)));
+            }
+            if value::symbol_is(head, "vector") && items.len() == 2 {
+                let inner = parse_type_term(heap, items[1], vars)?;
+                return Some(SigTerm::VectorOf(Box::new(inner)));
+            }
+            // Compound forms without inner-var support — delegate to parse_type
+            // (type vars inside `or`/`and`/`map` widen to Ty::ANY there).
+            parse_type(heap, form).map(SigTerm::Ty)
+        }
+        _ => parse_type(heap, form).map(SigTerm::Ty),
+    }
+}
+
+/// Parse the items of an arrow type-expr to a [`SigWithVars`], tracking type
+/// variables in `vars`. Mirrors [`parse_arrow`] but produces `SigTerm`s.
+fn parse_arrow_with_vars(
+    heap: &Heap,
+    items: &[Value],
+    pos: usize,
+    vars: &mut HashMap<String, u32>,
+) -> Option<SigWithVars> {
+    if pos + 2 != items.len() {
+        return None;
+    }
+    let ret = parse_type_term(heap, items[pos + 1], vars)?;
+    let amp = items[..pos]
+        .iter()
+        .position(|v| matches!(v, Value::Sym(s) if value::symbol_is(*s, "&")));
+    let (params, rest) = if let Some(apos) = amp {
+        if apos + 2 != pos {
+            return None;
+        }
+        let mut params = Vec::with_capacity(apos);
+        for &p in &items[..apos] {
+            params.push(parse_type_term(heap, p, vars)?);
+        }
+        let rest_term = parse_type_term(heap, items[apos + 1], vars)?;
+        (params, Some(rest_term))
+    } else {
+        let mut params = Vec::with_capacity(pos);
+        for &p in &items[..pos] {
+            params.push(parse_type_term(heap, p, vars)?);
+        }
+        (params, None)
+    };
+    Some(SigWithVars { params, rest, ret })
+}
+
+/// If `form` is a `(sig name (… -> …))` declaration whose arrow contains at
+/// least one type variable (`?A`, `?B` …), return `(name, sig_with_vars)`.
+/// Returns `None` for non-`sig` forms, non-arrow type-exprs, or arrows with
+/// no variables — the plain [`parse_sig_decl`] path handles those.
+pub(super) fn parse_sig_decl_with_vars(
+    heap: &Heap,
+    form: Value,
+) -> Option<(Symbol, SigWithVars)> {
+    let items = list_items(heap, form)?;
+    if items.len() != 3 {
+        return None;
+    }
+    let Value::Sym(head) = items[0] else {
+        return None;
+    };
+    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
+        return None;
+    }
+    let Value::Sym(name) = items[1] else {
+        return None;
+    };
+    let ty_items = list_items(heap, items[2])?;
+    let pos = ty_items.iter().position(|v| is_arrow_marker(*v))?;
+    let mut vars: HashMap<String, u32> = HashMap::new();
+    let sig = parse_arrow_with_vars(heap, &ty_items, pos, &mut vars)?;
+    if vars.is_empty() {
+        return None;
+    }
+    Some((name, sig))
 }
 
 /// If `form` is a `(sig name (… -> …))` declaration whose type-expr is an arrow,

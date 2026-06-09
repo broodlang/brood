@@ -1,7 +1,8 @@
 # Type intersections — `(and TypeA TypeB …)` in the type grammar
 
-> Status: **design only**. Not yet started. All prior type slices (1–5) are
-> shipped. This is the next natural addition to the surface grammar.
+> Status: **shipped** (both slices). Runtime (`type-matches?`) and static checker
+> (`parse_type` → `Ty::intersect`) both handle `(and …)`. See
+> `tests/contract_test.blsp` "intersection type checks" for coverage.
 
 ## Problem
 

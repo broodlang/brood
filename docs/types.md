@@ -1,9 +1,12 @@
 # Brood types — set-theoretic, gradual, advisory
 
 **Status:** steps 0–4 done; Step 5+ well underway (ADR-078) — function **arrow**
-types, sequence **element** types, and **parametric HOF results**
-(`map`/`filter`/`reduce`/`fold` flow element types through) all shipped; only
-intersections + user-generic type variables remain (gated on a consumer). The
+types, sequence **element** types, **parametric HOF results**
+(`map`/`filter`/`reduce`/`fold` flow element types through), **`(and …)`
+intersections**, **`(map K V)` key/value contracts** (runtime + checker
+refinements for `get`/`keys`/`vals`/`assoc`), and **`?A` type variable
+unification** (user-declared sigs: `SigTerm`/`SigWithVars` resolve return
+types per-call from arg types) all shipped. The
 advisory checker (`(check 'form)`)
 is the lattice's first consumer (`crates/lisp/src/types/{mod,check}.rs`). This doc is the
 plan *and* the compatibility contract: the staircase says what to build next, the
@@ -355,7 +358,7 @@ type to be known (either unknown → unrefined `pair`). `append`/`concat` union 
 element types of all arguments; any argument with an unknown element type → flat
 fallback. Zero new false positives across `std/` + `tests/`.
 
-**⬜ Still deferred (ADR-011).**
+**Still deferred / in progress (ADR-011).**
 
 - **Expanded curated sigs** — `str`/`pr-str` → `string`, `println`/`print` → `nil`,
   `number->string` → `string`, etc. Small table additions that catch a specific class
@@ -370,16 +373,18 @@ fallback. Zero new false positives across `std/` + `tests/`.
   the alias machinery in `Ctx` already handles narrowing through this shape at
   check-time, so extending `infer_sig` to recognise a single-alias body is bounded
   and sound.
-- **Intersections** `(and TypeA TypeB)` in the type grammar — designed in
-  [`docs/type-intersections.md`](type-intersections.md). Small, self-contained;
-  both the Brood runtime and the Rust checker need ~10 lines each. Ready to tackle.
-- **Map key/value types** `(map K V)` — designed in
-  [`docs/type-map-kv.md`](type-map-kv.md). Pure-Brood runtime slice ships alone;
-  full checker refinement (`map_kv` field on `Ty`) is the heavier follow-on.
-- **Type variables** for user-defined generic functions — designed in
-  [`docs/type-variables.md`](type-variables.md). Requires a `SigTerm` enum and
-  a unification pass; gated on a real consumer. The curated HOFs already ship via
-  per-rule Option B (no type variables needed there).
+- ✅ **Intersections** `(and TypeA TypeB)` — shipped: `type-matches?` handles `(and …)`
+  via `every?` (one line); `parse_type` in `annot.rs` produces `Ty::intersect` for
+  the static checker. See [`docs/type-intersections.md`](type-intersections.md).
+- ✅ **Map key/value types** `(map K V)` — fully shipped: `type-matches?` walks
+  `entries` for runtime contracts; `Ty::map_of` carries `map_kv` refinement in
+  the checker; `get`/`keys`/`vals`/`assoc` derive precise result types.
+  See [`docs/type-map-kv.md`](type-map-kv.md).
+- ✅ **Type variables** `?A` — fully shipped: grammar (`parse_type`), runtime
+  (`type-matches?` passes unknown names), and static unification
+  (`SigWithVars`/`SigTerm` in `ctx.rs`; `parse_sig_decl_with_vars` in
+  `annot.rs`; `expr_ty` resolves return types per-call from arg types).
+  See [`docs/type-variables.md`](type-variables.md).
 
 ## How it runs — and why it's outside the runtime
 

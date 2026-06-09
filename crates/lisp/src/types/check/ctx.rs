@@ -26,6 +26,122 @@ use std::collections::{HashMap, HashSet};
 use crate::core::value::Symbol;
 use crate::types::{Sig, Ty};
 
+// ---- Type-variable representation for user-declared sigs --------------------
+
+/// A type-expression term that may contain type variables (`?A`, `?B`…).
+/// Used only for user-declared `(sig …)` / `(sig! …)` forms; primitive sigs
+/// are plain [`Sig`] and remain untouched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SigTerm {
+    /// A concrete type — no variable.
+    Ty(Ty),
+    /// A type variable, identified by its index in the declaration
+    /// (assigned sequentially at parse time: first `?`-symbol seen = 0).
+    Var(u32),
+    /// `(list ?A)` — the element type may be a variable.
+    ListOf(Box<SigTerm>),
+    /// `(vector ?A)` — the element type may be a variable.
+    VectorOf(Box<SigTerm>),
+}
+
+impl SigTerm {
+    /// Resolve this term to a concrete `Ty` given a substitution built by
+    /// unification. Unresolved variables widen to `Ty::ANY` (safe — a
+    /// missing binding means no argument pinned the var).
+    pub(super) fn resolve(&self, subst: &HashMap<u32, Ty>) -> Ty {
+        match self {
+            SigTerm::Ty(t) => t.clone(),
+            SigTerm::Var(i) => subst.get(i).cloned().unwrap_or(Ty::ANY),
+            SigTerm::ListOf(inner) => {
+                let e = inner.resolve(subst);
+                if e == Ty::ANY {
+                    crate::types::Ty::LIST
+                } else {
+                    Ty::list_of(e)
+                }
+            }
+            SigTerm::VectorOf(inner) => {
+                let e = inner.resolve(subst);
+                if e == Ty::ANY {
+                    crate::types::Ty::of(crate::core::value::Tag::Vector)
+                } else {
+                    Ty::vector_of(e)
+                }
+            }
+        }
+    }
+}
+
+/// A function signature whose parameters and return may contain type
+/// variables.  Used exclusively for user-declared sigs; primitive sigs
+/// remain plain [`Sig`].
+#[derive(Clone, Debug)]
+pub(super) struct SigWithVars {
+    pub(super) params: Vec<SigTerm>,
+    pub(super) rest: Option<SigTerm>,
+    pub(super) ret: SigTerm,
+}
+
+impl SigWithVars {
+    /// Build the unification substitution from a slice of argument types.
+    /// Each arg's known type is unified against the corresponding param term
+    /// (left-to-right, one level deep).  Binding two args to the same var
+    /// unions their types (over-approximation; sound).
+    pub(super) fn unify_args(&self, arg_tys: &[Option<Ty>]) -> HashMap<u32, Ty> {
+        let mut subst: HashMap<u32, Ty> = HashMap::new();
+        for (i, arg_ty) in arg_tys.iter().enumerate() {
+            let Some(ty) = arg_ty else { continue };
+            let term = if i < self.params.len() {
+                &self.params[i]
+            } else if let Some(r) = &self.rest {
+                r
+            } else {
+                continue;
+            };
+            unify_term(term, ty.clone(), &mut subst);
+        }
+        subst
+    }
+
+    /// Resolve the return type given the argument types.
+    pub(super) fn resolve_ret(&self, arg_tys: &[Option<Ty>]) -> Ty {
+        let subst = self.unify_args(arg_tys);
+        self.ret.resolve(&subst)
+    }
+
+    /// Resolve the i-th parameter type given the full substitution.
+    pub(super) fn resolve_param(&self, i: usize, subst: &HashMap<u32, Ty>) -> Option<Ty> {
+        let term = if i < self.params.len() {
+            &self.params[i]
+        } else {
+            self.rest.as_ref()?
+        };
+        Some(term.resolve(subst))
+    }
+}
+
+/// Unify a single `SigTerm` against a known concrete `ty`, extending `subst`.
+/// One level deep — no recursive types.
+pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
+    match term {
+        SigTerm::Ty(_) => {} // concrete: nothing to bind
+        SigTerm::Var(i) => {
+            let entry = subst.entry(*i).or_insert(Ty::NEVER);
+            *entry = entry.clone().union(ty);
+        }
+        SigTerm::ListOf(inner) => {
+            if let Some(elem) = ty.elem_ty() {
+                unify_term(inner, elem.clone(), subst);
+            }
+        }
+        SigTerm::VectorOf(inner) => {
+            if let Some(elem) = ty.elem_ty() {
+                unify_term(inner, elem.clone(), subst);
+            }
+        }
+    }
+}
+
 /// Locally-known types for variables in scope — populated by `let`/`let*`
 /// bindings and by an enclosing `if`'s guard. Globals are never tracked here
 /// (they're redefinable under hot reload — `dynamic()`, not `Any`).
@@ -77,6 +193,12 @@ pub(super) struct Ctx {
     /// Slice 1 trusts these without runtime enforcement; slice 2 (the strong
     /// arrow) makes that trust sound. See `docs/type-annotations.md`.
     declared: HashMap<Symbol, Sig>,
+    /// User-declared sigs that contain type variables (`?A`) — the full
+    /// [`SigWithVars`] for unification at call sites.  Populated alongside
+    /// [`declared`] when the sig annotation has at least one `?`-symbol.
+    /// `declared` always carries the flattened version (`?A` → `Ty::ANY`) so
+    /// the arity-fallback path is unchanged; this table carries the richer form.
+    declared_vars: HashMap<Symbol, SigWithVars>,
     /// Parameters whose type was **seeded from the enclosing function's `(sig …)`
     /// declaration** — the subset of `types` we trust enough to flag a *dead
     /// clause* on. A guard that narrows one of these to the empty type means a
@@ -248,6 +370,15 @@ impl Ctx {
     /// [`check_file`] like [`add_file_global`](Ctx::add_file_global).
     pub(super) fn add_declared_sig(&mut self, sym: Symbol, sig: Sig) {
         self.declared.insert(sym, sig);
+    }
+    /// The full (variable-bearing) declared sig for `sym`, if it was parsed
+    /// with at least one type variable.
+    pub(super) fn declared_sig_with_vars(&self, sym: Symbol) -> Option<&SigWithVars> {
+        self.declared_vars.get(&sym)
+    }
+    /// Record the type-variable-bearing sig alongside the flattened one.
+    pub(super) fn add_declared_sig_with_vars(&mut self, sym: Symbol, sig: SigWithVars) {
+        self.declared_vars.insert(sym, sig);
     }
     /// Seed parameter `sym` with the type `ty` its enclosing function's `(sig …)`
     /// declared for it, and remember it as a sig-typed param (so a guard that

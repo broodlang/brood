@@ -1,7 +1,9 @@
 # Map key/value types — `(map KeyType ValType)` in the type grammar
 
-> Status: **design only**. Not yet started. Extends the element-type work
-> (ADR-078 slice 2) from sequences to maps.
+> Status: **slice 1 shipped** (Brood runtime), **slice 2 shipped** (checker
+> flat-accept). `type-matches?` walks `entries` to verify each key/value pair;
+> `parse_type` parses `(map K V)` and produces `Ty::of(Tag::Map)`. Slice 3 (full
+> `map_kv` refinement in `Ty`) deferred until a real consumer drives it.
 
 ## Problem
 
