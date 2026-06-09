@@ -240,6 +240,45 @@ fn quot_min_over_neg1_deopts_to_bignum() {
 }
 
 #[test]
+fn let_bindings_compile_and_round_trip_through_slots() {
+    // A `let` binder inside a hot loop: `d` is stored into a frame slot (SetLocal) and
+    // read back (Local) within the recursion. acc → acc + 2*acc = 3*acc each step.
+    is(
+        "(defn f (i acc) (if (< i 1) acc (let (d (* acc 2)) (f (- i 1) (+ acc d)))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (f 10 1))))
+         (run 50000 0)",
+        "59049", // 3^10
+    );
+    // Multiple binders in one `let` + a deopt-safe re-run: an overflowing binder must
+    // still produce the VM's BigInt (the slot is recomputed on the VM re-run).
+    is(
+        "(defn f (i acc) (if (< i 1) acc (let (a (+ acc 1) b (* acc 3)) (f (- i 1) (+ a b)))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (f 8 1))))
+         (run 50000 0)",
+        "87381",
+    );
+    // `let` whose binder overflows mid-loop → deopt → VM recomputes the binding as BigInt.
+    is(
+        "(defn f (i acc) (if (< i 1) acc (let (sq (* acc acc)) (f (- i 1) sq))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (f 6 2))))
+         (run 50000 0)",
+        "18446744073709551616", // 2^64 by repeated squaring of 2, six times (overflows i64 → BigInt)
+    );
+}
+
+#[test]
+fn do_sequencing_under_jit() {
+    // A `do` with non-final forms (Pop) inside a tiering arm. The non-final arithmetic is
+    // pure so it's discarded; the loop still computes correctly.
+    is(
+        "(defn f (i acc) (if (< i 1) acc (f (- i 1) (do (+ acc 0) (* acc 1) (+ acc 2)))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (f 5 0))))
+         (run 50000 0)",
+        "10", // each step keeps only the last `do` form, acc -> acc+2, five steps from 0
+    );
+}
+
+#[test]
 fn jit_result_matches_a_known_fib_style_accumulator() {
     // A two-accumulator tail loop (the classic iterative fib), fully in the int subset.
     is(
