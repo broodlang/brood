@@ -2302,3 +2302,37 @@ transiently-in-registers discipline holds). Commits `08844a4`/`b6ba590`/`3564a39
 **Remaining JIT payoff: Brood→Brood calls** (`Inst::Call` via `brood_rt_call_slow`) — so a
 body that calls a *helper* JITs (the common real-code shape). Reuses `Op::Handle` for the
 result + the out-pointer ABI pattern; needs deopt/preempt/error handling across the call.
+
+## 2026-06-10 — Kernel review: two bugs fixed (timer wakeup, prim2 de-opt) + cleanup
+
+Reviewed the VM, GC, and scheduler for bugs / cleanup / speedups. Found two genuine bugs,
+both independent of any in-flight JIT work, plus hardening. Full suite stays green.
+
+**Bug 1 — lost timer wakeup in the `receive` suspend→park window** (`process/`). A
+capture-mode `receive` *arms* its `(after ms …)` timer (`mailbox.rs`) before the process is
+actually parked (`scheduler.rs::park_on_receive`), which only happens after the suspend
+signal travels back up through `vm_run_bc`/`run_one`. If the deadline fired inside that
+window, `wake_for_timeout` found no `waiter`, returned without re-queuing, and *consumed*
+its (current-gen) timer entry — then `park_on_receive` parked the process forever (it only
+re-checked `kill_pending` + a raced message, never the deadline). Invisible at the suite's
+multi-second timeouts; a real lost-wakeup for sub-ms deadlines under load. Fix:
+`park_on_receive` re-checks `st.recv_deadline` under the `mailbox.state` lock it already
+holds and re-queues on a passed deadline, so the timer-fire and this check serialise — one
+of them always wakes the process.
+
+**Bug 2 — swapped `Prim2SlotInt` permanently de-opted after any `def`** (`eval/compile.rs`).
+A `(op Const Local)` fusion (`(- 24 x)`, `(/ 100 x)`, `(< 5 x)`) stores an *inverted*
+arg-map so the inline operand pick stays correct. But `prim2_inline_exec`'s guard
+revalidation compared that inverted map against `resolve_prim`'s *natural* map, which never
+matches — so after the first epoch bump (any `def`) the arm fell to the slow dispatch path
+*and* re-ran `resolve_prim` every call, forever. Results were always correct (the slow path
+un-swaps); only the inline fast path was silently lost — exactly the de-opt the fusion
+exists to prevent, biting the REPL/hot-reload workflow. Fix: pass `swapped` so revalidation
+un-inverts the map first. Regression test `swapped_prim2slotint_reinlines_after_epoch_bump`.
+
+**Cleanup / hardening.** Deleted dead `Heap::set_root` (duplicated `set_root_at`, no
+callers) and the dead `EXIT_REASON` thread-local (never read). Relaxed the per-quantum
+`RUNNING`/`PEAK_RUNNING` diagnostic atomics from `SeqCst` to `Relaxed`. Made the
+tree-walker-defer `capture_top_level` save/restore panic-safe via an RAII `CaptureTopGuard`.
+Extended `value_is_immovable` to check `Range`/`Transient` (tripwire gap) and added a
+`transients.is_empty()` debug-assert to `freeze_as_shared_code` (matching the rope one).

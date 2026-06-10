@@ -1259,6 +1259,11 @@ impl Heap {
             slabs.ropes.is_empty(),
             "a Rope cannot appear in the prelude — it is pure Brood with no rope literals",
         );
+        debug_assert!(
+            slabs.transients.is_empty(),
+            "a transient cannot appear in the prelude — its root/watermark point into the \
+             about-to-be-frozen LOCAL slabs and would dangle",
+        );
         // Inline-extract any `Shared` string entries the builder created
         // (~9 prelude docstrings exceed `SHARED_BLOB_THRESHOLD` at the time
         // of writing). PRELUDE is shared `Arc<SharedCode>` across runtimes;
@@ -4028,13 +4033,6 @@ impl Heap {
     /// … heap.truncate_roots(n);` region.
     pub fn truncate_roots(&mut self, n: usize) {
         self.roots.truncate(n);
-    }
-
-    /// Overwrite the `i`th explicit root in place (operand-stack slot update —
-    /// e.g. advancing a rooted cons-spine cursor between argument evals). Paired
-    /// with [`root_at`](Self::root_at) for read-back.
-    pub fn set_root(&mut self, i: usize, v: Value) {
-        self.roots[i] = v;
     }
 
     /// Root `v` for the duration of a collection-bearing region, **skipping the

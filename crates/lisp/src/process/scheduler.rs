@@ -614,13 +614,6 @@ static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0); // 0 = default (≈ npro
 static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0); // worker threads actually started
 static WORKERS_STARTED: Once = Once::new();
 
-thread_local! {
-    /// Set by a process's body just before it returns, so `run_one` can read the
-    /// exit reason (for monitor `[:down …]` delivery) once the driver returns on
-    /// this same worker thread. Cleared at the start of every scheduling quantum.
-    static EXIT_REASON: RefCell<Option<Message>> = const { RefCell::new(None) };
-}
-
 /// One worker's run queue + the condvar that parks it when the queue is empty.
 type WorkerQueue = (Mutex<VecDeque<Box<Process>>>, Condvar);
 
@@ -1016,15 +1009,16 @@ fn run_one(mut proc: Box<Process>) {
     STEALABLE.fetch_sub(1, Ordering::Relaxed);
     mailbox.status.store(ST_RUNNING, Ordering::Relaxed); // about to resume on this worker
 
-    let live = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
-    PEAK_RUNNING.fetch_max(live, Ordering::SeqCst);
+    // Pure diagnostics (`peak_threads()`): no invariant needs a total order with other
+    // atomics, so `Relaxed` is enough on this per-quantum path.
+    let live = RUNNING.fetch_add(1, Ordering::Relaxed) + 1;
+    PEAK_RUNNING.fetch_max(live, Ordering::Relaxed);
     // Mark this worker busy for `assign_worker`'s load metric while we're inside the run
     // (cleared in `finish_quantum`).
     WORKER_BUSY[wid].store(true, Ordering::Relaxed);
     // Fresh reduction budget for this scheduling quantum (decremented in the VM driver's
     // loop top via `tick_capture`; at zero the process captures + re-enqueues — preempt).
     REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
-    EXIT_REASON.with(|r| *r.borrow_mut() = None); // stale from a prior process on this worker
 
     // The worker drives the body's bytecode (`vm_run_bc`) directly — no coroutine — so a
     // paused process's continuation is relocatable heap data (`Suspended`) and can resume
@@ -1046,7 +1040,7 @@ fn run_one(mut proc: Box<Process>) {
 /// worker's `REDUCTIONS` TLS, so its post-yield value is the remainder (Erlang counts
 /// reductions the same way).
 fn finish_quantum(mailbox: &Arc<Mailbox>, wid: usize) {
-    RUNNING.fetch_sub(1, Ordering::SeqCst);
+    RUNNING.fetch_sub(1, Ordering::Relaxed); // pure diagnostic — see `run_one`
     WORKER_BUSY[wid].store(false, Ordering::Relaxed);
     let used = REDUCTION_BUDGET.saturating_sub(REDUCTIONS.with(|r| r.get()));
     mailbox.reductions.fetch_add(used as u64, Ordering::Relaxed);
@@ -1122,6 +1116,15 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
     } else if st.queue.len() > st.scanned {
         // A message raced in during the park — resume instead of parking. This is a
         // wake, so the process may migrate (`wake_enqueue`).
+        drop(st);
+        wake_enqueue(proc);
+    } else if st.recv_deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        // The receive deadline elapsed inside the suspend→park window: the timer fired
+        // before we got here, found no `waiter`, and consumed its (current-gen) entry, so
+        // parking now would hang forever (nothing left to wake us). Re-queue instead — the
+        // process re-scans, finds the deadline passed, and takes its `after` clause. The
+        // timer-fire and this check both serialise on `mailbox.state`, so exactly one of
+        // them re-queues: either the timer saw a `waiter`, or we see the passed deadline.
         drop(st);
         wake_enqueue(proc);
     } else {
