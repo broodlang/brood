@@ -502,11 +502,21 @@ current element and `acc` is the current accumulator."
 (defn nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
 
-(defn nth (coll i & default)
+(defn nth
   "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
-  (if (vector? coll)
-    (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) (first default))
-    (nth-list coll i (first default))))
+  ;; The fixed 2-arity arm is the hot path (`(nth v i)`): it is VM-eligible
+  ;; (exact arity), so its body compiles to bytecode and the inner `vector-ref`
+  ;; inlines to a slab read — whereas the variadic-only definition deferred the
+  ;; whole thing to the tree-walker. The `& default` arm keeps the explicit-default
+  ;; behaviour for the rarer 3-arg call.
+  ((coll i)
+    (if (vector? coll)
+      (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
+      (nth-list coll i nil)))
+  ((coll i & default)
+    (if (vector? coll)
+      (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) (first default))
+      (nth-list coll i (first default)))))
 
 ;; ---- numeric helpers ----
 ;; ---- map operations ----
@@ -2037,10 +2047,14 @@ search rides on."
   (if (empty? coll) acc (join--parts sep (rest coll) (cons (first coll) (cons sep acc)))))
 (defn join (sep coll)
   "Concatenate the strings in `coll` with `sep` between adjacent elements."
-  ;; One `apply str` over the assembled parts is O(total length); the previous
-  ;; fold did `(str acc sep x)` each step, rebuilding the whole accumulator —
-  ;; O(total length²).
-  (if (empty? coll) "" (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil))))))
+  ;; For the common case — a string separator over a list/vector/range — the
+  ;; native `%string-join` walks `coll` once into one buffer (no intermediate
+  ;; parts list, no reverse). The all-Brood path stays as a fallback for an
+  ;; exotic (non-string) separator: it builds the interleaved parts list
+  ;; (reversed) then concatenates in one `apply str` pass.
+  (if (string? sep)
+    (%string-join sep coll)
+    (if (empty? coll) "" (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil)))))))
 
 (defn string-split--acc (s sep acc)
   (let (i (index-of s sep))

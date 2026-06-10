@@ -722,6 +722,10 @@ pub fn gensym(prefix: &str) -> Value {
 pub(crate) mod jit_layout {
     /// The 8-aligned payload sits after the `u8` discriminant under `repr(C, u8)`.
     pub const PAYLOAD_OFFSET: usize = 8;
+    /// `Value::Bool`'s discriminant (declaration order: `Nil`=0, `Bool`=1, `Int`=2). The
+    /// JIT boxes a comparison result (`<`/`<=`/`=`, an `i8` 0/1) as a `Value::Bool` with
+    /// this tag — a Brood comparison yields `true`/`false`, not the integers 0/1.
+    pub const TAG_BOOL: u8 = 1;
     /// `Value::Int`'s discriminant (declaration order: `Nil`=0, `Bool`=1, `Int`=2).
     pub const TAG_INT: u8 = 2;
     /// `Value::Pair`'s discriminant. Note this is **not** `Tag::Pair` (7): `Value` has an
@@ -755,6 +759,13 @@ mod jit_layout_tests {
             std::slice::from_raw_parts(&p as *const Value as *const u8, std::mem::size_of::<Value>())
         };
         assert_eq!(pbytes[0], jit_layout::TAG_PAIR, "Value::Pair discriminant drifted");
+        // `Value::Bool`'s discriminant must match `TAG_BOOL` (the JIT boxes a comparison
+        // result as a Bool, not an Int); a variant reorder breaks it.
+        let bt = Value::Bool(true);
+        let btbytes = unsafe {
+            std::slice::from_raw_parts(&bt as *const Value as *const u8, std::mem::size_of::<Value>())
+        };
+        assert_eq!(btbytes[0], jit_layout::TAG_BOOL, "Value::Bool discriminant drifted");
         let v = Value::Int(0x0123_4567_89ab_cdef_u64 as i64);
         // Read the raw bytes (no transmute size constraint).
         let bytes = unsafe {

@@ -852,8 +852,13 @@ the workaround available today.
       worked out, see devlog 2026-06-09): `cons`/`car`/`cdr` and Brood→Brood **calls**
       via an **out-pointer callback ABI** (a `Value` is 24 bytes, so it can't be a
       register-pair return), `Op::Handle(w0,w1,w2)`, a `Pair` tag-check before car/cdr,
-      and a back-edge `gc_safepoint` for cons loops — DONE 2026-06-09. Calls are the real payoff (most real
-      bodies call a helper → currently bail).
+      and a back-edge `gc_safepoint` for cons loops — DONE 2026-06-09. ✅ **Brood→Brood
+      calls landed (2026-06-10)** — non-tail (`brood_rt_call_slow`/`jit_dispatch_call`, the
+      callee runs as a nested VM apply) and **tail** (outcome 4 → `jit_dispatch_tail` hands
+      the driver a `ChunkExit::Tail` so the frame is reused, O(1) stack for mutual
+      recursion). Free-global callee via `brood_rt_global` (live env, late binding);
+      comparison results box as `Bool` not `Int`; a tail-call body-weight gate (≥4 work
+      ops) avoids the per-hop round-trip regressing thin ping/pong loops.
     - ⬜ **Stage 3 — IC in native code**: epoch-guarded call-site IC compiles to
       `cmp [EPOCH_SLOT], r_epoch; jne slow_path` *inside* the JIT'd code (the
       Stage-1.5 guard is a per-activation Rust check in `jit_tier`); global-read

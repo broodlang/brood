@@ -2336,3 +2336,43 @@ callers) and the dead `EXIT_REASON` thread-local (never read). Relaxed the per-q
 tree-walker-defer `capture_top_level` save/restore panic-safe via an RAII `CaptureTopGuard`.
 Extended `value_is_immovable` to check `Range`/`Transient` (tripwire gap) and added a
 `transients.is_empty()` debug-assert to `freeze_as_shared_code` (matching the rope one).
+
+## 2026-06-10 — JIT tier-2: Brood→Brood calls (non-tail + tail-call TCO)
+
+The JIT now fires on bodies that call other functions — the common real-code shape —
+both non-tail (a helper call whose result feeds the body) and tail (mutual recursion /
+a body ending in a call to a *different* global). This was uncommitted working-tree work
+that an external `git reset` wiped mid-session; reconstructed from the captured diff and
+re-validated.
+
+**Mechanism.** A `Value` never rides in a register (24-byte enum), so a call stages its
+callee + args onto the operand stack (`roots`) via `brood_rt_push` in the VM's `Inst::Call`
+layout, then:
+- **Non-tail** → `brood_rt_call_slow` → `jit_dispatch_call`: runs the callee inline (a
+  nested, non-top-level VM apply, so it can't preempt/suspend across the native boundary —
+  the §7.4 dirty carve-out), result read back as an `Op::Handle` via the out-pointer ABI.
+- **Tail** → outcome 4 → `jit_dispatch_tail`: hands `vm_run_bc` a `ChunkExit::Tail`/`Done`
+  so the driver reuses the frame (TCO). The native stack never grows — the driver loop is
+  the trampoline — so 2M-deep mutual recursion stays O(1) stack.
+- A free-global callee resolves live via `brood_rt_global` (`jit_resolve_global`), reading
+  the current env so a `def` rebind is seen immediately (late binding). Unbound → an error
+  parked in `JIT_PENDING_ERROR`, propagated as outcome 3 (no VM re-run).
+
+**GC discipline.** Staged operands are real `roots` (GC-visible). A live `Handle` left
+*below* a call's operands would be a bare heap pointer in a register across the callee's
+collection, so the lowering **bails** if any deeper operand is a `Handle`; `roots_base` is
+re-fetched after every call (a `push`/callee frame may reallocate it, so it's an SSA
+`Variable`, not a fixed value). Comparison results box as `Value::Bool` (`TAG_BOOL`), not
+`Int 1` (`box_scalar`).
+
+**Body-weight gate.** A tail call round-trips native↔driver per hop; benchmarking puts the
+crossover at ~4 work ops, so an arm *ending* in a tail call lowers only with ≥4 work
+instructions — a thinner ping/pong stays on the VM (same speed, no regression). Plain
+`SelfCall` int loops (no round-trip) still tier (~27×). `opt_level=speed` on for GVN +
+redundant-load elimination across the re-read frame slots.
+
+**Validated.** `breakage/jit_breakage_test.blsp` — 37 warmed JIT≡VM cases (non-tail/tail
+calls, mutual recursion, 2M-deep O(1) stack, handle-valued tail args via `cons`,
+cross-process shared native code, comparison bools, deopt boundaries) — green plain and
+under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, plus the lowering unit test and the full
+workspace suite.
