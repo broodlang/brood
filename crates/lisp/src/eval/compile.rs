@@ -820,6 +820,11 @@ fn value_is_immovable(v: Value) -> bool {
         Value::Map(id) => id.region() != value::LOCAL,
         Value::Rope(id) => id.region() != value::LOCAL,
         Value::Fn(id) | Value::Macro(id) => id.region() != value::LOCAL,
+        // A `Range` is a `VecId` and a `Transient` a `TransientId` — both movable when
+        // LOCAL, so they must be checked too (else this tripwire would wrongly pass a
+        // movable LOCAL `Range`/`Transient` baked into a Const).
+        Value::Range(id) => id.region() != value::LOCAL,
+        Value::Transient(id) => id.region() != value::LOCAL,
         // Inline scalars (Int/Float/Bool/Nil), interned Sym/Keyword, and the
         // remaining handle-free kinds carry nothing the GC relocates.
         _ => true,
@@ -1530,15 +1535,26 @@ fn prim2_inline_exec(
     heap: &mut Heap,
     op: PrimOp,
     map: [u8; 2],
+    swapped: bool,
     head: Symbol,
     guard: &AtomicU64,
     x: Value,
     y: Value,
 ) -> Result<Option<Value>, LispError> {
     let cur = heap.global_epoch();
+    // The map the *head* itself resolves to (`resolve_prim`'s natural arg-map). For a
+    // `(op Const Local)` fusion (`swapped`), the instruction's `map` was inverted so the
+    // inline operand pick stays correct (`emit_node`), so un-invert it before comparing —
+    // otherwise revalidation never matches and the arm silently slow-paths forever after
+    // the first epoch bump (a `def`). Non-swapped instructions compare `map` directly.
+    let head_map = if swapped {
+        [1 - map[0] as usize, 1 - map[1] as usize]
+    } else {
+        [map[0] as usize, map[1] as usize]
+    };
     let inlinable = guard.load(Ordering::Relaxed) == cur || {
         match resolve_prim(heap, head) {
-            Some((op2, m2)) if op2 == op && m2 == [map[0] as usize, map[1] as usize] => {
+            Some((op2, m2)) if op2 == op && m2 == head_map => {
                 guard.store(cur, Ordering::Relaxed);
                 true
             }
@@ -2159,6 +2175,17 @@ fn exec_call(
     result.map_err(tag)
 }
 
+/// Restores the `capture_top_level` flag on drop — so the gate is reset even if the
+/// guarded tree-walker `apply` *panics* (caught by `run_one`'s `catch_unwind`). The
+/// manual save/restore it replaces leaked a `false` flag on a panic until the next
+/// `vm_run_bc` entry re-stamped it.
+struct CaptureTopGuard(bool);
+impl Drop for CaptureTopGuard {
+    fn drop(&mut self) {
+        crate::process::set_capture_top_level(self.0);
+    }
+}
+
 /// Dispatch a call whose callee and `argv` are already evaluated. A VM-eligible
 /// closure of matching arity runs on the VM (or, in tail position, returns a
 /// `Tail` for the trampoline); everything else (natives, multi-arm / ineligible
@@ -2267,9 +2294,8 @@ fn dispatch(
         // the worker (§7.4 dirty-scheduler carve-out) instead of attempting a
         // state-capture that can't cross the native boundary.
         crate::perf_bump!(tw_defer);
-        let prev = crate::process::set_capture_top_level(false);
+        let _guard = CaptureTopGuard(crate::process::set_capture_top_level(false));
         let result = crate::eval::apply(heap, cur_callee, &cur_argv, genv);
-        crate::process::set_capture_top_level(prev);
         return Ok(Step::Done(result?));
     }
     Ok(Step::Done(crate::eval::apply(heap, cur_callee, &cur_argv, genv)?))
@@ -2851,7 +2877,7 @@ fn exec_chunk(
                 let sb = heap.root_at(n - 1);
                 let x = [sa, sb][map[0] as usize];
                 let y = [sa, sb][map[1] as usize];
-                match prim2_inline_exec(heap, *op, *map, *head, guard, x, y)? {
+                match prim2_inline_exec(heap, *op, *map, false, *head, guard, x, y)? {
                     Some(v) => { heap.truncate_roots(n - 2); heap.push_root(v); }
                     None => {
                         // Operands already rooted at n-2 and n-1.
@@ -2865,7 +2891,7 @@ fn exec_chunk(
                 let sb = heap.root_at(base + slot_b);
                 let x = [sa, sb][map[0] as usize];
                 let y = [sa, sb][map[1] as usize];
-                let v = match prim2_inline_exec(heap, *op, *map, *head, guard, x, y)? {
+                let v = match prim2_inline_exec(heap, *op, *map, false, *head, guard, x, y)? {
                     Some(v) => v,
                     None => {
                         let save = heap.roots_len();
@@ -2881,7 +2907,7 @@ fn exec_chunk(
                 let sb = Value::Int(*int_b);
                 let x = [sa, sb][map[0] as usize];
                 let y = [sa, sb][map[1] as usize];
-                let v = match prim2_inline_exec(heap, *op, *map, *head, guard, x, y)? {
+                let v = match prim2_inline_exec(heap, *op, *map, *swapped, *head, guard, x, y)? {
                     Some(v) => v,
                     None => {
                         // Dispatch to the user `head` in the ORIGINAL call order. For the
@@ -4555,6 +4581,31 @@ mod tests {
             Value::Pair(id) => id.index(),
             other => panic!("expected a Pair, got {:?}", std::mem::discriminant(&other)),
         }
+    }
+
+    /// Regression: a swapped `(op Const Local)` `Prim2SlotInt` must keep inlining after an
+    /// epoch bump. The fusion stores an *inverted* arg-map (so the inline operand pick is
+    /// correct); `prim2_inline_exec` revalidates against the head's *natural* map, so the
+    /// `swapped` call site must un-invert it. Before the fix it compared the inverted map,
+    /// which never matched `resolve_prim`'s natural map — so every such prim silently fell
+    /// to the slow path forever after the first `def` bumped the epoch.
+    #[test]
+    fn swapped_prim2slotint_reinlines_after_epoch_bump() {
+        let mut interp = crate::Interp::new();
+        let heap = &mut interp.heap;
+        let minus = value::intern("-"); // natural map [0,1]; `(- 24 x)` fuses to [1,0] swapped
+        // A stale guard (≠ current epoch) forces the revalidation path the bug lived on.
+        let guard = AtomicU64::new(heap.global_epoch().wrapping_add(1));
+        // Operands as the caller picks them for map=[1,0]: x = const 24, y = local 5.
+        let out = prim2_inline_exec(heap, PrimOp::Sub, [1, 0], true, minus, &guard, Value::Int(24), Value::Int(5))
+            .expect("no arithmetic error");
+        match out {
+            Some(Value::Int(n)) => assert_eq!(n, 19, "(- 24 5) must inline to 19"),
+            Some(other) => panic!("expected Int(19), got tag {:?}", value::tag(other)),
+            None => panic!("swapped Prim2SlotInt slow-pathed after an epoch bump (the bug)"),
+        }
+        // The guard was refreshed to the live epoch, so subsequent calls take the fast path.
+        assert_eq!(guard.load(Ordering::Relaxed), heap.global_epoch());
     }
 
     #[test]
