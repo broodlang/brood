@@ -525,27 +525,47 @@ current element and `acc` is the current accumulator."
 ;; primitives with the variadic / default-bearing surface.
 
 ;; (get coll k) -> value or nil if absent; (get coll k default) -> value or default.
-(defn get (coll k & default)
+;; The fixed-arity 2- and 3-arg arms are the hot paths: exact arity → VM-eligible,
+;; so the body compiles to bytecode and the common `(get m k d)` map case goes
+;; straight to the `map-get` kernel op — no variadic-rest dispatch, no `(first
+;; default)`, and no extra call hop. The cond is repeated per arm (rather than
+;; factored into a helper) precisely to avoid that extra call on the hot path.
+(defn get
   "The value at key/index `k` in `coll`, or `default` (else `nil`) if absent.
 Maps look up by key; vectors, lists, and strings index by integer position
 (out-of-range yields the default, never an error)."
-  (cond
-    (map? coll) (map-get coll k (first default))
-    (transient? coll) (transient-get coll k (first default))
-    (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
-                     (char-at coll k)
-                     (first default))
-    :else (nth coll k (first default))))
+  ((coll k)
+    (cond
+      (map? coll) (map-get coll k nil)
+      (transient? coll) (transient-get coll k nil)
+      (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) nil)
+      :else (nth coll k nil)))
+  ((coll k default)
+    (cond
+      (map? coll) (map-get coll k default)
+      (transient? coll) (transient-get coll k default)
+      (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) default)
+      :else (nth coll k default)))
+  ((coll k & default)
+    (cond
+      (map? coll) (map-get coll k (first default))
+      (transient? coll) (transient-get coll k (first default))
+      (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) (first default))
+      :else (nth coll k (first default)))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
 (defn assoc--pairs (set m kvs)
   (if (empty? kvs) m (assoc--pairs set (set m (first kvs) (second kvs)) (rest (rest kvs)))))
-(defn assoc (coll & kvs)
+(defn assoc
   "A fresh collection like `coll` with each `key value` pair added or updated.
 For a map, keys are added or replaced; for a vector, integer indices in
 `[0, count)` are replaced (an out-of-range index is an error — appending is via
 `conj`, not `assoc`)."
-  (assoc--pairs (if (vector? coll) vector-assoc map-assoc) coll kvs))
+  ;; The single-pair `(assoc coll k v)` arm is the hot case (it's what `update`,
+  ;; tallies, and most call sites use): exact arity → VM-eligible, and it skips the
+  ;; `& kvs` rest-list + the `assoc--pairs` loop, going straight to the kernel op.
+  ((coll k v) (if (vector? coll) (vector-assoc coll k v) (map-assoc coll k v)))
+  ((coll & kvs) (assoc--pairs (if (vector? coll) vector-assoc map-assoc) coll kvs)))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
