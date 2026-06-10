@@ -66,8 +66,19 @@ impl Jit {
     /// these Rust functions). No code is compiled here.
     #[allow(clippy::new_without_default)] // construction can fail on an unsupported host
     pub fn new() -> Self {
-        let mut builder = JITBuilder::new(default_libcall_names())
-            .expect("Cranelift JITBuilder for the host ISA");
+        // `opt_level=speed` turns on Cranelift's GVN + alias-aware redundant-load
+        // elimination, which matters here: a hot loop body re-reads the same frame slot
+        // several times (`(< i 1)`, `(- i 1)`, `(+ acc i)` all tag-check + load slot `i`),
+        // and the default `opt_level=none` keeps every one of those loads + tag-checks.
+        // The extra compile cost is paid on the background compiler thread, off the hot
+        // path; the optimizations are semantics-preserving, so the GC discipline is
+        // unaffected. Falls back to default flags if the host rejects the setting.
+        let mut builder = JITBuilder::with_flags(
+            &[("opt_level", "speed")],
+            default_libcall_names(),
+        )
+        .or_else(|_| JITBuilder::new(default_libcall_names()))
+        .expect("Cranelift JITBuilder for the host ISA");
         builder.symbol("brood_rt_tick", brood_rt_tick as *const u8);
         builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
@@ -75,6 +86,8 @@ impl Jit {
         builder.symbol("brood_rt_cons", brood_rt_cons as *const u8);
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
+        builder.symbol("brood_rt_push", brood_rt_push as *const u8);
+        builder.symbol("brood_rt_global", brood_rt_global as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         Jit { module: JITModule::new(builder) }
@@ -291,16 +304,66 @@ pub unsafe extern "C" fn brood_rt_roots_base(heap: *mut Heap) -> *mut u8 {
     (*heap).roots_base_ptr() as *mut u8
 }
 
-/// Slow-path call dispatch / deopt: when a JIT'd call site can't take its fast path (IC
-/// miss, non-closure callee, arity mismatch), it falls back to the interpreter's
-/// dispatch on the callee + args already staged in `roots`. The exact protocol (how
-/// many roots, where the result lands) is finalized in **Stage 1** with the call
-/// lowering; stubbed here so the callback table is complete and the symbol exists for
-/// the trampoline/Cranelift module to resolve.
+/// Push a `Value` (by word-triple) onto the operand stack (`roots`). The JIT stages a
+/// Brood→Brood call's callee + args here, in the VM's `Inst::Call` layout, before
+/// [`brood_rt_call_slow`]. Goes through `push_root` so the `roots` length/capacity are
+/// maintained; a growth may reallocate the buffer, so the JIT re-fetches
+/// [`brood_rt_roots_base`] after the call.
 ///
 /// # Safety
-/// `heap` must be the live context pointer.
+/// `heap` must be the live context pointer; the word triple is bytes the JIT read out
+/// of a real `Value` (a slot, an `Int` box, or a handle result).
 #[no_mangle]
-pub unsafe extern "C" fn brood_rt_call_slow(_heap: *mut Heap, _argc: u32) {
-    unimplemented!("brood_rt_call_slow: the JIT call protocol lands in Stage 1 (ADR-101)")
+pub unsafe extern "C" fn brood_rt_push(heap: *mut Heap, w0: i64, w1: i64, w2: i64) {
+    (*heap).push_root(words_to_val(w0, w1, w2));
+}
+
+/// Resolve a free global `sym` (a JIT'd call's callee-loading `Inst::Global`/`GlobalIc`,
+/// or a global read in value position), writing the value to `*out`. Returns 0 on
+/// success, 1 if unbound — in which case the error is parked for the arm to propagate
+/// (it returns the error outcome, 3). Reads the *live* env, so a `def` rebind is seen
+/// immediately (late binding, exactly like the VM's `Inst::Global`).
+///
+/// # Safety
+/// `heap`/`out` must be live; `sym` is an interned [`crate::core::value::Symbol`].
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_global(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    sym: u32,
+) -> i64 {
+    match crate::eval::compile::jit_resolve_global(&mut *heap, sym) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => 1,
+    }
+}
+
+/// Run a JIT'd arm's **non-tail** Brood→Brood call. The callee + `argc` args have been
+/// staged on the operand stack (`roots`) in the VM's `Inst::Call` layout
+/// (`[.., callee, arg0 .. arg_{argc-1}]`); this mirrors the non-tail `Inst::Call` path —
+/// read them, dispatch through the interpreter to completion, truncate the operands,
+/// and write the result to `*out`. Returns 0 on success, 1 on error (parked for the arm
+/// to propagate). The callee runs as a **nested, non-top-level** VM apply, so it can't
+/// preempt/suspend across this native boundary (the §7.4 dirty carve-out) — exactly
+/// like a Rust builtin calling back into Brood. See
+/// [`crate::eval::compile::jit_dispatch_call`].
+///
+/// # Safety
+/// `heap`/`out` must be live; `argc` callee+args are staged on `roots`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_call_slow(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    argc: u32,
+) -> i64 {
+    match crate::eval::compile::jit_dispatch_call(&mut *heap, argc as usize) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => 1,
+    }
 }

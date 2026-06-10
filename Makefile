@@ -30,7 +30,7 @@ JIT_FEATURES := $(if $(filter-out 0,$(WITH_JIT)),--features brood/jit,)
 TS_FEATURES := --features brood/treesit
 
 .DEFAULT_GOAL := help
-.PHONY: help build test ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
+.PHONY: help build test test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -59,6 +59,41 @@ test-both: ## Run the whole suite through BOTH engines (tree-walker + VM) — th
 	BROOD_VM=1 cargo nextest run --no-fail-fast
 	@echo ">>> suite under the tree-walker (BROOD_VM=0 escape hatch)"
 	BROOD_VM=0 cargo nextest run --no-fail-fast
+
+breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwire armed) — try to break the JIT/VM/memory. NOT part of `make test`.
+	# These are deliberately abusive tests that live OUTSIDE tests/ (so neither
+	# `make test` nor `nest test` ever discovers them) and try to make the JIT
+	# diverge from the VM, overflow the eval stack, leak/corrupt the heap, or
+	# deadlock the scheduler. Each file is a self-contained `brood --test` suite.
+	#
+	# Built fast-but-armed: `--release` for speed (the loops warm the JIT past its
+	# tiering threshold, which needs real iteration counts) + `--features jit` so
+	# the JIT actually fires + `-C debug-assertions=on` so the per-deref GC
+	# tripwire and the heap verifier stay armed (catch a use-after-GC at the bad
+	# deref, not as a distant SIGSEGV). For the heaviest GC hunt, re-run with
+	# `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 make breakagetests` (much slower:
+	# collects at every safepoint).
+	#
+	# Each file runs in its OWN process, so a segfault (Brood's stack-overflow
+	# failure mode) is contained to that file — the loop keeps going and the
+	# summary still prints. Exits non-zero if any file failed or crashed.
+	@echo ">>> building brood (release, +jit, debug-assertions armed) ..."
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=on" cargo build --release -p cli --features jit
+	@bin=target/release/brood; fail=0; \
+	echo ">>> running breakage suite with $$bin"; \
+	for f in breakage/*_test.blsp; do \
+		echo ""; echo "===== $$f ====="; \
+		$$bin --test "$$f"; \
+		rc=$$?; \
+		if [ $$rc -ne 0 ]; then \
+			fail=1; \
+			if [ $$rc -gt 128 ]; then echo ">>> CRASH ($$f): exit $$rc (signal $$((rc-128)) — likely SIGSEGV / stack overflow)"; \
+			else echo ">>> FAIL ($$f): exit $$rc"; fi; \
+		fi; \
+	done; \
+	echo ""; \
+	if [ $$fail -ne 0 ]; then echo ">>> breakage suite: FAILURES above"; exit 1; \
+	else echo ">>> breakage suite: all files passed"; fi
 
 ensure-nextest: ## Install cargo-nextest into ~/.local/bin (prebuilt binary) if it's missing
 	@command -v cargo-nextest >/dev/null 2>&1 && { echo "cargo-nextest already installed: $$(cargo nextest --version)"; } || { \

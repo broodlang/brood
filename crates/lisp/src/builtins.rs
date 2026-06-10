@@ -922,6 +922,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%string-join",
+        Arity::exact(2),
+        Sig::new(vec![string, seq], string),
+        string_join,
+    );
+    def(
+        heap,
         "pr-str",
         Arity::exact(1),
         Sig::new(vec![any], string),
@@ -2631,6 +2638,13 @@ fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // tree-walker path, so the escape hatch / differential TW mode stay honest.
     // Checked once, not per element.
     let use_vm = crate::eval::compile::vm_enabled();
+    // Primitive-reducer fast path: when `f` is `+`/`*` (directly, or via the
+    // prelude wrapper's passthrough arm), fold with the inlined scalar op and
+    // never call back into `apply` per element — that per-element dispatch is the
+    // dominant cost of `(reduce + 0 (range n))`. Resolved once against the live
+    // env; a per-element miss (i64 overflow → BigInt, or a Float/BigInt acc) falls
+    // back to the real reducer for that step, so the result stays bit-identical.
+    let prim = crate::eval::compile::reduce_prim_op(heap, f);
     heap.root_scope(|heap| {
         let f_r = heap.root(f);
         let mut acc_r = heap.root(init);
@@ -2638,10 +2652,18 @@ fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         while if step > 0 { i < hi } else { i > hi } {
             let f = heap.read_root(f_r);
             let acc = heap.read_root(acc_r);
-            let next = if use_vm {
-                crate::eval::compile::apply_value(heap, f, &[acc, Value::Int(i)], env)?
-            } else {
-                apply(heap, f, &[acc, Value::Int(i)], env)?
+            let next = match prim {
+                Some(op) => match crate::eval::compile::prim_apply_step(op, acc, Value::Int(i))? {
+                    Some(v) => v,
+                    None if use_vm => {
+                        crate::eval::compile::apply_value(heap, f, &[acc, Value::Int(i)], env)?
+                    }
+                    None => apply(heap, f, &[acc, Value::Int(i)], env)?,
+                },
+                None if use_vm => {
+                    crate::eval::compile::apply_value(heap, f, &[acc, Value::Int(i)], env)?
+                }
+                None => apply(heap, f, &[acc, Value::Int(i)], env)?,
             };
             acc_r = heap.advance_root(acc_r, next);
             i += step;
@@ -3029,6 +3051,33 @@ fn str_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mut s = String::new();
     for &a in args {
         s.push_str(&printer::display(heap, a));
+    }
+    Ok(heap.alloc_string(&s))
+}
+
+/// `(%string-join sep coll)` — the native fast path behind `join` for a string
+/// separator. Walks `coll` once, appending each element's display form (the same
+/// `str`/`join` use) with `sep` between adjacent elements into one pre-sized
+/// buffer — no intermediate cons list and no `reverse` pass, which is what the
+/// all-Brood `join` paid (≈2N cons cells built then reversed). `coll` is realised
+/// via `seq_items` (list / vector / range; empty → `""`). Semantics match the
+/// prelude `join`: display form per element, separator only between adjacent
+/// elements, so a single-element collection has no trailing separator.
+fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let sep = match arg(args, 0) {
+        s @ Value::Str(_) => printer::display(heap, s),
+        v => return Err(LispError::wrong_type(heap, "%string-join", "string", v)),
+    };
+    let items = heap.seq_items(arg(args, 1))?;
+    // Rough pre-size (separators + a small per-element allowance) to avoid most
+    // re-grows without a second display pass just to compute the exact length.
+    let mut s =
+        String::with_capacity(sep.len() * items.len().saturating_sub(1) + items.len() * 8);
+    for (i, &item) in items.iter().enumerate() {
+        if i > 0 {
+            s.push_str(&sep);
+        }
+        s.push_str(&printer::display(heap, item));
     }
     Ok(heap.alloc_string(&s))
 }

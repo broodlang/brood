@@ -1,0 +1,279 @@
+;;; JIT breakage tests (ADR-101) — try to make the tier-1/tier-2 JIT diverge
+;;; from the VM, or crash. NOT part of the mainstream suite: run with
+;;; `make breakagetests` (which builds `brood --features jit`). Without `jit`
+;;; these still pass — they just exercise the VM, which is the oracle the JIT
+;;; must match.
+;;;
+;;; The contract every case asserts: a WARMED program (driven tens of thousands
+;;; of times so the background compiler installs native code) yields EXACTLY the
+;;; value the VM would, or raises the SAME clean error. A wrapping native op, a
+;;; missed deopt, a stale epoch, or a bad handle copy would show up as a wrong
+;;; number / wrong type / panic here.
+;;;
+;;; Keep every loop TAIL-recursive: test bodies run in small-stack green
+;;; processes. Anything that `def`s a global lives in an `:isolated` block (its
+;;; own private, rolled-back global table) so a redefinition can't leak.
+
+(defmodule jit-breakage-test (:use test))
+
+;; Top-level drivers + helpers. `(warm-* )` warm an arm well past the tiering
+;; threshold (8) and give the async compiler ample time; correctness holds
+;; whether or not a given run has tiered yet, so these never flake.
+
+(defn jb-sumto (i acc) (if (< i 1) acc (jb-sumto (- i 1) (+ acc i))))
+(defn jb-prod  (i acc) (if (< i 1) acc (jb-prod (- i 1) (* acc i))))
+(defn jb-fib   (n a b) (if (< n 1) a (jb-fib (- n 1) b (+ a b))))
+(defn jb-build (n acc) (if (< n 1) acc (jb-build (- n 1) (cons n acc))))
+(defn jb-elt   (xs n)  (if (< n 1) (first xs) (jb-elt (rest xs) (- n 1))))
+(defn jb-walk  (xs n)  (if (< n 1) xs (jb-walk (rest xs) (- n 1))))
+(defn jb-carry (xs n)  (if (< n 1) xs (jb-carry xs (- n 1))))
+
+(defn jb-helper (x) (* x 2))
+(defn jb-use    (x) (+ (jb-helper x) 1))
+(defn jb-sum3   (a b c) (+ a (+ b c)))
+(defn jb-answer () 42)
+(defn jb-use0   (x) (+ (jb-answer) x))
+(defn jb-sign   (x) (if (< x 0) -1 (if (= x 0) 0 1)))
+
+;; Mutual recursion — each arm *ends* in a tail call to the OTHER global
+;; (`Inst::Call { tail: true }`, not `SelfCall`). Bodies are heavy (5 work ops:
+;; `<`,`-`,`+`,`*`,`rem`) so they clear the JIT's tail-call body-weight gate and
+;; actually tier; the driver reuses the frame (TCO) across hops.
+(defn jb-fa (n acc) (if (< n 1) acc (jb-fb (- n 1) (rem (+ acc (* n 7)) 1000000))))
+(defn jb-fb (n acc) (if (< n 1) acc (jb-fa (- n 1) (rem (+ acc (* n 3)) 1000000))))
+;; Mutual recursion that conses a list across the hops — a HANDLE flows as a tail-call
+;; arg, and the per-hop allocation is bounded by the driver-loop-top safepoint.
+(defn jb-tb-build (n acc) (if (< n 1) acc (jb-tb-grow (- n 1) (cons (* n n) acc))))
+(defn jb-tb-grow  (n acc) (if (< n 1) acc (jb-tb-build (- n 1) (cons (+ n 1) acc))))
+
+;; generic "spin a thunk-shaped arm k times" drivers
+(defn jb-drive-i (k f a)   (if (< k 1) a   (jb-drive-i (- k 1) f (f a))))
+
+(describe "jit breakage: fused int loops"
+  (test "50k-warmed sum-to-1000 stays exact"
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-sumto 1000 0)))))
+      (assert= 500500 (run 50000 0))))
+
+  (test "iterative fib(90) under a warmed driver"
+    ;; fib(90) is the largest fib still inside i64 — the boundary the native
+    ;; adds must hit without wrapping.
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-fib 90 0 1)))))
+      (assert= 2880067194370816120 (run 50000 0))))
+
+  (test "fib(100) overflows i64 → must deopt to BigInt, not wrap"
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-fib 100 0 1)))))
+      (assert= 354224848179261915075 (run 20000 0)))))
+
+(describe "jit breakage: overflow / deopt boundaries"
+  (test "30! product deopts to BigInt under JIT"
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-prod 30 1)))))
+      (assert= 265252859812191058636308480000000 (run 30000 0))))
+
+  (test "i64::MAX + 1 promotes to BigInt even when warmed"
+    (letrec (inc (fn (x) (+ x 1))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (inc 9223372036854775807)))))
+      (assert= 9223372036854775808 (run 50000 0))))
+
+  (test "i64::MIN - 1 underflows to BigInt"
+    (letrec (dec (fn (x) (- x 1))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (dec -9223372036854775808)))))
+      (assert= -9223372036854775809 (run 50000 0))))
+
+  (test "deopt storm: accumulator flips int→float mid-stream, every iteration"
+    ;; The seed alternates int / float each outer step, so the warmed inner arm
+    ;; keeps tag-checking and deopting. Result must track the VM exactly.
+    (letrec (f (fn (i acc) (if (< i 1) acc (f (- i 1) (+ acc 1))))
+          run (fn (k a) (if (< k 1) a
+                          (run (- k 1) (+ (f 5 0) (f 5 0.5))))))
+      ;; each outer step: (0+1+..) int 5 + float 5.5 = 10.5; final acc is last value
+      (assert= 10.5 (run 50000 0))))
+
+  (test "exact vs inexact division: warmed `/` deopts only on a remainder"
+    (letrec (d (fn (x) (/ 24 x))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (d 4)))))
+      (assert= 6 (run 20000 0))     ; warm on exact
+      (assert= 4 (d 6))              ; exact
+      (assert= 4.8 (d 5)))))         ; inexact → Float, matches VM
+
+(describe "jit breakage: division edge cases raise cleanly"
+  (test "warmed rem then divide-by-zero raises, never traps"
+    (letrec (r (fn (a b) (rem a b))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (r 10 2)))))
+      (run 20000 0)
+      (assert-error (r 10 0))))
+
+  (test "warmed quot then quot i64::MIN / -1 deopts to BigInt (no SIGFPE)"
+    (letrec (q (fn (a b) (quot a b))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (q 100 5)))))
+      (run 20000 0)
+      (assert= 9223372036854775808 (q -9223372036854775808 -1))))
+
+  (test "warmed quot then divide-by-zero raises"
+    (letrec (q (fn (a b) (quot a b))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (q 7 3)))))
+      (run 20000 0)
+      (assert-error (q 7 0)))))
+
+(describe "jit breakage: comparisons return bools, not ints"
+  (test "a warmed predicate returning a bare `<` prints true/false"
+    (letrec (lt? (fn (a b) (< a b))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (lt? 2 5)))))
+      (is (= true (run 50000 false)))))
+
+  (test "warmed `>=` predicate"
+    (letrec (ge? (fn (a b) (>= a b))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (ge? 2 5)))))
+      (is (= false (run 50000 true)))))
+
+  (test "comparison bound in a let round-trips as a bool"
+    (letrec (classify (fn (x) (letrec (small (< x 10)) small))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (classify 3)))))
+      (is (= true (run 50000 false)))))
+
+  (test "all six comparisons, warmed, on both sides of the pivot"
+    (do
+      ;; warm each then probe 3/5/9 against 5
+      (is (= true  (jb-drive-bool 30000 (fn () (< 3 5)))))
+      (is (= false (jb-drive-bool 30000 (fn () (< 9 5)))))
+      (is (= true  (jb-drive-bool 30000 (fn () (<= 5 5)))))
+      (is (= true  (jb-drive-bool 30000 (fn () (> 9 5)))))
+      (is (= false (jb-drive-bool 30000 (fn () (>= 3 5)))))
+      (is (= true  (jb-drive-bool 30000 (fn () (= 5 5))))))))
+
+(defn jb-drive-bool (k thunk) (if (< k 1) (thunk) (do (thunk) (jb-drive-bool (- k 1) thunk))))
+
+(describe "jit breakage: control-flow shapes"
+  (test "deep 3-way classify warmed"
+    (letrec (run (fn (k a) (if (< k 1) a
+                          (run (- k 1) (+ (jb-sign -7) (+ (jb-sign 0) (jb-sign 12)))))))
+      (assert= 0 (run 50000 0))))
+
+  (test "collatz step counter (rem/quot/mul/add) under JIT"
+    (letrec (cstep (fn (n steps)
+                  (if (= n 1) steps
+                    (if (= (rem n 2) 0)
+                      (cstep (quot n 2) (+ steps 1))
+                      (cstep (+ (* 3 n) 1) (+ steps 1)))))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (cstep 27 0)))))
+      (assert= 111 (run 20000 0))))
+
+  (test "do-sequencing keeps only the last form"
+    (letrec (f (fn (i acc) (if (< i 1) acc (f (- i 1) (do (+ acc 0) (* acc 1) (+ acc 2)))))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (f 5 0)))))
+      (assert= 10 (run 50000 0))))
+
+  (test "nested let binders, repeated-squaring overflow → BigInt"
+    (letrec (f (fn (i acc) (if (< i 1) acc (letrec (sq (* acc acc)) (f (- i 1) sq))))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (f 6 2)))))
+      (assert= 18446744073709551616 (run 50000 0)))))
+
+(describe "jit breakage: handles (cons / car / cdr) under GC pressure"
+  (test "cons-build a 1000-element list 5000 times, traverse to verify"
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-elt (jb-build 1000 nil) 999)))))
+      (assert= 1000 (run 5000 0))))
+
+  (test "carry a handle through a loop unchanged"
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-carry (list 1 2 3) 50)))))
+      (assert= (list 1 2 3) (run 50000 nil))))
+
+  (test "walk a list to its nil tail through the JIT"
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-walk (list 1 2) 2)))))
+      (is (nil? (run 100000 nil)))))
+
+  (test "first/rest then arithmetic on the element (handle-as-int tag-check)"
+    (letrec (sum2 (fn (xs) (+ (first xs) (first (rest xs))))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (sum2 (list 11 22 33))))))
+      (assert= 33 (run 100000 0))))
+
+  (test "car of a non-pair deopts and raises, even warmed"
+    (letrec (hd (fn (xs) (first xs))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (hd (list 1 2))))))
+      (run 50000 0)
+      (assert-error (first 7)))))
+
+(describe "jit breakage: non-tail Brood→Brood calls"
+  (test "warmed (+ (helper x) 1)"
+    (letrec (run (fn (k acc) (if (< k 1) acc (run (- k 1) (jb-use 10)))))
+      (assert= 21 (run 50000 0))))
+
+  (test "3-arg helper result fed into arithmetic"
+    (letrec (use (fn (x) (* (jb-sum3 x x x) 2))
+          run (fn (k acc) (if (< k 1) acc (run (- k 1) (use 5)))))
+      (assert= 30 (run 50000 0))))
+
+  (test "call result flows straight into cons"
+    (letrec (pairup (fn (x) (cons (jb-helper x) x))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (first (pairup 9))))))
+      (assert= 18 (run 100000 0))))
+
+  (test "0-arg helper inside a warmed caller does not panic"
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-use0 8)))))
+      (assert= 50 (run 50000 0))))
+
+  (test "free global read in value position, warmed"
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (+ jb-const 1)))))
+      (assert= 42 (run 50000 0))))
+
+  (test "an error inside a JIT'd call propagates (does not silently re-run)"
+    (letrec (use (fn (x) (+ (jb-helper x) 1))
+          run (fn (k) (if (< k 1) (use nil) (do (use 10) (run (- k 1))))))
+      (assert-error (run 50000)))))
+
+(def jb-const 41)
+
+(describe "jit breakage: letrec self-loops calling helpers (the strongest GC shape)"
+  (test "sum of squares via letrec calling a helper each step"
+    (letrec (sumsq (fn (n)
+                  (letrec (go (fn (acc i) (if (< i 1) acc (go (+ acc (jb-helper i)) (- i 1)))))
+                    (go 0 n)))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (sumsq 100)))))
+      ;; helper doubles: Σ 2i for 1..100 = 2*5050 = 10100
+      (assert= 10100 (run 20000 0))))
+
+  (test "cons of a call result each iteration (alloc + call coexist)"
+    (letrec (build (fn (n)
+                  (letrec (go (fn (acc i) (if (< i 1) acc (go (cons (jb-helper i) acc) (- i 1)))))
+                    (first (go nil n))))
+          run (fn (k last) (if (< k 1) last (run (- k 1) (build 100)))))
+      (assert= 2 (run 20000 0)))))
+
+(describe "jit breakage: many distinct functions warmed at once (compiler queue pressure)"
+  (test "warm a dozen arms in one test, then verify each"
+    ;; Floods the background compiler with distinct chunks; nothing should be
+    ;; mis-installed against the wrong arm.
+    (do
+      (jb-drive-i 20000 (fn (a) (+ a 1)) 0)
+      (jb-drive-i 20000 (fn (a) (- a 1)) 0)
+      (jb-drive-i 20000 (fn (a) (* a 1)) 1)
+      (jb-drive-i 20000 (fn (a) (if (< a 99999999) (+ a 1) a)) 0)
+      (assert= 11 (jb-use 5))
+      (assert= 500500 (jb-sumto 1000 0))
+      (assert= 2 (jb-elt (jb-build 5 nil) 1)))))
+
+(describe "jit breakage: tail calls to a different callee (mutual recursion)"
+  (test "warmed heavy mutual recursion matches the VM"
+    ;; fa/fb each END in a tail call to the other (Inst::Call { tail: true }); warmed via
+    ;; the driver so both tier. The driver reuses the frame (TCO) and re-tiers the callee.
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (jb-fa 200 0)))))
+      (assert= 100700 (run 50000 0))))
+  (test "a 2,000,000-deep mutual recursion stays O(1) stack (no native-stack growth)"
+    ;; Would SIGSEGV if the JIT'd tail call recursed in Rust instead of reusing the frame.
+    (letrec (warm (fn (k last) (if (< k 1) last (warm (- k 1) (jb-fa 50 0)))))
+      (do (warm 30000 0)
+          (assert= 0 (jb-fa 2000000 0)))))
+  (test "a handle (consed list) flows as a tail-call arg under GC"
+    ;; The per-hop cons allocates; the result handle is staged as a tail-call arg and the
+    ;; nursery is bounded by the driver-loop-top safepoint. GC-stress territory.
+    (letrec (run (fn (k last) (if (< k 1) last (run (- k 1) (first (jb-tb-build 10 nil))))))
+      (assert= 2 (run 50000 0))))
+  (test "tail mutual recursion across processes (shared native code)"
+    ;; Warm in the root, then fan over green processes that run the same native tail-call
+    ;; code concurrently; each sends (jb-fa n 0), the parent sums. Matches the VM.
+    (letrec (warm   (fn (k last) (if (< k 1) last (warm (- k 1) (jb-fa 50 0))))
+             spawn-n (fn (n coord) (if (< n 1) nil (do (spawn (send coord (jb-fa n 0)))
+                                                       (spawn-n (- n 1) coord))))
+             collect (fn (n acc) (if (< n 1) acc (collect (- n 1) (receive (m (+ acc m)))))))
+      (do (warm 30000 0)
+          (let (me (self))
+            (do (spawn-n 100 me)
+                (assert= 863600 (collect 100 0))))))))
