@@ -560,6 +560,13 @@ enum ChunkExit {
     /// Reduction budget exhausted at the inline `SelfCall` safepoint (capture mode). The
     /// frame is already reset (ip=0, new args in slots); the driver captures as usual.
     Preempt,
+    /// Back-edge tiering (`--features jit`): a hot self-tail loop periodically exits the
+    /// inline `SelfCall` loop so the driver can tier it. The frame is already reset
+    /// (ip=0, the iteration's args in slots), so the driver just re-enters the *same* arm
+    /// at ip 0 with `try_jit` set — counting toward the threshold while untried, and
+    /// running the native code (which loops internally) once it's installed. Without this
+    /// a self-tail loop is one arm entry and never reaches the per-entry tier threshold.
+    SelfTail,
 }
 
 // ===================== compiler (form → Node) =====================
@@ -2806,6 +2813,12 @@ fn exec_chunk(
     capture: bool,
 ) -> Result<ChunkExit, LispError> {
     let chunk = arm.chunk.as_ref().expect("exec_chunk: arm has no chunk");
+    // Back-edge tiering counter (jit only): counts `SelfCall` iterations so a hot
+    // self-tail loop can be handed to the driver to tier (it would otherwise be a single
+    // arm entry that never reaches the per-entry threshold). Checked every
+    // `BACKEDGE_TIER_INTERVAL` iterations to keep the inline loop tight.
+    #[cfg(feature = "jit")]
+    let mut back_edges: u32 = 0;
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
         *ip += 1;
@@ -3214,6 +3227,26 @@ fn exec_chunk(
                 if crate::process::deadline_exceeded() {
                     return Err(crate::eval::deadline_error());
                 }
+                // Back-edge tiering: periodically hand a hot self-tail loop to the driver
+                // so it can tier. The frame is already reset (ip=0, args in slots), so the
+                // driver re-enters this same arm at ip 0. We exit only when there's a
+                // reason to: native code is installed (run it — it loops internally), or
+                // the arm is still untried (drive `jit_tier`'s counter toward the
+                // threshold). While QUEUED (compile in flight) or BAILED we stay inline —
+                // no round-trips — just an atomic load every `BACKEDGE_TIER_INTERVAL`.
+                #[cfg(feature = "jit")]
+                {
+                    const BACKEDGE_TIER_INTERVAL: u32 = 256;
+                    back_edges = back_edges.wrapping_add(1);
+                    if back_edges % BACKEDGE_TIER_INTERVAL == 0 {
+                        let code = arm.jit_code.load(std::sync::atomic::Ordering::Acquire);
+                        let installed =
+                            !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED;
+                        if installed || code.is_null() {
+                            return Ok(ChunkExit::SelfTail);
+                        }
+                    }
+                }
                 // Stay in the inner dispatch loop — no function-call round-trip.
                 continue;
             }
@@ -3610,6 +3643,19 @@ fn vm_run_bc(
                 // The tail callee occupies a fresh frame at ip 0 — give it a tier check
                 // too (whether the tail call came from the VM or a JIT'd arm). This is what
                 // lets mutually-recursive arms reached only via tail calls run natively.
+                #[cfg(feature = "jit")]
+                {
+                    try_jit = true;
+                }
+            }
+            Ok(ChunkExit::SelfTail) => {
+                // Back-edge tiering: a hot self-tail loop handed itself back so we can
+                // tier it. The frame is already reset in place (ip=0, the iteration's args
+                // in slots) and the operand stack is at the frame top, so we simply
+                // re-enter the *same* arm with a tier check — `jit_tier` counts toward the
+                // threshold while untried, then runs the installed native code (which
+                // loops internally). No frame rebuild; `cur_arm`/`cur_base`/`cur_env` hold.
+                cur_ip = 0;
                 #[cfg(feature = "jit")]
                 {
                     try_jit = true;
