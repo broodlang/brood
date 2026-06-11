@@ -89,6 +89,7 @@ impl Jit {
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
         builder.symbol("brood_rt_global", brood_rt_global as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
+        builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         Jit { module: JITModule::new(builder) }
     }
@@ -289,6 +290,40 @@ pub unsafe extern "C" fn brood_rt_cdr(
         crate::core::value::Value::Pair(id) => h.pair(id).1,
         _ => crate::core::value::Value::Nil,
     };
+}
+
+/// `vector-ref` / `nth` of a dense vector by an `Int` index, writing the element to
+/// `*out` and returning `0`; returns `1` (deopt to the VM) for a non-vector receiver, a
+/// non-`Int` index, or an out-of-range index — the VM then applies the exact semantics
+/// (`vector-ref`'s bounds error, or `nth`'s `default`). Reads the slab only; never
+/// allocates, so it is not a safepoint (a `Handle` produced here is consumed before any
+/// collection).
+///
+/// # Safety
+/// `heap`/`out` live; the word triples are real `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_vector_ref(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    v0: i64,
+    v1: i64,
+    v2: i64,
+    i0: i64,
+    i1: i64,
+    i2: i64,
+) -> i64 {
+    use crate::core::value::Value;
+    let h = &mut *heap;
+    let (vid, idx) = match (words_to_val(v0, v1, v2), words_to_val(i0, i1, i2)) {
+        (Value::Vector(id), Value::Int(n)) => (id, n),
+        _ => return 1,
+    };
+    let v = h.vector(vid);
+    if idx < 0 || idx as usize >= v.len() {
+        return 1;
+    }
+    *out = v[idx as usize];
+    0
 }
 
 /// Base pointer of the operand-stack/`roots` buffer. JIT'd code calls this once at
