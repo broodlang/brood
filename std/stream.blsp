@@ -140,8 +140,12 @@ Call immediately after accept or connect, before any data has been read."
     ([:tcp-closed ~sock]
      (cond
        pending (send pending (if (= buf "") :stream-done [:stream-val buf]))
-       (not= buf "") (stream--sock-eof-loop buf)
-       else nil))
+       ;; No requester yet (buffered data or not): stay alive in the EOF loop so the
+       ;; consumer's next `[:next]` is answered (remaining data, then `:stream-done`).
+       ;; Returning `nil` here when `buf` is "" was a race: if EOF was processed while
+       ;; the consumer was between requests, the process died and the consumer's final
+       ;; `[:next]` blocked forever (the stream hung).
+       else (stream--sock-eof-loop buf)))
     ;; Socket error
     ([:tcp-error ~sock msg]
      (when pending (send pending [:stream-err msg])))
