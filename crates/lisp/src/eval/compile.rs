@@ -4856,13 +4856,33 @@ static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<Arc<Compile
         std::thread::Builder::new()
             .name("brood-jit".into())
             .spawn(move || {
+                // If codegen ever *panics* (a Cranelift verifier/finalize failure, e.g. an
+                // unregistered `brood_rt_*` symbol, or any future lowering bug), don't let
+                // the panic kill this thread — that would abandon the receiver, fill the
+                // bounded queue, and silently disable the JIT process-wide while the program
+                // ran on none the wiser. Catch it, mark the offending arm BAILED, and stop
+                // compiling further (the module may be left half-mutated, so subsequent
+                // compiles can't be trusted): the process keeps running, correctly, on the
+                // interpreter. A single panic still prints once via the default hook — a
+                // loud, actionable signal — but doesn't spam or crash.
+                let mut codegen_poisoned = false;
                 for arm in rx {
+                    if codegen_poisoned {
+                        arm.jit_code.store(crate::jit::BAILED, Release);
+                        continue;
+                    }
                     let mut jit = crate::jit::GLOBAL_JIT.lock().unwrap_or_else(|e| e.into_inner());
-                    let lowered = jit_lower_arm(&mut jit, &arm);
+                    let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        jit_lower_arm(&mut jit, &arm)
+                    }));
                     drop(jit); // install the pointer outside the module lock
                     match lowered {
-                        Some(ptr) => arm.jit_code.store(ptr as *mut u8, Release),
-                        None => arm.jit_code.store(crate::jit::BAILED, Release),
+                        Ok(Some(ptr)) => arm.jit_code.store(ptr as *mut u8, Release),
+                        Ok(None) => arm.jit_code.store(crate::jit::BAILED, Release),
+                        Err(_) => {
+                            codegen_poisoned = true;
+                            arm.jit_code.store(crate::jit::BAILED, Release);
+                        }
                     }
                 }
             })
