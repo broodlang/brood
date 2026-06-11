@@ -3897,7 +3897,9 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
             | Inst::Prim2SlotSlot { op, .. }
             | Inst::Prim2SlotInt { op, .. }
                 if in_subset_op(op) => {}
-            _ => return None,
+            _ => {
+                return None;
+            }
         }
     }
 
@@ -4656,10 +4658,19 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 Inst::Jump(t) => {
                     if *t == len {
                         // Jump straight to Done: return the single result via roots[base].
-                        if stack.len() != 1 {
-                            return None;
+                        if stack.len() == 1 {
+                            exit_done(&mut b, stack[0]);
+                        } else {
+                            // A reachable Done always leaves exactly one value, so a
+                            // different stack height here means this block is **dead** — the
+                            // bytecode compiler emits a jump-past-the-`else` after a branch
+                            // that ended in a tail `SelfCall` (which never falls through), so
+                            // it can't run. Terminate it by routing to `deopt`: never
+                            // executes, and if the unreachability assumption were ever wrong
+                            // it safely falls back to the VM rather than mis-returning. (This
+                            // dead jump is why e.g. `collatz`'s `steps` arm wouldn't lower.)
+                            b.ins().jump(deopt, &[]);
                         }
-                        exit_done(&mut b, stack[0]);
                     } else {
                         let args: Vec<BlockArg> =
                             stack.iter().map(|&op| BlockArg::Value(as_int(&mut b, op))).collect();
@@ -4902,13 +4913,25 @@ static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<Arc<Compile
 fn chunk_ops_all_native(heap: &Heap, arm: &CompiledArm) -> bool {
     let Some(chunk) = arm.chunk.as_ref() else { return true };
     chunk.code.iter().all(|inst| match inst {
-        Inst::Prim2 { op, map, head, .. }
-        | Inst::Prim2SlotSlot { op, map, head, .. }
-        | Inst::Prim2SlotInt { op, map, head, .. } => {
+        Inst::Prim2 { op, map, head, .. } | Inst::Prim2SlotSlot { op, map, head, .. } => {
+            // These store the head's *natural* arg-map (what `resolve_prim` returns).
             matches!(
                 resolve_prim(heap, *head),
                 Some((o, m)) if o == *op && m == [map[0] as usize, map[1] as usize]
             )
+        }
+        Inst::Prim2SlotInt { op, map, head, swapped, .. } => {
+            // A `(Const, Local)` fusion inverts the map so the slot is operand 0 (and sets
+            // `swapped`). Un-invert before comparing to `resolve_prim`'s natural map —
+            // otherwise a commutative `(op const local)` like `(* 3 m)` spuriously fails
+            // this check and the whole (valid) arm is wrongly marked BAILED, never JITs.
+            // Mirrors the revalidation in `prim2_inline_exec`.
+            let want = if *swapped {
+                [1 - map[0] as usize, 1 - map[1] as usize]
+            } else {
+                [map[0] as usize, map[1] as usize]
+            };
+            matches!(resolve_prim(heap, *head), Some((o, m)) if o == *op && m == want)
         }
         _ => true,
     })
