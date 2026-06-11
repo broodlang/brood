@@ -23,6 +23,11 @@
   (run-process "git" (list "-C" dir "init" "-q"))
   (run-process "git" (list "-C" dir "config" "user.email" "t@example.com"))
   (run-process "git" (list "-C" dir "config" "user.name" "Test"))
+  ;; Disable commit/tag signing in the fixture repo: the dev's global config may
+  ;; force SSH/GPG signing (e.g. via 1Password), which would fail here — an unlocked
+  ;; agent isn't a test prerequisite, and these throwaway commits don't need signing.
+  (run-process "git" (list "-C" dir "config" "commit.gpgsign" "false"))
+  (run-process "git" (list "-C" dir "config" "tag.gpgsign" "false"))
   (run-process "git" (list "-C" dir "add" "-A"))
   (run-process "git" (list "-C" dir "commit" "-q" "-m" "init"))
   (str "file://" dir))
