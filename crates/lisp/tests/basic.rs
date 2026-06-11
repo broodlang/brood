@@ -1270,10 +1270,24 @@ fn binding_undeclared_is_an_error() {
 /// runner.
 #[test]
 fn parser_rejects_deeply_nested_input_instead_of_overflowing() {
-    let mut interp = brood::Interp::new();
-    let src: String = "(".repeat(5000);
-    let err = interp.eval_str(&src).expect_err("must reject deep input");
-    let msg = format!("{}", err);
+    // Run on a thread with a realistic stack. The parser caps nesting at 256
+    // levels (the property under test — it returns a depth-cap error instead of
+    // recursing unbounded), but unwinding even 256 large *debug* frames needs
+    // more than nextest's ~2 MB default test-thread stack, so a debug `make test`
+    // would abort before the cap's error could surface. Release frames are small
+    // enough that it passes either way; the real runtime runs eval on a generous
+    // stack too. This test asserts graceful rejection, not minimal stack use.
+    let msg = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let mut interp = brood::Interp::new();
+            let src: String = "(".repeat(5000);
+            let err = interp.eval_str(&src).expect_err("must reject deep input");
+            format!("{}", err)
+        })
+        .expect("spawn deep-parse thread")
+        .join()
+        .expect("deep-parse thread must not overflow the stack");
     assert!(
         msg.contains("nested too deeply"),
         "expected a depth-cap parse error, got: {}",
