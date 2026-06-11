@@ -3822,6 +3822,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 | PrimOp::Quot
                 | PrimOp::Div
                 | PrimOp::Cons
+                | PrimOp::VectorRef
         )
     };
     for inst in code {
@@ -4031,6 +4032,16 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     callslow_sig.returns.push(AbiParam::new(types::I64)); // status
     let callslow_id =
         m.declare_function("brood_rt_call_slow", Linkage::Import, &callslow_sig).ok()?;
+    // brood_rt_vector_ref(heap, out, vec 3 words, idx 3 words) -> status: bounds-checked
+    // slab read into `*out` (0 = ok, 1 = deopt for non-vector / non-int / out-of-range).
+    let mut vref_sig = m.make_signature();
+    vref_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    vref_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
+    for _ in 0..6 {
+        vref_sig.params.push(AbiParam::new(types::I64)); // vec 3 words + idx 3 words
+    }
+    vref_sig.returns.push(AbiParam::new(types::I64)); // status
+    let vref_id = m.declare_function("brood_rt_vector_ref", Linkage::Import, &vref_sig).ok()?;
 
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
@@ -4045,6 +4056,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let push_ref = m.declare_func_in_func(push_id, b.func);
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
+    let vref_ref = m.declare_func_in_func(vref_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
     let has_cons = code.iter().any(|i| {
@@ -4371,6 +4383,29 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
         Op::Handle(w0, w1, w2)
     };
+    // `vector-ref` / inlined `nth`: a bounds-checked slab read via the runtime helper.
+    // On status≠0 (non-vector / non-int / out-of-range) it branches to `deopt`, so the
+    // VM owns the exact result (`vector-ref`'s error, `nth`'s default); otherwise the
+    // element rides back as a `Handle`. The helper never allocates, so the handle is
+    // safe to hold until its immediate consumer.
+    let vector_ref = |b: &mut FunctionBuilder,
+                      vec: [cranelift_codegen::ir::Value; 3],
+                      idx: [cranelift_codegen::ir::Value; 3]|
+     -> Op {
+        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+        let c = b.ins().call(
+            vref_ref,
+            &[heap, out_addr, vec[0], vec[1], vec[2], idx[0], idx[1], idx[2]],
+        );
+        let status = b.inst_results(c)[0];
+        let cont = b.create_block();
+        b.ins().brif(status, deopt, &[], cont, &[]);
+        b.switch_to_block(cont);
+        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let w1 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+        let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+        Op::Handle(w0, w1, w2)
+    };
 
     // Translate each leader block in ip order.
     for ip in 0..len {
@@ -4514,6 +4549,13 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                             &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
                         );
                         stack.push(h);
+                    } else if matches!(op, PrimOp::VectorRef) {
+                        // `(vector-ref v i)` / inlined `(nth v i)`: map is `[0,1]`, so
+                        // source 0 (`aa`) is the vector, source 1 (`bb`) the index.
+                        let vec = read_words(&mut b, aa_op);
+                        let idx = read_words(&mut b, bb_op);
+                        let h = vector_ref(&mut b, vec, idx);
+                        stack.push(h);
                     } else {
                         // Arithmetic/comparison: materialise to int, apply `map`.
                         let aa = as_int(&mut b, aa_op);
@@ -4534,6 +4576,13 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                             &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
                         );
                         stack.push(h);
+                    } else if matches!(op, PrimOp::VectorRef) {
+                        // `(nth slot_a slot_b)`: source 0 = vector slot, source 1 = index
+                        // slot (map `[0,1]`). Read each as a full `Value`, then slab-read.
+                        let vec = read_words(&mut b, Op::Slot(*slot_a));
+                        let idx = read_words(&mut b, Op::Slot(*slot_b));
+                        let h = vector_ref(&mut b, vec, idx);
+                        stack.push(h);
                     } else {
                         // Source 0 = slot_a, source 1 = slot_b (the VM's `[sa, sb]` order).
                         let sa = load_slot_int(&mut b, *slot_a as i64);
@@ -4544,6 +4593,12 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     }
                 }
                 Inst::Prim2SlotInt { op, map, slot_a, int_b, .. } => {
+                    // A const-index `vector-ref`/`nth` (`(nth v 0)`) fuses here; it's rare
+                    // (matmul-style loops use a variable index) — bail to the VM rather than
+                    // materialise the const operand as a `Value` word-triple.
+                    if matches!(op, PrimOp::VectorRef) {
+                        return None;
+                    }
                     // Source 0 = slot_a, source 1 = the literal `int_b` (the fusion of
                     // `(Const, Local)` already inverted `map` so the slot is source 0).
                     let sa = load_slot_int(&mut b, *slot_a as i64);
