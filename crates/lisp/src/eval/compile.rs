@@ -3839,11 +3839,7 @@ static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// corrupting. `0` under `--without-jit`, so that build's frames are unchanged.
 #[cfg(feature = "jit")]
 fn jit_spill_reserve(code: &[Inst]) -> usize {
-    let non_tail_calls = code
-        .iter()
-        .filter(|i| matches!(i, Inst::Call { tail: false, .. }))
-        .count();
-    if non_tail_calls < 2 {
+    if non_tail_call_count(code) < 2 {
         return 0;
     }
     // Reserve **only** for arms that are actually JIT-lowerable — every opcode in the
@@ -3858,20 +3854,12 @@ fn jit_spill_reserve(code: &[Inst]) -> usize {
         return 0;
     }
     // Reserve **only** for the arms that actually lower (and benefit) — see the matching
-    // gate in `jit_lower_arm`. A two-call arm that walks a data structure (a `VectorRef`
-    // (`nth`) or `first`/`rest`, like bintree's `check`) is *not* lowered (it regresses),
-    // so reserve nothing: the spill slots are dead frame weight on the VM path otherwise,
-    // and that frame bloat slows the arm's *interpreted* execution too (e.g. 20 000
-    // short `fib`s in `spawn`, which don't all reach native) — the cost that made the
-    // earlier flat `RESERVE = 4` regress `spawn` ~1.8× regardless of the JIT.
-    let walks = code.iter().any(|i| {
-        matches!(i, Inst::Prim1 { .. })
-            || matches!(i,
-                Inst::Prim2 { op: PrimOp::VectorRef, .. }
-                | Inst::Prim2SlotSlot { op: PrimOp::VectorRef, .. }
-                | Inst::Prim2SlotInt { op: PrimOp::VectorRef, .. })
-    });
-    if walks {
+    // gate in `jit_lower_arm`. A two-call arm that walks a data structure (`VectorRef` /
+    // `first`/`rest`, like bintree's `check`) is *not* lowered (it regresses), so reserve
+    // nothing: the spill slots would be dead frame weight slowing the arm's *interpreted*
+    // execution too (e.g. 20 000 short `fib`s in `spawn`) — the cost that made an earlier
+    // flat reserve regress `spawn` ~1.8×.
+    if chunk_walks_structure(code) {
         return 0;
     }
     // A pure-arithmetic two-call recursion (`fib`'s `(+ (fib …) (fib …))`) spills exactly
@@ -3884,6 +3872,30 @@ fn jit_spill_reserve(code: &[Inst]) -> usize {
 #[cfg(not(feature = "jit"))]
 fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
+}
+
+/// Count of non-tail Brood→Brood calls in `code` — the shape that needs a handle spill
+/// (≥2) and drives the spill-reserve / lowering gates.
+#[cfg(feature = "jit")]
+fn non_tail_call_count(code: &[Inst]) -> usize {
+    code.iter()
+        .filter(|i| matches!(i, Inst::Call { tail: false, .. }))
+        .count()
+}
+
+/// True if the arm walks a data structure — a `VectorRef` (`nth`) or `first`/`rest`. A
+/// two-call arm that does this (bintree's `check`) regresses if linked (the per-call
+/// frame/handle-copy cost outweighs the dispatch saving), so it stays on the VM. Shared
+/// by [`jit_spill_reserve`] and `jit_lower_arm`'s benefit gate so the two can't drift.
+#[cfg(feature = "jit")]
+fn chunk_walks_structure(code: &[Inst]) -> bool {
+    code.iter().any(|i| {
+        matches!(i, Inst::Prim1 { .. })
+            || matches!(i,
+                Inst::Prim2 { op: PrimOp::VectorRef, .. }
+                | Inst::Prim2SlotSlot { op: PrimOp::VectorRef, .. }
+                | Inst::Prim2SlotInt { op: PrimOp::VectorRef, .. })
+    })
 }
 
 /// True iff every opcode in `code` is in the integer JIT subset — i.e. `jit_lower_arm`
@@ -3963,58 +3975,15 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     }
 
     // ---- Pre-bail on any out-of-subset instruction (so we never half-build) ----
-    // Subset: Const(Int) / Local / Prim2{,SlotSlot,SlotInt}(Add,Sub,Mul,Lt,Le,Eq) /
-    // Jump / JumpIfFalse / SelfCall. The fused `Prim2Slot*` variants are what
-    // `emit_node` actually produces for the common `(- i 1)` / `(+ acc i)` loop body
-    // (operands that are frame locals or int literals), so the JIT must lower them or
-    // it never fires on real compiled code. (Call, Global, the division family, etc.
-    // come in later increments.)
-    let in_subset_op = |op: &PrimOp| {
-        matches!(
-            op,
-            PrimOp::Add
-                | PrimOp::Sub
-                | PrimOp::Mul
-                | PrimOp::Lt
-                | PrimOp::Le
-                | PrimOp::Eq
-                | PrimOp::Rem
-                | PrimOp::Quot
-                | PrimOp::Div
-                | PrimOp::Cons
-                | PrimOp::VectorRef
-        )
-    };
-    for inst in code {
-        match inst {
-            Inst::Const(cv) if matches!(cv.load(), Value::Int(_)) => {}
-            Inst::Local(_)
-            | Inst::Jump(_)
-            | Inst::JumpIfFalse(_)
-            | Inst::SelfCall { .. }
-            | Inst::Pop
-            | Inst::SetLocal(_)
-            // A free-global read (a call's callee, or a value-position global) — resolved
-            // live by `brood_rt_global`.
-            | Inst::Global(_)
-            | Inst::GlobalIc { .. }
-            // `first`/`rest` (PrimOp1 is only First/Rest, both lowered).
-            | Inst::Prim1 { .. } => {}
-            // A Brood→Brood call. Non-tail → `brood_rt_call_slow` (runs the callee inline,
-            // result back as a handle). Tail → staged on `roots` + outcome 4, the driver
-            // dispatches it and reuses this frame (TCO), then re-tiers the callee.
-            Inst::Call { .. } => {}
-            // `cons` is supported as the generic `Prim2` and the `(Local, Local)`-fused
-            // `Prim2SlotSlot`; the rarer `(_, Const)`-fused `Prim2SlotInt{Cons}` bails at
-            // translation (it would need const-operand word materialisation).
-            Inst::Prim2 { op, .. }
-            | Inst::Prim2SlotSlot { op, .. }
-            | Inst::Prim2SlotInt { op, .. }
-                if in_subset_op(op) => {}
-            _ => {
-                return None;
-            }
-        }
+    // The accepted subset is `chunk_in_jit_subset` (the single source of truth, shared
+    // with `jit_spill_reserve`): Const(Int), Local, Jump, JumpIfFalse, SelfCall, Pop,
+    // SetLocal, Global/GlobalIc (resolved live by the global callbacks), Prim1
+    // (`first`/`rest`), Call (linked / dispatched), and Prim2{,SlotSlot,SlotInt} on an
+    // in-subset op. The fused `Prim2Slot*` variants are what `emit_node` produces for the
+    // common `(- i 1)` / `(+ acc i)` loop body, so lowering them is what makes the JIT
+    // fire on real compiled code.
+    if !chunk_in_jit_subset(code) {
+        return None;
     }
 
     // ---- Body-weight gate for arms ending in a tail call (jit-tier2.md §6.2). ----
@@ -4056,19 +4025,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     // bintree's `check` — the per-call linking cost (frame nil-init + the handle-arg copies
     // + the helper calls) outweighs the saving and the arm *regresses* vs the VM's IC'd
     // call path. Such arms stay on the VM (no spill lowering): measured neutral, not slower.
-    let non_tail_calls = code
-        .iter()
-        .filter(|i| matches!(i, Inst::Call { tail: false, .. }))
-        .count();
-    if non_tail_calls >= 2
-        && code.iter().any(|i| {
-            matches!(i, Inst::Prim1 { .. })
-                || matches!(i,
-                    Inst::Prim2 { op: PrimOp::VectorRef, .. }
-                    | Inst::Prim2SlotSlot { op: PrimOp::VectorRef, .. }
-                    | Inst::Prim2SlotInt { op: PrimOp::VectorRef, .. })
-        })
-    {
+    if non_tail_call_count(code) >= 2 && chunk_walks_structure(code) {
         return None;
     }
 
@@ -4315,9 +4272,6 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let out_slot = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, STRIDE as u32, 3));
     b.ins().jump(leader_block[0].unwrap(), &[]);
 
-    let is_i64 = |b: &FunctionBuilder, v: cranelift_codegen::ir::Value| {
-        b.func.dfg.value_type(v) == types::I64
-    };
     // Box an `Op::Int`'s register value into a whole-`Value`'s `(tag_byte, payload_i64)`.
     // An `i64` arithmetic/const/slot value → `Value::Int` (`TAG_INT`, payload as-is). The
     // only *non*-`i64` `Op::Int` is a comparison result (`<`/`<=`/`=`, an `i8` 0/1), and a
@@ -4629,19 +4583,14 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 // `brood_rt_global`. Late binding holds via the cache's epoch stamp; an
                 // unbound symbol parks an error and exits via `error` (outcome 3). The
                 // resolved value is an arbitrary `Value`, so it's a `Handle`.
-                Inst::Global(_) | Inst::GlobalIc { .. } => {
-                    let sym_val = match &code[j] {
-                        Inst::Global(s) | Inst::GlobalIc { sym: s, .. } => *s,
-                        _ => unreachable!(),
-                    };
-                    let sym = b.ins().iconst(types::I32, sym_val as i64);
+                Inst::Global(s) | Inst::GlobalIc { sym: s, .. } => {
+                    let sym = b.ins().iconst(types::I32, *s as i64);
                     let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
-                    let c = match &code[j] {
-                        Inst::GlobalIc { site, .. } => {
-                            let site_v = b.ins().iconst(types::I32, *site as i64);
-                            b.ins().call(globic_ref, &[heap, out_addr, sym, site_v])
-                        }
-                        _ => b.ins().call(glob_ref, &[heap, out_addr, sym]),
+                    let c = if let Inst::GlobalIc { site, .. } = &code[j] {
+                        let site_v = b.ins().iconst(types::I32, *site as i64);
+                        b.ins().call(globic_ref, &[heap, out_addr, sym, site_v])
+                    } else {
+                        b.ins().call(glob_ref, &[heap, out_addr, sym])
                     };
                     let status = b.inst_results(c)[0];
                     let cont = b.create_block();
@@ -4943,8 +4892,9 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     // non-int local condition, e.g. `nil`/`false`, deopts to the VM, matching
                     // the eager-int behaviour the JIT had before lazy slots).
                     let brif_cond = match cond {
-                        // A comparison result (`I8`) is the only thing we branch on.
-                        Op::Int(v) if !is_i64(&b, v) => Some(v),
+                        // A comparison result (`I8`) is the only thing we branch on — an
+                        // `Op::Int` whose value type isn't `i64` (so a `<`/`=` boolean).
+                        Op::Int(v) if b.func.dfg.value_type(v) != types::I64 => Some(v),
                         // Anything else is a raw value, always truthy in Brood — but a
                         // `Slot`/`Handle` is tag-checked to an `Int` first (a non-int local
                         // condition, e.g. `nil`/`false`, deopts to the VM, matching the

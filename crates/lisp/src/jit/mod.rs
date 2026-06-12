@@ -81,8 +81,6 @@ impl Jit {
         .expect("Cranelift JITBuilder for the host ISA");
         builder.symbol("brood_rt_tick", brood_rt_tick as *const u8);
         builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
-        builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
-        builder.symbol("brood_rt_alloc_pair", brood_rt_alloc_pair as *const u8);
         builder.symbol("brood_rt_cons", brood_rt_cons as *const u8);
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
@@ -187,34 +185,6 @@ pub unsafe extern "C" fn brood_rt_gc_safepoint(heap: *mut Heap) {
     if !crate::process::macro_block_active() && h.gc_due() {
         h.collect(&mut [], &mut []);
     }
-}
-
-/// Read the current global epoch. The JIT'd call-site / global-read inline cache
-/// compares its cached epoch against this (`cmp [EPOCH_SLOT], r_epoch; jne slow`,
-/// ADR-101 §6.2); a `def` hot-reload bumps the epoch, invalidating every JIT'd IC at
-/// its next call exactly as it invalidates the interpreter IC.
-///
-/// # Safety
-/// `heap` must be the live context pointer.
-#[no_mangle]
-pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> u64 {
-    (*heap).global_epoch()
-}
-
-/// Allocate a cons cell from the top two operand-stack slots: `car` is the deeper slot,
-/// `cdr` the top (the order `exec_chunk` pushes a 2-arg call's operands). Pops both and
-/// pushes the pair. Operating through `roots` keeps the operands and the fresh pair
-/// rooted across the allocation's own safepoint (the GC may run inside `alloc_pair`).
-///
-/// # Safety
-/// `heap` must be the live context pointer; the operand stack must hold ≥2 slots.
-#[no_mangle]
-pub unsafe extern "C" fn brood_rt_alloc_pair(heap: *mut Heap) {
-    let h = &mut *heap;
-    let cdr = h.pop_root().expect("brood_rt_alloc_pair: operand-stack underflow (cdr)");
-    let car = h.pop_root().expect("brood_rt_alloc_pair: operand-stack underflow (car)");
-    let pair = h.alloc_pair(car, cdr);
-    h.push_root(pair);
 }
 
 // ---- The handle ops: cons / car / cdr, by-value with an out-pointer. ----
