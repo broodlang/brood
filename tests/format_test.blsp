@@ -61,6 +61,40 @@
       (is (string-contains? out
             "(some-test-form x y z) (some-result-form a b)\n  (another-test-form")))))
 
+(describe "format: assoc pairs its key/value args"
+  ;; `assoc`/`assoc!` take a collection then trailing key/value PAIRS. Broken,
+  ;; the collection rides the head line and each k/v pair sits on one body line
+  ;; (the *format-pair-body* shape), not one element per line.
+  (test "a broken assoc pairs key+value, collection on the head line"
+    (let (out (format-source "(assoc m\n :alpha 1 :beta 2 :gamma 3)"))
+      (is (string-contains? out "(assoc m\n  :alpha 1\n  :beta 2\n  :gamma 3)"))
+      ;; never one element per line
+      (is (not (string-contains? out ":alpha\n")))))
+  (test "a width-busting assoc pairs rather than splits"
+    (let (out (format-source "(assoc configuration-map :alpha-key 100 :beta-key 200 :gamma-key 300 :delta-key 400 :epsilon-key 500 :zeta-key 600)"))
+      (is (string-contains? out ":alpha-key 100\n"))
+      (is (not (string-contains? out ":alpha-key\n")))))
+  (test "a short assoc stays on one line"
+    (assert= (format-source "(assoc m :a 1 :b 2)") "(assoc m :a 1 :b 2)\n"))
+  (test "assoc is idempotent when broken"
+    (let (out (format-source "(assoc m\n :alpha 1 :beta 2 :gamma 3)"))
+      (assert= out (format-source out)))))
+
+(describe "format: receive breaks cond-style"
+  ;; `receive` has no scrutinee — every clause is a body form, so a broken
+  ;; receive puts the head alone and each clause on its own line (header 0,
+  ;; like `cond`), rather than riding the first clause up onto the head line.
+  (test "a broken receive keeps each clause on its own line, head alone"
+    ;; an author newline after the head forces the broken shape (keep-broken)
+    (let (out (format-source "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"))
+      (is (string-contains? out
+            "(receive\n  (:stop (cleanup))\n  ([:go x] (run x))\n  (after t (tick)))"))))
+  (test "a short receive stays on one line"
+    (assert= (format-source "(receive ([:sse ev] ev))") "(receive ([:sse ev] ev))\n"))
+  (test "receive is idempotent when broken"
+    (let (out (format-source "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"))
+      (assert= out (format-source out)))))
+
 (describe "format: comments are preserved"
   (test "a top-level comment is kept"
     (assert= (format-source ";; hello\n(def x 1)") ";; hello\n(def x 1)\n"))
@@ -104,9 +138,9 @@
   ;; comment sits on its own line at the pair indent.
   (test "a trailing comment in let bindings keeps the pair together, inline"
     (let (out (format-source "(let (a 1\n      b 2  ; note\n      c 3)\n  body)"))
-      (is (string-contains? out "b 2  ; note"))   ; pair intact, comment inline
-      (is (string-contains? out "a 1\n      b 2"))   ; aligned under the first element
-      (is (not (string-contains? out "b\n")))))   ; name never split from its value
+      (is (string-contains? out "b 2  ; note"))  ; pair intact, comment inline
+      (is (string-contains? out "a 1\n      b 2"))  ; aligned under the first element
+      (is (not (string-contains? out "b\n")))))  ; name never split from its value
   (test "an own-line comment in let bindings stays on its own line, pairs intact"
     (let (out (format-source "(let (a 1\n      ;; mid\n      b 2)\n  body)"))
       (is (string-contains? out "a 1\n      ;; mid\n      b 2"))))
@@ -186,6 +220,8 @@
                     "'(a b c)"
                     "(let (a 1 b 2) (+ a b))"
                     "(cond (= x 1) :one (= x 2) :two else :many)"
+                    "(assoc m\n :alpha 1 :beta 2 :gamma 3)"
+                    "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"
                     "(if (and a b) c d)"
                     "{:a 1 :b 2}"
                     "[1 [2 [3 [4]]]]"

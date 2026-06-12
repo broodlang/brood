@@ -84,69 +84,54 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ;; reflows on every rename.)
 (def *format-headers*
   {'defn 2
-    ; name params
-    'defmacro
-    2
-    ; name params
-    'def
-    1
-    ; name (value goes on the next line if it breaks)
-    'defdyn
-    1
-    ; name (value goes on the next line if it breaks)
-    'defmodule
-    1
-    ; name (docstring goes on the next line if it breaks)
-    'fn
-    1
-    ; params
-    'let
-    1
-    ; bindings list
-    'letrec
-    1
-    ; bindings list
-    'binding
-    1
-    ; bindings list
-    ;; predicate-and-body
-    'if
-    1
-    ; predicate (then/else each go on their own lines)
-    'when
-    1
-    'unless
-    1
-    ;; scrutinee-and-arms
-    'case
-    1
-    ; expr
-    'match
-    1
-    ; expr
-    ;; bare body
-    'cond
-    0
-    'do
-    0
-    'try
-    0
-    ;; loop forms
-    'dotimes
-    1
-    ; binding
-    'dolist
-    1
-    ; binding
-    'loop
-    1
-    ; bindings
-    ;; tests
-    'describe
-    1
-    ; name
-    'test
-    1})
+   ; name params
+   'defmacro 2
+   ; name params
+   'def 1
+   ; name (value goes on the next line if it breaks)
+   'defdyn 1
+   ; name (value goes on the next line if it breaks)
+   'defmodule 1
+   ; name (docstring goes on the next line if it breaks)
+   'fn 1
+   ; params
+   'let 1
+   ; bindings list
+   'letrec 1
+   ; bindings list
+   'binding 1
+   ; bindings list
+   ;; predicate-and-body
+   'if 1
+   ; predicate (then/else each go on their own lines)
+   'when 1
+   'unless 1
+   ;; scrutinee-and-arms
+   'case 1
+   ; expr
+   'match 1
+   ; expr
+   ;; bare body
+   'cond 0
+   'do 0
+   'try 0
+   ;; actor receive: every clause on its own line, like cond (no scrutinee rides up)
+   'receive 0
+   ;; assoc / assoc!: the collection rides the head line, then key/value PAIRS
+   ;; (see *format-pair-body*) — `(assoc m :k1 v1 :k2 v2)` not one element per line
+   'assoc 1
+   'assoc! 1
+   ;; loop forms
+   'dotimes 1
+   ; binding
+   'dolist 1
+   ; binding
+   'loop 1
+   ; bindings
+   ;; tests
+   'describe 1
+   ; name
+   'test 1})
 ; name
 
 (defn head-header-count (head-node)
@@ -162,7 +147,9 @@ not a known body form (defaults to call-style — every arg breaks)."
 
 ;; Forms whose body args (after the header) are emitted as test+body pairs,
 ;; one pair per line. Comments between clauses are kept on their own lines.
-(def *format-pair-body* {'cond true 'case true})
+;; `assoc`/`assoc!` ride one header arg (the collection) and then pair their
+;; trailing key/value arguments, the same shape as `cond`'s test+result.
+(def *format-pair-body* {'cond true 'case true 'assoc true 'assoc! true})
 
 (defn pair-bindings? (head-node)
   "True if `head-node` names a form whose first header arg is a pair-list."
@@ -262,15 +249,14 @@ not a known body form (defaults to call-style — every arg breaks)."
   ;; element on its own line. The pair walker is comment-aware, so a map with
   ;; comments still pairs up (with the comments preserved in place).
   (let (one (single-line n)
-         ;; Respect the author's line structure: if the source had newlines
-         ;; *inside this form's own children*, keep it broken even if the
-         ;; collapsed form would fit. Standard Lisp formatter behaviour
-         ;; (matches Clojure/Racket/Emacs-lisp), and idempotent — a form
-         ;; already on one line stays on one line, a form already broken
-         ;; stays broken. Maps follow the same rule but get the pair-break
-         ;; layout below.
-         keep-broken
-         (had-author-newlines? n))
+        ;; Respect the author's line structure: if the source had newlines
+        ;; *inside this form's own children*, keep it broken even if the
+        ;; collapsed form would fit. Standard Lisp formatter behaviour
+        ;; (matches Clojure/Racket/Emacs-lisp), and idempotent — a form
+        ;; already on one line stays on one line, a form already broken
+        ;; stays broken. Maps follow the same rule but get the pair-break
+        ;; layout below.
+        keep-broken (had-author-newlines? n))
     (cond
       (and one (not keep-broken) (<= (+ indent (string-length one)) *format-width*)) one
       (= (node-kind n) :map) (render--pair-break (node-children n) indent "{" "}")
@@ -314,25 +300,19 @@ not a known body form (defaults to call-style — every arg breaks)."
     (cond
       (nil? forms) (str open close)
       else (let (head (first forms)
-                  args
-                  (rest forms)
-                  hdr-count
-                  (head-header-count head)
-                  pair-bind
-                  (pair-bindings? head)
-                  pair-bd
-                  (pair-body? head)
-                  body-ind
-                  (+ indent 2)
-                  ;; eff-hdr: how many args ride on the head line. Body-form
-                  ;; counts (>= 0) override the default; for generic calls
-                  ;; (-1) we ride exactly one arg when it's single-line.
-                  eff-hdr
-                  (cond
-                    (>= hdr-count 0) (min hdr-count (length args))
-                    (nil? args) 0
-                    (nil? (single-line (first args))) 0
-                    else 1))
+                 args (rest forms)
+                 hdr-count (head-header-count head)
+                 pair-bind (pair-bindings? head)
+                 pair-bd (pair-body? head)
+                 body-ind (+ indent 2)
+                 ;; eff-hdr: how many args ride on the head line. Body-form
+                 ;; counts (>= 0) override the default; for generic calls
+                 ;; (-1) we ride exactly one arg when it's single-line.
+                 eff-hdr (cond
+                           (>= hdr-count 0) (min hdr-count (length args))
+                           (nil? args) 0
+                           (nil? (single-line (first args))) 0
+                           else 1))
              (let (header-args (take eff-hdr args)
                    first-body-idx (kids--index-of-form kids (inc eff-hdr))
                    header-line (render--head-line head header-args pair-bind (inc indent))
@@ -433,7 +413,12 @@ closing delimiter has to break to its own line so it isn't swallowed."
     acc
     (let (c (vector-ref kids i))
       (cond
-        (whitespace? c) (render--pair-walk kids (inc i) n pair-ind (+ nl (count-newlines (node-text c))) acc)
+        (whitespace? c) (render--pair-walk kids
+                          (inc i)
+                          n
+                          pair-ind
+                          (+ nl (count-newlines (node-text c)))
+                          acc)
         (comment? c) (render--pair-walk kids
                        (inc i)
                        n
