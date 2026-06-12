@@ -1349,12 +1349,19 @@ fn compile_arm(
     // subset for now — `compile_chunk` returns `None` otherwise, and the arm runs
     // via `exec_node` exactly as before).
     let chunk = compile_chunk(&body);
+    // Reserve a few extra frame slots (above the compiler's `scope.max`) when the arm
+    // has ≥2 non-tail calls, so a JIT-lowered version can spill call-result handles
+    // that must survive a later call's safepoint (two-call recursion: `fib`, bintree
+    // `check`). The VM never references these slots; `push_frame` nil-inits them like
+    // any other. Computed identically here (to size the frame) and in `jit_lower_arm`
+    // (to place spills) via `jit_spill_reserve`.
+    let spill_reserve = chunk.as_ref().map_or(0, |c| jit_spill_reserve(&c.code));
     Some(CompiledArm {
         nrequired,
         noptional,
         optional_defaults,
         rest_slot: rest.map(|_| nrequired + noptional),
-        nslots: scope.max,
+        nslots: scope.max + spill_reserve,
         body,
         chunk,
         has_runtime_handles,
@@ -3820,6 +3827,106 @@ pub fn apply_engine(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId)
 #[cfg(feature = "jit")]
 static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Frame slots reserved for the JIT to **spill call-result handles** that must survive
+/// a later call's safepoint — the two-call-recursion shape (`fib`'s
+/// `(+ (fib …) (fib …))`, bintree's `check`) where the first call's result is a heap
+/// handle sitting in a register below the second call. Spilling it into a GC-visible
+/// frame slot (rather than bailing to the VM) lets the arm lower. Reserved iff the arm
+/// has ≥2 non-tail calls — the only shape that can leave a handle below a call. The VM
+/// never references these slots; `push_frame` nil-inits them like any other. Computed
+/// identically at arm construction (to size the frame) and in `jit_lower_arm` (to place
+/// spills); if the predicate ever under-counts, the lowering bails safely rather than
+/// corrupting. `0` under `--without-jit`, so that build's frames are unchanged.
+#[cfg(feature = "jit")]
+fn jit_spill_reserve(code: &[Inst]) -> usize {
+    let non_tail_calls = code
+        .iter()
+        .filter(|i| matches!(i, Inst::Call { tail: false, .. }))
+        .count();
+    if non_tail_calls < 2 {
+        return 0;
+    }
+    // Reserve **only** for arms that are actually JIT-lowerable — every opcode in the
+    // integer subset `jit_lower_arm` accepts. The reserve adds a frame slot that the VM
+    // nil-inits on every activation, so reserving for an arm that never lowers (a prelude
+    // function with out-of-subset ops — `send`/`receive`/`spawn` machinery, string/map
+    // work — which the JIT can't compile anyway) is pure dead weight on the interpreter
+    // path. Blanket-reserving every ≥2-non-tail-call arm regressed `spawn` ~1.9× (20 000
+    // procs paying bloated prelude frames), even under `BROOD_VM=0`. Gating on the subset
+    // keeps the reserve on `fib`-shaped arms (which lower and win) and off everything else.
+    if !chunk_in_jit_subset(code) {
+        return 0;
+    }
+    // Reserve **only** for the arms that actually lower (and benefit) — see the matching
+    // gate in `jit_lower_arm`. A two-call arm that walks a data structure (a `VectorRef`
+    // (`nth`) or `first`/`rest`, like bintree's `check`) is *not* lowered (it regresses),
+    // so reserve nothing: the spill slots are dead frame weight on the VM path otherwise,
+    // and that frame bloat slows the arm's *interpreted* execution too (e.g. 20 000
+    // short `fib`s in `spawn`, which don't all reach native) — the cost that made the
+    // earlier flat `RESERVE = 4` regress `spawn` ~1.8× regardless of the JIT.
+    let walks = code.iter().any(|i| {
+        matches!(i, Inst::Prim1 { .. })
+            || matches!(i,
+                Inst::Prim2 { op: PrimOp::VectorRef, .. }
+                | Inst::Prim2SlotSlot { op: PrimOp::VectorRef, .. }
+                | Inst::Prim2SlotInt { op: PrimOp::VectorRef, .. })
+    });
+    if walks {
+        return 0;
+    }
+    // A pure-arithmetic two-call recursion (`fib`'s `(+ (fib …) (fib …))`) spills exactly
+    // one live call-result handle: the first call's result waits in a slot across the
+    // second call's safepoint, and the `+` of the two results reduces back to an int (so
+    // chains like `(+ (f a) (f b) (f c))` still need only one). One slot; arms that would
+    // need more bail at translation (`spill_next >= reserve`) and run on the VM.
+    1
+}
+#[cfg(not(feature = "jit"))]
+fn jit_spill_reserve(_code: &[Inst]) -> usize {
+    0
+}
+
+/// True iff every opcode in `code` is in the integer JIT subset — i.e. `jit_lower_arm`
+/// could lower this arm (modulo the handle-spill, which is what the reserve enables).
+/// Mirrors `jit_lower_arm`'s pre-bail check; the two must stay in sync. Used by
+/// [`jit_spill_reserve`] so only genuinely-lowerable arms get spill frame slots.
+#[cfg(feature = "jit")]
+fn chunk_in_jit_subset(code: &[Inst]) -> bool {
+    let in_subset_op = |op: &PrimOp| {
+        matches!(
+            op,
+            PrimOp::Add
+                | PrimOp::Sub
+                | PrimOp::Mul
+                | PrimOp::Lt
+                | PrimOp::Le
+                | PrimOp::Eq
+                | PrimOp::Rem
+                | PrimOp::Quot
+                | PrimOp::Div
+                | PrimOp::Cons
+                | PrimOp::VectorRef
+        )
+    };
+    code.iter().all(|inst| match inst {
+        Inst::Const(cv) => matches!(cv.load(), Value::Int(_)),
+        Inst::Local(_)
+        | Inst::Jump(_)
+        | Inst::JumpIfFalse(_)
+        | Inst::SelfCall { .. }
+        | Inst::Pop
+        | Inst::SetLocal(_)
+        | Inst::Global(_)
+        | Inst::GlobalIc { .. }
+        | Inst::Prim1 { .. }
+        | Inst::Call { .. } => true,
+        Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
+            in_subset_op(op)
+        }
+        _ => false,
+    })
+}
+
 /// Compile `arm`'s chunk to a native `extern "C" fn(heap: *mut Heap, base: i64) -> i64`
 /// for the Step-A int subset, or `None` to bail to the VM. The compiled fn reads its
 /// frame slots from `roots[base..]`, computes in registers, **boxes the result into
@@ -3840,6 +3947,13 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let code = &chunk.code;
     let len = code.len();
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
+    // Handle-spill scratch: `[spill_base, spill_base + reserve)` are the frame slots
+    // reserved (above the compiler's slot ceiling) for spilling call-result handles
+    // that must survive a later call's safepoint. `reserve` matches what arm
+    // construction added to `nslots`, so `spill_base` is exactly the old `scope.max`.
+    let reserve = jit_spill_reserve(code);
+    let spill_base = arm.nslots - reserve;
+    let mut spill_next = 0usize;
     // Return-via-roots writes/reads the result at `roots[base]` (slot 0), and the VM hooks
     // read it back the same way — both require slot 0 to exist. A 0-slot arm (a 0-arg,
     // 0-local fn like `(defn k () 7)`) has `base == roots_len`, so `roots[base]` is out of
@@ -3932,6 +4046,30 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         if work < TAIL_CALL_MIN_WORK {
             return None;
         }
+    }
+
+    // ---- Benefit gate for two-call recursion (the handle-spill shape). ----
+    // Lowering an arm with ≥2 non-tail calls only pays off when the call/dispatch cost it
+    // removes (native-to-native linking, `jit_dispatch_call`) dominates the body — pure
+    // integer recursion like `fib`'s `(+ (fib …) (fib …))` (and so `pfib`). When the body
+    // also *walks a data structure* — a `VectorRef` (`nth`) or `first`/`rest`, as in
+    // bintree's `check` — the per-call linking cost (frame nil-init + the handle-arg copies
+    // + the helper calls) outweighs the saving and the arm *regresses* vs the VM's IC'd
+    // call path. Such arms stay on the VM (no spill lowering): measured neutral, not slower.
+    let non_tail_calls = code
+        .iter()
+        .filter(|i| matches!(i, Inst::Call { tail: false, .. }))
+        .count();
+    if non_tail_calls >= 2
+        && code.iter().any(|i| {
+            matches!(i, Inst::Prim1 { .. })
+                || matches!(i,
+                    Inst::Prim2 { op: PrimOp::VectorRef, .. }
+                    | Inst::Prim2SlotSlot { op: PrimOp::VectorRef, .. }
+                    | Inst::Prim2SlotInt { op: PrimOp::VectorRef, .. })
+        })
+    {
+        return None;
     }
 
     // ---- Block leaders: ip 0, every jump target, the inst after a jump, the `len`
@@ -4073,6 +4211,17 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     glob_sig.params.push(AbiParam::new(types::I32)); // sym (interned u32)
     glob_sig.returns.push(AbiParam::new(types::I64)); // status
     let glob_id = m.declare_function("brood_rt_global", Linkage::Import, &glob_sig).ok()?;
+    // brood_rt_global_ic(heap, out, sym, site) -> status: as above but through the
+    // per-site global inline cache (no `env_get` walk on a cache hit).
+    let mut globic_sig = m.make_signature();
+    globic_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    globic_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
+    globic_sig.params.push(AbiParam::new(types::I32)); // sym
+    globic_sig.params.push(AbiParam::new(types::I32)); // site
+    globic_sig.returns.push(AbiParam::new(types::I64)); // status
+    let globic_id = m
+        .declare_function("brood_rt_global_ic", Linkage::Import, &globic_sig)
+        .ok()?;
     let mut callslow_sig = m.make_signature();
     callslow_sig.params.push(AbiParam::new(ptr_ty)); // heap
     callslow_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
@@ -4103,6 +4252,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     let push_ref = m.declare_func_in_func(push_id, b.func);
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
+    let globic_ref = m.declare_func_in_func(globic_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
@@ -4471,15 +4621,28 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 // (arithmetic / a branch) or copy it whole (a binder / arg / return), so a
                 // handle in the slot rides along untouched.
                 Inst::Local(i) => stack.push(Op::Slot(*i)),
-                // A free-global read (a call's callee, or a value-position global). Resolved
-                // live by `brood_rt_global` (the `GlobalIc` `site` is ignored — re-reading
-                // the env each call keeps late binding without a native-side cache); an
+                // A free-global read (a call's callee, or a value-position global). A
+                // `GlobalIc` resolves through the per-`site` global inline cache
+                // (`brood_rt_global_ic` — a cached read on a process-global env, no `env_get`
+                // walk per call; this is what keeps a hot recursive callee like `fib`
+                // resolving itself cheaply). A bare `Global` (no site) falls back to
+                // `brood_rt_global`. Late binding holds via the cache's epoch stamp; an
                 // unbound symbol parks an error and exits via `error` (outcome 3). The
                 // resolved value is an arbitrary `Value`, so it's a `Handle`.
-                Inst::Global(s) | Inst::GlobalIc { sym: s, .. } => {
-                    let sym = b.ins().iconst(types::I32, *s as i64);
+                Inst::Global(_) | Inst::GlobalIc { .. } => {
+                    let sym_val = match &code[j] {
+                        Inst::Global(s) | Inst::GlobalIc { sym: s, .. } => *s,
+                        _ => unreachable!(),
+                    };
+                    let sym = b.ins().iconst(types::I32, sym_val as i64);
                     let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
-                    let c = b.ins().call(glob_ref, &[heap, out_addr, sym]);
+                    let c = match &code[j] {
+                        Inst::GlobalIc { site, .. } => {
+                            let site_v = b.ins().iconst(types::I32, *site as i64);
+                            b.ins().call(globic_ref, &[heap, out_addr, sym, site_v])
+                        }
+                        _ => b.ins().call(glob_ref, &[heap, out_addr, sym]),
+                    };
                     let status = b.inst_results(c)[0];
                     let cont = b.create_block();
                     b.ins().brif(status, error, &[], cont, &[]);
@@ -4495,10 +4658,24 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     // A live `Handle` left on the operand stack BELOW the call's own operands
                     // would be a heap pointer in a register across the collection → stale.
                     // `Slot`/`Int` are safe (a slot lives in `roots`, GC-visible; an int is
-                    // not a handle). Bail if any deeper operand is a `Handle`.
+                    // not a handle). So **spill** each deeper `Handle` into a reserved frame
+                    // slot (GC-visible, relocated correctly by the callee's safepoint) and
+                    // replace it with that `Slot` — this is what lets two-call recursion
+                    // (`(+ (fib …) (fib …))`, bintree `check`) lower instead of bailing. The
+                    // store writes the handle's three words into the frame *before* any
+                    // `brood_rt_push` (which may realloc `roots`), so the read-all-then-stage
+                    // discipline below is preserved. Out of reserved slots → bail to the VM.
                     let below = stack.len().checked_sub(argc + 1)?;
-                    if stack[..below].iter().any(|op| matches!(op, Op::Handle(..))) {
-                        return None;
+                    for d in 0..below {
+                        if matches!(stack[d], Op::Handle(..)) {
+                            if spill_next >= reserve {
+                                return None;
+                            }
+                            let slot = spill_base + spill_next;
+                            spill_next += 1;
+                            store_op(&mut b, slot as i64, stack[d]);
+                            stack[d] = Op::Slot(slot);
+                        }
                     }
                     // Pop callee + args (callee deepest), then read **every** operand's words
                     // into registers BEFORE staging — a `brood_rt_push` may reallocate
@@ -4952,6 +5129,22 @@ thread_local! {
     /// (`3`) and [`vm_run_bc`] takes this to propagate.
     static JIT_PENDING_ERROR: std::cell::RefCell<Option<LispError>> =
         const { std::cell::RefCell::new(None) };
+    /// Native-to-native call recursion depth (the linking fast path in
+    /// [`jit_dispatch_call`]). A JIT'd arm's non-tail call to a JIT'd callee runs the
+    /// callee on the **native** stack (one Rust frame chain per level), not the VM's
+    /// heap-frame driver loop, so [`MAX_BC_FRAMES`] — which bounds that loop — does not
+    /// bound it. Left unguarded, deep non-tail recursion (`(+ (f …) (f …))`) overflows
+    /// the native stack and aborts. This counter caps the native depth and parks a
+    /// [`stack_depth_error`](crate::eval::stack_depth_error) instead — the clean error
+    /// the VM raises for the same runaway. Save/restored around each native entry.
+    static JIT_NATIVE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Set while a native-recursion subtree has exceeded [`JIT_NATIVE_DEPTH`]'s cap and is
+    /// being drained on the VM instead. [`jit_tier`] reads it and declines to run native
+    /// (returns `None` → interpret), so the rest of the recursion stays in [`vm_run_bc`]'s
+    /// heap-frame driver loop — bounded by [`MAX_BC_FRAMES`] on the *heap*, not the native
+    /// stack. This keeps deep non-tail recursion working (as it does on the pure VM) rather
+    /// than aborting. Save/restored around the over-cap dispatch in [`jit_dispatch_call`].
+    static JIT_FORCE_VM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Take the error a JIT runtime callback parked (see [`JIT_PENDING_ERROR`]) — called by
@@ -4978,6 +5171,50 @@ pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Option<Value> 
     }
 }
 
+/// Resolve free global `sym` through the per-`site` global inline cache — the JIT
+/// equivalent of the VM's `Inst::GlobalIc`, sharing the same [`Heap::vm_global_ics`]
+/// entries. On a process-global env, a cached value stamped at the current epoch is
+/// returned without an `env_get` walk; a miss resolves once and fills the cache. This
+/// is the difference between a hot recursive callee (`fib` resolving itself every call)
+/// costing one cached read vs. a full name resolution per call — the cost that made
+/// native-linked recursion regress `spawn` (millions of redundant `env_get`s). Late
+/// binding holds via the epoch stamp (a `def` bumps the epoch → miss → re-resolve;
+/// the JIT'd arm is invalidated by the same epoch). Dynamic vars are never cached.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> Option<Value> {
+    let env = heap.read_root_env(JIT_CALL_ENV.with(|c| c.get()));
+    if heap.is_global(env) {
+        let epoch = heap.global_epoch();
+        if let Some(v) = heap.vm_global_ic_probe(site, sym, epoch) {
+            crate::perf_bump!(global_ic_hit);
+            return Some(v);
+        }
+        crate::perf_bump!(global_ic_miss);
+        match heap.env_get(env, sym) {
+            Some(v) => {
+                if !value::is_dynamic(sym) {
+                    heap.vm_global_ic_put(site, sym, epoch, v);
+                }
+                Some(v)
+            }
+            None => {
+                let e = crate::eval::unbound_error(heap, sym);
+                JIT_PENDING_ERROR.with(|c| *c.borrow_mut() = Some(e));
+                None
+            }
+        }
+    } else {
+        match heap.env_get(env, sym) {
+            Some(v) => Some(v),
+            None => {
+                let e = crate::eval::unbound_error(heap, sym);
+                JIT_PENDING_ERROR.with(|c| *c.borrow_mut() = Some(e));
+                None
+            }
+        }
+    }
+}
+
 /// Run a JIT'd arm's **non-tail** Brood→Brood call. The callee + `argc` args are staged
 /// on the operand stack (`roots`) in the VM's `Inst::Call` layout
 /// (`[.., callee, arg0 .. arg_{argc-1}]`); this is the non-tail `Inst::Call` path lifted
@@ -4988,13 +5225,130 @@ pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Option<Value> 
 /// boundary (the §7.4 dirty carve-out), exactly like a builtin calling back into Brood.
 #[cfg(feature = "jit")]
 pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize) -> Option<Value> {
+    use std::sync::atomic::Ordering::Acquire;
+    // Cap on native-to-native recursion (see [`JIT_NATIVE_DEPTH`]). Past this many native
+    // levels, drain the rest of the subtree on the VM (heap frames, [`MAX_BC_FRAMES`]) so
+    // deep non-tail recursion keeps working instead of overflowing the native stack. 1 500
+    // levels (~a few MB of the 16 MB worker stack) dwarfs any real call depth.
+    const NATIVE_DEPTH_LIMIT: u32 = 1500;
+
     let n = heap.roots_len();
-    let callee = heap.root_at(n - argc - 1);
+    let stage_base = n - argc - 1;
+    let over_cap = JIT_NATIVE_DEPTH.with(|c| c.get()) >= NATIVE_DEPTH_LIMIT;
+
+    // ---- Native-to-native call linking ----
+    // If the callee is a Brood closure whose arm for this `argc` already carries installed,
+    // epoch-current native code, call its native entry **directly** — replace the staged
+    // `[callee, args]` with the callee's frame and invoke it — skipping the
+    // `dispatch → vm_apply → vm_run_bc → jit_tier` chain the slow path walks (the per-call
+    // overhead that dominates non-tail recursion: `fib`, `pfib`). The frame goes at
+    // `stage_base`, exactly where the VM puts a callee frame, so this holds **no more roots
+    // than the interpreter** — keeping the staged operands rooted *as well* (an earlier
+    // design) cost ~2× the live roots per recursion level and regressed `spawn` ~1.8× from
+    // the extra GC pressure across 20 000 process heaps.
+    {
+        let callee = heap.root_at(stage_base);
+        if let Value::Fn(id) = callee {
+            if let Some(arm) = compiled_arm_for(heap, id, argc) {
+                let code = arm.jit_code.load(Acquire);
+                let installed =
+                    !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED;
+                // `nslots > 0` mirrors `jit_lower_arm`'s return-via-`roots[base]` requirement.
+                // `noptional == 0 && rest_slot.is_none()` keeps the inline frame setup trivial
+                // and infallible (no default eval, which could GC/err) — the lowerable arms
+                // (`fib`-shaped) all qualify. The epoch guard mirrors `jit_tier`: a `def` since
+                // compilation invalidates the native code. Over the recursion cap → skip
+                // (the slow path drains on the VM via `JIT_FORCE_VM`).
+                if installed
+                    && arm.nslots > 0
+                    && arm.noptional == 0
+                    && arm.rest_slot.is_none()
+                    && !over_cap
+                    && arm.compile_epoch.load(Acquire) == heap.global_epoch()
+                {
+                    let depth = JIT_NATIVE_DEPTH.with(|c| c.get());
+                    let callee_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                    // Read the args, then replace the staged operands with the callee's frame
+                    // at `stage_base`: nil-fill `nslots`, bind args into slots `[0, argc)`. No
+                    // eval runs (no optionals), so no GC can strand the `argv` copy.
+                    let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+                    for k in 0..argc {
+                        argv.push(heap.root_at(stage_base + 1 + k));
+                    }
+                    heap.truncate_roots(stage_base);
+                    for _ in 0..arm.nslots {
+                        heap.push_root(Value::Nil);
+                    }
+                    for (k, &a) in argv.iter().enumerate() {
+                        heap.set_root_at(stage_base + k, a);
+                    }
+                    let base = stage_base;
+                    // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
+                    // `jit_lower_arm`, living for the process in `GLOBAL_JIT`; the frame is set
+                    // up at `roots[base..]`.
+                    let f: extern "C" fn(*mut Heap, i64) -> i64 =
+                        unsafe { std::mem::transmute(code) };
+                    let env_root = EnvRoot::Stable(callee_env);
+                    let saved = JIT_CALL_ENV.with(|c| c.replace(env_root));
+                    JIT_NATIVE_DEPTH.with(|c| c.set(depth + 1));
+                    let outcome = f(heap as *mut Heap, base as i64);
+                    JIT_NATIVE_DEPTH.with(|c| c.set(depth));
+                    JIT_CALL_ENV.with(|c| c.set(saved));
+                    match outcome {
+                        // Done: the result is boxed in `roots[base]`. Take it, drop the frame.
+                        0 => {
+                            let result = heap.root_at(base);
+                            heap.truncate_roots(stage_base);
+                            return Some(result);
+                        }
+                        // Error: the callee parked it (unbound global, a deeper failure).
+                        // PROPAGATE — never re-run, or an already-failed subtree re-errors at
+                        // every unwinding level (quadratic; a hang on deep failing recursion).
+                        3 => {
+                            heap.truncate_roots(stage_base);
+                            return None;
+                        }
+                        // deopt (1) / preempt (2) / tail (4): the native arm didn't complete.
+                        // Re-run the callee on the VM. The args survive in the frame's param
+                        // slots `[base, base+argc)` (GC-updated; params aren't overwritten by
+                        // the arm body), so re-read them, drop the frame, and run via `vm_apply`
+                        // — which handles deopt/preempt/tail correctly.
+                        _ => {
+                            let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+                            for k in 0..argc {
+                                argv2.push(heap.root_at(base + k));
+                            }
+                            heap.truncate_roots(stage_base);
+                            return match vm_apply(heap, arm, &argv2, callee_env) {
+                                Ok(v) => Some(v),
+                                Err(e) => {
+                                    JIT_PENDING_ERROR.with(|c| *c.borrow_mut() = Some(e));
+                                    None
+                                }
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Slow path ---- (re-read callee + args fresh: a fast-path fallthrough may have
+    // run a collection that relocated the staged operands).
+    let callee = heap.root_at(stage_base);
     let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
     for k in 0..argc {
-        argv.push(heap.root_at(n - argc + k));
+        argv.push(heap.root_at(stage_base + 1 + k));
     }
     let env = heap.read_root_env(JIT_CALL_ENV.with(|c| c.get()));
+    // Over the native cap: force this dispatch (and everything it recurses into) onto the
+    // VM, so the remaining recursion drains through the bounded heap-frame loop rather than
+    // the native stack. Restored after, so siblings above the cap go native again.
+    let saved_force = if over_cap {
+        Some(JIT_FORCE_VM.with(|c| c.replace(true)))
+    } else {
+        None
+    };
     let result = match dispatch(heap, callee, argv, false, env) {
         Ok(Step::Done(v)) => Ok(v),
         // `tail = false` makes `dispatch` run a VM closure to a `Step::Done`; this arm is
@@ -5002,6 +5356,9 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize) -> Option<Value> {
         Ok(Step::Tail { compiled, args, genv }) => vm_apply(heap, compiled, &args, genv),
         Err(e) => Err(e),
     };
+    if let Some(prev) = saved_force {
+        JIT_FORCE_VM.with(|c| c.set(prev));
+    }
     match result {
         Ok(v) => {
             // Mirror the non-tail `Inst::Call`: drop callee+args, leaving the operand
@@ -5089,6 +5446,11 @@ pub(crate) fn jit_tier(
     use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
     const THRESHOLD: u32 = 8;
 
+    // Draining an over-deep native-recursion subtree on the VM (see [`JIT_FORCE_VM`]):
+    // interpret this arm so its recursion stays in the bounded heap-frame loop.
+    if JIT_FORCE_VM.with(|c| c.get()) {
+        return None;
+    }
     let code = arm.jit_code.load(Acquire);
     if code == crate::jit::BAILED || code == crate::jit::QUEUED {
         return None; // out of subset, or compile in flight — run the VM
@@ -5115,7 +5477,17 @@ pub(crate) fn jit_tier(
             .is_ok()
             && JIT_COMPILER.try_send(arm.clone()).is_err()
         {
+            // The background compile queue is full (a burst of distinct hot arms — e.g.
+            // thousands of short-lived green processes each tiering their own arm copy,
+            // overwhelming the bounded channel). Reset to untried AND back the hotness
+            // counter all the way off, so the arm runs on the VM for another THRESHOLD
+            // calls before re-attempting — instead of re-validating (`chunk_ops_all_native`,
+            // an `env_get`/`resolve_prim` per op) on *every* call while the queue stays
+            // full. Measured: ~36M redundant re-validations in `spawn` (20 000 procs)
+            // collapse to ~1/THRESHOLD of that. The arm still compiles once the queue
+            // drains (a long-lived process re-reaches the threshold and re-enqueues).
             arm.jit_code.store(std::ptr::null_mut(), Release);
+            arm.jit_calls.store(0, Relaxed);
         }
         return None;
     }

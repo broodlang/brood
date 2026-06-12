@@ -88,6 +88,7 @@ impl Jit {
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
         builder.symbol("brood_rt_global", brood_rt_global as *const u8);
+        builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
@@ -368,6 +369,33 @@ pub unsafe extern "C" fn brood_rt_global(
     sym: u32,
 ) -> i64 {
     match crate::eval::compile::jit_resolve_global(&mut *heap, sym) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => 1,
+    }
+}
+
+/// Resolve a free global through the per-site global inline cache (the same
+/// [`Heap::vm_global_ics`] the VM's `Inst::GlobalIc` uses), keyed by `site`. On a
+/// process-global env this serves a cached, epoch-stamped value instead of walking
+/// `env_get` every call — the difference between a hot recursive callee (`fib`) costing
+/// one cached read vs. a full name resolution per call. Late binding is preserved by the
+/// epoch stamp: a `def` bumps the global epoch, the probe misses, and it re-resolves
+/// (and the JIT'd arm is itself invalidated by the same epoch). 0 on success, 1 if
+/// unbound (error parked).
+///
+/// # Safety
+/// `heap`/`out` must be live; `sym` is an interned [`crate::core::value::Symbol`].
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_global_ic(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    sym: u32,
+    site: u32,
+) -> i64 {
+    match crate::eval::compile::jit_resolve_global_ic(&mut *heap, sym, site) {
         Some(v) => {
             *out = v;
             0
