@@ -2756,7 +2756,12 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             // can cache the resolved arm (Stage 5); the callee is still pushed and
             // resolved in-order, so the IC is a pure cache.
             let head = if let Node::Global(s) = &**callee { Some(*s) } else { None };
-            emit_node(callee, code)?;
+            // A free-global head is NOT staged: `Inst::Call` resolves it through the call IC
+            // (or `env_get` on a miss), so there's no redundant head-`Global` push + per-call
+            // `env_get`. A computed callee (head `None`) is staged below the args as before.
+            if head.is_none() {
+                emit_node(callee, code)?;
+            }
             for a in args.iter() {
                 emit_node(a, code)?;
             }
@@ -3027,66 +3032,81 @@ fn exec_chunk(
             }
             Inst::Call { argc, tail, pos, site, head } => {
                 let pos = *pos;
-                // Operand layout: [.., callee, arg0 .. arg_{argc-1}] (callee emitted
-                // first, then each arg — the same order `exec_call` evaluates them).
+                let argc = *argc;
                 let n = heap.roots_len();
-                let callee = heap.root_at(n - argc - 1);
-                let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(*argc);
-                for k in 0..*argc {
+                let cur_env = heap.read_root_env(genv);
+                // The top `argc` operands are always the args. A **free-global** head
+                // (`head = Some`) is NOT staged — no preceding `Global` inst pushed it — so
+                // the operands are just `[args]` (`drop_base = n - argc`) and the callee is
+                // resolved here: the call-site IC gives `(callee, arm)` on a hit with no
+                // `env_get`, else `env_get` resolves it and fills the IC. A **computed**
+                // head (`head = None`) is staged below the args (`callee` at `n - argc - 1`,
+                // `drop_base = n - argc - 1`) and takes no IC. This unifies callee resolution
+                // into the call IC — the head no longer has its own `Global`/`env_get`.
+                let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+                for k in 0..argc {
                     argv.push(heap.root_at(n - argc + k));
                 }
-                let cur_env = heap.read_root_env(genv);
-                // Call-site IC (Stage 5): if the head is a free global resolving through
-                // the process global, reuse the cached `(arm, env)` for this site/argc —
-                // skipping `dispatch`'s passthrough probe + `compiled_arm_for`. The
-                // callee was already resolved in-order (`callee` above), so this only
-                // caches the *arm*; the epoch guard drops a stale entry after any `def`.
                 let mut fast: Option<(Arc<CompiledArm>, EnvId)> = None;
-                if *site != NO_SITE {
-                    if let Some(sym) = head {
-                        if heap.is_global(cur_env) {
-                            let epoch = heap.global_epoch();
-                            if let Some((_v, payload)) =
-                                heap.vm_call_ic_probe(*site, *sym, *argc as u32, epoch)
-                            {
-                                crate::perf_bump!(call_ic_hit);
-                                fast = payload;
-                            } else if !value::is_dynamic(*sym) {
-                                crate::perf_bump!(call_ic_miss);
-                                // Cache the in-order-resolved `callee`'s arm (only a
-                                // non-passthrough closure with a compiled arm for this
-                                // argc gets the VM fast path; everything else caches the
-                                // value alone and still takes `dispatch`).
-                                let arm = match callee {
-                                    Value::Fn(id)
-                                        if crate::eval::passthrough_arm(heap, id, *argc)
-                                            .is_none() =>
-                                    {
-                                        compiled_arm_for(heap, id, *argc).map(|arm| {
-                                            let cenv = heap
-                                                .closure(id)
-                                                .env
-                                                .unwrap_or_else(|| heap.global());
-                                            (arm, cenv)
-                                        })
-                                    }
-                                    _ => None,
-                                };
-                                fast = arm.clone();
+                let (callee, drop_base) = if let Some(sym) = head {
+                    let drop_base = n - argc;
+                    if *site != NO_SITE && heap.is_global(cur_env) {
+                        let epoch = heap.global_epoch();
+                        if let Some((v, payload)) =
+                            heap.vm_call_ic_probe(*site, *sym, argc as u32, epoch)
+                        {
+                            crate::perf_bump!(call_ic_hit);
+                            fast = payload;
+                            (v, drop_base)
+                        } else {
+                            crate::perf_bump!(call_ic_miss);
+                            let v = match heap.env_get(cur_env, *sym) {
+                                Some(v) => v,
+                                None => {
+                                    return Err(tag_pos(crate::eval::unbound_error(heap, *sym), pos))
+                                }
+                            };
+                            // Cache the resolved callee + (for a non-passthrough VM closure)
+                            // its arm. A dynamic var is never cached (it can shadow per call).
+                            let arm = match v {
+                                Value::Fn(id)
+                                    if crate::eval::passthrough_arm(heap, id, argc).is_none() =>
+                                {
+                                    compiled_arm_for(heap, id, argc).map(|arm| {
+                                        let cenv =
+                                            heap.closure(id).env.unwrap_or_else(|| heap.global());
+                                        (arm, cenv)
+                                    })
+                                }
+                                _ => None,
+                            };
+                            fast = arm.clone();
+                            if !value::is_dynamic(*sym) {
                                 heap.vm_call_ic_put(
                                     *site,
                                     crate::core::heap::CallIcEntry {
                                         sym: *sym,
-                                        argc: *argc as u32,
+                                        argc: argc as u32,
                                         epoch,
-                                        callee,
+                                        callee: v,
                                         arm,
                                     },
                                 );
                             }
+                            (v, drop_base)
                         }
+                    } else {
+                        // No IC (a local/dynamic binding shadows the head, or no site):
+                        // resolve live each call.
+                        let v = match heap.env_get(cur_env, *sym) {
+                            Some(v) => v,
+                            None => return Err(tag_pos(crate::eval::unbound_error(heap, *sym), pos)),
+                        };
+                        (v, drop_base)
                     }
-                }
+                } else {
+                    (heap.root_at(n - argc - 1), n - argc - 1)
+                };
                 // Inline fast-path: IC hit for the exact same arm, same captured env, no
                 // optional/rest params, and GC is not yet due. Covers the common
                 // `(defn f (x) … (f …))` self-tail pattern (which uses `Inst::Call` via
@@ -3176,15 +3196,15 @@ fn exec_chunk(
                     });
                 }
                 match step {
-                    // Non-tail call to a chunked VM arm: drop callee+args and hand the
-                    // driver a frame to **push** (no native recursion).
+                    // Non-tail call to a chunked VM arm: drop the operands (`[args]`, plus a
+                    // computed callee) and hand the driver a frame to **push**.
                     Step::Tail { compiled, args, genv } => {
-                        heap.truncate_roots(n - argc - 1);
+                        heap.truncate_roots(drop_base);
                         return Ok(ChunkExit::Call { arm: compiled, args, genv });
                     }
                     // Native / tree-walked callee already ran: push its value and continue.
                     Step::Done(v) => {
-                        heap.truncate_roots(n - argc - 1);
+                        heap.truncate_roots(drop_base);
                         heap.push_root(v);
                     }
                 }
@@ -4610,6 +4630,21 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     // `jit_dispatch_call` (only meaningful when `site != NO_SITE`, i.e. a
                     // free-global head). `u32::MAX` stands in for a computed/local head.
                     let call_head = head.unwrap_or(u32::MAX);
+                    // Operands consumed by the call. A **free-global** head (`head = Some`)
+                    // isn't staged — the compiler emits no head `Global`, so the operand
+                    // stack holds only the `argc` args; `jit_dispatch_call` resolves the
+                    // callee via the call IC. A **computed** head leaves the callee staged
+                    // below the args (`argc + 1` operands).
+                    let n_ops = if head.is_some() { argc } else { argc + 1 };
+                    // A free-global **tail** call is elided too (no staged callee), but the
+                    // tail path (`jit_dispatch_tail`, outcome 4) reads a staged callee — so
+                    // don't lower an arm ending in one; the VM runs it correctly. Computed
+                    // tail calls keep their staged callee and lower fine; non-tail elided
+                    // calls go via `jit_dispatch_call`. Rare (mutual recursion) — self-tail
+                    // loops use `SelfCall`, a different path.
+                    if *tail && head.is_some() {
+                        return None;
+                    }
                     // The call is a safepoint (the callee runs arbitrary Brood and may GC).
                     // A live `Handle` left on the operand stack BELOW the call's own operands
                     // would be a heap pointer in a register across the collection → stale.
@@ -4621,7 +4656,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     // store writes the handle's three words into the frame *before* any
                     // `brood_rt_push` (which may realloc `roots`), so the read-all-then-stage
                     // discipline below is preserved. Out of reserved slots → bail to the VM.
-                    let below = stack.len().checked_sub(argc + 1)?;
+                    let below = stack.len().checked_sub(n_ops)?;
                     for d in 0..below {
                         if matches!(stack[d], Op::Handle(..)) {
                             if spill_next >= reserve {
@@ -4633,15 +4668,15 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                             stack[d] = Op::Slot(slot);
                         }
                     }
-                    // Pop callee + args (callee deepest), then read **every** operand's words
+                    // Pop the operands (computed callee deepest, then args), then read each
                     // into registers BEFORE staging — a `brood_rt_push` may reallocate
-                    // `roots`, so no slot read may run after a push (it would use a stale
-                    // base; this is the same read-all-then-store discipline as `SelfCall`).
-                    let mut ops: Vec<Op> = Vec::with_capacity(argc + 1);
-                    for _ in 0..(argc + 1) {
+                    // `roots`, so no slot read may run after a push (the read-all-then-store
+                    // discipline, same as `SelfCall`).
+                    let mut ops: Vec<Op> = Vec::with_capacity(n_ops);
+                    for _ in 0..n_ops {
                         ops.push(stack.pop()?);
                     }
-                    ops.reverse(); // ops[0] = callee, ops[1..] = args in source order
+                    ops.reverse(); // computed callee (if any) first, then args in source order
                     let mut worded: Vec<[cranelift_codegen::ir::Value; 3]> =
                         Vec::with_capacity(ops.len());
                     for &op in &ops {
@@ -5085,6 +5120,7 @@ pub(crate) fn jit_take_error(heap: &mut Heap) -> Option<LispError> {
 /// value, or parks an unbound error and returns `None`. Reads the *live* env each call,
 /// so a `def` rebind is seen immediately (the same late binding as `Inst::Global`).
 #[cfg(feature = "jit")]
+#[inline]
 pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Option<Value> {
     let env = heap.read_root_env(heap.jit_call_env);
     match heap.env_get(env, sym) {
@@ -5107,6 +5143,7 @@ pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Option<Value> 
 /// binding holds via the epoch stamp (a `def` bumps the epoch → miss → re-resolve;
 /// the JIT'd arm is invalidated by the same epoch). Dynamic vars are never cached.
 #[cfg(feature = "jit")]
+#[inline]
 pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> Option<Value> {
     let env = heap.read_root_env(heap.jit_call_env);
     if heap.is_global(env) {
@@ -5141,53 +5178,48 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
     }
 }
 
-/// Run a JIT'd arm's **non-tail** Brood→Brood call. The callee + `argc` args are staged
-/// on the operand stack (`roots`) in the VM's `Inst::Call` layout
-/// (`[.., callee, arg0 .. arg_{argc-1}]`); this is the non-tail `Inst::Call` path lifted
-/// out: read them, [`dispatch`] to completion, truncate the operands, return the result
-/// (or park the error and return `None`). `tail = false` ⇒ `dispatch` runs the callee
-/// fully — a VM closure via [`vm_apply`], a native/tree-walked callee inline — as a
-/// **nested** (non-top-level) run, so it never preempts/suspends across the native
-/// boundary (the §7.4 dirty carve-out), exactly like a builtin calling back into Brood.
+/// Run a JIT'd arm's **non-tail** Brood→Brood call. The `argc` args are the top operands
+/// on `roots`. A **free-global** head (`site != NO_SITE`) is *not* staged — the callee is
+/// resolved here via the call-site IC (`head` + `site`), so the args occupy `[n-argc, n)`
+/// and the frame starts at `n-argc`. A **computed** head leaves the callee staged below the
+/// args (`[n-argc-1]`). The fast path links straight to the callee's native code; otherwise
+/// [`dispatch`] runs it (`tail = false` ⇒ to completion) as a **nested** (non-top-level)
+/// run, so it never preempts/suspends across the native boundary (the §7.4 carve-out).
 #[cfg(feature = "jit")]
 pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: Symbol) -> Option<Value> {
     use std::sync::atomic::Ordering::Acquire;
-    // Cap on native-to-native recursion (see [`JIT_NATIVE_DEPTH`]). Past this many native
-    // levels, drain the rest of the subtree on the VM (heap frames, [`MAX_BC_FRAMES`]) so
-    // deep non-tail recursion keeps working instead of overflowing the native stack. 1 500
-    // levels (~a few MB of the 16 MB worker stack) dwarfs any real call depth.
+    // Cap on native-to-native recursion (see [`Heap::jit_native_depth`]). Past this many
+    // native levels, drain the rest of the subtree on the VM (heap frames, bounded by
+    // [`MAX_BC_FRAMES`]) so deep non-tail recursion keeps working instead of overflowing the
+    // native stack. 1 500 levels (~a few MB of the 16 MB worker stack) dwarfs any real depth.
     const NATIVE_DEPTH_LIMIT: u32 = 1500;
 
     let n = heap.roots_len();
-    let stage_base = n - argc - 1;
     let over_cap = heap.jit_native_depth >= NATIVE_DEPTH_LIMIT;
     let epoch = heap.global_epoch();
+    // A free-global head isn't staged (`elided`): the callee is resolved via the call IC.
+    // `stage_base` is where the callee frame starts — directly at the args for an elided
+    // head, one slot lower (over the staged callee) for a computed one.
+    let elided = site != NO_SITE;
+    let stage_base = if elided { n - argc } else { n - argc - 1 };
 
     // ---- Native-to-native call linking ----
-    // If the callee is a Brood closure whose arm for this `argc` already carries installed,
-    // epoch-current native code, call its native entry **directly** — replace the staged
-    // `[callee, args]` with the callee's frame and invoke it — skipping the
-    // `dispatch → vm_apply → vm_run_bc → jit_tier` chain the slow path walks (the per-call
-    // overhead that dominates non-tail recursion: `fib`, `pfib`). The frame goes at
-    // `stage_base`, exactly where the VM puts a callee frame, so this holds **no more roots
-    // than the interpreter** — keeping the staged operands rooted *as well* (an earlier
-    // design) cost ~2× the live roots per recursion level and regressed `spawn` ~1.8× from
-    // the extra GC pressure across 20 000 process heaps.
+    // Link straight to the callee's installed, epoch-current native code — set up its frame
+    // at `stage_base` and call its entry — skipping `dispatch → vm_apply → vm_run_bc →
+    // jit_tier`. The arm (and captured env) come from the call-site IC (reusing the VM's
+    // `vm_call_ic`, epoch-stamped): a hit costs no `env_get` and no `compiled_arm_for`. The
+    // frame is exactly where the VM puts a callee frame, so this holds no more roots than the
+    // interpreter. These sites bypass `exec_chunk`, so the JIT self-populates the IC on a miss.
     {
-        // Resolve the callee's compiled arm + captured env. A free-global call head
-        // (`site != NO_SITE`) goes through the call-site inline cache — reusing the VM's
-        // `vm_call_ic`, epoch-stamped — so the per-call `compiled_arm_for` / `vm_cache_arm`
-        // lookup (measured ~23% of pfib) runs once per site, not every call. These call
-        // sites run native (bypassing `exec_chunk`, where the VM would otherwise fill the
-        // IC), so the JIT self-populates on a miss. A `def` bumps `epoch` and invalidates
-        // the entry, exactly as it does the interpreter's.
-        let resolved: Option<(Arc<CompiledArm>, EnvId)> = if site != NO_SITE {
+        let resolved: Option<(Arc<CompiledArm>, EnvId)> = if elided {
             match heap.vm_call_ic_probe(site, head, argc as u32, epoch) {
                 Some((_, Some((a, env)))) => Some((a, env)),
                 _ => {
-                    let callee = heap.root_at(stage_base);
-                    if let Value::Fn(id) = callee {
-                        compiled_arm_for(heap, id, argc).map(|a| {
+                    // Miss: resolve the callee global (the only `env_get` on the call path,
+                    // and only while cold) and fill the IC.
+                    let cenv = heap.read_root_env(heap.jit_call_env);
+                    match heap.env_get(cenv, head) {
+                        Some(Value::Fn(id)) => compiled_arm_for(heap, id, argc).map(|a| {
                             let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
                             if !value::is_dynamic(head) {
                                 heap.vm_call_ic_put(
@@ -5196,15 +5228,14 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
                                         sym: head,
                                         argc: argc as u32,
                                         epoch,
-                                        callee,
+                                        callee: Value::Fn(id),
                                         arm: Some((a.clone(), env)),
                                     },
                                 );
                             }
                             (a, env)
-                        })
-                    } else {
-                        None
+                        }),
+                        _ => None,
                     }
                 }
             }
@@ -5215,99 +5246,104 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
             None
         };
         if let Some((arm, callee_env)) = resolved {
+            let code = arm.jit_code.load(Acquire);
+            let installed =
+                !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED;
+            // `nslots > 0` mirrors `jit_lower_arm`'s return-via-`roots[base]` requirement;
+            // no-optional/no-rest keeps the inline frame setup trivial and infallible. The
+            // epoch guard mirrors `jit_tier`. Over the recursion cap → skip (the slow path
+            // drains on the VM via `jit_force_vm`).
+            if installed
+                && arm.nslots > 0
+                && arm.noptional == 0
+                && arm.rest_slot.is_none()
+                && !over_cap
+                && arm.compile_epoch.load(Acquire) == epoch
             {
-                let code = arm.jit_code.load(Acquire);
-                let installed =
-                    !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED;
-                // `nslots > 0` mirrors `jit_lower_arm`'s return-via-`roots[base]` requirement.
-                // `noptional == 0 && rest_slot.is_none()` keeps the inline frame setup trivial
-                // and infallible (no default eval, which could GC/err) — the lowerable arms
-                // (`fib`-shaped) all qualify. The epoch guard mirrors `jit_tier`: a `def` since
-                // compilation invalidates the native code. Over the recursion cap → skip
-                // (the slow path drains on the VM via `JIT_FORCE_VM`).
-                if installed
-                    && arm.nslots > 0
-                    && arm.noptional == 0
-                    && arm.rest_slot.is_none()
-                    && !over_cap
-                    && arm.compile_epoch.load(Acquire) == epoch
-                {
-                    let depth = heap.jit_native_depth;
-                    // Turn the staged `[callee, args]` into the callee's frame in place — no
-                    // temp copy, no re-push. The arm came from the IC, so the staged callee
-                    // slot is dead: shift the args down one (`roots[sb+k] = roots[sb+1+k]`,
-                    // forward-safe since each write is below its read), then resize to
-                    // `nslots` and nil-fill the callee's let/spill slots `[argc, nslots)`.
+                let depth = heap.jit_native_depth;
+                // Build the callee frame at `stage_base`. For an elided head the args are
+                // already in place (`[stage_base, stage_base+argc)`); for a computed head the
+                // dead callee slot sits below them, so shift the args down one (forward-safe:
+                // each write is below its read). Then nil-fill the let/spill slots.
+                if !elided {
                     for k in 0..argc {
                         let a = heap.root_at(stage_base + 1 + k);
                         heap.set_root_at(stage_base + k, a);
                     }
-                    heap.truncate_roots(stage_base + argc);
-                    for _ in argc..arm.nslots {
-                        heap.push_root(Value::Nil);
+                }
+                heap.truncate_roots(stage_base + argc);
+                for _ in argc..arm.nslots {
+                    heap.push_root(Value::Nil);
+                }
+                let base = stage_base;
+                // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
+                // `jit_lower_arm`, living for the process in `GLOBAL_JIT`; the frame is set
+                // up at `roots[base..]`.
+                let f: extern "C" fn(*mut Heap, i64) -> i64 =
+                    unsafe { std::mem::transmute(code) };
+                let env_root = EnvRoot::Stable(callee_env);
+                let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
+                heap.jit_native_depth = depth + 1;
+                let outcome = f(heap as *mut Heap, base as i64);
+                heap.jit_native_depth = depth;
+                heap.jit_call_env = saved;
+                match outcome {
+                    // Done: result boxed in `roots[base]`. Take it, drop the frame.
+                    0 => {
+                        let result = heap.root_at(base);
+                        heap.truncate_roots(stage_base);
+                        return Some(result);
                     }
-                    let base = stage_base;
-                    // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
-                    // `jit_lower_arm`, living for the process in `GLOBAL_JIT`; the frame is set
-                    // up at `roots[base..]`.
-                    let f: extern "C" fn(*mut Heap, i64) -> i64 =
-                        unsafe { std::mem::transmute(code) };
-                    let env_root = EnvRoot::Stable(callee_env);
-                    let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
-                    heap.jit_native_depth = depth + 1;
-                    let outcome = f(heap as *mut Heap, base as i64);
-                    heap.jit_native_depth = depth;
-                    heap.jit_call_env = saved;
-                    match outcome {
-                        // Done: the result is boxed in `roots[base]`. Take it, drop the frame.
-                        0 => {
-                            let result = heap.root_at(base);
-                            heap.truncate_roots(stage_base);
-                            return Some(result);
+                    // Error: callee parked it. PROPAGATE — never re-run, or an already-failed
+                    // subtree re-errors at every unwinding level (quadratic).
+                    3 => {
+                        heap.truncate_roots(stage_base);
+                        return None;
+                    }
+                    // deopt (1) / preempt (2) / tail (4): re-run the callee on the VM. The args
+                    // survive in the frame's param slots `[base, base+argc)` (params aren't
+                    // overwritten by the arm body), so re-read, drop the frame, and `vm_apply`.
+                    _ => {
+                        let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+                        for k in 0..argc {
+                            argv2.push(heap.root_at(base + k));
                         }
-                        // Error: the callee parked it (unbound global, a deeper failure).
-                        // PROPAGATE — never re-run, or an already-failed subtree re-errors at
-                        // every unwinding level (quadratic; a hang on deep failing recursion).
-                        3 => {
-                            heap.truncate_roots(stage_base);
-                            return None;
-                        }
-                        // deopt (1) / preempt (2) / tail (4): the native arm didn't complete.
-                        // Re-run the callee on the VM. The args survive in the frame's param
-                        // slots `[base, base+argc)` (GC-updated; params aren't overwritten by
-                        // the arm body), so re-read them, drop the frame, and run via `vm_apply`
-                        // — which handles deopt/preempt/tail correctly.
-                        _ => {
-                            let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
-                            for k in 0..argc {
-                                argv2.push(heap.root_at(base + k));
+                        heap.truncate_roots(stage_base);
+                        return match vm_apply(heap, arm, &argv2, callee_env) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                heap.jit_pending_error = Some(e);
+                                None
                             }
-                            heap.truncate_roots(stage_base);
-                            return match vm_apply(heap, arm, &argv2, callee_env) {
-                                Ok(v) => Some(v),
-                                Err(e) => {
-                                    heap.jit_pending_error = Some(e);
-                                    None
-                                }
-                            };
-                        }
+                        };
                     }
                 }
             }
         }
     }
 
-    // ---- Slow path ---- (re-read callee + args fresh: a fast-path fallthrough may have
-    // run a collection that relocated the staged operands).
-    let callee = heap.root_at(stage_base);
+    // ---- Slow path ---- (not linkable: not yet native, over the cap, or a non-closure /
+    // unbound callee). Resolve the callee (elided: via `env_get`; computed: the staged slot)
+    // and run it on the VM. The args are the top `argc` operands either way.
+    let callee = if elided {
+        let cenv = heap.read_root_env(heap.jit_call_env);
+        match heap.env_get(cenv, head) {
+            Some(v) => v,
+            None => {
+                heap.jit_pending_error = Some(crate::eval::unbound_error(heap, head));
+                return None;
+            }
+        }
+    } else {
+        heap.root_at(stage_base)
+    };
     let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
     for k in 0..argc {
-        argv.push(heap.root_at(stage_base + 1 + k));
+        argv.push(heap.root_at(n - argc + k));
     }
     let env = heap.read_root_env(heap.jit_call_env);
-    // Over the native cap: force this dispatch (and everything it recurses into) onto the
-    // VM, so the remaining recursion drains through the bounded heap-frame loop rather than
-    // the native stack. Restored after, so siblings above the cap go native again.
+    // Over the native cap: force this dispatch (and all it recurses into) onto the VM, so the
+    // remaining recursion drains through the bounded heap-frame loop. Restored after.
     let saved_force = if over_cap {
         Some(std::mem::replace(&mut heap.jit_force_vm, true))
     } else {
@@ -5315,8 +5351,6 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
     };
     let result = match dispatch(heap, callee, argv, false, env) {
         Ok(Step::Done(v)) => Ok(v),
-        // `tail = false` makes `dispatch` run a VM closure to a `Step::Done`; this arm is
-        // defensive (a future `dispatch` tweak) and runs the tail callee to completion.
         Ok(Step::Tail { compiled, args, genv }) => vm_apply(heap, compiled, &args, genv),
         Err(e) => Err(e),
     };
@@ -5325,10 +5359,7 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
     }
     match result {
         Ok(v) => {
-            // Mirror the non-tail `Inst::Call`: drop callee+args, leaving the operand
-            // stack back at the frame top. (On error we leave them — `vm_run_bc` unwinds
-            // the whole frame to its entry mark.)
-            heap.truncate_roots(n - argc - 1);
+            heap.truncate_roots(stage_base);
             Some(v)
         }
         Err(e) => {
