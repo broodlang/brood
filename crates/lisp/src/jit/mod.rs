@@ -80,6 +80,7 @@ impl Jit {
         builder.symbol("brood_rt_tick", brood_rt_tick as *const u8);
         builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
         builder.symbol("brood_rt_cons", brood_rt_cons as *const u8);
+        builder.symbol("brood_rt_make_vector2", brood_rt_make_vector2 as *const u8);
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
@@ -225,6 +226,30 @@ pub unsafe extern "C" fn brood_rt_cons(
     let car = words_to_val(c0, c1, c2);
     let cdr = words_to_val(d0, d1, d2);
     *out = h.alloc_pair(car, cdr);
+}
+
+/// Build a 2-element vector from two `Value`s (each by word-triple), writing the
+/// fresh vector to `*out`. The JIT lowering of a `[a b]` literal (`Inst::MakeVector(2)`,
+/// e.g. bintree's `make`); mirrors [`brood_rt_cons`] — a bump-allocate that never
+/// collects, so the elements need no extra rooting beyond the words passed in.
+///
+/// # Safety
+/// `heap`/`out` live; the word triples are bytes the JIT read out of real `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_make_vector2(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    b0: i64,
+    b1: i64,
+    b2: i64,
+) {
+    let h = &mut *heap;
+    let a = words_to_val(a0, a1, a2);
+    let b = words_to_val(b0, b1, b2);
+    *out = h.alloc_vector(vec![a, b]);
 }
 
 /// `first` of a `Value` (by word-triple), writing its car to `*out`. The JIT **tag-checks

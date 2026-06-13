@@ -4218,7 +4218,7 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         )
     };
     code.iter().all(|inst| match inst {
-        Inst::Const(cv) => matches!(cv.load(), Value::Int(_)),
+        Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil),
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)
@@ -4232,6 +4232,10 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
             in_subset_op(op)
         }
+        // A 2-element vector literal `[a b]` — lowered via `brood_rt_make_vector2`,
+        // the same bump-allocate path as `cons`. Only arity 2 (bintree's `make`);
+        // wider literals bail (they'd need a roots-staging variadic helper).
+        Inst::MakeVector(n) => *n == 2,
         _ => false,
     })
 }
@@ -4460,6 +4464,17 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let cons_id = m
         .declare_function("brood_rt_cons", Linkage::Import, &cons_sig)
         .ok()?;
+    // brood_rt_make_vector2(heap, out, a 3 words, b 3 words) — same ABI as cons,
+    // builds a 2-element vector (`[a b]` literal, e.g. bintree's `make`).
+    let mut makevec2_sig = m.make_signature();
+    makevec2_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    makevec2_sig.params.push(AbiParam::new(ptr_ty)); // out
+    for _ in 0..6 {
+        makevec2_sig.params.push(AbiParam::new(types::I64)); // elem0 3 words + elem1 3 words
+    }
+    let makevec2_id = m
+        .declare_function("brood_rt_make_vector2", Linkage::Import, &makevec2_sig)
+        .ok()?;
     // brood_rt_gc_safepoint(heap): collect if due (bounds the nursery for cons loops).
     let mut sp_sig = m.make_signature();
     sp_sig.params.push(AbiParam::new(ptr_ty));
@@ -4529,6 +4544,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let car_ref = m.declare_func_in_func(car_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
+    let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     let push_ref = m.declare_func_in_func(push_id, b.func);
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
@@ -4549,7 +4565,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
             } | Inst::Prim2SlotInt {
                 op: PrimOp::Cons,
                 ..
-            }
+            } | Inst::MakeVector(_)
         )
     });
 
@@ -4921,12 +4937,18 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         let mut j = ip;
         loop {
             match &code[j] {
-                Inst::Const(cv) => {
-                    let Value::Int(n) = cv.load() else {
-                        return None;
-                    };
-                    stack.push(Op::Int(b.ins().iconst(types::I64, n)));
-                }
+                Inst::Const(cv) => match cv.load() {
+                    Value::Int(n) => stack.push(Op::Int(b.ins().iconst(types::I64, n))),
+                    // `nil` (e.g. bintree `make`'s `(= d 0)` then-branch): a scalar atom,
+                    // tag 0 / no payload — push it as a constant 3-word handle. A consumer
+                    // that wants an int (`as_int`) tag-checks and deopts; a binder/return
+                    // copies the words verbatim (`store_op`), which is all `make` does.
+                    Value::Nil => {
+                        let z = b.ins().iconst(types::I64, 0);
+                        stack.push(Op::Handle(z, z, z));
+                    }
+                    _ => return None,
+                },
                 // Lazy: push a reference to the frame slot. Consumers tag-check it to an int
                 // (arithmetic / a branch) or copy it whole (a binder / arg / return), so a
                 // handle in the slot rides along untouched.
@@ -5100,6 +5122,23 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                         PrimOp1::Rest => cdr_ref,
                     };
                     let h = call_handle(&mut b, fref, &[w0, w1, w2]);
+                    stack.push(h);
+                }
+                Inst::MakeVector(n) => {
+                    // Only arity 2 reaches here (gated by `chunk_in_jit_subset`); bail
+                    // defensively otherwise. Same bump-allocate path as `cons`: read both
+                    // operands as words (source order — `a` deeper, `b` on top), allocate.
+                    if *n != 2 {
+                        return None;
+                    }
+                    let (b_op, a_op) = (stack.pop()?, stack.pop()?);
+                    let aw = read_words(&mut b, a_op);
+                    let bw = read_words(&mut b, b_op);
+                    let h = call_handle(
+                        &mut b,
+                        makevec2_ref,
+                        &[aw[0], aw[1], aw[2], bw[0], bw[1], bw[2]],
+                    );
                     stack.push(h);
                 }
                 Inst::Prim2 { op, map, .. } => {
