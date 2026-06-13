@@ -3317,7 +3317,9 @@ fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// predicates (`int?`/`string?`/…) are Brood wrappers over it (`std/prelude.blsp`),
 /// and the in-language type checks build on it too.
 fn type_of(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(value::kw(value::tag(arg(args, 0)).name()))
+    // Cached keyword id per tag — `type-of` is hit per element by the seq
+    // predicates, so re-interning the tag name here dominated intern cost.
+    Ok(Value::Keyword(value::tag(arg(args, 0)).keyword()))
 }
 
 // ---------- value <-> text and I/O ----------

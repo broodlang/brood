@@ -512,6 +512,27 @@ impl Tag {
             Tag::Transient => "transient",
         }
     }
+
+    /// The `type-of` keyword *id* for this tag, interned **once** and cached.
+    /// `type-of` (and the seq predicates built on it — `pair?`/`empty?`/… hit it
+    /// per element) used to re-intern the tag name on every call; on map/list-heavy
+    /// code that was essentially the entire `intern` cost (~98% of all interns were
+    /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
+    pub fn keyword(self) -> Symbol {
+        static KW: LazyLock<[Symbol; 18]> = LazyLock::new(|| {
+            const TAGS: [Tag; 18] = [
+                Tag::Nil, Tag::Bool, Tag::Int, Tag::Float, Tag::Sym, Tag::Keyword,
+                Tag::Str, Tag::Pair, Tag::Vector, Tag::Fn, Tag::Macro, Tag::Native,
+                Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Transient,
+            ];
+            let mut out = [0u32; 18];
+            for t in TAGS {
+                out[t as usize] = intern(t.name());
+            }
+            out
+        });
+        KW[self as usize]
+    }
 }
 
 /// The runtime [`Tag`] of `v` — the canonical discriminant of [`Value`]. The one
