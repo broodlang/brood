@@ -4183,6 +4183,8 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     callslow_sig.params.push(AbiParam::new(ptr_ty)); // heap
     callslow_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
     callslow_sig.params.push(AbiParam::new(types::I32)); // argc (u32)
+    callslow_sig.params.push(AbiParam::new(types::I32)); // call site (NO_SITE if none)
+    callslow_sig.params.push(AbiParam::new(types::I32)); // call-head sym (u32::MAX if none)
     callslow_sig.returns.push(AbiParam::new(types::I64)); // status
     let callslow_id =
         m.declare_function("brood_rt_call_slow", Linkage::Import, &callslow_sig).ok()?;
@@ -4601,8 +4603,13 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
                     stack.push(Op::Handle(w0, w1, w2));
                 }
-                Inst::Call { argc, tail, .. } => {
+                Inst::Call { argc, tail, site, head, pos: _ } => {
                     let argc = *argc;
+                    let call_site = *site;
+                    // The call-head symbol, for the call-site inline cache in
+                    // `jit_dispatch_call` (only meaningful when `site != NO_SITE`, i.e. a
+                    // free-global head). `u32::MAX` stands in for a computed/local head.
+                    let call_head = head.unwrap_or(u32::MAX);
                     // The call is a safepoint (the callee runs arbitrary Brood and may GC).
                     // A live `Handle` left on the operand stack BELOW the call's own operands
                     // would be a heap pointer in a register across the collection → stale.
@@ -4661,7 +4668,9 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     // result → `out_slot`, status in a register.
                     let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
                     let argc_v = b.ins().iconst(types::I32, argc as i64);
-                    let c = b.ins().call(callslow_ref, &[heap, out_addr, argc_v]);
+                    let site_v = b.ins().iconst(types::I32, call_site as i64);
+                    let head_v = b.ins().iconst(types::I32, call_head as i64);
+                    let c = b.ins().call(callslow_ref, &[heap, out_addr, argc_v, site_v, head_v]);
                     let status = b.inst_results(c)[0];
                     // The callee grew/relocated `roots`; re-fetch the base for later slots.
                     let rbc = b.ins().call(rb_ref, &[heap]);
@@ -5174,7 +5183,7 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
 /// **nested** (non-top-level) run, so it never preempts/suspends across the native
 /// boundary (the §7.4 dirty carve-out), exactly like a builtin calling back into Brood.
 #[cfg(feature = "jit")]
-pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize) -> Option<Value> {
+pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: Symbol) -> Option<Value> {
     use std::sync::atomic::Ordering::Acquire;
     // Cap on native-to-native recursion (see [`JIT_NATIVE_DEPTH`]). Past this many native
     // levels, drain the rest of the subtree on the VM (heap frames, [`MAX_BC_FRAMES`]) so
@@ -5185,6 +5194,7 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize) -> Option<Value> {
     let n = heap.roots_len();
     let stage_base = n - argc - 1;
     let over_cap = JIT_NATIVE_DEPTH.with(|c| c.get()) >= NATIVE_DEPTH_LIMIT;
+    let epoch = heap.global_epoch();
 
     // ---- Native-to-native call linking ----
     // If the callee is a Brood closure whose arm for this `argc` already carries installed,
@@ -5197,9 +5207,48 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize) -> Option<Value> {
     // design) cost ~2× the live roots per recursion level and regressed `spawn` ~1.8× from
     // the extra GC pressure across 20 000 process heaps.
     {
-        let callee = heap.root_at(stage_base);
-        if let Value::Fn(id) = callee {
-            if let Some(arm) = compiled_arm_for(heap, id, argc) {
+        // Resolve the callee's compiled arm + captured env. A free-global call head
+        // (`site != NO_SITE`) goes through the call-site inline cache — reusing the VM's
+        // `vm_call_ic`, epoch-stamped — so the per-call `compiled_arm_for` / `vm_cache_arm`
+        // lookup (measured ~23% of pfib) runs once per site, not every call. These call
+        // sites run native (bypassing `exec_chunk`, where the VM would otherwise fill the
+        // IC), so the JIT self-populates on a miss. A `def` bumps `epoch` and invalidates
+        // the entry, exactly as it does the interpreter's.
+        let resolved: Option<(Arc<CompiledArm>, EnvId)> = if site != NO_SITE {
+            match heap.vm_call_ic_probe(site, head, argc as u32, epoch) {
+                Some((_, Some((a, env)))) => Some((a, env)),
+                _ => {
+                    let callee = heap.root_at(stage_base);
+                    if let Value::Fn(id) = callee {
+                        compiled_arm_for(heap, id, argc).map(|a| {
+                            let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                            if !value::is_dynamic(head) {
+                                heap.vm_call_ic_put(
+                                    site,
+                                    crate::core::heap::CallIcEntry {
+                                        sym: head,
+                                        argc: argc as u32,
+                                        epoch,
+                                        callee,
+                                        arm: Some((a.clone(), env)),
+                                    },
+                                );
+                            }
+                            (a, env)
+                        })
+                    } else {
+                        None
+                    }
+                }
+            }
+        } else if let Value::Fn(id) = heap.root_at(stage_base) {
+            compiled_arm_for(heap, id, argc)
+                .map(|a| (a, heap.closure(id).env.unwrap_or_else(|| heap.global())))
+        } else {
+            None
+        };
+        if let Some((arm, callee_env)) = resolved {
+            {
                 let code = arm.jit_code.load(Acquire);
                 let installed =
                     !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED;
@@ -5214,10 +5263,9 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize) -> Option<Value> {
                     && arm.noptional == 0
                     && arm.rest_slot.is_none()
                     && !over_cap
-                    && arm.compile_epoch.load(Acquire) == heap.global_epoch()
+                    && arm.compile_epoch.load(Acquire) == epoch
                 {
                     let depth = JIT_NATIVE_DEPTH.with(|c| c.get());
-                    let callee_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
                     // Read the args, then replace the staged operands with the callee's frame
                     // at `stage_base`: nil-fill `nslots`, bind args into slots `[0, argc)`. No
                     // eval runs (no optionals), so no GC can strand the `argv` copy.
