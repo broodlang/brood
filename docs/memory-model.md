@@ -6,9 +6,14 @@
 > *minor* collection copies only the nursery's survivors — tenuring them into old
 > once the nursery crosses `min_tenure`, else a young semi-space flip — and **never
 > recopies the old generation**; a rarer *major* compacts old when it doubles past
-> `major_floor`. This is sound with **no write barrier** because immutability
-> (ADR-026) forbids old→young pointers — the one exception being a frame tenured
-> *mid-bind*, tracked in a one-entry remembered set (`env_define`). Result on a
+> `major_floor`. This is sound with **almost no write barrier** because immutability
+> (ADR-026) forbids old→young pointers — the two exceptions are (1) a frame tenured
+> *mid-bind*, tracked in the `remembered` set (`env_define`), and (2) a **live
+> transient** tenured while still being built, tracked in `remembered_transients`
+> (`transient_assoc`/`transient_dissoc`): a transient cell is mutable, so after it
+> tenures an `assoc!` can repoint its `root` at a fresh young node. Both barriers
+> flush the recorded old object's young refs in place on the next minor and remap
+> the set through the forwarding table on a major. Result on a
 > stateful workload (a process holding a large live set across churn): ~8× faster,
 > ~9× lower RSS, ~70× less copy volume than the single-space copy below; everything
 > else is the same operand-stack-rooted copy described in the next banner. Handles
