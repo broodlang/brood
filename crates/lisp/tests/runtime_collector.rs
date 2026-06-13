@@ -41,7 +41,9 @@ fn superseded_global_versions_are_reclaimable() {
     let total = interp.heap.runtime_closure_count();
     let live = interp.heap.runtime_live_closure_count();
     let reclaimable = total.saturating_sub(live);
-    eprintln!("RUNTIME-GC estimate after {N} redefs: total={total} live={live} reclaimable={reclaimable}");
+    eprintln!(
+        "RUNTIME-GC estimate after {N} redefs: total={total} live={live} reclaimable={reclaimable}"
+    );
 
     // Only the current `f` (+ `redef` itself + a handful) is reachable from the
     // bindings; the other ~N-1 `f` versions are superseded and unreferenced.
@@ -87,18 +89,29 @@ fn evacuation_copies_only_live_code_and_verifies() {
     let (total, live, verified) = interp.heap.runtime_evacuate_check();
     eprintln!("RUNTIME-GC 2a evacuate: total={total} live={live} verified={verified}");
 
-    assert!(verified, "evacuated region has a dangling handle (a missed rewrite)");
+    assert!(
+        verified,
+        "evacuated region has a dangling handle (a missed rewrite)"
+    );
     assert_eq!(
         live,
         interp.heap.runtime_live_closure_count(),
         "evacuation must copy exactly the reachable closures",
     );
-    assert!(total >= N, "expected ≥{N} promoted closures, got total={total}");
-    assert!(live < 50, "live should be a small constant, got {live} (total {total})");
+    assert!(
+        total >= N,
+        "expected ≥{N} promoted closures, got total={total}"
+    );
+    assert!(
+        live < 50,
+        "live should be a small constant, got {live} (total {total})"
+    );
 
     // The program is unchanged by the (out-of-place) evacuation — `f` still works.
     // Last redef was i=N-1=2999, so f = (fn (x) (+ (* x 2999) 2999)); (f 7)=8*2999.
-    let v = interp.eval_str("(f 7)").expect("f errored after evacuation");
+    let v = interp
+        .eval_str("(f 7)")
+        .expect("f errored after evacuation");
     assert_eq!(interp.print(v), "23992");
 }
 
@@ -126,29 +139,47 @@ fn in_place_collect_reclaims_and_preserves_correctness() {
         ))
         .expect("redef loop errored");
 
-    let (before, after) =
-        interp.heap.runtime_collect().expect("collect should run for a single-process Interp");
-    eprintln!("RUNTIME-GC 2b collect: before={before} after={after} reclaimed={}", before - after);
+    let (before, after) = interp
+        .heap
+        .runtime_collect()
+        .expect("collect should run for a single-process Interp");
+    eprintln!(
+        "RUNTIME-GC 2b collect: before={before} after={after} reclaimed={}",
+        before - after
+    );
     assert!(before >= N, "expected ≥{N} promoted, got {before}");
-    assert!(before - after >= N - 50, "expected ~{} reclaimed, got {}", N - 1, before - after);
+    assert!(
+        before - after >= N - 50,
+        "expected ~{} reclaimed, got {}",
+        N - 1,
+        before - after
+    );
 
     // The rewritten current `f` still computes (last redef i=N-1=1999): 1999*7+1999.
     let v = interp.eval_str("(f 7)").expect("f errored after collect");
     assert_eq!(interp.print(v), (1999 * 7 + 1999).to_string());
     // Freshly-defined code runs on the compacted region (cleared caches rebuild).
-    let v = interp.eval_str("(defn k (a) (* a a)) (k 9)").expect("new code errored after collect");
+    let v = interp
+        .eval_str("(defn k (a) (* a a)) (k 9)")
+        .expect("new code errored after collect");
     assert_eq!(interp.print(v), "81");
 
     // The LOCAL-heap rewrite path: collect *while* a RUNTIME closure is held in a
     // LOCAL binding (`g`) on the live operand stack/env. The whole expression is one
     // top-level form, so the collect runs with `g` live — it must rewrite `g`'s
     // handle so `(g 3)` still calls the right (compacted) code.
-    let v = interp.eval_str("(let (g f) (runtime-collect) (g 3))").expect("let-held collect errored");
+    let v = interp
+        .eval_str("(let (g f) (runtime-collect) (g 3))")
+        .expect("let-held collect errored");
     assert_eq!(interp.print(v), (1999 * 3 + 1999).to_string());
 
     // A second bare collect now reclaims little (steady state — nothing superseded).
     let (b2, a2) = interp.heap.runtime_collect().expect("second collect");
-    assert!(b2 - a2 < 50, "steady-state collect should reclaim little, got {}", b2 - a2);
+    assert!(
+        b2 - a2 < 50,
+        "steady-state collect should reclaim little, got {}",
+        b2 - a2
+    );
 }
 
 /// The **automatic** safepoint trigger bounds the RUNTIME region with *no*
@@ -184,7 +215,9 @@ fn auto_safepoint_collect_bounds_runtime_region() {
 
     // And the program is still correct after all those mid-loop compactions: the
     // current `f` (last redef i=N-1=5999) resolves on the compacted region.
-    let v = interp.eval_str("(f 7)").expect("f errored after auto-collect");
+    let v = interp
+        .eval_str("(f 7)")
+        .expect("f errored after auto-collect");
     assert_eq!(interp.print(v), (5999i64 * 7 + 5999).to_string());
 }
 

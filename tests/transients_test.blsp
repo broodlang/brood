@@ -192,6 +192,16 @@
   ;; A 2000-entry build must still equal the persistent fold, no flush_oob/poison.
   (test "a 2000-entry transient build equals the persistent fold"
     (assert= (ts-transient 2000) (ts-persistent 2000)))
+  ;; The stress path above always *flips* (tiny nursery), so it never exercised
+  ;; the *tenure* path — where a use-after-GC bug hid: a transient tenured to the
+  ;; old gen, then an `assoc!` repointing its root at a fresh young node (an
+  ;; OLD->YOUNG edge a later minor flip skipped), leaving the cell's root dangling.
+  ;; A build past `min_tenure` (16K live) forces a real tenure mid-build; under the
+  ;; concurrent suite (scaled-down floor) it also flips afterwards, so it must
+  ;; still equal the persistent fold. A deterministic low-floor/tenure version is
+  ;; in `crates/lisp/tests/gc.rs::transient_survives_tenure_then_flip`.
+  (test "a transient build that tenures (past min_tenure) equals the persistent fold"
+    (assert= (ts-transient 20000) (ts-persistent 20000)))
   (test "transient builds equal persistent maps at several sizes"
     (is (= (ts-transient 0) (ts-persistent 0)))
     (is (= (ts-transient 1) (ts-persistent 1)))

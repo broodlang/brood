@@ -573,17 +573,83 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 
     // transcendental math — hardware f64 ops that can't be approximated in Brood
     // over `floor`/`rem`/`*` at the precision level scripts actually need.
-    def(heap, "sin",   Arity::exact(1), Sig::new(vec![num], float), math_sin);
-    def(heap, "cos",   Arity::exact(1), Sig::new(vec![num], float), math_cos);
-    def(heap, "tan",   Arity::exact(1), Sig::new(vec![num], float), math_tan);
-    def(heap, "asin",  Arity::exact(1), Sig::new(vec![num], float), math_asin);
-    def(heap, "acos",  Arity::exact(1), Sig::new(vec![num], float), math_acos);
-    def(heap, "atan",  Arity::exact(1), Sig::new(vec![num], float), math_atan);
-    def(heap, "atan2", Arity::exact(2), Sig::new(vec![num, num], float), math_atan2);
-    def(heap, "exp",   Arity::exact(1), Sig::new(vec![num], float), math_exp);
-    def(heap, "ln",    Arity::exact(1), Sig::new(vec![num], float), math_ln);
-    def(heap, "log2",  Arity::exact(1), Sig::new(vec![num], float), math_log2);
-    def(heap, "log10", Arity::exact(1), Sig::new(vec![num], float), math_log10);
+    def(
+        heap,
+        "sin",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_sin,
+    );
+    def(
+        heap,
+        "cos",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_cos,
+    );
+    def(
+        heap,
+        "tan",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_tan,
+    );
+    def(
+        heap,
+        "asin",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_asin,
+    );
+    def(
+        heap,
+        "acos",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_acos,
+    );
+    def(
+        heap,
+        "atan",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_atan,
+    );
+    def(
+        heap,
+        "atan2",
+        Arity::exact(2),
+        Sig::new(vec![num, num], float),
+        math_atan2,
+    );
+    def(
+        heap,
+        "exp",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_exp,
+    );
+    def(
+        heap,
+        "ln",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_ln,
+    );
+    def(
+        heap,
+        "log2",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_log2,
+    );
+    def(
+        heap,
+        "log10",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_log10,
+    );
 
     // rope — the editor buffer's text storage (ADR-045). The irreducible text
     // mechanism: a `ropey::Rope` gives O(log n) edits + char/line indexing that
@@ -1033,8 +1099,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // debug instrumentation (ADR-038). Their fn defs are gated to match.
     #[cfg(feature = "dev-tools")]
     {
-        def(heap, "gc-stats", Arity::exact(0), Sig::nullary(map_ty), gc_stats);
-        def(heap, "vm-stats", Arity::exact(0), Sig::nullary(map_ty), vm_stats);
+        def(
+            heap,
+            "gc-stats",
+            Arity::exact(0),
+            Sig::nullary(map_ty),
+            gc_stats,
+        );
+        def(
+            heap,
+            "vm-stats",
+            Arity::exact(0),
+            Sig::nullary(map_ty),
+            vm_stats,
+        );
         def(
             heap,
             "gc-collect",
@@ -1135,7 +1213,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::with_rest(vec![string, int, any], any, list_ty),
         span_runs,
     );
-    def(heap, "clipboard-get", Arity::exact(0), Sig::nullary(any), clipboard_get);
+    def(
+        heap,
+        "clipboard-get",
+        Arity::exact(0),
+        Sig::nullary(any),
+        clipboard_get,
+    );
     def(
         heap,
         "clipboard-set!",
@@ -1195,7 +1279,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // carries its source appended to the binary. These let `std/project.blsp`
     // boot it; `%builtin-module` (above) already consults the bundle, so
     // `require` resolves an app's modules with no load-path change.
-    def(heap, "%bundled?", Arity::exact(0), Sig::nullary(bool_ty), bundled_p);
+    def(
+        heap,
+        "%bundled?",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        bundled_p,
+    );
     def(
         heap,
         "%bundle-manifest",
@@ -1356,20 +1446,86 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     // SHA-1, SHA-384, SHA-512, and MD5 — string and byte-vector variants.
     // String variants hash UTF-8 bytes; -bytes variants hash arbitrary byte ints.
-    def(heap, "%sha1",        Arity::exact(1), Sig::new(vec![string], string), sha1_hex);
-    def(heap, "%sha1-bytes",  Arity::exact(1), Sig::new(vec![any], string),    sha1_hex_bytes);
-    def(heap, "%sha384",      Arity::exact(1), Sig::new(vec![string], string), sha384_hex);
-    def(heap, "%sha384-bytes",Arity::exact(1), Sig::new(vec![any], string),    sha384_hex_bytes);
-    def(heap, "%sha512",      Arity::exact(1), Sig::new(vec![string], string), sha512_hex);
-    def(heap, "%sha512-bytes",Arity::exact(1), Sig::new(vec![any], string),    sha512_hex_bytes);
-    def(heap, "%md5",         Arity::exact(1), Sig::new(vec![string], string), md5_hex);
-    def(heap, "%md5-bytes",   Arity::exact(1), Sig::new(vec![any], string),    md5_hex_bytes);
+    def(
+        heap,
+        "%sha1",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        sha1_hex,
+    );
+    def(
+        heap,
+        "%sha1-bytes",
+        Arity::exact(1),
+        Sig::new(vec![any], string),
+        sha1_hex_bytes,
+    );
+    def(
+        heap,
+        "%sha384",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        sha384_hex,
+    );
+    def(
+        heap,
+        "%sha384-bytes",
+        Arity::exact(1),
+        Sig::new(vec![any], string),
+        sha384_hex_bytes,
+    );
+    def(
+        heap,
+        "%sha512",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        sha512_hex,
+    );
+    def(
+        heap,
+        "%sha512-bytes",
+        Arity::exact(1),
+        Sig::new(vec![any], string),
+        sha512_hex_bytes,
+    );
+    def(
+        heap,
+        "%md5",
+        Arity::exact(1),
+        Sig::new(vec![string], string),
+        md5_hex,
+    );
+    def(
+        heap,
+        "%md5-bytes",
+        Arity::exact(1),
+        Sig::new(vec![any], string),
+        md5_hex_bytes,
+    );
     // HMAC primitives — one-call Rust implementations over the hmac crate already
     // present for the node handshake. Replaces the pure-Brood RFC 2104 construction
     // in std/hash.blsp which was ~200x slower due to hex-encode/decode round-trips.
-    def(heap, "%hmac-sha256", Arity::exact(2), Sig::new(vec![string, string], string), hmac_sha256_fn);
-    def(heap, "%hmac-sha1",   Arity::exact(2), Sig::new(vec![string, string], string), hmac_sha1_fn);
-    def(heap, "%hmac-sha512", Arity::exact(2), Sig::new(vec![string, string], string), hmac_sha512_fn);
+    def(
+        heap,
+        "%hmac-sha256",
+        Arity::exact(2),
+        Sig::new(vec![string, string], string),
+        hmac_sha256_fn,
+    );
+    def(
+        heap,
+        "%hmac-sha1",
+        Arity::exact(2),
+        Sig::new(vec![string, string], string),
+        hmac_sha1_fn,
+    );
+    def(
+        heap,
+        "%hmac-sha512",
+        Arity::exact(2),
+        Sig::new(vec![string, string], string),
+        hmac_sha512_fn,
+    );
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
     // layout / lock file / conflict policy are all Brood (std/package.blsp).
@@ -1405,7 +1561,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], string.union(nil_ty)),
         getenv,
     );
-    def(heap, "hostname", Arity::exact(0), Sig::nullary(string), hostname);
+    def(
+        heap,
+        "hostname",
+        Arity::exact(0),
+        Sig::nullary(string),
+        hostname,
+    );
     def(
         heap,
         "run-process",
@@ -1413,11 +1575,41 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, seq], int),
         run_process,
     );
-    def(heap, "%env-all", Arity::exact(0), Sig::nullary(map_ty), env_all);
-    def(heap, "%argv",    Arity::exact(0), Sig::nullary(seq),    argv_builtin);
-    def(heap, "%os-type", Arity::exact(0), Sig::nullary(kw),     os_type_builtin);
-    def(heap, "%os-cmd",  Arity::at_least(1), Sig::new(vec![string, seq], map_ty), os_cmd);
-    def(heap, "%halt",    Arity::exact(1),    Sig::new(vec![int], nil_ty),          halt_builtin);
+    def(
+        heap,
+        "%env-all",
+        Arity::exact(0),
+        Sig::nullary(map_ty),
+        env_all,
+    );
+    def(
+        heap,
+        "%argv",
+        Arity::exact(0),
+        Sig::nullary(seq),
+        argv_builtin,
+    );
+    def(
+        heap,
+        "%os-type",
+        Arity::exact(0),
+        Sig::nullary(kw),
+        os_type_builtin,
+    );
+    def(
+        heap,
+        "%os-cmd",
+        Arity::at_least(1),
+        Sig::new(vec![string, seq], map_ty),
+        os_cmd,
+    );
+    def(
+        heap,
+        "%halt",
+        Arity::exact(1),
+        Sig::new(vec![int], nil_ty),
+        halt_builtin,
+    );
 
     // macros
     def(
@@ -1614,12 +1806,30 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     // Namespaces (ADR-065): `%in-ns` sets the namespace being compiled into. The
     // `ns` macro (prelude) emits it; the resolver pass reads `heap.compile_ns`.
-    def(heap, "%in-ns", Arity::exact(1), Sig::new(vec![sym], sym), in_ns);
-    def(heap, "current-ns", Arity::exact(0), Sig::new(vec![], sym), current_ns);
+    def(
+        heap,
+        "%in-ns",
+        Arity::exact(1),
+        Sig::new(vec![sym], sym),
+        in_ns,
+    );
+    def(
+        heap,
+        "current-ns",
+        Arity::exact(0),
+        Sig::new(vec![], sym),
+        current_ns,
+    );
     // `(%refer 'mod subset)` — populate the current file's import table from a
     // `(:use …)` clause. `subset` is nil (refer all public names) or a seq of
     // bare symbols. The `ns` macro emits it after `(require 'mod)`.
-    def(heap, "%refer", Arity::exact(2), Sig::new(vec![sym, any], nil_ty), refer);
+    def(
+        heap,
+        "%refer",
+        Arity::exact(2),
+        Sig::new(vec![sym, any], nil_ty),
+        refer,
+    );
     // `%binding`'s first arg is the *list/vector of names*, second is the
     // *list/vector of values*, third is the thunk — the macro `binding` emits
     // these as `(quote (*a* *b* …))` + `[v1 v2 …]` + `(fn () …)`.
@@ -1685,7 +1895,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "ref", Arity::exact(0), Sig::nullary(ref_ty), make_ref);
     // `(exit pid reason)` — send an exit signal (Erlang `exit/2`). `:kill` is the
     // untrappable hard kill; any other reason is the soft (next-`receive`) signal.
-    def(heap, "exit", Arity::exact(2), Sig::new(vec![pid_ty, any], nil_ty), exit_proc);
+    def(
+        heap,
+        "exit",
+        Arity::exact(2),
+        Sig::new(vec![pid_ty, any], nil_ty),
+        exit_proc,
+    );
     // `monitor` also accepts a name map (forwarded to the remote node).
     def(
         heap,
@@ -1704,9 +1920,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // Links (ADR-077): symmetric failure coupling + `trap_exit`, the bidirectional
     // cousin of `monitor`. `link`/`unlink` couple the current process to a pid;
     // `trap-exit` turns a linked peer's death into a `[:EXIT pid reason]` message.
-    def(heap, "link", Arity::exact(1), Sig::new(vec![pid_ty], nil_ty), link_proc);
-    def(heap, "unlink", Arity::exact(1), Sig::new(vec![pid_ty], nil_ty), unlink_proc);
-    def(heap, "trap-exit", Arity::exact(1), Sig::new(vec![any], bool_ty), trap_exit_proc);
+    def(
+        heap,
+        "link",
+        Arity::exact(1),
+        Sig::new(vec![pid_ty], nil_ty),
+        link_proc,
+    );
+    def(
+        heap,
+        "unlink",
+        Arity::exact(1),
+        Sig::new(vec![pid_ty], nil_ty),
+        unlink_proc,
+    );
+    def(
+        heap,
+        "trap-exit",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        trap_exit_proc,
+    );
     def(
         heap,
         "spawn-count",
@@ -1772,10 +2006,34 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], string),
         random_token,
     );
-    def(heap, "%random-bytes",     Arity::exact(1), Sig::new(vec![int], seq),                   random_bytes);
-    def(heap, "%chacha20-encrypt", Arity::exact(3), Sig::new(vec![any, any, any], seq),         chacha20_encrypt);
-    def(heap, "%chacha20-decrypt", Arity::exact(3), Sig::new(vec![any, any, any], any),         chacha20_decrypt);
-    def(heap, "%pbkdf2-sha256",    Arity::exact(4), Sig::new(vec![string, string, int, int], seq), pbkdf2_sha256_fn);
+    def(
+        heap,
+        "%random-bytes",
+        Arity::exact(1),
+        Sig::new(vec![int], seq),
+        random_bytes,
+    );
+    def(
+        heap,
+        "%chacha20-encrypt",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], seq),
+        chacha20_encrypt,
+    );
+    def(
+        heap,
+        "%chacha20-decrypt",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], any),
+        chacha20_decrypt,
+    );
+    def(
+        heap,
+        "%pbkdf2-sha256",
+        Arity::exact(4),
+        Sig::new(vec![string, string, int, int], seq),
+        pbkdf2_sha256_fn,
+    );
     def(
         heap,
         "spit-private",
@@ -2220,13 +2478,34 @@ fn num_bin(
 }
 
 fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    num_bin(heap, args, "%add", i64::checked_add, |a, b| a + b, |a, b| a + b)
+    num_bin(
+        heap,
+        args,
+        "%add",
+        i64::checked_add,
+        |a, b| a + b,
+        |a, b| a + b,
+    )
 }
 fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    num_bin(heap, args, "%sub", i64::checked_sub, |a, b| a - b, |a, b| a - b)
+    num_bin(
+        heap,
+        args,
+        "%sub",
+        i64::checked_sub,
+        |a, b| a - b,
+        |a, b| a - b,
+    )
 }
 fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    num_bin(heap, args, "%mul", i64::checked_mul, |a, b| a * b, |a, b| a * b)
+    num_bin(
+        heap,
+        args,
+        "%mul",
+        i64::checked_mul,
+        |a, b| a * b,
+        |a, b| a * b,
+    )
 }
 
 fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -2271,9 +2550,7 @@ fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // BigInt/float cases.
     let lt = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x < y,
-        _ if is_integer(a) && is_integer(b) => {
-            heap.value_cmp(a, b) == std::cmp::Ordering::Less
-        }
+        _ if is_integer(a) && is_integer(b) => heap.value_cmp(a, b) == std::cmp::Ordering::Less,
         _ => num_to_f64(heap, "%lt", a)? < num_to_f64(heap, "%lt", b)?,
     };
     Ok(Value::Bool(lt))
@@ -2287,9 +2564,7 @@ fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%le")?;
     let le = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x <= y,
-        _ if is_integer(a) && is_integer(b) => {
-            heap.value_cmp(a, b) != std::cmp::Ordering::Greater
-        }
+        _ if is_integer(a) && is_integer(b) => heap.value_cmp(a, b) != std::cmp::Ordering::Greater,
         _ => num_to_f64(heap, "%le", a)? <= num_to_f64(heap, "%le", b)?,
     };
     Ok(Value::Bool(le))
@@ -2944,11 +3219,7 @@ fn map_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 // ---------- transient maps ----------
 
 /// Pull a `TransientId` out of `v` or raise a self-identifying type error.
-fn expect_transient(
-    heap: &Heap,
-    who: &str,
-    v: Value,
-) -> Result<value::TransientId, LispError> {
+fn expect_transient(heap: &Heap, who: &str, v: Value) -> Result<value::TransientId, LispError> {
     expect!(heap, who, v, "transient",
         Value::Transient(id) => id,
     )
@@ -2990,7 +3261,9 @@ fn transient_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Map(m) => m,
         _ => unreachable!("a transient root is a Map"),
     };
-    Ok(heap.map_get(root, arg(args, 1)).unwrap_or_else(|| arg(args, 2)))
+    Ok(heap
+        .map_get(root, arg(args, 1))
+        .unwrap_or_else(|| arg(args, 2)))
 }
 
 /// `(transient-count t)` — entry count of a live transient, O(1).
@@ -3029,7 +3302,9 @@ fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
-        Value::Str(id) => Ok(Value::Int(crate::text_width::display_width(heap.string(id)) as i64)),
+        Value::Str(id) => Ok(Value::Int(
+            crate::text_width::display_width(heap.string(id)) as i64,
+        )),
         _ => Err(LispError::wrong_type(heap, "display-width", "string", v)),
     }
 }
@@ -3071,8 +3346,7 @@ fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let items = heap.seq_items(arg(args, 1))?;
     // Rough pre-size (separators + a small per-element allowance) to avoid most
     // re-grows without a second display pass just to compute the exact length.
-    let mut s =
-        String::with_capacity(sep.len() * items.len().saturating_sub(1) + items.len() * 8);
+    let mut s = String::with_capacity(sep.len() * items.len().saturating_sub(1) + items.len() * 8);
     for (i, &item) in items.iter().enumerate() {
         if i > 0 {
             s.push_str(&sep);
@@ -3315,7 +3589,10 @@ fn gc_stats_map(heap: &mut Heap) -> Value {
         // verifier / poison bits are compiled in) — so a benchmark can confirm
         // it's measuring a clean release build, not a debug-armed one. `false`
         // for `make install` / `cargo build --release`.
-        (value::kw("debug-build"), Value::Bool(cfg!(debug_assertions))),
+        (
+            value::kw("debug-build"),
+            Value::Bool(cfg!(debug_assertions)),
+        ),
     ];
     heap.map_from_pairs(pairs)
 }
@@ -3624,7 +3901,14 @@ fn tree_sitter_parse(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "tree-sitter-parse", arg(args, 0))?;
     let lang = match arg(args, 1) {
         Value::Keyword(s) => value::symbol_name(s),
-        v => return Err(LispError::wrong_type(heap, "tree-sitter-parse", "keyword", v)),
+        v => {
+            return Err(LispError::wrong_type(
+                heap,
+                "tree-sitter-parse",
+                "keyword",
+                v,
+            ))
+        }
     };
     crate::treesit::parse(heap, &src, &lang)
 }
@@ -3919,7 +4203,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // core `log` module is a `proc/gen` process. `proc/supervisor` is OTP-style
     // supervision — independent of `proc/gen`, both over the same kernel primitives.
     ("proc/gen", include_str!("../../../std/proc/gen.blsp")),
-    ("proc/supervisor", include_str!("../../../std/proc/supervisor.blsp")),
+    (
+        "proc/supervisor",
+        include_str!("../../../std/proc/supervisor.blsp"),
+    ),
     // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
     // the dev observer's tree sort *and* a shipped app's process list (myedit's
@@ -3988,7 +4275,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     ("agent", include_str!("../../../std/agent.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
-    ("editor/buffer", include_str!("../../../std/editor/buffer.blsp")),
+    (
+        "editor/buffer",
+        include_str!("../../../std/editor/buffer.blsp"),
+    ),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer
@@ -3997,12 +4287,21 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // named once, referenced everywhere, restyled in one place. Required by `ui`
     // (so every ui-run app gets it) and the observer.
     ("editor/face", include_str!("../../../std/editor/face.blsp")),
-    ("editor/display", include_str!("../../../std/editor/display.blsp")),
-    ("editor/keymap", include_str!("../../../std/editor/keymap.blsp")),
+    (
+        "editor/display",
+        include_str!("../../../std/editor/display.blsp"),
+    ),
+    (
+        "editor/keymap",
+        include_str!("../../../std/editor/keymap.blsp"),
+    ),
     // Composable, runtime-reconfigurable behaviour layers over `keymap` (the
     // generic mechanism the editor's "modes" are built from; buffer-agnostic).
     // Opt-in, never in the prelude. See docs/layers.md.
-    ("editor/layers", include_str!("../../../std/editor/layers.blsp")),
+    (
+        "editor/layers",
+        include_str!("../../../std/editor/layers.blsp"),
+    ),
     // Structural (s-expression) navigation over the parse-source CST — reusable
     // Brood-code tooling (same tier as the formatter / LSP), not editor-specific.
     // (The text-mode/brood-mode *layers* built on it are editor policy and live in
@@ -4015,7 +4314,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
     // model (ADR-090): the app runs on the daemon, a thin `attach` client paints
     // pushed frames + ships back keys. Pure Brood over `ui-run` + the node link.
-    ("editor/serve", include_str!("../../../std/editor/serve.blsp")),
+    (
+        "editor/serve",
+        include_str!("../../../std/editor/serve.blsp"),
+    ),
     // Emacs-style tiled window splits: an immutable binary layout tree + pure
     // pane/divider geometry + drag-to-resize over `:drag` mouse events (ADR-077).
     // Reusable editor toolkit (content-agnostic); the keybindings + payload are
@@ -4037,23 +4339,41 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // `highlight`/`lineedit` stay in CORE: they are reusable UI a shipped app may
     // `require` (the editor's minibuffer reuses `std/lineedit`'s core), not just
     // REPL plumbing — so a lean release keeps them.
-    ("editor/highlight", include_str!("../../../std/editor/highlight.blsp")),
+    (
+        "editor/highlight",
+        include_str!("../../../std/editor/highlight.blsp"),
+    ),
     // Generic tree-sitter language services (`fontify` + structural motions) over
     // the `tree-sitter-parse` builtin's positioned CST — the foreign-language
     // analogue of `sexp`+`highlight`. Pure UI a shipped editor `require`s for its
     // ruby/elixir/… modes (ROADMAP §C), so it stays in CORE; opt-in, never prelude.
-    ("editor/treesit", include_str!("../../../std/editor/treesit.blsp")),
+    (
+        "editor/treesit",
+        include_str!("../../../std/editor/treesit.blsp"),
+    ),
     // Lexical Markdown highlighter — the `highlight` analogue for `.md` buffers
     // (`markdown-spans` → `[start end face]` spans, ADR-092). Pure UI a shipped app
     // may `require` (myedit's markdown-mode), so it stays in CORE alongside
     // `highlight`/`lineedit`; opt-in, never in the prelude.
-    ("editor/markdown", include_str!("../../../std/editor/markdown.blsp")),
+    (
+        "editor/markdown",
+        include_str!("../../../std/editor/markdown.blsp"),
+    ),
     // Lexical `.env` and Dockerfile highlighters, the dotenv/Dockerfile analogues of
     // `markdown` (`env-spans` / `dockerfile-spans` → `[start end face]` spans). Pure
     // UI a shipped app may `require` (myedit's env-/docker-mode); CORE, like markdown.
-    ("editor/dotenv", include_str!("../../../std/editor/dotenv.blsp")),
-    ("editor/dockerfile", include_str!("../../../std/editor/dockerfile.blsp")),
-    ("editor/lineedit", include_str!("../../../std/editor/lineedit.blsp")),
+    (
+        "editor/dotenv",
+        include_str!("../../../std/editor/dotenv.blsp"),
+    ),
+    (
+        "editor/dockerfile",
+        include_str!("../../../std/editor/dockerfile.blsp"),
+    ),
+    (
+        "editor/lineedit",
+        include_str!("../../../std/editor/lineedit.blsp"),
+    ),
     ("format", include_str!("../../../std/format.blsp")),
 ];
 
@@ -4393,7 +4713,7 @@ fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                         break;
                     }
                     match chars[j] {
-                        '\\' => j += 2,        // escape: skip the backslash and the next char
+                        '\\' => j += 2, // escape: skip the backslash and the next char
                         '"' => {
                             j += 1;
                             break;
@@ -4416,8 +4736,12 @@ fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         };
         let text: String = chars[start..end].iter().collect();
         let tv = heap.alloc_string(&text);
-        let tok =
-            heap.alloc_vector(vec![Value::Int(start as i64), Value::Int(end as i64), kw(kind), tv]);
+        let tok = heap.alloc_vector(vec![
+            Value::Int(start as i64),
+            Value::Int(end as i64),
+            kw(kind),
+            tv,
+        ]);
         out.push(tok);
         i = end;
     }
@@ -4474,11 +4798,21 @@ fn read_spans(heap: &Heap, who: &str, v: Value) -> Result<Vec<(i64, i64, Value)>
     for sv in &items {
         let parts = match sv {
             Value::Vector(id) => heap.vector(*id).to_vec(),
-            _ => return Err(LispError::runtime(format!("{}: each span must be a [start end face] vector", who))),
+            _ => {
+                return Err(LispError::runtime(format!(
+                    "{}: each span must be a [start end face] vector",
+                    who
+                )))
+            }
         };
         match (parts.first(), parts.get(1), parts.get(2)) {
             (Some(Value::Int(s)), Some(Value::Int(e)), Some(f)) => out.push((*s, *e, *f)),
-            _ => return Err(LispError::runtime(format!("{}: each span must be [int int face]", who))),
+            _ => {
+                return Err(LispError::runtime(format!(
+                    "{}: each span must be [int int face]",
+                    who
+                )))
+            }
         }
     }
     Ok(out)
@@ -4598,7 +4932,8 @@ mod clipboard {
     use std::sync::{Mutex, OnceLock};
     static CB: OnceLock<Option<Mutex<Clipboard>>> = OnceLock::new();
     fn handle() -> Option<&'static Mutex<Clipboard>> {
-        CB.get_or_init(|| Clipboard::new().ok().map(Mutex::new)).as_ref()
+        CB.get_or_init(|| Clipboard::new().ok().map(Mutex::new))
+            .as_ref()
     }
     pub fn get_text() -> Option<String> {
         handle()?.lock().ok()?.get_text().ok()
@@ -4710,8 +5045,9 @@ fn char_to_int(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let n = expect_int(heap, "int->char", arg(args, 0))?;
-    let c = char::from_u32(n as u32)
-        .ok_or_else(|| LispError::runtime(format!("int->char: {} is not a valid Unicode codepoint", n)))?;
+    let c = char::from_u32(n as u32).ok_or_else(|| {
+        LispError::runtime(format!("int->char: {} is not a valid Unicode codepoint", n))
+    })?;
     let mut buf = [0u8; 4];
     Ok(heap.alloc_string(c.encode_utf8(&mut buf)))
 }
@@ -4739,28 +5075,53 @@ fn utf8_bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
                         cur = tail;
                     }
                     Value::Nil => break,
-                    other => return Err(LispError::wrong_type(
-                        heap, "utf8-bytes->string", "proper list", other,
-                    )),
+                    other => {
+                        return Err(LispError::wrong_type(
+                            heap,
+                            "utf8-bytes->string",
+                            "proper list",
+                            other,
+                        ))
+                    }
                 }
             }
             out
         }
-        other => return Err(LispError::wrong_type(heap, "utf8-bytes->string", "vector or list", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "utf8-bytes->string",
+                "vector or list",
+                other,
+            ))
+        }
     };
     let mut bytes = Vec::with_capacity(items.len());
     for (i, val) in items.iter().enumerate() {
         match val {
             Value::Int(n) if *n >= 0 && *n <= 255 => bytes.push(*n as u8),
-            Value::Int(n) => return Err(LispError::runtime(format!(
-                "utf8-bytes->string: byte at index {} is out of range: {}", i, n
-            ))),
-            other => return Err(LispError::wrong_type(heap, "utf8-bytes->string", "int", *other)),
+            Value::Int(n) => {
+                return Err(LispError::runtime(format!(
+                    "utf8-bytes->string: byte at index {} is out of range: {}",
+                    i, n
+                )))
+            }
+            other => {
+                return Err(LispError::wrong_type(
+                    heap,
+                    "utf8-bytes->string",
+                    "int",
+                    *other,
+                ))
+            }
         }
     }
     match String::from_utf8(bytes) {
         Ok(s) => Ok(heap.alloc_string(&s)),
-        Err(e) => Err(LispError::runtime(format!("utf8-bytes->string: invalid UTF-8: {}", e))),
+        Err(e) => Err(LispError::runtime(format!(
+            "utf8-bytes->string: invalid UTF-8: {}",
+            e
+        ))),
     }
 }
 
@@ -4805,15 +5166,15 @@ macro_rules! math1_positive {
     };
 }
 
-math1_unrestricted!(math_sin,  "sin", sin);
-math1_unrestricted!(math_cos,  "cos", cos);
-math1_unrestricted!(math_tan,  "tan", tan);
+math1_unrestricted!(math_sin, "sin", sin);
+math1_unrestricted!(math_cos, "cos", cos);
+math1_unrestricted!(math_tan, "tan", tan);
 math1_unrestricted!(math_atan, "atan", atan);
-math1_unrestricted!(math_exp,  "exp", exp);
+math1_unrestricted!(math_exp, "exp", exp);
 math1_bounded!(math_asin, "asin", asin);
 math1_bounded!(math_acos, "acos", acos);
-math1_positive!(math_ln,    "ln",    ln);
-math1_positive!(math_log2,  "log2",  log2);
+math1_positive!(math_ln, "ln", ln);
+math1_positive!(math_log2, "log2", log2);
 math1_positive!(math_log10, "log10", log10);
 
 fn math_atan2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -4952,17 +5313,23 @@ fn expect_socket(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
 }
 
 fn socket_port(who: &str, p: i64) -> Result<u16, LispError> {
-    u16::try_from(p).map_err(|_| LispError::runtime(format!("{}: port {} out of range 0..=65535", who, p)))
+    u16::try_from(p)
+        .map_err(|_| LispError::runtime(format!("{}: port {} out of range 0..=65535", who, p)))
 }
 
 fn tcp_connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let host = expect_string(heap, "tcp-connect", arg(args, 0))?;
-    let port = socket_port("tcp-connect", expect_int(heap, "tcp-connect", arg(args, 1))?)?;
+    let port = socket_port(
+        "tcp-connect",
+        expect_int(heap, "tcp-connect", arg(args, 1))?,
+    )?;
     let owner = crate::process::self_pid();
     match crate::net::connect(&host, port, owner) {
         Ok(id) => Ok(Value::Socket(id)),
-        Err(e) => Err(LispError::runtime(format!("tcp-connect {}:{}: {}", host, port, e))
-            .with_code(crate::error::error_codes::FILE_IO)),
+        Err(e) => Err(
+            LispError::runtime(format!("tcp-connect {}:{}: {}", host, port, e))
+                .with_code(crate::error::error_codes::FILE_IO),
+        ),
     }
 }
 
@@ -4972,14 +5339,19 @@ fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let owner = crate::process::self_pid();
     match crate::net::listen(&host, port, owner) {
         Ok(id) => Ok(Value::Socket(id)),
-        Err(e) => Err(LispError::runtime(format!("tcp-listen {}:{}: {}", host, port, e))
-            .with_code(crate::error::error_codes::FILE_IO)),
+        Err(e) => Err(
+            LispError::runtime(format!("tcp-listen {}:{}: {}", host, port, e))
+                .with_code(crate::error::error_codes::FILE_IO),
+        ),
     }
 }
 
 fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let host = expect_string(heap, "tls-request", arg(args, 0))?;
-    let port = socket_port("tls-request", expect_int(heap, "tls-request", arg(args, 1))?)?;
+    let port = socket_port(
+        "tls-request",
+        expect_int(heap, "tls-request", arg(args, 1))?,
+    )?;
     let request = expect_string(heap, "tls-request", arg(args, 2))?;
     let owner = crate::process::self_pid();
     let id = crate::net::tls_request(&host, port, request.to_string(), owner);
@@ -5247,9 +5619,10 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
         // Ctrl+Alt (Emacs C-M-… — structural sexp motion C-M-f/b/u/d, mark-sexp
         // C-M-SPC). Must precede the ctrl-only / alt-only arms so the second modifier
         // isn't dropped (the `ctrl-meta-` spelling the keymaps bind).
-        KeyCode::Char(c) if ctrl && alt => {
-            Value::Keyword(value::intern(&format!("ctrl-meta-{}", c.to_ascii_lowercase())))
-        }
+        KeyCode::Char(c) if ctrl && alt => Value::Keyword(value::intern(&format!(
+            "ctrl-meta-{}",
+            c.to_ascii_lowercase()
+        ))),
         KeyCode::Char(c) if ctrl => {
             Value::Keyword(value::intern(&format!("ctrl-{}", c.to_ascii_lowercase())))
         }
@@ -5317,7 +5690,12 @@ fn write_term_bytes(bytes: &[u8]) -> std::io::Result<()> {
 /// three frame dispatchers; they deliberately *diverge downstream* (e.g. gui-draw
 /// clamps coords at parse time, term-draw at use), so they must not drift on this
 /// shared prologue — keep it here, in one place.
-fn frame_ops(heap: &Heap, frame: Value, who: &str, expected: &str) -> Result<Vec<(value::Symbol, Vec<Value>)>, LispError> {
+fn frame_ops(
+    heap: &Heap,
+    frame: Value,
+    who: &str,
+    expected: &str,
+) -> Result<Vec<(value::Symbol, Vec<Value>)>, LispError> {
     let ops: Vec<Value> = match frame {
         Value::Vector(id) => heap.vector(id).to_vec(),
         other => return Err(LispError::wrong_type(heap, who, expected, other)),
@@ -5361,10 +5739,16 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let face = parts.get(5).copied().unwrap_or(Value::Nil);
             let fill = " ".repeat(w);
             for i in 0..h.max(0) {
-                crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row + i))).map_err(term_err)?;
-                apply_face(&mut out, heap, face)?;
-                crossterm::queue!(out, Print(&fill), SetAttribute(Attribute::Reset), ResetColor)
+                crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row + i)))
                     .map_err(term_err)?;
+                apply_face(&mut out, heap, face)?;
+                crossterm::queue!(
+                    out,
+                    Print(&fill),
+                    SetAttribute(Attribute::Reset),
+                    ResetColor
+                )
+                .map_err(term_err)?;
             }
         } else if tag == cursor_t {
             use crate::gui::CursorStyle;
@@ -5838,7 +6222,13 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let w = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 3))?);
             let h = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?);
             let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::Nil));
-            ops.push(crate::gui::Op::Rect { row, col, w, h, face });
+            ops.push(crate::gui::Op::Rect {
+                row,
+                col,
+                w,
+                h,
+                face,
+            });
         } else if tag == text_t {
             let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
             let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
@@ -5852,8 +6242,12 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let w = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 3))?);
             let h = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?);
             let shape = match parts.get(5) {
-                Some(Value::Keyword(s)) if *s == col_resize_t => Some(crate::gui::CursorShape::ColResize),
-                Some(Value::Keyword(s)) if *s == row_resize_t => Some(crate::gui::CursorShape::RowResize),
+                Some(Value::Keyword(s)) if *s == col_resize_t => {
+                    Some(crate::gui::CursorShape::ColResize)
+                }
+                Some(Value::Keyword(s)) if *s == row_resize_t => {
+                    Some(crate::gui::CursorShape::RowResize)
+                }
                 _ => None,
             };
             if let Some(shape) = shape {
@@ -5949,7 +6343,12 @@ fn gui_font(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         (None, arg(args, 0))
     };
     let Value::Map(m) = spec else {
-        return Err(LispError::wrong_type(heap, "gui-font!", "map (a font spec)", spec));
+        return Err(LispError::wrong_type(
+            heap,
+            "gui-font!",
+            "map (a font spec)",
+            spec,
+        ));
     };
     let family = match heap.map_get(m, value::kw("family")) {
         Some(Value::Keyword(s)) => Some(s),
@@ -5968,7 +6367,12 @@ fn gui_inset(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Int(n) => n.max(0) as f32,
         Value::Float(f) => f.max(0.0) as f32,
         other => {
-            return Err(LispError::wrong_type(heap, "gui-inset!", "a number (pixels)", other))
+            return Err(LispError::wrong_type(
+                heap,
+                "gui-inset!",
+                "a number (pixels)",
+                other,
+            ))
         }
     };
     crate::gui::inset(px).map_err(LispError::runtime)?;
@@ -5984,7 +6388,14 @@ fn gui_inset(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn gui_font_register(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = match arg(args, 0) {
         Value::Keyword(s) => s,
-        other => return Err(LispError::wrong_type(heap, "gui-font-register", "keyword", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "gui-font-register",
+                "keyword",
+                other,
+            ))
+        }
     };
     let Value::Map(id) = arg(args, 1) else {
         return Err(LispError::wrong_type(
@@ -6227,7 +6638,12 @@ fn collect_bytes(name: &'static str, bv: Value, heap: &mut Heap) -> Result<Vec<u
             vec.iter()
                 .map(|v| match v {
                     Value::Int(n) if *n >= 0 && *n <= 255 => Ok(*n as u8),
-                    other => Err(LispError::wrong_type(heap, name, "byte int (0-255)", *other)),
+                    other => Err(LispError::wrong_type(
+                        heap,
+                        name,
+                        "byte int (0-255)",
+                        *other,
+                    )),
                 })
                 .collect::<Result<Vec<u8>, LispError>>()
         }
@@ -6241,7 +6657,14 @@ fn collect_bytes(name: &'static str, bv: Value, heap: &mut Heap) -> Result<Vec<u
                         let (h, t) = heap.pair(id);
                         match h {
                             Value::Int(n) if n >= 0 && n <= 255 => out.push(n as u8),
-                            other => return Err(LispError::wrong_type(heap, name, "byte int (0-255)", other)),
+                            other => {
+                                return Err(LispError::wrong_type(
+                                    heap,
+                                    name,
+                                    "byte int (0-255)",
+                                    other,
+                                ))
+                            }
                         }
                         cur = t;
                     }
@@ -6584,8 +7007,12 @@ fn git_clone(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let Some(parent) = std::path::Path::new(&dest).parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                LispError::runtime(format!("%git-clone: cannot create {}: {}", parent.display(), e))
-                    .with_code(crate::error::error_codes::FILE_IO)
+                LispError::runtime(format!(
+                    "%git-clone: cannot create {}: {}",
+                    parent.display(),
+                    e
+                ))
+                .with_code(crate::error::error_codes::FILE_IO)
             })?;
         }
     }
@@ -6594,11 +7021,21 @@ fn git_clone(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     git_or_err(&["-C", &dest, "remote", "add", "origin", &url], None)?;
 
     // Fast path: fetch the exact commit shallowly. Many servers (GitHub) allow it.
-    let direct = run_git(&["-C", &dest, "fetch", "-q", "--depth", "1", "origin", &commit], None)?;
+    let direct = run_git(
+        &[
+            "-C", &dest, "fetch", "-q", "--depth", "1", "origin", &commit,
+        ],
+        None,
+    )?;
     if !direct.status.success() {
         // Fallback: fetch the named ref (shallow first, then full if the server
         // rejects a shallow ref fetch), which must contain the locked commit.
-        if git_or_err(&["-C", &dest, "fetch", "-q", "--depth", "1", "origin", &gref], None).is_err() {
+        if git_or_err(
+            &["-C", &dest, "fetch", "-q", "--depth", "1", "origin", &gref],
+            None,
+        )
+        .is_err()
+        {
             git_or_err(&["-C", &dest, "fetch", "-q", "origin", &gref], None)?;
         }
     }
@@ -6830,7 +7267,7 @@ fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.map_from_pairs(vec![
         (kw("stdout"), stdout),
         (kw("stderr"), stderr),
-        (kw("exit"),   Value::Int(exit_code)),
+        (kw("exit"), Value::Int(exit_code)),
     ]))
 }
 
@@ -7929,7 +8366,8 @@ fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // an unbound `mod/name` surfaces as a normal unbound-reference error).
             for item in heap.seq_items(subset)? {
                 let bare = expect_symbol(heap, "%refer", item)?;
-                let qualified = value::intern(&format!("{}/{}", mod_name, value::symbol_name(bare)));
+                let qualified =
+                    value::intern(&format!("{}/{}", mod_name, value::symbol_name(bare)));
                 heap.add_import(bare, qualified);
             }
         }
@@ -8078,7 +8516,10 @@ mod cursor_style_tests {
     #[test]
     fn maps_keywords_with_block_default() {
         assert_eq!(cursor_style_from(value::kw("bar")), CursorStyle::Bar);
-        assert_eq!(cursor_style_from(value::kw("underline")), CursorStyle::Underline);
+        assert_eq!(
+            cursor_style_from(value::kw("underline")),
+            CursorStyle::Underline
+        );
         assert_eq!(cursor_style_from(value::kw("block")), CursorStyle::Block);
         // a bare `[:cursor row col]` (no style) and any unknown keyword → Block
         assert_eq!(cursor_style_from(Value::Nil), CursorStyle::Block);
@@ -8144,7 +8585,10 @@ mod mouse_event_tests {
     #[test]
     fn bare_motion_is_not_emitted() {
         let mut heap = Heap::new();
-        assert!(matches!(mouse_to_value(&mut heap, ev(MK::Moved)), Value::Nil));
+        assert!(matches!(
+            mouse_to_value(&mut heap, ev(MK::Moved)),
+            Value::Nil
+        ));
     }
 
     // Held modifiers ride on the event as a trailing `[:ctrl …]` vector (so an app

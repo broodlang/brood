@@ -73,12 +73,10 @@ impl Jit {
         // The extra compile cost is paid on the background compiler thread, off the hot
         // path; the optimizations are semantics-preserving, so the GC discipline is
         // unaffected. Falls back to default flags if the host rejects the setting.
-        let mut builder = JITBuilder::with_flags(
-            &[("opt_level", "speed")],
-            default_libcall_names(),
-        )
-        .or_else(|_| JITBuilder::new(default_libcall_names()))
-        .expect("Cranelift JITBuilder for the host ISA");
+        let mut builder =
+            JITBuilder::with_flags(&[("opt_level", "speed")], default_libcall_names())
+                .or_else(|_| JITBuilder::new(default_libcall_names()))
+                .expect("Cranelift JITBuilder for the host ISA");
         builder.symbol("brood_rt_tick", brood_rt_tick as *const u8);
         builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
         builder.symbol("brood_rt_cons", brood_rt_cons as *const u8);
@@ -90,7 +88,9 @@ impl Jit {
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
-        Jit { module: JITModule::new(builder) }
+        Jit {
+            module: JITModule::new(builder),
+        }
     }
 
     /// The Cranelift module to declare + define compiled arms through (Stage 1).
@@ -132,9 +132,13 @@ impl Jit {
             b.ins().return_(&[v]);
             b.finalize();
         }
-        self.module.define_function(id, &mut ctx).expect("define smoke fn");
+        self.module
+            .define_function(id, &mut ctx)
+            .expect("define smoke fn");
         self.module.clear_context(&mut ctx);
-        self.module.finalize_definitions().expect("finalize smoke fn");
+        self.module
+            .finalize_definitions()
+            .expect("finalize smoke fn");
         self.module.get_finalized_function(id)
     }
 }

@@ -44,8 +44,8 @@ use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    BigIntId, Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId, Passthrough,
-    RopeId, StrId, Symbol, TransientId, Value, VecId, LOCAL, PRELUDE, RUNTIME,
+    BigIntId, Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId,
+    Passthrough, RopeId, StrId, Symbol, TransientId, Value, VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::{LispError, LispResult};
 
@@ -102,7 +102,13 @@ macro_rules! region_ref {
             match id.region() {
                 LOCAL if id.is_old() => {
                     #[cfg(debug_assertions)]
-                    self.check_epoch_aged(true, id.generation(), id.index(), stringify!($name), id.0);
+                    self.check_epoch_aged(
+                        true,
+                        id.generation(),
+                        id.index(),
+                        stringify!($name),
+                        id.0,
+                    );
                     &self.old.$field[id.index()]
                 }
                 LOCAL => {
@@ -116,7 +122,13 @@ macro_rules! region_ref {
                         id.0
                     );
                     #[cfg(debug_assertions)]
-                    self.check_epoch_aged(false, id.generation(), id.index(), stringify!($name), id.0);
+                    self.check_epoch_aged(
+                        false,
+                        id.generation(),
+                        id.index(),
+                        stringify!($name),
+                        id.0,
+                    );
                     &self.local.$field[id.index()]
                 }
                 PRELUDE => &self.prelude.slabs.$field[id.index()],
@@ -898,9 +910,21 @@ pub struct Heap {
     /// still mid-bind, e.g. a collection during a `let` rhs eval, then bound
     /// further). A minor collection scans these as extra roots and rewrites their
     /// bindings to the promoted handles, then clears the set. Empty on the common
-    /// path (binds finish in the nursery). Brood's immutability means env-frame
-    /// binding is the sole data mutation, so this is the language's one barrier site.
+    /// path (binds finish in the nursery). Env-frame binding is *one* of the two
+    /// data mutations Brood allows — the other is a live transient (see
+    /// [`Self::remembered_transients`]); every other value is immutable.
     remembered: Vec<EnvId>,
+    /// **Write-barrier remembered set for transients** — the transient analogue of
+    /// [`Self::remembered`]. A transient cell is mutable: once tenured to the old
+    /// gen, an `assoc!`/`dissoc!` repoints its `root` at a *fresh nursery* node,
+    /// creating an OLD→YOUNG edge. A minor *flip* skips the old gen (relying on the
+    /// immutability invariant that old never points young), so without recording
+    /// the edge it would relocate the young root and leave the old cell's `root`
+    /// dangling. [`transient_assoc`](Self::transient_assoc) /
+    /// [`transient_dissoc`](Self::transient_dissoc) record the cell here when it is
+    /// old; the next minor flushes each cell's root and rewrites it in place (then
+    /// drops the set on a tenure, retains it on a flip — the edge persists).
+    remembered_transients: Vec<TransientId>,
     /// The **old-generation** epoch — stamped into tenured handles
     /// (`local_old_gen`) and bumped only by a *major* collection (which moves old
     /// objects). A minor collection leaves old objects in place, so it does **not**
@@ -1194,6 +1218,7 @@ impl Heap {
             gc_enabled: false,
             local_epoch: 0,
             remembered: Vec::new(),
+            remembered_transients: Vec::new(),
             old_epoch: 0,
             major_threshold: usize::MAX,
             gc_runs: 0,
@@ -1237,6 +1262,7 @@ impl Heap {
             gc_enabled: true,
             local_epoch: 0,
             remembered: Vec::new(),
+            remembered_transients: Vec::new(),
             old_epoch: 0,
             major_threshold: major_floor(),
             gc_runs: 0,
@@ -1573,7 +1599,9 @@ impl Heap {
             // def-site key matches the global the resolver will actually define
             // (`foo/name`); a no-op at root or for an already-qualified name.
             Value::Sym(name) => Some(match self.compile_ns {
-                Some(ns) => crate::eval::macros::qualify_name(&crate::core::value::symbol_name(ns), name),
+                Some(ns) => {
+                    crate::eval::macros::qualify_name(&crate::core::value::symbol_name(ns), name)
+                }
                 None => name,
             }),
             _ => None,
@@ -2301,6 +2329,18 @@ impl Heap {
         cell.watermark
     }
 
+    /// Record a write-barrier hit for transient `id` after its `root` was just
+    /// repointed. Only an **old-gen** cell matters: it may now hold an OLD→YOUNG
+    /// edge a minor flip would miss (see [`Self::remembered_transients`]). A young
+    /// cell is flushed wholesale by every minor, so it needs no barrier. De-duped
+    /// like the env barrier — a tight `assoc!` loop into one tenured transient
+    /// records it once per minor, not once per call.
+    fn remember_transient(&mut self, id: TransientId) {
+        if id.is_old() && !self.remembered_transients.contains(&id) {
+            self.remembered_transients.push(id);
+        }
+    }
+
     /// `(assoc! t k v)` — mutate the transient in place, returning the same handle.
     /// Errors if `t` is no longer live. Runs the watermarked CHAMP `assoc`, so the
     /// transient's owned nodes are rewritten in place. The epoch guard
@@ -2321,6 +2361,7 @@ impl Heap {
         let hash = self.hash_value(key);
         let new_root = self.champ_assoc(root, key, val, hash, 0, Some(watermark));
         self.transient_cell_mut(id).root = Value::Map(new_root);
+        self.remember_transient(id);
         Ok(Value::Transient(id))
     }
 
@@ -2347,6 +2388,7 @@ impl Heap {
         let hash = self.hash_value(key);
         let new_root = self.champ_dissoc(root, key, hash, 0);
         self.transient_cell_mut(id).root = Value::Map(new_root);
+        self.remember_transient(id);
         Ok(Value::Transient(id))
     }
 
@@ -2562,7 +2604,13 @@ impl Heap {
                 id.0
             );
         }
-        self.check_epoch_aged(id.is_old(), id.generation(), id.index(), "local_shared_blob_ptr", id.0);
+        self.check_epoch_aged(
+            id.is_old(),
+            id.generation(),
+            id.index(),
+            "local_shared_blob_ptr",
+            id.0,
+        );
         match self.string_slot(id) {
             LocalString::Shared(arc) => Some(Arc::as_ptr(arc)),
             LocalString::Inline(_) => None,
@@ -2620,7 +2668,13 @@ impl Heap {
             );
         }
         #[cfg(debug_assertions)]
-        self.check_epoch_aged(id.is_old(), id.generation(), id.index(), "local_shared_blob", id.0);
+        self.check_epoch_aged(
+            id.is_old(),
+            id.generation(),
+            id.index(),
+            "local_shared_blob",
+            id.0,
+        );
         match self.string_slot(id) {
             LocalString::Shared(arc) => Some(Arc::clone(arc)),
             LocalString::Inline(_) => None,
@@ -3637,9 +3691,7 @@ impl Heap {
             // ordered by the bignum's sign (it's strictly larger/smaller in
             // magnitude than any i64) — `BigInt::cmp` after promotion gives that
             // for free.
-            (BigInt(_) | Int(_), BigInt(_) | Int(_)) => {
-                self.bigint_of(a).cmp(&self.bigint_of(b))
-            }
+            (BigInt(_) | Int(_), BigInt(_) | Int(_)) => self.bigint_of(a).cmp(&self.bigint_of(b)),
             (BigInt(x), Float(y)) => bigint_cmp_float(self.bigint(x), y),
             (Float(x), BigInt(y)) => bigint_cmp_float(self.bigint(y), x).reverse(),
             (Str(x), Str(y)) => self.string(x).cmp(self.string(y)),
@@ -4413,7 +4465,10 @@ impl Heap {
         self.vm_call_ics.borrow_mut().clear();
         self.vm_global_ics.borrow_mut().clear();
 
-        debug_assert!(verify_rt_slabs(&new), "runtime_collect left a dangling RUNTIME handle");
+        debug_assert!(
+            verify_rt_slabs(&new),
+            "runtime_collect left a dangling RUNTIME handle"
+        );
 
         // 5. Install the compacted region; bump the version so any IC stamp is stale.
         {
@@ -4574,7 +4629,11 @@ impl Heap {
     }
 
     /// Record the compile result for closure key `k` (eligible body or `None`).
-    pub fn vm_cache_put(&self, k: VmCacheKey, v: Option<Arc<crate::eval::compile::CompiledClosure>>) {
+    pub fn vm_cache_put(
+        &self,
+        k: VmCacheKey,
+        v: Option<Arc<crate::eval::compile::CompiledClosure>>,
+    ) {
         self.vm_cache.borrow_mut().insert(k, v);
     }
 
@@ -4632,7 +4691,10 @@ impl Heap {
         sym: Symbol,
         argc: u32,
         epoch: u64,
-    ) -> Option<(Value, Option<(Arc<crate::eval::compile::CompiledArm>, EnvId)>)> {
+    ) -> Option<(
+        Value,
+        Option<(Arc<crate::eval::compile::CompiledArm>, EnvId)>,
+    )> {
         let t = self.vm_call_ics.borrow();
         let e = t.get(site as usize)?.as_ref()?;
         if e.sym == sym && e.argc == argc && e.epoch == epoch {
@@ -4864,6 +4926,28 @@ impl Heap {
         if !tenure {
             self.remembered = remembered;
         }
+        // Same barrier for transients: an old-gen transient cell whose `root` an
+        // `assoc!` repointed at a young node. Flush that root into `dest` and write
+        // it back in place (the cell lives in `dest` while tenuring — we took the
+        // old gen into `dest` — or in `self.old` while flipping). A tenure makes
+        // the edge old->old (drop the set); a flip keeps the root young (retain).
+        let remembered_tr = std::mem::take(&mut self.remembered_transients);
+        for &t in &remembered_tr {
+            let root = if tenure {
+                dest.transients[t.index()].root
+            } else {
+                self.old.transients[t.index()].root
+            };
+            let nv = flush_value(&young, &mut dest, &mut fwd, root);
+            if tenure {
+                dest.transients[t.index()].root = nv;
+            } else {
+                self.old.transients[t.index()].root = nv;
+            }
+        }
+        if !tenure {
+            self.remembered_transients = remembered_tr;
+        }
         // form_pos re-key: a surviving nursery pair moves to its new slot with the
         // destination's age bit (old when tenuring, young when flipping); dead
         // nursery entries drop; existing OLD entries are untouched (old didn't move
@@ -4951,7 +5035,26 @@ impl Heap {
             let remembered = std::mem::take(&mut self.remembered);
             self.remembered = remembered
                 .into_iter()
-                .filter_map(|e| fwd.envs.get(&(e.index() as u32)).map(|&n| fwd.mint_env(n as usize)))
+                .filter_map(|e| {
+                    fwd.envs
+                        .get(&(e.index() as u32))
+                        .map(|&n| fwd.mint_env(n as usize))
+                })
+                .collect();
+        }
+        // Same stale-handle remap for the transient barrier set: a flip retains
+        // old TransientIds whose roots are still young, and this major just moved
+        // those cells into fresh old slabs. Rewrite each through `fwd.transients`
+        // (populated by `flush_roots`), dropping any whose cell wasn't copied.
+        if !self.remembered_transients.is_empty() {
+            let rt = std::mem::take(&mut self.remembered_transients);
+            self.remembered_transients = rt
+                .into_iter()
+                .filter_map(|t| {
+                    fwd.transients
+                        .get(&(t.index() as u32))
+                        .map(|&n| fwd.mint_transient(n as usize))
+                })
                 .collect();
         }
         let old_form_pos = std::mem::take(&mut self.form_pos);
@@ -5074,31 +5177,49 @@ impl Heap {
                 }
             }
         }
-        let bad = |kind: &str, is_old: bool, gen: u32, idx: usize, len: usize, parent: u64, raw: u64| {
-            let (ep, space) = if is_old { (old_ep, "OLD") } else { (young_ep, "nursery") };
-            assert!(
-                idx < len,
-                "GC-VERIFY: stored stale {kind} handle OUT OF BOUNDS ({space} slot {idx} \
+        let bad =
+            |kind: &str, is_old: bool, gen: u32, idx: usize, len: usize, parent: u64, raw: u64| {
+                let (ep, space) = if is_old {
+                    (old_ep, "OLD")
+                } else {
+                    (young_ep, "nursery")
+                };
+                assert!(
+                    idx < len,
+                    "GC-VERIFY: stored stale {kind} handle OUT OF BOUNDS ({space} slot {idx} \
                  ≥ slab len {len}); handle {raw:#x} held in container {parent:#x}. \
                  A handle was kept across a collection without re-rooting, then \
                  written into the live graph — use-after-GC.",
-            );
-            assert!(
+                );
+                assert!(
                 gen == ep,
                 "GC-VERIFY: stored stale {kind} handle from epoch {gen}, {space} generation is \
                  now epoch {ep} (slot {idx}, handle {raw:#x}); held in container \
                  {parent:#x}. That cell holds a handle kept across a collection \
                  without re-rooting — use-after-GC at the op that built it.",
             );
-        };
+            };
         // Routed slab views: young vs old by the handle's age bit.
         while let Some(w) = work.pop() {
             match w {
                 W::V(v, parent) => match v {
                     Value::Pair(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("pair", id.is_old(), id.generation(), id.index(), slabs.pairs.len(), parent, id.0);
-                        if !id.is_old() && !std::mem::replace(&mut seen_pair[id.is_old() as usize][id.index()], true) {
+                        bad(
+                            "pair",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.pairs.len(),
+                            parent,
+                            id.0,
+                        );
+                        if !id.is_old()
+                            && !std::mem::replace(
+                                &mut seen_pair[id.is_old() as usize][id.index()],
+                                true,
+                            )
+                        {
                             let (a, b) = slabs.pairs[id.index()];
                             work.push(W::V(a, id.0));
                             work.push(W::V(b, id.0));
@@ -5106,8 +5227,21 @@ impl Heap {
                     }
                     Value::Vector(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("vector", id.is_old(), id.generation(), id.index(), slabs.vectors.len(), parent, id.0);
-                        if !id.is_old() && !std::mem::replace(&mut seen_vec[id.is_old() as usize][id.index()], true) {
+                        bad(
+                            "vector",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.vectors.len(),
+                            parent,
+                            id.0,
+                        );
+                        if !id.is_old()
+                            && !std::mem::replace(
+                                &mut seen_vec[id.is_old() as usize][id.index()],
+                                true,
+                            )
+                        {
                             for &el in &slabs.vectors[id.index()] {
                                 work.push(W::V(el, id.0));
                             }
@@ -5117,12 +5251,33 @@ impl Heap {
                     // handle itself (bounds + epoch), nothing to descend into.
                     Value::Range(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("range", id.is_old(), id.generation(), id.index(), slabs.vectors.len(), parent, id.0);
+                        bad(
+                            "range",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.vectors.len(),
+                            parent,
+                            id.0,
+                        );
                     }
                     Value::Map(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("map", id.is_old(), id.generation(), id.index(), slabs.maps.len(), parent, id.0);
-                        if !id.is_old() && !std::mem::replace(&mut seen_map[id.is_old() as usize][id.index()], true) {
+                        bad(
+                            "map",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.maps.len(),
+                            parent,
+                            id.0,
+                        );
+                        if !id.is_old()
+                            && !std::mem::replace(
+                                &mut seen_map[id.is_old() as usize][id.index()],
+                                true,
+                            )
+                        {
                             let node = &slabs.maps[id.index()];
                             for &(mk, mv) in &node.data {
                                 work.push(W::V(mk, id.0));
@@ -5135,15 +5290,39 @@ impl Heap {
                     }
                     Value::Str(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("string", id.is_old(), id.generation(), id.index(), slabs.strings.len(), parent, id.0);
+                        bad(
+                            "string",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.strings.len(),
+                            parent,
+                            id.0,
+                        );
                     }
                     Value::BigInt(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("bigint", id.is_old(), id.generation(), id.index(), slabs.bigints.len(), parent, id.0);
+                        bad(
+                            "bigint",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.bigints.len(),
+                            parent,
+                            id.0,
+                        );
                     }
                     Value::Transient(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("transient", id.is_old(), id.generation(), id.index(), slabs.transients.len(), parent, id.0);
+                        bad(
+                            "transient",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.transients.len(),
+                            parent,
+                            id.0,
+                        );
                         // Its one child is `root` — walk it so a stale handle
                         // stored in the cell surfaces here with the path.
                         if id.index() < slabs.transients.len() {
@@ -5152,12 +5331,33 @@ impl Heap {
                     }
                     Value::Rope(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("rope", id.is_old(), id.generation(), id.index(), slabs.ropes.len(), parent, id.0);
+                        bad(
+                            "rope",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.ropes.len(),
+                            parent,
+                            id.0,
+                        );
                     }
                     Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad("closure", id.is_old(), id.generation(), id.index(), slabs.closures.len(), parent, id.0);
-                        if !id.is_old() && !std::mem::replace(&mut seen_clo[id.is_old() as usize][id.index()], true) {
+                        bad(
+                            "closure",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.closures.len(),
+                            parent,
+                            id.0,
+                        );
+                        if !id.is_old()
+                            && !std::mem::replace(
+                                &mut seen_clo[id.is_old() as usize][id.index()],
+                                true,
+                            )
+                        {
                             let cl = &slabs.closures[id.index()];
                             for arm in &cl.arms {
                                 for &f in &arm.body {
@@ -5179,8 +5379,18 @@ impl Heap {
                         continue;
                     }
                     let slabs = if e.is_old() { &self.old } else { &self.local };
-                    bad("env", e.is_old(), e.generation(), e.index(), slabs.envs.len(), parent, e.0);
-                    if !e.is_old() && !std::mem::replace(&mut seen_env[e.is_old() as usize][e.index()], true) {
+                    bad(
+                        "env",
+                        e.is_old(),
+                        e.generation(),
+                        e.index(),
+                        slabs.envs.len(),
+                        parent,
+                        e.0,
+                    );
+                    if !e.is_old()
+                        && !std::mem::replace(&mut seen_env[e.is_old() as usize][e.index()], true)
+                    {
                         let frame = &slabs.envs[e.index()];
                         if let Some(p) = frame.parent {
                             work.push(W::E(p, e.0));
@@ -5212,7 +5422,6 @@ impl Heap {
     pub fn set_root_at(&mut self, i: usize, v: Value) {
         self.roots[i] = v;
     }
-
 }
 
 // ----- heap flush (arena flip / Phase 2) -----------------------------------
@@ -5329,7 +5538,11 @@ fn flush_oob(
          this-pass object (missed rooting / use-after-GC / foreign handle). \
          Re-run with BROOD_GC_VERIFY=1 for the root→cell path.",
         age = if is_old { "old" } else { "young" },
-        space = if src_old { "old-gen (major)" } else { "nursery (minor)" },
+        space = if src_old {
+            "old-gen (major)"
+        } else {
+            "nursery (minor)"
+        },
     );
 }
 
@@ -5750,7 +5963,9 @@ fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id:
             // shared/already-copied cell resolves via the `fwd` check below
             // (handled by `flush_rt_value` on the terminal), so we only extend
             // the spine for fresh cells.
-            Value::Pair(p) if p.region() == RUNTIME && !fwd.pairs.contains_key(&(p.index() as u32)) => {
+            Value::Pair(p)
+                if p.region() == RUNTIME && !fwd.pairs.contains_key(&(p.index() as u32)) =>
+            {
                 cur_id = p;
             }
             // Nil / atom / dotted tail / shared-or-copied RUNTIME pair: flush it
@@ -5780,7 +5995,10 @@ fn flush_rt_vector(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, i
         return VecId::runtime(n as usize);
     }
     let items: Vec<Value> = old.vectors.get(id.index()).expect("rt vector").clone();
-    let copied: Vec<Value> = items.into_iter().map(|x| flush_rt_value(old, new, fwd, x)).collect();
+    let copied: Vec<Value> = items
+        .into_iter()
+        .map(|x| flush_rt_value(old, new, fwd, x))
+        .collect();
     let new_idx = new.vectors.push(copied);
     fwd.vectors.insert(key, new_idx as u32);
     VecId::runtime(new_idx)
@@ -5847,7 +6065,12 @@ fn flush_rt_map(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: 
         .collect();
     let new_data: SmallVec<[(Value, Value); 4]> = data_snapshot
         .iter()
-        .map(|&(k, v)| (flush_rt_value(old, new, fwd, k), flush_rt_value(old, new, fwd, v)))
+        .map(|&(k, v)| {
+            (
+                flush_rt_value(old, new, fwd, k),
+                flush_rt_value(old, new, fwd, v),
+            )
+        })
         .collect();
     let new_idx = new.maps.push(MapNode {
         size,
@@ -5871,7 +6094,13 @@ fn flush_rt_closure(
     if let Some(&n) = fwd.closures.get(&key) {
         return ClosureId::runtime(n as usize);
     }
-    let cl = old.closures.get(id.index()).expect("rt closure slot").get().expect("rt closure set").clone();
+    let cl = old
+        .closures
+        .get(id.index())
+        .expect("rt closure slot")
+        .get()
+        .expect("rt closure set")
+        .clone();
     // Reserve-then-fill (OnceLock) breaks cyclic closures (a closure whose captured
     // env binds the closure itself), exactly as `promote_closure` does.
     let new_idx = new.closures.push(OnceLock::new());
@@ -5887,16 +6116,21 @@ fn flush_rt_closure(
                 .map(|&(s, d)| (s, flush_rt_value(old, new, fwd, d)))
                 .collect(),
             rest: arm.rest,
-            body: arm.body.iter().map(|&f| flush_rt_value(old, new, fwd, f)).collect(),
+            body: arm
+                .body
+                .iter()
+                .map(|&f| flush_rt_value(old, new, fwd, f))
+                .collect(),
             passthrough: arm.passthrough.clone(),
         })
         .collect();
     let env = cl.env.map(|e| flush_rt_env(old, new, fwd, e));
-    let _ = new
-        .closures
-        .get(new_idx)
-        .unwrap()
-        .set(Closure { name: cl.name, arms, doc: cl.doc, env });
+    let _ = new.closures.get(new_idx).unwrap().set(Closure {
+        name: cl.name,
+        arms,
+        doc: cl.doc,
+        env,
+    });
     ClosureId::runtime(new_idx)
 }
 
@@ -5909,15 +6143,25 @@ fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env:
         return EnvId::runtime(n as usize);
     }
     let (parent, vars_snapshot): (Option<EnvId>, EnvVars) = {
-        let frame = old.envs.get(env.index()).expect("rt env slot").get().expect("rt env set");
+        let frame = old
+            .envs
+            .get(env.index())
+            .expect("rt env slot")
+            .get()
+            .expect("rt env set");
         (frame.parent, frame.vars.iter().copied().collect())
     };
     let new_idx = new.envs.push(OnceLock::new());
     fwd.envs.insert(key, new_idx as u32);
     let new_parent = parent.map(|p| flush_rt_env(old, new, fwd, p));
-    let vars: EnvVars =
-        vars_snapshot.iter().map(|&(s, v)| (s, flush_rt_value(old, new, fwd, v))).collect();
-    let _ = new.envs.get(new_idx).unwrap().set(EnvFrame { vars, parent: new_parent });
+    let vars: EnvVars = vars_snapshot
+        .iter()
+        .map(|&(s, v)| (s, flush_rt_value(old, new, fwd, v)))
+        .collect();
+    let _ = new.envs.get(new_idx).unwrap().set(EnvFrame {
+        vars,
+        parent: new_parent,
+    });
     EnvId::runtime(new_idx)
 }
 
@@ -5966,7 +6210,11 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
         if !node.data.iter().all(|&(k, v)| ok(k) && ok(v)) {
             return false;
         }
-        if !node.children.iter().all(|c| c.region() != RUNTIME || c.index() < nm) {
+        if !node
+            .children
+            .iter()
+            .all(|c| c.region() != RUNTIME || c.index() < nm)
+        {
             return false;
         }
     }
@@ -6120,12 +6368,19 @@ mod gen_handle_tests {
         let keep = envs[keep_pos];
         assert!(keep.is_old(), "frame should be tenured into the old gen");
         let high_index = keep.index();
-        assert!(high_index > 0, "kept frame should sit at a non-zero old index");
+        assert!(
+            high_index > 0,
+            "kept frame should sit at a non-zero old index"
+        );
         // Mid-bind define: store a *young* value into the tenured frame, recording
         // an old->young edge in `remembered`.
         let young = h.alloc_pair(Value::Int(1), Value::Int(2));
         h.env_define(keep, x, young);
-        assert_eq!(h.remembered.len(), 1, "the old->young edge should be remembered");
+        assert_eq!(
+            h.remembered.len(),
+            1,
+            "the old->young edge should be remembered"
+        );
         // Keep only `keep` rooted, so the upcoming major reclaims the 7 inflation
         // frames and *shrinks* the old gen below `high_index`.
         let mut roots = vec![keep];

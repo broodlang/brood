@@ -1452,7 +1452,9 @@ fn reset_units_prevents_reload_double_count() {
     interp.eval_str("(require 'test)").expect("require test");
     // Simulate a test file loaded twice into one image: two registrations.
     interp
-        .eval_str(r#"(test/reset-units!) (test/test "t" (test/is true)) (test/test "t" (test/is true))"#)
+        .eval_str(
+            r#"(test/reset-units!) (test/test "t" (test/is true)) (test/test "t" (test/is true))"#,
+        )
         .expect("register twice");
     let doubled = interp
         .eval_str("(get (test/run-tests-structured) :total)")
@@ -1486,7 +1488,10 @@ fn reset_units_prevents_reload_double_count() {
 #[test]
 fn bignum_overflow_promotes() {
     // 10^12 * 10^12 = 10^24, well past i64::MAX (~9.2*10^18).
-    assert_eq!(run("(* 1000000000000 1000000000000)"), "1000000000000000000000000");
+    assert_eq!(
+        run("(* 1000000000000 1000000000000)"),
+        "1000000000000000000000000"
+    );
     // Still an integer to the language.
     assert_eq!(run("(int? (* 1000000000000 1000000000000))"), "true");
     assert_eq!(run("(number? (* 1000000000000 1000000000000))"), "true");
@@ -1505,7 +1510,10 @@ fn bignum_demotes_when_result_fits() {
         "true"
     );
     // 2^100 / 2^100 demotes to 1.
-    assert_eq!(run("(quot (bit-shift-left 1 100) (bit-shift-left 1 100))"), "1");
+    assert_eq!(
+        run("(quot (bit-shift-left 1 100) (bit-shift-left 1 100))"),
+        "1"
+    );
 }
 
 #[test]
@@ -1515,19 +1523,28 @@ fn bignum_literal_roundtrips() {
     assert_eq!(run(lit), lit);
     assert_eq!(run(&format!("(int? {lit})")), "true");
     // Negative over-range literal.
-    assert_eq!(run("-99999999999999999999999999999"), "-99999999999999999999999999999");
+    assert_eq!(
+        run("-99999999999999999999999999999"),
+        "-99999999999999999999999999999"
+    );
 }
 
 #[test]
 fn bignum_shifts_unbounded() {
     // (bit-shift-left 1 200) is 1 followed by zeros — a 61-digit number.
     let s = run("(bit-shift-left 1 200)");
-    assert_eq!(s, "1606938044258990275541962092341162602522202993782792835301376");
+    assert_eq!(
+        s,
+        "1606938044258990275541962092341162602522202993782792835301376"
+    );
     assert_eq!(run("(bit-count (bit-shift-left 1 200))"), "1");
     assert_eq!(run("(int? (bit-shift-left 1 200))"), "true");
     // A right shift undoes it.
     assert_eq!(run("(bit-shift-right (bit-shift-left 1 200) 200)"), "1");
-    assert_eq!(run("(bit-shift-right (bit-shift-left 1 200) 100)"), run("(bit-shift-left 1 100)"));
+    assert_eq!(
+        run("(bit-shift-right (bit-shift-left 1 200) 100)"),
+        run("(bit-shift-left 1 100)")
+    );
     // Negative shift is still an error.
     assert!(fresh_interp().eval_str("(bit-shift-left 1 -1)").is_err());
 }
@@ -1544,31 +1561,58 @@ fn bignum_bitwise() {
         run("(= (bit-or (bit-shift-left 1 200) (bit-shift-left 1 100)) (+ (bit-shift-left 1 200) (bit-shift-left 1 100)))"),
         "true"
     );
-    assert_eq!(run("(bit-xor (bit-shift-left 1 200) (bit-shift-left 1 200))"), "0");
+    assert_eq!(
+        run("(bit-xor (bit-shift-left 1 200) (bit-shift-left 1 200))"),
+        "0"
+    );
 }
 
 #[test]
 fn bignum_quot_rem_mod() {
     // (quot 2^200 2^100) == 2^100.
-    assert_eq!(run("(quot (bit-shift-left 1 200) (bit-shift-left 1 100))"), run("(bit-shift-left 1 100)"));
+    assert_eq!(
+        run("(quot (bit-shift-left 1 200) (bit-shift-left 1 100))"),
+        run("(bit-shift-left 1 100)")
+    );
     // rem divides evenly here.
-    assert_eq!(run("(rem (bit-shift-left 1 200) (bit-shift-left 1 100))"), "0");
+    assert_eq!(
+        run("(rem (bit-shift-left 1 200) (bit-shift-left 1 100))"),
+        "0"
+    );
     // mod composes (prelude) over rem/+/-.
-    assert_eq!(run("(mod (+ (bit-shift-left 1 200) 7) (bit-shift-left 1 100))"), "7");
+    assert_eq!(
+        run("(mod (+ (bit-shift-left 1 200) 7) (bit-shift-left 1 100))"),
+        "7"
+    );
 }
 
 #[test]
 fn bignum_comparisons() {
     // BigInt vs Int: a big positive is greater than any i64.
-    assert_eq!(run("(> (bit-shift-left 1 200) 9223372036854775807)"), "true");
-    assert_eq!(run("(< (- 0 (bit-shift-left 1 200)) -9223372036854775808)"), "true");
+    assert_eq!(
+        run("(> (bit-shift-left 1 200) 9223372036854775807)"),
+        "true"
+    );
+    assert_eq!(
+        run("(< (- 0 (bit-shift-left 1 200)) -9223372036854775808)"),
+        "true"
+    );
     // BigInt vs BigInt.
-    assert_eq!(run("(< (bit-shift-left 1 100) (bit-shift-left 1 200))"), "true");
-    assert_eq!(run("(= (bit-shift-left 1 200) (bit-shift-left 1 200))"), "true");
+    assert_eq!(
+        run("(< (bit-shift-left 1 100) (bit-shift-left 1 200))"),
+        "true"
+    );
+    assert_eq!(
+        run("(= (bit-shift-left 1 200) (bit-shift-left 1 200))"),
+        "true"
+    );
     // Int and BigInt are never equal (disjoint ranges).
     assert_eq!(run("(= 1 (bit-shift-left 1 200))"), "false");
     // <= boundary.
-    assert_eq!(run("(<= (bit-shift-left 1 200) (bit-shift-left 1 200))"), "true");
+    assert_eq!(
+        run("(<= (bit-shift-left 1 200) (bit-shift-left 1 200))"),
+        "true"
+    );
 }
 
 #[test]
@@ -1612,7 +1656,9 @@ fn transient_equals_persistent_fold() {
     let transient = run(&format!(
         "(persistent! (reduce (fn (t i) (assoc! t i i)) (transient {{}}) (range {n})))"
     ));
-    let persistent = run(&format!("(reduce (fn (m i) (assoc m i i)) {{}} (range {n}))"));
+    let persistent = run(&format!(
+        "(reduce (fn (m i) (assoc m i i)) {{}} (range {n}))"
+    ));
     assert_eq!(transient, persistent);
     // ...and round-tripping through transient is the identity on contents.
     assert_eq!(run(&format!("(= (persistent! (reduce (fn (t i) (assoc! t i i)) (transient {{}}) (range {n}))) (reduce (fn (m i) (assoc m i i)) {{}} (range {n})))")), "true");
@@ -1645,8 +1691,14 @@ fn transient_dissoc_bang() {
 fn transient_lookups_on_live_transient() {
     // get / count / contains? work on a live transient (Clojure-style).
     assert_eq!(run("(get (assoc! (transient {}) :a 1) :a)"), "1");
-    assert_eq!(run("(get (assoc! (transient {}) :a 1) :missing :dflt)"), ":dflt");
-    assert_eq!(run("(count (assoc! (assoc! (transient {}) :a 1) :b 2))"), "2");
+    assert_eq!(
+        run("(get (assoc! (transient {}) :a 1) :missing :dflt)"),
+        ":dflt"
+    );
+    assert_eq!(
+        run("(count (assoc! (assoc! (transient {}) :a 1) :b 2))"),
+        "2"
+    );
     assert_eq!(run("(contains? (assoc! (transient {}) :a 1) :a)"), "true");
     assert_eq!(run("(contains? (assoc! (transient {}) :a 1) :b)"), "false");
 }
@@ -1754,7 +1806,9 @@ fn ics_never_bypass_a_dynamic_binding() {
 #[test]
 fn prim1_guard_sees_redefinition() {
     let mut interp = fresh_interp();
-    interp.eval_str("(def use-first (fn [xs] (first xs)))").unwrap();
+    interp
+        .eval_str("(def use-first (fn [xs] (first xs)))")
+        .unwrap();
     let v = interp.eval_str("(use-first (list 1 2))").unwrap();
     assert_eq!(interp.print(v), "1");
     interp.eval_str("(def first (fn [x] :redefined))").unwrap();
@@ -1787,9 +1841,15 @@ fn letrec_self_recursion_accumulates() {
 fn defseq_ops_run_correctly() {
     assert_eq!(run("(map inc (range 5))"), "(1 2 3 4 5)");
     assert_eq!(run("(filter even? (range 10))"), "(0 2 4 6 8)");
-    assert_eq!(run("(mapcat (fn (x) (list x x)) (range 3))"), "(0 0 1 1 2 2)");
+    assert_eq!(
+        run("(mapcat (fn (x) (list x x)) (range 3))"),
+        "(0 0 1 1 2 2)"
+    );
     assert_eq!(run("(remove even? (range 6))"), "(1 3 5)");
-    assert_eq!(run("(keep (fn (x) (if (even? x) (* x 10) nil)) (range 6))"), "(0 20 40)");
+    assert_eq!(
+        run("(keep (fn (x) (if (even? x) (* x 10) nil)) (range 6))"),
+        "(0 20 40)"
+    );
 }
 
 /// Each call builds a *fresh* self-recursive closure with its own captured env;

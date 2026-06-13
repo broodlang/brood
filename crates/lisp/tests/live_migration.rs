@@ -68,7 +68,9 @@ fn deep_receive_continuations_resume_correctly_across_workers() {
     // correctness every burst. A wrong total = a lost/corrupted continuation.
     let mut migrated = false;
     for _ in 0..40 {
-        let v = interp.eval_str(&format!("(burst {})", k)).expect("burst errored");
+        let v = interp
+            .eval_str(&format!("(burst {})", k))
+            .expect("burst errored");
         let got = interp.print(v);
         assert_eq!(
             got,

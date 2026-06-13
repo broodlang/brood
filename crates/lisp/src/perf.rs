@@ -128,10 +128,14 @@ pub fn dump_if_requested() {
 #[macro_export]
 macro_rules! perf_bump {
     ($field:ident) => {
-        $crate::perf::C.$field.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
+        $crate::perf::C
+            .$field
+            .fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
     };
     ($field:ident, $n:expr) => {
-        $crate::perf::C.$field.fetch_add($n as u64, ::std::sync::atomic::Ordering::Relaxed)
+        $crate::perf::C
+            .$field
+            .fetch_add($n as u64, ::std::sync::atomic::Ordering::Relaxed)
     };
 }
 

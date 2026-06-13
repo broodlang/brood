@@ -68,7 +68,9 @@ fn idle_worker_steals_fresh_backlog_under_load() {
 
         (drive 60 500)
     "#;
-    let v = interp.eval_str(prog).expect("work-stealing program errored");
+    let v = interp
+        .eval_str(prog)
+        .expect("work-stealing program errored");
     let outcome = interp.print(v);
 
     // Correctness holds unconditionally — even on a single-core fallback (pool of
@@ -83,7 +85,8 @@ fn idle_worker_steals_fresh_backlog_under_load() {
     // bound. (Skipped on a 1-worker fallback, where stealing is impossible.)
     if process::worker_threads() >= 2 {
         assert_eq!(
-            outcome, ":stole",
+            outcome,
+            ":stole",
             "the work-stealing path never fired across 60 bursts of 500 processes \
              (worker_threads = {}) — it appears dead",
             process::worker_threads(),

@@ -169,11 +169,7 @@ fn parse_arrow(heap: &Heap, items: &[Value], pos: usize) -> Option<Sig> {
 /// Parse a type-expression form into a [`SigTerm`], tracking type-variable
 /// assignments in `vars` (variable name → sequential index). Every `?`-prefixed
 /// symbol that hasn't been seen before gets the next index.
-fn parse_type_term(
-    heap: &Heap,
-    form: Value,
-    vars: &mut HashMap<String, u32>,
-) -> Option<SigTerm> {
+fn parse_type_term(heap: &Heap, form: Value, vars: &mut HashMap<String, u32>) -> Option<SigTerm> {
     match form {
         Value::Sym(s) => {
             let name = value::symbol_name(s);
@@ -249,10 +245,7 @@ fn parse_arrow_with_vars(
 /// least one type variable (`?A`, `?B` …), return `(name, sig_with_vars)`.
 /// Returns `None` for non-`sig` forms, non-arrow type-exprs, or arrows with
 /// no variables — the plain [`parse_sig_decl`] path handles those.
-pub(super) fn parse_sig_decl_with_vars(
-    heap: &Heap,
-    form: Value,
-) -> Option<(Symbol, SigWithVars)> {
+pub(super) fn parse_sig_decl_with_vars(heap: &Heap, form: Value) -> Option<(Symbol, SigWithVars)> {
     let items = list_items(heap, form)?;
     if items.len() != 3 {
         return None;

@@ -20,12 +20,18 @@ fn warns_with_position_and_message_on_a_bad_form() {
     let bad = r#"(check-string-structured "(map cons (list 1 2 3))")"#;
     assert_eq!(out(&format!("(count {bad})")), "1");
     assert_eq!(out(&format!("(get (first {bad}) :line)")), "1");
-    assert_eq!(out(&format!("(string? (get (first {bad}) :message))")), "true");
+    assert_eq!(
+        out(&format!("(string? (get (first {bad}) :message))")),
+        "true"
+    );
 }
 
 #[test]
 fn empty_on_clean_unparsable_or_empty_source() {
-    assert_eq!(out(r#"(empty? (check-string-structured "(def x 1)"))"#), "true");
+    assert_eq!(
+        out(r#"(empty? (check-string-structured "(def x 1)"))"#),
+        "true"
+    );
     // incomplete input (mid-edit) — no diagnostics rather than an error
     assert_eq!(out(r#"(empty? (check-string-structured "("))"#), "true");
     assert_eq!(out(r#"(empty? (check-string-structured ""))"#), "true");

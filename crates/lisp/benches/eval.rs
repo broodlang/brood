@@ -105,7 +105,9 @@ fn reduce_range(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     // and VM-compiles, so the Vm row shows a clear speedup over the Tw row
     // (~65–67% faster measured at the time of routing).
     let src = format!("(defn rf (a x) (+ a (* x 2))) (reduce rf 0 (range {n}))");
-    bencher.with_inputs(|| interp_on(eng)).bench_refs(|interp| interp.eval_str(&src).unwrap());
+    bencher
+        .with_inputs(|| interp_on(eng))
+        .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
 /// A `(try … (catch e …))` body — the `try` macro wraps the body in a LOCAL
@@ -122,7 +124,9 @@ fn try_body(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
         "(defn acc-sum (n acc) (if (= n 0) acc (acc-sum (- n 1) (+ acc n)))) \
          (try (acc-sum {n} 0) (catch _ -1))"
     );
-    bencher.with_inputs(|| interp_on(eng)).bench_refs(|interp| interp.eval_str(&src).unwrap());
+    bencher
+        .with_inputs(|| interp_on(eng))
+        .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
 /// `(apply f …)`-driven tail recursion. The VM's `dispatch` now unfolds `apply`
@@ -132,10 +136,11 @@ fn try_body(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 /// fallback path only. The Vm row should be clearly faster than Tw.
 #[divan::bench(args = engine_grid![10_000, 100_000])]
 fn apply_driven(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
-    let src = format!(
-        "(def loop- (fn (n) (if (= n 0) :done (apply loop- (list (- n 1)))))) (loop- {n})"
-    );
-    bencher.with_inputs(|| interp_on(eng)).bench_refs(|interp| interp.eval_str(&src).unwrap());
+    let src =
+        format!("(def loop- (fn (n) (if (= n 0) :done (apply loop- (list (- n 1)))))) (loop- {n})");
+    bencher
+        .with_inputs(|| interp_on(eng))
+        .bench_refs(|interp| interp.eval_str(&src).unwrap());
 }
 
 /// Naive (non-tail) recursive Fibonacci — exercises function-call overhead and

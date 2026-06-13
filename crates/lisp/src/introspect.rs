@@ -176,8 +176,8 @@ pub fn resolve_in_source(interp: &mut Interp, src: &str, name: &str) -> String {
     let resolved = (|| -> Option<String> {
         let forms = ns_context_forms(&mut interp.heap, src)?;
         macros::file_ns(&interp.heap, &forms)?; // not namespaced → leave bare
-        // Mirror the loader (lib.rs eval_str/eval_source): reset, eval the header
-        // so its `%in-ns`/`%refer` set compile_ns + imports, resolve, restore.
+                                                // Mirror the loader (lib.rs eval_str/eval_source): reset, eval the header
+                                                // so its `%in-ns`/`%refer` set compile_ns + imports, resolve, restore.
         let prev_ns = interp.heap.set_compile_ns(None);
         let known = macros::scan_def_names(&interp.heap, &forms);
         let prev_known = interp.heap.set_ns_known_names(known);
@@ -570,8 +570,14 @@ pub fn call_form(fn_name: &str, string_args: &[&str]) -> String {
 /// least the prelude), never panics. The policy lives in Brood; this is the
 /// thin typed seam Rust callers reach it through.
 pub fn load_tooling_image(interp: &mut Interp, root: &str) -> Result<(), String> {
-    let code = format!("(require 'project) {}", call_form("project/setup-tooling-image", &[root]));
-    interp.eval_str(&code).map(|_| ()).map_err(|e| e.to_string())
+    let code = format!(
+        "(require 'project) {}",
+        call_form("project/setup-tooling-image", &[root])
+    );
+    interp
+        .eval_str(&code)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -601,7 +607,10 @@ mod tests {
         // already qualified → unchanged
         assert_eq!(resolve_in_source(&mut interp, src, "set/conj"), "set/conj");
         // a root (unnamespaced) file qualifies nothing
-        assert_eq!(resolve_in_source(&mut interp, "(defn baz (x) x)", "baz"), "baz");
+        assert_eq!(
+            resolve_in_source(&mut interp, "(defn baz (x) x)", "baz"),
+            "baz"
+        );
     }
 
     /// Resolving a never-seen identifier must not grow the interner (kernel
@@ -649,8 +658,14 @@ mod tests {
         );
 
         // A real global still resolves through each gated helper.
-        assert!(signature(&mut interp, "map").0.is_some(), "map has a signature");
-        assert!(arglist_tokens(&mut interp, "map").is_some(), "map has an arglist");
+        assert!(
+            signature(&mut interp, "map").0.is_some(),
+            "map has a signature"
+        );
+        assert!(
+            arglist_tokens(&mut interp, "map").is_some(),
+            "map has an arglist"
+        );
     }
 
     /// The interned-name check must run *after* the header eval, not before:

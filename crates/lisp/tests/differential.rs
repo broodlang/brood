@@ -211,18 +211,30 @@ fn engines_agree_on_corpus() {
 fn vm_defers_unexpanded_forward_referenced_macro() {
     // forward ref: `fwm` defined after `uf` → must defer, still produce 21.
     assert_eq!(
-        eval_on("(defn uf (n) (fwm n)) (defmacro fwm (x) `(* ~x 3)) (uf 7)", true),
+        eval_on(
+            "(defn uf (n) (fwm n)) (defmacro fwm (x) `(* ~x 3)) (uf 7)",
+            true
+        ),
         Ok("21".to_string()),
     );
     // a forward macro whose argument is itself macro syntax (the `~`-pin shape that
     // produced the original "unbound unquote").
     assert_eq!(
-        eval_on("(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)", true),
-        eval_on("(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)", false),
+        eval_on(
+            "(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)",
+            true
+        ),
+        eval_on(
+            "(defn uw (n) (pm (~n))) (defmacro pm (x) `(quote ~x)) (uw 9)",
+            false
+        ),
     );
     // a macro defined *before* still VM-compiles (we didn't over-defer).
     assert_eq!(
-        eval_on("(defmacro em (x) `(+ ~x 1)) (defn ue (n) (em n)) (ue 41)", true),
+        eval_on(
+            "(defmacro em (x) `(+ ~x 1)) (defn ue (n) (em n)) (ue 41)",
+            true
+        ),
         Ok("42".to_string()),
     );
 }

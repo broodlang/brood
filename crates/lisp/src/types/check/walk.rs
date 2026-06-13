@@ -260,7 +260,10 @@ pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
             // later fixed-arity `(sig …)` declaration isn't misread as an exact
             // arity for a variadic callee (a false positive). A sig that itself
             // declares a `&` rest type is fine — it yields `Arity::at_least`.
-            if items.get(2).is_some_and(|&v| def_value_is_variadic(heap, v)) {
+            if items
+                .get(2)
+                .is_some_and(|&v| def_value_is_variadic(heap, v))
+            {
                 ctx.mark_variadic_global(name);
             }
         }

@@ -11,6 +11,77 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started
 
 ---
 
+## Findings from brood-life profiling (2026-06-13)
+
+Two runtime-level issues surfaced while optimising `brood-life` (a GUI Game of
+Life whose per-frame hot spot is rebuilding a ~3.6k-entry colour map). Both are
+in the **allocation / GC** layer and gate real perf work; measured against the
+session `nest` (12 scheduler workers).
+
+- ⬜ **[ACTION] Go over the full brood-life language feedback** —
+  [`brood-life-feedback-2026-06-13.md`](brood-life-feedback-2026-06-13.md) is a
+  broader four-axis review from the test-bed (performance, code style, features,
+  abstractions + types), beyond the two GC items below. **Triage it into roadmap
+  items**, deciding accept / defer / reject per proposal. Headlines to rule on:
+  a **`defrecord` prelude macro + per-field `sig`** (its top cross-axis pick —
+  kills the `(get m :key)` tax, names state, makes map-key typos catchable);
+  `{:keys […]}` map destructuring; a `clamp`/`as->` prelude add; the
+  `read-string`/`eval` silent trailing-form drop; an atomic file `append`
+  primitive; **parallel allocation off the global lock** (the deepest perf
+  ceiling, flagged below, with *no design doc yet*); JIT-default-on + float
+  specialisation. The doc also flags **stale docs** to sweep (`transients.md`,
+  `spec.md §11`, `value-repr.md` byte count). Each accepted item graduates into
+  its own ✅/🟡/⬜ entry here.
+
+- ⬜ **[HIGH] GC: transient maps corrupt when the build allocates** — a
+  `transient`/`assoc!`/`persistent!` build whose per-entry **value expression
+  allocates** panics nondeterministically with `index out of bounds: the len is
+  0 but the index is N` (N varies run to run). Minimal standalone repro:
+
+  ```lisp
+  ;; PANICS (value `(into [] …)` allocates → GC fires mid-build):
+  (persistent! (reduce (fn (t i) (assoc! t i (into [] (range (mod i 12)))))
+                 (transient {}) (range 8000)))
+  ;; FINE (value doesn't allocate):
+  (persistent! (reduce (fn (t i) (assoc! t i (+ i 1))) (transient {}) (range 8000)))
+  ```
+
+  Storing precomputed / constant / non-allocating values is always safe; only a
+  value whose *computation* allocates (triggering a collection while the
+  transient is live) corrupts it. Diagnosis: the in-progress transient's mutable
+  node buffer is not a scannable GC root (or isn't rewritten under compaction),
+  so a collection frees/moves it → use-after-GC → the OOB. Same class as the two
+  fixed `[HIGH]` entries below (`remembered`-set rewrite, live-arm before
+  `push_frame`); `BROOD_GC_VERIFY=1` + the per-deref tripwire should localise it.
+  **Impact:** blocks transients for their advertised "~order-of-magnitude cheaper
+  map building" — any real build computes allocating values — which would roughly
+  halve `brood-life`'s `recolor` (the dominant frame cost).
+
+- ⬜ **[perf] Allocation serialises across green processes (no multicore for
+  allocation-bound work)** — CPU-bound *non-allocating* work parallelises
+  (partially); *allocation-heavy* work does not at all. Clean scaling, each task
+  a fresh spawned process with its own heap (so not the caller's heap size):
+
+  | parallel tasks | pure compute (no alloc) | alloc-heavy (build a 3.6k map) |
+  |---|---|---|
+  | 1 | 156 ms | 52 ms |
+  | 2 | 217 ms (1.4×) | 104 ms (2.0×) |
+  | 4 | 342 ms (2.2×) | 200 ms (3.9×) |
+  | 8 | 615 ms (4.0×) | 421 ms (**8.1×**) |
+
+  Eight allocation-heavy processes take 8× one — perfectly serial, zero speedup —
+  while eight compute-only processes get ~2×. Diagnosis: a global lock on the
+  allocation / collection path serialises every process whenever it allocates, so
+  the M:N scheduler (and ADR-100 work-stealing / precise mid-eval GC) delivers no
+  parallelism for the allocation-bound workloads that are most real Brood code.
+  **Impact:** two-process designs get no throughput overlap — e.g. `brood-life`'s
+  SIM (`recolor`) and RENDERER (`render`) are both allocation-bound, so splitting
+  them across processes (ADR-058) buys responsiveness but **not** frame-time
+  (pipelining them was a measured no-op). Investigate per-process/thread-local
+  allocation off the global lock, or a concurrent collector.
+
+---
+
 ## Kernel audit follow-ups (2026-06-03)
 
 From the kernel review in [`kernel-audit-2026-06-03.md`](kernel-audit-2026-06-03.md).

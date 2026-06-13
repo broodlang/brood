@@ -31,12 +31,12 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
-use crate::process::keywords as pk;
 use crate::error::LispError;
+use crate::process::keywords as pk;
 
+use super::links;
 use super::mailbox::{wake_parked, Mailbox, REGISTRY, ST_RUNNABLE, ST_RUNNING};
 use super::message::Message;
-use super::links;
 use super::monitor;
 
 /// A green process (ADR-100 §8.4 — state capture, corosensei removed): its own `Heap`,
@@ -194,7 +194,6 @@ impl Drop for MacroBlockGuard {
         MACRO_BLOCK.with(|d| d.set(d.get().saturating_sub(1)));
     }
 }
-
 
 /// RAII guard: increments `GC_BLOCK` on construction, decrements on `Drop`.
 /// Acquired at the top of every `eval` call and every `macroexpand_all` call —
@@ -501,8 +500,7 @@ impl Drop for DirtyBlockGuard {
 fn drain_worker_queue(wid: usize) {
     // Every queued process is stranded on this dirty worker (it won't return to its run
     // loop) and is migratable (no native stack), so re-route them all off it.
-    let stranded: Vec<Box<Process>> =
-        crate::core::sync::lock(&WORKERS[wid].0).drain(..).collect();
+    let stranded: Vec<Box<Process>> = crate::core::sync::lock(&WORKERS[wid].0).drain(..).collect();
     // These left a queue without going through `run_one` (the usual decrement site), so
     // account for the removal here; the `enqueue` below re-adds one each. Net zero — the
     // `STEALABLE` count stays equal to the processes actually sitting in queues.
@@ -865,8 +863,8 @@ pub fn exit(pid: u64, reason: Message) {
 pub(super) fn enqueue(proc: Box<Process>) {
     let wid = proc.worker_id;
     proc.mailbox.status.store(ST_RUNNABLE, Ordering::Relaxed); // queued, awaiting a worker turn
-    // Count it as stealable runnable work (the `try_steal` fast-path hint). Balanced by
-    // the single decrement in `run_one` when it's pulled to run (by its owner or a thief).
+                                                               // Count it as stealable runnable work (the `try_steal` fast-path hint). Balanced by
+                                                               // the single decrement in `run_one` when it's pulled to run (by its owner or a thief).
     STEALABLE.fetch_add(1, Ordering::Relaxed);
     let (lock, cv) = &WORKERS[wid];
     crate::core::sync::lock(lock).push_back(proc);
@@ -1118,7 +1116,10 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
         // wake, so the process may migrate (`wake_enqueue`).
         drop(st);
         wake_enqueue(proc);
-    } else if st.recv_deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+    } else if st
+        .recv_deadline
+        .is_some_and(|d| std::time::Instant::now() >= d)
+    {
         // The receive deadline elapsed inside the suspend→park window: the timer fired
         // before we got here, found no `waiter`, and consumed its (current-gen) entry, so
         // parking now would hang forever (nothing left to wake us). Re-queue instead — the
@@ -1188,8 +1189,12 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     // Inherit a snapshot of the spawner's capture stack (the same `Arc`s), so a
     // child of an MCP-watchdog'd handler still diverts its output off the JSON-RPC
     // channel. An empty stack (the common case) clones to an empty `Vec`.
-    let inherited_capture =
-        CURRENT.with(|c| c.borrow().as_ref().map(|ctx| ctx.capture.clone()).unwrap_or_default());
+    let inherited_capture = CURRENT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|ctx| ctx.capture.clone())
+            .unwrap_or_default()
+    });
     // Promote the thunk into the shared RUNTIME region so its handle (and any
     // captured local scope) is valid in the child, which shares this runtime's
     // code via the Arcs below. A top-level function is already shared (no-op).
@@ -1233,7 +1238,6 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     Ok(pid)
 }
 
-
 /// `(self)` — this process's pid.
 pub fn self_pid() -> u64 {
     ensure_ctx().pid
@@ -1269,7 +1273,11 @@ pub(super) fn ensure_ctx() -> Ctx {
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let mailbox = Mailbox::new();
         crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
-        let ctx = Ctx { pid, mailbox, capture: Vec::new() };
+        let ctx = Ctx {
+            pid,
+            mailbox,
+            capture: Vec::new(),
+        };
         *c.borrow_mut() = Some(ctx.clone());
         ctx
     })
@@ -1307,11 +1315,13 @@ pub fn take_capture() -> Option<String> {
 /// — no capture — is a thread-local borrow + a `Vec::last` check; the `print` hot
 /// path pays no lock unless capturing.
 pub fn capture_append(s: &str) -> bool {
-    CURRENT.with(|c| match c.borrow().as_ref().and_then(|ctx| ctx.capture.last()) {
-        Some(arc) => {
-            crate::core::sync::lock(arc).push_str(s);
-            true
-        }
-        None => false,
-    })
+    CURRENT.with(
+        |c| match c.borrow().as_ref().and_then(|ctx| ctx.capture.last()) {
+            Some(arc) => {
+                crate::core::sync::lock(arc).push_str(s);
+                true
+            }
+            None => false,
+        },
+    )
 }

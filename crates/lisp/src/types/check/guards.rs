@@ -130,8 +130,8 @@ pub(super) fn guard_assertion(heap: &Heap, test: Value, ctx: &Ctx) -> Option<Gua
     // pre-expanded as `%eq` calls when arities are 2, so we only need to
     // recognise the primitive shape.
     if items.len() == 3 && head_name == kw::EQ_PRIM {
-        if let Some((sym, ty)) = literal_eq_guard(items[1], items[2])
-            .or_else(|| literal_eq_guard(items[2], items[1]))
+        if let Some((sym, ty)) =
+            literal_eq_guard(items[1], items[2]).or_else(|| literal_eq_guard(items[2], items[1]))
         {
             // **`then_only`:** `(%eq m lit)` being true proves `m` has `lit`'s
             // tag, but being *false* proves nothing about the tag — `m ≠ "x"`
@@ -258,10 +258,8 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         // Type-variable sig: resolve the return type from arg types
                         // (e.g. `(sig identity (?A -> ?A))` → result = arg type).
                         if let Some(sv) = ctx.declared_sig_with_vars(s) {
-                            let arg_tys: Vec<Option<Ty>> = items[1..]
-                                .iter()
-                                .map(|&a| expr_ty(heap, a, ctx))
-                                .collect();
+                            let arg_tys: Vec<Option<Ty>> =
+                                items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                             return Some(sv.resolve_ret(&arg_tys));
                         }
                         if let Some(sg) = ctx.declared_sig(s) {

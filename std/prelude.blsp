@@ -601,19 +601,24 @@ can.)"
 ;; immutable (ADR-026). The builders fold with the 3-arg kernel `map-assoc` (no
 ;; per-step rest-list, unlike variadic `assoc`).
 
-(defn merge--into (acc m) (if (nil? m) acc (reduce-kv map-assoc acc m)))
+;; Built through one transient (assoc! mutates owned nodes in place) instead of
+;; folding immutable `map-assoc` — same result, but no path-copy per entry. The
+;; transient is read-through (`contains?`/`get` dispatch to it), so merge-with's
+;; running combine sees prior entries.
+(defn merge--into! (t m) (if (nil? m) t (reduce-kv assoc! t m)))
 (defn merge (& maps)
   "A single map combining the given maps left to right; on a duplicate key the rightmost map wins. `nil` maps are skipped, so `(merge)` is `{}`."
-  (fold merge--into {} maps))
+  (persistent! (fold merge--into! (transient {}) maps)))
 
 ;; merge-with: on a shared key, combine with `(f existing new)` instead of replacing.
-(defn merge-with--step (f a k v)
-  (if (contains? a k) (map-assoc a k (f (get a k) v)) (map-assoc a k v)))
+(defn merge-with--step! (f t k v)
+  (if (contains? t k) (assoc! t k (f (get t k) v)) (assoc! t k v)))
 (defn merge-with (f & maps)
   "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped."
-  (fold (fn (acc m) (if (nil? m) acc (reduce-kv (fn (a k v) (merge-with--step f a k v)) acc m)))
-    {}
-    maps))
+  (persistent!
+    (fold (fn (t m) (if (nil? m) t (reduce-kv (fn (a k v) (merge-with--step! f a k v)) t m)))
+      (transient {})
+      maps)))
 
 (defn update (coll k f & args)
   "A collection like `coll` with the value at key/index `k` replaced by
@@ -623,10 +628,10 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 
 (defn update-vals (m f)
   "A map like `m` with `f` applied to every value."
-  (reduce-kv (fn (acc k v) (map-assoc acc k (f v))) {} m))
+  (persistent! (reduce-kv (fn (acc k v) (assoc! acc k (f v))) (transient {}) m)))
 (defn update-keys (m f)
   "A map like `m` with `f` applied to every key (later keys win on a collision)."
-  (reduce-kv (fn (acc k v) (map-assoc acc (f k) v)) {} m))
+  (persistent! (reduce-kv (fn (acc k v) (assoc! acc (f k) v)) (transient {}) m)))
 
 (defn select-keys (m ks)
   "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."
@@ -635,14 +640,15 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
   ;; stored value (used directly); only when that value happens to equal the
   ;; first sentinel do we disambiguate present-vs-absent with a second sentinel,
   ;; so a key stored with `nil`/`false` is still kept (contains?'s guarantee).
-  (fold (fn (acc k)
-          (let (v (map-get m k :%select-miss-a))
-            (if (= v :%select-miss-a)
-              (let (v2 (map-get m k :%select-miss-b))
-                (if (= v2 :%select-miss-b) acc (map-assoc acc k v2)))
-              (map-assoc acc k v))))
-    {}
-    ks))
+  (persistent!
+    (fold (fn (acc k)
+            (let (v (map-get m k :%select-miss-a))
+              (if (= v :%select-miss-a)
+                (let (v2 (map-get m k :%select-miss-b))
+                  (if (= v2 :%select-miss-b) acc (assoc! acc k v2)))
+                (assoc! acc k v))))
+      (transient {})
+      ks)))
 
 (defn zipmap (ks vs)
   "A map pairing each key in `ks` with the value at the same position in `vs`, stopping at the shorter."

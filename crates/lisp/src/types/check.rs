@@ -516,7 +516,8 @@ mod tests {
         // An unparseable type-expr is dropped — never a false signal.
         let w = file_warnings("(sig k (bogus -> int))\n(defn k (x) x)\n(k \"s\")");
         assert!(
-            w.iter().all(|m| !m.contains("k:") || !m.contains("argument")),
+            w.iter()
+                .all(|m| !m.contains("k:") || !m.contains("argument")),
             "an unrecognised type-expr must be ignored, not guessed: {w:?}"
         );
     }
@@ -543,8 +544,7 @@ mod tests {
             "&rest variadic defn must not get a false arity warning: {w:?}"
         );
         // A multi-arity fn with a variadic arm is likewise variadic.
-        let w =
-            file_warnings("(sig h (int -> int))\n(defn h ((x) x) ((x & ys) x))\n(h 1 2 3)");
+        let w = file_warnings("(sig h (int -> int))\n(defn h ((x) x) ((x & ys) x))\n(h 1 2 3)");
         assert!(
             w.iter()
                 .all(|m| !(m.contains("h:") && m.contains("number of arguments"))),
@@ -562,8 +562,9 @@ mod tests {
     #[test]
     fn dead_clause_flagged_for_a_sig_typed_param() {
         // A `match` literal pattern that can't match the parameter's declared type.
-        let w =
-            file_warnings("(sig f (int -> keyword))\n(defn f (n) (match n (\"hi\" :s) (_ :other)))");
+        let w = file_warnings(
+            "(sig f (int -> keyword))\n(defn f (n) (match n (\"hi\" :s) (_ :other)))",
+        );
         assert!(
             w.iter()
                 .any(|m| m.contains("unreachable clause") && m.contains("int")),
@@ -695,10 +696,7 @@ mod tests {
     fn map_kv_refinement_flows_through_checker() {
         // (sig f ((map keyword int) -> int)): the get result is int | nil.
         // Feeding that to string-length should warn.
-        let w = check_with_defs(
-            &["(defn f (m) (get m :k))"],
-            "(string-length (f {:a 1}))",
-        );
+        let w = check_with_defs(&["(defn f (m) (get m :k))"], "(string-length (f {:a 1}))");
         // Without the sig the result type is unknown → no warning — so we need
         // the sig to be declared. Use file_warnings to get the sig parsed.
         let src = "
@@ -727,13 +725,14 @@ mod tests {
 
         // Correct uses stay silent.
         for ok in [
-            "(get {:a 1} :a)",  // any map get — flat result, no warning
+            "(get {:a 1} :a)", // any map get — flat result, no warning
             "(keys {:a 1})",
             "(vals {:a 1})",
         ] {
             assert!(
                 warnings(ok).iter().all(|w| !w.contains("expects")),
-                "{ok} should be silent: {:?}", warnings(ok)
+                "{ok} should be silent: {:?}",
+                warnings(ok)
             );
         }
     }
@@ -880,7 +879,8 @@ mod tests {
         // The param type is also inferred: `y` at number position → x : number.
         let w = check_with_defs(&["(defn double (x) (let (y x) (* y 2)))"], "(double :k)");
         assert!(
-            w.iter().any(|s| s.contains("double") && s.contains("number")),
+            w.iter()
+                .any(|s| s.contains("double") && s.contains("number")),
             "let-alias: param type should propagate from callee: {:?}",
             w
         );
@@ -1274,7 +1274,9 @@ mod tests {
         // The single-form path (REPL / `(check 'form)`) stays lenient: a free
         // operand variable is ambiguous, not provably unbound — only call *heads*
         // are flagged there. (Guards the no-false-positives rule for fragments.)
-        assert!(warnings("(first xs)").iter().all(|m| !m.contains("unbound")));
+        assert!(warnings("(first xs)")
+            .iter()
+            .all(|m| !m.contains("unbound")));
         assert!(warnings("(+ 1 foo)").iter().all(|m| !m.contains("unbound")));
         assert!(warnings("(let (x bar) (first x))")
             .iter()
@@ -1302,9 +1304,11 @@ mod tests {
     #[test]
     fn function_as_value_lint_is_quiet_on_the_correct_and_legitimate_shapes() {
         // Called correctly — no warning.
-        assert!(check_with_defs(&["(defn home () \"\\e[H\")"], "(print (home))")
-            .iter()
-            .all(|m| !m.contains("function used as a value")));
+        assert!(
+            check_with_defs(&["(defn home () \"\\e[H\")"], "(print (home))")
+                .iter()
+                .all(|m| !m.contains("function used as a value"))
+        );
         // A fn that *takes* arguments is a plausible intentional callback value.
         assert!(check_with_defs(&["(defn f (x) x)"], "(print f)")
             .iter()
@@ -1609,7 +1613,8 @@ mod tests {
         );
         let w = warnings("(fold inc 0 nil)");
         assert!(
-            w.iter().any(|s| s.contains("fold") && s.contains("callback")),
+            w.iter()
+                .any(|s| s.contains("fold") && s.contains("callback")),
             "fold should flag a 1-arg callback (inc): {w:?}"
         );
         // A correct 2-arg callback is silent.
@@ -1708,7 +1713,8 @@ mod tests {
         // not be flagged — the `and` guard narrows `m` to a vector (→ never here).
         let w = warnings_expanded("(match (list 1 2) ([a b] :vec) (_ :not-vec))");
         assert!(
-            w.iter().all(|s| !s.contains("vector-ref") && !s.contains("vector-length")),
+            w.iter()
+                .all(|s| !s.contains("vector-ref") && !s.contains("vector-length")),
             "a list matched against a vector pattern must not warn: {w:?}"
         );
     }
@@ -1922,26 +1928,48 @@ mod soundness_oracle {
         // extractors, higher-order results) — where an under-approximation hides.
         let cases = [
             // literals
-            "5", "3.0", "\"hi\"", ":k", "true", "false", "nil",
+            "5",
+            "3.0",
+            "\"hi\"",
+            ":k",
+            "true",
+            "false",
+            "nil",
             // vector literals (element union)
-            "[1 2 3]", "[1 \"a\" :k]", "[]",
+            "[1 2 3]",
+            "[1 \"a\" :k]",
+            "[]",
             // quote
-            "(quote sym)", "(quote (1 2 3))",
+            "(quote sym)",
+            "(quote (1 2 3))",
             // primitive results
-            "(string-length \"hi\")", "(+ 1 2)", "(- 10 3 2)", "(* 2 3)",
-            "(< 1 2)", "(<= 1 1)", "(string->number \"5\")",
+            "(string-length \"hi\")",
+            "(+ 1 2)",
+            "(- 10 3 2)",
+            "(* 2 3)",
+            "(< 1 2)",
+            "(<= 1 1)",
+            "(string->number \"5\")",
             // sequence constructors / extractors
-            "(list 1 2 3)", "(vector 1 2 3)",
-            "(first [1 2 3])", "(last [1 2 3])", "(nth [10 20 30] 1)", "(first [])",
+            "(list 1 2 3)",
+            "(vector 1 2 3)",
+            "(first [1 2 3])",
+            "(last [1 2 3])",
+            "(nth [10 20 30] 1)",
+            "(first [])",
             // higher-order results (parametric — ADR-078)
-            "(map inc [1 2 3])", "(filter even? [1 2 3 4])",
-            "(reduce + 0 [1 2 3])", "(fold (fn (a x) (+ a x)) 0 [1 2 3])",
+            "(map inc [1 2 3])",
+            "(filter even? [1 2 3 4])",
+            "(reduce + 0 [1 2 3])",
+            "(fold (fn (a x) (+ a x)) 0 [1 2 3])",
             "(map (fn (x) (+ x 1)) [1 2 3])",
             // empty / all-filtered results evaluate to `nil` — these exercise the
             // `… | nil` widening in `list_result`; drop it and the oracle bites.
-            "(map inc [])", "(filter (fn (x) false) [1 2 3])",
+            "(map inc [])",
+            "(filter (fn (x) false) [1 2 3])",
             // nested
-            "(first (map inc [1 2 3]))", "(reduce + 0 (map inc [1 2 3]))",
+            "(first (map inc [1 2 3]))",
+            "(reduce + 0 (map inc [1 2 3]))",
         ];
         for src in cases {
             let mut interp = crate::Interp::new();

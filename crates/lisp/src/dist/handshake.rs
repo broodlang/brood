@@ -347,17 +347,32 @@ mod tests {
         assert_eq!(b_my_mac, a_expects_b_mac, "B's mac must verify on A");
 
         // A different cookie produces a different MAC (integrity).
-        assert_ne!(a_my_mac, compute_mac("other", &nonce_b, &eph_b, b, a, addr_a, &eph_a));
+        assert_ne!(
+            a_my_mac,
+            compute_mac("other", &nonce_b, &eph_b, b, a, addr_a, &eph_a)
+        );
         // A different peer nonce produces a different MAC (replay defence).
-        assert_ne!(a_my_mac, compute_mac(cookie, &[3u8; NONCE_LEN], &eph_b, b, a, addr_a, &eph_a));
+        assert_ne!(
+            a_my_mac,
+            compute_mac(cookie, &[3u8; NONCE_LEN], &eph_b, b, a, addr_a, &eph_a)
+        );
         // A tampered advertised address produces a different MAC, so a MitM
         // can't rewrite where peers will later dial us (ADR-088).
-        assert_ne!(a_my_mac, compute_mac(cookie, &nonce_b, &eph_b, b, a, "tcp:evil:6666", &eph_a));
+        assert_ne!(
+            a_my_mac,
+            compute_mac(cookie, &nonce_b, &eph_b, b, a, "tcp:evil:6666", &eph_a)
+        );
         // A swapped *peer* ephemeral pubkey produces a different MAC, so a MitM
         // can't substitute its own DH key (ADR-089) — the Auth check would fail.
-        assert_ne!(a_my_mac, compute_mac(cookie, &nonce_b, &[99u8; EPH_PUB_LEN], b, a, addr_a, &eph_a));
+        assert_ne!(
+            a_my_mac,
+            compute_mac(cookie, &nonce_b, &[99u8; EPH_PUB_LEN], b, a, addr_a, &eph_a)
+        );
         // A swapped *own* ephemeral pubkey also changes the MAC (both keys bound).
-        assert_ne!(a_my_mac, compute_mac(cookie, &nonce_b, &eph_b, b, a, addr_a, &[99u8; EPH_PUB_LEN]));
+        assert_ne!(
+            a_my_mac,
+            compute_mac(cookie, &nonce_b, &eph_b, b, a, addr_a, &[99u8; EPH_PUB_LEN])
+        );
     }
 
     /// Both ends derive the *same* directional keys from the X25519 exchange, and

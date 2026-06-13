@@ -162,7 +162,11 @@ fn qq_seq(
         .any(|&it| tagged(heap, it, kw::UNQUOTE_SPLICING).is_some());
     if !has_splice {
         let mut out = Vec::with_capacity(items.len() + 1);
-        out.push(if is_vector { sym("vector") } else { sym("list") });
+        out.push(if is_vector {
+            sym("vector")
+        } else {
+            sym("list")
+        });
         for &it in items {
             out.push(qq_elem(heap, it, depth, autogen)?);
         }
@@ -270,7 +274,9 @@ fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
         Ok(i) => i,
         Err(_) => return,
     };
-    let Some(&Value::Sym(h)) = items.first() else { return };
+    let Some(&Value::Sym(h)) = items.first() else {
+        return;
+    };
     if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
         return;
     }
@@ -342,7 +348,12 @@ pub fn qualify_name(ns_name: &str, name: value::Symbol) -> value::Symbol {
 /// Resolve one free reference symbol. Qualify only with positive evidence the name
 /// belongs to this namespace (already a `ns/name` global, or pre-scanned as a def
 /// head this file will create); otherwise leave bare for root/prelude fall-through.
-fn resolve_sym(heap: &Heap, s: value::Symbol, ns_name: &str, locals: &[value::Symbol]) -> value::Symbol {
+fn resolve_sym(
+    heap: &Heap,
+    s: value::Symbol,
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> value::Symbol {
     if locals.contains(&s) {
         return s;
     }
@@ -438,8 +449,15 @@ fn resolve_list(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Sy
 
 /// `(def NAME value)` / `(defmacro NAME params body…)` — qualify NAME; resolve the
 /// value (def) or the body with params bound (defmacro). Params left verbatim.
-fn resolve_def(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
-    let is_defmacro = matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::DEFMACRO));
+fn resolve_def(
+    heap: &mut Heap,
+    form: Value,
+    items: &[Value],
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> Value {
+    let is_defmacro =
+        matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::DEFMACRO));
     let mut out = Vec::with_capacity(items.len());
     out.push(items[0]); // def / defmacro head, verbatim
     match items.get(1) {
@@ -477,7 +495,13 @@ fn resolve_def(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, loc
 
 /// `(fn …)` — single-arity `(params body…)` or multi-arity
 /// `(doc? (params body…)…)`. Params bind in their body; param lists left verbatim.
-fn resolve_fn(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+fn resolve_fn(
+    heap: &mut Heap,
+    form: Value,
+    items: &[Value],
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> Value {
     let parts = &items[1..];
     let (has_doc, clause_start) = match parts.first() {
         Some(Value::Str(_)) if parts.len() > 1 => (true, 1),
@@ -507,7 +531,12 @@ fn resolve_fn(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, loca
 }
 
 /// One `(params body…)` arity clause: params bind in the body.
-fn resolve_arity_clause(heap: &mut Heap, clause: Value, ns_name: &str, locals: &[value::Symbol]) -> Value {
+fn resolve_arity_clause(
+    heap: &mut Heap,
+    clause: Value,
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> Value {
     let cparts = match heap.list_to_vec(clause) {
         Ok(c) if !c.is_empty() => c,
         _ => return clause,
@@ -525,7 +554,13 @@ fn resolve_arity_clause(heap: &mut Heap, clause: Value, ns_name: &str, locals: &
 /// `(let/let*/letrec (s1 v1 …) body…)` — simple symbol binders post-expand
 /// (patterns lowered to `match*`). Binders left verbatim; RHSs and body resolved
 /// with binders in scope (sequential — a safe over-approximation for plain `let`).
-fn resolve_let(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+fn resolve_let(
+    heap: &mut Heap,
+    form: Value,
+    items: &[Value],
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> Value {
     let letrec = matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::LETREC));
     let binds = match items.get(1).and_then(|&b| form_items(heap, b)) {
         Some(b) if b.len() % 2 == 0 => b,
@@ -567,7 +602,13 @@ fn resolve_let(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, loc
 /// body with the clause pattern's symbols treated as bound (over-approximation:
 /// all symbols anywhere in the pattern are collected, so a binder is never
 /// qualified; a pinned reference there is left bare — safe, occasionally lossy).
-fn resolve_match(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+fn resolve_match(
+    heap: &mut Heap,
+    form: Value,
+    items: &[Value],
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> Value {
     if items.len() < 3 {
         return generic_resolve(heap, form, items, ns_name, locals);
     }
@@ -597,7 +638,13 @@ fn resolve_match(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, l
 
 /// Resolve every element of a list and rebuild (the fallback for binder forms whose
 /// shape didn't match — never over-qualifies because it adds no bound names).
-fn generic_resolve(heap: &mut Heap, form: Value, items: &[Value], ns_name: &str, locals: &[value::Symbol]) -> Value {
+fn generic_resolve(
+    heap: &mut Heap,
+    form: Value,
+    items: &[Value],
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> Value {
     let mut out = Vec::with_capacity(items.len());
     for &it in items {
         out.push(resolve_walk(heap, it, ns_name, locals));
@@ -1013,7 +1060,12 @@ fn refutable_bind(
     inner: Value,
 ) -> Value {
     let clause = heap.list(vec![pattern, inner]);
-    heap.list(vec![value::sym(kw::MATCH_STAR), value::kw(ctx), valexpr, clause])
+    heap.list(vec![
+        value::sym(kw::MATCH_STAR),
+        value::kw(ctx),
+        valexpr,
+        clause,
+    ])
 }
 
 /// Lower a `let` whose bindings include a non-symbol (pattern) target into
@@ -1251,7 +1303,10 @@ mod resolve_tests {
     #[test]
     fn local_binding_shadows_and_is_not_qualified() {
         // `foo/x` exists, but the `let`-bound `x` is local — must NOT qualify.
-        assert_eq!(resolved(&["(def foo/x 1)"], "foo", "(let (x 1) x)"), "(let (x 1) x)");
+        assert_eq!(
+            resolved(&["(def foo/x 1)"], "foo", "(let (x 1) x)"),
+            "(let (x 1) x)"
+        );
     }
 
     #[test]
@@ -1266,12 +1321,18 @@ mod resolve_tests {
     #[test]
     fn quoted_symbol_is_never_qualified() {
         // Data: even though `foo/bar` exists, a quoted `bar` is untouched (ADR-034).
-        assert_eq!(resolved(&["(def foo/bar 1)"], "foo", "(quote bar)"), "(quote bar)");
+        assert_eq!(
+            resolved(&["(def foo/bar 1)"], "foo", "(quote bar)"),
+            "(quote bar)"
+        );
     }
 
     #[test]
     fn already_qualified_symbol_passes_through() {
-        assert_eq!(resolved(&["(def other/bar 1)"], "foo", "(other/bar)"), "(other/bar)");
+        assert_eq!(
+            resolved(&["(def other/bar 1)"], "foo", "(other/bar)"),
+            "(other/bar)"
+        );
     }
 
     #[test]
@@ -1281,10 +1342,14 @@ mod resolve_tests {
         // this, the compile pass (and the advisory checker) walks the macro's raw
         // body and flags its clause keywords / pattern vars as unbound.
         let mut interp = Interp::new();
-        interp.eval_str("(defmacro m/double (x) (list (quote +) x x))").unwrap();
+        interp
+            .eval_str("(defmacro m/double (x) (list (quote +) x x))")
+            .unwrap();
         // Simulate a file that did `(defmodule u (:use m))`: compile in `u` with
         // `double` imported as `m/double`.
-        interp.heap.add_import(value::intern("double"), value::intern("m/double"));
+        interp
+            .heap
+            .add_import(value::intern("double"), value::intern("m/double"));
         interp.heap.set_compile_ns(Some(value::intern("u")));
         let g = interp.heap.global();
         let form = reader::read_one(&mut interp.heap, "(double 5)").unwrap();
@@ -1297,12 +1362,17 @@ mod resolve_tests {
         // No `(:use)` import and not directly bound → resolution is positive-evidence
         // only, so the bare head stays a raw call (never a false expansion).
         let mut interp = Interp::new();
-        interp.eval_str("(defmacro m/double (x) (list (quote +) x x))").unwrap();
+        interp
+            .eval_str("(defmacro m/double (x) (list (quote +) x x))")
+            .unwrap();
         interp.heap.set_compile_ns(Some(value::intern("u")));
         let g = interp.heap.global();
         let form = reader::read_one(&mut interp.heap, "(double 5)").unwrap();
         let out = macroexpand(&mut interp.heap, form, g).unwrap();
-        assert_eq!(crate::syntax::printer::print(&interp.heap, out), "(double 5)");
+        assert_eq!(
+            crate::syntax::printer::print(&interp.heap, out),
+            "(double 5)"
+        );
     }
 
     #[test]
@@ -1323,7 +1393,11 @@ mod resolve_tests {
         // same-named ns global present.
         // (printer renders an empty param list `()` as `nil`)
         assert_eq!(
-            resolved(&["(def foo/a 9)"], "foo", "(letrec (a (fn () (b)) b (fn () (a))) (a))"),
+            resolved(
+                &["(def foo/a 9)"],
+                "foo",
+                "(letrec (a (fn () (b)) b (fn () (a))) (a))"
+            ),
             "(letrec (a (fn nil (b)) b (fn nil (a))) (a))"
         );
     }
