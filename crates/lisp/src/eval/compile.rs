@@ -3549,7 +3549,7 @@ fn vm_run_bc(
                         // Done: result in `roots[cur_base]` → the `Done` arm retires it.
                         Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
                         // A JIT'd call/global errored — propagate the parked error.
-                        Some(3) => Err(jit_take_error()
+                        Some(3) => Err(jit_take_error(heap)
                             .expect("JIT error outcome without a parked error")),
                         // A JIT'd tail call: dispatch the staged callee+args → reuse the
                         // frame (`Tail`) or a finished native callee (`Done`).
@@ -5073,44 +5073,11 @@ fn chunk_ops_all_native(heap: &Heap, arm: &CompiledArm) -> bool {
     })
 }
 
+/// Take the error a JIT runtime callback parked (see [`Heap::jit_pending_error`]) — called
+/// by [`vm_run_bc`] on the error outcome.
 #[cfg(feature = "jit")]
-thread_local! {
-    /// The env of the JIT'd arm currently executing. The compiled `fn(heap, base)`
-    /// carries no env, but a Brood→Brood call needs the caller's env (to resolve a
-    /// free-global callee and as the `genv` for a native callee), so [`jit_tier`] sets
-    /// this around each native-arm entry. **Save/restored** there so it stays correct
-    /// under re-entry — a JIT'd callee whose body itself enters another JIT'd arm.
-    static JIT_CALL_ENV: std::cell::Cell<EnvRoot> =
-        const { std::cell::Cell::new(EnvRoot::Stable(EnvId::GLOBAL)) };
-    /// An error raised inside a JIT runtime callback (a callee that errored, an unbound
-    /// global). The C ABI can't return a `Value` *and* an error, so the callback parks
-    /// it here and returns a nonzero status; the compiled arm returns the error outcome
-    /// (`3`) and [`vm_run_bc`] takes this to propagate.
-    static JIT_PENDING_ERROR: std::cell::RefCell<Option<LispError>> =
-        const { std::cell::RefCell::new(None) };
-    /// Native-to-native call recursion depth (the linking fast path in
-    /// [`jit_dispatch_call`]). A JIT'd arm's non-tail call to a JIT'd callee runs the
-    /// callee on the **native** stack (one Rust frame chain per level), not the VM's
-    /// heap-frame driver loop, so [`MAX_BC_FRAMES`] — which bounds that loop — does not
-    /// bound it. Left unguarded, deep non-tail recursion (`(+ (f …) (f …))`) overflows
-    /// the native stack and aborts. This counter caps the native depth and parks a
-    /// [`stack_depth_error`](crate::eval::stack_depth_error) instead — the clean error
-    /// the VM raises for the same runaway. Save/restored around each native entry.
-    static JIT_NATIVE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    /// Set while a native-recursion subtree has exceeded [`JIT_NATIVE_DEPTH`]'s cap and is
-    /// being drained on the VM instead. [`jit_tier`] reads it and declines to run native
-    /// (returns `None` → interpret), so the rest of the recursion stays in [`vm_run_bc`]'s
-    /// heap-frame driver loop — bounded by [`MAX_BC_FRAMES`] on the *heap*, not the native
-    /// stack. This keeps deep non-tail recursion working (as it does on the pure VM) rather
-    /// than aborting. Save/restored around the over-cap dispatch in [`jit_dispatch_call`].
-    static JIT_FORCE_VM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Take the error a JIT runtime callback parked (see [`JIT_PENDING_ERROR`]) — called by
-/// [`vm_run_bc`] on the error outcome.
-#[cfg(feature = "jit")]
-pub(crate) fn jit_take_error() -> Option<LispError> {
-    JIT_PENDING_ERROR.with(|c| c.borrow_mut().take())
+pub(crate) fn jit_take_error(heap: &mut Heap) -> Option<LispError> {
+    heap.jit_pending_error.take()
 }
 
 /// Resolve free global `sym` in the executing JIT'd arm's env — the callee-loading
@@ -5119,12 +5086,12 @@ pub(crate) fn jit_take_error() -> Option<LispError> {
 /// so a `def` rebind is seen immediately (the same late binding as `Inst::Global`).
 #[cfg(feature = "jit")]
 pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Option<Value> {
-    let env = heap.read_root_env(JIT_CALL_ENV.with(|c| c.get()));
+    let env = heap.read_root_env(heap.jit_call_env);
     match heap.env_get(env, sym) {
         Some(v) => Some(v),
         None => {
             let e = crate::eval::unbound_error(heap, sym);
-            JIT_PENDING_ERROR.with(|c| *c.borrow_mut() = Some(e));
+            heap.jit_pending_error = Some(e);
             None
         }
     }
@@ -5141,7 +5108,7 @@ pub(crate) fn jit_resolve_global(heap: &mut Heap, sym: Symbol) -> Option<Value> 
 /// the JIT'd arm is invalidated by the same epoch). Dynamic vars are never cached.
 #[cfg(feature = "jit")]
 pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> Option<Value> {
-    let env = heap.read_root_env(JIT_CALL_ENV.with(|c| c.get()));
+    let env = heap.read_root_env(heap.jit_call_env);
     if heap.is_global(env) {
         let epoch = heap.global_epoch();
         if let Some(v) = heap.vm_global_ic_probe(site, sym, epoch) {
@@ -5158,7 +5125,7 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
             }
             None => {
                 let e = crate::eval::unbound_error(heap, sym);
-                JIT_PENDING_ERROR.with(|c| *c.borrow_mut() = Some(e));
+                heap.jit_pending_error = Some(e);
                 None
             }
         }
@@ -5167,7 +5134,7 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
             Some(v) => Some(v),
             None => {
                 let e = crate::eval::unbound_error(heap, sym);
-                JIT_PENDING_ERROR.with(|c| *c.borrow_mut() = Some(e));
+                heap.jit_pending_error = Some(e);
                 None
             }
         }
@@ -5193,7 +5160,7 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
 
     let n = heap.roots_len();
     let stage_base = n - argc - 1;
-    let over_cap = JIT_NATIVE_DEPTH.with(|c| c.get()) >= NATIVE_DEPTH_LIMIT;
+    let over_cap = heap.jit_native_depth >= NATIVE_DEPTH_LIMIT;
     let epoch = heap.global_epoch();
 
     // ---- Native-to-native call linking ----
@@ -5265,20 +5232,19 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
                     && !over_cap
                     && arm.compile_epoch.load(Acquire) == epoch
                 {
-                    let depth = JIT_NATIVE_DEPTH.with(|c| c.get());
-                    // Read the args, then replace the staged operands with the callee's frame
-                    // at `stage_base`: nil-fill `nslots`, bind args into slots `[0, argc)`. No
-                    // eval runs (no optionals), so no GC can strand the `argv` copy.
-                    let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+                    let depth = heap.jit_native_depth;
+                    // Turn the staged `[callee, args]` into the callee's frame in place — no
+                    // temp copy, no re-push. The arm came from the IC, so the staged callee
+                    // slot is dead: shift the args down one (`roots[sb+k] = roots[sb+1+k]`,
+                    // forward-safe since each write is below its read), then resize to
+                    // `nslots` and nil-fill the callee's let/spill slots `[argc, nslots)`.
                     for k in 0..argc {
-                        argv.push(heap.root_at(stage_base + 1 + k));
-                    }
-                    heap.truncate_roots(stage_base);
-                    for _ in 0..arm.nslots {
-                        heap.push_root(Value::Nil);
-                    }
-                    for (k, &a) in argv.iter().enumerate() {
+                        let a = heap.root_at(stage_base + 1 + k);
                         heap.set_root_at(stage_base + k, a);
+                    }
+                    heap.truncate_roots(stage_base + argc);
+                    for _ in argc..arm.nslots {
+                        heap.push_root(Value::Nil);
                     }
                     let base = stage_base;
                     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
@@ -5287,11 +5253,11 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
                     let f: extern "C" fn(*mut Heap, i64) -> i64 =
                         unsafe { std::mem::transmute(code) };
                     let env_root = EnvRoot::Stable(callee_env);
-                    let saved = JIT_CALL_ENV.with(|c| c.replace(env_root));
-                    JIT_NATIVE_DEPTH.with(|c| c.set(depth + 1));
+                    let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
+                    heap.jit_native_depth = depth + 1;
                     let outcome = f(heap as *mut Heap, base as i64);
-                    JIT_NATIVE_DEPTH.with(|c| c.set(depth));
-                    JIT_CALL_ENV.with(|c| c.set(saved));
+                    heap.jit_native_depth = depth;
+                    heap.jit_call_env = saved;
                     match outcome {
                         // Done: the result is boxed in `roots[base]`. Take it, drop the frame.
                         0 => {
@@ -5320,7 +5286,7 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
                             return match vm_apply(heap, arm, &argv2, callee_env) {
                                 Ok(v) => Some(v),
                                 Err(e) => {
-                                    JIT_PENDING_ERROR.with(|c| *c.borrow_mut() = Some(e));
+                                    heap.jit_pending_error = Some(e);
                                     None
                                 }
                             };
@@ -5338,12 +5304,12 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
     for k in 0..argc {
         argv.push(heap.root_at(stage_base + 1 + k));
     }
-    let env = heap.read_root_env(JIT_CALL_ENV.with(|c| c.get()));
+    let env = heap.read_root_env(heap.jit_call_env);
     // Over the native cap: force this dispatch (and everything it recurses into) onto the
     // VM, so the remaining recursion drains through the bounded heap-frame loop rather than
     // the native stack. Restored after, so siblings above the cap go native again.
     let saved_force = if over_cap {
-        Some(JIT_FORCE_VM.with(|c| c.replace(true)))
+        Some(std::mem::replace(&mut heap.jit_force_vm, true))
     } else {
         None
     };
@@ -5355,7 +5321,7 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
         Err(e) => Err(e),
     };
     if let Some(prev) = saved_force {
-        JIT_FORCE_VM.with(|c| c.set(prev));
+        heap.jit_force_vm = prev;
     }
     match result {
         Ok(v) => {
@@ -5366,7 +5332,7 @@ pub(crate) fn jit_dispatch_call(heap: &mut Heap, argc: usize, site: u32, head: S
             Some(v)
         }
         Err(e) => {
-            JIT_PENDING_ERROR.with(|c| *c.borrow_mut() = Some(e));
+            heap.jit_pending_error = Some(e);
             None
         }
     }
@@ -5446,7 +5412,7 @@ pub(crate) fn jit_tier(
 
     // Draining an over-deep native-recursion subtree on the VM (see [`JIT_FORCE_VM`]):
     // interpret this arm so its recursion stays in the bounded heap-frame loop.
-    if JIT_FORCE_VM.with(|c| c.get()) {
+    if heap.jit_force_vm {
         return None;
     }
     let code = arm.jit_code.load(Acquire);
@@ -5506,9 +5472,9 @@ pub(crate) fn jit_tier(
     let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code) };
     // Publish this arm's env for the call/global callbacks, save/restoring the previous
     // value so a JIT'd callee that re-enters another JIT'd arm nests correctly.
-    let saved_env = JIT_CALL_ENV.with(|c| c.replace(env));
+    let saved_env = std::mem::replace(&mut heap.jit_call_env, env);
     let outcome = f(heap as *mut Heap, base as i64);
-    JIT_CALL_ENV.with(|c| c.set(saved_env));
+    heap.jit_call_env = saved_env;
     Some(outcome)
 }
 

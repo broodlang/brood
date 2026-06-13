@@ -978,6 +978,26 @@ pub struct Heap {
     /// Same lifecycle: allocated at compile time, validated by (sym, epoch),
     /// cleared wholesale on a RUNTIME compaction.
     vm_global_ics: RefCell<Vec<Option<GlobalIcEntry>>>,
+    /// JIT execution state, per process. These were thread-locals; moved onto the heap so
+    /// (a) they travel with a process that migrates worker threads — notably `jit_force_vm`,
+    /// which must stay set across a yield during an over-deep VM drain — and (b) each access
+    /// is a plain field load rather than a TLS lookup (the linked-call hot path touches them
+    /// ~4× per call). Only meaningful while a JIT'd arm is on the stack.
+    ///
+    /// The executing JIT'd arm's env (its compiled `fn(heap, base)` carries none, but a
+    /// Brood→Brood call needs it to resolve a free-global callee). Save/restored around each
+    /// native-arm entry ([`jit_tier`]) so re-entry nests correctly.
+    pub(crate) jit_call_env: EnvRoot,
+    /// Native-to-native call recursion depth — bounds the native stack (which `MAX_BC_FRAMES`
+    /// doesn't), draining deeper recursion onto the VM instead of overflowing.
+    pub(crate) jit_native_depth: u32,
+    /// Set while draining an over-deep native-recursion subtree on the VM ([`jit_tier`]
+    /// reads it and declines to run native, keeping the recursion in the bounded heap-frame
+    /// loop).
+    pub(crate) jit_force_vm: bool,
+    /// An error parked by a JIT runtime callback (the C ABI can't return a `Value` *and* an
+    /// error); the arm returns the error outcome and [`vm_run_bc`] takes this to propagate.
+    pub(crate) jit_pending_error: Option<crate::error::LispError>,
 }
 
 /// One global-read inline-cache entry (ADR-096): the value a compiled
@@ -1184,6 +1204,10 @@ impl Heap {
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
+            jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
+            jit_native_depth: 0,
+            jit_force_vm: false,
+            jit_pending_error: None,
         }
     }
 
@@ -1223,6 +1247,10 @@ impl Heap {
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
+            jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
+            jit_native_depth: 0,
+            jit_force_vm: false,
+            jit_pending_error: None,
         }
     }
 
