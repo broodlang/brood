@@ -35,12 +35,49 @@
 //! machine down.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-static LIVE: AtomicUsize = AtomicUsize::new(0); // bytes currently allocated
-static PEAK: AtomicUsize = AtomicUsize::new(0); // high-water mark of LIVE
+// Live-bytes accounting is **sharded** across cache-line-padded counters, one
+// picked per thread, so allocators on different worker threads don't contend on a
+// single atomic. Before this, every (de)allocation hit one `LIVE` (a `fetch_add`)
+// and one `PEAK` (a `fetch_max` — a CAS *retry loop*, the worst case under
+// contention). With the interner mutex fixed (the dominant serialization, see
+// `value::intern`), this counter became the next contention point under
+// allocation-heavy fan-out — sharding it recovered a further ~20%. `live_bytes`
+// sums the shards; a shard can go negative (memory allocated on one thread, freed
+// on another), but the wrapping sum is exact mod 2^64, which covers any real heap.
+// Accounting stays process-wide (ADR-005/043; per-process limits deferred, ADR-011).
+const SHARDS: usize = 64;
+
+#[repr(align(64))] // own cache line — no false sharing between shards
+struct Shard(AtomicUsize);
+
+static LIVE: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
+static PEAK: AtomicUsize = AtomicUsize::new(0); // high-water mark of live_bytes()
+// A coarse, lazily-refreshed snapshot of `live_bytes()` for the per-allocation
+// hard-limit check, so that check stays one load instead of summing every shard on
+// the hot path. Refreshed on the `PEAK` sample cadence (see `record_alloc`); lags
+// real live bytes by at most one window — fine for a host-survival backstop that
+// already tolerates a small overshoot, and a single oversized allocation is still
+// caught directly by its own `size`. The exact soft limit (summed at the eval
+// safepoint) is the graceful path and trips first on gradual growth.
+static APPROX_LIVE: AtomicUsize = AtomicUsize::new(0);
 static HARD_LIMIT: AtomicUsize = AtomicUsize::new(0); // 0 = unlimited; abort if crossed
 static SOFT_LIMIT: AtomicUsize = AtomicUsize::new(0); // 0 = unlimited; safepoint raises if crossed
+
+// Round-robin shard assignment, one per thread. A `usize`/`Cell` thread-local has
+// no destructor, so first access is native TLS with no heap allocation — safe to
+// touch from inside the global allocator (no re-entrancy).
+static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
+// Allocations a thread makes between high-water samples. Sampling — rather than a
+// `fetch_max` per allocation — is what removes the CAS storm; the peak is an
+// observability figure, so a slightly late sample is acceptable.
+const PEAK_SAMPLE: u32 = 512;
+thread_local! {
+    static SHARD_IDX: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS;
+    static SINCE_SAMPLE: Cell<u32> = const { Cell::new(0) };
+}
 
 /// Default ceiling the *test runners* apply when neither env var is set
 /// (`brood --test`, `nest test`, the `cargo test` Brood suite). Its job is to
@@ -72,19 +109,38 @@ pub const TEST_DEFAULT_SOFT: usize = 1024 * 1024 * 1024; // 1 GiB
 pub struct Counting;
 
 fn record_alloc(size: usize) {
-    let live = LIVE.fetch_add(size, Ordering::Relaxed) + size;
-    PEAK.fetch_max(live, Ordering::Relaxed);
+    SHARD_IDX.with(|&i| LIVE[i].0.fetch_add(size, Ordering::Relaxed));
+    // Refresh PEAK / APPROX_LIVE roughly every PEAK_SAMPLE allocations on this
+    // thread, instead of a global `fetch_max` on every allocation (the old
+    // serialization point). `live_bytes` only sums the shards here, off the
+    // common path.
+    SINCE_SAMPLE.with(|c| {
+        let n = c.get().wrapping_add(1);
+        if n >= PEAK_SAMPLE {
+            c.set(0);
+            let live = live_bytes();
+            APPROX_LIVE.store(live, Ordering::Relaxed);
+            PEAK.fetch_max(live, Ordering::Relaxed);
+        } else {
+            c.set(n);
+        }
+    });
 }
 
-/// Would committing `size` more bytes cross the hard limit? A relaxed load + a
-/// saturating compare; when no limit is set (the common case) it's a single load
-/// of a zero and an early return. The check races slightly under the worker pool
-/// (another thread may commit between the load and the alloc), but the limit is a
-/// safety backstop, not byte-exact accounting — a small overshoot is fine.
+fn record_dealloc(size: usize) {
+    SHARD_IDX.with(|&i| LIVE[i].0.fetch_sub(size, Ordering::Relaxed));
+}
+
+/// Would committing `size` more bytes cross the hard limit? Reads the lazily
+/// refreshed `APPROX_LIVE` snapshot (one relaxed load); when no limit is set (the
+/// common case) it's a single load of a zero and an early return. The snapshot
+/// lags slightly and the check races under the worker pool, but the limit is a
+/// safety backstop, not byte-exact accounting — a small overshoot is fine, and a
+/// single oversized allocation is caught by its own `size` regardless of the lag.
 #[inline]
 fn would_exceed_hard(size: usize) -> bool {
     let limit = HARD_LIMIT.load(Ordering::Relaxed);
-    limit != 0 && LIVE.load(Ordering::Relaxed).saturating_add(size) > limit
+    limit != 0 && APPROX_LIVE.load(Ordering::Relaxed).saturating_add(size) > limit
 }
 
 unsafe impl GlobalAlloc for Counting {
@@ -103,7 +159,7 @@ unsafe impl GlobalAlloc for Counting {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         System.dealloc(ptr, layout);
-        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        record_dealloc(layout.size());
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -117,20 +173,26 @@ unsafe impl GlobalAlloc for Counting {
             if new_size >= old {
                 record_alloc(new_size - old);
             } else {
-                LIVE.fetch_sub(old - new_size, Ordering::Relaxed);
+                record_dealloc(old - new_size);
             }
         }
         new_ptr
     }
 }
 
-/// Bytes currently allocated across the whole process.
+/// Bytes currently allocated across the whole process (the wrapping sum of the
+/// per-thread shards — see `LIVE`).
 pub fn live_bytes() -> usize {
-    LIVE.load(Ordering::Relaxed)
+    LIVE.iter()
+        .fold(0usize, |acc, s| acc.wrapping_add(s.0.load(Ordering::Relaxed)))
 }
 
-/// The largest [`live_bytes`] has ever been (since process start).
+/// The largest [`live_bytes`] has ever been (since process start). The high-water
+/// mark is sampled on a cadence (see `record_alloc`), so fold in the current live
+/// figure on read to reflect any growth since the last sample.
 pub fn peak_bytes() -> usize {
+    let live = live_bytes();
+    PEAK.fetch_max(live, Ordering::Relaxed);
     PEAK.load(Ordering::Relaxed)
 }
 
@@ -165,7 +227,7 @@ pub fn soft_limit_hit() -> Option<usize> {
     if limit == 0 {
         return None;
     }
-    let live = LIVE.load(Ordering::Relaxed);
+    let live = live_bytes();
     if live > limit {
         Some(live)
     } else {

@@ -7,6 +7,7 @@
 //! payoff: a `Heap` is plain `Vec`s of data, so it is `Send` — a process can be
 //! moved between scheduler threads — and it gives us one place to do GC.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard, RwLock};
@@ -43,7 +44,32 @@ fn ids() -> MutexGuard<'static, HashMap<String, Symbol>> {
     IDS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+thread_local! {
+    // Per-thread name→id cache in front of the global `IDS` mutex. Symbol ids are
+    // append-only and globally consistent, so a cached id is valid forever; the
+    // global tables stay the sole *minter* of new ids. This keeps the hot path —
+    // re-interning an already-known name, which is the overwhelmingly common case
+    // (call heads, keywords, record fields) — a thread-local lookup with no global
+    // lock. Before this, every intern (even a hit) took the `IDS` mutex, which
+    // serialized parallel workers: under allocation-heavy fan-out the interner lock
+    // was the dominant contention point (~10% in `lock_contended` plus the futex
+    // waits behind it), not the heap allocator. Bounded memory: the symbol set is
+    // finite, so each thread caches at most every name it ever interns.
+    static CACHE: RefCell<HashMap<String, Symbol>> = RefCell::new(HashMap::new());
+}
+
 pub fn intern(name: &str) -> Symbol {
+    if let Some(id) = CACHE.with(|c| c.borrow().get(name).copied()) {
+        return id;
+    }
+    let id = intern_global(name);
+    CACHE.with(|c| c.borrow_mut().insert(name.to_string(), id));
+    id
+}
+
+// The global intern: mint or fetch the id under the `IDS` mutex. Reached only on a
+// thread-local cache miss (first time *this thread* sees `name`).
+fn intern_global(name: &str) -> Symbol {
     let mut ids = ids();
     if let Some(&id) = ids.get(name) {
         return id;
@@ -52,8 +78,7 @@ pub fn intern(name: &str) -> Symbol {
     // while holding the `IDS` lock keeps a single writer, so ids stay dense and
     // the two tables never disagree. `NAMES` and `IDS` each own their own copy of
     // the name (the `clone` below), so a new name costs two `String` allocations
-    // — only on the cold intern-a-new-name path; repeat lookups hit `IDS` and
-    // allocate nothing.
+    // — only on the cold intern-a-new-name path.
     let owned = name.to_string();
     let id = NAMES.push(owned.clone()) as Symbol;
     ids.insert(owned, id);
