@@ -391,8 +391,10 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     heap: *mut Heap,
     out: *mut crate::core::value::Value,
     argc: u32,
+    site: u32,
+    head: u32,
 ) -> i64 {
-    match crate::eval::compile::jit_dispatch_call(&mut *heap, argc as usize) {
+    match crate::eval::compile::jit_dispatch_call(&mut *heap, argc as usize, site, head) {
         Some(v) => {
             *out = v;
             0
