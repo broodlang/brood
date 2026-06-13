@@ -351,8 +351,7 @@ static PENDING_DIALS: LazyLock<RwLock<HashSet<Symbol>>> =
 /// every node it knows. Set `BROOD_NO_MESH=1` for point-to-point links only
 /// (you connect to exactly the nodes you dial, no transitive discovery). Read
 /// once at first use.
-static MESH_ENABLED: LazyLock<bool> =
-    LazyLock::new(|| std::env::var_os("BROOD_NO_MESH").is_none());
+static MESH_ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var_os("BROOD_NO_MESH").is_none());
 
 fn mesh_enabled() -> bool {
     *MESH_ENABLED
@@ -997,14 +996,14 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let (peer, peer_addr, session) = handshake(&mut stream, Role::Initiator)?;
     stream.set_read_timeout(None)?; // steady-state reader blocks until the next message
-    // Always pass to `establish` — even when we already have a link under the
-    // authenticated name. `establish` has its own symmetric tie-break (both sides
-    // compare connectors by name and reach the same decision). The losing side
-    // closes its own socket and returns; the winning side replaces the link. A
-    // short-circuit `stream.shutdown` here would skip the tie-break on our end
-    // while the peer still runs `establish` on theirs — they might win, register
-    // our doomed socket, and later fire a spurious `[:nodedown]` when the reader
-    // hits the EOF our shutdown sent.
+                                    // Always pass to `establish` — even when we already have a link under the
+                                    // authenticated name. `establish` has its own symmetric tie-break (both sides
+                                    // compare connectors by name and reach the same decision). The losing side
+                                    // closes its own socket and returns; the winning side replaces the link. A
+                                    // short-circuit `stream.shutdown` here would skip the tie-break on our end
+                                    // while the peer still runs `establish` on theirs — they might win, register
+                                    // our doomed socket, and later fire a spurious `[:nodedown]` when the reader
+                                    // hits the EOF our shutdown sent.
     establish(peer, peer_addr, stream, Role::Initiator, session);
     Ok(peer)
 }
@@ -1128,8 +1127,10 @@ fn establish(peer: Symbol, peer_addr: String, stream: Stream, role: Role, sessio
     // seal failure is treated like any I/O error — fall through to shutdown.
     let writer_sock = Arc::clone(&sock);
     if let Err(e) = writer_sock.set_write_timeout(Some(WRITE_TIMEOUT)) {
-        eprintln!("dist: warning: could not set write timeout on link to {}: {e}",
-                  value::symbol_name(peer));
+        eprintln!(
+            "dist: warning: could not set write timeout on link to {}: {e}",
+            value::symbol_name(peer)
+        );
     }
     std::thread::spawn(move || {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -1414,7 +1415,10 @@ mod tests {
         let held: Vec<HandshakeSlot> = (0..MAX_IN_FLIGHT_HANDSHAKES)
             .map(|_| HandshakeSlot::try_acquire().expect("under the cap"))
             .collect();
-        assert_eq!(IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire), MAX_IN_FLIGHT_HANDSHAKES);
+        assert_eq!(
+            IN_FLIGHT_HANDSHAKES.load(Ordering::Acquire),
+            MAX_IN_FLIGHT_HANDSHAKES
+        );
 
         // One past the cap is shed, and the failed attempt rolled its count back.
         assert!(HandshakeSlot::try_acquire().is_none(), "cap must shed");
@@ -1448,6 +1452,9 @@ mod tests {
             assert!(err.to_string().contains("cookie too short"), "got: {err}");
         }
         // No identity was published by the failed attempts.
-        assert!(!crate::core::sync::read(&NODE).started, "must stay a non-node");
+        assert!(
+            !crate::core::sync::read(&NODE).started,
+            "must stay a non-node"
+        );
     }
 }

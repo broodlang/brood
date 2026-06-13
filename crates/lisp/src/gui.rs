@@ -319,7 +319,11 @@ mod backend {
 
     /// The cursor shape for the pointer at cell `(col, row)`, given the window's
     /// zones — the first zone containing the point, or None (default cursor).
-    fn shape_at(zones: &[(u16, u16, u16, u16, super::CursorShape)], col: u16, row: u16) -> Option<super::CursorShape> {
+    fn shape_at(
+        zones: &[(u16, u16, u16, u16, super::CursorShape)],
+        col: u16,
+        row: u16,
+    ) -> Option<super::CursorShape> {
         zones.iter().find_map(|&(x, y, w, h, shape)| {
             if col >= x && col < x + w && row >= y && row < y + h {
                 Some(shape)
@@ -373,7 +377,12 @@ mod backend {
         Title { id: u64, title: String },
         /// Set window `id`'s taskbar/title-bar icon from raw RGBA pixels (row-major,
         /// `w*h*4` bytes). Behind `gui-icon!`; ignored if the data is the wrong length.
-        Icon { id: u64, rgba: Vec<u8>, w: u32, h: u32 },
+        Icon {
+            id: u64,
+            rgba: Vec<u8>,
+            w: u32,
+            h: u32,
+        },
         /// Raise window `id` to the front and give it OS keyboard focus (un-
         /// minimising it first). Behind `gui-focus` — surfaces an already-open
         /// singleton window instead of opening a duplicate.
@@ -612,7 +621,10 @@ mod backend {
     /// if the GUI thread never started or `id` isn't a live window.
     pub fn icon(id: u64, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
         if let Ok(g) = gui() {
-            let _ = g.lock().unwrap().send_event(UserEvent::Icon { id, rgba, w, h });
+            let _ = g
+                .lock()
+                .unwrap()
+                .send_event(UserEvent::Icon { id, rgba, w, h });
         }
         Ok(())
     }
@@ -804,8 +816,8 @@ mod backend {
             )
             .map_err(|e| format!("window: {e}"))?;
         let window = Rc::new(window);
-        let context =
-            softbuffer::Context::new(window.clone()).map_err(|e| format!("softbuffer context: {e}"))?;
+        let context = softbuffer::Context::new(window.clone())
+            .map_err(|e| format!("softbuffer context: {e}"))?;
         let surface = softbuffer::Surface::new(&context, window.clone())
             .map_err(|e| format!("softbuffer surface: {e}"))?;
         let mut renderer = Renderer::new(window.scale_factor(), families, base_px);
@@ -860,7 +872,12 @@ mod backend {
         /// windows simply persist — `resumed` only ever fires once here.)
         resumed: bool,
         /// `Open` requests received before `resumed`, drained when it fires.
-        pending_open: Vec<(u64, Option<String>, Option<(f64, f64)>, Sender<Result<OpenReply, String>>)>,
+        pending_open: Vec<(
+            u64,
+            Option<String>,
+            Option<(f64, f64)>,
+            Sender<Result<OpenReply, String>>,
+        )>,
     }
 
     impl GuiApp {
@@ -919,7 +936,12 @@ mod backend {
         fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
             match event {
                 // Create now if the display is live, else queue until `resumed`.
-                UserEvent::Open { subscriber, title, size, reply } => {
+                UserEvent::Open {
+                    subscriber,
+                    title,
+                    size,
+                    reply,
+                } => {
                     if self.resumed {
                         self.open_window(event_loop, subscriber, title, size, reply);
                     } else {
@@ -933,7 +955,12 @@ mod backend {
                     }
                 }
                 // Set a live window's taskbar/title-bar icon (behind gui-icon!).
-                UserEvent::Icon { id, rgba, w: iw, h: ih } => {
+                UserEvent::Icon {
+                    id,
+                    rgba,
+                    w: iw,
+                    h: ih,
+                } => {
                     if let Some(win) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
                         if let Ok(ic) = Icon::from_rgba(rgba, iw, ih) {
                             win.window.set_window_icon(Some(ic));
@@ -946,7 +973,13 @@ mod backend {
                         w.zones = ops
                             .iter()
                             .filter_map(|op| match op {
-                                Op::CursorZone { x, y, w: zw, h, shape } => Some((*x, *y, *zw, *h, *shape)),
+                                Op::CursorZone {
+                                    x,
+                                    y,
+                                    w: zw,
+                                    h,
+                                    shape,
+                                } => Some((*x, *y, *zw, *h, *shape)),
                                 _ => None,
                             })
                             .collect();
@@ -989,28 +1022,26 @@ mod backend {
                 // the global default: remembered for future windows and applied to
                 // every open one. Either way a target window recomputes its grid +
                 // republishes its size + redraws (`apply_font`).
-                UserEvent::Font { id, family, px } => {
-                    match id {
-                        Some(target) => {
-                            if let Some(w) =
-                                self.ids.get(&target).and_then(|wid| self.wins.get_mut(wid))
-                            {
-                                apply_font(w, family, px);
-                            }
-                        }
-                        None => {
-                            if let Some(f) = family {
-                                self.default_family = Some(f);
-                            }
-                            if let Some(p) = px {
-                                self.default_px = p.max(1.0);
-                            }
-                            for w in self.wins.values_mut() {
-                                apply_font(w, family, px);
-                            }
+                UserEvent::Font { id, family, px } => match id {
+                    Some(target) => {
+                        if let Some(w) =
+                            self.ids.get(&target).and_then(|wid| self.wins.get_mut(wid))
+                        {
+                            apply_font(w, family, px);
                         }
                     }
-                }
+                    None => {
+                        if let Some(f) = family {
+                            self.default_family = Some(f);
+                        }
+                        if let Some(p) = px {
+                            self.default_px = p.max(1.0);
+                        }
+                        for w in self.wins.values_mut() {
+                            apply_font(w, family, px);
+                        }
+                    }
+                },
                 UserEvent::Inset { px } => {
                     self.default_inset = px.max(0.0);
                     for w in self.wins.values_mut() {
@@ -1154,7 +1185,10 @@ mod backend {
                     // unfocused and never reach us, so synthesize one now (see CursorLeft).
                     if let Some(b) = w.held.take() {
                         let (col, row) = w.cursor;
-                        deliver(w.subscriber, mouse_message(&release_of(b, col, row, &w.mods)));
+                        deliver(
+                            w.subscriber,
+                            mouse_message(&release_of(b, col, row, &w.mods)),
+                        );
                     }
                 }
                 WindowEvent::CursorLeft { .. } => {
@@ -1164,7 +1198,10 @@ mod backend {
                     // Synthesize the release + clear `held` (mirrors the keyboard blur fix).
                     if let Some(b) = w.held.take() {
                         let (col, row) = w.cursor;
-                        deliver(w.subscriber, mouse_message(&release_of(b, col, row, &w.mods)));
+                        deliver(
+                            w.subscriber,
+                            mouse_message(&release_of(b, col, row, &w.mods)),
+                        );
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
@@ -1357,12 +1394,8 @@ mod backend {
         let inset = r.inset();
         let usable_w = (sz.width as usize).saturating_sub(2 * inset);
         let usable_h = (sz.height as usize).saturating_sub(2 * inset);
-        let cols = (usable_w / r.cell_w.max(1))
-            .max(1)
-            .min(u16::MAX as usize) as u16;
-        let rows = (usable_h / r.cell_h.max(1))
-            .max(1)
-            .min(u16::MAX as usize) as u16;
+        let cols = (usable_w / r.cell_w.max(1)).max(1).min(u16::MAX as usize) as u16;
+        let rows = (usable_h / r.cell_h.max(1)).max(1).min(u16::MAX as usize) as u16;
         *size.lock().unwrap() = (cols, rows);
     }
 
@@ -1371,8 +1404,10 @@ mod backend {
     /// the cell painted under it; a click in the inset margin clamps to the edge cell.
     fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer) -> (u16, u16) {
         let inset = r.inset() as f64;
-        let col = ((pos.x - inset).max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
-        let row = ((pos.y - inset).max(0.0) as usize / r.cell_h.max(1)).min(u16::MAX as usize) as u16;
+        let col =
+            ((pos.x - inset).max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
+        let row =
+            ((pos.y - inset).max(0.0) as usize / r.cell_h.max(1)).min(u16::MAX as usize) as u16;
         (col, row)
     }
 
@@ -1645,7 +1680,7 @@ mod backend {
         px: f32,
         cell_w: usize,
         cell_h: usize,
-        baseline: i32, // pixels from a cell's top to the text baseline
+        baseline: i32,   // pixels from a cell's top to the text baseline
         base_inset: f32, // logical-px content margin before the grid (ADR-079); 0 = flush
 
         // keyed by (cluster, family id, bold, italic, scale): the same cluster at a
@@ -1740,7 +1775,14 @@ mod backend {
         /// RGBA canvas sized to its cell span, cached by (cluster, family, style,
         /// scale). A color cluster (emoji) keeps its own colors; a monochrome cluster
         /// stores coverage in the alpha with white RGB, so the caller recolors it.
-        fn build_cluster(&self, g: &str, fid: u32, bold: bool, italic: bool, scale: u16) -> CachedGlyph {
+        fn build_cluster(
+            &self,
+            g: &str,
+            fid: u32,
+            bold: bool,
+            italic: bool,
+            scale: u16,
+        ) -> CachedGlyph {
             let scale = scale.max(1) as usize;
             let px = (self.px * scale as f32).max(1.0);
             let cells = cluster_cells(g).max(1);
@@ -1780,10 +1822,22 @@ mod backend {
                 composite_cluster(shared, &tb2, &mut rgba, cw, ch, Placement::Center);
                 true
             } else {
-                composite_cluster(shared, &tb, &mut rgba, cw, ch, Placement::Baseline(baseline));
+                composite_cluster(
+                    shared,
+                    &tb,
+                    &mut rgba,
+                    cw,
+                    ch,
+                    Placement::Baseline(baseline),
+                );
                 false
             };
-            CachedGlyph { color, width: cw, height: ch, rgba }
+            CachedGlyph {
+                color,
+                width: cw,
+                height: ch,
+                rgba,
+            }
         }
 
         /// Blit grapheme cluster `g` into the framebuffer at cell-pixel `(left, top)`,
@@ -1848,7 +1902,17 @@ mod backend {
     /// `(x, y)` (a no-op off-canvas / at zero alpha). Used to bake a shaped cluster's
     /// glyphs into one canvas before it's cached.
     #[allow(clippy::too_many_arguments)]
-    fn canvas_over(rgba: &mut [u8], cw: usize, ch: usize, x: i32, y: i32, sr: u8, sg: u8, sb: u8, sa: u8) {
+    fn canvas_over(
+        rgba: &mut [u8],
+        cw: usize,
+        ch: usize,
+        x: i32,
+        y: i32,
+        sr: u8,
+        sg: u8,
+        sb: u8,
+        sa: u8,
+    ) {
         if sa == 0 || x < 0 || y < 0 || x >= cw as i32 || y >= ch as i32 {
             return;
         }
@@ -1858,7 +1922,8 @@ mod backend {
         if out_a == 0 {
             return;
         }
-        let mix = |s: u8, d: u8| (((s as u32 * sa) + (d as u32 * da * (255 - sa) / 255)) / out_a) as u8;
+        let mix =
+            |s: u8, d: u8| (((s as u32 * sa) + (d as u32 * da * (255 - sa) / 255)) / out_a) as u8;
         rgba[idx] = mix(sr, rgba[idx]);
         rgba[idx + 1] = mix(sg, rgba[idx + 1]);
         rgba[idx + 2] = mix(sb, rgba[idx + 2]);
@@ -1877,7 +1942,14 @@ mod backend {
     /// Shape grapheme cluster `g` into a fresh cosmic-text buffer at `px` / line height
     /// `line_h`, in family/style `attrs`. The layout box is generous so a wide glyph
     /// isn't wrapped or clipped during shaping.
-    fn shape_cluster(shared: &mut FontShared, g: &str, attrs: Attrs, px: f32, w: f32, line_h: f32) -> CtBuffer {
+    fn shape_cluster(
+        shared: &mut FontShared,
+        g: &str,
+        attrs: Attrs,
+        px: f32,
+        w: f32,
+        line_h: f32,
+    ) -> CtBuffer {
         let mut tb = CtBuffer::new(&mut shared.fs, Metrics::new(px.max(1.0), line_h.max(1.0)));
         tb.set_size(Some(w + px), Some(line_h + px));
         tb.set_text(g, &attrs, Shaping::Advanced, None);
@@ -1904,7 +1976,14 @@ mod backend {
     /// `Center` puts the glyph's bounding box in the middle of the canvas (emoji).
     /// Color glyphs keep their own RGBA; mask glyphs store coverage as white + alpha
     /// (the caller recolors them with the face fg).
-    fn composite_cluster(shared: &mut FontShared, tb: &CtBuffer, rgba: &mut [u8], cw: usize, ch: usize, place: Placement) {
+    fn composite_cluster(
+        shared: &mut FontShared,
+        tb: &CtBuffer,
+        rgba: &mut [u8],
+        cw: usize,
+        ch: usize,
+        place: Placement,
+    ) {
         for run in tb.layout_runs() {
             for gl in run.glyphs.iter() {
                 let phys = gl.physical((0.0, 0.0), 1.0);
@@ -1933,8 +2012,15 @@ mod backend {
                             for rx in 0..iw {
                                 let i = ((ry * iw + rx) * 4) as usize;
                                 canvas_over(
-                                    rgba, cw, ch, ox + rx, oy + ry,
-                                    img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3],
+                                    rgba,
+                                    cw,
+                                    ch,
+                                    ox + rx,
+                                    oy + ry,
+                                    img.data[i],
+                                    img.data[i + 1],
+                                    img.data[i + 2],
+                                    img.data[i + 3],
                                 );
                             }
                         }
@@ -2093,8 +2179,17 @@ mod backend {
                         let left = inset + cx * cw;
                         fill_cell(&mut buf, fb_w, fb_h, left, top, block_w, ch_s, bg_packed);
                         r.draw_cluster(
-                            &mut buf, fb_w, fb_h, left, top, g, face.family, face.bold,
-                            face.italic, face.scale, fg,
+                            &mut buf,
+                            fb_w,
+                            fb_h,
+                            left,
+                            top,
+                            g,
+                            face.family,
+                            face.bold,
+                            face.italic,
+                            face.scale,
+                            fg,
                         );
                         if face.underline {
                             // a rule near the block bottom, in the text colour
@@ -2105,7 +2200,13 @@ mod backend {
                         cx += cells * scale;
                     }
                 }
-                Op::Rect { row, col, w, h, face } => {
+                Op::Rect {
+                    row,
+                    col,
+                    w,
+                    h,
+                    face,
+                } => {
                     // A solid panel: fill the w×h cell block with the face background
                     // (reverse swaps in the fg). No background → nothing to paint.
                     let bg = if face.reverse { face.fg } else { face.bg };

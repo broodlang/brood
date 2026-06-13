@@ -79,7 +79,11 @@ pub fn link(a: u64, b: u64) {
         }
     }
     // `b` already dead — notify the linker via the same trap-or-propagate path.
-    deliver_exit_to(a, local_pid_msg(b), Message::Keyword(value::intern(pk::NOPROC)));
+    deliver_exit_to(
+        a,
+        local_pid_msg(b),
+        Message::Keyword(value::intern(pk::NOPROC)),
+    );
 }
 
 /// `(unlink pid)` for a **local** `pid` — drop the symmetric link. Best-effort.
@@ -260,10 +264,6 @@ pub(crate) fn handle_node_down(node: Symbol) {
     };
     let reason = Message::Keyword(value::intern(pk::NOCONNECTION));
     for (local, remote) in affected {
-        deliver_exit_to(
-            local,
-            Message::Pid { node, id: remote },
-            reason.clone(),
-        );
+        deliver_exit_to(local, Message::Pid { node, id: remote }, reason.clone());
     }
 }

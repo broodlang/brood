@@ -346,10 +346,16 @@ fn tls_config() -> Arc<ClientConfig> {
 
 /// Connect + TLS handshake + write `request` + stream the response to `sink` as
 /// `[:tcp id data]` chunks. Returns Ok at clean EOF (caller emits `[:tcp-closed]`).
-fn tls_exchange(host: &str, port: u16, request: &str, id: u64, sink: &MailboxSink) -> std::io::Result<()> {
+fn tls_exchange(
+    host: &str,
+    port: u16,
+    request: &str,
+    id: u64,
+    sink: &MailboxSink,
+) -> std::io::Result<()> {
     let stream = TcpStream::connect((host, port))?;
-    let server_name = ServerName::try_from(host.to_string())
-        .map_err(|_| invalid("tls: invalid server name"))?;
+    let server_name =
+        ServerName::try_from(host.to_string()).map_err(|_| invalid("tls: invalid server name"))?;
     let conn = ClientConnection::new(tls_config(), server_name)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut tls = StreamOwned::new(conn, stream);
@@ -375,12 +381,14 @@ fn tls_exchange(host: &str, port: u16, request: &str, id: u64, sink: &MailboxSin
 pub fn tls_request(host: &str, port: u16, request: String, subscriber: u64) -> u64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let host = host.to_string();
-    spawn_io_source(subscriber, "brood-tls-request", move |sink| {
-        match tls_exchange(&host, port, &request, id, sink) {
+    spawn_io_source(
+        subscriber,
+        "brood-tls-request",
+        move |sink| match tls_exchange(&host, port, &request, id, sink) {
             Ok(()) => sink.emit(tcp_closed_msg(id)),
             Err(e) => sink.emit(tcp_error_msg(id, &e.to_string())),
-        }
-    });
+        },
+    );
     id
 }
 

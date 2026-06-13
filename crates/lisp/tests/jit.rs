@@ -36,7 +36,11 @@ fn run(src: &'static str) -> Result<String, String> {
 
 /// Assert a warmed program yields exactly `want`.
 fn is(src: &'static str, want: &str) {
-    assert_eq!(run(src).as_deref(), Ok(want), "JIT result diverged on:\n  {src}");
+    assert_eq!(
+        run(src).as_deref(),
+        Ok(want),
+        "JIT result diverged on:\n  {src}"
+    );
 }
 
 #[test]
@@ -92,8 +96,15 @@ fn comparisons_and_maps_are_correct_under_jit() {
     ] {
         let src = cmp(op);
         let mut interp = Interp::new();
-        let got = interp.eval_str(&src).map(|v| interp.print(v)).map_err(|e| e.message);
-        assert_eq!(got.as_deref(), Ok(want), "comparison `{op}` diverged under JIT");
+        let got = interp
+            .eval_str(&src)
+            .map(|v| interp.print(v))
+            .map_err(|e| e.message);
+        assert_eq!(
+            got.as_deref(),
+            Ok(want),
+            "comparison `{op}` diverged under JIT"
+        );
     }
 }
 
@@ -214,12 +225,10 @@ fn exact_division_inlines_inexact_deopts_to_float() {
 fn division_by_zero_deopts_to_the_same_error() {
     // A warmed division arm hitting a zero divisor must deopt and raise the VM's exact
     // error (Cranelift's srem would *trap*/abort if we hadn't guarded it).
-    let err = run(
-        "(defn r (a b) (rem a b))
+    let err = run("(defn r (a b) (rem a b))
          (defn run (k last) (if (< k 1) last (run (- k 1) (r 10 2))))
          (run 20000 0)
-         (r 10 0)",
-    )
+         (r 10 0)")
     .expect_err("division by zero must error, not return");
     assert!(
         err.contains("division by zero"),

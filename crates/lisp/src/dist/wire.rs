@@ -888,8 +888,14 @@ mod tests {
         // travel by spelling (re-interned on decode); addresses are plain strings.
         let f = Frame::Peers {
             peers: vec![
-                (value::intern("b@127.0.0.1"), "tcp:127.0.0.1:9002".to_string()),
-                (value::intern("c@127.0.0.1"), "unix:/run/brood/c.sock".to_string()),
+                (
+                    value::intern("b@127.0.0.1"),
+                    "tcp:127.0.0.1:9002".to_string(),
+                ),
+                (
+                    value::intern("c@127.0.0.1"),
+                    "unix:/run/brood/c.sock".to_string(),
+                ),
             ],
         };
         match read_full(&f) {

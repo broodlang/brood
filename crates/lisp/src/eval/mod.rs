@@ -293,7 +293,12 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         let then_r = heap.root(then_form);
                         let else_r = heap.root(else_form);
                         let test = eval_at(heap, test_form, env)?;
-                        Ok((test, heap.read_root(then_r), heap.read_root(else_r), heap.read_root_env(env_r)))
+                        Ok((
+                            test,
+                            heap.read_root(then_r),
+                            heap.read_root(else_r),
+                            heap.read_root_env(env_r),
+                        ))
                     })?;
                     env = new_env;
                     expr = if truthy(test) { then_form } else { else_form };
@@ -565,7 +570,11 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     let call_form_r = heap.root(call_form);
                     let env_r = heap.root_env(env);
                     let callee = eval_at(heap, head, env)?;
-                    Ok((callee, heap.read_root(call_form_r), heap.read_root_env(env_r)))
+                    Ok((
+                        callee,
+                        heap.read_root(call_form_r),
+                        heap.read_root_env(env_r),
+                    ))
                 })?;
                 call_form = new_call_form;
                 env = new_env;
@@ -630,8 +639,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         // lookup — no GC, so `cur_argv` stays valid). The shared
                         // `passthrough_redirect_ok` then gates the redirect (callable
                         // inner only), counts the reduction, and honours the deadline.
-                        let inner = eval(heap, head, cl_env)
-                            .map_err(|e| e.or_form_pos(heap, call_form))?;
+                        let inner =
+                            eval(heap, head, cl_env).map_err(|e| e.or_form_pos(heap, call_form))?;
                         // A redirect back to the *same* closure is direct self-recursion
                         // (`(defn hog () (hog))`), not a thin wrapper — fall through to
                         // the normal call path (which re-enters the `'tail:` loop, whose
@@ -654,64 +663,65 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // `bind_params` selects the arm matching this call's arity, binds
                     // it, and hands back that arm's body (snapshotted into an inline
                     // `SmallVec` so the loop below doesn't re-dispatch the slab).
-                    let (scope, body) =
-                        bind_params(heap, id, &cur_argv).map_err(|e| e.or_form_pos(heap, call_form))?;
-                if body.is_empty() {
-                    return Ok(Value::Nil);
-                }
-                let (last, init) = body.split_last().expect("checked non-empty");
-                if init.is_empty() {
-                    // Single-form body (the common case): hand `last` straight to
-                    // the loop — the safepoint roots `expr`/`env` for us, so no
-                    // operand-stack push is needed.
-                    expr = *last;
-                    env = scope;
+                    let (scope, body) = bind_params(heap, id, &cur_argv)
+                        .map_err(|e| e.or_form_pos(heap, call_form))?;
+                    if body.is_empty() {
+                        return Ok(Value::Nil);
+                    }
+                    let (last, init) = body.split_last().expect("checked non-empty");
+                    if init.is_empty() {
+                        // Single-form body (the common case): hand `last` straight to
+                        // the loop — the safepoint roots `expr`/`env` for us, so no
+                        // operand-stack push is needed.
+                        expr = *last;
+                        env = scope;
+                        continue 'tail;
+                    }
+                    // Multi-form body: each non-last form is evaluated for effect, and
+                    // an eval can collect at any depth (ADR-061) — so root `scope`,
+                    // `last`, and the remaining body forms across those evals, then
+                    // re-read the relocated handles for the tail hand-off.
+                    let (new_last, new_scope) = heap.root_scope(|heap| {
+                        let scope_r = heap.root_env(scope);
+                        let last_r = heap.root(*last);
+                        let init_r: SmallVec<[Root; 8]> =
+                            init.iter().map(|&f| heap.root(f)).collect();
+                        for &fr in &init_r {
+                            let scope_now = heap.read_root_env(scope_r);
+                            let form = heap.read_root(fr);
+                            eval_at(heap, form, scope_now)?;
+                        }
+                        Ok((heap.read_root(last_r), heap.read_root_env(scope_r)))
+                    })?;
+                    expr = new_last;
+                    env = new_scope;
                     continue 'tail;
                 }
-                // Multi-form body: each non-last form is evaluated for effect, and
-                // an eval can collect at any depth (ADR-061) — so root `scope`,
-                // `last`, and the remaining body forms across those evals, then
-                // re-read the relocated handles for the tail hand-off.
-                let (new_last, new_scope) = heap.root_scope(|heap| {
-                    let scope_r = heap.root_env(scope);
-                    let last_r = heap.root(*last);
-                    let init_r: SmallVec<[Root; 8]> = init.iter().map(|&f| heap.root(f)).collect();
-                    for &fr in &init_r {
-                        let scope_now = heap.read_root_env(scope_r);
-                        let form = heap.read_root(fr);
-                        eval_at(heap, form, scope_now)?;
-                    }
-                    Ok((heap.read_root(last_r), heap.read_root_env(scope_r)))
-                })?;
-                expr = new_last;
-                env = new_scope;
-                continue 'tail;
-            }
-            other => {
-                let shown = crate::syntax::printer::print(heap, other);
-                let mut err =
-                    LispError::type_err(format!("cannot call non-function: {}", shown));
-                // A literal (string / number / keyword / bool) in head position almost
-                // always means C-style call syntax: `f(x)` reads in Brood as two forms
-                // — `f` then `(x)` — so the inner `(x)` tries to call the *value* of
-                // `x`. Nudge toward the Lisp form instead of a bare type error.
-                if matches!(
-                    other,
-                    Value::Str(_)
-                        | Value::Int(_)
-                        | Value::Float(_)
-                        | Value::Bool(_)
-                        | Value::Keyword(_)
-                ) {
-                    err = err.with_hint(
-                        "a value can't be called — in Brood the function goes inside the \
+                other => {
+                    let shown = crate::syntax::printer::print(heap, other);
+                    let mut err =
+                        LispError::type_err(format!("cannot call non-function: {}", shown));
+                    // A literal (string / number / keyword / bool) in head position almost
+                    // always means C-style call syntax: `f(x)` reads in Brood as two forms
+                    // — `f` then `(x)` — so the inner `(x)` tries to call the *value* of
+                    // `x`. Nudge toward the Lisp form instead of a bare type error.
+                    if matches!(
+                        other,
+                        Value::Str(_)
+                            | Value::Int(_)
+                            | Value::Float(_)
+                            | Value::Bool(_)
+                            | Value::Keyword(_)
+                    ) {
+                        err = err.with_hint(
+                            "a value can't be called — in Brood the function goes inside the \
                          parens: write (f x), not f(x). (`name(args)` reads as two separate \
                          forms, so the `(args)` tries to call a value.)",
-                    );
+                        );
+                    }
+                    return Err(err.or_form_pos(heap, call_form));
                 }
-                return Err(err.or_form_pos(heap, call_form));
             }
-        }
         }
     }
 }
@@ -779,7 +789,10 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
             // `cannot call non-function` message asserted by suite_test) so the two
             // engines — and direct vs `apply`-routed calls — never diverge.
             let shown = crate::syntax::printer::print(heap, other);
-            Err(LispError::type_err(format!("cannot call non-function: {}", shown)))
+            Err(LispError::type_err(format!(
+                "cannot call non-function: {}",
+                shown
+            )))
         }
     }
 }
@@ -918,7 +931,10 @@ fn bind_params(
         }
         Ok((
             heap.read_root_env(scope_rt),
-            body_rt.iter().map(|&r| heap.read_root(r)).collect::<SmallVec<_>>(),
+            body_rt
+                .iter()
+                .map(|&r| heap.read_root(r))
+                .collect::<SmallVec<_>>(),
         ))
     })
 }
@@ -1021,8 +1037,7 @@ pub(crate) fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
 /// `unless`/`when`/`ref` — those Just Work, so hinting them would be wrong.
 pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
     Some(match name {
-        "set!" | "setq" | "setf" | "set-car!" | "set-cdr!" | "vector-set!"
-        | "string-set!" => {
+        "set!" | "setq" | "setf" | "set-car!" | "set-cdr!" | "vector-set!" | "string-set!" => {
             "Brood is immutable (ADR-026) — there is no in-place assignment. Hold \
              changing state in a process (spawn/send/receive), or `def` to rebind a \
              global; let/fn bindings never mutate."

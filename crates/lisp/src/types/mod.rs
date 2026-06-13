@@ -296,7 +296,12 @@ impl Ty {
             other.tags & MAP_BIT != 0,
             &other.map_kv,
         );
-        Ty { tags, arrow, elem, map_kv }
+        Ty {
+            tags,
+            arrow,
+            elem,
+            map_kv,
+        }
     }
 
     /// `self ∩ other` — values in both. When the relevant bit survives and one
@@ -321,7 +326,12 @@ impl Ty {
         } else {
             None
         };
-        Ty { tags, arrow, elem, map_kv }
+        Ty {
+            tags,
+            arrow,
+            elem,
+            map_kv,
+        }
     }
 
     /// `¬self` — every value *not* in `self`, as a **sound over-approximation**:
@@ -1029,7 +1039,10 @@ mod tests {
             "(int, string) -> number"
         );
         // A bare "any function" (no refinement) still prints as its tags.
-        assert_eq!(Ty::of_tags(&[Tag::Fn, Tag::Native]).to_string(), "fn | native");
+        assert_eq!(
+            Ty::of_tags(&[Tag::Fn, Tag::Native]).to_string(),
+            "fn | native"
+        );
     }
 
     #[test]
@@ -1073,7 +1086,7 @@ mod tests {
     fn intersect_narrows_to_the_known_arrow() {
         let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
         let any_fn = Ty::of_tags(&[Tag::Fn, Tag::Native]); // unrefined
-        // refined ∩ any-function → keep the refinement (narrowing via fn? guard).
+                                                           // refined ∩ any-function → keep the refinement (narrowing via fn? guard).
         assert_eq!(f.clone().intersect(any_fn).as_arrow(), f.as_arrow());
     }
 
@@ -1103,7 +1116,9 @@ mod tests {
         // `nil | list<E>` (the shape a `(map …)`/`(filter …)` result carries)
         // names the nil rather than hiding it.
         assert_eq!(
-            Ty::list_of(Ty::of(Tag::Int)).union(Ty::of(Tag::Nil)).to_string(),
+            Ty::list_of(Ty::of(Tag::Int))
+                .union(Ty::of(Tag::Nil))
+                .to_string(),
             "nil | list<int>"
         );
     }
@@ -1141,7 +1156,11 @@ mod tests {
         let once = vi.clone().negate();
         assert_eq!(once, Ty::ANY, "¬(vector<int>) widens all the way to any");
         assert_eq!(once.negate(), Ty::NEVER, "…so ¬¬ collapses to never");
-        assert_ne!(vi.clone().negate().negate(), vi, "double negation does NOT hold");
+        assert_ne!(
+            vi.clone().negate().negate(),
+            vi,
+            "double negation does NOT hold"
+        );
         // The same collapse for an arrow refinement: ¬¬((int)->int) == never.
         let ai = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
         assert_eq!(ai.clone().negate(), Ty::ANY);

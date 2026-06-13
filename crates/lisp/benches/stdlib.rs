@@ -329,10 +329,7 @@ mod csv {
             .map(|i| format!("{i},name_{i},{}", i * 100))
             .collect();
         let csv = format!("id,name,score\n{}", rows.join("\n"));
-        bench_prog(
-            bencher,
-            format!("(require 'csv) (def src {csv:?}) {body}"),
-        );
+        bench_prog(bencher, format!("(require 'csv) (def src {csv:?}) {body}"));
     }
 
     /// Parse a CSV string with `n` rows.
@@ -626,28 +623,19 @@ mod enum_extras {
     /// `chunk-every` into groups of 10 over `n` elements.
     #[divan::bench(args = [1_000, 10_000])]
     fn chunk_every(bencher: divan::Bencher, n: usize) {
-        bench_prog(
-            bencher,
-            format!("(count (chunk-every 10 (range {n})))"),
-        );
+        bench_prog(bencher, format!("(count (chunk-every 10 (range {n})))"));
     }
 
     /// `chunk-by even?` over `n` integers.
     #[divan::bench(args = [1_000, 10_000])]
     fn chunk_by(bencher: divan::Bencher, n: usize) {
-        bench_prog(
-            bencher,
-            format!("(count (chunk-by even? (range {n})))"),
-        );
+        bench_prog(bencher, format!("(count (chunk-by even? (range {n})))"));
     }
 
     /// Running sum via `scan` over `n` integers.
     #[divan::bench(args = [1_000, 10_000])]
     fn scan(bencher: divan::Bencher, n: usize) {
-        bench_prog(
-            bencher,
-            format!("(last (scan + 0 (range {n})))"),
-        );
+        bench_prog(bencher, format!("(last (scan + 0 (range {n})))"));
     }
 
     /// `zip-with +` two `n`-element ranges.

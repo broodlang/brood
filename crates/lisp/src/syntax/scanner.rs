@@ -51,7 +51,9 @@ pub enum StringScan {
     /// body was still scanned through its closing quote (so the tolerant CST
     /// keeps a correct span); a string that is *also* unterminated reports
     /// `Unterminated` instead — the REPL's continuation prompt keys off it.
-    BadEscape { at: usize },
+    BadEscape {
+        at: usize,
+    },
 }
 
 impl<'a> Scanner<'a> {
@@ -71,9 +73,7 @@ impl<'a> Scanner<'a> {
             match bytes[i] {
                 b'\n' => line_starts.push((i + 1) as u32),
                 // CRLF's break is recorded by its `\n`; only a lone CR breaks here.
-                b'\r' if bytes.get(i + 1) != Some(&b'\n') => {
-                    line_starts.push((i + 1) as u32)
-                }
+                b'\r' if bytes.get(i + 1) != Some(&b'\n') => line_starts.push((i + 1) as u32),
                 // U+2028 LINE SEPARATOR (E2 80 A8) / U+2029 PARAGRAPH
                 // SEPARATOR (E2 80 A9) in UTF-8.
                 0xE2 if bytes.get(i + 1) == Some(&0x80)
@@ -417,11 +417,20 @@ mod tests {
             s.scan_string_body(Some(&mut out)),
             StringScan::BadEscape { at: 2 }
         ));
-        assert_eq!(&s.src[s.pos..], "after", "scan continues past the close quote");
+        assert_eq!(
+            &s.src[s.pos..],
+            "after",
+            "scan continues past the close quote"
+        );
 
         // Malformed `\u{}` shapes likewise; the catch-all `\X` → literal X
         // rule for other chars is unchanged.
-        for bad in [r#"\u{}"x"#, r#"\u{nothex}"x"#, r#"\u{110000}"x"#, r#"\u41"x"#] {
+        for bad in [
+            r#"\u{}"x"#,
+            r#"\u{nothex}"x"#,
+            r#"\u{110000}"x"#,
+            r#"\u41"x"#,
+        ] {
             let mut s = Scanner::new(bad);
             assert!(
                 matches!(s.scan_string_body(None), StringScan::BadEscape { at: 0 }),
@@ -430,7 +439,10 @@ mod tests {
         }
         let mut s = Scanner::new(r#"\q"x"#);
         let mut out = String::new();
-        assert!(matches!(s.scan_string_body(Some(&mut out)), StringScan::Closed));
+        assert!(matches!(
+            s.scan_string_body(Some(&mut out)),
+            StringScan::Closed
+        ));
         assert_eq!(out, "q", "unknown non-hex escapes still pass through");
     }
 

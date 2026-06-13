@@ -272,7 +272,11 @@ fn promoted_range_survives_collection() {
         (= r '(1 3 5 7 9))
     "#;
     let v = interp.eval_str(prog).expect("range-def program errored");
-    assert_eq!(interp.print(v), "true", "def'd range corrupted by collection");
+    assert_eq!(
+        interp.print(v),
+        "true",
+        "def'd range corrupted by collection"
+    );
 }
 
 #[test]
@@ -334,7 +338,9 @@ fn promotes_cyclic_local_closures_without_crashing() {
             (send root (if ok :pass :fail))))
         (receive (:pass :pass) (:fail :fail) (after 10000 :timed-out))
     "#;
-    let v = interp.eval_str(prog).expect("cyclic-promote program errored");
+    let v = interp
+        .eval_str(prog)
+        .expect("cyclic-promote program errored");
     assert_eq!(
         interp.print(v),
         ":pass",
@@ -370,7 +376,9 @@ fn sends_closure_capturing_closure_without_crashing() {
           (spawn (send root (handler {:path "/"}))))
         (receive (m m) (after 10000 :timed-out))
     "#;
-    let v = interp.eval_str(prog).expect("send-closure-capturing-closure errored");
+    let v = interp
+        .eval_str(prog)
+        .expect("send-closure-capturing-closure errored");
     assert_eq!(
         interp.print(v),
         ":ok",
@@ -417,6 +425,40 @@ fn runtime_collect_iterates_long_promoted_list_spine() {
         "a 100k-element list promoted to RUNTIME didn't survive a runtime_collect \
          intact — flush_rt_pair's cdr-spine evacuation regressed (recursion \
          overflow, or a mis-wired iterative rebuild)",
+    );
+}
+
+/// Regression: a **transient held across a tenuring collection** must stay
+/// correct. A live transient is *mutable*, so once tenured to the old gen an
+/// `assoc!` repoints its `root` at a fresh young node — an OLD->YOUNG edge. A
+/// minor *flip* skips the old gen (immutable data never points young), so without
+/// a write barrier it relocated the young root and left the old cell's `root`
+/// dangling: a use-after-GC (debug panic / silent corruption in release). The fix
+/// records mutated old transients in a `remembered_transients` set the next minor
+/// flushes (see `Heap::remember_transient`).
+///
+/// A low floor + tenure makes a few-thousand-entry `assoc!` build cycle
+/// tenure/flip many times deterministically. The env is read once via `OnceLock`;
+/// safe here because nextest runs each test in its own process. Pre-fix this
+/// panics inside the build; post-fix it returns the correct map.
+#[test]
+fn transient_survives_tenure_then_flip() {
+    std::env::set_var("BROOD_GC_FLOOR", "1000");
+    std::env::set_var("BROOD_GC_TENURE", "500");
+    let mut interp = Interp::new();
+    let prog = r#"
+        (def m (persistent!
+                 (reduce (fn (t i) (assoc! t i (* i i))) (transient {}) (range 3000))))
+        (list (count m) (get m 2999) (get m 0))
+    "#;
+    let v = interp
+        .eval_str(prog)
+        .expect("transient build across a tenuring collection errored");
+    assert_eq!(
+        interp.print(v),
+        "(3000 8994001 0)",
+        "a transient tenured mid-build then mutated lost its root across a flip — \
+         the transient write barrier (remembered_transients) regressed",
     );
 }
 

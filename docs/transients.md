@@ -13,6 +13,34 @@ build call (~7% end-to-end on build-heavy programs); no small-map regression.
 Covered by `tests/transients_test.blsp` (equivalence, input-immutability,
 cross-process round-trip, hot-reload), green under `BROOD_GC_STRESS=1`/`GC_VERIFY`.
 
+**Update (Phase 2 shipped — this note's rejection was overruled).** The
+user-facing surface *was* subsequently added: `transient` / `assoc!` / `dissoc!`
+/ `persistent!` as builtins over a real `Value::Transient` (`heap.rs`
+`alloc_transient`/`transient_assoc`/…), with `get`/`count`/`contains?` dispatching
+to it for live reads. The prelude's multi-assoc combinators (`merge`,
+`merge-with`, `select-keys`, `update-vals`, `update-keys`) build through it
+instead of folding immutable `map-assoc` (measured ~1.4–1.6× on large inputs).
+Unlike the internal builder, a `Value::Transient` **can be held across a
+safepoint**, so the "GC cannot fire mid-build" simplification below does *not*
+apply to it. Two mechanisms keep it correct:
+
+1. **Epoch re-anchor** (`transient_reanchor`): a collection bumps `local_epoch`
+   and relocates the cell's owned nodes; on the next `assoc!` the stale watermark
+   is reset to the current slab length, so relocated nodes read as non-owned and
+   are path-copied once (re-establishing owned nodes) rather than mutated by a
+   bogus index.
+2. **Transient write barrier** (`remembered_transients`): a transient *cell*
+   tenured to the old gen is mutable, so a later `assoc!` repoints its `root` at a
+   fresh *young* node — an OLD→YOUNG edge a minor *flip* would otherwise skip
+   (the flip relies on the immutable-data invariant that old never points young),
+   leaving the cell's root dangling. The mutating ops record an old cell in
+   `remembered_transients`; the next minor flushes its root in place (dropped on a
+   tenure, retained on a flip), exactly as `remembered` does for env frames. The
+   tenure path is regression-tested in `gc.rs::transient_survives_tenure_then_flip`
+   and `transients_test.blsp` (the "tenures past min_tenure" case). Before this
+   barrier the surface corrupted under GC on allocation-heavy builds (a silent
+   use-after-GC in release; an epoch-tripwire panic in debug).
+
 ## Problem
 
 Building a map by repeated `assoc` is O(N log₁₆ N) *allocations*: every

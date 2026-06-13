@@ -24,9 +24,9 @@ use std::time::{Duration, Instant};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, MapId, Symbol, Value};
-use crate::process::keywords as pk;
 use crate::error::{LispError, LispResult};
 use crate::eval;
+use crate::process::keywords as pk;
 
 use super::message::{from_message, to_message, Message};
 use super::scheduler::{ensure_ctx, wake_enqueue, Ctx, Process};
@@ -336,9 +336,10 @@ pub fn receive_match(
                 // the receive was first entered (and actually fires), instead of being
                 // reset to `now + ms` on each wake. Cleared at every non-suspend exit.
                 let mut st = crate::core::sync::lock(&ctx.mailbox.state);
-                Some(*st.recv_deadline.get_or_insert_with(|| {
-                    Instant::now() + Duration::from_millis(ms as u64)
-                }))
+                Some(
+                    *st.recv_deadline
+                        .get_or_insert_with(|| Instant::now() + Duration::from_millis(ms as u64)),
+                )
             } else {
                 // Coroutine/root: the `receive_match` loop holds the deadline across its
                 // waits (it never exits between scans), so compute it once here.
@@ -633,7 +634,11 @@ mod tests {
     #[test]
     fn timer_gen_supersedes_earlier_entries() {
         let mb = Mailbox::new();
-        assert_eq!(mb.timer_gen.load(Ordering::Relaxed), 0, "fresh mailbox at gen 0");
+        assert_eq!(
+            mb.timer_gen.load(Ordering::Relaxed),
+            0,
+            "fresh mailbox at gen 0"
+        );
 
         // Mirror `wait_for_message`'s green branch: `fetch_add(1) + 1` is the gen
         // stamped onto the entry just armed. A server looping
@@ -641,7 +646,11 @@ mod tests {
         let gen1 = mb.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let gen2 = mb.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let gen3 = mb.timer_gen.fetch_add(1, Ordering::Relaxed) + 1;
-        assert_eq!((gen1, gen2, gen3), (1, 2, 3), "each park stamps a fresh gen");
+        assert_eq!(
+            (gen1, gen2, gen3),
+            (1, 2, 3),
+            "each park stamps a fresh gen"
+        );
 
         // The staleness gate `wake_for_timeout` applies: an entry fires only while
         // its gen equals the mailbox's current `timer_gen`. After three arms only
@@ -703,7 +712,11 @@ mod tests {
     fn empty_receive_in_a_capture_run_suspends() {
         let mailbox = Mailbox::new();
         // Greenness comes from `in_capture_run` (set below), not a yielder.
-        let ctx = Ctx { pid: 999_999, mailbox: Arc::clone(&mailbox), capture: Vec::new() };
+        let ctx = Ctx {
+            pid: 999_999,
+            mailbox: Arc::clone(&mailbox),
+            capture: Vec::new(),
+        };
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = Some(ctx));
         crate::process::scheduler::set_capture_run(true);
         // A *top-level* capture receive (bytecode-reachable, no native frame between it
@@ -721,10 +734,17 @@ mod tests {
         crate::process::scheduler::set_capture_top_level(prev_top);
         crate::process::scheduler::set_capture_run(false);
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx
-        let err = r.expect_err("an empty receive in a capture run must signal a suspend, not return");
-        assert!(err.is_control(), "the suspend must be a control signal, not a real error");
+        let err =
+            r.expect_err("an empty receive in a capture run must signal a suspend, not return");
         assert!(
-            matches!(err.control, Some(crate::error::Control::Suspend { deadline: None })),
+            err.is_control(),
+            "the suspend must be a control signal, not a real error"
+        );
+        assert!(
+            matches!(
+                err.control,
+                Some(crate::error::Control::Suspend { deadline: None })
+            ),
             "an indefinite receive carries no deadline"
         );
     }

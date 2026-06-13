@@ -172,7 +172,8 @@ pub fn mounted() -> &'static Option<Bundle> {
             return None;
         }
         // Real bundle — read just the archive bytes (not the base binary).
-        f.seek(SeekFrom::Start(len - FOOTER_LEN as u64 - alen)).ok()?;
+        f.seek(SeekFrom::Start(len - FOOTER_LEN as u64 - alen))
+            .ok()?;
         let mut archive = vec![0u8; alen as usize];
         f.read_exact(&mut archive).ok()?;
         parse_archive(&archive)

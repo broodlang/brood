@@ -160,16 +160,15 @@ impl Interp {
             let form = self.heap.root_at(roots_base + i);
             // Compile pass: expand macros once before evaluating (form-by-form,
             // so a macro a form defines is in scope for the forms after it).
-            let outcome = eval::macros::compile(&mut self.heap, form, self.root)
-                .and_then(|f| {
-                    // BROOD_VM → the compiling engine (ADR-076); off → tree-walker.
-                    // Stage 0 defers, so this is at parity. Mirrors `eval_source`.
-                    if eval::compile::vm_enabled() {
-                        eval::compile::run(&mut self.heap, f, self.root)
-                    } else {
-                        eval::eval(&mut self.heap, f, self.root)
-                    }
-                });
+            let outcome = eval::macros::compile(&mut self.heap, form, self.root).and_then(|f| {
+                // BROOD_VM → the compiling engine (ADR-076); off → tree-walker.
+                // Stage 0 defers, so this is at parity. Mirrors `eval_source`.
+                if eval::compile::vm_enabled() {
+                    eval::compile::run(&mut self.heap, f, self.root)
+                } else {
+                    eval::eval(&mut self.heap, f, self.root)
+                }
+            });
             match outcome {
                 Ok(v) => result = v,
                 Err(e) => {

@@ -72,7 +72,10 @@ pub fn symbol_name(sym: Symbol) -> String {
 /// walk. Reach for [`symbol_name`] only when an owned `String` must outlive the
 /// table (stored in a `Value`, returned across an API boundary, collected).
 pub fn symbol_name_ref(sym: Symbol) -> &'static str {
-    NAMES.get(sym as usize).expect("interned symbol id").as_str()
+    NAMES
+        .get(sym as usize)
+        .expect("interned symbol id")
+        .as_str()
 }
 
 /// Look up an existing interned symbol without inserting one. Returns `None` if
@@ -207,7 +210,10 @@ macro_rules! handle {
                     index,
                 );
                 let h = $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT));
-                debug_assert!(h.region() < REGION_RESERVED, "region 0b11 is reserved for EnvId::GLOBAL");
+                debug_assert!(
+                    h.region() < REGION_RESERVED,
+                    "region 0b11 is reserved for EnvId::GLOBAL"
+                );
                 h
             }
             /// A LOCAL handle in the **old (tenured) generation**, stamped with the
@@ -221,7 +227,10 @@ macro_rules! handle {
                     index,
                 );
                 let h = $name((index as u64) | (((gen as u64) & GEN_MASK) << GEN_SHIFT) | AGE_OLD);
-                debug_assert!(h.region() < REGION_RESERVED, "region 0b11 is reserved for EnvId::GLOBAL");
+                debug_assert!(
+                    h.region() < REGION_RESERVED,
+                    "region 0b11 is reserved for EnvId::GLOBAL"
+                );
                 h
             }
             /// A handle into the immutable shared prelude region (no generation).
@@ -232,7 +241,10 @@ macro_rules! handle {
                     "prelude index {} overflows",
                     index
                 );
-                debug_assert!(PRELUDE < REGION_RESERVED, "region 0b11 is reserved for EnvId::GLOBAL");
+                debug_assert!(
+                    PRELUDE < REGION_RESERVED,
+                    "region 0b11 is reserved for EnvId::GLOBAL"
+                );
                 $name((index as u64) | ((PRELUDE as u64) << REGION_SHIFT))
             }
             /// A handle into the runtime's mutable shared code region (no generation).
@@ -243,7 +255,10 @@ macro_rules! handle {
                     "runtime index {} overflows",
                     index
                 );
-                debug_assert!(RUNTIME < REGION_RESERVED, "region 0b11 is reserved for EnvId::GLOBAL");
+                debug_assert!(
+                    RUNTIME < REGION_RESERVED,
+                    "region 0b11 is reserved for EnvId::GLOBAL"
+                );
                 $name((index as u64) | ((RUNTIME as u64) << REGION_SHIFT))
             }
             /// Which region this handle addresses ([`LOCAL`]/[`PRELUDE`]/[`RUNTIME`]).
@@ -745,27 +760,49 @@ mod jit_layout_tests {
     /// updated rather than silently miscompiling. See `docs/jit-stage1.md` §2.
     #[test]
     fn value_layout_is_stable_for_the_jit() {
-        assert_eq!(std::mem::align_of::<Value>(), 8, "Value must stay 8-aligned");
+        assert_eq!(
+            std::mem::align_of::<Value>(),
+            8,
+            "Value must stay 8-aligned"
+        );
         // The JIT addresses a roots slot as `roots_base + k * size_of::<Value>()` (its
         // `STRIDE`) and copies a whole handle word-by-word across all `size_of` bytes — a
         // change here is an ABI break the JIT codegen must follow. It is **not** 16: the
         // `Pid { node, id }` variant needs two payload words (the second at offset 16),
         // which a tag+payload-only copy would drop.
-        assert_eq!(std::mem::size_of::<Value>(), 24, "Value size (the JIT's STRIDE) drifted");
+        assert_eq!(
+            std::mem::size_of::<Value>(),
+            24,
+            "Value size (the JIT's STRIDE) drifted"
+        );
         // `Value::Pair`'s discriminant byte must match `TAG_PAIR` (the JIT's car/cdr
         // tag-check); a variant reorder breaks it.
         let p = Value::Pair(PairId::local_gen(0, 0));
         let pbytes = unsafe {
-            std::slice::from_raw_parts(&p as *const Value as *const u8, std::mem::size_of::<Value>())
+            std::slice::from_raw_parts(
+                &p as *const Value as *const u8,
+                std::mem::size_of::<Value>(),
+            )
         };
-        assert_eq!(pbytes[0], jit_layout::TAG_PAIR, "Value::Pair discriminant drifted");
+        assert_eq!(
+            pbytes[0],
+            jit_layout::TAG_PAIR,
+            "Value::Pair discriminant drifted"
+        );
         // `Value::Bool`'s discriminant must match `TAG_BOOL` (the JIT boxes a comparison
         // result as a Bool, not an Int); a variant reorder breaks it.
         let bt = Value::Bool(true);
         let btbytes = unsafe {
-            std::slice::from_raw_parts(&bt as *const Value as *const u8, std::mem::size_of::<Value>())
+            std::slice::from_raw_parts(
+                &bt as *const Value as *const u8,
+                std::mem::size_of::<Value>(),
+            )
         };
-        assert_eq!(btbytes[0], jit_layout::TAG_BOOL, "Value::Bool discriminant drifted");
+        assert_eq!(
+            btbytes[0],
+            jit_layout::TAG_BOOL,
+            "Value::Bool discriminant drifted"
+        );
         let v = Value::Int(0x0123_4567_89ab_cdef_u64 as i64);
         // Read the raw bytes (no transmute size constraint).
         let bytes = unsafe {
@@ -774,7 +811,11 @@ mod jit_layout_tests {
                 std::mem::size_of::<Value>(),
             )
         };
-        assert_eq!(bytes[0], jit_layout::TAG_INT, "Value::Int discriminant drifted");
+        assert_eq!(
+            bytes[0],
+            jit_layout::TAG_INT,
+            "Value::Int discriminant drifted"
+        );
         let off = jit_layout::PAYLOAD_OFFSET;
         let payload = i64::from_ne_bytes(bytes[off..off + 8].try_into().unwrap());
         assert_eq!(
@@ -783,4 +824,3 @@ mod jit_layout_tests {
         );
     }
 }
-

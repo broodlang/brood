@@ -38,7 +38,10 @@ pub fn install_crash_dump() {
         let mut body = String::new();
         body.push_str("\n=== brood crash dump ===\n");
         body.push_str(&format!("when:    {when} ms since epoch\n"));
-        body.push_str(&format!("thread:  {}\n", thread.name().unwrap_or("<unnamed>")));
+        body.push_str(&format!(
+            "thread:  {}\n",
+            thread.name().unwrap_or("<unnamed>")
+        ));
         body.push_str(&format!("panic:   {info}\n"));
         body.push_str(&format!("backtrace:\n{bt}\n"));
         if let Ok(mut f) = std::fs::OpenOptions::new()

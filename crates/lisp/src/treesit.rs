@@ -89,12 +89,7 @@ fn byte_to_char_offsets(s: &str) -> Vec<u32> {
 /// `:kids` (ALL children — named and anonymous, so keywords/operators are
 /// present for fontify); a leaf carries `:text`.
 #[cfg(feature = "treesit")]
-fn node_to_positioned(
-    heap: &mut Heap,
-    node: tree_sitter::Node,
-    src: &str,
-    b2c: &[u32],
-) -> Value {
+fn node_to_positioned(heap: &mut Heap, node: tree_sitter::Node, src: &str, b2c: &[u32]) -> Value {
     let kw = |k: &str| Value::Keyword(value::intern(k));
     let start = Value::Int(b2c[node.start_byte()] as i64);
     let end = Value::Int(b2c[node.end_byte()] as i64);

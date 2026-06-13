@@ -94,7 +94,9 @@ pub enum Control {
     /// continuation to the scheduler and park it. `deadline` is the absolute wake
     /// time for a `(receive … (after ms …))`, so the scheduler arms a timer; `None`
     /// waits indefinitely.
-    Suspend { deadline: Option<std::time::Instant> },
+    Suspend {
+        deadline: Option<std::time::Instant>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -395,7 +397,10 @@ mod tests {
         // error-handling natives (`%try`, `binding`, `%isolate`) re-raise it.
         let s = LispError::suspend(None);
         assert!(s.is_control());
-        assert!(matches!(s.control, Some(Control::Suspend { deadline: None })));
+        assert!(matches!(
+            s.control,
+            Some(Control::Suspend { deadline: None })
+        ));
         // Real errors are never control signals.
         assert!(!LispError::new(ErrorKind::Runtime, "boom").is_control());
         assert!(!LispError::type_err("nope").is_control());
