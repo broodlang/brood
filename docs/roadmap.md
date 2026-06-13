@@ -33,52 +33,52 @@ session `nest` (12 scheduler workers).
   `spec.md §11`, `value-repr.md` byte count). Each accepted item graduates into
   its own ✅/🟡/⬜ entry here.
 
-- ⬜ **[HIGH] GC: transient maps corrupt when the build allocates** — a
-  `transient`/`assoc!`/`persistent!` build whose per-entry **value expression
-  allocates** panics nondeterministically with `index out of bounds: the len is
-  0 but the index is N` (N varies run to run). Minimal standalone repro:
+- ✅ **[HIGH] GC: transient maps corrupt when the build allocates** — *fixed,
+  commit `32bbda7`.* A `transient`/`assoc!`/`persistent!` build whose per-entry
+  value expression allocated panicked nondeterministically (`index out of bounds`
+  / use-after-GC). The original diagnosis ("the mutable node buffer is not a
+  scannable root") was close but not the mechanism: the transient *is* rooted and
+  *is* rewritten on a flip. The real cause is **tenure**. Once the build crosses
+  `min_tenure` (16K live) the transient **cell** tenures to the old generation;
+  a subsequent `assoc!` then repoints its `root` at a fresh *young* node — an
+  OLD→YOUNG edge a minor **flip** skips (a flip never scans old, relying on the
+  immutability invariant that old never points young). The old cell's root was
+  left dangling. Allocating values only triggered it because they make collections
+  fire mid-build; non-allocating values rarely crossed the threshold.
 
-  ```lisp
-  ;; PANICS (value `(into [] …)` allocates → GC fires mid-build):
-  (persistent! (reduce (fn (t i) (assoc! t i (into [] (range (mod i 12)))))
-                 (transient {}) (range 8000)))
-  ;; FINE (value doesn't allocate):
-  (persistent! (reduce (fn (t i) (assoc! t i (+ i 1))) (transient {}) (range 8000)))
-  ```
+  Fix: a `remembered_transients` write-barrier set, the transient analogue of the
+  env-frame `remembered` set — `assoc!`/`dissoc!` record an old-gen cell, the next
+  minor flushes its root in place (dropped on a tenure, retained on a flip), and a
+  major remaps it through `fwd.transients`. `is_owned` already guards `!is_old`,
+  so no shared old node is ever mutated in place. Regression-tested
+  (`gc.rs::transient_survives_tenure_then_flip`, proven to fail without the
+  barrier; plus a tenure case in `transients_test.blsp`). This unblocked the
+  prelude's multi-assoc combinators (`merge` / `merge-with` / `select-keys` /
+  `update-vals` / `update-keys`), now built on a transient (~1.4–1.6× on large
+  inputs), and `recolor`-style allocating builds in `brood-life`.
 
-  Storing precomputed / constant / non-allocating values is always safe; only a
-  value whose *computation* allocates (triggering a collection while the
-  transient is live) corrupts it. Diagnosis: the in-progress transient's mutable
-  node buffer is not a scannable GC root (or isn't rewritten under compaction),
-  so a collection frees/moves it → use-after-GC → the OOB. Same class as the two
-  fixed `[HIGH]` entries below (`remembered`-set rewrite, live-arm before
-  `push_frame`); `BROOD_GC_VERIFY=1` + the per-deref tripwire should localise it.
-  **Impact:** blocks transients for their advertised "~order-of-magnitude cheaper
-  map building" — any real build computes allocating values — which would roughly
-  halve `brood-life`'s `recolor` (the dominant frame cost).
+- ✅ **[perf] Allocation serialises across green processes** — *fixed, commit
+  `67c2ec2`. The "global lock on the allocation path" diagnosis was wrong.*
+  Allocation-heavy fan-out barely scaled (8 processes ≈ 6–8× one, near-serial),
+  while pure compute scaled. Profiling the fan-out (`perf record` on 8 alloc-heavy
+  processes) showed the serialization was **not** the allocator — per-process heaps
+  already bump-allocate lock-free — but the **global symbol-interner mutex**
+  (`value::intern`'s `IDS: Mutex<HashMap>`), taken on *every* intern including hits
+  (call heads, keywords, record fields are re-interned constantly): ~10% in
+  `lock_contended` plus the futex waits stacked behind it.
 
-- ⬜ **[perf] Allocation serialises across green processes (no multicore for
-  allocation-bound work)** — CPU-bound *non-allocating* work parallelises
-  (partially); *allocation-heavy* work does not at all. Clean scaling, each task
-  a fresh spawned process with its own heap (so not the caller's heap size):
-
-  | parallel tasks | pure compute (no alloc) | alloc-heavy (build a 3.6k map) |
-  |---|---|---|
-  | 1 | 156 ms | 52 ms |
-  | 2 | 217 ms (1.4×) | 104 ms (2.0×) |
-  | 4 | 342 ms (2.2×) | 200 ms (3.9×) |
-  | 8 | 615 ms (4.0×) | 421 ms (**8.1×**) |
-
-  Eight allocation-heavy processes take 8× one — perfectly serial, zero speedup —
-  while eight compute-only processes get ~2×. Diagnosis: a global lock on the
-  allocation / collection path serialises every process whenever it allocates, so
-  the M:N scheduler (and ADR-100 work-stealing / precise mid-eval GC) delivers no
-  parallelism for the allocation-bound workloads that are most real Brood code.
-  **Impact:** two-process designs get no throughput overlap — e.g. `brood-life`'s
-  SIM (`recolor`) and RENDERER (`render`) are both allocation-bound, so splitting
-  them across processes (ADR-058) buys responsiveness but **not** frame-time
-  (pipelining them was a measured no-op). Investigate per-process/thread-local
-  allocation off the global lock, or a concurrent collector.
+  Fix: a **thread-local intern cache** (per-thread name→id map; symbol ids are
+  append-only and globally consistent, so a cached id is valid forever and the
+  global mutex only mints genuinely new ids) makes the hot path lock-free.
+  Secondary: with the mutex gone the single global alloc byte-counter (a
+  `fetch_add` + a `fetch_max` CAS loop per allocation) became the next contention
+  point, now **sharded** across 64 cache-line-padded counters (`live_bytes` is
+  their wrapping sum; `PEAK`/limit-check sampled off the hot path). Measured (8
+  alloc-heavy processes building maps): **10.8 s → 3.4 s, effective parallelism
+  ~1.3× → ~4×**; `spawn` (20k short processes) improved ~9% (A/B). A concurrent
+  collector and per-process limits remain future work, but the "perfectly serial
+  allocation" ceiling — which made `brood-life`'s SIM/RENDERER split a frame-time
+  no-op — is gone.
 
 ---
 
