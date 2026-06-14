@@ -2591,3 +2591,56 @@ off a type-system + LSP review:
 
 All green: `brood-lsp` 99 tests, `brood --lib` 271, `type_check_catalog` +
 `check_string_structured`. `docs/lsp.md` updated for both LSP additions.
+
+## 2026-06-14 — JIT: lower `and`/`or` (mandelbrot ~5.3×) + fix two promotion-exposed regressions
+
+Continuing the benchmark audit. `mandelbrot` (the suite's worst row, 1326 ms) tiered
+*then deopted* on every native entry — confirmed `jit_native=0, jit_deopt=109`. Its
+`esc` escape test is `(and (<= (+ xx yy) 4.0) (< i maxi))`; isolating showed `and`/`or`
+itself bailed the arm, even all-integer.
+
+- **Lower `and`/`or`** (`30156ad`). `(and X Y)` expands to `(let (g X) (if g Y g))`, so a
+  comparison result crosses a block-param merge. Two bugs kept it (and *any* arm using
+  `and`/`or`) off the native path: (1) block params are `I64` but a comparison is an
+  `i8` (the depth interp assumed an `i8` never crosses a boundary — it does, via
+  `and`/`or`); passing it raw was an `I8`-into-`I64` verifier mismatch → the whole arm
+  bailed at `define_function`. Fixed by zero-extending an `i8` block arg. (2) The merge's
+  else edge returns the bound slot `g` (a `Value::Bool`); `as_int` deopted on it, and
+  `is_bool_op(Op::Slot)` was false, so the merge param was tagged `Op::Int` on one edge
+  and `Op::Bool` on the other — last-writer-wins made a `0` (false) read as a *truthy*
+  integer, looping forever. Fixed by tracking `slot_bool` (mirror of `slot_float`).
+  Result: **mandelbrot 1326 → 250 ms (~5.3×)**, the suite's biggest single win — it now
+  beats Elixir and Ruby. (Float *comparisons* already had codegen; this unlocked the
+  control flow around them.) Verified: full in-language suite (2091) green under jit incl
+  the format tiering-corruption canary; `and`/`or` parity incl non-bool returns matches
+  the tree-walker.
+
+The top-level-lambda promotion (`dfa4f67`) then turned out to have exposed **two latent
+closure-serialisation gaps** (it VM-compiles closures the tree-walker used to handle):
+
+- **RUNTIME source positions** (`8b79069`). `form-pos`/`set_form_pos` were LOCAL-only, so
+  a body frozen into RUNTIME lost its position — already true for any `defn` body, and
+  promotion extended it to inline lambdas, regressing `source_positions_survive_a_cross_node_send`
+  (the shipped closure's quoted literal had no position → `form-pos` on the receiver
+  returned nil). Added a RUNTIME position table (`RuntimeCode.positions`, the shared-region
+  counterpart of the per-heap LOCAL map); `promote_list` carries each pair's position
+  across. Fixes `form-pos` for both inline lambdas *and* `defn` bodies (the latter never
+  worked over the wire).
+- **`def`-RHS-in-`let` capture** (`84c70e7`). `(let (me 42) (def f (fn () me)))` then
+  `(f)` returned "unbound symbol: me" — and the same shape broke `remote_spawn_sync`
+  (shipped thunk's captured local lost → remote child crashed). `def` evaluates its RHS
+  via `compile::run(heap, rhs, env)`, which built a *fresh empty Scope*; with a non-global
+  `env` (a `def` inside a `let`) the enclosing lexicals weren't compile-time visible, so a
+  VM-compiled capturing closure never snapshotted them. Fixed by seeding `compile::run`'s
+  scope from a non-global env's lexical frames. No-op for top-level forms (`env == global`).
+
+- **Deterministic preemption test** (`347d790`). The cpu-bound-starvation test bounded a
+  liveness property with a wall-clock `receive` timeout — intrinsically flaky (false-fires
+  under OS CPU starvation). Verified the scheduler is correct first (FIFO run queue,
+  preempted process re-enqueues at the back), then replaced the timeout with a
+  reduction-bounded drive: test-only hooks (`set_test_no_workers` + `test_drive_quanta`)
+  run real scheduling quanta synchronously, so the bound is in *work units, not time*.
+  Deterministic (0/40 idle, 0/20 under load) and discriminating (1 quantum → `:starved`).
+
+Whole workspace **594/0**. Benchmark docs + positioning diagram refreshed (geomean
+~16× → ~13.5× as `mandelbrot` came off the bottom; `matmul` ~39× is now the largest gap).
