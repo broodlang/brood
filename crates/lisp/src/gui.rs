@@ -164,6 +164,20 @@ pub enum Op {
         bytes: Vec<u8>,
         color: Option<[u8; 3]>,
     },
+    /// Like `Cells`, but each live cell is filled with its OWN colour from `colors`
+    /// (bit-index → rgb), falling back to `default`. One op for a whole COLOURED board,
+    /// so the SIM emits a single op instead of an interpreted `[:text]` per live cell
+    /// (the per-cell op-build was ~110 ms for 10K cells). The colour map is decoded once
+    /// at parse time. GUI-only.
+    CellsRgb {
+        row0: u16,
+        col0: u16,
+        w: u32,
+        aspect: u16,
+        bytes: Vec<u8>,
+        colors: std::collections::HashMap<u64, [u8; 3]>,
+        default: [u8; 3],
+    },
 }
 
 /// A keystroke, in a backend-neutral shape the Brood side turns into the same
@@ -913,6 +927,7 @@ pub(crate) mod backend {
         // default build, or no env) is the CPU softbuffer — so other apps stay on CPU.
         #[cfg(feature = "gui-gpu")]
         let backend = if gpu_enabled() {
+            eprintln!("brood gui: GPU (OpenGL) backend active");
             Backend::Gpu(crate::gui_gpu::GlWindow::new(window.clone())?)
         } else {
             cpu_backend(&window)?
@@ -2427,6 +2442,25 @@ pub(crate) mod backend {
                                 fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
                                 b &= b - 1;
                             }
+                        }
+                    }
+                }
+                Op::CellsRgb { row0, col0, w, aspect, bytes, colors, default } => {
+                    let asp = (*aspect).max(1) as usize;
+                    let cell_w = asp * cw;
+                    let wmod = (*w).max(1) as usize;
+                    for (bi, &byte) in bytes.iter().enumerate() {
+                        let mut b = byte;
+                        let base = bi * 8;
+                        while b != 0 {
+                            let bit = base + b.trailing_zeros() as usize;
+                            let rgb = colors.get(&(bit as u64)).copied().unwrap_or(*default);
+                            let x = bit % wmod;
+                            let y = bit / wmod;
+                            let left = inset + (*col0 as usize + x * asp) * cw;
+                            let top = inset + (*row0 as usize + y) * ch;
+                            fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, pack(rgb));
+                            b &= b - 1;
                         }
                     }
                 }
