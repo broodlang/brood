@@ -4394,6 +4394,79 @@ fn inst_opcode_name(inst: &Inst) -> &'static str {
     }
 }
 
+/// Collect every [`Node::SelfCall`]'s argument slice reachable in `node` (all are
+/// tail calls). Used to find which parameter slots a self-recursive arm passes through
+/// **unchanged** every iteration, for the JIT's matmul-style loop-invariant hoist.
+#[cfg(feature = "jit")]
+fn collect_self_call_args<'a>(node: &'a Node, out: &mut Vec<&'a [Node]>) {
+    match node {
+        Node::SelfCall { args, .. } => out.push(args),
+        Node::If(a, b, c) => {
+            collect_self_call_args(a, out);
+            collect_self_call_args(b, out);
+            collect_self_call_args(c, out);
+        }
+        Node::Do(xs) | Node::Vector(xs) => {
+            for x in xs.iter() {
+                collect_self_call_args(x, out);
+            }
+        }
+        Node::Map(kvs) => {
+            for (k, v) in kvs.iter() {
+                collect_self_call_args(k, out);
+                collect_self_call_args(v, out);
+            }
+        }
+        Node::Call { callee, args, .. } => {
+            collect_self_call_args(callee, out);
+            for x in args.iter() {
+                collect_self_call_args(x, out);
+            }
+        }
+        Node::LetBind { binds, body } => {
+            for (_, n) in binds.iter() {
+                collect_self_call_args(n, out);
+            }
+            collect_self_call_args(body, out);
+        }
+        Node::MakeClosure { captures, .. } => {
+            for (_, n) in captures.iter() {
+                collect_self_call_args(n, out);
+            }
+        }
+        Node::Prim2 { a, b, .. } => {
+            collect_self_call_args(a, out);
+            collect_self_call_args(b, out);
+        }
+        Node::Prim1 { a, .. } => collect_self_call_args(a, out),
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
+    }
+}
+
+/// Parameter slots a self-recursive arm carries **unchanged** across every back-edge
+/// — `SelfCall` arg `k` is exactly `Node::Local(k)` in *every* self-call — i.e. the
+/// loop-invariant locals. The JIT hoists an invariant **vector** slot's element base
+/// out of the loop (LICM): a load whose source can't be mutated (Brood is immutable,
+/// ADR-026) is invariant with no alias analysis. Returns `vec![false; nrequired]` when
+/// the arm has no `SelfCall` (not a loop — nothing to hoist).
+#[cfg(feature = "jit")]
+fn invariant_param_slots(body: &Node, nrequired: usize) -> Vec<bool> {
+    let mut calls = Vec::new();
+    collect_self_call_args(body, &mut calls);
+    if calls.is_empty() {
+        return vec![false; nrequired];
+    }
+    let mut inv = vec![true; nrequired];
+    for args in &calls {
+        for (k, flag) in inv.iter_mut().enumerate() {
+            if !matches!(args.get(k), Some(Node::Local(j)) if *j == k) {
+                *flag = false;
+            }
+        }
+    }
+    inv
+}
+
 /// Compile `arm`'s chunk to a native `extern "C" fn(heap: *mut Heap, base: i64) -> i64`
 /// for the Step-A int subset, or `None` to bail to the VM. The compiled fn reads its
 /// frame slots from `roots[base..]`, computes in registers, **boxes the result into
@@ -4418,6 +4491,52 @@ pub(crate) fn jit_lower_arm(
     let code = &chunk.code;
     let len = code.len();
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
+    // matmul-style loop-invariant hoist (LICM): a vector slot the arm carries unchanged
+    // every iteration has an *immutable* element base we resolve once at entry, then read
+    // inline (`ptr + idx*STRIDE`) instead of calling `brood_rt_vector_ref` per element.
+    // Sound with no alias analysis because Brood data can't be mutated (ADR-026). Gated to
+    // arms that neither allocate (`cons`/vector build → LOCAL GC) nor make a Brood→Brood
+    // call (could `def` → RUNTIME compaction): under that gate nothing runs mid-arm to
+    // relocate the storage, and a preempt/deopt re-enters from the entry block (re-hoist).
+    let invariant = invariant_param_slots(&arm.body, arm.nrequired);
+    let hoist_safe = !code.iter().any(|i| {
+        matches!(
+            i,
+            Inst::Call { .. }
+                | Inst::MakeVector(_)
+                | Inst::Prim2 {
+                    op: PrimOp::Cons,
+                    ..
+                }
+                | Inst::Prim2SlotSlot {
+                    op: PrimOp::Cons,
+                    ..
+                }
+                | Inst::Prim2SlotInt {
+                    op: PrimOp::Cons,
+                    ..
+                }
+        )
+    });
+    // Invariant slots actually read as a fused `(nth slot idx)` vector operand — the only
+    // form that names its vector slot directly (a global / computed vector can't hoist).
+    let mut hoist_slots: Vec<usize> = Vec::new();
+    if hoist_safe {
+        for i in code.iter() {
+            if let Inst::Prim2SlotSlot {
+                op: PrimOp::VectorRef,
+                slot_a,
+                ..
+            } = i
+            {
+                if invariant.get(*slot_a).copied().unwrap_or(false)
+                    && !hoist_slots.contains(slot_a)
+                {
+                    hoist_slots.push(*slot_a);
+                }
+            }
+        }
+    }
     // Per-slot "holds an f64" flag, for picking float vs integer arith on each op.
     // Seeded from the tier-time profile (params; `slot_tags[k] == TAG_FLOAT`) and
     // updated during lowering when a float result is stored to a slot (let-binders,
@@ -4721,6 +4840,19 @@ pub(crate) fn jit_lower_arm(
     let vref_id = m
         .declare_function("brood_rt_vector_ref", Linkage::Import, &vref_sig)
         .ok()?;
+    // brood_rt_vector_base(heap, vec 3 words, out_len: *mut i64) -> *const Value: resolve
+    // an invariant vector's element (data_ptr, len) once for the LICM hoist; null ptr ⇒
+    // not a vector (the hoist deopts at entry). Only declared/used when `hoist_slots`.
+    let mut vbase_sig = m.make_signature();
+    vbase_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    for _ in 0..3 {
+        vbase_sig.params.push(AbiParam::new(types::I64)); // vec 3 words
+    }
+    vbase_sig.params.push(AbiParam::new(ptr_ty)); // out_len: *mut i64
+    vbase_sig.returns.push(AbiParam::new(ptr_ty)); // element data ptr (null = non-vector)
+    let vbase_id = m
+        .declare_function("brood_rt_vector_base", Linkage::Import, &vbase_sig)
+        .ok()?;
 
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
@@ -4738,6 +4870,7 @@ pub(crate) fn jit_lower_arm(
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
+    let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
     let has_cons = code.iter().any(|i| {
@@ -4807,6 +4940,44 @@ pub(crate) fn jit_lower_arm(
         STRIDE as u32,
         3,
     ));
+
+    // LICM hoist: resolve each invariant vector slot's element (ptr, len) once here in
+    // the entry block (which dominates every loop block, so the values are usable in the
+    // body). A non-vector slot branches to `deopt` (the VM then owns the exact result).
+    // Maps slot → (data_ptr, len). Empty for the common arm (no invariant vector read).
+    let mut hoisted: std::collections::HashMap<
+        usize,
+        (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value),
+    > = std::collections::HashMap::new();
+    if !hoist_slots.is_empty() {
+        let len_slot = b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            8,
+            3,
+        ));
+        let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
+        for &slot in &hoist_slots {
+            let roots_base = b.use_var(rb_var);
+            let i = b.ins().iadd_imm(base, slot as i64);
+            let o = b.ins().imul_imm(i, STRIDE);
+            let addr = b.ins().iadd(roots_base, o);
+            let w0 = b.ins().load(types::I64, MemFlags::new(), addr, 0);
+            let w1 = b
+                .ins()
+                .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+            let w2 = b
+                .ins()
+                .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8);
+            let c = b.ins().call(vbase_ref, &[heap, w0, w1, w2, len_addr]);
+            let ptr = b.inst_results(c)[0];
+            // null ptr ⇒ slot isn't a vector ⇒ deopt (VM runs the arm; same result).
+            let cont = b.create_block();
+            b.ins().brif(ptr, cont, &[], deopt, &[]);
+            b.switch_to_block(cont);
+            let vlen = b.ins().load(types::I64, MemFlags::new(), len_addr, 0);
+            hoisted.insert(slot, (ptr, vlen));
+        }
+    }
     b.ins().jump(leader_block[0].unwrap(), &[]);
 
     // Box an `Op::Int`'s register value into a whole-`Value`'s `(tag_byte, payload_i64)`.
@@ -5595,11 +5766,41 @@ pub(crate) fn jit_lower_arm(
                         stack.push(h);
                     } else if matches!(op, PrimOp::VectorRef) {
                         // `(nth slot_a slot_b)`: source 0 = vector slot, source 1 = index
-                        // slot (map `[0,1]`). Read each as a full `Value`, then slab-read.
-                        let vec = read_words(&mut b, Op::Slot(*slot_a));
-                        let idx = read_words(&mut b, Op::Slot(*slot_b));
-                        let h = vector_ref(&mut b, vec, idx);
-                        stack.push(h);
+                        // slot (map `[0,1]`).
+                        if let Some(&(ptr, vlen)) = hoisted.get(slot_a) {
+                            // Hoisted invariant base: inline `ptr + idx*STRIDE` element read
+                            // (no per-element call / slab lookup). The index slot tag-checks
+                            // to int (deopt otherwise); an out-of-range index deopts so the
+                            // VM produces `nth`'s exact out-of-range result.
+                            let idx = load_slot_int(&mut b, *slot_b as i64);
+                            let oob =
+                                b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, vlen);
+                            let cont = b.create_block();
+                            b.ins().brif(oob, deopt, &[], cont, &[]);
+                            b.switch_to_block(cont);
+                            let off = b.ins().imul_imm(idx, STRIDE);
+                            let elem = b.ins().iadd(ptr, off);
+                            let w0 = b.ins().load(types::I64, MemFlags::new(), elem, 0);
+                            let w1 = b.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                elem,
+                                PAYLOAD_OFFSET as i32,
+                            );
+                            let w2 = b.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                elem,
+                                PAYLOAD_OFFSET as i32 + 8,
+                            );
+                            stack.push(Op::Handle(w0, w1, w2));
+                        } else {
+                            // Read each operand as a full `Value`, then slab-read.
+                            let vec = read_words(&mut b, Op::Slot(*slot_a));
+                            let idx = read_words(&mut b, Op::Slot(*slot_b));
+                            let h = vector_ref(&mut b, vec, idx);
+                            stack.push(h);
+                        }
                     } else if op_is_float(Op::Slot(*slot_a)) || op_is_float(Op::Slot(*slot_b)) {
                         // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`).
                         let sa = as_f64(&mut b, Op::Slot(*slot_a));
