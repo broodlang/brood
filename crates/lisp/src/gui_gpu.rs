@@ -25,7 +25,12 @@ use glutin::surface::{Surface, SurfaceAttributesBuilder, SwapInterval, WindowSur
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::gui::Op;
+use crate::text_width::cluster_cells;
+
+const DEFAULT_FG: [u8; 3] = [0xe5, 0xe5, 0xe5];
 
 const DEFAULT_BG: [f32; 3] = [12.0 / 255.0, 12.0 / 255.0, 16.0 / 255.0];
 
@@ -216,7 +221,31 @@ impl GlWindow {
                         }
                     }
                 }
-                // Text / cursor / zones: not drawn in the GPU prototype (glyph atlas TODO).
+                // Text: draw the cell BACKGROUND (a coloured Life cell is a space + `:bg`,
+                // so this is what makes clicks/spawns visible). The glyph coverage itself
+                // (footer letters) is the glyph-atlas increment, still TODO.
+                Op::Text { row, col, s, face } => {
+                    let paint_bg = face.bg.is_some() || face.reverse;
+                    if paint_bg {
+                        let bg = if face.reverse {
+                            face.fg.unwrap_or(DEFAULT_FG)
+                        } else {
+                            face.bg.unwrap_or([12, 12, 16])
+                        };
+                        let scale = face.scale.max(1) as usize;
+                        let cells: usize = s.graphemes(true).map(cluster_cells).sum();
+                        if cells > 0 {
+                            push(
+                                insetf + *col as f32 * cwf,
+                                insetf + *row as f32 * chf,
+                                (cells * scale) as f32 * cwf,
+                                scale as f32 * chf,
+                                bg,
+                            );
+                        }
+                    }
+                }
+                // Cursor / zones: not drawn in the GPU prototype.
                 _ => {}
             }
         }
