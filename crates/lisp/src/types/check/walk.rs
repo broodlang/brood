@@ -45,10 +45,16 @@ fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity> {
     }
 }
 
-/// The arity of a **simple single-clause** `fn` literal `(fn (a b) body…)`.
-/// `None` for anything we can't read off cleanly — a
-/// multi-arity `fn`, an `&optional`/`&`-variadic or destructuring parameter
-/// list, or a non-`fn` head — so the callback-arity check stays
+/// The arity of a **single-clause** `fn` literal — `(fn (a b) …)` → `exact(2)`,
+/// `(fn (a &optional b) …)` → `range(1, 2)`, `(fn (a b & c) …)` → `at_least(2)`.
+/// This mirrors what `arity_of` already computes for a *named* variadic global, so
+/// a variadic inline lambda whose *minimum* arity exceeds what a fixed-arity HOF
+/// supplies (e.g. `(map (fn (a b & c) …) xs)` — needs ≥2, gets 1) is now caught,
+/// while a permissive `(fn (& xs) …)` (min 0) still isn't flagged.
+///
+/// `None` for anything we can't read off cleanly — a multi-arity `fn` (clause
+/// lists, not a bare param list), a destructuring parameter, an out-of-order
+/// marker, or a non-`fn` head — so the callback-arity check stays
 /// false-positive-free.
 fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
     let items = list_items(heap, form)?;
@@ -67,22 +73,51 @@ fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
     // The parameter list. A multi-arity `fn` has clause *lists* here instead
     // (`((a) …) ((a b) …)`), whose elements aren't bare symbols → we bail below.
     let params = list_items(heap, *parts.first()?)?;
-    let mut n = 0usize;
+    // Phase machine over the param list: required names, then an optional run
+    // after `&optional`, then a single rest binder after `&`. A marker out of
+    // order (or repeated) is a shape we don't model — bail.
+    #[derive(PartialEq)]
+    enum Phase {
+        Required,
+        Optional,
+        Rest,
+    }
+    let mut phase = Phase::Required;
+    let mut required = 0usize;
+    let mut optional = 0usize;
+    let mut has_rest = false;
     for p in params {
-        match p {
-            Value::Sym(sym) => {
-                // `&optional` / `&` make the arity variable — bail (skip).
-                if value::symbol_is(sym, kw::AMP) || value::symbol_is(sym, kw::AMP_OPTIONAL) {
-                    return None;
-                }
-                n += 1;
-            }
+        let Value::Sym(sym) = p else {
             // A destructuring pattern (nested list/vector) or a clause list →
             // not a simple parameter, so not a shape we count here.
-            _ => return None,
+            return None;
+        };
+        if value::symbol_is(sym, kw::AMP_OPTIONAL) {
+            if phase != Phase::Required {
+                return None;
+            }
+            phase = Phase::Optional;
+        } else if value::symbol_is(sym, kw::AMP) {
+            if phase == Phase::Rest {
+                return None;
+            }
+            phase = Phase::Rest;
+            has_rest = true;
+        } else {
+            match phase {
+                Phase::Required => required += 1,
+                Phase::Optional => optional += 1,
+                Phase::Rest => {} // the single rest binder — name doesn't affect arity
+            }
         }
     }
-    Some(Arity::exact(n))
+    Some(if has_rest {
+        Arity::at_least(required)
+    } else if optional > 0 {
+        Arity::range(required, required + optional)
+    } else {
+        Arity::exact(required)
+    })
 }
 
 /// How a callback argument reads in a diagnostic — a named function by its name,
