@@ -754,20 +754,38 @@ pub fn worker_threads() -> u64 {
 /// Resolve the pool size: `BROOD_J` env override, else `set_max_parallel`'s
 /// value, else ≈ `nproc`. Called exactly once — at the `WORKERS` LazyLock
 /// init — so the env read never lands on the spawn hot path.
+///
+/// **Floored at 2.** A native-nested `receive` *blocks* its worker thread like a BEAM
+/// dirty scheduler (§7.4) instead of capturing a continuation, and `drain_worker_queue`
+/// re-routes anything queued behind it off the (now stranded) worker. With a single
+/// worker there is nowhere to re-route to — `assign_worker` hands the work back to the
+/// same dirty worker — so a process queued behind the block never runs. That deadlocks
+/// e.g. a test that spawns a child and then receives from it under `--max-parallel 1`
+/// (the spawned child is stranded; the receive times out). The pool therefore always
+/// keeps at least one spare thread to drain a dirty-blocked worker, exactly as BEAM
+/// runs dirty schedulers in addition to its normal scheduler count. `--max-parallel`
+/// still caps how many tests the framework runs *concurrently*; it just can't starve
+/// the runtime of the spare a dirty-block needs.
 fn worker_count() -> usize {
-    if let Some(s) = std::env::var_os("BROOD_J") {
-        if let Some(n) = s.to_str().and_then(|t| t.parse::<usize>().ok()) {
-            if n > 0 {
-                return n;
-            }
-        }
-    }
-    match WORKER_COUNT.load(Ordering::SeqCst) {
-        0 => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
-        n => n,
-    }
+    let requested = std::env::var_os("BROOD_J")
+        .and_then(|s| s.to_str().and_then(|t| t.parse::<usize>().ok()))
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| match WORKER_COUNT.load(Ordering::SeqCst) {
+            0 => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            n => n,
+        });
+    // The floor applies only to the real OS-thread pool. The deterministic test driver
+    // (`set_test_no_workers`) starts no threads and drives quanta by hand, so it can't
+    // dirty-block a worker and *wants* the exact requested count (e.g. the one-worker
+    // preemption test pins both processes to worker 0).
+    let floor = if TEST_NO_WORKERS.load(Ordering::SeqCst) {
+        1
+    } else {
+        2
+    };
+    requested.max(floor)
 }
 
 /// A human descriptor for a process in death/crash diagnostics: its registered
