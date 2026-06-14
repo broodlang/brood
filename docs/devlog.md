@@ -2973,3 +2973,11 @@ recursion lint on `pattern_matching_test`'s `pm-fac`, a true positive.
 Regression tests for each in `check.rs`; 116 checker unit tests, 278 lib, 2163
 in-language — green. (Bucket B/C — deeper inference, gradual-assignment checking — stay
 deferred per ADR-011 until a real consumer needs them.)
+
+- **2026-06-14** — `string-split` made a **native builtin** (ADR-109): the pure-Brood
+  version re-`substring`ed the tail each step and char-indexed `substring` is O(index), so
+  splitting was O(n²) — a 174 KB `git ls-files` parse took ~840 ms in brood-edit's
+  project-file scan, now ~10 ms (one `str::split` pass). Removed `string-split`/
+  `string-split--acc` from `std/prelude.blsp`; semantics unchanged (empty sep → chars), so
+  `tests/strings_test.blsp` and the ~10 std modules built on split (file/path/text/diff/
+  datetime/url/http/sse) are unaffected. 2150 in-language tests green.
