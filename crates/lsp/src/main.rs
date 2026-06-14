@@ -897,10 +897,24 @@ fn publish(
         .collect();
 
     // (2) Type-check warnings — Tier 1, only when the parse succeeded enough to
-    // read positioned forms.
-    lsp_diags.extend(typecheck_diagnostics(interp, text, cst_root, index));
+    // read positioned forms. Skipped for the manifest: `project.blsp` is read as
+    // *data* by the project loader (`project--apply`) and never evaluated as code,
+    // so its `(project …)` head isn't a binding — running the checker on it would
+    // emit a spurious `unbound symbol: project`. Tier-0 syntax errors still apply.
+    if !is_manifest_uri(uri) {
+        lsp_diags.extend(typecheck_diagnostics(interp, text, cst_root, index));
+    }
 
     send_diagnostics(connection, uri, lsp_diags, Some(doc.version))
+}
+
+/// Whether `uri` names a project manifest (`project.blsp`). The manifest is data
+/// consumed by the project loader, not evaluatable code, so the advisory
+/// type-checker must not run on it (see [`publish`]).
+fn is_manifest_uri(uri: &Uri) -> bool {
+    uri_to_path(uri)
+        .map(|p| p.file_name().and_then(|n| n.to_str()) == Some("project.blsp"))
+        .unwrap_or(false)
 }
 
 /// The Tier-1 advisory type-check diagnostics for `text`: run [`check_file`] over
