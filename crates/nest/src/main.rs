@@ -554,7 +554,7 @@ fn cmd_run(
     } else {
         let calls = watch
             .iter()
-            .map(|p| brood::introspect::call_form("reload-on-change", &[p]))
+            .map(|p| brood::introspect::call_form("reload/reload-on-change", &[p]))
             .collect::<Vec<_>>()
             .join(" ");
         format!("(require 'reload) {}", calls)
