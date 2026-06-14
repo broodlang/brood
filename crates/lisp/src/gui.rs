@@ -818,8 +818,13 @@ mod backend {
     struct Win {
         window: Rc<Window>,
         // Keeps the softbuffer display connection alive for `surface`'s lifetime.
+        #[cfg(not(feature = "gui-gpu"))]
         _context: softbuffer::Context<Rc<Window>>,
+        #[cfg(not(feature = "gui-gpu"))]
         surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+        // GPU backend (feature "gui-gpu") replaces the softbuffer surface above.
+        #[cfg(feature = "gui-gpu")]
+        gl: crate::gui_gpu::GlWindow,
         renderer: Renderer,
         size: Arc<Mutex<(u16, u16)>>,
         /// The process this window's input is delivered to (its mailbox).
@@ -880,10 +885,14 @@ mod backend {
             )
             .map_err(|e| format!("window: {e}"))?;
         let window = Rc::new(window);
+        #[cfg(not(feature = "gui-gpu"))]
         let context = softbuffer::Context::new(window.clone())
             .map_err(|e| format!("softbuffer context: {e}"))?;
+        #[cfg(not(feature = "gui-gpu"))]
         let surface = softbuffer::Surface::new(&context, window.clone())
             .map_err(|e| format!("softbuffer surface: {e}"))?;
+        #[cfg(feature = "gui-gpu")]
+        let gl = crate::gui_gpu::GlWindow::new(window.clone())?;
         let mut renderer = Renderer::new(window.scale_factor(), families, base_px);
         // honour a global default family set before this window opened
         if let Some(f) = default_family {
@@ -893,8 +902,12 @@ mod backend {
         renderer.set_inset(default_inset);
         Ok(Win {
             window,
+            #[cfg(not(feature = "gui-gpu"))]
             _context: context,
+            #[cfg(not(feature = "gui-gpu"))]
             surface,
+            #[cfg(feature = "gui-gpu")]
+            gl,
             renderer,
             size: Arc::new(Mutex::new((80, 24))),
             subscriber,
@@ -1418,7 +1431,11 @@ mod backend {
                     }
                 }
                 WindowEvent::RedrawRequested => {
-                    paint(&mut w.surface, &w.window, &mut w.renderer, &w.frame)
+                    #[cfg(not(feature = "gui-gpu"))]
+                    paint(&mut w.surface, &w.window, &mut w.renderer, &w.frame);
+                    #[cfg(feature = "gui-gpu")]
+                    w.gl
+                        .paint(&w.frame, w.renderer.cell_w, w.renderer.cell_h, w.renderer.inset());
                 }
                 _ => {}
             }
@@ -2349,22 +2366,27 @@ mod backend {
                     }
                 }
                 Op::Cells { row0, col0, w, aspect, bits, color } => {
-                    // Enumerate the bitboard's set bits (O(live), like `bit-positions`):
-                    // pull the lowest set bit, fill its cell, clear it, repeat. Each cell
-                    // is an `aspect`-wide × 1-tall block of screen cells.
+                    // Enumerate the bitboard's set bits by walking the u64 limbs ONCE —
+                    // O(limbs + live), not the O(live × limbs) clone+set_bit scan (which is
+                    // quadratic in board size: on a 400×400 board it dominated the frame).
+                    // Each cell is an `aspect`-wide × 1-tall block of screen cells.
                     if let Some(rgb) = color {
                         let packed = pack(*rgb);
                         let asp = (*aspect).max(1) as usize;
                         let cell_w = asp * cw; // a board cell spans `aspect` screen cells
                         let wmod = (*w).max(1) as u64;
-                        let mut mag = bits.magnitude().clone();
-                        while let Some(i) = mag.trailing_zeros() {
-                            let x = (i as u64 % wmod) as usize;
-                            let y = (i as u64 / wmod) as usize;
-                            let left = inset + (*col0 as usize + x * asp) * cw;
-                            let top = inset + (*row0 as usize + y) * ch;
-                            fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
-                            mag.set_bit(i, false);
+                        for (li, word) in bits.magnitude().iter_u64_digits().enumerate() {
+                            let mut word = word;
+                            let base = (li as u64) * 64;
+                            while word != 0 {
+                                let bit = base + word.trailing_zeros() as u64;
+                                let x = (bit % wmod) as usize;
+                                let y = (bit / wmod) as usize;
+                                let left = inset + (*col0 as usize + x * asp) * cw;
+                                let top = inset + (*row0 as usize + y) * ch;
+                                fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
+                                word &= word - 1;
+                            }
                         }
                     }
                 }
