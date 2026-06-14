@@ -673,7 +673,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `(print ansi-clear)` (a bare symbol prints `#<fn …>` and emits no escape). The
   ESC byte is the `\e` string escape. (For a render-op frame buffer, use
   `std/display`.)
-- **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime`
+- **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime` `file-stat`
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`)
   `send` `receive` `self` `ref` `monitor` `demonitor` `register` `whereis`
   — plus the **`proc/gen`** framework below
