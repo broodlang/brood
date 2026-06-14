@@ -175,6 +175,11 @@ cranelift-module = { version = "0.132.1", optional = true }
 cranelift-codegen = { version = "0.132.1", optional = true }
 cranelift-frontend = { version = "0.132.1", optional = true }
 
+# uid/gid → owner/group name resolution for `file-stat`'s `ls -l`-style listing
+# (getpwuid/getgrgid). Unix-only; already in the dependency tree (transitive).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the
 # released library pulls nothing extra). Run with `cargo bench`.

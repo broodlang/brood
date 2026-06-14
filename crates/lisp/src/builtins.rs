@@ -2321,7 +2321,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("file-size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),
-    ("file-stat", &["path"], "Metadata for path in ONE stat as a map {:dir? :size :mtime :symlink? :exec? :mode}, or nil if missing. :symlink?/:mode read the link itself (lstat); :dir?/:size/:mtime follow it. :mtime is epoch-ms (nil if unreadable); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix). One syscall replaces dir?+file-size+file-mtime when listing a directory."),
+    ("file-stat", &["path"], "Metadata for path in ONE stat as a map {:dir? :size :mtime :symlink? :exec? :mode :nlink :uid :gid :owner :group}, or nil if missing. :symlink? reads the link itself (lstat); the rest follow it. :mtime is epoch-ms (nil if unreadable); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix); :nlink the hard-link count; :uid/:gid the numeric ids; :owner/:group their resolved names (the numeric id as a string if unresolved). Everything an `ls -l` row needs in one syscall (vs dir?+file-size+file-mtime)."),
     ("delete-file", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
     ("delete-dir", &["path"], "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure."),
     ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
@@ -7403,15 +7403,20 @@ fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         .unwrap_or(Value::Nil);
 
     #[cfg(unix)]
-    let (mode, exec) = {
-        use std::os::unix::fs::PermissionsExt;
+    let (mode, exec, nlink, uid, gid) = {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let m = meta.permissions().mode();
-        (m as i64 & 0o7777, m & 0o111 != 0)
+        (m as i64 & 0o7777, m & 0o111 != 0, meta.nlink() as i64, meta.uid(), meta.gid())
     };
     #[cfg(not(unix))]
-    let (mode, exec) = (0_i64, false);
+    let (mode, exec, nlink, uid, gid) = (0_i64, false, 1_i64, 0_u32, 0_u32);
 
     let kw = |k: &'static str| Value::Keyword(value::intern(k));
+    // Owner/group names (getpwuid/getgrgid), falling back to the numeric id as a string.
+    let owner = uid_name(uid).unwrap_or_else(|| uid.to_string());
+    let group = gid_name(gid).unwrap_or_else(|| gid.to_string());
+    let owner_v = heap.alloc_string(&owner);
+    let group_v = heap.alloc_string(&group);
     let pairs = vec![
         (kw("dir?"), Value::Bool(meta.is_dir())),
         (kw("size"), Value::Int(meta.len() as i64)),
@@ -7419,8 +7424,53 @@ fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         (kw("symlink?"), Value::Bool(symlink)),
         (kw("exec?"), Value::Bool(exec)),
         (kw("mode"), Value::Int(mode)),
+        (kw("nlink"), Value::Int(nlink)),
+        (kw("uid"), Value::Int(uid as i64)),
+        (kw("gid"), Value::Int(gid as i64)),
+        (kw("owner"), owner_v),
+        (kw("group"), group_v),
     ];
     Ok(heap.map_from_pairs(pairs))
+}
+
+/// The user name for `uid` via `getpwuid`, or `None` if it doesn't resolve. The libc
+/// call returns a pointer into a shared static buffer, so a process-wide lock serialises
+/// our calls (Brood schedules green processes across OS threads); the name is copied out
+/// before the lock drops. `None` off unix.
+#[cfg(unix)]
+fn uid_name(uid: u32) -> Option<String> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = LOCK.lock().unwrap();
+    unsafe {
+        let pw = libc::getpwuid(uid as libc::uid_t);
+        if pw.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr((*pw).pw_name).to_str().ok().map(|s| s.to_string())
+    }
+}
+
+/// The group name for `gid` via `getgrgid` (see `uid_name` for the locking note).
+#[cfg(unix)]
+fn gid_name(gid: u32) -> Option<String> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = LOCK.lock().unwrap();
+    unsafe {
+        let gr = libc::getgrgid(gid as libc::gid_t);
+        if gr.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr((*gr).gr_name).to_str().ok().map(|s| s.to_string())
+    }
+}
+
+#[cfg(not(unix))]
+fn uid_name(_uid: u32) -> Option<String> {
+    None
+}
+#[cfg(not(unix))]
+fn gid_name(_gid: u32) -> Option<String> {
+    None
 }
 
 /// `(getenv name)` — the value of environment variable `name` as a string, or nil
