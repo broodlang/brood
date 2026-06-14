@@ -2591,3 +2591,66 @@ off a type-system + LSP review:
 
 All green: `brood-lsp` 99 tests, `brood --lib` 271, `type_check_catalog` +
 `check_string_structured`. `docs/lsp.md` updated for both LSP additions.
+
+## 2026-06-14 — LSP: selection range, context-aware module completion, two more code actions (+ a doc-link bug fix)
+
+A second review pass (four parallel evidence-based audits over the type checker
+and LSP) found the checker "remarkably complete" — its only gaps (exhaustiveness,
+redundant-clause, exception typing, `binding`-scope) are all deliberate and align
+with "never reject a runnable program". It also caught a real bug in the just-added
+`document_link.rs`: `collect_module_names` recursed into `Quote`/`Quasi` nodes, so a
+`(require 'foo)` written as *data* (`'(require 'foo)`) emitted a spurious link —
+fixed (stop descending into quoted forms) + regression test. (A claimed
+`lambda_literal_arity` bug was a false alarm — the phase machine rejects a repeated
+`&optional` correctly; the auditor miscalculated a boolean.)
+
+Then three LSP additions off the review's "genuinely missing" list:
+
+1. **Two more code actions** (`code_actions.rs`), off an `unbound symbol: foo`
+   finding: **"Add `(require 'mod)`"** when `foo` is a qualified `mod/x` whose
+   module resolves on the load-path (insert under any `defmodule` header, else at
+   top), and **"Create function `foo`"** when `foo` is a call head — a stub
+   `(defn foo (a b …) nil)` at EOF with arity matched to the call site. `quickfix`
+   gained an explicit `preferred` flag so these attach the diagnostic without
+   stealing the preferred slot from did-you-mean.
+
+2. **Context-aware completion** (`completion.rs`): inside `(require '…)` or a
+   `(:use …)`/`(:alias …)` clause, offer requireable **module names** alone (new
+   `introspect::loadable_modules` — loaded `*features*` + top-level `<name>.blsp`
+   across `*load-path*`), suppressing the generic globals that are noise there.
+
+3. **Selection range** (`selection_range.rs`, `textDocument/selectionRange`):
+   smart expand/shrink along the CST node chain — symbol → form → outer form → …
+   → file — skipping trivia and same-extent wrappers. Pure tree geometry.
+
+`docs/lsp.md` updated (capability summary, handler list, roadmap table). Tests:
+`brood-lsp` 113 (code_actions ×6 new, completion ×2, selection_range ×3,
+document_link ×1, end-to-end selectionRange). All green.
+
+## 2026-06-14 — fix two cross-node regressions from the inline-lambda JIT promotion (dfa4f67)
+
+`make test` surfaced two deterministic `cli::distribution` failures. Git-bisect
+(automated, isolated worktree) pinned **both** to `dfa4f67 "jit: promote top-level
+inline lambdas into RUNTIME"`, which started freezing an inline `(fn …)`'s body into
+the shared RUNTIME region so the enclosing form is VM-compilable. Two distinct
+defects fell out:
+
+1. **Source positions lost** (`source_positions_survive_a_cross_node_send`). The
+   per-process `form_pos` map only keys LOCAL pairs; once a positioned form is
+   `promote`d into RUNTIME its position vanished, so `(form-pos …)` — and a closure
+   shipped to a peer — returned `nil`. Fix: a sparse, interior-mutable `pair_pos`
+   map on the shared `CodeSlabs`, populated by `promote_list` (which holds `&self`)
+   and consulted by `form_pos` for RUNTIME pairs. (heap.rs, + a unit test.)
+
+2. **Captures lost** (`remote_spawn_sync_returns_a_usable_remote_pid` — the remote
+   child died `unbound symbol: me`). `compile_make_closure` promoted a closure that
+   captures an *enclosing* lexical, but `compile_captures` snapshots those by name
+   (`Node::Global`), which resolves via the local env chain yet does NOT survive
+   being shipped to another node. Fix: only promote a **non-capturing** inline
+   lambda (`captures.is_empty() && self_name.is_none()`); a capturing one defers to
+   the tree-walker as before. The targeted win (pipeline/matmul's non-capturing
+   compute lambdas) is unaffected. (compile.rs.)
+
+Full suite green (609). The async `remote-spawn` already worked; only the capturing
++ promoted path was broken, which is why the regression hid behind the sync variant
+and the position-reflection test.
