@@ -131,13 +131,26 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
    ;; tests
    'describe 1
    ; name
-   'test 1})
+   'test 1
+   ;; the project manifest: head alone, then :key value pairs (see *format-pair-body*)
+   'project 0})
 ; name
+
+;; Project/plugin-contributed header rules, layered over the built-ins above.
+;; `project-setup` (re)sets this from the manifest's `:format-headers` plus any
+;; `:format-plugins` deps, so `nest format`, the LSP, and `nest mcp` all honour a
+;; framework's macro shapes (e.g. Hatch's `deflive`/`on`/`tick`). Empty when not in a
+;; project or when no rules are declared. Entries here win over the built-ins.
+(def *format-headers-extra* {})
 
 (defn head-header-count (head-node)
   "How many args after this head stay on the first line of a broken list. -1 means
-not a known body form (defaults to call-style — every arg breaks)."
-  (if (= (node-kind head-node) :symbol) (get *format-headers* (symbol (node-text head-node)) -1) -1))
+not a known body form (defaults to call-style — every arg breaks). Consults the
+project/plugin table (`*format-headers-extra*`) first, then the built-ins."
+  (if (= (node-kind head-node) :symbol)
+    (let (sym (symbol (node-text head-node)))
+      (get *format-headers-extra* sym (get *format-headers* sym -1)))
+    -1))
 
 ;; Forms whose FIRST header arg is a pair-list (alternating name/value). When
 ;; that list breaks across lines, we group each name+value on one line and
@@ -149,7 +162,7 @@ not a known body form (defaults to call-style — every arg breaks)."
 ;; one pair per line. Comments between clauses are kept on their own lines.
 ;; `assoc`/`assoc!` ride one header arg (the collection) and then pair their
 ;; trailing key/value arguments, the same shape as `cond`'s test+result.
-(def *format-pair-body* {'cond true 'case true 'assoc true 'assoc! true})
+(def *format-pair-body* {'cond true 'case true 'assoc true 'assoc! true 'project true})
 
 (defn pair-bindings? (head-node)
   "True if `head-node` names a form whose first header arg is a pair-list."
@@ -640,6 +653,10 @@ closing delimiter has to break to its own line so it isn't swallowed."
             (let (p (path-join dir entry))
               (cond
                 (dir? p) (if (format--ignored-dir? entry) acc (append acc (format--collect-blsp p)))
+                ;; Skip generated lock files (`project.lock.blsp`): they're machine-
+                ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
+                ;; every project-setup, so formatting them just fights the resolver.
+                (ends-with? entry ".lock.blsp") acc
                 (ends-with? entry ".blsp") (append acc (list p))
                 else acc)))
       nil

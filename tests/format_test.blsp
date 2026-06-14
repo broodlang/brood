@@ -264,3 +264,22 @@
   (test "repeated format-source does not drift under tiering"
     (let (src "(def y 5)\n(+ a b c)\n(if a b c)\n(defn g (x) x)\n")
       (is (format--stable? src (format-source src) 0 300)))))
+
+(describe "format: project/plugin-extensible headers"
+  ;; *format-headers-extra* lets a project (and its :format-plugins deps) teach the
+  ;; formatter the shape of framework macros — e.g. Hatch's `deflive` clauses, where
+  ;; the clause signature should ride the head line like `defn`'s params. One test
+  ;; (both states checked in sequence) so the two format calls don't race on the shared
+  ;; global; the head symbol appears in no other test, and the extra table only ADDS
+  ;; rules, so the brief set can't change how unrelated forms format elsewhere.
+  (test "an extra header rule keeps the clause signature on the head line"
+    (let (src "(zzz-clause \"event\" (params model)\n  (handler params model))")
+      (def *format-headers-extra* {})
+      (let (plain (format-source src))
+        (def *format-headers-extra* {'zzz-clause 2})
+        (let (ruled (format-source src))
+          (def *format-headers-extra* {})
+          ;; no rule → call-style: the event name sits alone, the signature splits
+          (assert= (starts-with? plain "(zzz-clause \"event\"\n") true)
+          ;; rule = 2 → event name + (params model) ride the head line
+          (assert= (starts-with? ruled "(zzz-clause \"event\" (params model)\n") true))))))

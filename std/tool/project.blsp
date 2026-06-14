@@ -40,6 +40,12 @@ the `nest new` scaffolder."
 ; override set before the run.
 (def *project-dependencies* nil)
 ; list of normalised dep maps from the manifest's :dependencies (ADR-037)
+(def *project-format-headers* nil)
+; the manifest's :format-headers map ({head-symbol → header-count}) — extra formatter
+; rules for this project's own macros; nil when unset
+(def *project-format-plugins* nil)
+; the manifest's :format-plugins vector ([dep-name …]) — deps whose own
+; :format-headers this project pulls in (so a framework ships its macro shapes)
 
 ;; (plist-get '(:a 1 :b 2) :b) => 2 — the value after key k in a flat kv list, or nil.
 (defn plist-get (kvs k)
@@ -176,6 +182,8 @@ the `nest new` scaffolder."
     (when tst (def *project-test-paths* tst))
     (when m (def *project-main* (project--parse-main m))))
   (def *project-dependencies* (project--parse-deps (plist-get opts :dependencies)))
+  (def *project-format-headers* (plist-get opts :format-headers))
+  (def *project-format-plugins* (plist-get opts :format-plugins))
   *project-name*)
 
 ;; --- finding the project + discovering tests ---------------------------------
@@ -269,6 +277,51 @@ the `nest new` scaffolder."
 
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*
 ;; so its modules are require-able by name.
+;; --- formatter rules from the manifest (+ its :format-plugins deps) ----------
+;; A package declares `:format-headers {head-symbol count …}` in its own manifest;
+;; a project pulls a dep's rules in with `:format-plugins [dep …]`, and may add its
+;; own `:format-headers`. The effective EXTRA table (layered over format's built-ins)
+;; is plugin deps' rules in declaration order, then this project's own on top.
+
+(defn project--path-dep-dir (dep-name)
+  "The local directory of `:path` dependency `dep-name` (relative to the project
+root), or nil if there's no such :path dep. (Only :path deps can supply formatter
+rules today; a :git plugin is a no-op.)"
+  (fold (fn (acc d)
+          (if (and (nil? acc) (= (get d :name) dep-name) (= (get d :kind) :path))
+            (get d :path)
+            acc))
+    nil
+    *project-dependencies*))
+
+(defn project--manifest-format-headers (manifest-path)
+  "Read the `:format-headers` map declared in the manifest at `manifest-path`; {} if
+the file is missing or declares none."
+  (if (file-exists? manifest-path)
+    (let (form (read-first (slurp manifest-path)))
+      (if (and (pair? form) (= (first form) 'project))
+        (or (plist-get (rest form) :format-headers) {})
+        {}))
+    {}))
+
+(defn project--plugin-format-headers (root plugin-name)
+  "The `:format-headers` a `:format-plugins` entry contributes — read from that
+:path dep's own project.blsp. {} for a non-:path dep."
+  (let (dir (project--path-dep-dir plugin-name))
+    (if (nil? dir)
+      {}
+      (project--manifest-format-headers (path-join (path-join root dir) "project.blsp")))))
+
+(defn project--effective-format-headers (root)
+  "The extra formatter-header table for this project: each `:format-plugins` dep's
+rules merged in declaration order, then this project's own `:format-headers` on top
+(so a project can retune a framework rule). {} when none are declared."
+  (let (from-plugins (fold (fn (acc plugin) (merge acc (project--plugin-format-headers root plugin)))
+                       {}
+                       (or *project-format-plugins* (list)))
+        own (or *project-format-headers* {}))
+    (merge from-plugins own)))
+
 (defn project-setup (root)
   (def *project-root* root)
   ;; Read the manifest as *data* and apply it — rather than `load`ing it, which
@@ -281,6 +334,10 @@ the `nest new` scaffolder."
           (project--apply (rest form))))))
   (def *load-path* (append (project--abs-paths root *project-source-paths*) *load-path*))
   (project--ensure-deps-on-path root)
+  ;; Hand the formatter this project's (+ its plugins') macro-shape rules, so
+  ;; `nest format`/LSP/MCP indent framework macros correctly. Always set (resetting
+  ;; any stale value from a prior setup in a long-lived tooling image).
+  (def *format-headers-extra* (project--effective-format-headers root))
   root)
 
 ;; Load a full project image for **tooling** (the LSP and the `nest mcp` server):

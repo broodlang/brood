@@ -44,7 +44,8 @@
       (refute (get sf :dir?))
       (refute (get sf :symlink?))
       (is (get sd :dir?))                                  ; the dir itself
-      (is (number? (get sf :mtime)))                       ; epoch-ms
+      (is (number? (get sf :mtime)))                       ; epoch-ms last-modified
+      (is (number? (get sf :atime)))                       ; epoch-ms last-access
       (is (>= (get sf :nlink) 1))                          ; hard-link count
       (is (number? (get sf :uid)))
       (is (string? (get sf :owner)))                       ; resolved name (or numeric id)

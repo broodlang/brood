@@ -91,7 +91,7 @@ arg silently becoming `nil`.
 | | `spit` | 2 | write a string to a file (write-side of `load`) |
 | | `slurp` | 1 | read a whole file into a string (read-side of `spit`; unlike `load`, does not evaluate) |
 | | `file-mtime` | 1 | last-modified time as epoch-milliseconds, or nil if missing (cheap stat; pair with `load` for hot-reload) |
-| | `file-stat` | 1 | one-stat metadata map `{:dir? :size :mtime :symlink? :exec? :mode}`, or nil if missing (collapses `dir?`+`file-size`+`file-mtime` for a directory lister) |
+| | `file-stat` | 1 | one-stat metadata map `{:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}`, or nil if missing (collapses `dir?`+`file-size`+`file-mtime` for a directory lister + a recency sort) |
 | **System** | `getenv` | 1 | environment-variable value, or nil if unset |
 | | `run-process` | 2 | run an external program (`prog`, args list), inherit stdio → exit code |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |
