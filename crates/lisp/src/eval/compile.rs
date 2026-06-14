@@ -1211,6 +1211,43 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                         });
                     }
                 }
+                // N-ary associative arithmetic (`(+ a b c …)`, `(* …)`) whose head is a
+                // free reference to the prelude operator: left-fold into nested 2-ary
+                // `Prim2` so each step inlines to a native add/mul (and the whole arm can
+                // tier), instead of dispatching the variadic prelude `fold` once per call
+                // (e.g. bintree's `(+ 1 (check …) (check …))`). Left-fold matches the
+                // prelude's own `fold`; each `Prim2(Add/Mul)` deopts on i64 overflow exactly
+                // as `%add`/`%mul` promote to BigInt, so results stay identical. Restricted
+                // to the associative reducers with the in-order map `[0,1]` — never a
+                // comparison (`<`/`=` chain pairwise, not fold) or a swapped wrapper.
+                if items.len() > 3 && scope.lookup(h).is_none() {
+                    if let Some((op, [0, 1])) = resolve_prim(heap, h) {
+                        if matches!(op, PrimOp::Add | PrimOp::Mul) {
+                            let mut acc = compile_node(heap, items[1], scope, false)?;
+                            for &arg in &items[2..] {
+                                let b = compile_node(heap, arg, scope, false)?;
+                                let broot = !matches!(
+                                    b,
+                                    Node::Const(_)
+                                        | Node::Local(_)
+                                        | Node::Global(_)
+                                        | Node::GlobalIc { .. }
+                                );
+                                acc = Node::Prim2 {
+                                    op,
+                                    a: Box::new(acc),
+                                    b: Box::new(b),
+                                    map: [0, 1],
+                                    head: h,
+                                    guard: AtomicU64::new(heap.global_epoch()),
+                                    pos: heap.form_pos(form),
+                                    broot,
+                                };
+                            }
+                            return Some(acc);
+                        }
+                    }
+                }
             }
             // Direct `letrec` self-recursive tail call (the self-call optimization):
             // a tail call whose head is this closure's own self-name, not shadowed by
