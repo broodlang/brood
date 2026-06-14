@@ -201,6 +201,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], vec_ty),
         bit_positions,
     );
+    // --- bitset: a fixed-size bit array backed by a refc SharedBlob (POC, ADR-107-adjacent).
+    // A `bitset` is a `Str` whose bytes are raw bit-data (LSB-first, bit i = byte i/8 bit i%8),
+    // ALWAYS stored shared, so it crosses `send`/`table` by reference (Arc bump), not a copy —
+    // unlike a bignum, which serialises to decimal. Bitwise ops are O(bytes) native loops.
+    def(heap, "bitset", Arity::exact(1), Sig::new(vec![int], string), bs_make);
+    def(heap, "bitset-ones", Arity::exact(1), Sig::new(vec![int], string), bs_ones);
+    def(heap, "bitset-and", Arity::exact(2), Sig::new(vec![string, string], string), bs_and);
+    def(heap, "bitset-or", Arity::exact(2), Sig::new(vec![string, string], string), bs_or);
+    def(heap, "bitset-xor", Arity::exact(2), Sig::new(vec![string, string], string), bs_xor);
+    def(heap, "bitset-shl", Arity::exact(2), Sig::new(vec![string, int], string), bs_shl);
+    def(heap, "bitset-shr", Arity::exact(2), Sig::new(vec![string, int], string), bs_shr);
+    def(heap, "bitset-set", Arity::exact(2), Sig::new(vec![string, int], string), bs_set);
+    def(heap, "bitset-count", Arity::exact(1), Sig::new(vec![string], int), bs_count);
+    def(heap, "bitset-positions", Arity::exact(1), Sig::new(vec![string], vec_ty), bs_positions);
+    def(heap, "bitset-planes", Arity::exact(1), Sig::new(vec![vec_ty], vec_ty), bs_planes);
 
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
@@ -2828,6 +2843,176 @@ fn bit_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             }
         }
         v => return Err(LispError::wrong_type(heap, "bit-positions", "int", v)),
+    }
+    Ok(heap.alloc_vector(out))
+}
+
+// ===== bitset: refc-shared fixed-size bit array (POC) ============================
+// A bitset is read WITHOUT copying its bytes: a shared one hands back its `Arc`
+// (a refcount bump), so the bitwise ops touch the blob in place and only the
+// RESULT is allocated. (An inline string — only happens off the bitset path —
+// falls back to a one-time copy.)
+enum BsData {
+    Shared(std::sync::Arc<crate::core::blob::SharedBlob>),
+    Owned(Vec<u8>),
+}
+impl BsData {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            BsData::Shared(a) => a.as_bytes(),
+            BsData::Owned(v) => v,
+        }
+    }
+}
+
+fn bs_arc(heap: &Heap, v: Value, who: &str) -> Result<BsData, LispError> {
+    match v {
+        Value::Str(id) => Ok(match heap.local_shared_blob(id) {
+            Some(a) => BsData::Shared(a),
+            None => BsData::Owned(heap.string(id).as_bytes().to_vec()),
+        }),
+        _ => Err(LispError::wrong_type(heap, who, "bitset", v)),
+    }
+}
+
+// Allocate a bitset from raw bytes — ALWAYS shared, so send/table ship it by reference.
+fn bs_alloc(heap: &mut Heap, bytes: &[u8]) -> Value {
+    heap.alloc_string_from_shared(crate::core::blob::SharedBlob::new(bytes))
+}
+
+fn bs_nbytes(nbits: i64) -> usize {
+    ((nbits.max(0) as usize) + 7) / 8
+}
+
+fn bs_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "bitset", arg(args, 0))?;
+    Ok(bs_alloc(heap, &vec![0u8; bs_nbytes(n)]))
+}
+
+fn bs_ones(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "bitset-ones", arg(args, 0))?.max(0) as usize;
+    let len = (n + 7) / 8;
+    let mut out = vec![0xffu8; len];
+    if len > 0 && n % 8 != 0 {
+        out[len - 1] = (1u8 << (n % 8)) - 1;
+    }
+    Ok(bs_alloc(heap, &out))
+}
+
+fn bs_binop(heap: &mut Heap, args: &[Value], who: &str, f: fn(u8, u8) -> u8) -> LispResult {
+    let a = bs_arc(heap, arg(args, 0), who)?;
+    let b = bs_arc(heap, arg(args, 1), who)?;
+    let (ab, bb) = (a.bytes(), b.bytes());
+    let out: Vec<u8> = (0..ab.len()).map(|i| f(ab[i], *bb.get(i).unwrap_or(&0))).collect();
+    Ok(bs_alloc(heap, &out))
+}
+
+// Fused bit-plane full-adder: sum a vector of bitsets bit-by-bit into the low THREE
+// planes [s0 s1 s2] of the per-bit count, in ONE native pass (no per-op allocation —
+// the ~40-op interpreted reduce this replaces alloc'd a fresh bitset per step). The
+// adder is bitwise-parallel: each byte carries 8 independent bit-columns; the carry
+// flows between PLANES (s0→s1→s2), not between bits. General over any field count.
+fn bs_planes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let items: Vec<Value> = match arg(args, 0) {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        v => return Err(LispError::wrong_type(heap, "bitset-planes", "vector", v)),
+    };
+    let datas: Vec<BsData> = items
+        .iter()
+        .map(|x| bs_arc(heap, *x, "bitset-planes"))
+        .collect::<Result<_, _>>()?;
+    let len = datas.first().map_or(0, |d| d.bytes().len());
+    let (mut s0, mut s1, mut s2) = (vec![0u8; len], vec![0u8; len], vec![0u8; len]);
+    for d in &datas {
+        let m = d.bytes();
+        for j in 0..len {
+            let mj = *m.get(j).unwrap_or(&0);
+            let c = s0[j] & mj;
+            s0[j] ^= mj;
+            let c2 = s1[j] & c;
+            s1[j] ^= c;
+            s2[j] ^= c2;
+        }
+    }
+    let r0 = bs_alloc(heap, &s0);
+    let r1 = bs_alloc(heap, &s1);
+    let r2 = bs_alloc(heap, &s2);
+    Ok(heap.alloc_vector(vec![r0, r1, r2]))
+}
+
+fn bs_and(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    bs_binop(heap, args, "bitset-and", |x, y| x & y)
+}
+fn bs_or(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    bs_binop(heap, args, "bitset-or", |x, y| x | y)
+}
+fn bs_xor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    bs_binop(heap, args, "bitset-xor", |x, y| x ^ y)
+}
+
+fn bs_shl(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let srcd = bs_arc(heap, arg(args, 0), "bitset-shl")?;
+    let src = srcd.bytes();
+    let n = expect_int(heap, "bitset-shl", arg(args, 1))?.max(0) as usize;
+    let (len, bo, bs) = (src.len(), n / 8, n % 8);
+    let mut out = vec![0u8; len];
+    for j in bo..len {
+        let lo = src[j - bo] as u16;
+        let mut v = lo << bs;
+        if bs != 0 && j - bo >= 1 {
+            v |= (src[j - bo - 1] as u16) >> (8 - bs);
+        }
+        out[j] = (v & 0xff) as u8;
+    }
+    Ok(bs_alloc(heap, &out))
+}
+
+fn bs_shr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let srcd = bs_arc(heap, arg(args, 0), "bitset-shr")?;
+    let src = srcd.bytes();
+    let n = expect_int(heap, "bitset-shr", arg(args, 1))?.max(0) as usize;
+    let (len, bo, bs) = (src.len(), n / 8, n % 8);
+    let mut out = vec![0u8; len];
+    for j in 0..len {
+        let hi = j + bo;
+        if hi >= len {
+            break;
+        }
+        let mut v = (src[hi] as u16) >> bs;
+        if bs != 0 && hi + 1 < len {
+            v |= (src[hi + 1] as u16) << (8 - bs);
+        }
+        out[j] = (v & 0xff) as u8;
+    }
+    Ok(bs_alloc(heap, &out))
+}
+
+fn bs_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut src = bs_arc(heap, arg(args, 0), "bitset-set")?.bytes().to_vec();
+    let i = expect_int(heap, "bitset-set", arg(args, 1))?.max(0) as usize;
+    let (byte, bit) = (i / 8, i % 8);
+    if byte < src.len() {
+        src[byte] |= 1 << bit;
+    }
+    Ok(bs_alloc(heap, &src))
+}
+
+fn bs_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let srcd = bs_arc(heap, arg(args, 0), "bitset-count")?;
+    let n: u32 = srcd.bytes().iter().map(|b| b.count_ones()).sum();
+    Ok(Value::Int(n as i64))
+}
+
+fn bs_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let srcd = bs_arc(heap, arg(args, 0), "bitset-positions")?;
+    let src = srcd.bytes();
+    let mut out: Vec<Value> = Vec::new();
+    for (bi, &byte) in src.iter().enumerate() {
+        let mut b = byte;
+        while b != 0 {
+            out.push(Value::Int((bi * 8 + b.trailing_zeros() as usize) as i64));
+            b &= b - 1;
+        }
     }
     Ok(heap.alloc_vector(out))
 }
