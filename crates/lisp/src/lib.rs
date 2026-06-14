@@ -38,6 +38,7 @@ pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives i
 pub mod perf; // VM work-attribution counters (feature "perf-stats") — docs/benchmarking.md
 pub mod proc; // persistent child-process mechanism: spawn + stdio pipes over the mailbox seam (ADR-104)
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
+pub mod table; // in-memory shared table — Brood's ETS (ADR-107): a sendable handle into a global store of deep clones
 pub mod text_width; // grapheme-cluster display-cell width (the `display-width` builtin + the GUI grid)
 pub mod treesit; // optional tree-sitter parsing for foreign languages (feature "treesit") — ROADMAP §C
 

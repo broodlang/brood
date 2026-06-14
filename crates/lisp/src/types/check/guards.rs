@@ -18,7 +18,7 @@ use crate::types::Ty;
 
 use super::ctx::Ctx;
 use super::sigs::sig_of;
-use super::walk::list_items;
+use super::walk::{is_fn_head, list_items};
 
 /// Names that have *syntactic* meaning but aren't bound values — never flag
 /// these as unbound. Mirrors `eval::SPECIAL_NAMES` plus the macros that the
@@ -493,7 +493,7 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
     };
-    if !value::symbol_is(head, kw::FN) {
+    if !is_fn_head(head) {
         return None;
     }
     // Exactly `(fn <param-list> <body>)` — one param list + one body expression.

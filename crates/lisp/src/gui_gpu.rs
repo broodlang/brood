@@ -195,18 +195,16 @@ impl GlWindow {
                         }
                     }
                 }
-                Op::Cells { row0, col0, w, aspect, bits, color } => {
+                Op::Cells { row0, col0, w, aspect, bytes, color } => {
                     if let Some(rgb) = color {
                         let asp = (*aspect).max(1) as usize;
                         let cell_w = (asp as f32) * cwf;
-                        let wmod = (*w).max(1) as u64;
-                        // Enumerate set bits by walking the limbs ONCE — O(limbs + live),
-                        // not the O(live × limbs) clone+set_bit scan (quadratic on big boards).
-                        for (li, word) in bits.magnitude().iter_u64_digits().enumerate() {
-                            let mut word = word;
-                            let base = (li as u64) * 64;
-                            while word != 0 {
-                                let bit = base + word.trailing_zeros() as u64;
+                        let wmod = (*w).max(1) as usize;
+                        for (bi, &byte) in bytes.iter().enumerate() {
+                            let mut b = byte;
+                            let base = bi * 8;
+                            while b != 0 {
+                                let bit = base + b.trailing_zeros() as usize;
                                 let x = (bit % wmod) as f32;
                                 let y = (bit / wmod) as f32;
                                 push(
@@ -216,7 +214,7 @@ impl GlWindow {
                                     chf,
                                     *rgb,
                                 );
-                                word &= word - 1;
+                                b &= b - 1;
                             }
                         }
                     }

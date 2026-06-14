@@ -158,7 +158,10 @@ pub enum Op {
         col0: u16,
         w: u32,
         aspect: u16,
-        bits: num_bigint::BigInt,
+        /// The board's set bits as little-endian bytes (bit `y*w+x` = byte `i/8` bit `i%8`).
+        /// Decoded once at parse time from EITHER a bignum or a `bitset`, so the paint path
+        /// is representation-agnostic — a plain set-bit byte scan.
+        bytes: Vec<u8>,
         color: Option<[u8; 3]>,
     },
 }
@@ -2365,27 +2368,26 @@ mod backend {
                         }
                     }
                 }
-                Op::Cells { row0, col0, w, aspect, bits, color } => {
-                    // Enumerate the bitboard's set bits by walking the u64 limbs ONCE —
-                    // O(limbs + live), not the O(live × limbs) clone+set_bit scan (which is
-                    // quadratic in board size: on a 400×400 board it dominated the frame).
+                Op::Cells { row0, col0, w, aspect, bytes, color } => {
+                    // Enumerate set bits by a single byte scan — O(bytes + live), and the
+                    // same code whether the board came in as a bignum or a bitset.
                     // Each cell is an `aspect`-wide × 1-tall block of screen cells.
                     if let Some(rgb) = color {
                         let packed = pack(*rgb);
                         let asp = (*aspect).max(1) as usize;
                         let cell_w = asp * cw; // a board cell spans `aspect` screen cells
-                        let wmod = (*w).max(1) as u64;
-                        for (li, word) in bits.magnitude().iter_u64_digits().enumerate() {
-                            let mut word = word;
-                            let base = (li as u64) * 64;
-                            while word != 0 {
-                                let bit = base + word.trailing_zeros() as u64;
-                                let x = (bit % wmod) as usize;
-                                let y = (bit / wmod) as usize;
+                        let wmod = (*w).max(1) as usize;
+                        for (bi, &byte) in bytes.iter().enumerate() {
+                            let mut b = byte;
+                            let base = bi * 8;
+                            while b != 0 {
+                                let bit = base + b.trailing_zeros() as usize;
+                                let x = bit % wmod;
+                                let y = bit / wmod;
                                 let left = inset + (*col0 as usize + x * asp) * cw;
                                 let top = inset + (*row0 as usize + y) * ch;
                                 fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
-                                word &= word - 1;
+                                b &= b - 1;
                             }
                         }
                     }
