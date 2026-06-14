@@ -358,8 +358,20 @@ fn resolve_sym(
         return s;
     }
     let name = value::symbol_name_ref(s);
-    if name.contains('/') {
-        return s; // already qualified
+    if let Some(slash) = name.find('/') {
+        // A qualified `prefix/rest`. If `prefix` is a module alias from `(:alias …)`
+        // — stored in the import table under the slash-suffixed key `prefix/` so it
+        // rides the same per-file lifecycle — rewrite to the real module path:
+        // `conn/build` → `web/conn/build`. Otherwise it's already fully qualified.
+        let alias_key = value::intern(&format!("{}/", &name[..slash]));
+        if let Some(target) = heap.import_of(alias_key) {
+            return value::intern(&format!(
+                "{}/{}",
+                value::symbol_name_ref(target),
+                &name[slash + 1..]
+            ));
+        }
+        return s; // already qualified, no alias
     }
     if is_ambient(name) {
         return s; // earmuffed `*foo*` — ambient/root by convention (ADR-065)
