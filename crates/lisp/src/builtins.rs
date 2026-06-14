@@ -764,6 +764,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "tcp-set-binary",
+        Arity::exact(2),
+        Sig::new(vec![socket_ty, bool_ty], nil_ty),
+        tcp_set_binary,
+    );
+    def(
+        heap,
         "tcp-controlling-process",
         Arity::exact(2),
         Sig::new(vec![socket_ty, pid_ty], nil_ty),
@@ -2205,7 +2212,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tcp-connect", &["host", "port"], "Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure."),
     ("tcp-listen", &["host", "port"], "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket."),
     ("tls-request", &["host", "port", "request"], "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). Returns a socket id; pair with tcp-drain. Low-level — prefer http-get."),
-    ("tcp-send", &["sock", "s"], "Write the whole string s to sock (blocking). Returns nil; throws on error."),
+    ("tcp-send", &["sock", "s"], "Write the whole string s to sock (blocking). Text mode (default): s is sent as UTF-8. Binary mode (see tcp-set-binary): each codepoint of s must be 0–255 and is written as one raw byte. Returns nil; throws on error."),
+    ("tcp-set-binary", &["sock", "on"], "Switch sock between text mode (default) and binary mode. In binary mode inbound [:tcp …] data is a byte-faithful Latin-1 string (one codepoint 0–255 per byte received) and tcp-send writes each codepoint 0–255 as one raw byte — for length-prefixed / control-byte protocols like WebSocket framing. Returns nil; throws if sock is gone or a listener."),
     ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
     ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
     ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
@@ -5408,8 +5416,34 @@ fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_socket(heap, "tcp-send", arg(args, 0))?;
     let data = expect_string(heap, "tcp-send", arg(args, 1))?;
-    crate::net::send(id, data.as_bytes())
-        .map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
+    if crate::net::is_binary(id) {
+        // Binary mode: write each codepoint as one raw byte (Latin-1). The string
+        // must be a byte-string (codepoints 0–255) — e.g. a WebSocket frame the
+        // caller built by UTF-8-encoding any text payload into this form.
+        let mut out = Vec::with_capacity(data.len());
+        for c in data.chars() {
+            let n = c as u32;
+            if n > 0xFF {
+                return Err(LispError::runtime(format!(
+                    "tcp-send: codepoint U+{:04X} is not a byte (0–255); a binary-mode socket sends raw bytes only",
+                    n
+                )));
+            }
+            out.push(n as u8);
+        }
+        crate::net::send(id, &out)
+    } else {
+        crate::net::send(id, data.as_bytes())
+    }
+    .map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
+    Ok(Value::Nil)
+}
+
+fn tcp_set_binary(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_socket(heap, "tcp-set-binary", arg(args, 0))?;
+    let on = !matches!(arg(args, 1), Value::Nil | Value::Bool(false));
+    crate::net::set_binary(id, on)
+        .map_err(|e| LispError::runtime(format!("tcp-set-binary: {}", e)))?;
     Ok(Value::Nil)
 }
 
