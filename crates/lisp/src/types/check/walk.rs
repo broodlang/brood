@@ -676,7 +676,7 @@ pub(super) fn check_into(
 /// in the extended scope. Parameter positions (`& rest`, `&optional`) are
 /// binders, not references, so they're not flagged as unbound.
 fn check_fn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
-    check_fn_seeded(heap, items, ctx, out, None);
+    check_fn_seeded(heap, items, ctx, out, None, None);
 }
 
 /// `check_fn`, optionally seeding the parameters from a `(sig …)` signature — used
@@ -691,6 +691,7 @@ fn check_fn_seeded(
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
     sig: Option<&crate::types::Sig>,
+    name: Option<Symbol>,
 ) {
     // Multi-arity `fn` — `(fn ((a) …) ((a b) …))` — isn't one param list + body;
     // each form (after an optional docstring) is a clause `(param-list body…)`.
@@ -743,6 +744,27 @@ fn check_fn_seeded(
     };
     for &body_form in &items[body_start..] {
         check_into(heap, body_form, &scope, out);
+    }
+    // Return-type check (a `GradualTy` consumer): the body's last form is the
+    // function's result, which must be *consistent* with the declared return `R`.
+    // `gradual_of` makes an over-approximated result (a call) `dynamic`, so the ∩
+    // relation only warns on a body type provably disjoint from `R` — never on a
+    // widened guess (a `number`-returning body declared `int` defers). A precise
+    // literal return uses `⊆`. Only fires with a seeded (sig-matched) sig.
+    if let Some(s) = sig {
+        if let Some(&ret_form) = items[body_start..].last() {
+            let g = gradual_of(heap, ret_form, &scope);
+            if !g.consistent_with(s.ret.clone()) {
+                let who = name.map(|n| format!("{}: ", name_of(n))).unwrap_or_default();
+                out.push((
+                    heap.form_pos(ret_form),
+                    format!(
+                        "{}declared return type {} but the body yields {}",
+                        who, s.ret, g.bound
+                    ),
+                ));
+            }
+        }
     }
 }
 
@@ -819,7 +841,7 @@ fn check_def(
     if let Some(&Value::Sym(name)) = items.get(1) {
         if let Some(sig) = ctx.declared_sig(name) {
             if let Some(fn_items) = fn_form_items(heap, value_form) {
-                check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig));
+                check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig), Some(name));
                 return;
             }
         }
