@@ -84,6 +84,17 @@ mod imp {
         jit_deopt,
         /// A tiered arm was preempted by the reduction budget — outcome 2.
         jit_preempt,
+        /// `jit_dispatch_call` linked native→native and the callee returned **Done**
+        /// (a leaf — a value in `roots[base]`, not a tail-call). The path under
+        /// scrutiny for the bool-leaf miscompile.
+        jit_link_done,
+        /// `jit_dispatch_call` linked native→native but the callee deopted/preempted/
+        /// tail-returned, so it re-ran on the VM via `vm_apply`.
+        jit_link_rerun,
+        /// A native arm deopted/preempted but left `roots` **longer than `jit_tier`
+        /// found them** — a dirty operand stack that corrupts the `exec_chunk` re-run.
+        /// Nonzero ⇒ a real correctness hole.
+        jit_deopt_dirty,
     );
 }
 
