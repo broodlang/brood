@@ -237,6 +237,9 @@ mod disabled {
     pub fn grab(_id: u64, _on: bool) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
+    pub fn fullscreen(_id: u64, _on: bool) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
     pub fn size(_id: u64) -> Result<(u16, u16), String> {
         Err(NOT_COMPILED.into())
     }
@@ -265,12 +268,14 @@ mod disabled {
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    close, draw, focus, font, grab, held_key, icon, inset, open, register_family, size, title,
+    close, draw, focus, font, fullscreen, grab, held_key, icon, inset, open, register_family, size,
+    title,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    close, draw, focus, font, grab, held_key, icon, inset, open, register_family, size, title,
+    close, draw, focus, font, fullscreen, grab, held_key, icon, inset, open, register_family, size,
+    title,
 };
 
 #[cfg(feature = "gui")]
@@ -299,7 +304,7 @@ mod backend {
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{Key as WKey, ModifiersState, NamedKey, PhysicalKey};
     use winit::platform::wayland::EventLoopBuilderExtWayland;
-    use winit::window::{CursorGrabMode, CursorIcon, Icon, Window, WindowId};
+    use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Icon, Window, WindowId};
 
     use cosmic_text::{
         fontdb, Attrs, Buffer as CtBuffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache,
@@ -391,6 +396,10 @@ mod backend {
         /// `gui-grab-cursor` — keeps the cursor inside the window for mouse-look so
         /// it can't slip out and click another app.
         Grab { id: u64, on: bool },
+        /// Make window `id` borderless-fullscreen (`on`) or restore it to a normal
+        /// window. Behind `gui-fullscreen!` — what an editor `init.blsp` toggles to
+        /// open maximised over the whole screen.
+        Fullscreen { id: u64, on: bool },
         /// Set a cell font — family and/or pixel size; `None` fields are left
         /// unchanged. `id: None` is the **global default**: applied to every open
         /// window and remembered for windows opened later. `id: Some(w)` targets
@@ -544,6 +553,22 @@ mod backend {
             .lock()
             .unwrap()
             .send_event(UserEvent::Grab { id, on })
+            .map_err(|_| "gui thread is gone".to_string())
+    }
+
+    /// `(gui-fullscreen! id on)` — make window `id` borderless-fullscreen (`on`
+    /// true) or restore it. Dispatched to the GUI thread like `grab`.
+    pub fn fullscreen(id: u64, on: bool) -> Result<(), String> {
+        {
+            let w = windows().lock().unwrap();
+            if !w.contains_key(&id) {
+                return Err("gui window not open".into());
+            }
+        }
+        gui()?
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::Fullscreen { id, on })
             .map_err(|_| "gui thread is gone".to_string())
     }
 
@@ -1015,6 +1040,15 @@ mod backend {
                         } else if !on {
                             let _ = w.window.set_cursor_grab(CursorGrabMode::None);
                         }
+                    }
+                }
+                // Borderless-fullscreen the window (`Borderless(None)` = the current
+                // monitor), or restore it. The resize that follows republishes the new
+                // cell grid like any other, so the loop re-renders at the bigger size.
+                UserEvent::Fullscreen { id, on } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        w.window
+                            .set_fullscreen(if on { Some(Fullscreen::Borderless(None)) } else { None });
                     }
                 }
                 // Cell font. `id: Some(w)` retunes just that window, leaving the
