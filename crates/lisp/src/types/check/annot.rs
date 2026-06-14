@@ -68,6 +68,10 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
         // `nil` reads as the literal `Value::Nil`, not a symbol — so a type-expr
         // like `(or int nil)` lands here, not in `base_ty`.
         Value::Nil => Some(Ty::of(Tag::Nil)),
+        // A bare keyword in type position is a literal (singleton) type — exactly
+        // that value. Unambiguous (base types are bare *symbols*), and the form
+        // `(or :maximized :fullboth nil)` composes via the `(or …)` union above.
+        Value::Keyword(s) => Some(Ty::keyword_lit(s)),
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
             // An arrow: a list containing the `->` marker. Detect it first, so

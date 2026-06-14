@@ -24,10 +24,11 @@
 
 pub mod check;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::value::{self, Tag, Value};
+use crate::core::value::{self, Symbol, Tag, Value};
 
 /// Every tag, in bit order — for iterating a `Ty`'s members (printing, etc.) and
 /// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
@@ -91,6 +92,11 @@ const SEQ_BITS: u32 = (1u32 << bit(Tag::Pair)) | (1u32 << bit(Tag::Vector));
 /// The map tag — the one tag a key/value refinement applies to.
 const MAP_BIT: u32 = 1u32 << bit(Tag::Map);
 
+/// The keyword tag — the one tag a literal (singleton) refinement applies to. A
+/// keyword-literal type `:maximized` refines the keyword members to exactly the
+/// listed keyword symbols (set-theoretic literal types, ADR; keyword-only first).
+const KEYWORD_BIT: u32 = 1u32 << bit(Tag::Keyword);
+
 /// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
 /// *structured refinements* on its function and sequence members (Step 5+,
 /// ADR-078).
@@ -126,6 +132,14 @@ pub struct Ty {
     /// Refinement of the map member (`map`) — `(key-type, val-type)`, when
     /// statically known.  `None` means "keys and values of any type".
     map_kv: Option<Arc<(Ty, Ty)>>,
+    /// Refinement of the keyword member (`keyword`) to a literal set — the exact
+    /// keyword symbols admitted, e.g. `{:maximized, :fullboth}`. `None` means "any
+    /// keyword". When `Some`, the `Keyword` bit is in `tags` and the set is
+    /// non-empty; the keyword member is constrained to the set while every *other*
+    /// tag in `tags` stays open (so `(or :a :b nil)` admits the two keywords *and*
+    /// `nil`). Unlike the other refinements, union of two literal sets is *exact*
+    /// (the set-union), not a widening — so `(or :a :b)` keeps both.
+    lit: Option<Arc<BTreeSet<Symbol>>>,
 }
 
 impl Ty {
@@ -147,6 +161,7 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: None,
+            lit: None,
         }
     }
 
@@ -177,6 +192,7 @@ impl Ty {
             arrow: Some(Arc::new(sig)),
             elem: None,
             map_kv: None,
+            lit: None,
         }
     }
 
@@ -195,6 +211,7 @@ impl Ty {
             arrow: None,
             elem: Some(Arc::new(elem)),
             map_kv: None,
+            lit: None,
         }
     }
 
@@ -205,7 +222,28 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: Some(Arc::new((key, val))),
+            lit: None,
         }
+    }
+
+    /// A keyword-literal (singleton) type — exactly the keyword `sym`. Unions of
+    /// these build an enumerated keyword type, e.g. `(or :maximized :fullboth)`.
+    pub fn keyword_lit(sym: Symbol) -> Ty {
+        let mut set = BTreeSet::new();
+        set.insert(sym);
+        Ty {
+            tags: KEYWORD_BIT,
+            arrow: None,
+            elem: None,
+            map_kv: None,
+            lit: Some(Arc::new(set)),
+        }
+    }
+
+    /// The keyword-literal refinement, if this type carries one (the exact keyword
+    /// symbols admitted). `None` means "any keyword" (or no keyword member).
+    pub fn as_lit(&self) -> Option<&BTreeSet<Symbol>> {
+        self.lit.as_deref()
     }
 
     /// The key/value refinement, if this map type carries one. The bridge the
@@ -233,8 +271,13 @@ impl Ty {
     }
 
     /// The type of a concrete value — the bridge from a runtime value to its type.
+    /// A keyword becomes its **literal singleton** (`:foo`, not the whole `keyword`
+    /// tag), so a literal in code is checked against an enumerated keyword sig.
     pub fn of_value(v: Value) -> Ty {
-        Ty::of(value::tag(v))
+        match v {
+            Value::Keyword(s) => Ty::keyword_lit(s),
+            _ => Ty::of(value::tag(v)),
+        }
     }
 
     /// The type asserted when the named type-predicate holds — the bridge from a
@@ -298,11 +341,17 @@ impl Ty {
             other.tags & MAP_BIT != 0,
             &other.map_kv,
         );
+        // Literal sets union *exactly* (not widen) — `:a ∪ :b = {a,b}`. But a side
+        // whose keyword member is *open* (keyword tag, no literal set) contributes
+        // every keyword, so the result keyword member is open too (`:a ∪ keyword =
+        // keyword`).
+        let lit = merge_union_lit(&self, &other);
         Ty {
             tags,
             arrow,
             elem,
             map_kv,
+            lit,
         }
     }
 
@@ -312,7 +361,7 @@ impl Ty {
     /// guard narrowing `T ∩ tested_by(pred)`, where `tested_by` is flat, so a
     /// refined `T` keeps its refinement through the narrow.)
     pub fn intersect(self, other: Ty) -> Ty {
-        let tags = self.tags & other.tags;
+        let mut tags = self.tags & other.tags;
         let arrow = if tags & FN_BITS != 0 {
             merge_intersect(&self.arrow, &other.arrow)
         } else {
@@ -328,11 +377,33 @@ impl Ty {
         } else {
             None
         };
+        // Literal sets intersect; if the result is empty no keyword qualifies, so
+        // clear the keyword bit too. An *open* side (keyword, no set) intersects to
+        // the other side's set (the narrower).
+        let lit = if tags & KEYWORD_BIT != 0 {
+            match (&self.lit, &other.lit) {
+                (Some(a), Some(b)) => {
+                    let s: BTreeSet<Symbol> = a.intersection(b).copied().collect();
+                    if s.is_empty() {
+                        tags &= !KEYWORD_BIT;
+                        None
+                    } else {
+                        Some(Arc::new(s))
+                    }
+                }
+                (Some(a), None) => Some(a.clone()),
+                (None, Some(b)) => Some(b.clone()),
+                (None, None) => None,
+            }
+        } else {
+            None
+        };
         Ty {
             tags,
             arrow,
             elem,
             map_kv,
+            lit,
         }
     }
 
@@ -362,6 +433,11 @@ impl Ty {
         }
         if self.map_kv.is_some() {
             tags |= self.tags & MAP_BIT;
+        }
+        // A literal set omits the *other* keywords, which are in the complement —
+        // so the keyword tag survives (widened to "any keyword").
+        if self.lit.is_some() {
+            tags |= KEYWORD_BIT;
         }
         Ty::flat(tags)
     }
@@ -419,14 +495,39 @@ impl Ty {
                 }
             }
         }
+        if self.tags & KEYWORD_BIT != 0 {
+            if let Some(b) = &other.lit {
+                match &self.lit {
+                    // every keyword self admits must be one `other` admits
+                    Some(a) => {
+                        if !a.is_subset(b) {
+                            return false;
+                        }
+                    }
+                    None => return false, // self = "any keyword" ⊄ a literal set
+                }
+            }
+        }
         true
     }
 
-    /// Do `self` and `other` share no values? (`self ∩ other = ⊥`.) Decided on
-    /// tags alone — never inferred from a refinement mismatch, so a refinement can
-    /// only suppress a warning, never raise a false one (advisory-soundness).
+    /// Do `self` and `other` share no values? (`self ∩ other = ⊥`.) Tag overlap
+    /// decides it, with one *precise* exception: when the only shared tag is
+    /// `keyword` and both sides pin disjoint literal sets, no keyword satisfies
+    /// both. This only ever *adds* genuinely-disjoint cases (a literal set is an
+    /// exact enumeration, not an approximation), so it can't raise a false warning
+    /// — advisory-soundness holds.
     pub fn is_disjoint(&self, other: &Ty) -> bool {
-        self.tags & other.tags == 0
+        let shared = self.tags & other.tags;
+        if shared == 0 {
+            return true;
+        }
+        if shared == KEYWORD_BIT {
+            if let (Some(a), Some(b)) = (&self.lit, &other.lit) {
+                return a.is_disjoint(b);
+            }
+        }
+        false
     }
 
     /// Does this type admit a value with `tag`?
@@ -474,6 +575,35 @@ fn merge_intersect<T: PartialEq>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> Opti
         (Some(x), None) => Some(x.clone()),
         (None, Some(y)) => Some(y.clone()),
         (None, None) => None,
+    }
+}
+
+/// The surviving keyword-literal set for a **union**. Unlike the generic
+/// [`merge_union`], two literal sets combine *exactly* (set-union), since the union
+/// of `{:a}` and `{:b}` is precisely `{:a, :b}`. But if either side has its keyword
+/// member *open* (the keyword tag present with no literal set — i.e. "any keyword"),
+/// the union admits every keyword, so the result is open too (`None`).
+fn merge_union_lit(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<Symbol>>> {
+    let open = |t: &Ty| t.tags & KEYWORD_BIT != 0 && t.lit.is_none();
+    if open(a) || open(b) {
+        return None;
+    }
+    match (&a.lit, &b.lit) {
+        (None, None) => None,
+        (x, y) => {
+            let mut set = BTreeSet::new();
+            if let Some(x) = x {
+                set.extend(x.iter().copied());
+            }
+            if let Some(y) = y {
+                set.extend(y.iter().copied());
+            }
+            if set.is_empty() {
+                None
+            } else {
+                Some(Arc::new(set))
+            }
+        }
     }
 }
 
@@ -532,6 +662,22 @@ impl fmt::Display for Ty {
                     return write!(f, "{nil}(list | vector)<{elem}>");
                 }
             }
+        }
+        // A keyword-literal type: the enumerated keywords (`:a | :b`), plus any
+        // other tags this type also admits (`:a | :b | nil`). Sorted by name so the
+        // rendering is stable regardless of intern order.
+        if let Some(set) = &self.lit {
+            let mut parts: Vec<String> = set
+                .iter()
+                .map(|s| format!(":{}", value::symbol_name_ref(*s)))
+                .collect();
+            parts.sort();
+            for tag in ALL_TAGS {
+                if tag as u8 as u32 != bit(Tag::Keyword) && self.contains_tag(tag) {
+                    parts.push(tag.name().to_string());
+                }
+            }
+            return f.write_str(&parts.join(" | "));
         }
         let mut first = true;
         for tag in ALL_TAGS {
@@ -1205,5 +1351,96 @@ mod tests {
         assert!(!Ty::vector_of(Ty::of(Tag::Int)).is_disjoint(&Ty::vector_of(Ty::of(Tag::Str))));
         // a vector and an int are disjoint (tags don't overlap).
         assert!(Ty::vector_of(Ty::of(Tag::Int)).is_disjoint(&Ty::of(Tag::Int)));
+    }
+
+    // ---- keyword-literal (singleton) types — ADR, keyword-only slice ----
+
+    /// `(or :a :b)` as a `Ty` — the union of two keyword singletons.
+    fn kw_union(names: &[&str]) -> Ty {
+        names
+            .iter()
+            .map(|n| Ty::keyword_lit(value::intern(n)))
+            .reduce(|a, b| a.union(b))
+            .unwrap()
+    }
+
+    #[test]
+    fn keyword_literal_renders_as_its_value() {
+        assert_eq!(Ty::keyword_lit(value::intern("maximized")).to_string(), ":maximized");
+        // a union keeps both (set-union is exact, not a widening); rendered sorted.
+        assert_eq!(kw_union(&["a", "b"]).to_string(), ":a | :b");
+        // mixed with another tag: the literals plus the open tag.
+        assert_eq!(
+            kw_union(&["maximized", "fullscreen"])
+                .union(Ty::of(Tag::Nil))
+                .to_string(),
+            ":fullscreen | :maximized | nil"
+        );
+    }
+
+    #[test]
+    fn keyword_literal_union_is_exact_but_open_keyword_widens() {
+        // {:a} ∪ {:b} = {:a, :b} — exact, both kept.
+        let u = kw_union(&["a", "b"]);
+        let mut want = BTreeSet::new();
+        want.insert(value::intern("a"));
+        want.insert(value::intern("b"));
+        assert_eq!(u.as_lit(), Some(&want));
+        // {:a} ∪ keyword(any) → any keyword (open side wins).
+        let widened = Ty::keyword_lit(value::intern("a")).union(Ty::of(Tag::Keyword));
+        assert!(widened.contains_tag(Tag::Keyword));
+        assert_eq!(widened.as_lit(), None);
+    }
+
+    #[test]
+    fn keyword_literal_subtyping() {
+        let ab = kw_union(&["a", "b"]);
+        // :a <: (:a | :b)
+        assert!(Ty::keyword_lit(value::intern("a")).is_subtype(&ab));
+        // (:a | :b) <: keyword(any)
+        assert!(ab.is_subtype(&Ty::of(Tag::Keyword)));
+        // :c ⊄ (:a | :b)
+        assert!(!Ty::keyword_lit(value::intern("c")).is_subtype(&ab));
+        // any keyword ⊄ a specific literal set
+        assert!(!Ty::of(Tag::Keyword).is_subtype(&ab));
+    }
+
+    #[test]
+    fn keyword_literal_disjointness_is_precise() {
+        let ab = kw_union(&["a", "b"]);
+        // :c is provably not one of (:a | :b) → disjoint → the checker can warn.
+        assert!(Ty::keyword_lit(value::intern("c")).is_disjoint(&ab));
+        // :a overlaps → not disjoint.
+        assert!(!Ty::keyword_lit(value::intern("a")).is_disjoint(&ab));
+        // any keyword could be :a → NOT provably disjoint (no false positive).
+        assert!(!Ty::of(Tag::Keyword).is_disjoint(&ab));
+        // a non-keyword is disjoint by tags as before.
+        assert!(ab.is_disjoint(&Ty::of(Tag::Int)));
+        // sharing another tag (nil) means not disjoint even if keywords differ.
+        let c_or_nil = Ty::keyword_lit(value::intern("c")).union(Ty::of(Tag::Nil));
+        let ab_or_nil = ab.clone().union(Ty::of(Tag::Nil));
+        assert!(!c_or_nil.is_disjoint(&ab_or_nil));
+    }
+
+    #[test]
+    fn keyword_literal_intersection() {
+        // (:a | :b) ∩ (:b | :c) = {:b}
+        let inter = kw_union(&["a", "b"]).intersect(kw_union(&["b", "c"]));
+        let mut want = BTreeSet::new();
+        want.insert(value::intern("b"));
+        assert_eq!(inter.as_lit(), Some(&want));
+        // (:a) ∩ (:b) = never (empty literal set clears the keyword tag).
+        let empty = Ty::keyword_lit(value::intern("a")).intersect(Ty::keyword_lit(value::intern("b")));
+        assert!(empty.is_never());
+        // (:a | :b) ∩ keyword(any) = (:a | :b) (narrower wins).
+        let narrowed = kw_union(&["a", "b"]).intersect(Ty::of(Tag::Keyword));
+        assert_eq!(narrowed.as_lit(), kw_union(&["a", "b"]).as_lit());
+    }
+
+    #[test]
+    fn of_value_makes_a_keyword_singleton() {
+        let t = Ty::of_value(value::kw("maximized"));
+        assert_eq!(t.to_string(), ":maximized");
+        assert!(t.is_subtype(&Ty::of(Tag::Keyword)));
     }
 }

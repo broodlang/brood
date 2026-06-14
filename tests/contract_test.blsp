@@ -53,6 +53,32 @@
   (test "(vector string) rejects a vector containing a non-string"
     (assert-error (c-first-vec [1 "b"]))))
 
+;; --- keyword-literal (singleton) types ----------------------------------------
+;; A bare keyword in a sig is a *literal* type — the value must be exactly that
+;; keyword. `(or :a :b …)` enumerates the allowed values (set-theoretic literals).
+
+;; `nil` is the "off" alternative — the lattice and type-matches? both already
+;; handle the nil literal, so an enumerated keyword set mixes cleanly with it.
+;; (Bool/int/string literals are a deferred slice; `false` is NOT a literal type.)
+(defn c-mode (m) m)
+(sig! c-mode ((or :maximized :fullboth :fullscreen nil) -> any))
+
+(defn c-exact (k) k)
+(sig! c-exact (:ok -> :ok))
+
+(describe "keyword-literal type contracts"
+  (test "an enumerated value passes"
+    (assert= (c-mode :maximized) :maximized)
+    (assert= (c-mode :fullboth) :fullboth)
+    (assert= (c-mode nil) nil))
+  (test "a keyword outside the set throws"
+    (assert-error (c-mode :bogus)))
+  (test "a non-keyword outside the set throws"
+    (assert-error (c-mode 42)))
+  (test "a single keyword literal matches only that exact value"
+    (assert= (c-exact :ok) :ok)
+    (assert-error (c-exact :nope))))
+
 ;; --- rest params in sig! -------------------------------------------------------
 
 (defn c-sum (& xs) (reduce + 0 xs))

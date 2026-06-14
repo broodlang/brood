@@ -278,6 +278,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
                                               (type-matches? vtype (second kv))))
                                        (entries v)))))
                   else true))          ; arrow param / unknown compound → accept
+    (keyword? t) (= t v)               ; a keyword type-expr is a literal: match it exactly
     (%eq t 'any) true
     (%eq t 'number) (number? v)
     (%eq t 'int) (int? v)

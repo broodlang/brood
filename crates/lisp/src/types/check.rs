@@ -415,9 +415,11 @@ mod tests {
         assert!(warnings("(first 5)")
             .iter()
             .any(|w| w.contains("first") && w.contains("int")));
+        // A keyword literal now infers as its singleton type, so the diagnostic
+        // names the exact value (`:k`) rather than the coarse `keyword` tag.
         assert!(warnings("(string-length :k)")
             .iter()
-            .any(|w| w.contains("string-length") && w.contains("keyword")));
+            .any(|w| w.contains("string-length") && w.contains(":k")));
         assert!(warnings("(%add 1 \"x\")")
             .iter()
             .any(|w| w.contains("%add")));
@@ -493,6 +495,31 @@ mod tests {
         assert!(
             w.iter().all(|m| !m.contains("expects")),
             "correct uses of a declared fn must be silent: {w:?}"
+        );
+    }
+
+    #[test]
+    fn keyword_literal_types_in_a_sig_are_enforced() {
+        // A parameter typed as an enumerated keyword set flags a keyword outside it.
+        let w = file_warnings("(sig f ((or :a :b) -> int))\n(defn f (x) 1)\n(f :c)");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("f:") && m.contains("argument 1") && m.contains(":a | :b")),
+            "a keyword outside the literal set should flag, naming it: {w:?}"
+        );
+        // A member of the set is fine.
+        let w = file_warnings("(sig f ((or :a :b) -> int))\n(defn f (x) 1)\n(f :a)");
+        assert!(
+            w.iter().all(|m| !m.contains("expects")),
+            "a keyword in the set must be silent: {w:?}"
+        );
+        // The declared literal *result* flows out and is checked too.
+        let w = file_warnings(
+            "(sig mode (-> (or :maximized :fullscreen)))\n(defn mode () :maximized)\n(string-length (mode))",
+        );
+        assert!(
+            w.iter().any(|m| m.contains("string-length")),
+            "a keyword-literal result feeding string-length should flag: {w:?}"
         );
     }
 
@@ -1454,11 +1481,12 @@ mod tests {
 
     #[test]
     fn match_keyword_pattern_narrows_the_scrutinee() {
-        // Mirror of the int case for a keyword literal.
+        // Mirror of the int case for a keyword literal. The scrutinee narrows to
+        // the literal singleton `:foo`, so the diagnostic names that exact value.
         let w = warnings_expanded("(match x (:foo (first x)) (_ nil))");
         assert!(
             w.iter()
-                .any(|s| s.contains("first") && s.contains("keyword")),
+                .any(|s| s.contains("first") && s.contains(":foo")),
             "match keyword-literal pattern should narrow x: {:?}",
             w
         );
