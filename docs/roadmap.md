@@ -261,6 +261,19 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   only): depth counter for `expr_ty`/`check_into`, `catch_unwind` around the
   whole worker `run_one`, RAII guard for `check_file`'s panic path,
   `net.rs` binary-safe reads (blocked on a bytes Value type).
+- **Byte-faithful I/O for `proc`/`net` (a bytes Value kind, or a per-spawn bytes
+  mode).** Both the subprocess (`proc.rs`, ADR-104) and socket (`net.rs`, ADR-062)
+  readers deliver each chunk via `from_utf8_lossy`, so a multi-byte char split across
+  a read-buffer (64 KiB) boundary is mangled — and, because that changes the byte
+  count, it can desync a byte-length-framed protocol for a single frame larger than
+  one read. Surfaced concretely by myedit's LSP client (`src/lsp.blsp`): it frames
+  byte-accurately with `string->utf8-bytes`, so it's correct for the common
+  small/medium response (rust-analyzer completions work end to end), but a *fully*
+  faithful client wants the reader to hand up **raw bytes**, not a lossy string. The
+  clean fix reuses the existing byte-vector convention (`string->utf8-bytes` /
+  `utf8-bytes->string`, vectors of 0–255): deliver `[:proc h bytevec]` (a per-spawn
+  bytes mode) rather than introducing a whole bytes Value kind. Deferred until a
+  byte-framed protocol needs >64 KiB faithfulness; the common case is unaffected.
 
 ---
 

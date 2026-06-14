@@ -511,6 +511,14 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 "cannot send a socket across nodes; it is local to its runtime",
             ));
         }
+        Message::Subprocess(_) => {
+            // A subprocess id is local to one runtime's global registry (and names
+            // an OS process on this host); it has no meaning on a peer node.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot send a subprocess across nodes; it is local to its runtime",
+            ));
+        }
     }
     Ok(())
 }

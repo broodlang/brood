@@ -34,6 +34,7 @@ pub mod introspect; // tooling-facing queries on a live Interp (LSP today, MCP n
 pub mod jit; // tier-1 template JIT via Cranelift (feature "jit") — ADR-101, docs/value-repr.md
 pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives in bundled std/net/* (ADR-097)
 pub mod perf; // VM work-attribution counters (feature "perf-stats") — docs/benchmarking.md
+pub mod proc; // persistent child-process mechanism: spawn + stdio pipes over the mailbox seam (ADR-104)
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 pub mod text_width; // grapheme-cluster display-cell width (the `display-width` builtin + the GUI grid)
 pub mod treesit; // optional tree-sitter parsing for foreign languages (feature "treesit") — ROADMAP §C

@@ -2376,3 +2376,60 @@ calls, mutual recursion, 2M-deep O(1) stack, handle-valued tail args via `cons`,
 cross-process shared native code, comparison bools, deopt boundaries) — green plain and
 under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, plus the lowering unit test and the full
 workspace suite.
+
+## 2026-06-13 — Persistent child processes: `proc-spawn`/`proc-send`/`proc-close` (ADR-104)
+
+The language gap behind myedit's multi-source completion: an LSP source needs a
+*long-lived* child spoken to in framed JSON-RPC over stdio, and `%os-cmd` only runs
+a child to completion. Added a persistent-child primitive — and, true to the
+mechanism already in the tree, it's the socket model (ADR-062) wearing a different
+hat, not a fatter `%os-cmd`.
+
+A child is the same shape as a TCP stream — a bidirectional byte channel whose reads
+mustn't pin a scheduler worker — so it reuses the blocking-IO → mailbox seam
+(ADR-059, `spawn_io_source`). New `crate::proc` mirrors `crate::net`: stdout and
+stderr each read on a non-worker thread that delivers to the owning process's
+mailbox; Brood just `receive`s.
+
+- `(proc-spawn prog args)` → a `Value::Subprocess` handle; throws if the program
+  can't start.
+- stdout → `[:proc handle data]`; stderr → `[:proc-err handle data]` (**separate** —
+  merging would corrupt JSON-RPC framing); exit → `[:proc-closed handle code]`
+  (`code` is the exit status, or `nil` if signalled).
+- `(proc-send p s)` writes `s` to stdin + flushes; `(proc-close p)` kills + drops
+  stdin (idempotent; the final `[:proc-closed …]` still reaches the owner).
+
+A new 19th `Tag` (`subprocess`) threaded through `value.rs` / `types.rs` /
+`message.rs` (+ dist-wire rejection) / printer / heap hash+equality+ordering / the
+MCP JSON bridge — the standard cost of a scalar handle, paid once and consistent
+with `Socket`. Chose the dedicated handle over a reused int/ref: it's type-safe
+(`expect_subprocess`) and must round-trip through messages anyway (the reader
+threads tag their `[:proc …]` with it, and it may cross a `send`/`spawn` since the
+registry is runtime-global — `proc-send` works from any process, output still lands
+in the owner's mailbox).
+
+Two implementation knots worth noting: (1) stdin lives behind its *own*
+`Arc<Mutex<…>>`, not under the registry lock — a blocking write to a child that
+never drains its stdin must not stall every other `proc-*` op (a `ChildStdin` can't
+be `try_clone`d like a `TcpStream`). (2) Exactly one waiter reaps the child: the
+stdout reader, after EOF, polls `try_wait` with a brief lock + short nap, so it
+never holds the lock while blocked and a concurrent `proc-close` `kill` can always
+take it. Text-only like sockets (`from_utf8_lossy`) — fine for JSON-RPC.
+
+`tests/proc_test.blsp`: 5 isolated cases — handle/`type-of`, `cat` stdin echo +
+signal-death `nil` code, `sh -c` stdout + exit code 3, stderr as a separate channel,
+and the handle crossing into a worker process. Green; full workspace suite + 257
+lib tests still green. Editor-side wiring (an LSP completion source) is the next
+step, in myedit — no further kernel work needed.
+
+**Follow-up (consumer shipped).** myedit's `src/lsp.blsp` — an LSP client + multi-source
+completion source — now runs on `proc-*` end to end: `M-x lsp-connect` spawns
+rust-analyzer and Tab returns its 63 completions for `String::ne…`, merged with the
+mode/buffer-word sources. Building it surfaced one real limitation of the text delivery:
+the reader's per-chunk `from_utf8_lossy` (proc.rs / net.rs) mangles a multi-byte char
+split across a read boundary, and since that changes the byte count it can desync a
+byte-`Content-Length`-framed protocol for responses larger than one 64 KiB read. The
+client frames byte-accurately (`string->utf8-bytes`) so small/medium responses are exact;
+a *fully* faithful client wants `proc` to deliver **raw bytes** — reinforcing the
+bytes-value-kind roadmap item already flagged here and in net.rs. Not needed for the
+common case; noted as the next proc increment when a byte-framed protocol needs it.

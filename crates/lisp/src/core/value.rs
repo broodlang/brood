@@ -441,6 +441,13 @@ pub enum Value {
     /// owning process drives it via the non-blocking `tcp-*` primitives); **never**
     /// sent across processes. The TLS counterpart reuses this same handle.
     Socket(u64),
+    /// A child process — an id into the global subprocess registry
+    /// (`crate::proc`). Like a `Socket` it is a scalar handle, not a heap object:
+    /// the GC never traces or moves it, and it carries a live OS resource (a spawned
+    /// process plus its stdin pipe and stdout/stderr reader threads). Process-local
+    /// mechanism (the owning process drives it via the `proc-*` primitives and
+    /// receives its output as mailbox messages); **never** sent across processes.
+    Subprocess(u64),
     /// A **transient map** — Clojure's `(transient m)` / `assoc!` / `persistent!`
     /// fast-building handle into the per-process `transients` slab. A heap object
     /// holding a [`crate::core::heap::TransientCell`]: a mutable `root` (a `Map`),
@@ -484,6 +491,7 @@ pub enum Tag {
     Pid,
     Rope,
     Socket,
+    Subprocess,
     Transient,
 }
 
@@ -509,6 +517,7 @@ impl Tag {
             Tag::Pid => "pid",
             Tag::Rope => "rope",
             Tag::Socket => "socket",
+            Tag::Subprocess => "subprocess",
             Tag::Transient => "transient",
         }
     }
@@ -519,13 +528,14 @@ impl Tag {
     /// code that was essentially the entire `intern` cost (~98% of all interns were
     /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
     pub fn keyword(self) -> Symbol {
-        static KW: LazyLock<[Symbol; 18]> = LazyLock::new(|| {
-            const TAGS: [Tag; 18] = [
+        static KW: LazyLock<[Symbol; 19]> = LazyLock::new(|| {
+            const TAGS: [Tag; 19] = [
                 Tag::Nil, Tag::Bool, Tag::Int, Tag::Float, Tag::Sym, Tag::Keyword,
                 Tag::Str, Tag::Pair, Tag::Vector, Tag::Fn, Tag::Macro, Tag::Native,
-                Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Transient,
+                Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Subprocess,
+                Tag::Transient,
             ];
-            let mut out = [0u32; 18];
+            let mut out = [0u32; 19];
             for t in TAGS {
                 out[t as usize] = intern(t.name());
             }
@@ -563,6 +573,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Pid { .. } => Tag::Pid,
         Value::Rope(_) => Tag::Rope,
         Value::Socket(_) => Tag::Socket,
+        Value::Subprocess(_) => Tag::Subprocess,
         Value::Transient(_) => Tag::Transient,
     }
 }
