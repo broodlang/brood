@@ -11,10 +11,14 @@
 
 ;; A child spec whose worker announces itself to `to`, then waits. `:die` makes
 ;; it crash (abnormal exit); `:done` makes it return cleanly (`:normal` exit).
+;; `spawn-link` (not `spawn`): the child is linked to the supervisor *atomically*, so a
+;; fast `:normal` exit (e.g. right after `:done`) reaches it as `[:EXIT … :normal]`, never
+;; a racy `:noproc` that would spuriously restart a `:transient` child. This is the
+;; Erlang convention for supervised children (spawn_link).
 (defn watched-spec (to restart)
   {:id :w
    :restart restart
-   :start (fn () (spawn (do (send to [:up (self)]) (receive (:die (error "boom")) (:done :ok)))))})
+   :start (fn () (spawn-link (do (send to [:up (self)]) (receive (:die (error "boom")) (:done :ok)))))})
 
 ;; Like `watched-spec` but tags its announcement `[:up tag (self)]`, so a test
 ;; supervising several children can tell their incarnations apart.
@@ -22,7 +26,7 @@
   {:id tag
    :restart restart
    :start (fn ()
-            (spawn (do (send to [:up tag (self)]) (receive (:die (error "boom")) (:done :ok)))))})
+            (spawn-link (do (send to [:up tag (self)]) (receive (:die (error "boom")) (:done :ok)))))})
 
 ;; Collect `n` tagged `[:up tag pid]` announcements into a `{tag pid}` map.
 ;; Tail-recursive via the receive trampoline (a test runs in a small-stack proc).
@@ -57,40 +61,47 @@
 (describe "supervisor: one-for-one restart"
   :isolated
 
+  ;; Each test tags its child (`tagged-spec`) with a unique key so its `[:up …]`
+  ;; stream is isolated: this `:isolated` describe runs as ONE unit (shared process +
+  ;; mailbox, see test.blsp), so an untagged `[:up]` from a sibling test could, under
+  ;; load, arrive late and be miscounted by a later test's `receive` — flaking the
+  ;; absence checks below. A real restart of *this* test's child still sends
+  ;; `[:up <tag> newpid]` and is caught, so tagging fixes the cross-test race without
+  ;; masking a real restart bug.
   (test "a permanent child is restarted with a fresh pid after it crashes"
     (let (me (self)
-          sup (start-supervisor (list (watched-spec me :permanent))
+          sup (start-supervisor (list (tagged-spec me :perm-r :permanent))
                 {:max-restarts 5 :max-seconds 5})
-          p1 (receive ([:up p] p)))
+          p1 (receive ([:up :perm-r p] p)))
       (send p1 :die)  ; crash the first incarnation
-      (let (p2 (receive ([:up p] p)))
+      (let (p2 (receive ([:up :perm-r p] p)))
         ; the restart announces itself
         (is (not (= p1 p2)))  ; genuinely a new process
         (stop-supervisor sup))))
 
   (test "a transient child IS restarted after an abnormal exit"
     (let (me (self)
-          sup (start-supervisor (list (watched-spec me :transient)))
-          p1 (receive ([:up p] p)))
+          sup (start-supervisor (list (tagged-spec me :tr-abn :transient)))
+          p1 (receive ([:up :tr-abn p] p)))
       (send p1 :die)
-      (let (p2 (receive ([:up p] p)))
+      (let (p2 (receive ([:up :tr-abn p] p)))
         (is (not (= p1 p2)))
         (stop-supervisor sup))))
 
   (test "a transient child is NOT restarted after a clean :normal exit"
     (let (me (self)
-          sup (start-supervisor (list (watched-spec me :transient)))
-          p1 (receive ([:up p] p)))
+          sup (start-supervisor (list (tagged-spec me :tr-norm :transient)))
+          p1 (receive ([:up :tr-norm p] p)))
       (send p1 :done)  ; returns normally
-      (assert= :none (receive ([:up _] :restarted) (after 150 :none)))
+      (assert= :none (receive ([:up :tr-norm _] :restarted) (after 150 :none)))
       (stop-supervisor sup)))
 
   (test "a temporary child is never restarted"
     (let (me (self)
-          sup (start-supervisor (list (watched-spec me :temporary)))
-          p1 (receive ([:up p] p)))
+          sup (start-supervisor (list (tagged-spec me :temp-n :temporary)))
+          p1 (receive ([:up :temp-n p] p)))
       (send p1 :die)
-      (assert= :none (receive ([:up _] :restarted) (after 150 :none)))
+      (assert= :none (receive ([:up :temp-n _] :restarted) (after 150 :none)))
       (stop-supervisor sup))))
 
 (describe "supervisor: one-for-all"
