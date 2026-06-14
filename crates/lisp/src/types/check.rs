@@ -97,6 +97,7 @@ mod annot;
 mod ctx;
 mod guards;
 mod hygiene;
+mod protocol;
 mod recursion;
 mod sigs;
 mod walk;
@@ -284,6 +285,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
             ctx.add_declared_sig_with_vars(name, sv);
         }
     }
+    // Pass 2.6: protocol conformance — model `(defprotocol …)` and check that each
+    // `(defimpl …)` provides every declared op at the right arity. Read from the
+    // un-expanded forms (the macros lower past recognition, like `sig`/`defmodule`).
+    let protocols = protocol::collect(heap, &forms);
+    protocol::check_impls(heap, &forms, &protocols, &mut out);
     // Pass 3: check each expanded form with the accumulated file-globals.
     for &form in &expanded {
         check_into(heap, form, &ctx, &mut out);
@@ -359,6 +365,40 @@ mod tests {
             .into_iter()
             .map(|(_, m)| m)
             .collect()
+    }
+
+    // ---- protocol conformance (Pass 2.6) ----
+    // `file_warnings` returns *all* diagnostics; these assert on the protocol ones
+    // with `.contains` (the un-defined `defprotocol`/`defimpl` macros also draw
+    // unbound-symbol noise in a bare test interp, which is irrelevant here).
+
+    #[test]
+    fn protocol_flags_a_missing_op() {
+        let ws = file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x))");
+        assert!(ws.iter().any(|w| w.contains("missing op `b`")), "{ws:?}");
+    }
+
+    #[test]
+    fn protocol_flags_an_arity_mismatch() {
+        let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x y] x))");
+        assert!(
+            ws.iter().any(|w| w.contains("`a` takes 1 arg(s), this impl has 2")),
+            "{ws:?}"
+        );
+    }
+
+    #[test]
+    fn protocol_flags_an_undeclared_method() {
+        let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x] x) (z [x] x))");
+        assert!(ws.iter().any(|w| w.contains("has no op `z`")), "{ws:?}");
+    }
+
+    #[test]
+    fn protocol_complete_impl_is_clean() {
+        let ws = file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x) (b [x] x))");
+        assert!(!ws.iter().any(|w| w.contains("missing op")), "{ws:?}");
+        assert!(!ws.iter().any(|w| w.contains("has no op")), "{ws:?}");
+        assert!(!ws.iter().any(|w| w.contains("takes")), "{ws:?}");
     }
 
     /// The non-tail-recursion lint (`recursion::check_recursion`) over a
@@ -722,10 +762,9 @@ mod tests {
     #[test]
     fn map_kv_refinement_flows_through_checker() {
         // (sig f ((map keyword int) -> int)): the get result is int | nil.
-        // Feeding that to string-length should warn.
-        let w = check_with_defs(&["(defn f (m) (get m :k))"], "(string-length (f {:a 1}))");
-        // Without the sig the result type is unknown → no warning — so we need
-        // the sig to be declared. Use file_warnings to get the sig parsed.
+        // Feeding that to string-length should warn. Without the sig the result
+        // type is unknown → no warning, so the sig must be declared — use
+        // file_warnings so the `sig` form is parsed.
         let src = "
 (defn f (m) (get m :k))
 (sig f ((map keyword int) -> int))
