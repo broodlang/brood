@@ -1,0 +1,85 @@
+;;; `lambda` / `let*` — exact synonyms for `fn` / `let`.
+;;;
+;;; The macroexpand pass canonicalises `lambda` → `fn` and `let*` → `let` (after
+;;; the quote guard, so quoted data keeps its spelling), and the evaluator's
+;;; special-form table also dispatches them directly for a raw/un-expanded eval
+;;; path. So everything `fn`/`let` can do, these must do identically — on both the
+;;; tree-walker and the compiling VM. `let*` is a plain alias because Brood's `let`
+;;; is already sequential. The `across processes` block additionally proves a
+;;; `lambda`-built closure round-trips through a `send` deep-copy.
+
+(defmodule lambda-let-star-test (:use test))
+
+;; file-local helpers (survive an :isolated rollback)
+(defn lls-make-adder (n) (lambda (x) (+ x n)))
+
+(describe "lambda is a synonym for fn"
+  (test "immediate application"
+    (assert= 25 ((lambda (x) (* x x)) 5)))
+
+  (test "as a map callback"
+    (assert= '(2 3 4) (map (lambda (x) (+ x 1)) (list 1 2 3))))
+
+  (test "vector-destructuring parameter"
+    (assert= 7 ((lambda ([a b]) (+ a b)) [3 4])))
+
+  (test "variadic rest parameter"
+    (assert= '(2 3) ((lambda (a & rest) rest) 1 2 3)))
+
+  (test "multi-arity dispatch"
+    (let (f (lambda ((a) (* a 2)) ((a b) (+ a b))))
+      (assert= 10 (f 5))
+      (assert= 9 (f 4 5))))
+
+  (test "a let-bound recursive lambda"
+    (assert= 120 (let (fact (lambda (n) (if (= n 0) 1 (* n (fact (- n 1))))))
+                   (fact 5))))
+
+  (test "quoted (lambda ...) keeps its spelling — it is data, not expanded"
+    (assert= 'lambda (first '(lambda (x) x)))))
+
+(describe "let* is a synonym for let"
+  (test "sequential bindings see earlier names"
+    (assert= 2 (let* (a 1 b (+ a 1)) b)))
+
+  (test "vector-destructuring binding"
+    (assert= 15 (let* ([a b] [7 8]) (+ a b))))
+
+  (test "later binding shadows an earlier one"
+    (assert= 3 (let* (x 1 x (+ x 2)) x)))
+
+  (test "quoted (let* ...) keeps its spelling"
+    (assert= 'let* (first '(let* (a 1) a)))))
+
+;; ---- across processes --------------------------------------------------------
+;; A `lambda`-built closure is deep-copied on `send` (captured env flattened to
+;; its free vars, rebuilt on the receiver). Proves to_message/from_message +
+;; promote/freeze round-trip a closure the `lambda` spelling produced.
+
+(defn lls-apply-worker (parent)
+  (receive ([f x] (send parent (f x)))))
+
+(defn lls-build-worker (parent n x)
+  (let* (f (lambda (k) (+ k n)))   ; capture n via a let*-bound lambda
+    (send parent (f x))))
+
+(defn lls-spawn-builders (parent ks base)
+  (when (not (empty? ks))
+    (spawn (lls-build-worker parent (first ks) base))
+    (lls-spawn-builders parent (rest ks) base)))
+
+(defn lls-sum (got total acc)
+  (if (= got total) acc (lls-sum (+ got 1) total (+ acc (receive (v v))))))
+
+(describe "lambda closures across processes"
+  :isolated
+
+  (test "a lambda-built capture round-trips through send and applies on the receiver"
+    (let (me (self) w (spawn (lls-apply-worker me)))
+      (send w [(lls-make-adder 1000) 5])
+      (assert= 1005 (receive))))
+
+  (test "fan-out: many workers each build and apply their own lambda capture"
+    ;; worker i computes (i + 100); Σ for i in 1..20 = 210 + 2000 = 2210
+    (lls-spawn-builders (self) (range 1 21) 100)
+    (assert= 2210 (lls-sum 0 20 0))))

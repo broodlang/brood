@@ -6585,3 +6585,46 @@ corruption, deadlock, poisoning, GC-safety, or leak defect; the suite
 verifier. Adding the `Value`/`Tag` extended the type lattice by one (the
 compatibility-contract sites in `value.rs`/`heap.rs`/`types.rs`/`printer.rs`/
 `message.rs`/`wire.rs`); `table?`/`(type-of x) :table` complete it.
+
+## ADR-108 — `lambda`/`let*` are exact synonyms for `fn`/`let` (canonicalised at macroexpand)
+
+**Status:** accepted (2026-06-14). Implemented: `kw::LAMBDA`/`kw::LET_STAR`
+(`core/keywords.rs`); both in the evaluator's `SPECIAL_SPELLINGS` (`eval/mod.rs`,
+`lambda`→`SpecialForm::Fn`, `let*`→`SpecialForm::Let`); head canonicalisation in
+`macroexpand_all_depth` (`eval/macros.rs`) after the quote guard; both added to the
+LSP-facing `SPECIAL_FORMS` (`builtins.rs`) and the checker's `SPECIAL_HEAD` /
+`is_syntactic_keyword`; `tests/lambda_let_star_test.blsp`.
+
+**Context.** `eval/mod.rs::foreign_construct_hint` listed `lambda` and `let*` among the
+names that "Just Work" — so it deliberately *withheld* the "use `fn`/`let`" hint it gives
+foreign constructs (`defun`, `setq`, …). But neither was ever implemented: no special-form
+dispatch, no macro rewrite, so `((lambda (x) x) 5)` raised `unbound symbol: lambda` at
+runtime. The worst outcome — a Scheme/CL user's muscle-memory spelling failed with a bare
+unbound error and *no* guidance, because the hint that would have redirected them was
+suppressed by a comment that believed the forms existed.
+
+**Decision.** Honour the documented intent: make them **exact synonyms**, not foreign
+constructs. `lambda` ≡ `fn`; `let*` ≡ `let` (Brood's `let` is already sequential, so `let*`
+adds nothing but the familiar spelling). This keeps with "meet the user where their habits
+are" without growing the language's semantics — a synonym adds zero new evaluator behaviour.
+(The alternative — declaring them foreign and adding a `foreign_construct_hint` entry — was
+rejected: the codebase, including `nest grammar`/scope tooling, already treats `fn`/`lambda`
+as one thing, and a redirect hint is a worse experience than the form simply working.)
+
+**Mechanism.** Two layers. (1) The evaluator's special-form table dispatches `lambda`/`let*`
+directly, so a *raw, un-expanded* form reaching `eval` — a quasiquote-built closure, an
+`(eval '(lambda …))` — is handled. (2) `macroexpand_all` rewrites the head `lambda`→`fn` /
+`let*`→`let` immediately **after the quote/quasiquote guard** (so quoted *data* keeps its
+spelling — `(first '(lambda (x) x))` is still `lambda`) and **before** lowering. So the
+whole downstream pipeline — pattern lowering, the VM compile pass, and the tree-walker's
+own lowering re-entry — only ever sees `fn`/`let`, and no scattered `kw::FN`/`kw::LET` site
+needs to learn the synonym. Full parity follows for free: destructuring params, variadic,
+multi-arity dispatch, recursion, and closures that round-trip across processes.
+
+**Consequence.** A stored/printed expanded form shows `fn`/`let`, not the user's `lambda`/
+`let*` (expansion is lossy by design, as with every macro). The advisory checker, which
+macroexpands in whole-file mode, sees the canonical form; for the un-expanded fragment path
+(`(check 'form)`) the checker's `is_fn_head` / `SPECIAL_HEAD` entries recognise `lambda`/
+`let*` directly. Surfacing this also fixed three pre-existing checker false-positives (the
+two synonyms looking unbound, multi-arity-clause params, and self-recursive `let`-bound
+closures) — see the 2026-06-14 devlog entry.

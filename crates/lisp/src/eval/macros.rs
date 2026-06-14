@@ -851,15 +851,30 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
     let form = macroexpand(heap, form, env)?;
     match form {
         Value::Pair(_) => {
-            let items = match heap.list_to_vec(form) {
+            let mut items = match heap.list_to_vec(form) {
                 Ok(items) => items,
                 Err(_) => return Ok(form), // improper list: leave it be
             };
-            if let Some(Value::Sym(s)) = items.first().copied() {
+            if let Some(Value::Sym(head)) = items.first().copied() {
                 // quote/quasiquote contents are data, not calls to expand.
-                if value::symbol_is(s, kw::QUOTE) || value::symbol_is(s, kw::QUASIQUOTE) {
+                if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
                     return Ok(form);
                 }
+                // `lambda` / `let*` are synonyms for `fn` / `let`. Canonicalise the
+                // head now — *after* the quote guard (so quoted data keeps its
+                // spelling) and *before* lowering — so the whole downstream pipeline
+                // (pattern lowering here, the VM compile pass, and the tree-walker's
+                // lowering re-entry) only ever sees `fn` / `let`. `let*` aliases `let`
+                // because Brood's `let` is already sequential.
+                let s = if value::symbol_is(head, kw::LAMBDA) {
+                    items[0] = value::sym(kw::FN);
+                    value::intern(kw::FN)
+                } else if value::symbol_is(head, kw::LET_STAR) {
+                    items[0] = value::sym(kw::LET);
+                    value::intern(kw::LET)
+                } else {
+                    head
+                };
                 // Desugar pattern binders into the Brood `match*` engine so they
                 // expand once here (fast) rather than per call. eval's `let`/`fn`
                 // then only ever see plain symbol binds.
@@ -962,7 +977,7 @@ fn expand_tail(
 /// `(param-list body…)` clauses — i.e. is it an arity-only multi-clause fn? (A
 /// leading docstring is allowed.) Pattern multi-clause fns were already lowered
 /// to `match*`, so by here "all clauses" implies arity-only.
-fn fn_is_arity_multi_clause(heap: &Heap, items: &[Value]) -> bool {
+pub(crate) fn fn_is_arity_multi_clause(heap: &Heap, items: &[Value]) -> bool {
     let forms = &items[1..];
     let forms = match forms.first() {
         Some(&Value::Str(_)) if forms.len() > 1 => &forms[1..],
