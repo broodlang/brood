@@ -2409,6 +2409,26 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
     (map defmodule--use-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
 
+;; web/views/counter → counter  (a module name's last `/`-segment, as a symbol).
+(defn defmodule--last-segment (mod)
+  (symbol (last (string-split (name mod) "/"))))
+
+;; The `(require …)`+`(%alias …)` forms for one `(:alias mod [:as short])` clause:
+;; load the module, then register a prefix alias so a later `short/name` resolves to
+;; `mod/name` (Elixir-style `alias`). `short` defaults to `mod`'s last path segment;
+;; `:as` overrides it (needed when two modules share a last segment).
+(defn defmodule--alias-clause (clause)
+  (let (mod   (second clause)
+        opts  (rest (rest clause))
+        short (if (= (first opts) :as) (second opts) (defmodule--last-segment mod)))
+    (list (list 'require (list 'quote mod))
+      (list '%alias (list 'quote mod) (list 'quote short)))))
+
+(defn defmodule--alias-forms (clauses)
+  (apply concat
+    (map defmodule--alias-clause
+      (filter (fn (c) (and (pair? c) (= (first c) :alias))) clauses))))
+
 ;; A file declares itself a **module = namespace** at the top with `defmodule`
 ;; (ADR-065): each `def`/`defn`/`defmacro` defines `mod/name`, and a bare reference
 ;; resolves to `mod/name` if this namespace defines it, then through a `(:use …)`
@@ -2428,7 +2448,8 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
        (def *module-docs* (assoc *module-docs* ~key ~doc))
        (provide ~key)
        (%in-ns '~mod)
-       ~@(defmodule--use-forms clauses))))
+       ~@(defmodule--use-forms clauses)
+       ~@(defmodule--alias-forms clauses))))
 
 (defn module-doc (mod)
   "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."

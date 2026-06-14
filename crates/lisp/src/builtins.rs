@@ -1890,6 +1890,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym, any], nil_ty),
         refer,
     );
+    // `(:alias mod [:as short])` lowers to this — register a module alias so a later
+    // `short/name` reference resolves to `mod/name`.
+    def(
+        heap,
+        "%alias",
+        Arity::exact(2),
+        Sig::new(vec![sym, sym], nil_ty),
+        alias,
+    );
     // `%binding`'s first arg is the *list/vector of names*, second is the
     // *list/vector of values*, third is the thunk — the macro `binding` emits
     // these as `(quote (*a* *b* …))` + `[v1 v2 …]` + `(fn () …)`.
@@ -8596,6 +8605,30 @@ fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             }
         }
     }
+    Ok(Value::Nil)
+}
+
+/// `(%alias module short)` — register a module alias (Elixir-style): a later
+/// qualified reference `short/name` resolves to `module/name`. Stored in the import
+/// table under the slash-suffixed key `short/`, so it rides the same per-file
+/// lifecycle as `%refer`. The `(:alias …)` header emits it. A second `short` for a
+/// different module is a loud error (the ambiguous-last-segment case — disambiguate
+/// with an explicit `:as`).
+fn alias(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let module = expect_symbol(heap, "%alias", arg(args, 0))?;
+    let short = expect_symbol(heap, "%alias", arg(args, 1))?;
+    let key = value::intern(&format!("{}/", value::symbol_name(short)));
+    if let Some(prev) = heap.import_of(key) {
+        if prev != module {
+            return Err(LispError::runtime(format!(
+                "alias `{}` is already bound to `{}` — can't also alias `{}`; give one an explicit `:as` name",
+                value::symbol_name(short),
+                value::symbol_name(prev),
+                value::symbol_name(module),
+            )));
+        }
+    }
+    heap.add_import(key, module);
     Ok(Value::Nil)
 }
 
