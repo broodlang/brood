@@ -66,9 +66,9 @@ pub(crate) use links::{
 pub use scheduler::{
     begin_capture, capture_append, deadline_exceeded, exit, gc_block_depth, in_green_process,
     macro_block_active, migrate_count, parent_of, peak_threads, pid_value, self_pid, set_deadline,
-    set_max_parallel, spawn, spawn_count, stack_budget, stack_overflow_check, steal_count,
-    take_capture, tick, worker_threads, yield_now, GcBlockGuard, MacroBlockGuard,
-    WORKER_STACK_BYTES,
+    set_max_parallel, set_test_no_workers, spawn, spawn_count, stack_budget, stack_overflow_check,
+    steal_count, take_capture, test_drive_quanta, tick, worker_threads, yield_now, GcBlockGuard,
+    MacroBlockGuard, WORKER_STACK_BYTES,
 };
 // State-capture driver helpers (ADR-100 §8): read by the bytecode VM driver to decide
 // when to capture a continuation (vs. yield the coroutine / block the root), and by the

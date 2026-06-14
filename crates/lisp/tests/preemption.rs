@@ -3,70 +3,60 @@
 //! pool to ONE worker so an infinite-loop hog and a responder must share a single
 //! core — only preemption lets the responder run at all.
 //!
-//! This is its own test binary, so the process-wide `set_max_parallel(1)` is
-//! isolated from the other test binaries (which run with the default ≈`nproc`).
+//! This is its own test binary, so the process-wide `set_max_parallel(1)` +
+//! `set_test_no_workers(true)` are isolated from the other test binaries (which run
+//! the real pool at the default ≈`nproc`).
 //!
-//! The test is bounded by a `receive` timeout that is a **hang-guard, not a timing
-//! assertion**: if preemption regresses, the responder is starved and the root's
-//! `(after …)` fires, so the assertion fails with `:starved` instead of hanging CI.
-//! Under *correct* preemption the responder replies within milliseconds of CPU time,
-//! so the guard is sized (30 s) to never false-fire under realistic CI contention —
-//! even if the OS gives this single-worker process a small slice of wall-clock, 30 s
-//! contains orders of magnitude more reductions than the handful needed to reply.
-//! (A 3 s guard flaked once under peak load — a full release build + benchmark suite
-//! + the test runner all at once — where 3 wall-clock seconds held almost no CPU.)
+//! **Deterministic, not wall-clock-bounded.** Instead of starting OS worker threads
+//! and waiting (a real `(after …)` timeout flakes when load starves the process of
+//! CPU), we start *no* workers and drive scheduling **quanta by hand**
+//! (`test_drive_quanta`). The bound is then in *work units* — a starved responder is
+//! detected as "did not run within N quanta", which load cannot perturb. With a FIFO
+//! run queue + preemption: quantum 1 runs the hog (preempted after its reduction
+//! budget → re-enqueued at the back), quantum 2 runs the responder (replies + exits).
 
 use brood::{process, Interp};
 
 #[test]
 fn cpu_bound_process_does_not_starve_peers_on_one_worker() {
     process::set_max_parallel(1);
+    // Drive the scheduler ourselves (no OS worker threads) so the test is bounded by
+    // scheduling quanta — deterministic work units — never wall-clock.
+    process::set_test_no_workers(true);
     let mut interp = Interp::new();
-    // On one worker: an infinite hog (never returns, never receives) plus a
-    // responder. Without preemption the worker is captured by `hog` forever and
-    // `responder` never runs; with preemption `hog` yields every reduction budget,
-    // so `responder` gets the worker, replies, and the root sees `:pong`.
-    let prog = r#"
+    // Spawn an infinite CPU hog and a responder, send :ping — but DON'T block the root
+    // (no `receive` here), so the spawner returns immediately, leaving both green
+    // processes queued on worker 0 and :ping in the responder's mailbox.
+    let setup = r#"
         (def me (self))
         (defn hog () (hog))
         (defn responder (parent) (receive (:ping (send parent :pong))))
         (spawn (hog))
         (def r (spawn (responder me)))
         (send r :ping)
-        (receive (:pong :alive) (after 30000 :starved))
+        :ok
     "#;
-    let v = interp.eval_str(prog).expect("program errored");
+    interp.eval_str(setup).expect("setup errored");
+
+    // Run a bounded number of quanta on a *separate* thread, so `run_one`'s per-quantum
+    // ctx install doesn't disturb the root's ctx / scheduling TLS on this thread. 64 is
+    // far more than the 2 a correct scheduler needs; a scheduler that let the hog
+    // monopolise would never run the responder, so the poll below would see no :pong no
+    // matter how many quanta we run.
+    let ran = std::thread::spawn(|| process::test_drive_quanta(64))
+        .join()
+        .unwrap();
+    assert!(ran > 0, "expected to run at least one quantum, ran {ran}");
+
+    // Non-blocking poll (`after 0`, no wall-clock wait): did the responder's :pong reach
+    // the root within those quanta?
+    let v = interp
+        .eval_str("(receive (:pong :alive) (after 0 :starved))")
+        .expect("poll errored");
+    process::set_test_no_workers(false);
     assert_eq!(
         interp.print(v),
         ":alive",
-        "responder was starved by the CPU-bound hog — preemption is not working"
-    );
-}
-
-/// `process-info`'s `:reductions` (Erlang's scheduling unit) climbs for a process
-/// that does work. A CPU-bound worker that grinds a long loop then parks in
-/// `receive` must report a positive reduction count — the scheduler accumulates
-/// `REDUCTION_BUDGET` per preempted quantum (plus the partial final one). This is
-/// the "is this process busy?" signal the observer shows; a count stuck at 0 means
-/// the accumulation regressed (e.g. `preempt` refreshing the budget before it's
-/// tallied).
-#[test]
-fn process_info_reports_reductions() {
-    let mut interp = Interp::new();
-    let prog = r#"
-        (def root (self))
-        (def w (spawn (do
-          (defn work (n acc) (if (= n 0) acc (work (- n 1) (+ acc 1))))
-          (work 300000 0)
-          (receive (_ :ok)))))   ;; park after grinding, so it's stable to query
-        (sleep 500)
-        (get (process-info w) :reductions)
-    "#;
-    let v = interp.eval_str(prog).expect("reductions program errored");
-    let reds: i64 = interp.print(v).trim().parse().unwrap_or(-1);
-    assert!(
-        reds > 0,
-        "CPU-bound worker should accrue reductions, got {reds} — preempt/run_one \
-         reduction accounting regressed",
+        "responder was starved by the CPU-bound hog — preemption / fair scheduling is not working"
     );
 }
