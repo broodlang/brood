@@ -70,10 +70,20 @@ enum Sock {
         /// byte protocols (WebSocket framing). The reader thread reads this per
         /// chunk, so `tcp-set-binary` flips an already-running socket mid-stream.
         binary: Arc<AtomicBool>,
+        /// The green-process pid that owns this socket. Set when the socket is
+        /// created and updated by `controlling_process`; when that process dies
+        /// `close_process_sockets` shuts the socket down, so a dead owner never
+        /// leaks its fd — a worker that crashes mid-connection, a listener whose
+        /// process is killed, etc.
+        owner: u64,
     },
     /// A listening socket — the accept thread owns the `TcpListener`; `alive`
     /// stops it on close. `port` is cached so `local-port` works without it.
-    Listener { alive: Arc<AtomicBool>, port: u16 },
+    Listener {
+        alive: Arc<AtomicBool>,
+        port: u16,
+        owner: u64,
+    },
 }
 
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Sock>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -193,7 +203,13 @@ fn start_reader(
     })
 }
 
-fn accept_loop(lid: u64, listener: TcpListener, alive: Arc<AtomicBool>, sink: &MailboxSink) {
+fn accept_loop(
+    lid: u64,
+    listener: TcpListener,
+    alive: Arc<AtomicBool>,
+    owner: u64,
+    sink: &MailboxSink,
+) {
     while alive.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -214,6 +230,11 @@ fn accept_loop(lid: u64, listener: TcpListener, alive: Arc<AtomicBool>, sink: &M
                             reader: None,
                             accepted_at: Some(Instant::now()),
                             binary: Arc::new(AtomicBool::new(false)),
+                            // Owned by the listener's process until a handler claims it
+                            // with `tcp-controlling-process` (which retargets owner).
+                            // So if the listener dies before a claim, the unclaimed
+                            // socket is cleaned up with it (not just by the reaper).
+                            owner,
                         },
                     );
                     reap_unclaimed(&mut reg);
@@ -247,6 +268,7 @@ pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
             reader: Some(handle),
             accepted_at: None, // actively connected → never reaped
             binary,
+            owner: subscriber,
         },
     );
     Ok(id)
@@ -265,10 +287,11 @@ pub fn listen(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
         Sock::Listener {
             alive: alive.clone(),
             port: local,
+            owner: subscriber,
         },
     );
     spawn_io_source(subscriber, "brood-tcp-accept", move |sink| {
-        accept_loop(id, listener, alive, sink)
+        accept_loop(id, listener, alive, subscriber, sink)
     });
     Ok(id)
 }
@@ -285,6 +308,7 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
             reader,
             accepted_at,
             binary,
+            owner,
         }) => {
             match reader {
                 Some(h) => h.retarget(pid),
@@ -293,8 +317,10 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
                     *reader = Some(start_reader(id, clone, pid, binary.clone()));
                 }
             }
-            // Claimed now: clear the accept stamp so the reaper never drops it.
+            // Claimed now: clear the accept stamp so the reaper never drops it, and
+            // hand ownership to the claiming process so the socket dies with it.
             *accepted_at = None;
+            *owner = pid;
             Ok(())
         }
         Some(Sock::Listener { .. }) => Err(invalid(
@@ -360,6 +386,38 @@ pub fn close(id: u64) {
         }
         Some(Sock::Listener { alive, .. }) => alive.store(false, Ordering::Relaxed),
         None => {}
+    }
+}
+
+/// Close every socket owned by green-process `pid`. Called from the scheduler's
+/// once-per-death `deregister`, so a process that dies (crash, kill, normal exit)
+/// without `tcp-close`ing its sockets doesn't leak them: a stream is shut down, a
+/// listener's accept loop is stopped (freeing the bound port). The mirror of letting
+/// a process's fds be reclaimed when it exits in an OS process model.
+pub fn close_process_sockets(pid: u64) {
+    let mut reg = reg();
+    let doomed: Vec<u64> = reg
+        .iter()
+        .filter_map(|(&id, sock)| {
+            let owner = match sock {
+                Sock::Stream { owner, .. } => *owner,
+                Sock::Listener { owner, .. } => *owner,
+            };
+            if owner == pid {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for id in doomed {
+        match reg.remove(&id) {
+            Some(Sock::Stream { stream, .. }) => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Some(Sock::Listener { alive, .. }) => alive.store(false, Ordering::Relaxed),
+            None => {}
+        }
     }
 }
 
