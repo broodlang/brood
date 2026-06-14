@@ -1742,6 +1742,25 @@ mod tests {
     }
 
     #[test]
+    fn transient_is_a_valid_count_and_contains_arg() {
+        // count/length/contains? dispatch to transient-* kernel hooks at runtime, so
+        // a live transient is a valid argument — the sigs must admit Tag::Transient.
+        for src in [
+            "(count (transient {}))",
+            "(length (transient {}))",
+            "(contains? (transient {}) :k)",
+        ] {
+            let w = warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("expects")),
+                "transient must be accepted by {src}: {w:?}"
+            );
+        }
+        // A genuinely wrong arg (a number) is still flagged — the domain stays tight.
+        assert!(warnings("(count 5)").iter().any(|m| m.contains("count")));
+    }
+
+    #[test]
     fn multi_arity_fn_clause_params_are_bound() {
         // Regression: `check_fn` read a multi-arity fn's first clause as a param
         // list, so a param used only in a *later* clause looked unbound — a false
