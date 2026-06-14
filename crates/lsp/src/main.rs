@@ -268,7 +268,7 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
             let result = docs.get(&pos.text_document.uri).map(|doc| {
                 let a = &doc.analysis;
                 let offset = a.line_index.offset(&doc.text, pos.position);
-                completion::completions(interp, &a.scope, &doc.text, offset)
+                completion::completions(interp, &a.scope, &a.cst, &doc.text, offset)
             });
             Response::new_ok(id, result)
         }
