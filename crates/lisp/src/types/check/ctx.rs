@@ -168,6 +168,14 @@ pub(super) struct Ctx {
     /// evaluated, so these aren't in `heap`'s global table — we track them
     /// here so a later form doesn't flag them as unbound.
     file_globals: HashSet<Symbol>,
+    /// File-local `(defmacro name …)` names. A subset of `file_globals` tagged as
+    /// *macros* specifically, so the walk can recognise a call whose head is a
+    /// file-local macro it couldn't expand (single-file mode, or a macro defined
+    /// inside a deferred `test`/`describe` thunk) and treat its argument syntax as
+    /// opaque — a macro may quote its args, splice them into a binder, or `def` a
+    /// symbol arg, so walking them as evaluated code would false-flag. Populated by
+    /// [`collect_def_names`](super::walk::collect_def_names).
+    file_macros: HashSet<Symbol>,
     /// File-local `def`/`defn` names whose value is a **variadic** `fn` (a `&`
     /// rest param). The declared `(sig …)` parser only builds fixed-arity sigs,
     /// so a sig on a variadic defn would otherwise yield a spurious *exact* arity
@@ -341,6 +349,16 @@ impl Ctx {
     /// accumulator threads through [`check_file`].
     pub(super) fn add_file_global(&mut self, sym: Symbol) {
         self.file_globals.insert(sym);
+    }
+    /// Record a file-local `(defmacro name …)` — both as a file-global (it's a
+    /// bound name) and in the macro set (its calls take opaque syntax).
+    pub(super) fn add_file_macro(&mut self, sym: Symbol) {
+        self.file_globals.insert(sym);
+        self.file_macros.insert(sym);
+    }
+    /// Is `sym` a file-local macro name accumulated by [`check_file`]?
+    pub(super) fn is_file_macro(&self, sym: Symbol) -> bool {
+        self.file_macros.contains(&sym)
     }
     /// Record that file-local `sym`'s value is a **variadic** `fn` (has a `&`
     /// rest param). Consulted by the arity check so a `(sig …)`-derived *exact*
