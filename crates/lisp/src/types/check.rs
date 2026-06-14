@@ -60,8 +60,12 @@
 //!   `(not …)` flips the assertion. Bindings inside a branch override the
 //!   narrowing as ordinary shadowing.
 //!
-//! Vocabulary is `Option<Ty>` (known / unknown), not `GradualTy` — the
-//! disjointness check only needs "do I know this type?". Forms inside `try` /
+//! The *disjointness* check's vocabulary is `Option<Ty>` (known / unknown), not
+//! `GradualTy` — it only needs "do I know this type?". The one place `GradualTy`
+//! *is* used is the **gradual-assignment check** (`walk::gradual_of` + `check_def`):
+//! `(def x …)` against a non-arrow `(sig x T)` uses **consistent subtyping**, where a
+//! bounded dynamic (`dynamic_within(t)` for a declared-typed redefinable global) is
+//! the thing `Option<Ty>` can't express. Forms inside `try` /
 //! `error-of` / `assert-error` are skipped (they deliberately exercise failures).
 //!
 //! ## Beyond type misuse
@@ -305,6 +309,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         }
         if let Some((name, sv)) = annot::parse_sig_decl_with_vars(heap, form) {
             ctx.add_declared_sig_with_vars(name, sv);
+        }
+        // Non-arrow `(sig x T)` value-type declarations — consumed by the
+        // gradual-assignment check on `(def x …)` (the first `GradualTy` consumer).
+        if let Some((name, ty)) = annot::parse_value_sig_decl(heap, form) {
+            ctx.add_declared_value_ty(name, ty);
         }
     }
     // Pass 2.6: protocol/behaviour conformance. Model `(defprotocol …)` /
@@ -1752,6 +1761,56 @@ mod tests {
             w.iter().all(|m| !m.contains("unbound symbol")),
             "a `lambda` literal must not draw unbound-symbol warnings: {w:?}"
         );
+    }
+
+    // ---- gradual-assignment check: `(def x …)` vs a non-arrow `(sig x T)` ----
+    // (GradualTy's first consumer — ADR-024.)
+
+    #[test]
+    fn def_against_value_sig_flags_a_literal_mismatch() {
+        // `(sig n int)` then `(def n "hello")` — a precise literal disjoint from
+        // the declared type. stat(string) ⊄ int → flagged.
+        let w = file_warnings(r#"(sig n int) (def n "hello")"#);
+        assert!(
+            w.iter().any(|m| m.contains("n: value of type string")
+                && m.contains("not assignable")
+                && m.contains("int")),
+            "a string literal assigned to an int-declared name must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn def_against_value_sig_catches_a_bounded_dynamic_global() {
+        // The genuine GradualTy value-add: `label` is a redefinable global with a
+        // declared type, so it's dynamic_within(string) — a bounded dynamic that
+        // Option<Ty> can't represent. Assigning it to an int-declared name is
+        // disjoint (string ∩ int = ⊥) → flagged.
+        let w = file_warnings(
+            r#"(sig count int) (sig label string) (def label "x") (def count label)"#,
+        );
+        assert!(
+            w.iter()
+                .any(|m| m.contains("count: value of type string") && m.contains("int")),
+            "a string-typed global assigned to an int-declared name must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn def_against_value_sig_defers_when_consistent_or_unknown() {
+        // Every one of these is consistent (or dynamic) → no assignment warning.
+        for src in [
+            "(sig n int) (def n 5)",                          // exact
+            "(sig m number) (def m 5)",                       // int <: number
+            "(sig n int) (def n (+ 1 2))",                    // call result widened → defer
+            "(sig n int) (def n some-unknown-global)",        // unknown → pure dynamic
+            "(sig a int) (sig b number) (def b 5) (def a b)", // int <- number: ∩≠⊥ → defer
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("not assignable")),
+                "a consistent/dynamic assignment must not warn ({src}): {w:?}"
+            );
+        }
     }
 
     #[test]

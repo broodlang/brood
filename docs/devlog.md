@@ -3006,3 +3006,39 @@ lib, 2163 in-language — green.
 Bucket B's other slices (sound branchy-body inference; wiring up the unconsumed
 `GradualTy` for gradual-assignment checking) remain deferred per ADR-011 until a
 concrete consumer needs them.
+
+## 2026-06-15 — GradualTy gets its first consumer: gradual-assignment checking of `(def x …)` vs `(sig x T)`
+
+`GradualTy`/`consistent_with` were built-and-tested but **unconsumed** — referenced
+only by their own unit tests, with a standing "wire it in only when a real
+gradual-assignment consumer arrives" note. Rather than delete the island (the
+greenfield instinct), gave it the consumer the note asked for.
+
+A non-arrow `(sig x T)` declares a **value type** (previously grammar-accepted but
+dropped by the checker). The new check: `(def x <expr>)` must assign a value
+*consistent* with `T`. The design is what makes `GradualTy` actually earn its place
+over the existing `Option<Ty>` disjointness pass — **assignment uses consistent
+subtyping, not disjointness**:
+
+- A reference to a redefinable global with a declared type is `dynamic_within(t)` —
+  a *bounded dynamic* that `Option<Ty>` (only known/unknown) structurally can't
+  represent. So `(def count label)` with `label : string`, `count : int` is flagged
+  (`string ∩ int = ⊥`), where the disjointness pass — treating every global as an
+  untracked `None` — sees nothing.
+- A precise **literal** is `stat(t)` (checked with `⊆`): `(def n "hello")` against
+  `(sig n int)` flags.
+- An **over-approximated** value (a call result, a local) is `dynamic_within(t)`, so
+  consistency uses `∩ ≠ ⊥` and can't over-warn on a widened guess: `(def n (+ 1 2))`
+  against `int` *defers* (`number ∩ int ≠ ⊥`), not warns — no false positive. An
+  unknown global → pure `dynamic()` → always defers (hot-reload safe).
+
+Implementation: `annot::parse_value_sig_decl` (non-arrow sigs), `Ctx.declared_value_ty`,
+`walk::gradual_of` (the expression → `GradualTy` bridge) + the check in `check_def`.
+Project-wide `nest check` over `std/` + `tests/` stays at 3 (the intentional recursion
+lint) — zero new false positives. 120 checker unit tests, 279 lib, 2163 in-language —
+green. Updated the now-stale "unconsumed island" status notes in types.md /
+type-annotations.md / the check.rs module doc.
+
+This is the first slice of bucket B's gradual-typing work; return-type and
+declared-param assignment checks remain deferred (the return check needs the
+sound body inference ADR-011 still defers).

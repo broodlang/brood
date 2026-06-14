@@ -64,8 +64,12 @@ full checker refinement (`map_kv` in `Ty`); type variable unification at call
 sites (`SigTerm` route — see [type-variables.md](type-variables.md)).
 
 A `(sig name (… -> …))` whose type-expr is an **arrow** declares a function
-signature. Non-arrow `(sig x int)` (a value's type) is accepted by the grammar
-but ignored by the call-checker in slice 1 (nothing consumes it yet).
+signature. Non-arrow `(sig x int)` (a value's type) declares a **value type**:
+it's consumed by the **gradual-assignment check** (`GradualTy`'s first consumer),
+which verifies a `(def x <expr>)` assigns a value *consistent* with the declared
+type — flagging `(def x "s")` against `(sig x int)`, and `(def x g)` when `g`'s
+own declared type is disjoint from `x`'s, while deferring on a dynamic value
+(an over-approximated call, an unknown global) so hot reload is never fought.
 
 ## How the checker uses it (slice 1 — shipped)
 

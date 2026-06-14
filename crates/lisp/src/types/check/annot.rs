@@ -299,3 +299,31 @@ pub(super) fn parse_sig_decl(heap: &Heap, form: Value) -> Option<(Symbol, Sig)> 
     let sig = parse_type(heap, items[2])?.as_arrow()?.clone();
     Some((name, sig))
 }
+
+/// If `form` is a `(sig name T)` declaration whose type-expr `T` is a **value
+/// type** (not an arrow), return `(name, T)`. The non-function counterpart of
+/// [`parse_sig_decl`]: `(sig x int)` declares the *value* `x` has type `int`,
+/// which the gradual-assignment check consults to verify `(def x …)`. Returns
+/// `None` for a non-`sig` form or an arrow type-expr (that's `parse_sig_decl`'s).
+pub(super) fn parse_value_sig_decl(heap: &Heap, form: Value) -> Option<(Symbol, Ty)> {
+    let items = list_items(heap, form)?;
+    if items.len() != 3 {
+        return None;
+    }
+    let Value::Sym(head) = items[0] else {
+        return None;
+    };
+    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
+        return None;
+    }
+    let Value::Sym(name) = items[1] else {
+        return None;
+    };
+    let ty = parse_type(heap, items[2])?;
+    // A function arrow is a *callable* signature — that's `parse_sig_decl`'s job;
+    // here we only take a plain value type.
+    if ty.as_arrow().is_some() {
+        return None;
+    }
+    Some((name, ty))
+}
