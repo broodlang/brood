@@ -75,6 +75,15 @@ mod imp {
         env_hops,
         /// LOCAL heap allocations (pairs/vectors/maps/strings/closures/…).
         alloc,
+        /// A tiered arm ran to completion on native code (jit_tier outcome 0/4) —
+        /// the "it tiered and stayed native" signal.
+        jit_native,
+        /// A tiered arm deopted back to the VM mid-run (an operand wasn't the
+        /// expected `Int`, or a `VectorRef` missed) — outcome 1. High vs `jit_native`
+        /// for a hot arm means it compiles but keeps falling off the native path.
+        jit_deopt,
+        /// A tiered arm was preempted by the reduction budget — outcome 2.
+        jit_preempt,
     );
 }
 
