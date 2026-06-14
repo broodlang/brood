@@ -6359,3 +6359,60 @@ arbitrary-bytes value kind, and adding one is a separate language-surface decisi
 ordering, and the MCP JSON bridge — the standard cost of a new scalar handle, paid
 once. The editor's multi-source completion (the original motivation) now builds an
 LSP source on top of this with no further kernel work. `%os-cmd` is untouched.
+
+## ADR-105 — Keyword-literal (singleton) types: a literal-set refinement on `Ty`
+
+**Status:** accepted (2026-06-14). Implemented: the `lit` refinement on `Ty`
+(`crates/lisp/src/types/mod.rs`), `parse_type` accepting a bare keyword
+(`types/check/annot.rs`), the runtime `type-matches?` keyword branch
+(`std/prelude.blsp`), unit tests in `types/mod.rs` + `types/check.rs`, and
+`tests/contract_test.blsp`.
+
+**Context.** Many positions admit a *closed set of keyword values*, not "any
+keyword": the editor's `init.blsp` `:fullscreen` is one of `:maximized` /
+`:fullboth` / `:fullscreen` (or `nil`); a mode/state argument is `:on`/`:off`; a
+direction is `:row`/`:col`. The type lattice could only say `keyword` — so a sig
+couldn't enumerate the allowed values, and neither the advisory checker, the LSP,
+nor a runtime contract could flag a wrong one. (Surfaced by the myedit prime
+directive: the editor wanted to put its config's allowed values in the type system;
+the fix belongs in Brood, not the editor.)
+
+**Decision.**
+
+**A literal-set refinement, not a new `Ty` kind.** `Ty` gains
+`lit: Option<Arc<BTreeSet<Symbol>>>` alongside `arrow`/`elem`/`map_kv`. `Some(set)`
+means the keyword member is constrained to exactly those keyword symbols, while every
+*other* tag in `tags` stays open — so `(or :a :b nil)` is `{tags: keyword|nil,
+lit: {a,b}}` and admits the two keywords *and* `nil`. Keyword-only for this slice;
+bool/int/string literals are the same machinery (more `Lit` kinds) and a deferred
+follow-on. `false` is therefore **not** a literal type — use `nil` for an "off" arm.
+
+**Union is exact (the one departure from the other refinements).** `arrow`/`elem`/
+`map_kv` *widen* to `None` when two sides differ, because the union of two distinct
+arrows isn't one arrow. But the union of two literal *sets* is precisely their
+set-union, so `(or :a :b)` keeps both. A side whose keyword member is *open* (the
+keyword tag with no set) contributes every keyword, so it widens the result to open.
+`intersect` narrows (empty intersection clears the keyword bit); `negate` widens to
+"any keyword" (the omitted keywords are in the complement).
+
+**`is_disjoint` gains a precise keyword case.** Its tags-only rule can't see that
+`:a` and `:b` (both keyword-tagged) are distinct values. The call-check
+(`walk.rs`, its only real caller) needs that to warn on `:c` against `(or :a :b)`.
+So `is_disjoint` adds: when the *only* shared tag is `keyword` and both sides pin
+disjoint literal sets, they're disjoint. This only ever reports *genuinely* disjoint
+types (a literal set is an exact enumeration, not an approximation), so it never
+raises a false warning — advisory-soundness holds.
+
+**Bare-keyword surface syntax.** A sig writes `(or :maximized :fullboth nil)`, not
+`'`-quoted. A keyword is self-evaluating and unambiguous in type position (base types
+are bare *symbols*), and bare survives the runtime path: `sig!` quotes the whole
+type-expr, so a bare `:maximized` reaches `type-matches?` as the keyword value
+(matched by `=`); a quoted `':maximized` would arrive as `(quote :maximized)` and
+silently match anything.
+
+**Consequences.** `of_value` infers a keyword literal as its singleton, so
+diagnostics now name the exact value (`got :k`) rather than the coarse `keyword`
+tag — two existing checker tests were updated to the sharper output. Literal types
+help code the checker *sees*; a data file read with `read-first` (an editor
+`init.blsp`) is not type-checked, so in-file feedback there remains a separate
+LSP-on-data concern.

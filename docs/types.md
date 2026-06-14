@@ -72,6 +72,12 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   and a **sequence element type** `vector<int>` (the `elem` refinement), with
   `map`/`filter`/`reduce`/`fold` results derived from their arguments. The flat
   tag bitset remains the coarse set under any refinement.
+- **Keyword-literal (singleton) types** (the `lit` refinement, ADR-105): a sig can
+  enumerate exact keyword values — `(or :maximized :fullboth nil)` — and the checker
+  flags a keyword outside the set. Unlike the other refinements, union is *exact*
+  (the set-union, since `(or :a :b)` is precisely both), and `is_disjoint` gains a
+  precise keyword case so `:c` is provably-not-`(or :a :b)` — still sound (a literal
+  set is an enumeration, never an over-approximation). Keyword-only so far.
 
 ## The staircase — tackle one at a time
 
