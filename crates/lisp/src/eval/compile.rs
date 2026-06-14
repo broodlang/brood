@@ -3871,7 +3871,24 @@ fn vm_run_bc(
             {
                 if try_jit {
                     try_jit = false;
-                    match jit_tier(&cur_arm, heap, cur_base, cur_env) {
+                    let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
+                    // Work-attribution (perf-stats): native completion (0/4) vs a
+                    // mid-run deopt (1) vs preemption (2). A hot arm with high
+                    // `jit_deopt` vs `jit_native` compiles but keeps falling off the
+                    // native path — the matmul-class signal.
+                    match jit_outcome {
+                        Some(0) | Some(4) => {
+                            crate::perf_bump!(jit_native);
+                        }
+                        Some(1) => {
+                            crate::perf_bump!(jit_deopt);
+                        }
+                        Some(2) => {
+                            crate::perf_bump!(jit_preempt);
+                        }
+                        _ => {}
+                    }
+                    match jit_outcome {
                         // Done: result in `roots[cur_base]` → the `Done` arm retires it.
                         Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
                         // A JIT'd call/global errored — propagate the parked error.
