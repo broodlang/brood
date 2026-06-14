@@ -3059,9 +3059,31 @@ many tests the framework runs concurrently; it just can't starve the runtime of 
 a dirty-block needs. The reported repro now passes 10/10 at `--max-parallel 1`; the full
 suite (616 cargo cases incl. `brood_suite_passes`) and the scheduler tests stay green.
 
-KNOWN FOLLOW-UP: the test framework runs up to `*parallel-batch* = 4` units concurrently,
-each of which can dirty-block *and* spawn a child — so files with several such tests
-(`link_test`, `exit_test`) still deadlock when the pool is smaller than ~2×batch
-(`-j2..4`); they pass at `-j8`+ and at the default ≈nproc. The complete fix is on-demand
-dirty-scheduler growth (spawn an overflow drainer when dirty-blocks exhaust the live
-workers) — a larger kernel change, tracked separately.
+FOLLOW-UP (done, same day — see the next entry): the floor at 2 only covers a *single*
+dirty-block. The framework runs up to `*parallel-batch* = 4` units concurrently, each able
+to dirty-block *and* spawn a child, so files with several such tests (`link_test`,
+`exit_test`) still deadlocked when the pool was smaller than ~2×batch (`-j2..4`). Completed
+by on-demand dirty-scheduler growth.
+
+## 2026-06-15 — scheduler: on-demand dirty-scheduler growth (the complete native-nested-receive fix)
+
+Completes the previous entry. When **every** executor thread is dirty-blocked there is no
+live thread to run the queued work that would unblock them — a hard deadlock
+(`link_test`/`exit_test` hung at `-j2..4`, passed only at `-j8`+/default).
+
+Fix (modelled on BEAM growing dirty schedulers on demand): track `LIVE_EXECUTORS` — the
+executor threads (fixed workers + overflow drainers) **not** currently dirty-blocked.
+`dirty_block` decrements it; when it hits 0 with work still queued (`STEALABLE > 0`), spawn
+a transient `overflow_drain` thread that steals + runs any worker's queue until the pool
+drains, then exits. `enqueue` also spawns one if it queues work while `LIVE_EXECUTORS == 0`
+(closes the timer-fire / cross-worker-wake-after-last-block window). The drainer is itself
+an executor (`IS_EXECUTOR`), so a process *it* runs that dirty-blocks spawns a replacement;
+the root thread stays uncounted (owns no queue, strands nothing). `STEALABLE` /
+`LIVE_EXECUTORS` use `SeqCst` at the decision sites so the "never strand work with no live
+executor" invariant holds on weak memory models, not just x86-TSO; a decrement-then-recheck
+in both `dirty_block` and the drainer's retire path closes the symmetric race with
+`enqueue`'s push-then-check (in the total order, at least one side spawns).
+
+Result: `link_test`/`exit_test` pass 3/3 at `-j1..4` (and up), the repro 10/10 at
+`--max-parallel 1`; full suite + GC-stress green. Drainers are transient and bounded by the
+number of concurrent dirty-blocks, so steady-state thread count is unchanged.
