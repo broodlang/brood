@@ -6907,6 +6907,7 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let row_resize_t = value::intern("row-resize");
     let vspans_t = value::intern("vspans");
     let cells_t = value::intern("cells");
+    let cells_rgb_t = value::intern("cells-rgb");
     let rect_t = value::intern("rect");
     let mut ops = Vec::with_capacity(parsed.len());
     for (tag, parts) in parsed {
@@ -7011,6 +7012,37 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             };
             let color = span_color(heap, arg(&parts, 6));
             ops.push(crate::gui::Op::Cells { row0, col0, w, aspect, bytes, color });
+        } else if tag == cells_rgb_t {
+            // [:cells-rgb row0 col0 w aspect bits colors default] — a whole COLOURED board
+            // in one op: each live cell takes its colour from `colors` (a map bit-index →
+            // packed colour, the spawn-colour layer), falling back to `default`. Replaces
+            // the per-cell [:text] builder (the per-frame op-build was the coloured wall).
+            let row0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
+            let col0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+            let w = expect_int(heap, "gui-draw", arg(&parts, 3))?.max(1) as u32;
+            let aspect = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?).max(1);
+            let bytes = match arg(&parts, 5) {
+                Value::Str(id) => match heap.local_shared_blob(id) {
+                    Some(blob) => blob.as_bytes().to_vec(),
+                    None => heap.string(id).as_bytes().to_vec(),
+                },
+                v => expect_bigint(heap, "gui-draw", v)?.magnitude().to_bytes_le(),
+            };
+            // Decode the colour map once: bit-index → rgb (packed as r | g<<12 | b<<24).
+            let mut colors = std::collections::HashMap::new();
+            if let Value::Map(mid) = arg(&parts, 6) {
+                for (k, v) in heap.map_entries(mid) {
+                    if let (Value::Int(idx), Some(p)) = (k, heap.as_bigint(v)) {
+                        let bits: u64 = (&p).try_into().unwrap_or(0);
+                        colors.insert(
+                            idx as u64,
+                            [(bits & 4095) as u8, ((bits >> 12) & 4095) as u8, ((bits >> 24) & 4095) as u8],
+                        );
+                    }
+                }
+            }
+            let default = span_color(heap, arg(&parts, 7)).unwrap_or([229, 229, 229]);
+            ops.push(crate::gui::Op::CellsRgb { row0, col0, w, aspect, bytes, colors, default });
         }
     }
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;

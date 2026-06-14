@@ -290,6 +290,29 @@ impl GlWindow {
                         }
                     }
                 }
+                Op::CellsRgb { row0, col0, w, aspect, bytes, colors, default } => {
+                    let asp = (*aspect).max(1) as usize;
+                    let cell_w = (asp as f32) * cwf;
+                    let wmod = (*w).max(1) as usize;
+                    for (bi, &byte) in bytes.iter().enumerate() {
+                        let mut b = byte;
+                        let base = bi * 8;
+                        while b != 0 {
+                            let bit = base + b.trailing_zeros() as usize;
+                            let rgb = colors.get(&(bit as u64)).copied().unwrap_or(*default);
+                            let x = (bit % wmod) as f32;
+                            let y = (bit / wmod) as f32;
+                            push(
+                                insetf + (*col0 as f32 + x * asp as f32) * cwf,
+                                insetf + (*row0 as f32 + y) * chf,
+                                cell_w,
+                                chf,
+                                rgb,
+                            );
+                            b &= b - 1;
+                        }
+                    }
+                }
                 // Text: the cell BACKGROUND as a solid quad (a coloured Life cell is a space
                 // + `:bg`), plus a deferred textured quad per non-space cluster (the glyph
                 // coverage — footer letters). Mirrors the CPU `paint` per-cluster walk.
