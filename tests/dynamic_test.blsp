@@ -40,7 +40,10 @@
 
 ;; A worker that crashes *inside* a binding — its (per-process) binding stack dies
 ;; with it and must not perturb anyone else.
-(defn dt-crasher () (binding (*dt* 999) (throw :boom)))
+;; Waits for `:go` before crashing, so a `monitor` can be established while it's still
+;; alive — otherwise, under load, it can die before the monitor and the `[:down]` carries
+;; `:noproc` instead of the `[:error …]` crash reason the test asserts on.
+(defn dt-crasher () (receive (:go (binding (*dt* 999) (throw :boom)))))
 
 ;; ---- single-process semantics -----------------------------------------------
 
@@ -131,10 +134,13 @@
     (assert= (receive ([:v v] v)) 0))
 
   (test "one process crashing inside a binding leaves the rest working"
-    ;; Spawn a worker that dies mid-binding; monitor confirms the crash…
+    ;; Spawn a worker, monitor it while it's alive, THEN signal it to crash mid-binding —
+    ;; so the `[:down]` carries the real `[:error …]` reason (not a racy `:noproc`). The
+    ;; runner's per-test watchdog is the hang-guard, so no wall-clock fallback is needed.
     (let (c (spawn (dt-crasher)))
       (let (mr (monitor c))
-        (assert= (receive ([:down ~mr _ [:error _]] :crashed) (after 500 :timeout)) :crashed)))
+        (send c :go)
+        (assert= (receive ([:down ~mr _ [:error _]] :crashed)) :crashed)))
     ;; …then fresh workers still compute correctly (Σ 1..10 = 55)…
     (dt-spawn-workers (self) (dt-range 1 11))
     (assert= (dt-collect 0 10 0) 55)

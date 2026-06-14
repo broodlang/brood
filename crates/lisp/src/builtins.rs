@@ -1927,6 +1927,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%spawn-link",
+        Arity::exact(1),
+        Sig::new(vec![callable], pid_ty),
+        spawn_link,
+    );
+    def(
+        heap,
         "%spawn-named",
         Arity::exact(2),
         Sig::new(vec![sym.union(kw), callable], pid_ty),
@@ -2354,6 +2361,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("throw", &["x"], "Raise x as an error - a non-local exit caught by try/catch."),
     ("%make-macro", &["f"], "Tag fn f as a macro: the expander calls it on the unevaluated argument forms and splices its result in place. The `defmacro` macro lowers to this."),
     ("%spawn", &["thunk"], "Run thunk (a 0-arg fn) in a new green process; returns its pid. Use the `spawn` macro."),
+    ("%spawn-link", &["thunk"], "Like %spawn but atomically links the child to the caller before it runs (no spawn->link :noproc race). Use the `spawn-link` macro."),
     ("send", &["target", "msg"], "Copy msg into target's mailbox; target is a pid or {:name :node} address. Routes locally or over a node link. Returns nil."),
     ("self", &[], "This process's own pid (carries this node's identity)."),
     ("exit", &["pid", "reason"], "Send an exit signal to process pid, local or remote (Erlang exit/2). reason :kill is the untrappable hard kill — pid dies at its next reduction tick, or immediately if parked. Any other reason is the soft signal — pid dies at its next receive. Monitors fire [:down ref pid reason]. A remote pid is routed to its node over the link. No-op for a dead/unknown pid. Returns nil."),
@@ -8114,6 +8122,14 @@ fn blob_strong_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pid = crate::process::spawn(heap, arg(args, 0))?;
+    Ok(crate::process::pid_value(pid))
+}
+
+/// `(%spawn-link thunk)` — atomic `spawn` + `link`: the new child is linked to the
+/// caller *before* it runs, so its exit reason is delivered reliably even on an instant
+/// exit (no spawn→link `:noproc` race). The `spawn-link` macro wraps an expression.
+fn spawn_link(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let pid = crate::process::spawn_linked(heap, arg(args, 0))?;
     Ok(crate::process::pid_value(pid))
 }
 
