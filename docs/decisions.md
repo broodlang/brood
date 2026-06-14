@@ -6628,3 +6628,35 @@ macroexpands in whole-file mode, sees the canonical form; for the un-expanded fr
 `let*` directly. Surfacing this also fixed three pre-existing checker false-positives (the
 two synonyms looking unbound, multi-arity-clause params, and self-recursive `let`-bound
 closures) — see the 2026-06-14 devlog entry.
+
+## ADR-109 — `string-split` is a native builtin (not pure Brood)
+
+**Status:** accepted (2026-06-14). Implemented: `string_split` + its registration and
+arity/doc entry in `crates/lisp/src/builtins.rs` (beside `%str-index-of`); the former
+`string-split`/`string-split--acc` defns removed from `std/prelude.blsp`;
+`tests/strings_test.blsp` already covers the semantics.
+
+**Context.** Per ADR-006/008 the string library (`split`/`join`/`replace`/`trim`/…) is
+written in Brood over the `substring`/`%str-index-of`/`str` primitives, and `string-split`
+was a pure-Brood tail-recursion: find the separator, emit the head, recurse on the *tail*
+substring. But Brood strings are char-indexed and `substring` is O(index) (UTF-8 has no
+O(1) char access — the same reason `%str-index-of` is native), so re-slicing the shrinking
+tail each step makes the whole split **O(n²)**. This surfaced in the editor (brood-edit):
+parsing a 174 KB `git ls-files` output took **~840 ms**, dominating project-file listing on
+a large repo. `string-split` is also the substrate ~10 std modules build on (`file`
+read-lines, `path`, `text` words, `diff`, `datetime`, `url`, `net/http`, `net/sse`), so the
+quadratic cost was latent everywhere, not just the editor.
+
+**Decision.** Make `string-split` a native builtin — one O(n) pass via Rust's `str::split`
+(empty separator → chars, matching the old semantics and `string->list`). A correct O(n)
+version is unexpressible in pure Brood given char-indexed `substring`, so this is genuinely
+kernel-worthy (ADR-008's bar), and it *shrinks* the surface: one focused builtin replaces a
+recursive Brood pair and joins the existing native string-scanner family
+(`%str-index-of`/`string-span`/`string-span-until`). The 174 KB parse dropped ~840 ms →
+~10 ms; every `string-split` caller benefits.
+
+**Alternatives rejected.** (a) A native O(n) char iterator + a pure-Brood fold — still one
+builtin, but allocates a heap string per *character* (~30× more), slower and GC-heavy.
+(b) Byte-offset `index-of` + byte-slice `substring` — exposes raw UTF-8 byte offsets
+(boundary footguns) and adds two builtins. (c) Route through the native regex engine —
+heavier (compile per call), wrong semantics (literal vs pattern), removes nothing.
