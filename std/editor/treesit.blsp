@@ -137,10 +137,44 @@ if none."
                      (ts--named-kids enc))))
     (if (nil? lst) point (get lst :start))))
 
+(defn ts--chain-rest (node point)
+  "The containers strictly enclosing `point` below `node`, outermost first — each a
+container that contains the next. `()` at the leaf."
+  (let (hit (first (filter (fn (k) (and (ts--container? k)
+                                     (< (get k :start) point)
+                                     (< point (get k :end))))
+                     (or (get node :kids) []))))
+    (if (nil? hit) () (cons hit (ts--chain-rest hit point)))))
+
+(def ts--def-kinds
+  ;; node KINDS that are themselves definitions — most grammars (Ruby, …) name them
+  ;; distinctly. Extend for a new language whose defs have their own node kind.
+  (list "method" "singleton_method" "class" "module" "function_definition" "method_declaration"))
+
+(def ts--def-macros
+  ;; Elixir defines via a `call` to one of these macros (the node kind is just `call`, so we
+  ;; key off the callee text). Extend for a macro-defined construct in another grammar.
+  (list "def" "defp" "defmacro" "defmacrop" "defmodule" "defprotocol" "defimpl"))
+
+(defn ts--defun? (text node)
+  "Whether `node` is a definition for `beginning-of-defun`: a definition-*kind* node (Ruby
+`method`/`class`/`module`, …) or a `call` whose callee text is a `def`-family macro (Elixir,
+where `def`/`defmodule`/… are calls, not distinct node kinds)."
+  (let (k (name (get node :kind)))
+    (or (includes? ts--def-kinds k)
+      (and (= k "call")
+        (let (head (first (ts--named-kids node)))
+          (and (not (nil? head))
+            (includes? ts--def-macros (substring text (get head :start) (get head :end)))))))))
+
 (defn point-defun-start (text lang point)
-  "Start of the top-level node containing `point` (`beginning-of-defun`);
-unchanged if none."
+  "Start of the enclosing **definition** (`beginning-of-defun`): the deepest `def` / `class`
+/ `module` / … containing `point` — so a `def` inside an Elixir `defmodule` or a Ruby `class`,
+not the whole enclosing module. Falls back to the top-level form, then `point`."
   (let (root (tree-sitter-parse text lang)
-        top (first (filter (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
-                     (ts--named-kids root))))
-    (if (nil? top) point (get top :start))))
+        chain (ts--chain-rest root point)
+        defuns (filter (fn (n) (ts--defun? text n)) chain))
+    (cond
+      (not (empty? defuns)) (get (last defuns) :start)
+      (not (empty? chain)) (get (first chain) :start)
+      :else point)))

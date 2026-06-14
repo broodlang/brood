@@ -519,6 +519,15 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 "cannot send a subprocess across nodes; it is local to its runtime",
             ));
         }
+        Message::Table(_) => {
+            // A table id is local to one runtime's global registry; it has no meaning
+            // on a peer node. Refuse rather than ship a dangling handle. (Send the
+            // table's snapshot — an ordinary map — across nodes instead.)
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot send a table across nodes; it is local to its runtime",
+            ));
+        }
     }
     Ok(())
 }

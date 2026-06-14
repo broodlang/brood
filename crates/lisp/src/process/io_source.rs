@@ -35,7 +35,9 @@ pub struct MailboxSink {
 impl MailboxSink {
     /// Deliver `msg` to the current subscriber's mailbox (and wake it).
     pub fn emit(&self, msg: Message) {
-        deliver(self.subscriber.load(Ordering::Relaxed), msg);
+        // Acquire pairs with `retarget`'s Release store so a source thread always sees
+        // the latest subscriber after a `tcp-controlling-process` handoff.
+        deliver(self.subscriber.load(Ordering::Acquire), msg);
     }
 }
 
@@ -49,7 +51,8 @@ pub struct SubscriberHandle {
 impl SubscriberHandle {
     /// Redirect all future deliveries to process `pid`.
     pub fn retarget(&self, pid: u64) {
-        self.subscriber.store(pid, Ordering::Relaxed);
+        // Release so the source thread's Acquire load in `emit` observes the new target.
+        self.subscriber.store(pid, Ordering::Release);
     }
 }
 

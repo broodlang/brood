@@ -108,17 +108,6 @@ impl SigWithVars {
         let subst = self.unify_args(arg_tys);
         self.ret.resolve(&subst)
     }
-
-    /// Resolve the i-th parameter type given the full substitution.
-    #[allow(dead_code)]
-    pub(super) fn resolve_param(&self, i: usize, subst: &HashMap<u32, Ty>) -> Option<Ty> {
-        let term = if i < self.params.len() {
-            &self.params[i]
-        } else {
-            self.rest.as_ref()?
-        };
-        Some(term.resolve(subst))
-    }
 }
 
 /// Unify a single `SigTerm` against a known concrete `ty`, extending `subst`.

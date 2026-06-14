@@ -657,7 +657,28 @@ fn cmd_run(
         ),
         None => String::new(),
     };
-    let code = format!("{}{}{} {}", project_setup, node_setup, watch_setup, body);
+    // Advisory pre-flight for an explicit FILE run, so *every* `nest run` path
+    // checks first: `nest run` (:main) already checks via `check-project-sources`
+    // (in `run-project`), and `brood <file>` pre-checks too — this closes the gap
+    // for `nest run FILE.blsp`, which loads the file directly. `check-file` returns
+    // GNU `path:line:col: warning:` strings; print to stderr and run regardless
+    // (advisory, never gates). `BROOD_NO_CHECK=1` opts out — the flag the rest of
+    // the toolchain honors. Runs after `project_setup` (so the file's load-path is
+    // set) and before the body. Like `brood <file>`, this is a *single-file* check:
+    // a qualified reference to an unloaded sibling module may warn — use `nest check`
+    // (whole-project) or `BROOD_NO_CHECK=1` for that case.
+    let check_setup = match file {
+        Some(path) => format!(
+            "(unless (= (getenv \"BROOD_NO_CHECK\") \"1\") \
+               (doseq (w (check-file \"{}\")) (eprintln w))) ",
+            brood::introspect::escape_brood_string(path)
+        ),
+        None => String::new(),
+    };
+    let code = format!(
+        "{}{}{}{} {}",
+        project_setup, check_setup, node_setup, watch_setup, body
+    );
     run(interp, &code);
 }
 

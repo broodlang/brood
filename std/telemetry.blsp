@@ -1,0 +1,182 @@
+;; std/telemetry.blsp — Erlang :telemetry-style instrumentation.
+;; Loaded with (require 'telemetry).
+;;
+;; Design notes (the *why*; the *what* is in the docstrings):
+;;  - **Handlers run in a dedicated LISTENER process, never in the emitting process.**
+;;    `emit` is a fire-and-forget `send` to the listener, so a handler can NEVER crash,
+;;    hang, or even slow the process that emitted the event (e.g. a web-request
+;;    process). The only process a buggy handler can take down is the listener — and a
+;;    *throwing* handler doesn't even do that (the listener catches it and detaches the
+;;    handler). An UNCATCHABLE handler fault (a stack overflow, `(exit … :kill)`) kills
+;;    only the listener; supervise it (see `start-telemetry`) and it restarts with the
+;;    handler table intact. This is the deliberate trade-off vs. Erlang's inline
+;;    dispatch: we accept one listener as a serialization point in exchange for total
+;;    emitter isolation. Keep handlers cheap, or `forward` heavy work to your own
+;;    process — the listener only dispatches.
+;;  - The handler table is a `def`-rebound global (`*telemetry-handlers*`), so it
+;;    survives a listener restart (the listener is a stateless executor that reads it)
+;;    and a handler attached in one process is visible to the listener (ADR-013).
+;;    attach/detach are configuration-time data ops (they never run handler code), so
+;;    they can't crash from a handler either.
+;;  - Events are plain Brood values compared by structural `=`: a keyword (:request)
+;;    or, Erlang-style, a vector of keyword segments ([:http :request :stop]). `span`
+;;    builds the :start/:stop/:exception sub-events off a base vector.
+
+(defmodule telemetry
+  "An Erlang :telemetry-style instrumentation seam, written in Brood. Code `emit`s a
+named event with a measurements map and a metadata map; every handler `attach`ed to
+that event runs on each emit. Crucially, handlers run in a dedicated LISTENER process,
+reached by a fire-and-forget `send` — so a handler can never crash, hang, or slow the
+emitting process; the only thing a buggy handler can take down is the listener (and a
+*throwing* handler is merely caught and detached). Start the listener once
+(`start-telemetry`) and supervise it; the handler table is a shared global that
+survives a restart. To run slow handler work off the listener too, `forward` to a
+process you own.")
+
+;; The shared handler table: event → list of {:id … :fn …}. A `def`-rebound global so
+;; it survives a listener restart and is visible across processes (ADR-013).
+(def *telemetry-handlers* {})
+
+;; ---- table helpers (pure) ---------------------------------------------------
+
+(defn telemetry--without-id (table id)
+  "`table` with any handler whose id is `id` removed from every event bucket."
+  (fold (fn (acc ev)
+          (assoc acc ev (filter (fn (h) (not (= (get h :id) id))) (get table ev))))
+        {} (keys table)))
+
+(defn telemetry--dispatch (bucket event measurements metadata)
+  "Run every handler in `bucket` (the handlers for `event`), each guarded by
+try/catch. Returns the list of ids whose handler threw (to be detached). Runs in the
+LISTENER process."
+  (fold (fn (failed h)
+          (try (do ((get h :fn) event measurements metadata) failed)
+               (catch _ (cons (get h :id) failed))))
+        nil bucket))
+
+(defn telemetry--run-handlers (event measurements metadata)
+  "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
+  (let (bucket (get *telemetry-handlers* event nil))
+    (when bucket
+      (let (failed (telemetry--dispatch bucket event measurements metadata))
+        (when (not (empty? failed))
+          (def *telemetry-handlers* (fold telemetry--without-id *telemetry-handlers* failed)))))))
+
+;; ---- the listener process ---------------------------------------------------
+
+(defn telemetry--listen ()
+  "The listener loop: dispatch emits, answer a sync ping, stop on :stop. Tail-recursive
+(O(1) stack). A throwing handler is caught in `telemetry--dispatch`; an uncatchable
+handler fault kills only this process."
+  (receive
+    ([:emit event measurements metadata]
+      (do (telemetry--run-handlers event measurements metadata) (telemetry--listen)))
+    ([:ping from r] (do (send from [:telemetry-pong r]) (telemetry--listen)))
+    (:stop nil)))
+
+;; ---- lifecycle --------------------------------------------------------------
+
+(defn start-telemetry ()
+  "Spawn the telemetry listener, register it as `:telemetry`, and return its pid. Call
+once at startup. Supervise the returned pid (e.g. as a `:permanent` child) so it
+restarts on an uncatchable handler fault — the handler table is a separate global, so
+handlers survive the restart. A second call replaces the registration with a fresh
+listener."
+  (let (pid (spawn (telemetry--listen)))
+    (register :telemetry pid)
+    pid))
+
+(defn telemetry-pid ()
+  "The listener pid, or nil if telemetry isn't started."
+  (whereis :telemetry))
+
+(defn stop-telemetry ()
+  "Stop the listener if running. Returns nil. (Handlers stay registered in the global;
+a later `start-telemetry` reuses them.)"
+  (let (pid (telemetry-pid)) (when pid (send pid :stop)) nil))
+
+(defn telemetry-sync ()
+  "Block until the listener has processed every emit queued before this call (a FIFO
+round-trip), or 2s. For ordering in tests and for flushing before shutdown. Safe: it
+times out rather than hanging if the listener is down, and never runs handler code in
+the caller."
+  (let (pid (telemetry-pid))
+    (if pid
+      (let (r (ref))
+        (send pid [:ping (self) r])
+        (receive ([:telemetry-pong ~r] :ok) (after 2000 :timeout)))
+      :no-listener)))
+
+;; ---- emitting (fire-and-forget — never touches the caller beyond a send) -----
+
+(defn emit (event &optional measurements metadata)
+  "Emit `event` with a measurements map and a metadata map (both default `{}`). The
+event is `send`-ed to the listener and handlers run THERE — so this never blocks the
+caller and no handler can crash or hang it. Returns nil; a cheap no-op if telemetry
+isn't started."
+  (let (pid (telemetry-pid))
+    (when pid (send pid [:emit event (or measurements {}) (or metadata {})]))
+    nil))
+
+;; ---- handlers (configuration-time; data ops only, never run handler code) -----
+
+(defn attach (id event handler)
+  "Attach `handler` — a fn of `(event measurements metadata)` — to `event` under the
+globally-unique `id` (any value; re-attaching the same id replaces it). Returns `id`.
+Configuration-time: call at startup, not concurrently from many processes (the table
+is a `def`-rebound global). The handler runs in the listener process, so keep it
+fast — `forward` heavy work to a process you own."
+  (let (cleaned (telemetry--without-id *telemetry-handlers* id)
+        bucket  (get cleaned event nil))
+    (def *telemetry-handlers* (assoc cleaned event (cons {:id id :fn handler} bucket)))
+    id))
+
+(defn detach (id)
+  "Remove the handler attached under `id`. Returns nil; no-op if no such id."
+  (def *telemetry-handlers* (telemetry--without-id *telemetry-handlers* id))
+  nil)
+
+(defn detach-all ()
+  "Remove every handler (resets the table). Returns nil."
+  (def *telemetry-handlers* {})
+  nil)
+
+(defn forward (id event pid)
+  "Attach a handler under `id` that forwards each emit of `event` to `pid` as
+`[:telemetry event measurements metadata]`. The opt-in way to run heavy/blocking
+handler logic in a process you own, off even the listener. Returns `id`."
+  (attach id event (fn (e m md) (send pid [:telemetry e m md]))))
+
+(defn handlers ()
+  "The handler table as a map of event → list of `{:id :fn}` (introspection)."
+  *telemetry-handlers*)
+
+;; ---- span -------------------------------------------------------------------
+
+(defn telemetry--sub (event seg)
+  "Append lifecycle segment `seg` to a base event: a vector gets it appended
+(`[:http :req]` → `[:http :req :stop]`); any other value is wrapped (`[event seg]`)."
+  (if (vector? event) (into event [seg]) [event seg]))
+
+(defn telemetry--span (event metadata thunk)
+  (let (metadata (or metadata {})
+        t0       (now))
+    (emit (telemetry--sub event :start) {:system-time t0} metadata)
+    (try
+      (let (result (thunk))
+        (emit (telemetry--sub event :stop) {:duration (- (now) t0)} metadata)
+        result)
+      (catch e
+        (emit (telemetry--sub event :exception)
+              {:duration (- (now) t0)}
+              (assoc metadata :error (error-message e)))
+        (throw e)))))
+
+(defmacro span (event metadata & body)
+  "Time `body` as a telemetry span around `event` (a vector base, Erlang-style):
+emits `event`++`[:start]` before, `event`++`[:stop]` with `{:duration ms}` after a
+normal return, or `event`++`[:exception]` with `{:duration ms}` and the error in the
+metadata on a throw (then re-raises). `metadata` is a map shared by all three events.
+The events are emitted async (fire-and-forget); the timing measures `body` running in
+the caller. Returns `body`'s value."
+  `(telemetry--span ~event ~metadata (fn () ~@body)))

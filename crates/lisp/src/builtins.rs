@@ -47,6 +47,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const rope: Ty = Ty::of(Tag::Rope);
     const socket_ty: Ty = Ty::of(Tag::Socket);
     const subprocess_ty: Ty = Ty::of(Tag::Subprocess);
+    const table_ty: Ty = Ty::of(Tag::Table);
     const kw: Ty = Ty::of(Tag::Keyword);
     const sym: Ty = Ty::of(Tag::Sym);
     const bool_ty: Ty = Ty::of(Tag::Bool);
@@ -200,6 +201,35 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![int], vec_ty),
         bit_positions,
+    );
+    // --- bitset: a fixed-size bit array backed by a refc SharedBlob (POC, ADR-107-adjacent).
+    // A `bitset` is a `Str` whose bytes are raw bit-data (LSB-first, bit i = byte i/8 bit i%8),
+    // ALWAYS stored shared, so it crosses `send`/`table` by reference (Arc bump), not a copy —
+    // unlike a bignum, which serialises to decimal. Bitwise ops are O(bytes) native loops.
+    def(heap, "bitset", Arity::exact(1), Sig::new(vec![int], string), bs_make);
+    def(heap, "bitset-ones", Arity::exact(1), Sig::new(vec![int], string), bs_ones);
+    def(heap, "bitset-and", Arity::exact(2), Sig::new(vec![string, string], string), bs_and);
+    def(heap, "bitset-or", Arity::exact(2), Sig::new(vec![string, string], string), bs_or);
+    def(heap, "bitset-xor", Arity::exact(2), Sig::new(vec![string, string], string), bs_xor);
+    def(heap, "bitset-shl", Arity::exact(2), Sig::new(vec![string, int], string), bs_shl);
+    def(heap, "bitset-shr", Arity::exact(2), Sig::new(vec![string, int], string), bs_shr);
+    def(heap, "bitset-set", Arity::exact(2), Sig::new(vec![string, int], string), bs_set);
+    def(heap, "bitset-count", Arity::exact(1), Sig::new(vec![string], int), bs_count);
+    def(heap, "bitset-positions", Arity::exact(1), Sig::new(vec![string], vec_ty), bs_positions);
+    def(heap, "bitset-planes", Arity::exact(1), Sig::new(vec![vec_ty], vec_ty), bs_planes);
+    def(
+        heap,
+        "bitset-neighbour-sum",
+        Arity::exact(7),
+        Sig::new(vec![string, string, string, string, string, int, int], vec_ty),
+        bs_neighbour_sum,
+    );
+    def(
+        heap,
+        "bitset-life-step",
+        Arity::exact(7),
+        Sig::new(vec![string, string, string, string, string, int, int], string),
+        bs_life_step,
     );
 
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
@@ -506,6 +536,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, string], int),
         str_index_of,
     );
+    // Splitting genuinely needs Rust for the same reason as the search above: a
+    // pure-Brood split re-`substring`s the tail each step, and char-indexed substring
+    // is O(index), so the whole split is O(n²) — a 174 KB `git ls-files` output took
+    // ~840 ms in the editor's project-file scan. Rust's `str::split` is one O(n) pass.
+    def(
+        heap,
+        "string-split",
+        Arity::exact(2),
+        Sig::new(vec![string, string], list_ty),
+        string_split,
+    );
     // Case folding (Unicode tables) and parse-or-nil genuinely need Rust; the rest
     // of the string library (split/join/replace/index-of/trim/…) is Brood over
     // these + `substring`/`%str-index-of`/`str` (std/prelude.blsp).
@@ -806,6 +847,66 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![subprocess_ty], nil_ty),
         proc_close,
+    );
+    // In-memory shared table — Brood's ETS (ADR-107). A `Value::Table` handle into a
+    // global registry of stores holding deep clones (Message form); sendable across
+    // processes (every copy shares one store) but local to this runtime.
+    def(heap, "table", Arity::exact(0), Sig::nullary(table_ty), table_new);
+    def(
+        heap,
+        "table-put",
+        Arity::exact(3),
+        Sig::new(vec![table_ty, any, any], table_ty),
+        table_put,
+    );
+    def(
+        heap,
+        "table-get",
+        Arity::range(2, 3),
+        Sig::new(vec![table_ty, any], any),
+        table_get,
+    );
+    def(
+        heap,
+        "table-has?",
+        Arity::exact(2),
+        Sig::new(vec![table_ty, any], bool_ty),
+        table_has,
+    );
+    def(
+        heap,
+        "table-delete",
+        Arity::exact(2),
+        Sig::new(vec![table_ty, any], table_ty),
+        table_delete,
+    );
+    def(
+        heap,
+        "table-incr",
+        Arity::range(2, 3),
+        Sig::new(vec![table_ty, any], int),
+        table_incr,
+    );
+    def(
+        heap,
+        "table-count",
+        Arity::exact(1),
+        Sig::new(vec![table_ty], int),
+        table_count,
+    );
+    def(
+        heap,
+        "table-snapshot",
+        Arity::exact(1),
+        Sig::new(vec![table_ty], map_ty),
+        table_snapshot,
+    );
+    def(
+        heap,
+        "table-drop",
+        Arity::exact(1),
+        Sig::new(vec![table_ty], bool_ty),
+        table_drop,
     );
     def(
         heap,
@@ -2215,6 +2316,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("string-length", &["s"], "The number of characters in string s."),
     ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length."),
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
+    ("string-split", &["s", "sep"], "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters."),
     ("string-span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string-span-until."),
     ("string-span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string-length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string-span."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),
@@ -2257,6 +2359,15 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("proc-spawn", &["prog", "args", "opts"], "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned."),
     ("proc-send", &["p", "s"], "Write the whole string s to subprocess p's stdin (blocking) and flush. Returns nil; throws if p is unknown/closed."),
     ("proc-close", &["p"], "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner."),
+    ("table", &[], "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table-put/table-delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle."),
+    ("table-put", &["t", "k", "v"], "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."),
+    ("table-get", &["t", "k", "default"], "A fresh copy of the value stored under k in table t, or default (nil if omitted) when absent."),
+    ("table-has?", &["t", "k"], "True if table t has an entry for key k."),
+    ("table-delete", &["t", "k"], "Remove key k from table t if present. Returns t."),
+    ("table-incr", &["t", "k", "delta"], "Atomically add delta (default 1) to the integer at key k in table t, treating an absent key as 0, and return the new value. The read-modify-write is atomic under the table lock, so concurrent increments never lose an update — use this for counters. Errors if the existing value is not an integer."),
+    ("table-count", &["t"], "The number of entries in table t."),
+    ("table-snapshot", &["t"], "A consistent point-in-time copy of the whole table t as an immutable map. Atomic; the returned map is unaffected by later mutation of t. Use map ops (keys/vals/get/reduce) on it. O(n)."),
+    ("table-drop", &["t"], "Remove table t from the registry, freeing its store. Idempotent; returns true if it existed. Other handles to t then error on use."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
@@ -2838,6 +2949,297 @@ fn bit_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         v => return Err(LispError::wrong_type(heap, "bit-positions", "int", v)),
     }
     Ok(heap.alloc_vector(out))
+}
+
+// ===== bitset: refc-shared fixed-size bit array (POC) ============================
+// A bitset is read WITHOUT copying its bytes: a shared one hands back its `Arc`
+// (a refcount bump), so the bitwise ops touch the blob in place and only the
+// RESULT is allocated. (An inline string — only happens off the bitset path —
+// falls back to a one-time copy.)
+enum BsData {
+    Shared(std::sync::Arc<crate::core::blob::SharedBlob>),
+    Owned(Vec<u8>),
+}
+impl BsData {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            BsData::Shared(a) => a.as_bytes(),
+            BsData::Owned(v) => v,
+        }
+    }
+}
+
+fn bs_arc(heap: &Heap, v: Value, who: &str) -> Result<BsData, LispError> {
+    match v {
+        Value::Str(id) => Ok(match heap.local_shared_blob(id) {
+            Some(a) => BsData::Shared(a),
+            None => BsData::Owned(heap.string(id).as_bytes().to_vec()),
+        }),
+        _ => Err(LispError::wrong_type(heap, who, "bitset", v)),
+    }
+}
+
+// Allocate a bitset from raw bytes — ALWAYS shared, so send/table ship it by reference.
+fn bs_alloc(heap: &mut Heap, bytes: &[u8]) -> Value {
+    heap.alloc_string_from_shared(crate::core::blob::SharedBlob::new(bytes))
+}
+
+fn bs_nbytes(nbits: i64) -> usize {
+    ((nbits.max(0) as usize) + 7) / 8
+}
+
+fn bs_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "bitset", arg(args, 0))?;
+    Ok(bs_alloc(heap, &vec![0u8; bs_nbytes(n)]))
+}
+
+fn bs_ones(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let n = expect_int(heap, "bitset-ones", arg(args, 0))?.max(0) as usize;
+    let len = (n + 7) / 8;
+    let mut out = vec![0xffu8; len];
+    if len > 0 && n % 8 != 0 {
+        out[len - 1] = (1u8 << (n % 8)) - 1;
+    }
+    Ok(bs_alloc(heap, &out))
+}
+
+fn bs_binop(heap: &mut Heap, args: &[Value], who: &str, f: fn(u8, u8) -> u8) -> LispResult {
+    let a = bs_arc(heap, arg(args, 0), who)?;
+    let b = bs_arc(heap, arg(args, 1), who)?;
+    let (ab, bb) = (a.bytes(), b.bytes());
+    let out: Vec<u8> = (0..ab.len()).map(|i| f(ab[i], *bb.get(i).unwrap_or(&0))).collect();
+    Ok(bs_alloc(heap, &out))
+}
+
+// Fused bit-plane full-adder: sum a vector of bitsets bit-by-bit into the low THREE
+// planes [s0 s1 s2] of the per-bit count, in ONE native pass (no per-op allocation —
+// the ~40-op interpreted reduce this replaces alloc'd a fresh bitset per step). The
+// adder is bitwise-parallel: each byte carries 8 independent bit-columns; the carry
+// flows between PLANES (s0→s1→s2), not between bits. General over any field count.
+fn bs_planes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let items: Vec<Value> = match arg(args, 0) {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        v => return Err(LispError::wrong_type(heap, "bitset-planes", "vector", v)),
+    };
+    let datas: Vec<BsData> = items
+        .iter()
+        .map(|x| bs_arc(heap, *x, "bitset-planes"))
+        .collect::<Result<_, _>>()?;
+    let len = datas.first().map_or(0, |d| d.bytes().len());
+    let (mut s0, mut s1, mut s2) = (vec![0u8; len], vec![0u8; len], vec![0u8; len]);
+    for d in &datas {
+        let m = d.bytes();
+        for j in 0..len {
+            let mj = *m.get(j).unwrap_or(&0);
+            let c = s0[j] & mj;
+            s0[j] ^= mj;
+            let c2 = s1[j] & c;
+            s1[j] ^= c;
+            s2[j] ^= c2;
+        }
+    }
+    let r0 = bs_alloc(heap, &s0);
+    let r1 = bs_alloc(heap, &s1);
+    let r2 = bs_alloc(heap, &s2);
+    Ok(heap.alloc_vector(vec![r0, r1, r2]))
+}
+
+fn bs_and(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    bs_binop(heap, args, "bitset-and", |x, y| x & y)
+}
+fn bs_or(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    bs_binop(heap, args, "bitset-or", |x, y| x | y)
+}
+fn bs_xor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    bs_binop(heap, args, "bitset-xor", |x, y| x ^ y)
+}
+
+fn bs_shl(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let srcd = bs_arc(heap, arg(args, 0), "bitset-shl")?;
+    let src = srcd.bytes();
+    let n = expect_int(heap, "bitset-shl", arg(args, 1))?.max(0) as usize;
+    let (len, bo, bs) = (src.len(), n / 8, n % 8);
+    let mut out = vec![0u8; len];
+    for j in bo..len {
+        let lo = src[j - bo] as u16;
+        let mut v = lo << bs;
+        if bs != 0 && j - bo >= 1 {
+            v |= (src[j - bo - 1] as u16) >> (8 - bs);
+        }
+        out[j] = (v & 0xff) as u8;
+    }
+    Ok(bs_alloc(heap, &out))
+}
+
+fn bs_shr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let srcd = bs_arc(heap, arg(args, 0), "bitset-shr")?;
+    let src = srcd.bytes();
+    let n = expect_int(heap, "bitset-shr", arg(args, 1))?.max(0) as usize;
+    let (len, bo, bs) = (src.len(), n / 8, n % 8);
+    let mut out = vec![0u8; len];
+    for j in 0..len {
+        let hi = j + bo;
+        if hi >= len {
+            break;
+        }
+        let mut v = (src[hi] as u16) >> bs;
+        if bs != 0 && hi + 1 < len {
+            v |= (src[hi + 1] as u16) << (8 - bs);
+        }
+        out[j] = (v & 0xff) as u8;
+    }
+    Ok(bs_alloc(heap, &out))
+}
+
+fn bs_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut src = bs_arc(heap, arg(args, 0), "bitset-set")?.bytes().to_vec();
+    let i = expect_int(heap, "bitset-set", arg(args, 1))?.max(0) as usize;
+    let (byte, bit) = (i / 8, i % 8);
+    if byte < src.len() {
+        src[byte] |= 1 << bit;
+    }
+    Ok(bs_alloc(heap, &src))
+}
+
+fn bs_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let srcd = bs_arc(heap, arg(args, 0), "bitset-count")?;
+    let n: u32 = srcd.bytes().iter().map(|b| b.count_ones()).sum();
+    Ok(Value::Int(n as i64))
+}
+
+fn bs_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let srcd = bs_arc(heap, arg(args, 0), "bitset-positions")?;
+    let src = srcd.bytes();
+    let mut out: Vec<Value> = Vec::new();
+    for (bi, &byte) in src.iter().enumerate() {
+        let mut b = byte;
+        while b != 0 {
+            out.push(Value::Int((bi * 8 + b.trailing_zeros() as usize) as i64));
+            b &= b - 1;
+        }
+    }
+    Ok(heap.alloc_vector(out))
+}
+
+// Pure byte-buffer bit ops (LSB-first, fixed length) used by the fused step below.
+fn b_shl(src: &[u8], n: usize) -> Vec<u8> {
+    let (len, bo, bs) = (src.len(), n / 8, n % 8);
+    let mut out = vec![0u8; len];
+    for j in bo..len {
+        let mut v = (src[j - bo] as u16) << bs;
+        if bs != 0 && j - bo >= 1 {
+            v |= (src[j - bo - 1] as u16) >> (8 - bs);
+        }
+        out[j] = (v & 0xff) as u8;
+    }
+    out
+}
+fn b_shr(src: &[u8], n: usize) -> Vec<u8> {
+    let (len, bo, bs) = (src.len(), n / 8, n % 8);
+    let mut out = vec![0u8; len];
+    for j in 0..len {
+        let hi = j + bo;
+        if hi >= len {
+            break;
+        }
+        let mut v = (src[hi] as u16) >> bs;
+        if bs != 0 && hi + 1 < len {
+            v |= (src[hi + 1] as u16) << (8 - bs);
+        }
+        out[j] = (v & 0xff) as u8;
+    }
+    out
+}
+fn b_and(a: &[u8], b: &[u8]) -> Vec<u8> {
+    (0..a.len()).map(|i| a[i] & b.get(i).copied().unwrap_or(0)).collect()
+}
+fn b_or(a: &[u8], b: &[u8]) -> Vec<u8> {
+    (0..a.len()).map(|i| a[i] | b.get(i).copied().unwrap_or(0)).collect()
+}
+fn b_xor(a: &[u8], b: &[u8]) -> Vec<u8> {
+    (0..a.len()).map(|i| a[i] ^ b.get(i).copied().unwrap_or(0)).collect()
+}
+
+// The whole Moore-8 torus neighbour sum in ONE native pass: builds the eight
+// torus-shifted neighbour fields (west/east with column wrap, then each lifted a
+// row up/down with row wrap) and full-adders them into the low 3 count planes
+// [s0 s1 s2]. A general life-like-CA primitive; the survival RULE stays in Brood.
+// Args: board bits, the precomputed col0/high/mask/board-mask bitsets, w, h.
+fn bs_neighbour_sum(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "bitset-neighbour-sum";
+    let b = bs_arc(heap, arg(args, 0), who)?;
+    let col0 = bs_arc(heap, arg(args, 1), who)?;
+    let high = bs_arc(heap, arg(args, 2), who)?;
+    let mask = bs_arc(heap, arg(args, 3), who)?;
+    let board = bs_arc(heap, arg(args, 4), who)?;
+    let w = expect_int(heap, who, arg(args, 5))?.max(1) as usize;
+    let h = expect_int(heap, who, arg(args, 6))?.max(1) as usize;
+    let (bb, c0, hi, mk, bd) = (b.bytes(), col0.bytes(), high.bytes(), mask.bytes(), board.bytes());
+    let (wm1, hm1w) = (w - 1, (h - 1) * w);
+
+    // west / east fields (torus-wrapped within each row)
+    let l = b_or(&b_and(&b_shl(bb, 1), &b_xor(c0, bd)), &b_shr(&b_and(bb, hi), wm1));
+    let r = b_or(&b_and(&b_shr(bb, 1), &b_xor(hi, bd)), &b_shl(&b_and(bb, c0), wm1));
+    let up = |f: &[u8]| b_or(&b_and(&b_shl(f, w), bd), &b_shr(f, hm1w));
+    let dn = |f: &[u8]| b_or(&b_shr(f, w), &b_shl(&b_and(f, mk), hm1w));
+    let ns: [Vec<u8>; 8] = [up(&l), up(bb), up(&r), l.clone(), r.clone(), dn(&l), dn(bb), dn(&r)];
+
+    let len = bb.len();
+    let (mut s0, mut s1, mut s2) = (vec![0u8; len], vec![0u8; len], vec![0u8; len]);
+    for m in &ns {
+        for j in 0..len {
+            let mj = m[j];
+            let c = s0[j] & mj;
+            s0[j] ^= mj;
+            let c2 = s1[j] & c;
+            s1[j] ^= c;
+            s2[j] ^= c2;
+        }
+    }
+    let r0 = bs_alloc(heap, &s0);
+    let r1 = bs_alloc(heap, &s1);
+    let r2 = bs_alloc(heap, &s2);
+    Ok(heap.alloc_vector(vec![r0, r1, r2]))
+}
+
+// A whole Conway step in ONE native op: the Moore-8 torus neighbour sum (above)
+// plus the B3/S23 survival rule `s1 & ~s2 & (s0 | cur)`, returning the next board
+// bitset directly — no intermediate Brood allocation. (Bakes the Life rule, unlike
+// the general `bitset-neighbour-sum`.) Args as `bitset-neighbour-sum`.
+fn bs_life_step(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "bitset-life-step";
+    let b = bs_arc(heap, arg(args, 0), who)?;
+    let col0 = bs_arc(heap, arg(args, 1), who)?;
+    let high = bs_arc(heap, arg(args, 2), who)?;
+    let mask = bs_arc(heap, arg(args, 3), who)?;
+    let board = bs_arc(heap, arg(args, 4), who)?;
+    let w = expect_int(heap, who, arg(args, 5))?.max(1) as usize;
+    let h = expect_int(heap, who, arg(args, 6))?.max(1) as usize;
+    let (bb, c0, hi, mk, bd) = (b.bytes(), col0.bytes(), high.bytes(), mask.bytes(), board.bytes());
+    let (wm1, hm1w) = (w - 1, (h - 1) * w);
+
+    let l = b_or(&b_and(&b_shl(bb, 1), &b_xor(c0, bd)), &b_shr(&b_and(bb, hi), wm1));
+    let r = b_or(&b_and(&b_shr(bb, 1), &b_xor(hi, bd)), &b_shl(&b_and(bb, c0), wm1));
+    let up = |f: &[u8]| b_or(&b_and(&b_shl(f, w), bd), &b_shr(f, hm1w));
+    let dn = |f: &[u8]| b_or(&b_shr(f, w), &b_shl(&b_and(f, mk), hm1w));
+    let ns: [Vec<u8>; 8] = [up(&l), up(bb), up(&r), l.clone(), r.clone(), dn(&l), dn(bb), dn(&r)];
+
+    let len = bb.len();
+    let mut next = vec![0u8; len];
+    for j in 0..len {
+        let (mut s0, mut s1, mut s2) = (0u8, 0u8, 0u8);
+        for m in &ns {
+            let mj = m[j];
+            let c = s0 & mj;
+            s0 ^= mj;
+            let c2 = s1 & c;
+            s1 ^= c;
+            s2 ^= c2;
+        }
+        // survive iff (2 neighbours and alive) or 3 neighbours: s1 & ~s2 & (s0 | cur)
+        next[j] = s1 & (s2 ^ bd[j]) & (s0 | bb[j]);
+    }
+    Ok(bs_alloc(heap, &next))
 }
 
 /// Validate a shift amount: non-negative (a negative shift is an error) and not
@@ -4332,6 +4734,14 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // (fire-and-forget = async); the one process serialises writes (no interleaving)
     // and isolates a backend crash. Opt-in, never in the prelude.
     ("log", include_str!("../../../std/log.blsp")),
+    // Erlang :telemetry-style instrumentation (ADR-106). Handlers run in a dedicated
+    // LISTENER process (emit is a fire-and-forget send), so a buggy handler can never
+    // crash/hang the emitting process — only the listener, which a throwing handler
+    // doesn't even do (caught + detached). The handler table is a `def`-rebound global
+    // that survives a listener restart (ADR-013). `span` brackets a body with
+    // :start/:stop/:exception events; `forward` runs handler work in your own process.
+    // Opt-in, never in the prelude.
+    ("telemetry", include_str!("../../../std/telemetry.blsp")),
     // Date and time utilities (UTC): epoch↔datetime conversion, ISO 8601
     // format/parse, arithmetic, calendar predicates. Pure Brood over `now`.
     ("datetime", include_str!("../../../std/datetime.blsp")),
@@ -5099,6 +5509,21 @@ fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Int(idx))
 }
 
+/// `(string-split s sep)` — split `s` into a list of substrings on each occurrence
+/// of `sep`, in one O(n) pass. An empty separator splits `s` into its individual
+/// characters (1-char strings). Mirrors the semantics of the former pure-Brood
+/// `string-split`/`string->list`, but without the O(n²) tail-substring rebuild.
+fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "string-split", arg(args, 0))?;
+    let sep = expect_string(heap, "string-split", arg(args, 1))?;
+    let out: Vec<Value> = if sep.is_empty() {
+        s.chars().map(|c| heap.alloc_string(&c.to_string())).collect()
+    } else {
+        s.split(sep.as_str()).map(|part| heap.alloc_string(part)).collect()
+    };
+    Ok(heap.list_from_slice(&out))
+}
+
 /// `(to-fixed x n)` — x rendered with exactly `n` digits after the decimal point
 /// (rounded). The one float→text op the language can't bootstrap: `str`/`pr-str`
 /// print the shortest round-tripping form (full f64 precision, e.g.
@@ -5420,6 +5845,69 @@ fn expect_socket(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
     expect!(heap, who, v, "socket",
         Value::Socket(id) => id,
     )
+}
+
+// ---------- in-memory shared table (Brood's ETS, ADR-107) ----------
+// A `Value::Table(id)` handle; the store lives in `crate::table`. These builtins are
+// thin wrappers — all the storage / locking / clone-in-clone-out lives there.
+
+fn expect_table(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
+    expect!(heap, who, v, "table",
+        Value::Table(id) => id,
+    )
+}
+
+fn table_new(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::Table(crate::table::create()))
+}
+
+fn table_put(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-put", arg(args, 0))?;
+    crate::table::check_key("table-put", arg(args, 1))?;
+    crate::table::put(heap, id, arg(args, 1), arg(args, 2))
+}
+
+fn table_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-get", arg(args, 0))?;
+    crate::table::check_key("table-get", arg(args, 1))?;
+    crate::table::get(heap, id, arg(args, 1), arg(args, 2))
+}
+
+fn table_has(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-has?", arg(args, 0))?;
+    crate::table::check_key("table-has?", arg(args, 1))?;
+    Ok(Value::Bool(crate::table::has(heap, id, arg(args, 1))?))
+}
+
+fn table_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-delete", arg(args, 0))?;
+    crate::table::check_key("table-delete", arg(args, 1))?;
+    crate::table::delete(heap, id, arg(args, 1))
+}
+
+fn table_incr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-incr", arg(args, 0))?;
+    crate::table::check_key("table-incr", arg(args, 1))?;
+    let delta = match arg(args, 2) {
+        Value::Nil => 1, // (table-incr t k) defaults the delta to 1
+        v => expect_int(heap, "table-incr", v)?,
+    };
+    crate::table::incr(heap, id, arg(args, 1), delta)
+}
+
+fn table_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-count", arg(args, 0))?;
+    Ok(Value::Int(crate::table::count(id)?))
+}
+
+fn table_snapshot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-snapshot", arg(args, 0))?;
+    crate::table::snapshot(heap, id)
+}
+
+fn table_drop(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_table(heap, "table-drop", arg(args, 0))?;
+    Ok(Value::Bool(crate::table::drop_table(id)))
 }
 
 fn socket_port(who: &str, p: i64) -> Result<u16, LispError> {
@@ -6512,9 +7000,17 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let col0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
             let w = expect_int(heap, "gui-draw", arg(&parts, 3))?.max(1) as u32;
             let aspect = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?).max(1);
-            let bits = expect_bigint(heap, "gui-draw", arg(&parts, 5))?;
+            // The board may be a bignum OR a `bitset` (a refc-shared `Str` of raw bytes) —
+            // decode either to little-endian set-bit bytes for the representation-agnostic paint.
+            let bytes = match arg(&parts, 5) {
+                Value::Str(id) => match heap.local_shared_blob(id) {
+                    Some(blob) => blob.as_bytes().to_vec(),
+                    None => heap.string(id).as_bytes().to_vec(),
+                },
+                v => expect_bigint(heap, "gui-draw", v)?.magnitude().to_bytes_le(),
+            };
             let color = span_color(heap, arg(&parts, 6));
-            ops.push(crate::gui::Op::Cells { row0, col0, w, aspect, bits, color });
+            ops.push(crate::gui::Op::Cells { row0, col0, w, aspect, bytes, color });
         }
     }
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;
@@ -7973,7 +8469,9 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::DO,
     kw::DEF,
     kw::FN,
+    kw::LAMBDA,
     kw::LET,
+    kw::LET_STAR,
     kw::LETREC,
     kw::QUOTE,
     kw::QUASIQUOTE,

@@ -104,7 +104,13 @@
       ;; The body item moves to a new line at +2 indent.
       (is (string-contains? out "\n  x)"))))
   (test "blank lines between two top-level comments are preserved"
-    (assert= (format-source ";; a\n\n;; b\n(def x 1)") ";; a\n\n;; b\n(def x 1)\n")))
+    (assert= (format-source ";; a\n\n;; b\n(def x 1)") ";; a\n\n;; b\n(def x 1)\n"))
+  (test "a trailing comment on a top-level form is hoisted above it"
+    (assert= (format-source "(def x 5) ;; note") ";; note\n(def x 5)\n"))
+  (test "a trailing comment on a body form is hoisted above it"
+    (let (out (format-source "(defn f (x)\n  (foo) ;; note\n  (bar))"))
+      (is (string-contains? out "  ;; note\n  (foo)"))
+      (is (not (string-contains? out "(foo) ;; note"))))))
 
 (describe "format: a comment just before a closing delimiter"
   ;; Regression (the bug that broke tests/adversarial_test.blsp): when the last
@@ -134,19 +140,20 @@
       (is (string-contains? out "(b 2)"))))
   ;; A comment in a let bindings list used to disable pair-grouping entirely,
   ;; splitting every `name value` onto two lines. The pair walker is comment-aware:
-  ;; pairs stay together, a trailing comment rides its pair's line, an own-line
-  ;; comment sits on its own line at the pair indent.
-  (test "a trailing comment in let bindings keeps the pair together, inline"
+  ;; pairs stay together, a trailing comment is hoisted onto its own line above its
+  ;; pair, an own-line comment sits on its own line at the pair indent.
+  (test "a trailing comment in let bindings is hoisted above its pair, kept intact"
     (let (out (format-source "(let (a 1\n      b 2  ; note\n      c 3)\n  body)"))
-      (is (string-contains? out "b 2  ; note"))  ; pair intact, comment inline
-      (is (string-contains? out "a 1\n      b 2"))  ; aligned under the first element
+      (is (string-contains? out "; note\n      b 2"))  ; hoisted above the pair
+      (is (not (string-contains? out "b 2  ; note")))  ; not inline anymore
       (is (not (string-contains? out "b\n")))))  ; name never split from its value
   (test "an own-line comment in let bindings stays on its own line, pairs intact"
     (let (out (format-source "(let (a 1\n      ;; mid\n      b 2)\n  body)"))
       (is (string-contains? out "a 1\n      ;; mid\n      b 2"))))
   (test "a comment in a map pairs up like bindings (not one element per line)"
     (let (out (format-source "(def m {:a 1\n        :b 2  ; note\n        :c 3})"))
-      (is (string-contains? out ":b 2  ; note"))
+      (is (string-contains? out "; note"))
+      (is (not (string-contains? out ":b 2  ; note")))  ; hoisted above, not inline
       (is (not (string-contains? out ":b\n")))))
   (test "comments in pair-lists are idempotent"
     (let (out (format-source "(let (a 1\n      b 2  ; note\n      ;; mid\n      c 3)\n  body)"))
@@ -165,16 +172,12 @@
   (test ";;; marker (top-level banner) survives"
     (let (out (format-source ";;; banner\n(def x 1)"))
       (is (string-contains? out ";;; banner"))))
-  (test "trailing comment after code stays on the same line"
-    (let (out (format-source "(def x 1) ; trailing"))
-      (is (string-contains? out "(def x 1)"))
-      (is (string-contains? out "; trailing"))
-      ;; And specifically: not pushed onto its own line.
-      (is (not (string-contains? out "(def x 1)\n; trailing")))))
-  (test "trailing comment after a closing paren is preserved"
-    (let (out (format-source "(defn f () 0) ;; nullary"))
-      (is (string-contains? out "(defn f () 0)"))
-      (is (string-contains? out ";; nullary"))))
+  (test "a trailing comment is hoisted onto its own line above the code"
+    ;; A comment after code on the same line moves to its own line *above* that
+    ;; code (never stays trailing). The marker is preserved verbatim.
+    (assert= (format-source "(def x 1) ; trailing") "; trailing\n(def x 1)\n"))
+  (test "a trailing comment after a closing paren is hoisted above the form"
+    (assert= (format-source "(defn f () 0) ;; nullary") ";; nullary\n(defn f () 0)\n"))
   (test "comment-only input gets a single trailing newline, nothing else"
     (assert= (format-source ";; just a comment") ";; just a comment\n")))
 
