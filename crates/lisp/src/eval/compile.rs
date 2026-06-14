@@ -4120,6 +4120,27 @@ fn vm_run_bc(
 /// tree-walker. `env` is the process's global/root env.
 pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     let mut scope = Scope::new();
+    // When invoked with a *non-global* env — a `def` RHS evaluated inside a `let`,
+    // e.g. `(let (me …) (def f (fn () me)))` — the form's closures must be able to
+    // capture the enclosing lexicals. Seed them as `enclosing` names so a VM-compiled
+    // closure snapshots them (`compile_captures` reads each via `env_get` on the live
+    // env at `MakeClosure` time); without this the closure resolves them as unbound
+    // globals once the lexical frame is gone (e.g. when a `def`'d closure is later
+    // called, or shipped to another node). The overwhelmingly common case is
+    // `env == global` (top-level forms): no lexical frames, so this is a no-op.
+    if !heap.is_global(env) {
+        let mut e = env;
+        while !heap.is_global(e) {
+            let (parent, bindings) = heap.env_frame_ref(e);
+            for &(sym, _) in bindings {
+                scope.enclosing.push(sym);
+            }
+            match parent {
+                Some(p) => e = p,
+                None => break,
+            }
+        }
+    }
     match compile_node(heap, form, &mut scope, false) {
         Some(node) => {
             // A top-level `let` introduces frame slots too — give the form a frame
