@@ -314,10 +314,12 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "first")
         || value::symbol_is(head, "last")
         || value::symbol_is(head, "nth")
+        || value::symbol_is(head, "second")
+        || value::symbol_is(head, "third")
     {
         let arg = *items.get(1)?;
         let elem = expr_ty(heap, arg, ctx)?.elem_ty().cloned()?;
-        // first/last/nth yield `nil` on an empty / out-of-range sequence.
+        // first/second/third/last/nth yield `nil` on an empty / out-of-range seq.
         return Some(elem.union(Ty::of(Tag::Nil)));
     }
     // `(filter pred coll)` keeps `coll`'s element type — the result is the items
@@ -328,8 +330,15 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
         return list_result(a);
     }
-    // `(reverse coll)` — the same elements, reversed; element type is unchanged.
-    if value::symbol_is(head, "reverse") {
+    // Element-preserving reshapers whose sequence is the *first* argument — the
+    // same elements, fewer / reordered: `reverse`, `rest` (drop the head),
+    // `but-last`, `distinct` / `dedupe` (drop duplicates). `nil | list<A>`.
+    if value::symbol_is(head, "reverse")
+        || value::symbol_is(head, "rest")
+        || value::symbol_is(head, "but-last")
+        || value::symbol_is(head, "distinct")
+        || value::symbol_is(head, "dedupe")
+    {
         let coll = *items.get(1)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
         return list_result(a);
@@ -341,13 +350,16 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
         return list_result(a);
     }
-    // `(take n coll)` / `(drop n coll)` / `(take-while pred coll)` /
-    // `(drop-while pred coll)` — prefix/suffix slices; the sequence arg is
-    // always the last (position 2). Element type is preserved unchanged.
+    // Element-preserving slices/filters whose sequence is the *second* argument —
+    // `take` / `drop` / `take-while` / `drop-while`, `take-last` / `drop-last`, and
+    // `remove` (the `filter` complement). Element type is preserved unchanged.
     if value::symbol_is(head, "take")
         || value::symbol_is(head, "drop")
         || value::symbol_is(head, "take-while")
         || value::symbol_is(head, "drop-while")
+        || value::symbol_is(head, "take-last")
+        || value::symbol_is(head, "drop-last")
+        || value::symbol_is(head, "remove")
     {
         let coll = *items.get(2)?;
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
@@ -424,6 +436,31 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
         let b = callback_ret(heap, f, &[a], ctx);
         return list_result(b);
+    }
+    // `(keep f coll)` — `map` then drop the `nil` results; `nil | list<B>` for
+    // `B` = the callback's return (over-approximated by keeping `nil` in `B`, a
+    // sound superset). Unknown callback / element → flat.
+    if value::symbol_is(head, "keep") {
+        let f = *items.get(1)?;
+        let coll = *items.get(2)?;
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let b = callback_ret(heap, f, &[a], ctx);
+        return list_result(b);
+    }
+    // `(interpose sep coll)` — weave `sep` between `coll`'s elements; the result
+    // holds both, `nil | list<A | type(sep)>`. Both must be known, else flat.
+    if value::symbol_is(head, "interpose") && items.len() == 3 {
+        let sep_ty = expr_ty(heap, items[1], ctx);
+        let a = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty().cloned());
+        return match (sep_ty, a) {
+            (Some(s), Some(e)) => list_result(Some(s.union(e))),
+            _ => None,
+        };
+    }
+    // `(range …)` always produces numbers — `nil | list<number>` (empty for an
+    // empty range). A sound superset whatever the bound types (int or float).
+    if value::symbol_is(head, "range") {
+        return list_result(Some(Ty::NUMBER));
     }
     // `(reduce f init coll)` / `(fold f init coll)` reduce to an accumulator typed
     // `ty(init) | B`, where `B` is the 2-arg callback's return (`(f acc x)`). The

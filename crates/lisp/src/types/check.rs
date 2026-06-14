@@ -2049,6 +2049,43 @@ mod tests {
     }
 
     #[test]
+    fn element_type_flows_through_more_combinators() {
+        // Structured-types extension: second/third/rest/but-last/distinct/dedupe/
+        // take-last/drop-last/remove/keep/interpose/range all flow the element type,
+        // so a downstream string-vs-number mismatch is caught. Each must warn here.
+        for src in [
+            r#"(+ 1 (second ["a" "b"]))"#,
+            r#"(+ 1 (first (rest ["a" "b"])))"#,
+            r#"(+ 1 (first (but-last ["a" "b"])))"#,
+            r#"(+ 1 (first (distinct ["a" "b"])))"#,
+            r#"(+ 1 (first (dedupe ["a" "b"])))"#,
+            r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
+            r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
+            r#"(+ 1 (first (keep (fn (x) x) ["a" "b"])))"#,
+            "(string-length (first (range 5)))",
+        ] {
+            let w = warnings(src);
+            assert!(
+                w.iter().any(|s| s.contains("number") || s.contains("string")),
+                "expected an element-type mismatch for {src}: {w:?}"
+            );
+        }
+        // Negative controls — a valid element type must NOT warn.
+        for src in [
+            "(+ 1 (second [10 20]))",
+            "(+ 1 (first (rest [10 20])))",
+            // interpose unions the separator: int|string includes int → valid for +.
+            r#"(+ 1 (first (interpose "z" [1 2])))"#,
+        ] {
+            let w = warnings(src);
+            assert!(
+                w.iter().all(|s| !s.contains("expects number")),
+                "a valid element type must not warn for {src}: {w:?}"
+            );
+        }
+    }
+
+    #[test]
     fn identity_lambda_preserves_element_type() {
         // `(map (fn (x) x) (list 1 2 3))` : list<int> — the lambda returns its
         // argument, so B = the element type A.
