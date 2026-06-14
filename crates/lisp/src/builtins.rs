@@ -216,6 +216,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "bitset-count", Arity::exact(1), Sig::new(vec![string], int), bs_count);
     def(heap, "bitset-positions", Arity::exact(1), Sig::new(vec![string], vec_ty), bs_positions);
     def(heap, "bitset-planes", Arity::exact(1), Sig::new(vec![vec_ty], vec_ty), bs_planes);
+    def(
+        heap,
+        "bitset-neighbour-sum",
+        Arity::exact(7),
+        Sig::new(vec![string, string, string, string, string, int, int], vec_ty),
+        bs_neighbour_sum,
+    );
+    def(
+        heap,
+        "bitset-life-step",
+        Arity::exact(7),
+        Sig::new(vec![string, string, string, string, string, int, int], string),
+        bs_life_step,
+    );
 
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
@@ -3015,6 +3029,127 @@ fn bs_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     }
     Ok(heap.alloc_vector(out))
+}
+
+// Pure byte-buffer bit ops (LSB-first, fixed length) used by the fused step below.
+fn b_shl(src: &[u8], n: usize) -> Vec<u8> {
+    let (len, bo, bs) = (src.len(), n / 8, n % 8);
+    let mut out = vec![0u8; len];
+    for j in bo..len {
+        let mut v = (src[j - bo] as u16) << bs;
+        if bs != 0 && j - bo >= 1 {
+            v |= (src[j - bo - 1] as u16) >> (8 - bs);
+        }
+        out[j] = (v & 0xff) as u8;
+    }
+    out
+}
+fn b_shr(src: &[u8], n: usize) -> Vec<u8> {
+    let (len, bo, bs) = (src.len(), n / 8, n % 8);
+    let mut out = vec![0u8; len];
+    for j in 0..len {
+        let hi = j + bo;
+        if hi >= len {
+            break;
+        }
+        let mut v = (src[hi] as u16) >> bs;
+        if bs != 0 && hi + 1 < len {
+            v |= (src[hi + 1] as u16) << (8 - bs);
+        }
+        out[j] = (v & 0xff) as u8;
+    }
+    out
+}
+fn b_and(a: &[u8], b: &[u8]) -> Vec<u8> {
+    (0..a.len()).map(|i| a[i] & b.get(i).copied().unwrap_or(0)).collect()
+}
+fn b_or(a: &[u8], b: &[u8]) -> Vec<u8> {
+    (0..a.len()).map(|i| a[i] | b.get(i).copied().unwrap_or(0)).collect()
+}
+fn b_xor(a: &[u8], b: &[u8]) -> Vec<u8> {
+    (0..a.len()).map(|i| a[i] ^ b.get(i).copied().unwrap_or(0)).collect()
+}
+
+// The whole Moore-8 torus neighbour sum in ONE native pass: builds the eight
+// torus-shifted neighbour fields (west/east with column wrap, then each lifted a
+// row up/down with row wrap) and full-adders them into the low 3 count planes
+// [s0 s1 s2]. A general life-like-CA primitive; the survival RULE stays in Brood.
+// Args: board bits, the precomputed col0/high/mask/board-mask bitsets, w, h.
+fn bs_neighbour_sum(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "bitset-neighbour-sum";
+    let b = bs_arc(heap, arg(args, 0), who)?;
+    let col0 = bs_arc(heap, arg(args, 1), who)?;
+    let high = bs_arc(heap, arg(args, 2), who)?;
+    let mask = bs_arc(heap, arg(args, 3), who)?;
+    let board = bs_arc(heap, arg(args, 4), who)?;
+    let w = expect_int(heap, who, arg(args, 5))?.max(1) as usize;
+    let h = expect_int(heap, who, arg(args, 6))?.max(1) as usize;
+    let (bb, c0, hi, mk, bd) = (b.bytes(), col0.bytes(), high.bytes(), mask.bytes(), board.bytes());
+    let (wm1, hm1w) = (w - 1, (h - 1) * w);
+
+    // west / east fields (torus-wrapped within each row)
+    let l = b_or(&b_and(&b_shl(bb, 1), &b_xor(c0, bd)), &b_shr(&b_and(bb, hi), wm1));
+    let r = b_or(&b_and(&b_shr(bb, 1), &b_xor(hi, bd)), &b_shl(&b_and(bb, c0), wm1));
+    let up = |f: &[u8]| b_or(&b_and(&b_shl(f, w), bd), &b_shr(f, hm1w));
+    let dn = |f: &[u8]| b_or(&b_shr(f, w), &b_shl(&b_and(f, mk), hm1w));
+    let ns: [Vec<u8>; 8] = [up(&l), up(bb), up(&r), l.clone(), r.clone(), dn(&l), dn(bb), dn(&r)];
+
+    let len = bb.len();
+    let (mut s0, mut s1, mut s2) = (vec![0u8; len], vec![0u8; len], vec![0u8; len]);
+    for m in &ns {
+        for j in 0..len {
+            let mj = m[j];
+            let c = s0[j] & mj;
+            s0[j] ^= mj;
+            let c2 = s1[j] & c;
+            s1[j] ^= c;
+            s2[j] ^= c2;
+        }
+    }
+    let r0 = bs_alloc(heap, &s0);
+    let r1 = bs_alloc(heap, &s1);
+    let r2 = bs_alloc(heap, &s2);
+    Ok(heap.alloc_vector(vec![r0, r1, r2]))
+}
+
+// A whole Conway step in ONE native op: the Moore-8 torus neighbour sum (above)
+// plus the B3/S23 survival rule `s1 & ~s2 & (s0 | cur)`, returning the next board
+// bitset directly — no intermediate Brood allocation. (Bakes the Life rule, unlike
+// the general `bitset-neighbour-sum`.) Args as `bitset-neighbour-sum`.
+fn bs_life_step(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let who = "bitset-life-step";
+    let b = bs_arc(heap, arg(args, 0), who)?;
+    let col0 = bs_arc(heap, arg(args, 1), who)?;
+    let high = bs_arc(heap, arg(args, 2), who)?;
+    let mask = bs_arc(heap, arg(args, 3), who)?;
+    let board = bs_arc(heap, arg(args, 4), who)?;
+    let w = expect_int(heap, who, arg(args, 5))?.max(1) as usize;
+    let h = expect_int(heap, who, arg(args, 6))?.max(1) as usize;
+    let (bb, c0, hi, mk, bd) = (b.bytes(), col0.bytes(), high.bytes(), mask.bytes(), board.bytes());
+    let (wm1, hm1w) = (w - 1, (h - 1) * w);
+
+    let l = b_or(&b_and(&b_shl(bb, 1), &b_xor(c0, bd)), &b_shr(&b_and(bb, hi), wm1));
+    let r = b_or(&b_and(&b_shr(bb, 1), &b_xor(hi, bd)), &b_shl(&b_and(bb, c0), wm1));
+    let up = |f: &[u8]| b_or(&b_and(&b_shl(f, w), bd), &b_shr(f, hm1w));
+    let dn = |f: &[u8]| b_or(&b_shr(f, w), &b_shl(&b_and(f, mk), hm1w));
+    let ns: [Vec<u8>; 8] = [up(&l), up(bb), up(&r), l.clone(), r.clone(), dn(&l), dn(bb), dn(&r)];
+
+    let len = bb.len();
+    let mut next = vec![0u8; len];
+    for j in 0..len {
+        let (mut s0, mut s1, mut s2) = (0u8, 0u8, 0u8);
+        for m in &ns {
+            let mj = m[j];
+            let c = s0 & mj;
+            s0 ^= mj;
+            let c2 = s1 & c;
+            s1 ^= c;
+            s2 ^= c2;
+        }
+        // survive iff (2 neighbours and alive) or 3 neighbours: s1 & ~s2 & (s0 | cur)
+        next[j] = s1 & (s2 ^ bd[j]) & (s0 | bb[j]);
+    }
+    Ok(bs_alloc(heap, &next))
 }
 
 /// Validate a shift amount: non-negative (a negative shift is an error) and not
