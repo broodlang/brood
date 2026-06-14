@@ -386,6 +386,18 @@ type to be known (either unknown → unrefined `pair`). `append`/`concat` union 
 element types of all arguments; any argument with an unknown element type → flat
 fallback. Zero new false positives across `std/` + `tests/`.
 
+**✅ Structural combinators (fifth slice).** The element-type flow was extended to
+the rest of the element-preserving / element-extracting sequence library:
+`second`/`third` (extract — `A | nil`, like `first`); `rest`/`but-last`/`distinct`/
+`dedupe`/`take-last`/`drop-last`/`remove` (preserve — `nil | list<A>`, like
+`reverse`/`take`); `keep` (`map`-then-drop-`nil` — `nil | list<B>`, like `map`);
+`interpose` (`nil | list<A | type(sep)>`, weaving the separator in); and `range`
+(`nil | list<number>` — always numeric, a sound superset over int/float bounds).
+So `(+ 1 (first (rest ["a" "b"])))` and `(string-length (first (range 5)))` are now
+flagged. Each rule yields the *exact* element type or a sound superset, and
+`is_disjoint` still ignores element refinements, so the additions can only sharpen a
+result — never raise a false positive. Zero new across `std/` + `tests/`.
+
 **All previously-deferred items shipped (ADR-011).**
 
 - ✅ **Expanded curated sigs** — shipped: predicate group (`number?`/`empty?`/`list?`/

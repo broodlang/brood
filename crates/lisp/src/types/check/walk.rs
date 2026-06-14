@@ -169,10 +169,24 @@ fn unbound_msg(nm: &str) -> String {
 /// file-local defs). The single predicate behind **both** the call-head and the
 /// operand unbound diagnostics, so the two never drift apart.
 fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
-    !ctx.is_local(s)
-        && !is_globally_bound(heap, s)
-        && curated_sig(s).is_none()
-        && !is_syntactic_keyword(&name_of(s))
+    if ctx.is_local(s) || is_globally_bound(heap, s) || curated_sig(s).is_some() {
+        return false;
+    }
+    let nm = name_of(s);
+    if is_syntactic_keyword(&nm) {
+        return false;
+    }
+    // A *qualified* reference (`mod/name`) whose module we don't know — no `mod/*`
+    // is loaded — can't be proven unbound: the module may be defined dynamically
+    // (`%load-string`, a required temp module) or live in a file a single-file
+    // check didn't load. Stay silent. A typo in a *known* module (some `mod/*`
+    // loaded) still falls through to the warning, so real qualified typos are kept.
+    if let Some(slash) = nm.rfind('/') {
+        if !ctx.module_is_known(&nm[..=slash]) {
+            return false;
+        }
+    }
+    true
 }
 
 /// True when a call whose head is `s` *evaluates its arguments as values* — `s`

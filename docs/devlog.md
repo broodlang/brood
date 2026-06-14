@@ -2968,3 +2968,74 @@ global and the inner row varies per `k`). Generalizes to any indexed loop over a
 invariant local vector. Verified: matmul + microbench JIT==tree-walker checksum parity,
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean, full in-language suite green under
 `--features jit` (format-tiering canary included), both feature builds compile.
+
+## 2026-06-14 — Checker false-positive sweep (bucket A): transient args, unexpandable macros, dynamic-namespace refs
+
+Three remaining advisory-checker false-positive classes, all fixed (the checker's
+prime directive is zero false positives). Project-wide `nest check` over `std/` +
+`tests/` dropped from 38 warnings to 3 — and those 3 are the *intentional* non-tail
+recursion lint on `pattern_matching_test`'s `pm-fac`, a true positive.
+
+1. **Transient as a `count`/`length`/`contains?` argument.** These ops dispatch to
+   `transient-*` kernel hooks when handed a live transient, so a transient is a valid
+   argument — but their curated sigs only admitted `str|map|seq`. Widened `countable`
+   to include `Tag::Transient` and gave `contains?` a `map_or_transient` domain
+   (`sigs.rs`). Domains stay otherwise tight (a number still warns).
+
+2. **Unexpandable macro calls.** A file-local macro the checker can't expand
+   (single-file mode, or one defined inside a deferred `test`/`describe` thunk) had its
+   argument subtree walked as ordinary code, and a name it `def`d went unrecorded — two
+   FPs: `(defmacro wp (v & body) ` `` `(let ((a b) ~v) ~@body)) ``  then `(wp x (+ a b))`
+   flagged `a`/`b` (opaque syntax `wp` splices into a binder), and `(mk qf)` (where `mk`
+   `def`s `qf`) left a later `(qf 5)` flagging `qf`. Fix: track file-local macro names
+   (`Ctx.file_macros`), detecting the lowered `(def name (%make-macro …))` shape since
+   `defmacro` is gone post-expansion; the walk skips descending into such a call's args,
+   and `collect_def_names` absorbs its bare-symbol args as possible globals (sound —
+   only widens the bound set). A genuine unbound head under a known callee still warns.
+
+3. **Qualified references to a dynamically-defined namespace.** `namespace_test` /
+   `package_test` build modules inside `%load-string` strings or temp files loaded at
+   runtime, so `(nsA/greet)` / `(greeter/greet …)` reference names the checker can't see
+   statically — ~25 FPs. Fix: `check_file` records the set of *known namespace prefixes*
+   (every `mod/` for which some `mod/<name>` global is loaded), and the unbound check
+   stays silent on a qualified name whose module isn't among them — we can't prove it
+   unbound. A typo in a *known* module (`(test/no-such-fn …)`) is still flagged, so the
+   useful qualified-typo catch is preserved. (`Arc<HashSet<String>>` in `Ctx` keeps the
+   per-scope clones cheap.)
+
+Regression tests for each in `check.rs`; 116 checker unit tests, 278 lib, 2163
+in-language — green. (Bucket B/C — deeper inference, gradual-assignment checking — stay
+deferred per ADR-011 until a real consumer needs them.)
+
+- **2026-06-14** — `string-split` made a **native builtin** (ADR-109): the pure-Brood
+  version re-`substring`ed the tail each step and char-indexed `substring` is O(index), so
+  splitting was O(n²) — a 174 KB `git ls-files` parse took ~840 ms in brood-edit's
+  project-file scan, now ~10 ms (one `str::split` pass). Removed `string-split`/
+  `string-split--acc` from `std/prelude.blsp`; semantics unchanged (empty sep → chars), so
+  `tests/strings_test.blsp` and the ~10 std modules built on split (file/path/text/diff/
+  datetime/url/http/sse) are unaffected. 2150 in-language tests green.
+
+## 2026-06-14 — Structured types, fifth slice: element flow through the rest of the sequence library
+
+Bucket B, the additive/low-risk slice (chosen over speculative body inference, which
+ADR-011 defers and which is the historical false-positive source). Extended the
+checker's element-type flow (`seq_aware_call_ty`) from the dozen combinators it
+already handled to the rest of the element-preserving / -extracting sequence library:
+`second`/`third` (extract, `A | nil`), `rest`/`but-last`/`distinct`/`dedupe`/
+`take-last`/`drop-last`/`remove` (preserve, `nil | list<A>`), `keep` (map-then-drop-nil,
+`nil | list<B>`), `interpose` (`nil | list<A | type(sep)>`), and `range`
+(`nil | list<number>`).
+
+So `(+ 1 (first (rest ["a" "b"])))` and `(string-length (first (range 5)))` are now
+caught, where before the result fell back to a flat `list`. Soundness is structural:
+each rule produces the *exact* element type (preserve/extract) or a sound superset
+(`keep`'s callback return keeps `nil`; `range`'s `number` covers int/float; `interpose`
+unions the separator), and `is_disjoint` still decides on tags alone and never inspects
+an element refinement — so a refinement can only *sharpen* a downstream result, never
+manufacture a false positive. Project-wide `nest check` over `std/` + `tests/` stays at
+3 warnings (all the intentional non-tail recursion lint). 117 checker unit tests, 279
+lib, 2163 in-language — green.
+
+Bucket B's other slices (sound branchy-body inference; wiring up the unconsumed
+`GradualTy` for gradual-assignment checking) remain deferred per ADR-011 until a
+concrete consumer needs them.
