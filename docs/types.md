@@ -294,6 +294,28 @@ never a false positive.
   positives (contract #5 holds — advisory, never gates). An intentional
   anaphoric macro (deliberate capture) would be flagged; none exist in-tree, and
   if one is written the lint should grow an opt-out rather than relax the gate.
+- ✅ **Protocol / behaviour conformance** (`check/protocol.rs`). Beyond type
+  misuse, the checker validates the `defprotocol` / `defbehaviour` / `defimpl` /
+  `(:implements …)` family against the declared interface: a diagnostic per op an
+  impl omits, per op whose arity disagrees, and per method the protocol never
+  declared (almost always a typo). Behaviours additionally check that a module
+  claiming `(:implements Name)` actually *defines* each declared op at the right
+  arity. The interface registry is seeded from the runtime `*protocols*` map (so
+  an interface declared in an imported module is known) and read from the
+  **un-expanded** tree (the protocol shape vanishes after `defprotocol` lowers to
+  `defn`s + registry calls — the same reason `sig` and the hygiene lint read
+  un-expanded). An impl/claim of an *unknown* protocol is left alone (it may be
+  declared in a file this one doesn't import) — no false positive.
+- ✅ **Non-tail self-recursion lint** (`check/recursion.rs`). A `defn` whose
+  self-call sits in a non-tail position is flagged — deep non-tail recursion
+  overflows the small green-process coroutine stack (today an uncatchable
+  segfault, not a clean error). Advisory; the fix is a tail-recursive accumulator
+  or a process-driven loop.
+- ✅ **Dead-clause lint** (`walk::newly_dead_sig_param`). When a `(sig …)` pins a
+  parameter's type, a `match` / `cond` clause whose guard narrows that parameter
+  to the empty type (`NEVER`) is provably unreachable and flagged. Sound because
+  it only fires on a *declared* sig type intersected to `⊥` — never on an inferred
+  or unknown type.
 
 With everything above, Step 4 is **done**, including the operand-position
 unbound check and a single unified `nest check` path (whole-project *and*
@@ -396,19 +418,23 @@ fallback. Zero new false positives across `std/` + `tests/`.
 The checker is a **pre-step at the file/project boundary**, never woven into
 evaluation:
 
-- `brood check <file>` — check a single file (the language binary).
+- `brood --check <file>…` — check one or more files (the language binary).
 - `nest check [FILE…]` — check the whole project, or specific files (the CI /
   editor entry point). Both forms run one Brood path that loads the project image
   first, so a single-file check resolves cross-namespace `:use`/qualified names
   exactly as a whole-project check does.
 - `brood <file>` — check, then run a file.
+- `nest run` — check, then run: the `:main` entry path checks the project sources
+  (`check-project-sources` in `run-project`), and `nest run FILE.blsp` (an explicit
+  file) pre-checks that file (`check-file`, a single-file check like `brood <file>`).
+  So every run path checks first; `BROOD_NO_CHECK=1` opts out.
 - `nest test` — check the project, then run the tests.
 - **Not** in the REPL / `load` / per-form `eval` (maybe later) — so there's no
   per-eval noise and no suppression machinery beyond the `try`/`error-of` skip.
 
 **Checking is upstream of hot reload, never part of it.** "Don't reload code we
 can already see will fail" is a property of the *workflow that orchestrates the
-reload* — today: run `brood check` first; later: the editor's reload command
+reload* — today: run `brood --check` first; later: the editor's reload command
 (itself Brood) checks, then reloads — **not** of the `def`/reload primitive. The
 runtime never consults the checker, so: contract #5 holds with **no carve-out**,
 there is nothing to override, and a wrong signature can at worst print a stray
@@ -475,10 +501,22 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
 
 - `crates/lisp/src/types/mod.rs` — the `Ty` lattice (step 1), `GradualTy`
   (step 2), and `tested_by` (the guard-narrowing bridge for step 4).
-- `crates/lisp/src/types/check.rs` — the advisory checker: the signature sources
-  (step 3) and the disjointness walk (step 4).
+- `crates/lisp/src/types/check.rs` — the checker's entry points (`check_form`,
+  `check_file`) + the in-source test suite; the work is split across the
+  `check/` submodules:
+  - `check/walk.rs` — the recursive `check_into`, the per-special-form helpers,
+    `SPECIAL_HEAD` dispatch, the arity / unbound / callback-arity checks.
+  - `check/sigs.rs` — signature + arity sources (primitive / curated / inferred).
+  - `check/guards.rs` — guard recognition, narrowing, `expr_ty`, sequence-aware
+    result types.
+  - `check/ctx.rs` — the `Ctx` threaded through the walk (narrowings, aliases,
+    file-globals, `SigWithVars` type-variable unification).
+  - `check/annot.rs` — `(sig …)` declaration parsing (un-expanded tree).
+  - `check/protocol.rs` — protocol / behaviour conformance.
+  - `check/recursion.rs` — the non-tail self-recursion lint.
+  - `check/hygiene.rs` — the macro-hygiene capture lint.
 - `crates/lisp/src/core/value.rs` — `Tag` (the atoms), `value::tag`, `NativeFn`
-  (gains a signature when step 3's table moves onto it).
+  (carries the `Sig` the checker reads — contract point #6).
 - `crates/lisp/src/eval/mod.rs` — `call_native` (the arity gate).
 - `crates/lisp/src/eval/macros.rs` — `macroexpand_all`, the pass the checker runs
   after.

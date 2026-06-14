@@ -45,6 +45,15 @@ fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity> {
     }
 }
 
+/// True when `head` is a function-literal head — `fn` or its synonym `lambda`.
+/// Both spell the same special form (`lambda` Just Works, see the evaluator), and
+/// both survive macro expansion as their original head, so every reader of a `fn`
+/// shape (here, [`guards::lambda_ret`], and `protocol`'s arity reader) must accept
+/// the two. Single source of truth so they can't drift.
+pub(super) fn is_fn_head(head: Symbol) -> bool {
+    value::symbol_is(head, kw::FN) || value::symbol_is(head, kw::LAMBDA)
+}
+
 /// The arity of a **single-clause** `fn` literal — `(fn (a b) …)` → `exact(2)`,
 /// `(fn (a &optional b) …)` → `range(1, 2)`, `(fn (a b & c) …)` → `at_least(2)`.
 /// This mirrors what `arity_of` already computes for a *named* variadic global, so
@@ -61,7 +70,7 @@ fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
     };
-    if !value::symbol_is(head, kw::FN) {
+    if !is_fn_head(head) {
         return None;
     }
     // Peel an optional leading docstring, matching the evaluator's `fn` parse.
@@ -255,6 +264,7 @@ static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
         (kw::LET, Let),
         (kw::LETREC, Letrec),
         (kw::FN, Fn),
+        (kw::LAMBDA, Fn),
         (kw::DEF, Def),
         (kw::DEFN, Defn),
         (kw::DEFMACRO, Defn),
@@ -611,6 +621,38 @@ fn check_fn_seeded(
     out: &mut Vec<(Option<Pos>, String)>,
     sig: Option<&crate::types::Sig>,
 ) {
+    // Multi-arity `fn` — `(fn ((a) …) ((a b) …))` — isn't one param list + body;
+    // each form (after an optional docstring) is a clause `(param-list body…)`.
+    // Bind *every* clause's params into one scope and walk every body. Over-binding
+    // (a param from clause N visible in clause M's body) only widens scope, so it
+    // can never manufacture a false positive — it just stops a param used in one
+    // clause from looking unbound. The sig seeding (single positional match) doesn't
+    // apply to a multi-arity callee, so it's dropped here.
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, items) {
+        let forms = &items[1..];
+        let forms = match forms.first() {
+            Some(Value::Str(_)) if forms.len() > 1 => &forms[1..],
+            _ => forms,
+        };
+        let mut scope = ctx.clone();
+        for &clause in forms {
+            if let Some(citems) = list_items(heap, clause) {
+                if let Some(&plist) = citems.first() {
+                    for p in fn_params(heap, plist) {
+                        scope = scope.bind(p, None);
+                    }
+                }
+            }
+        }
+        for &clause in forms {
+            if let Some(citems) = list_items(heap, clause) {
+                for &body_form in citems.get(1..).unwrap_or(&[]) {
+                    check_into(heap, body_form, &scope, out);
+                }
+            }
+        }
+        return;
+    }
     let Some(&params_form) = items.get(1) else {
         return;
     };
@@ -639,7 +681,7 @@ fn check_fn_seeded(
 fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
     let items = list_items(heap, form)?;
     match items.first()? {
-        &Value::Sym(s) if value::symbol_is(s, kw::FN) => Some(items),
+        &Value::Sym(s) if is_fn_head(s) => Some(items),
         _ => None,
     }
 }
@@ -847,6 +889,22 @@ fn check_let(
         while j < binds.len() {
             if let Value::Sym(name) = binds[j] {
                 scope = scope.bind(name, None);
+            }
+            j += 2;
+        }
+    } else {
+        // Plain `let` is sequential, but a binding whose RHS is a `fn`/`lambda`
+        // captures the let frame — the closure resolves its own binding name (and
+        // its fn-valued siblings) by late lookup when *called*, so a self- or
+        // mutually-recursive `let`-bound closure works at runtime. Pre-bind those
+        // names so the unbound check agrees. Only fn-valued names, and only widening
+        // scope, so an eager forward reference in a non-closure RHS still surfaces.
+        let mut j = 0;
+        while j < binds.len() {
+            if let Value::Sym(name) = binds[j] {
+                if fn_form_items(heap, binds[j + 1]).is_some() {
+                    scope = scope.bind(name, None);
+                }
             }
             j += 2;
         }

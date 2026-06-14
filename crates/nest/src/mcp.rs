@@ -800,12 +800,15 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         // A rope is editor-internal buffer text with no JSON shape; a tool that
         // wants its content should return `(rope->string r)` explicitly. A socket
         // is a live OS resource — likewise no JSON shape.
+        // A table is a live shared resource — no JSON shape; a tool that wants its
+        // contents should return `(table-snapshot t)` (a map) explicitly.
         Value::Fn(_)
         | Value::Macro(_)
         | Value::Native(_)
         | Value::Rope(_)
         | Value::Socket(_)
         | Value::Subprocess(_)
+        | Value::Table(_)
         | Value::Transient(_) => Err(format!(
             "value of kind {:?} has no JSON representation",
             value::tag(v)

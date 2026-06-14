@@ -20,6 +20,15 @@
 //!   which `if`-tests are recognisable guards, what an expression's type is.
 //! - [`walk`] — the recursive `check_into` and the per-special-form helpers
 //!   (`if`/`let`/`fn`/`def`/`defn`) plus `collect_def_names`.
+//! - [`annot`] — reads `(sig …)` declarations off the *un-expanded* tree, so a
+//!   user-declared signature seeds the checks for that name.
+//! - [`hygiene`] — the macro-hygiene lint: a `defmacro` template whose literal
+//!   binder can capture spliced caller code.
+//! - [`protocol`] — protocol / behaviour conformance: `defprotocol` /
+//!   `defbehaviour` / `defimpl` / `(:implements …)` checked for missing or
+//!   wrong-arity ops.
+//! - [`recursion`] — the non-tail self-recursion lint (deep non-tail recursion
+//!   overflows the green-process stack).
 //!
 //! ## Where signatures come from (Step 3)
 //!
@@ -1700,6 +1709,77 @@ mod tests {
         assert!(
             w.iter().all(|s| !s.contains("callback")),
             "a 1-arg lambda must not warn under map: {w:?}"
+        );
+    }
+
+    #[test]
+    fn lambda_head_behaves_like_fn() {
+        // `lambda` is a synonym for `fn` (and survives macro expansion as itself),
+        // so the callback-arity check must see through it exactly like `fn`.
+        let w = warnings("(map (lambda (a b) a) nil)");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
+            "map should flag a 2-arg `lambda` callback: {w:?}"
+        );
+        let w = warnings("(map (lambda (a) a) nil)");
+        assert!(
+            w.iter().all(|s| !s.contains("callback")),
+            "a 1-arg `lambda` must not warn under map: {w:?}"
+        );
+    }
+
+    #[test]
+    fn lambda_form_is_not_unbound() {
+        // Regression: `lambda` was missing from SPECIAL_HEAD / is_syntactic_keyword,
+        // so whole-file mode flagged the head AND its params as unbound symbols — a
+        // false positive on perfectly valid code.
+        let w = file_warnings("(def f (map (lambda (x) (+ x 1)) (list 1 2 3)))");
+        assert!(
+            w.iter().all(|m| !m.contains("unbound symbol")),
+            "a `lambda` literal must not draw unbound-symbol warnings: {w:?}"
+        );
+    }
+
+    #[test]
+    fn multi_arity_fn_clause_params_are_bound() {
+        // Regression: `check_fn` read a multi-arity fn's first clause as a param
+        // list, so a param used only in a *later* clause looked unbound — a false
+        // positive (it fired identically for `fn` and `lambda`).
+        let w = file_warnings("(def g (fn ((a) (* a 2)) ((a b) (+ a b))))");
+        assert!(
+            w.iter().all(|m| !m.contains("unbound symbol")),
+            "multi-arity fn clause params must not look unbound: {w:?}"
+        );
+        // `defn` (which expands to `(def name (fn …))`) and `lambda` too.
+        let w = file_warnings("(defn h ((a) a) ((a b) (+ a b)))");
+        assert!(w.iter().all(|m| !m.contains("unbound symbol")), "defn: {w:?}");
+        let w = file_warnings("(def k (lambda ((a) a) ((a b) (+ a b))))");
+        assert!(w.iter().all(|m| !m.contains("unbound symbol")), "lambda: {w:?}");
+    }
+
+    #[test]
+    fn self_recursive_let_bound_closure_is_bound() {
+        // Regression: a `let`-bound `fn`/`lambda` that calls its own binding name
+        // resolves at runtime (the closure captures the frame, late-binds on call),
+        // but the checker flagged the self-reference unbound. Pre-binding fn-valued
+        // let names fixes it — for `let` and `let*`, `fn` and `lambda`.
+        let w = file_warnings("(defn t () (let (fac (fn (n) (if (= n 0) 1 (fac n)))) (fac 5)))");
+        assert!(
+            w.iter().all(|m| !m.contains("unbound symbol: fac")),
+            "self-recursive let closure must not look unbound: {w:?}"
+        );
+        let w =
+            file_warnings("(defn t () (let* (fac (lambda (n) (if (= n 0) 1 (fac n)))) (fac 5)))");
+        assert!(
+            w.iter().all(|m| !m.contains("unbound symbol: fac")),
+            "self-recursive let* lambda must not look unbound: {w:?}"
+        );
+        // But an *eager* forward reference in a non-closure RHS still surfaces.
+        let w = file_warnings("(defn t () (let (a undefined-thing b 1) a))");
+        assert!(
+            w.iter().any(|m| m.contains("unbound symbol: undefined-thing")),
+            "an eager forward/undefined reference must still be flagged: {w:?}"
         );
     }
 

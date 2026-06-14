@@ -169,6 +169,12 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str(&id.to_string());
             out.push('>');
         }
+        Value::Table(id) => {
+            // A shared in-memory table — no readable literal (identity handle).
+            out.push_str("#<table ");
+            out.push_str(&id.to_string());
+            out.push('>');
+        }
         Value::Transient(id) => {
             // An identity-mutable build handle; no readable literal. Show its
             // entry count and whether it's still live (Clojure prints opaquely

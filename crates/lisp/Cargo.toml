@@ -28,6 +28,13 @@ dev-tools = []
 # The display *protocol* is unchanged Brood data (render ops); these just paint it
 # to a window instead of a terminal. See src/gui.rs and std/observer.blsp's `(observe)`.
 gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "clipboard"]
+# GPU rendering for the GUI window (OpenGL via glutin + glow), behind its OWN feature
+# so the default `gui` build stays on the CPU softbuffer path, byte-for-byte unchanged.
+# When on, it REPLACES softbuffer: instanced GPU quads for the cell/rect ops + an
+# immediate (non-vsync) swapchain — the win for high-cell-count sims (Game of Life),
+# where the CPU full-framebuffer present is the bottleneck. Text shaping (cosmic-text)
+# is unchanged; glyphs upload to a GL texture atlas (later increment).
+gui-gpu = ["gui", "dep:glow", "dep:glutin", "dep:glutin-winit", "dep:raw-window-handle"]
 # OS clipboard access (the `clipboard-get` / `clipboard-set!` builtins), via `arboard`.
 # Pulled in by `gui` (a windowed editor wants copy/paste with other apps), but its own
 # feature so it can be enabled alone. Without it the builtins are graceful no-ops
@@ -155,6 +162,14 @@ webpki-roots = "1"
 # `make clippy` lints `--all-features`, so a mismatch is caught at the gate.
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
+# Optional GPU backend (the `gui-gpu` feature). glutin creates a GL context on the
+# existing winit window via raw-window-handle 0.6 (the same rwh line winit 0.30 speaks),
+# glutin-winit bridges the two, and glow is the thin GL function loader. No vsync coupling:
+# the surface is set to an immediate swap interval. CPU `gui` builds link none of these.
+glow = { version = "0.16", optional = true }
+glutin = { version = "0.32", optional = true }
+glutin-winit = { version = "0.5", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 # OS clipboard (text only). `default-features = false` drops the `image-data` default
 # (no `image` crate pulled in); `wayland-data-control` adds Wayland support alongside the
 # always-built X11 backend, matching winit's dual support. See the `clipboard` feature.

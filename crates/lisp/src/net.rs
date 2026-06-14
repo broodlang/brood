@@ -103,6 +103,16 @@ fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Sock>> {
 /// are never reaped.
 const ACCEPT_REAP_AFTER: Duration = Duration::from_secs(30);
 
+/// Cap how long a single blocking `tcp-send` may stall before it fails instead of
+/// pinning its scheduler worker indefinitely (a slow-/stuck-reader back-pressure DoS).
+/// Reads are offloaded to dedicated threads (ADR-059); writes still run on the calling
+/// worker, so a stuck write is bounded here. A timed-out write leaves the stream
+/// desynced, so the caller must close on the error (the framework's send paths do). The
+/// complete fix — offloading writes to a per-socket writer thread — is larger: it must
+/// drain queued writes before close, else `tcp-send` then `tcp-close` would truncate the
+/// response. Tracked in hatch's docs/tcp-http-audit.md #1.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Drop every passive, unclaimed accepted socket older than [`ACCEPT_REAP_AFTER`].
 /// Called on each accept tick (cheap: it only inspects entries, and there's an
 /// accept tick exactly when new entries appear). Shutting the stream down here
@@ -193,7 +203,7 @@ fn start_reader(
                     sink.emit(tcp_closed_msg(id));
                     break;
                 }
-                Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n], binary.load(Ordering::Relaxed))),
+                Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n], binary.load(Ordering::Acquire))),
                 Err(_) => {
                     sink.emit(tcp_closed_msg(id));
                     break;
@@ -213,6 +223,8 @@ fn accept_loop(
     while alive.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Bound blocking writes on the accepted stream (see WRITE_TIMEOUT).
+                let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
                 // Register the accepted stream **passive** (no reader yet) and
                 // announce it; the owner calls `tcp-controlling-process` to start
                 // reading. Avoids losing early bytes before a handler takes over.
@@ -257,6 +269,8 @@ fn accept_loop(
 /// inbound data to `subscriber`. Returns the socket id.
 pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
     let stream = TcpStream::connect((host, port))?;
+    // Bound blocking writes (see WRITE_TIMEOUT) — applies to the write clone too (same fd).
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let reader = stream.try_clone()?;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let binary = Arc::new(AtomicBool::new(false));
@@ -340,7 +354,10 @@ pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
     let reg = reg();
     match reg.get(&id) {
         Some(Sock::Stream { binary, .. }) => {
-            binary.store(on, Ordering::Relaxed);
+            // Release so the reader thread's Acquire load (in `start_reader`) is
+            // guaranteed to observe this flip — the binary-mode switch must be visible
+            // to the reader before it decodes the next inbound chunk.
+            binary.store(on, Ordering::Release);
             Ok(())
         }
         Some(Sock::Listener { .. }) => Err(invalid(

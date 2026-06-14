@@ -158,7 +158,10 @@ pub enum Op {
         col0: u16,
         w: u32,
         aspect: u16,
-        bits: num_bigint::BigInt,
+        /// The board's set bits as little-endian bytes (bit `y*w+x` = byte `i/8` bit `i%8`).
+        /// Decoded once at parse time from EITHER a bignum or a `bitset`, so the paint path
+        /// is representation-agnostic — a plain set-bit byte scan.
+        bytes: Vec<u8>,
         color: Option<[u8; 3]>,
     },
 }
@@ -818,8 +821,13 @@ mod backend {
     struct Win {
         window: Rc<Window>,
         // Keeps the softbuffer display connection alive for `surface`'s lifetime.
+        #[cfg(not(feature = "gui-gpu"))]
         _context: softbuffer::Context<Rc<Window>>,
+        #[cfg(not(feature = "gui-gpu"))]
         surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+        // GPU backend (feature "gui-gpu") replaces the softbuffer surface above.
+        #[cfg(feature = "gui-gpu")]
+        gl: crate::gui_gpu::GlWindow,
         renderer: Renderer,
         size: Arc<Mutex<(u16, u16)>>,
         /// The process this window's input is delivered to (its mailbox).
@@ -880,10 +888,14 @@ mod backend {
             )
             .map_err(|e| format!("window: {e}"))?;
         let window = Rc::new(window);
+        #[cfg(not(feature = "gui-gpu"))]
         let context = softbuffer::Context::new(window.clone())
             .map_err(|e| format!("softbuffer context: {e}"))?;
+        #[cfg(not(feature = "gui-gpu"))]
         let surface = softbuffer::Surface::new(&context, window.clone())
             .map_err(|e| format!("softbuffer surface: {e}"))?;
+        #[cfg(feature = "gui-gpu")]
+        let gl = crate::gui_gpu::GlWindow::new(window.clone())?;
         let mut renderer = Renderer::new(window.scale_factor(), families, base_px);
         // honour a global default family set before this window opened
         if let Some(f) = default_family {
@@ -893,8 +905,12 @@ mod backend {
         renderer.set_inset(default_inset);
         Ok(Win {
             window,
+            #[cfg(not(feature = "gui-gpu"))]
             _context: context,
+            #[cfg(not(feature = "gui-gpu"))]
             surface,
+            #[cfg(feature = "gui-gpu")]
+            gl,
             renderer,
             size: Arc::new(Mutex::new((80, 24))),
             subscriber,
@@ -1418,7 +1434,11 @@ mod backend {
                     }
                 }
                 WindowEvent::RedrawRequested => {
-                    paint(&mut w.surface, &w.window, &mut w.renderer, &w.frame)
+                    #[cfg(not(feature = "gui-gpu"))]
+                    paint(&mut w.surface, &w.window, &mut w.renderer, &w.frame);
+                    #[cfg(feature = "gui-gpu")]
+                    w.gl
+                        .paint(&w.frame, w.renderer.cell_w, w.renderer.cell_h, w.renderer.inset());
                 }
                 _ => {}
             }
@@ -2348,23 +2368,27 @@ mod backend {
                         }
                     }
                 }
-                Op::Cells { row0, col0, w, aspect, bits, color } => {
-                    // Enumerate the bitboard's set bits (O(live), like `bit-positions`):
-                    // pull the lowest set bit, fill its cell, clear it, repeat. Each cell
-                    // is an `aspect`-wide × 1-tall block of screen cells.
+                Op::Cells { row0, col0, w, aspect, bytes, color } => {
+                    // Enumerate set bits by a single byte scan — O(bytes + live), and the
+                    // same code whether the board came in as a bignum or a bitset.
+                    // Each cell is an `aspect`-wide × 1-tall block of screen cells.
                     if let Some(rgb) = color {
                         let packed = pack(*rgb);
                         let asp = (*aspect).max(1) as usize;
                         let cell_w = asp * cw; // a board cell spans `aspect` screen cells
-                        let wmod = (*w).max(1) as u64;
-                        let mut mag = bits.magnitude().clone();
-                        while let Some(i) = mag.trailing_zeros() {
-                            let x = (i as u64 % wmod) as usize;
-                            let y = (i as u64 / wmod) as usize;
-                            let left = inset + (*col0 as usize + x * asp) * cw;
-                            let top = inset + (*row0 as usize + y) * ch;
-                            fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
-                            mag.set_bit(i, false);
+                        let wmod = (*w).max(1) as usize;
+                        for (bi, &byte) in bytes.iter().enumerate() {
+                            let mut b = byte;
+                            let base = bi * 8;
+                            while b != 0 {
+                                let bit = base + b.trailing_zeros() as usize;
+                                let x = bit % wmod;
+                                let y = bit / wmod;
+                                let left = inset + (*col0 as usize + x * asp) * cw;
+                                let top = inset + (*row0 as usize + y) * ch;
+                                fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
+                                b &= b - 1;
+                            }
                         }
                     }
                 }

@@ -91,8 +91,9 @@ a binding is made, it never changes. Concretely:
 - **Mutable state, when truly needed, is never a mutable `Value`.** It takes one
   of two shapes: a **process** holding evolving state in its receive-loop (the
   Erlang model), or a **Rust-backed opaque resource handle** exposed through
-  primitives (e.g. the coming rope/buffer, like a file handle) — mutation hidden
-  behind the kernel, never aliasable Lisp data.
+  primitives (the rope/buffer, or the [`table`](#in-memory-tables-broods-ets) store
+  below — like a file handle) — mutation hidden behind the kernel, never aliasable
+  Lisp data.
 
 **Why it pays off.** Immutability removes the entire shared-mutable-aliasing bug
 class and reinforces every other pillar of the system: the tracing GC needs no
@@ -103,6 +104,50 @@ also shrinks the core — two fewer special forms (`set!`, `while`). See
 [ADR-026](decisions.md) for the full rationale and trade-offs (e.g. repeated
 immutable `assoc`/`append` is O(n²); `reduce`/`fold` and future persistent
 structures are the mitigations).
+
+## In-memory tables (Brood's ETS)
+
+A `table` is shared, concurrently-mutable key→value state — Brood's answer to
+Erlang's ETS (ADR-107). It's the escape hatch for the case immutable maps and
+message-passing don't cover well: state that **many processes read and write
+directly**, without routing every access through one owning process's mailbox. It is
+a Rust-backed opaque handle (genuine mutable state, never a mutable `Value`):
+
+```clojure
+(def t (table))                  ; create — returns an opaque handle
+(table-put t :hits 0)            ; store (overwrites); returns t
+(table-get t :hits)              ; => 0   (a fresh copy)
+(table-get t :missing :default)  ; => :default
+(table-has? t :hits)             ; => true
+(table-incr t :hits)             ; => 1   (atomic; default delta 1)
+(table-incr t :hits 10)          ; => 11
+(table-count t)                  ; => 1
+(table-snapshot t)               ; => {:hits 11}  (an immutable map)
+(table-delete t :hits)
+(table-drop t)                   ; free it (else it lives till runtime exit)
+```
+
+How it behaves, and why it's safe:
+
+- **Shared by identity, like a pid.** The handle can be `send`'d to (or captured by)
+  other processes; every copy names the **same** store. `=` and `table?` compare by
+  identity — two tables with equal contents are not `=`.
+- **Copy-in / copy-out.** `table-put` stores a **deep clone** of the key and value;
+  `table-get` returns a **fresh copy** into the caller. So no two processes ever alias
+  a stored value (exactly ETS semantics), and the store is invisible to the garbage
+  collector — it can't corrupt across a collection.
+- **Keys are structural**, identical to map keys (`[1 2]`, `:k`, `"s"`, `42` all
+  work).
+- **`table-incr` is atomic** — a lock-held read-modify-write, so concurrent counters
+  never lose an update. (There is deliberately no closure-based `update`: running
+  arbitrary code under the lock can't be made safely atomic. For other atomic needs,
+  serialize through a process.)
+- **`table-snapshot`** is a consistent point-in-time map — unaffected by later
+  mutation — and your enumeration primitive: use ordinary map ops (`keys`, `vals`,
+  `reduce`) on it.
+- **Local to the runtime.** A table can't cross a node link (send its
+  `table-snapshot` — a plain map — instead). It lives until `table-drop` or runtime
+  exit (no owner-death cleanup yet).
 
 ## Maps
 
@@ -192,8 +237,8 @@ eagerly). They are reserved names.
 | `(if test then else?)` | Evaluate `then` if `test` is truthy, else `else` (or `nil`). |
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
-| `(fn (params) body...)` | A lexical closure. |
-| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). |
+| `(fn (params) body...)` | A lexical closure. `lambda` is an exact synonym. |
+| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). `let*` is an exact synonym (Brood's `let` is already sequential). |
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 | `(defmacro name (params) body...)` | Define a macro (see below). |
@@ -1350,6 +1395,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `working-dir`, `host`, `halt` |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2`, `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
 | `std/agent.blsp` | `'agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
+| `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`:
 
@@ -1366,3 +1412,54 @@ The following modules are also opt-in and live under `std/net/` and `std/tool/`:
 (require 'log)        ; structured logging
 (require 'task)       ; promise-style async tasks over processes
 ```
+
+### Telemetry (`require 'telemetry`)
+
+An Erlang-`:telemetry`-style instrumentation seam (ADR-106), written in Brood. Code
+**emits** a named event with a measurements map and a metadata map; **handlers**
+attached to that event run on each emit — but in an **isolated listener process**, so
+a handler can never affect the emitting process:
+
+```clojure
+(require 'telemetry)
+(start-telemetry)                                  ; spawn the listener once; supervise it
+
+(attach :access-log [:http :request :stop]         ; id, event, handler
+  (fn (event measurements metadata)
+    (log-info (str (get metadata :method) " " (get metadata :path)
+                   " → " (get metadata :status) " (" (get measurements :duration) "ms)"))))
+
+;; Bracket work in a span: emits [:http :request :start] before, and either
+;; [:http :request :stop] {:duration ms} on success or [:http :request :exception]
+;; on a throw (then re-raises). Returns the body's value.
+(span [:http :request] {:method "GET" :path "/"}
+  (handle-request req))
+
+;; Or emit a bare event yourself:
+(emit [:cache :hit] {:count 1} {:key k})
+```
+
+The defining property — **telemetry can never crash the emitting process, only the
+listener**:
+
+- **Handlers run in a dedicated listener process.** `emit` is a fire-and-forget
+  `send` to it, so a handler that throws, hangs, loops, or even hard-`exit`s can
+  never crash or slow the process that emitted the event (e.g. a web-request
+  process). The only casualty of a buggy handler is the listener — and a *throwing*
+  handler doesn't even do that: the listener catches it and **detaches** it. An
+  *uncatchable* fault (stack overflow, `(exit … :kill)`) kills only the listener;
+  **supervise it** (it's an ordinary `:permanent` child) and it restarts with the
+  handler table intact (the table is a separate global, ADR-013).
+- **The trade-off vs. Erlang.** Erlang runs handlers inline in the caller (fast, but
+  a bad handler degrades the caller). Brood chooses total emitter isolation, at the
+  cost of one listener as a serialization point. Keep handlers cheap, or use
+  `(forward id event pid)` to ship events to a process you own and do the heavy work
+  there.
+- **Events are plain Brood values** compared by structural `=` — a keyword
+  (`:request`) or, Erlang-style, a vector of keyword segments
+  (`[:http :request :stop]`).
+- **Zero-cost when off.** `emit` with no listener started is a cheap no-op.
+- `telemetry-sync` flushes (a FIFO round-trip) — handy in tests and before shutdown.
+
+`attach`/`detach` update a shared global, so call them at startup, not concurrently
+from many processes (configuration-time, as in Erlang). See `std/telemetry.blsp`.

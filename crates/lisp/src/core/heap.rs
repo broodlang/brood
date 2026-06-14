@@ -243,6 +243,7 @@ fn tag_rank(v: Value) -> u8 {
         Value::Socket(_) => 15,
         Value::Subprocess(_) => 16,
         Value::Transient(_) => 17,
+        Value::Table(_) => 18,
     }
 }
 
@@ -3522,6 +3523,12 @@ impl Heap {
                 18u8.hash(h);
                 id.hash(h);
             }
+            Value::Table(id) => {
+                // Identity-hashed (tag 20; a table is shared mutable state addressed
+                // by its registry handle, like a socket — compared by identity).
+                20u8.hash(h);
+                id.hash(h);
+            }
         }
     }
 
@@ -3625,6 +3632,10 @@ impl Heap {
             (Socket(x), Socket(y)) => x == y,
             // Subprocesses are identity values — equal iff the same registry handle.
             (Subprocess(x), Subprocess(y)) => x == y,
+            // Tables are shared mutable state — equal iff the same registry handle
+            // (the same store), like a pid. Two distinct tables never compare equal,
+            // even with equal contents (identity, not value).
+            (Table(x), Table(y)) => x == y,
             // Transients are identity-mutable: equal iff the same handle (like a
             // closure). Two distinct transients are never `=`, even with equal
             // contents — mutating one mustn't make the other "change".

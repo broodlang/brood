@@ -429,6 +429,9 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 (defn rope? (x)
   "True if `x` is a rope (editor buffer text from `string->rope`)."
   (%eq (type-of x) :rope))
+(defn table? (x)
+  "True if `x` is an in-memory table (from `(table)`) — Brood's shared mutable ETS store."
+  (%eq (type-of x) :table))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive)."
@@ -2085,17 +2088,10 @@ search rides on."
     (%string-join sep coll)
     (if (empty? coll) "" (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil)))))))
 
-(defn string-split--acc (s sep acc)
-  (let (i (index-of s sep))
-    (if (< i 0)
-      (reverse (cons s acc))
-      (string-split--acc (substring s (+ i (string-length sep)) (string-length s))
-        sep
-        (cons (substring s 0 i) acc)))))
-(defn string-split (s sep)
-  "Split `s` into a list of substrings on each occurrence of `sep`. An empty
-separator splits `s` into its individual characters."
-  (if (= sep "") (string->list s) (string-split--acc s sep nil)))
+;; `string-split` is now a native builtin (crates/lisp/src/builtins.rs) — one O(n)
+;; pass via Rust's `str::split`. The former pure-Brood version re-`substring`ed the
+;; tail each step, which is O(n²) (char-indexed substring is O(index)); a 174 KB
+;; `git ls-files` output took ~840 ms in the editor's project scan, now ~10 ms.
 
 (defn replace (s old new)
   "Return `s` with every occurrence of `old` replaced by `new`. An empty `old`

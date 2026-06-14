@@ -18,7 +18,7 @@ use crate::types::Ty;
 
 use super::ctx::Ctx;
 use super::sigs::sig_of;
-use super::walk::list_items;
+use super::walk::{is_fn_head, list_items};
 
 /// Names that have *syntactic* meaning but aren't bound values — never flag
 /// these as unbound. Mirrors `eval::SPECIAL_NAMES` plus the macros that the
@@ -36,6 +36,7 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::DO
             | kw::DEF
             | kw::FN
+            | kw::LAMBDA
             | kw::LET
             | kw::LETREC
             | kw::DEFMACRO
@@ -396,14 +397,14 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "keys") && items.len() == 2 {
         let map_arg = *items.get(1)?;
         if let Some((k, _)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
-            return Some(Ty::list_of(k.clone()).union(Ty::of(Tag::Nil)));
+            return list_result(Some(k.clone()));
         }
     }
     // `(vals m)` → `nil | list<V>`.
     if value::symbol_is(head, "vals") && items.len() == 2 {
         let map_arg = *items.get(1)?;
         if let Some((_, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
-            return Some(Ty::list_of(v.clone()).union(Ty::of(Tag::Nil)));
+            return list_result(Some(v.clone()));
         }
     }
     // `(assoc m k1 v1 …)` → `map<K, V>`, preserving the input's refinement.
@@ -493,7 +494,7 @@ fn lambda_ret(heap: &Heap, form: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opt
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
     };
-    if !value::symbol_is(head, kw::FN) {
+    if !is_fn_head(head) {
         return None;
     }
     // Exactly `(fn <param-list> <body>)` — one param list + one body expression.

@@ -393,9 +393,9 @@ closing delimiter has to break to its own line so it isn't swallowed."
 ;; Renders a list node `n` whose children are alternating name/value, breaking
 ;; to one pair per line when it doesn't fit. Continuation lines align under
 ;; the bindings list's first element (column = `indent + 1`, i.e. one past
-;; the opening `(`). Comments are preserved in place — a same-line trailing
-;; comment rides its pair's line, an own-line comment sits on its own line at
-;; the pair indent (the walker pairs name+value but never *across* a comment).
+;; the opening `(`). Comments are preserved — a same-line trailing comment is
+;; hoisted onto its own line *above* its pair, an own-line comment sits on its own
+;; line at the pair indent (the walker pairs name+value but never *across* a comment).
 (defn render-pair-list (n indent)
   (let (one (single-line n)
         keep-broken (had-author-newlines? n))
@@ -421,7 +421,7 @@ closing delimiter has to break to its own line so it isn't swallowed."
   ;; Walk kids, emitting one name+value pair per line and each comment in place.
   ;; `nl` tracks newlines since the last emitted item (so a blank line between
   ;; bindings survives). Mirrors render--body-pairs, but with no head, the pair
-  ;; indent for continuation lines, and same-line trailing comments kept inline.
+  ;; indent for continuation lines, and same-line trailing comments hoisted above.
   (if (= i n)
     acc
     (let (c (vector-ref kids i))
@@ -452,16 +452,24 @@ closing delimiter has to break to its own line so it isn't swallowed."
                    0
                    (str acc (render--pair-sep acc nl pair-ind false) arendr))
                  (let (brendr (render (vector-ref kids j) (+ pair-ind (string-length arendr) 1))
-                       line (str acc (render--pair-sep acc nl pair-ind false) arendr " " brendr)
+                       pair-body (str arendr " " brendr)
                        tc (trailing-comment-at kids (inc j) n))
                    (if (nil? tc)
-                     (render--pair-walk kids (inc j) n pair-ind 0 line)
+                     (render--pair-walk kids (inc j) n pair-ind 0
+                       (str acc (render--pair-sep acc nl pair-ind false) pair-body))
+                     ;; Hoist a same-line trailing comment onto its own line ABOVE the
+                     ;; pair (forced newline so it never lands right after `(`); the
+                     ;; pair then follows on its own line (nl 0).
                      (render--pair-walk kids
                        (inc tc)
                        n
                        pair-ind
-                       1
-                       (str line "  " (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
+                       0
+                       (str acc
+                         (render--pair-sep acc nl pair-ind true)
+                         (comment--strip-trailing-nl (node-text (vector-ref kids tc)))
+                         (render--pair-sep "x" 0 pair-ind false)
+                         pair-body))))))))))
 
 ;; ---- pair body emit (cond / case clauses) -----------------------------------
 ;; Like render--body but consumes two structural forms per emission, joined by
@@ -517,12 +525,12 @@ closing delimiter has to break to its own line so it isn't swallowed."
 (defn kids--next-nonws (kids i n)
   (cond (= i n) n (whitespace? (vector-ref kids i)) (kids--next-nonws kids (inc i) n) else i))
 
-;; "Trailing same-line comment" detection. After emitting a structural form at
-;; index `form-i`, peek through any following whitespace. If that whitespace
-;; contains no newline AND the next non-whitespace node is a comment, the
-;; comment was on the same line as the form in the source — we re-emit it
-;; alongside (two spaces + the comment text), instead of breaking it to its
-;; own line. Returns the index of that comment, or nil if there is none.
+;; "Trailing same-line comment" detection. After emitting a structural form,
+;; peek through any following whitespace. If that whitespace contains no newline
+;; AND the next non-whitespace node is a comment, the comment was on the same line
+;; as the form in the source. Each render site **hoists** such a comment onto its
+;; own line *above* the form (a trailing comment never stays after the code on the
+;; same line). Returns the index of that comment, or nil if there is none.
 (defn trailing-comment-at (kids start n) (trailing-comment-at--scan kids start n))
 (defn trailing-comment-at--scan (kids i n)
   (cond
@@ -562,21 +570,22 @@ closing delimiter has to break to its own line so it isn't swallowed."
                          (if (>= nl 2) "\n\n" "\n")
                          (indent-of body-ind)
                          (comment--strip-trailing-nl (node-text c))))
-        else (let (form-line (str acc
-                               (if (>= nl 2) "\n\n" "\n")
-                               (indent-of body-ind)
-                               (render c body-ind))
+        else (let (sep (if (>= nl 2) "\n\n" "\n")
+                   ind (indent-of body-ind)
+                   form-rendr (render c body-ind)
                    tc-idx (trailing-comment-at kids (inc i) n))
                (if (nil? tc-idx)
-                 (render--body--at kids (inc i) n body-ind 0 form-line)
+                 (render--body--at kids (inc i) n body-ind 0 (str acc sep ind form-rendr))
+                 ;; Hoist a same-line trailing comment onto its own line ABOVE the
+                 ;; form; the form is then the last emitted block (nl 0).
                  (render--body--at kids
                    (inc tc-idx)
                    n
                    body-ind
-                   1
-                   (str form-line
-                     "  "
-                     (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx)))))))))))
+                   0
+                   (str acc sep ind
+                     (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx)))
+                     "\n" ind form-rendr))))))))
 
 ;; ---- top-level walk ---------------------------------------------------------
 ;; `format-source src` parses src, renders the root, and ensures exactly one
@@ -616,15 +625,17 @@ closing delimiter has to break to its own line so it isn't swallowed."
                    n
                    0
                    (format-source--glue acc nl form-block))
+                 ;; Hoist a same-line trailing comment onto its own line ABOVE the
+                 ;; form; the form is then the last emitted block (nl 0).
                  (format-source--root--walk kids
                    (inc tc-idx)
                    n
-                   1
+                   0
                    (format-source--glue acc
                      nl
-                     (str form-block
-                       "  "
-                       (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))))))))))
+                     (str (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx)))
+                       "\n"
+                       form-block)))))))))
 
 (defn format-source--glue (acc nl block)
   (cond (= acc "") block (>= nl 2) (str acc "\n\n" block) else (str acc "\n" block)))
