@@ -937,6 +937,45 @@ fn try_steal(thief_wid: usize) -> Option<Box<Process>> {
     None
 }
 
+/// Test-only: when set, [`ensure_workers`] starts **no** OS worker threads, so a test
+/// can drive scheduling quanta synchronously and deterministically via
+/// [`test_drive_quanta`] (bounded by work units, not wall-clock). Inert (`false`) in
+/// every normal build — only the isolated preemption test sets it. A plain runtime
+/// `AtomicBool` (not `#[cfg(test)]`) because it is reached from an *integration* test,
+/// a separate crate that doesn't see the lib's `test` cfg; the one-time branch in
+/// `ensure_workers` is free in production (the flag is never set).
+static TEST_NO_WORKERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test-only: enable/disable [`TEST_NO_WORKERS`]. See [`test_drive_quanta`].
+#[doc(hidden)]
+pub fn set_test_no_workers(on: bool) {
+    TEST_NO_WORKERS.store(on, Ordering::SeqCst);
+}
+
+/// Test-only: synchronously run up to `max` scheduling quanta on the **calling** thread
+/// by popping worker 0's run queue and driving [`run_one`] (the real quantum logic,
+/// including the preempt → re-enqueue-at-the-back path). Returns the number of quanta
+/// actually run; stops early once the queue drains. This bounds a liveness test by
+/// **work units, not wall-clock**, so it is fully deterministic. Pair with
+/// [`set_test_no_workers`]`(true)` so no OS worker races the driving, and call it from a
+/// **fresh** thread (not the spawner's), so `run_one`'s per-quantum ctx install doesn't
+/// clobber the caller's process ctx / scheduling TLS.
+#[doc(hidden)]
+pub fn test_drive_quanta(max: usize) -> usize {
+    let mut ran = 0;
+    for _ in 0..max {
+        let next = crate::core::sync::lock(&WORKERS[0].0).pop_front();
+        match next {
+            Some(p) => {
+                run_one(p);
+                ran += 1;
+            }
+            None => break,
+        }
+    }
+    ran
+}
+
 /// Start the worker pool exactly once (on the first `spawn`).
 fn ensure_workers() {
     WORKERS_STARTED.call_once(|| {
@@ -945,6 +984,11 @@ fn ensure_workers() {
         // A later `set_max_parallel` won't resize the pool — sized once.
         let n = WORKERS.len();
         ACTIVE_WORKERS.store(n, Ordering::SeqCst);
+        // Test hook: skip starting OS workers so a test can drive quanta itself
+        // (`test_drive_quanta`). Inert in normal builds — the flag is never set.
+        if TEST_NO_WORKERS.load(Ordering::SeqCst) {
+            return;
+        }
         // A process body runs directly on its worker thread (ADR-100 §8.4 — no coroutine
         // stack), and nested native / tree-walked sub-calls recurse here, so the worker
         // stack must be at least `stack_budget`'s reference size (`WORKER_STACK_BYTES`),
