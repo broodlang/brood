@@ -32,6 +32,16 @@ pub fn completions(
     text: &str,
     offset: u32,
 ) -> Vec<CompletionItem> {
+    // Module-name context: inside `(require '…)` or a `(:use …)`/`(:alias …)`
+    // clause the only sensible candidates are requireable modules — offer those
+    // alone (a generic `+`/`if`/local would be noise there).
+    if in_module_name_position(cst, offset, text) {
+        return introspect::loadable_modules(interp)
+            .into_iter()
+            .map(|m| item(m, CompletionItemKind::MODULE))
+            .collect();
+    }
+
     let mut items = Vec::new();
     let mut seen = HashSet::new();
 
@@ -151,6 +161,48 @@ fn enclosing_defimpl(node: &Node, offset: u32, src: &str) -> Option<String> {
     None
 }
 
+/// True when byte `offset` sits where a **module name** belongs: an argument of
+/// `(require …)`, or the module slot of a `(:use …)`/`(:alias …)` clause (after the
+/// keyword, before any `:only`/`:as` marker). End-inclusive, so a cursor typing at
+/// the end of a still-open form counts as inside it.
+fn in_module_name_position(node: &Node, offset: u32, src: &str) -> bool {
+    let Some(list) = innermost_list(node, offset) else {
+        return false;
+    };
+    let mut forms = list.forms();
+    let Some(head) = forms.next() else {
+        return false;
+    };
+    match head.kind {
+        // `(require '…)` — any slot after the head symbol.
+        NodeKind::Symbol if head.text(src) == "require" => offset > head.span.end,
+        // `(:use mod …)` / `(:alias mod …)` — after the keyword, before a later
+        // `:only`/`:as`/`:refer` marker (so completing inside `:only [..]` doesn't
+        // offer modules).
+        NodeKind::Keyword if matches!(head.text(src), ":use" | ":alias") => {
+            offset > head.span.end
+                && !list
+                    .forms()
+                    .skip(1)
+                    .any(|f| f.kind == NodeKind::Keyword && f.span.end <= offset)
+        }
+        _ => false,
+    }
+}
+
+/// The innermost `List` whose span contains `offset` (end-inclusive), or `None`.
+fn innermost_list(node: &Node, offset: u32) -> Option<&Node> {
+    if offset < node.span.start || offset > node.span.end {
+        return None;
+    }
+    for child in &node.children {
+        if let Some(inner) = innermost_list(child, offset) {
+            return Some(inner);
+        }
+    }
+    (node.kind == NodeKind::List).then_some(node)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +268,50 @@ mod tests {
         );
         assert!(resolved.detail.unwrap().contains("(map "), "signature");
         assert!(resolved.documentation.is_some(), "doc");
+    }
+
+    #[test]
+    fn module_position_detection() {
+        // require argument, :use slot → module position; the head/keyword itself
+        // and an :only operand → not.
+        let chk = |src: &str, needle: &str| {
+            let root = cst::parse(src);
+            let at = src.find(needle).unwrap() as u32;
+            in_module_name_position(&root, at, src)
+        };
+        assert!(chk("(require 'foo)", "foo"));
+        assert!(chk("(defmodule a (:use foo))", "foo"));
+        assert!(chk("(defmodule a (:alias foo))", "foo"));
+        assert!(!chk("(require 'foo)", "require")); // on the head
+        assert!(!chk("(defmodule a (:use foo))", ":use")); // on the keyword
+        assert!(!chk("(defmodule a (:use foo :only [bar]))", "bar")); // past :only
+        assert!(!chk("(+ 1 2)", "+")); // ordinary call
+    }
+
+    #[test]
+    fn completes_module_names_in_require_and_use() {
+        // A module on the load-path is offered inside `(require '…)` and `(:use …)`,
+        // and the generic globals are suppressed there.
+        let dir = std::env::temp_dir().join(format!("brood_modcomp_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("greeter.blsp"), "(defmodule greeter)\n").unwrap();
+        let mut interp = Interp::new();
+        interp
+            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .unwrap();
+
+        for src in ["(require '", "(defmodule app (:use "] {
+            let root = cst::parse(src);
+            let tree = scope::analyze(&root, src);
+            let at = src.len() as u32;
+            let labels: Vec<String> = completions(&mut interp, &tree, &root, src, at)
+                .into_iter()
+                .map(|i| i.label)
+                .collect();
+            assert!(labels.contains(&"greeter".to_string()), "module missing in {src:?}: {labels:?}");
+            assert!(!labels.contains(&"+".to_string()), "generic global leaked into {src:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
