@@ -50,6 +50,34 @@ pub fn global_names(interp: &mut Interp) -> Vec<String> {
     names
 }
 
+/// The ops a protocol/behaviour `proto` declares — `(op-name, arity)` per op — read
+/// from the runtime `*protocols*` registry that `defprotocol`/`defbehaviour`
+/// populate. Empty if the registry or the named interface isn't loaded. Drives
+/// `defimpl` op-completion in the LSP. Read-only (no allocation into LOCAL).
+pub fn protocol_ops(interp: &Interp, proto: &str) -> Vec<(String, usize)> {
+    let heap = &interp.heap;
+    let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern("*protocols*")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (key, specs) in heap.map_entries(id) {
+        let Value::Sym(s) = key else { continue };
+        if value::symbol_name(s) != proto {
+            continue;
+        }
+        // Each spec is `(op-name [args…] …)`: name + the arg vector's length.
+        for op in heap.list_to_vec(specs).unwrap_or_default() {
+            let items = heap.list_to_vec(op).unwrap_or_default();
+            if let (Some(&Value::Sym(name)), Some(&Value::Vector(vid))) =
+                (items.first(), items.get(1))
+            {
+                out.push((value::symbol_name(name), heap.vector(vid).len()));
+            }
+        }
+    }
+    out
+}
+
 /// The `(signature, docstring)` of a global `name`, via `(list (arglist NAME)
 /// (doc NAME))`. `name` is a CST symbol token, so it can't contain a delimiter,
 /// comment, or quote char (see [`is_delimiter`]) — interpolating it can't escape
