@@ -17,8 +17,11 @@
 (defn ex-echo () (receive (m (ex-echo))))  ; a receive loop (one iteration per message)
 
 (defn ex-down-reason (p m)
-  ; wait for p's :down, return its reason (or :TIMEOUT)
-  (receive ([:down ~m ~p r] r) (after 3000 :TIMEOUT)))
+  ; wait for p's :down, return its reason. Liveness — every caller asserts a real
+  ; reason (p IS killed/returns), so block rather than bound it with a wall-clock
+  ; (after …) that fires early under load; the runner's per-test watchdog is the
+  ; hang-guard if a real regression ever leaves p alive.
+  (receive ([:down ~m ~p r] r)))
 
 (describe "exit / kill signals"
   (test "hard :kill stops a tight CPU loop (caught at the reduction tick)"
