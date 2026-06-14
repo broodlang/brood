@@ -4059,10 +4059,24 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
                         // The `(defmodule …)` header is re-evaluated too (so the
                         // reloaded file's namespace + imports are re-established for
                         // its defs, ADR-065) — it's a `def…`-named macro, caught here.
+                        //
+                        // Resolve the head through the current namespace + imports
+                        // before the macro check, so a *module-qualified* definer
+                        // macro used bare (e.g. `deflive` from `(:use web/live)`,
+                        // bound as `web/live/deflive`, not in root) is still
+                        // recognised and re-evaluated. Without this, a `(deflive …)`
+                        // top-level form would be skipped and its defs never reload.
                         nm.starts_with("def")
                             && (nm == "def"
                                 || nm == "defmacro"
-                                || matches!(heap.env_get(root, s), Some(Value::Macro(_))))
+                                || {
+                                    let resolved =
+                                        crate::eval::macros::resolve_reference(heap, s);
+                                    matches!(
+                                        heap.env_get(root, resolved),
+                                        Some(Value::Macro(_))
+                                    )
+                                })
                     }
                     _ => false,
                 }
