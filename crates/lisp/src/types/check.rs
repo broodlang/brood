@@ -404,6 +404,37 @@ mod tests {
         assert!(!ws.iter().any(|w| w.contains("takes")), "{ws:?}");
     }
 
+    // ---- behaviour conformance: `(:implements …)` on a module ----
+
+    #[test]
+    fn behaviour_flags_a_missing_callback() {
+        let ws = file_warnings(
+            "(defbehaviour B (render [m]) (mount [p]))\n(defmodule foo (:implements B))\n(defn render (m) m)",
+        );
+        assert!(ws.iter().any(|w| w.contains("behaviour B: this module is missing `mount`")), "{ws:?}");
+    }
+
+    #[test]
+    fn behaviour_flags_an_arity_mismatch() {
+        let ws = file_warnings(
+            "(defbehaviour B (render [m]))\n(defmodule foo (:implements B))\n(defn render (m extra) m)",
+        );
+        assert!(ws.iter().any(|w| w.contains("`render` takes 2 arg(s), the behaviour needs 1")), "{ws:?}");
+    }
+
+    #[test]
+    fn behaviour_complete_module_is_clean() {
+        let ws = file_warnings(
+            "(defbehaviour B (render [m]))\n(defmodule foo (:implements B))\n(defn render (m) m)",
+        );
+        // No conformance diagnostic (the bare-interp "unbound symbol: defbehaviour"
+        // noise contains the substring "behaviour", so match the real messages).
+        assert!(
+            !ws.iter().any(|w| w.contains("module is missing") || w.contains("the behaviour needs")),
+            "{ws:?}"
+        );
+    }
+
     /// The non-tail-recursion lint (`recursion::check_recursion`) over a
     /// macroexpanded form — what `check-file`'s Pass 3.5 runs.
     fn recursion_warnings(src: &str) -> Vec<String> {

@@ -34,6 +34,18 @@
       (write-file p "12345")
       (assert= (file-size p) 5)
       (assert= (file-size (path-join (ftmp) "nope.txt")) nil)))
+  (test "file-stat reports size/dir?/symlink? in one map, nil when missing"
+    (let (d (ftmp)
+          f (path-join d "stat.txt")
+          _ (write-file f "12345")
+          sf (file-stat f)
+          sd (file-stat d))
+      (assert= (get sf :size) 5)
+      (refute (get sf :dir?))
+      (refute (get sf :symlink?))
+      (is (get sd :dir?))                                  ; the dir itself
+      (is (number? (get sf :mtime)))                       ; epoch-ms
+      (assert= (file-stat (path-join d "nope.txt")) nil))) ; missing → nil
   (test "delete-file removes a file and is idempotent"
     (let (p (path-join (ftmp) "d.txt"))
       (write-file p "x")
