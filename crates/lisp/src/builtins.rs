@@ -2321,7 +2321,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("file-size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),
-    ("file-stat", &["path"], "Metadata for path in ONE stat as a map {:dir? :size :mtime :symlink? :exec? :mode :nlink :uid :gid :owner :group}, or nil if missing. :symlink? reads the link itself (lstat); the rest follow it. :mtime is epoch-ms (nil if unreadable); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix); :nlink the hard-link count; :uid/:gid the numeric ids; :owner/:group their resolved names (the numeric id as a string if unresolved). Everything an `ls -l` row needs in one syscall (vs dir?+file-size+file-mtime)."),
+    ("file-stat", &["path"], "Metadata for path in ONE stat as a map {:dir? :size :mtime :atime :symlink? :exec? :mode :nlink :uid :gid :owner :group}, or nil if missing. :symlink? reads the link itself (lstat); the rest follow it. :mtime/:atime are epoch-ms last-modified/last-access (nil if unreadable; :atime may be coarse under relatime/noatime mounts); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix); :nlink the hard-link count; :uid/:gid the numeric ids; :owner/:group their resolved names (the numeric id as a string if unresolved). Everything an `ls -l` row + a recency sort needs in one syscall."),
     ("delete-file", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
     ("delete-dir", &["path"], "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure."),
     ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
@@ -7395,12 +7395,14 @@ fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // dangling symlink (so a broken link still lists rather than vanishing).
     let meta = std::fs::metadata(&path).unwrap_or(lmeta);
 
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| Value::Int(d.as_millis() as i64))
-        .unwrap_or(Value::Nil);
+    let epoch_ms = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| Value::Int(d.as_millis() as i64))
+            .unwrap_or(Value::Nil)
+    };
+    let mtime = epoch_ms(meta.modified());
+    let atime = epoch_ms(meta.accessed());
 
     #[cfg(unix)]
     let (mode, exec, nlink, uid, gid) = {
@@ -7421,6 +7423,7 @@ fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         (kw("dir?"), Value::Bool(meta.is_dir())),
         (kw("size"), Value::Int(meta.len() as i64)),
         (kw("mtime"), mtime),
+        (kw("atime"), atime),
         (kw("symlink?"), Value::Bool(symlink)),
         (kw("exec?"), Value::Bool(exec)),
         (kw("mode"), Value::Int(mode)),
