@@ -3087,3 +3087,68 @@ in both `dirty_block` and the drainer's retire path closes the symmetric race wi
 Result: `link_test`/`exit_test` pass 3/3 at `-j1..4` (and up), the repro 10/10 at
 `--max-parallel 1`; full suite + GC-stress green. Drainers are transient and bounded by the
 number of concurrent dirty-blocks, so steady-state thread count is unchanged.
+
+## 2026-06-15 — GradualTy gets its first consumer: gradual-assignment checking of `(def x …)` vs `(sig x T)`
+
+`GradualTy`/`consistent_with` were built-and-tested but **unconsumed** — referenced
+only by their own unit tests, with a standing "wire it in only when a real
+gradual-assignment consumer arrives" note. Rather than delete the island (the
+greenfield instinct), gave it the consumer the note asked for.
+
+A non-arrow `(sig x T)` declares a **value type** (previously grammar-accepted but
+dropped by the checker). The new check: `(def x <expr>)` must assign a value
+*consistent* with `T`. The design is what makes `GradualTy` actually earn its place
+over the existing `Option<Ty>` disjointness pass — **assignment uses consistent
+subtyping, not disjointness**:
+
+- A reference to a redefinable global with a declared type is `dynamic_within(t)` —
+  a *bounded dynamic* that `Option<Ty>` (only known/unknown) structurally can't
+  represent. So `(def count label)` with `label : string`, `count : int` is flagged
+  (`string ∩ int = ⊥`), where the disjointness pass — treating every global as an
+  untracked `None` — sees nothing.
+- A precise **literal** is `stat(t)` (checked with `⊆`): `(def n "hello")` against
+  `(sig n int)` flags.
+- An **over-approximated** value (a call result, a local) is `dynamic_within(t)`, so
+  consistency uses `∩ ≠ ⊥` and can't over-warn on a widened guess: `(def n (+ 1 2))`
+  against `int` *defers* (`number ∩ int ≠ ⊥`), not warns — no false positive. An
+  unknown global → pure `dynamic()` → always defers (hot-reload safe).
+
+Implementation: `annot::parse_value_sig_decl` (non-arrow sigs), `Ctx.declared_value_ty`,
+`walk::gradual_of` (the expression → `GradualTy` bridge) + the check in `check_def`.
+Project-wide `nest check` over `std/` + `tests/` stays at 3 (the intentional recursion
+lint) — zero new false positives. 120 checker unit tests, 279 lib, 2163 in-language —
+green. Updated the now-stale "unconsumed island" status notes in types.md /
+type-annotations.md / the check.rs module doc.
+
+This is the first slice of bucket B's gradual-typing work; return-type and
+declared-param assignment checks remain deferred (the return check needs the
+sound body inference ADR-011 still defers).
+
+## 2026-06-15 — Gradual typing, slice 2: return-type checking + declared globals in value position
+
+Two more `GradualTy`-backed checks on top of the `(def x …)` assignment check, both
+FP-clean across `std/` + `tests/` (project-wide `nest check` stays at 3 — the
+intentional recursion lint).
+
+**Return-type checking.** A `(sig f (P… -> R))` now also checks that the body's last
+form yields a value *consistent* with `R`. Reuses `gradual_of`, so the soundness is the
+same: an over-approximated body (a call) is `dynamic_within(t)` and the `∩` relation
+only warns on a body type provably disjoint from `R` — `(sig f (int -> string))` with
+body `(+ x 1)` flags (`number ∩ string = ⊥`), while `(sig inc (int -> int))` with the
+same body *defers* (`number ∩ int ≠ ⊥`), no false positive. A precise literal body uses
+`⊆`. Threaded the function name through `check_fn_seeded` for the diagnostic
+(`f: declared return type string but the body yields number`). Single-clause sig'd fns
+only (multi-arity return checking deferred).
+
+**Declared globals in value position.** `expr_ty` for a bare global now falls back to a
+`(sig g T)` value-type declaration, so `g`'s declared type flows into the disjointness
+check: `(string-length g)` with `(sig g int)` is flagged, and it threads through a `let`
+binding too. A redefinable global is still only ever warned on a *provable* mismatch
+with its declared (contract) type and deferred on overlap — exactly `dynamic(T)`'s
+behaviour, honouring contract #4; a lexical local shadows it.
+
+`walk::gradual_of` is now the shared expression→`GradualTy` bridge for all three
+gradual checks. 123 checker unit tests, 282 lib, 2163 in-language — green. Still deferred
+(ADR-011): branchy-body inference for *precise* return types (today's return check is
+disjointness-sound but can't catch a body merely *wider* than R), and gradual
+intersection/negation.
