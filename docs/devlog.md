@@ -2709,3 +2709,43 @@ commits landed on `main` first and are equivalent/better, so the local fix was
 dropped on rebase.) Full suite green (609). The async `remote-spawn` already worked;
 only the capturing + promoted path was broken, which is why the regression hid
 behind the sync variant and the position-reflection test.
+
+## 2026-06-14 — atomic spawn-link: a real supervisor bug behind a flaky test
+
+Chasing a flaky test (`supervisor: a transient child is NOT restarted after a clean
+:normal exit`, intermittent under load) turned up a genuine concurrency bug. Confirmed
+it standalone in isolation (so not cross-test leakage): under 12-core load, **17/300**
+runs spuriously restarted a `:transient` child that exited `:normal`. Adding a 30 ms
+delay before the exit made it 300/300 clean — so the trigger is a child exiting
+*during/just-after startup*.
+
+Root cause: `supervisor--start-child` does `pid (start)` then `(link pid)` — a
+**spawn→link gap**. A child that exits in the gap is already dead when linked, and the
+kernel's `link`-on-a-dead-pid delivers `[:EXIT pid :noproc]` (the real reason is lost);
+`:noproc ≠ :normal`, so `supervisor--restartable?` fires the `:transient` restart. The
+`link` test had the identical race (`(spawn :ok)` then `link` → `:noproc` 3/80 under
+load) and `dynamic_test` the `monitor` analogue — three symptoms of one missing kernel
+primitive.
+
+Fix — **atomic `spawn-link`** (Erlang `spawn_link`): register the parent↔child link
+*before* the child is enqueued, so it can't exit before the link exists and its true
+exit reason is always delivered.
+- `scheduler.rs`: `spawn_linked` / `spawn_impl(link_parent)` calls `links::link`
+  (idempotent) right after the `REGISTRY` insert, before `enqueue`.
+- `builtins.rs`: `%spawn-link`; the `spawn-link` macro (prelude) now lowers to it
+  (was a non-atomic spawn-then-link, with the same gap its own docstring admitted).
+- `supervisor.blsp`: documents that supervised children's `:start` should `spawn-link`
+  (the Erlang convention) — examples updated.
+
+Tests hardened to the race-free pattern (and the redundant wall-clock `(after N)`
+liveness guards dropped — the runner's 120 s per-test watchdog is the real hang-guard):
+`supervisor_test` (per-test tagged `[:up]` streams + `spawn-link` specs), `link_test`
+(the `:normal` peer waits for `:go`; the survivor child uses `spawn-link`), `dynamic_test`
+(the crasher waits for `:go` so the monitor lands before it dies).
+
+Verified: supervisor 300/300 `:none` under load; supervisor + link 0 flakes across many
+suite-under-load iterations; full workspace 609/0 under normal load. **Not yet done:**
+other concurrency tests still show wall-clock timing-fragility under *pathological*
+12-core saturation (e.g. the nested-sub-supervisor teardown cascade) — same class, a
+separate test-hardening sweep; the suite is clean under normal CI and the underlying
+kernel race is gone.
