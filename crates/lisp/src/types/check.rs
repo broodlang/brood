@@ -1742,6 +1742,34 @@ mod tests {
     }
 
     #[test]
+    fn unexpandable_macro_calls_dont_false_flag() {
+        // A file-local macro the checker can't expand: its arguments are opaque
+        // syntax. (a) A macro that `def`s its symbol arg — the name must not look
+        // unbound later. (b) A macro that splices an arg into a binder — the
+        // spliced names must not look unbound.
+        let a = file_warnings(
+            "(defmacro mk (n) `(def ~n (fn (x) x))) (mk qf) (qf 5)",
+        );
+        assert!(
+            a.iter().all(|m| !m.contains("unbound symbol")),
+            "a macro-defined name must not look unbound: {a:?}"
+        );
+        let b = file_warnings(
+            "(defmacro wp (v & body) `(let ((a b) ~v) ~@body)) (wp [1 2] (+ a b))",
+        );
+        assert!(
+            b.iter().all(|m| !m.contains("unbound symbol")),
+            "names a macro splices into a binder must not look unbound: {b:?}"
+        );
+        // A genuine typo under a *known* (arg-evaluating) callee is still flagged.
+        let c = file_warnings("(println (genuine-typo 5))");
+        assert!(
+            c.iter().any(|m| m.contains("unbound symbol: genuine-typo")),
+            "a real unbound call head must still be flagged: {c:?}"
+        );
+    }
+
+    #[test]
     fn transient_is_a_valid_count_and_contains_arg() {
         // count/length/contains? dispatch to transient-* kernel hooks at runtime, so
         // a live transient is a valid argument — the sigs must admit Tag::Transient.

@@ -200,6 +200,23 @@ fn evaluates_args(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     }
 }
 
+/// True when call head `s` resolves to a **macro the checker did not expand** — a
+/// file-local `defmacro` (single-file mode, or one defined inside a deferred
+/// `test`/`describe` thunk) or a `Value::Macro` in the heap. A lexical local
+/// shadows any such name, so it isn't a macro then.
+///
+/// Such a call's arguments are *opaque syntax*: a macro may quote them, splice
+/// them into a binder, or `def` a symbol argument — none of which is evaluated
+/// code. So the walk must not descend into them (it would false-flag a template
+/// like `(let ((a b) v) (+ a b))`'s spliced `(+ a b)`). Only a macro the compile
+/// pass *couldn't* expand reaches the walk, so the lost coverage is inherent.
+fn resolves_to_macro(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
+    if ctx.is_lexical_local(s) {
+        return false;
+    }
+    ctx.is_file_macro(s) || matches!(heap.env_get(heap.global(), s), Some(Value::Macro(_)))
+}
+
 /// Flag a bare-symbol form sitting in an evaluated *value* position when it's
 /// unbound, attributing the warning to `parent` (the enclosing call / `def` /
 /// `if` / `let` form the reader positioned — a bare operand symbol carries no
@@ -300,7 +317,18 @@ pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
     }
     if value::symbol_is(head, kw::DEF) || value::symbol_is(head, kw::DEFMACRO) {
         if let Some(&Value::Sym(name)) = items.get(1) {
-            ctx.add_file_global(name);
+            // Tag a macro definition (so the walk treats its calls' arguments as
+            // opaque syntax); a plain `def` is just a global. `defmacro` lowers to
+            // `(def name (%make-macro …))` in the *expanded* tree, so detect the
+            // value shape too — the bare `defmacro` head only survives on the
+            // un-expanded fragment path.
+            let is_macro_def = value::symbol_is(head, kw::DEFMACRO)
+                || items.get(2).is_some_and(|&v| is_make_macro_form(heap, v));
+            if is_macro_def {
+                ctx.add_file_macro(name);
+            } else {
+                ctx.add_file_global(name);
+            }
             // If the value is a variadic `fn` (a `&` rest param), record it so a
             // later fixed-arity `(sig …)` declaration isn't misread as an exact
             // arity for a variadic callee (a false positive). A sig that itself
@@ -312,10 +340,31 @@ pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
                 ctx.mark_variadic_global(name);
             }
         }
+    } else if ctx.is_file_macro(head) {
+        // A call to a file-local macro the checker can't expand (single-file mode,
+        // or a macro defined in a deferred `test` thunk). A bare-symbol argument may
+        // be a name the macro *defines* — `(pm-def-fac pm-qfac)` → `pm-qfac` — so
+        // record those as file-globals; a later reference then isn't flagged
+        // unbound. Sound: this only widens the bound set, never adds a warning. The
+        // macro's source order puts its `defmacro` before this use, so it's already
+        // in `file_macros` by now.
+        for &arg in &items[1..] {
+            if let Value::Sym(s) = arg {
+                ctx.add_file_global(s);
+            }
+        }
     }
     for &item in &items[1..] {
         collect_def_names(heap, item, ctx);
     }
+}
+
+/// Is `form` a `(%make-macro …)` combination — the value a `defmacro` lowers to
+/// once expanded? Recognises a file-local macro definition in the expanded tree
+/// (where the `defmacro` head is gone, replaced by `(def name (%make-macro …))`).
+fn is_make_macro_form(heap: &Heap, form: Value) -> bool {
+    matches!(list_items(heap, form).as_deref(),
+        Some([Value::Sym(h), ..]) if value::symbol_is(*h, "%make-macro"))
 }
 
 /// Does the value form of a `def` resolve to a **variadic** `fn`/`lambda` — one
@@ -594,9 +643,16 @@ pub(super) fn check_into(
         }
     }
 
-    // Recurse: arguments (and any nested forms) may themselves be calls.
-    for &item in &items {
-        check_into(heap, item, ctx, out);
+    // Recurse into arguments (and nested forms) — unless the head is an
+    // unexpandable macro, whose operands are opaque syntax, not evaluated code
+    // (see `resolves_to_macro`). Walking a macro's args as code would false-flag a
+    // template's spliced binders (`(wp v (+ a b))` where `wp` binds `a`/`b`).
+    let head_is_macro =
+        matches!(items.first(), Some(&Value::Sym(s)) if resolves_to_macro(heap, ctx, s));
+    if !head_is_macro {
+        for &item in &items {
+            check_into(heap, item, ctx, out);
+        }
     }
 }
 
