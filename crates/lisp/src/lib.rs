@@ -29,6 +29,8 @@ pub mod cli_support; // tiny mechanism the `brood` and `nest` binaries share
 pub mod dist; // distributed nodes: connect two runtimes over TCP, route messages
 pub mod error; // errors + source positions (cross-cutting)
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
+#[cfg(feature = "gui-gpu")]
+pub mod gui_gpu; // optional GPU (OpenGL) render backend for `gui` — feature "gui-gpu"
 pub mod introspect; // tooling-facing queries on a live Interp (LSP today, MCP next)
 #[cfg(feature = "jit")]
 pub mod jit; // tier-1 template JIT via Cranelift (feature "jit") — ADR-101, docs/value-repr.md
