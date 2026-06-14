@@ -1452,6 +1452,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "file-stat",
+        Arity::exact(1),
+        Sig::new(vec![string], map_ty.union(nil_ty)),
+        file_stat,
+    );
+    def(
+        heap,
         "delete-file",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
@@ -2305,6 +2312,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("file-size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),
+    ("file-stat", &["path"], "Metadata for path in ONE stat as a map {:dir? :size :mtime :symlink? :exec? :mode}, or nil if missing. :symlink?/:mode read the link itself (lstat); :dir?/:size/:mtime follow it. :mtime is epoch-ms (nil if unreadable); :exec? is the owner-execute bit; :mode is the unix permission bits (0 off-unix). One syscall replaces dir?+file-size+file-mtime when listing a directory."),
     ("delete-file", &["path"], "Remove the file at path. Idempotent (nil if already absent); errors on a real I/O failure."),
     ("delete-dir", &["path"], "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure."),
     ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
@@ -7358,6 +7366,52 @@ fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         return Ok(Value::Nil);
     };
     Ok(Value::Int(since.as_millis() as i64))
+}
+
+/// `(file-stat path)` — one `stat` for `path` as a map, or `nil` if it is missing.
+/// Collapses the `dir?` / `file-size` / `file-mtime` trio (each its own syscall)
+/// into a single metadata read — the shape a directory lister (dired) wants per
+/// entry. `:symlink?` and `:mode` describe the link itself (`symlink_metadata`),
+/// while `:dir?` / `:size` / `:mtime` follow it (a symlink to a directory reports
+/// `:dir? true` so it's navigable, yet `:symlink? true` so it can be marked). Off
+/// unix there are no permission bits, so `:mode` is 0 and `:exec?` is false.
+fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "file-stat", arg(args, 0))?;
+    // lstat for the link's own nature; stat (follows) for size/mtime/dir?-of-target.
+    let Ok(lmeta) = std::fs::symlink_metadata(&path) else {
+        return Ok(Value::Nil);
+    };
+    let symlink = lmeta.file_type().is_symlink();
+    // Follow the link for the navigable facts; fall back to the link itself for a
+    // dangling symlink (so a broken link still lists rather than vanishing).
+    let meta = std::fs::metadata(&path).unwrap_or(lmeta);
+
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| Value::Int(d.as_millis() as i64))
+        .unwrap_or(Value::Nil);
+
+    #[cfg(unix)]
+    let (mode, exec) = {
+        use std::os::unix::fs::PermissionsExt;
+        let m = meta.permissions().mode();
+        (m as i64 & 0o7777, m & 0o111 != 0)
+    };
+    #[cfg(not(unix))]
+    let (mode, exec) = (0_i64, false);
+
+    let kw = |k: &'static str| Value::Keyword(value::intern(k));
+    let pairs = vec![
+        (kw("dir?"), Value::Bool(meta.is_dir())),
+        (kw("size"), Value::Int(meta.len() as i64)),
+        (kw("mtime"), mtime),
+        (kw("symlink?"), Value::Bool(symlink)),
+        (kw("exec?"), Value::Bool(exec)),
+        (kw("mode"), Value::Int(mode)),
+    ];
+    Ok(heap.map_from_pairs(pairs))
 }
 
 /// `(getenv name)` — the value of environment variable `name` as a string, or nil
