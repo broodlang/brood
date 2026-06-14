@@ -711,6 +711,14 @@ pub struct RuntimeCode {
     /// same as the bindings it describes. Read by `(source-location 'name)`; the
     /// image-query foundation for cross-file goto-definition.
     def_sites: RwLock<HashMap<Symbol, SourceLoc>>,
+    /// Source positions of RUNTIME *list forms*, keyed by the pair's RUNTIME slab
+    /// index — the RUNTIME counterpart of the per-heap LOCAL [`Heap::form_pos`] map.
+    /// The reader stamps positions on LOCAL pairs; `promote` carries them here when a
+    /// form is frozen into RUNTIME (a `defn` body, or a top-level inline lambda baked
+    /// for VM-compilation), so `(form-pos …)` still resolves and a position survives a
+    /// cross-node send (`Message::List`). Append-only in practice (a RUNTIME pair never
+    /// moves), so entries stay valid; shared across the runtime's processes via `Arc`.
+    positions: RwLock<HashMap<usize, crate::error::Pos>>,
 }
 
 /// Where a global was defined: the file, and the start position of its
@@ -729,6 +737,7 @@ impl Default for RuntimeCode {
             globals: RwLock::new(SymbolMap::default()),
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
+            positions: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -747,6 +756,7 @@ impl RuntimeCode {
             globals: RwLock::new(globals),
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
+            positions: RwLock::new(HashMap::new()),
         }
     }
 
@@ -768,6 +778,22 @@ impl RuntimeCode {
     fn def_sites_read(&self) -> RwLockReadGuard<'_, HashMap<Symbol, SourceLoc>> {
         self.def_sites.read().unwrap_or_else(|e| e.into_inner())
     }
+    /// RUNTIME-form source position by slab index, or `None`. See [`Self::positions`].
+    fn position_of(&self, idx: usize) -> Option<crate::error::Pos> {
+        self.positions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&idx)
+            .copied()
+    }
+    /// Record a RUNTIME-form source position (called by `promote`). See [`Self::positions`].
+    fn set_position(&self, idx: usize, pos: crate::error::Pos) {
+        self.positions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(idx, pos);
+    }
+
     fn def_sites_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, SourceLoc>> {
         self.def_sites.write().unwrap_or_else(|e| e.into_inner())
     }
@@ -1485,11 +1511,16 @@ impl Heap {
         }
     }
 
-    /// The recorded source position of a form, if it is a LOCAL list with one.
+    /// The recorded source position of a list form, if any. LOCAL pairs read the
+    /// per-heap reader-stamped table; RUNTIME pairs read the shared table `promote`
+    /// carried the position into (so `form-pos` works on a frozen `defn`/lambda body
+    /// and a position survives a cross-node send). PRELUDE forms carry none.
     pub fn form_pos(&self, v: Value) -> Option<crate::error::Pos> {
         if let Value::Pair(id) = v {
-            if id.region() == crate::core::value::LOCAL {
-                return self.form_pos.get(&form_pos_key(id)).copied();
+            match id.region() {
+                crate::core::value::LOCAL => return self.form_pos.get(&form_pos_key(id)).copied(),
+                crate::core::value::RUNTIME => return self.runtime.position_of(id.index()),
+                _ => {}
             }
         }
         None
@@ -2868,21 +2899,30 @@ impl Heap {
     /// Stops at the first already-shared cell or non-pair tail, preserving both
     /// improper (dotted) lists and existing structure sharing.
     fn promote_list(&self, first: PairId, fwd: &mut PromoteForward) -> Value {
-        let mut heads = Vec::new();
+        // Keep each source LOCAL pair id alongside its promoted head, so the new
+        // RUNTIME pair can inherit the source position (`form_pos`) the reader stamped
+        // on it — without this, `(form-pos …)` on a frozen body returns nil and a
+        // position is lost across a cross-node send.
+        let mut nodes: Vec<(PairId, Value)> = Vec::new();
         let mut cur = Value::Pair(first);
         let tail = loop {
             match cur {
                 Value::Pair(id) if id.region() == LOCAL => {
                     let (head, next) = self.pair(id);
-                    heads.push(self.promote_in(head, fwd));
+                    let promoted_head = self.promote_in(head, fwd);
+                    nodes.push((id, promoted_head));
                     cur = next;
                 }
                 other => break self.promote_in(other, fwd),
             }
         };
         let mut acc = tail;
-        for head in heads.into_iter().rev() {
-            acc = Value::Pair(PairId::runtime(self.runtime.code.pairs.push((head, acc))));
+        for (src, head) in nodes.into_iter().rev() {
+            let idx = self.runtime.code.pairs.push((head, acc));
+            if let Some(pos) = self.form_pos.get(&form_pos_key(src)).copied() {
+                self.runtime.set_position(idx, pos);
+            }
+            acc = Value::Pair(PairId::runtime(idx));
         }
         acc
     }
