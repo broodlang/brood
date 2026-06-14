@@ -800,6 +800,10 @@ pub(crate) mod jit_layout {
     pub const TAG_BOOL: u8 = 1;
     /// `Value::Int`'s discriminant (declaration order: `Nil`=0, `Bool`=1, `Int`=2).
     pub const TAG_INT: u8 = 2;
+    /// `Value::Float`'s discriminant — `Int`=2, `BigInt`=3, `Float`=4 (see `TAG_PAIR`'s
+    /// note on why `Value`'s tags differ from `Tag`'s). The float JIT tag-checks a slot's
+    /// discriminant against this before reading its `f64` payload. Pinned by the layout test.
+    pub const TAG_FLOAT: u8 = 4;
     /// `Value::Pair`'s discriminant. Note this is **not** `Tag::Pair` (7): `Value` has an
     /// extra `BigInt` after `Int` (folded into `int` by `Tag`) *and* a `Rope` before
     /// `Pair`, so `Value`'s discriminants run `… Int=2, BigInt=3, Float=4, …, Str=7,
@@ -859,6 +863,17 @@ mod jit_layout_tests {
             btbytes[0],
             jit_layout::TAG_BOOL,
             "Value::Bool discriminant drifted"
+        );
+        // `Value::Float`'s discriminant must match `TAG_FLOAT` (the float JIT's slot
+        // tag-check); a variant reorder breaks it.
+        let f = Value::Float(1.5);
+        let fbytes = unsafe {
+            std::slice::from_raw_parts(&f as *const Value as *const u8, std::mem::size_of::<Value>())
+        };
+        assert_eq!(
+            fbytes[0],
+            jit_layout::TAG_FLOAT,
+            "Value::Float discriminant drifted"
         );
         let v = Value::Int(0x0123_4567_89ab_cdef_u64 as i64);
         // Read the raw bytes (no transmute size constraint).
