@@ -47,7 +47,8 @@ pub fn read_all_positioned(heap: &mut Heap, src: &str) -> Result<Vec<(Value, Pos
     Ok(forms)
 }
 
-/// Read exactly one form, ignoring any trailing input.
+/// Read exactly one form, ignoring any trailing input. For internal callers that
+/// pass a known single form (macro/type tests, the printer round-trip).
 pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
     let mut parser = Parser::new(heap, src);
     parser.s.skip_trivia();
@@ -55,6 +56,27 @@ pub fn read_one(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
         return Err(parser.err_incomplete("unexpected end of input"));
     }
     parser.read_form()
+}
+
+/// Read exactly one form and require everything after it to be trivia (whitespace
+/// / commas / comments). Errors if a second form follows — so `read-string` is a
+/// *loud* error on trailing content, not a silent drop (use `read-all` to read
+/// every form). Trailing whitespace and comments are fine.
+pub fn read_one_complete(heap: &mut Heap, src: &str) -> Result<Value, LispError> {
+    let mut parser = Parser::new(heap, src);
+    parser.s.skip_trivia();
+    if parser.s.at_end() {
+        return Err(parser.err_incomplete("unexpected end of input"));
+    }
+    let form = parser.read_form()?;
+    parser.s.skip_trivia();
+    if !parser.s.at_end() {
+        return Err(parser.err(
+            "unexpected trailing content after the form — read-string reads a single \
+             form; use read-all (or eval-string) for input with more than one",
+        ));
+    }
+    Ok(form)
 }
 
 struct Parser<'a> {

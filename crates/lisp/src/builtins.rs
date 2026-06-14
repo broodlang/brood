@@ -1160,6 +1160,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "read-first",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        read_first,
+    );
+    def(
+        heap,
         "eval-string",
         Arity::exact(1),
         Sig::new(vec![string], any),
@@ -2203,8 +2210,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("runtime-collect", &[], "Compact the shared RUNTIME code region, reclaiming superseded versions of redefined globals (hot-reload churn). Returns {:before N :after M :reclaimed (N-M) :ran bool} (closure counts). Runs only when this runtime is uniquely owned (no other live process) — otherwise :ran is false and nothing changes. Usually unnecessary: the eval safepoint auto-compacts once hot-reload churn crosses a threshold (single-process); this forces it now. ADR-076 follow-up / docs/runtime-collector-exploration.md."),
     ("gc-trace", &["on?"], "Query (no arg) or set (truthy arg) per-collection GC trace logging for this process; returns the resulting state. When on, each minor/major collection prints a one-line summary to stderr. Defaulted from BROOD_GC_TRACE."),
     ("eval", &["form"], "Evaluate a form in the global environment."),
-    ("read-string", &["s"], "Parse and return the first form in string s."),
+    ("read-string", &["s"], "Parse and return the single form in string s. Errors on trailing content after the form (rather than silently dropping it) — use read-all for input with more than one form."),
     ("read-all", &["s"], "Parse every form in string s and return them as a list (the all-forms sibling of read-string)."),
+    ("read-first", &["s"], "Parse and return the first form in string s, ignoring any trailing forms (the lenient sibling of read-string — for peeking a multi-form source's leading form, e.g. a file's (defmodule …) header)."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
     ("scan-tokens", &["s"], "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."),
     ("span-runs", &["text", "base", "spans", "ranges"], "Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. With optional overlay ranges ([lo hi face], may overlap/be unordered) each char's face is its span face with every covering range face merged on top (later wins). Adjacent equal-face runs coalesce. The highlight span->runs tiler (fontify-runs), in Rust. Faces are opaque maps."),
@@ -3699,6 +3707,15 @@ fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 
 fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "read-string", arg(args, 0))?;
+    reader::read_one_complete(heap, &s)
+}
+
+/// `(read-first s)` — parse and return the **first** form in `s`, ignoring any
+/// trailing forms. The lenient sibling of `read-string`: for peeking the leading
+/// form of a multi-form source (e.g. a file's `(defmodule …)` header) without
+/// parsing — or erroring on — the rest.
+fn read_first(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "read-first", arg(args, 0))?;
     reader::read_one(heap, &s)
 }
 

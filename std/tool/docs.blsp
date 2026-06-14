@@ -30,7 +30,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; string. The form is discarded when the module is *loaded*, so it is read here
 ;; from source.
 (defn docs--leading-doc (src)
-  (let (form (read-string src))
+  (let (form (read-first src))
     (cond
       (string? form) form
       ; bare-string (legacy)

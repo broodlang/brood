@@ -276,7 +276,7 @@ the `nest new` scaffolder."
   ;; (it now lives in this namespace). Manifests stay written `(project …)`.
   (let (mf (path-join root "project.blsp"))
     (when (file-exists? mf)
-      (let (form (read-string (slurp mf)))
+      (let (form (read-first (slurp mf)))
         (when (and (pair? form) (= (first form) 'project))
           (project--apply (rest form))))))
   (def *load-path* (append (project--abs-paths root *project-source-paths*) *load-path*))
@@ -641,7 +641,7 @@ std. Errors if `root` is nil (not in a project)."
   (let (manifest (slurp (path-join root "project.blsp")))
     ;; Apply the manifest as DATA (not `load`) to learn its source paths + deps,
     ;; mirroring `project-setup`. We don't load any source here — just read it.
-    (let (form (read-string manifest))
+    (let (form (read-first manifest))
       (when (and (pair? form) (= (first form) 'project)) (project--apply (rest form))))
     ;; Project source dirs first, then resolved dependency dirs (so a project
     ;; module wins a stem clash with a dep — matches `*load-path*` ordering).
@@ -672,7 +672,7 @@ std. Errors if `root` is nil (not in a project)."
 string arguments). The `brood` binary calls this when it detects it is a `nest
 release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (default module `main`, fn `main`). Errors if the entry fn is missing/uncallable."
-  (let (form (read-string (%bundle-manifest)))
+  (let (form (read-first (%bundle-manifest)))
     (when (and (pair? form) (= (first form) 'project)) (project--apply (rest form))))
   ;; Load every embedded module once. Order-independent: cross-module
   ;; `:use`/`require` resolve through the same embedded table, and require is
@@ -732,7 +732,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     ;; (the project manifest is read the same way, ADR-020) and decouples it from
     ;; namespace resolution — `config` here is `project/config` (this body is
     ;; compiled in the `project` namespace), so the apply resolves.
-    (let (form (read-string (slurp p)))
+    (let (form (read-first (slurp p)))
       (when (and (pair? form) (= (first form) 'config))
         (apply config (rest form)))))
   nil)

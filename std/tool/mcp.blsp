@@ -47,7 +47,7 @@ error inside the user expression surfaces here as the `:error` branch."
     (when (not (string? src))
       (throw "eval: :source must be a string"))
     (try
-      (let (form (read-string src)
+      (let (form (read-first src)
             value (eval form))
         {:value (pr-str value)})
       (catch e
@@ -218,7 +218,7 @@ text — unbalanced parens in `:form` can't break the host expression."
     (when (not (string? src))
       (throw "macroexpand: :form must be a string"))
     (try
-      (let (form (read-string src)
+      (let (form (read-first src)
             out (if (= mode "all")
                   (macroexpand form)
                   (macroexpand-1 form)))
@@ -370,7 +370,7 @@ like `eval`. Returns `{:error msg}` on failure."
     (when (not (and (int? iters) (> iters 0)))
       (throw "bench: :iterations must be a positive integer"))
     (try
-      (let (form (read-string src)
+      (let (form (read-first src)
             t0 (now)
             value (eval form)
             _done (mcp--bench-loop form (- iters 1))
