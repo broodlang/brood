@@ -145,6 +145,22 @@ pub enum Op {
         col0: u16,
         cols: Vec<Vec<(u16, Option<[u8; 3]>)>>,
     },
+    /// A whole BITBOARD blitted as one op — the sparse-cell fast path for grid
+    /// sims (Game of Life, cellular automata). `bits` is an arbitrary-precision
+    /// integer in which set bit `y*w + x` means cell `(x, y)` is live; each live
+    /// cell is filled as an `aspect`×1 screen-cell rectangle in `color`, anchored
+    /// at screen cell `(row0, col0)`. Enumerating the set bits and expanding them
+    /// to rects happens here in Rust (O(live), like `bit-positions`), so a frame
+    /// of thousands of live cells costs the Brood side ONE op instead of one
+    /// op-per-cell. GUI-only — the terminal ignores it, like `:vspans`.
+    Cells {
+        row0: u16,
+        col0: u16,
+        w: u32,
+        aspect: u16,
+        bits: num_bigint::BigInt,
+        color: Option<[u8; 3]>,
+    },
 }
 
 /// A keystroke, in a backend-neutral shape the Brood side turns into the same
@@ -2329,6 +2345,26 @@ mod backend {
                                 fill_cell(&mut buf, fb_w, fb_h, left, y, cw, span_h, pack(*rgb));
                             }
                             y += span_h;
+                        }
+                    }
+                }
+                Op::Cells { row0, col0, w, aspect, bits, color } => {
+                    // Enumerate the bitboard's set bits (O(live), like `bit-positions`):
+                    // pull the lowest set bit, fill its cell, clear it, repeat. Each cell
+                    // is an `aspect`-wide × 1-tall block of screen cells.
+                    if let Some(rgb) = color {
+                        let packed = pack(*rgb);
+                        let asp = (*aspect).max(1) as usize;
+                        let cell_w = asp * cw; // a board cell spans `aspect` screen cells
+                        let wmod = (*w).max(1) as u64;
+                        let mut mag = bits.magnitude().clone();
+                        while let Some(i) = mag.trailing_zeros() {
+                            let x = (i as u64 % wmod) as usize;
+                            let y = (i as u64 / wmod) as usize;
+                            let left = inset + (*col0 as usize + x * asp) * cw;
+                            let top = inset + (*row0 as usize + y) * ch;
+                            fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
+                            mag.set_bit(i, false);
                         }
                     }
                 }

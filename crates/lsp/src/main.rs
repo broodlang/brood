@@ -34,7 +34,8 @@ use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
     DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
     InlayHintRequest, PrepareRenameRequest, References, Rename, Request as RequestTrait,
-    ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
+    ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest, SignatureHelpRequest,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeActionParams, CodeActionProviderCapability, CompletionItem, CompletionOptions,
@@ -44,7 +45,8 @@ use lsp_types::{
     FoldingRangeProviderCapability, GotoDefinitionParams, HoverParams, HoverProviderCapability,
     InlayHintParams, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
     PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions, RenameParams,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
     SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri, WorkspaceSymbolParams, WorkspaceSymbolResponse,
@@ -70,6 +72,7 @@ mod line_index;
 mod module_ref;
 mod references;
 mod rename;
+mod selection_range;
 mod semantic_tokens;
 mod signature;
 mod symbols;
@@ -113,6 +116,9 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         // formatting isn't offered — the formatter works on whole files.
         document_formatting_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        // Smart expand/shrink selection along the CST (symbol → form → outer
+        // form → file) — especially natural for s-expressions.
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         // Clickable links over module names that resolve to a file — `(require
         // 'foo)` arguments and `(:use foo)`/`(:alias foo)` clauses. No resolve
         // step: each link carries its target URI up front.
@@ -321,6 +327,17 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
             };
             Response::new_ok(id, result)
         }
+        SelectionRangeRequest::METHOD => {
+            let (id, p) = match extract::<SelectionRangeParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = docs.get(&p.text_document.uri).map(|doc| {
+                let a = &doc.analysis;
+                selection_range::selection_ranges(&a.cst, &doc.text, &a.line_index, &p.positions)
+            });
+            Response::new_ok(id, result)
+        }
         DocumentLinkRequest::METHOD => {
             let (id, p) = match extract::<DocumentLinkParams>(req) {
                 Ok(v) => v,
@@ -516,7 +533,10 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                     let mut acts = code_actions::code_actions(
                         interp,
                         &p.text_document.uri,
+                        &a.cst,
+                        &doc.text,
                         &a.scope,
+                        &a.line_index,
                         offset_of,
                         &p.context.diagnostics,
                     );
@@ -1366,6 +1386,22 @@ mod server_tests {
             titles.iter().any(|t| t.contains("reduce")),
             "expected a 'did you mean reduce' fix, got: {titles:?}"
         );
+
+        // selectionRange at the `+` head → a chain that expands to the enclosing
+        // call and beyond (at least two nested levels).
+        let r = request(
+            &client,
+            15,
+            SelectionRangeRequest::METHOD,
+            serde_json::json!({
+                "textDocument": { "uri": uri() },
+                "positions": [{ "line": 1, "character": 9 }],
+            }),
+        );
+        let sel: Vec<lsp_types::SelectionRange> =
+            serde_json::from_value(r.result.unwrap()).unwrap();
+        assert_eq!(sel.len(), 1, "one chain per position");
+        assert!(sel[0].parent.is_some(), "selection should expand to an enclosing form");
 
         shutdown(&client);
         handle.join().unwrap().unwrap();
