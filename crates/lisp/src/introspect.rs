@@ -397,6 +397,42 @@ pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
     out
 }
 
+/// Module names the buffer could `require` / `:use`: every already-loaded feature
+/// (`*features*`) plus every top-level `<name>.blsp` on the live `*load-path*`.
+/// Powers context-aware completion inside a `(require '…)` / `(:use …)` clause.
+/// Best-effort and de-duplicated (sorted): a nested `dir/mod` module appears only
+/// once it has been loaded (the path scan is one level deep, like a directory
+/// listing), which is the common case in a bootstrapped project.
+pub fn loadable_modules(interp: &mut Interp) -> Vec<String> {
+    let cp = interp.heap.checkpoint();
+    let mut out = std::collections::BTreeSet::new();
+    // 1. Loaded features — strings, including nested `dir/mod` names.
+    if let Ok(v) = interp.eval_str("*features*") {
+        if let Ok(items) = interp.heap.list_to_vec(v) {
+            for it in items {
+                if let Value::Str(id) = it {
+                    out.insert(interp.heap.string(id).to_string());
+                }
+            }
+        }
+    }
+    // 2. Top-level `<name>.blsp` basenames across the load-path dirs.
+    let scan = "(apply concat (map (fn (d) (if (file-exists? d) (list-dir d) nil)) *load-path*))";
+    if let Ok(v) = interp.eval_str(scan) {
+        if let Ok(items) = interp.heap.list_to_vec(v) {
+            for it in items {
+                if let Value::Str(id) = it {
+                    if let Some(base) = interp.heap.string(id).strip_suffix(".blsp") {
+                        out.insert(base.to_string());
+                    }
+                }
+            }
+        }
+    }
+    interp.heap.reset_local_to(cp);
+    out.into_iter().collect()
+}
+
 /// The docstring a `(defmodule mod "…")` header declared for module `module`, or
 /// `None` if it declared none / the module isn't loaded. Read straight off the
 /// `*module-docs*` table the `defmodule` macro populates (keyed by the module's
