@@ -241,7 +241,8 @@ fn tag_rank(v: Value) -> u8 {
         Value::Pid { .. } => 13,
         Value::Rope(_) => 14,
         Value::Socket(_) => 15,
-        Value::Transient(_) => 16,
+        Value::Subprocess(_) => 16,
+        Value::Transient(_) => 17,
     }
 }
 
@@ -3462,6 +3463,10 @@ impl Heap {
                 16u8.hash(h);
                 id.hash(h);
             }
+            Value::Subprocess(id) => {
+                19u8.hash(h);
+                id.hash(h);
+            }
             Value::Transient(id) => {
                 // Identity-hashed (tag 18; 17 is BigInt's): a transient is a
                 // mutable build handle, compared by identity like a closure, so
@@ -3571,6 +3576,8 @@ impl Heap {
             (Rope(x), Rope(y)) => self.rope(x) == self.rope(y),
             // Sockets are identity values — equal iff the same registry handle.
             (Socket(x), Socket(y)) => x == y,
+            // Subprocesses are identity values — equal iff the same registry handle.
+            (Subprocess(x), Subprocess(y)) => x == y,
             // Transients are identity-mutable: equal iff the same handle (like a
             // closure). Two distinct transients are never `=`, even with equal
             // contents — mutating one mustn't make the other "change".

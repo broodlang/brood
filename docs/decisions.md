@@ -6290,3 +6290,72 @@ token is a `:syntax/keyword`), so per-language tables name only the handful of
 builds and the in-language suite compile the grammars (a one-time build-time
 cost); the lean install adds `--features brood/treesit` explicitly since it builds
 `--no-default-features`.
+
+## ADR-104 — Persistent child processes: a `Value::Subprocess` over the mailbox seam, not a richer `%os-cmd`
+
+**Status:** accepted (2026-06-13). Implemented: `crate::proc`, the `proc-spawn` /
+`proc-send` / `proc-close` builtins, the `Value::Subprocess` handle, `tests/proc_test.blsp`.
+
+**Context.** `%os-cmd` (`system/cmd`) runs a child to completion and returns its
+captured `{:stdout :stderr :exit}`. That is exactly wrong for a *co-process you talk
+to continuously* — an LSP server, a REPL, a formatter daemon — where you write a
+request and read a reply over and over for the life of the child. The editor
+(myedit) wants multi-source completion, and an LSP source needs a long-lived child
+spoken to in framed JSON-RPC over stdio. Brood had no persistent-child-with-pipes
+primitive — the language gap that blocked it. (Surfaced by the myedit prime
+directive: a missing editor abstraction is a gap to fix in Brood, not to hack
+around in the editor.)
+
+**Decision.**
+
+**Mirror the socket mechanism (ADR-062), not extend `%os-cmd`.** A persistent child
+is the same *shape* as a TCP stream: a bidirectional byte channel plus a lifecycle,
+where reads must not pin a scheduler worker. So it reuses the same seam sockets use
+— the blocking-IO → mailbox handoff (ADR-059, `spawn_io_source`). Each child's
+stdout and stderr are read on dedicated non-worker threads that **deliver to the
+owning process's mailbox**; the Brood side just `receive`s. `%os-cmd` stays the
+one-shot tool it is; this is a separate primitive, not a knob on it (ADR-011).
+
+**Message vocabulary** (handle = a `Value::Subprocess`):
+- `[:proc handle data]` — a stdout chunk;
+- `[:proc-err handle data]` — a stderr chunk, **kept separate** from stdout
+  (merging them would corrupt a framed protocol like JSON-RPC);
+- `[:proc-closed handle code]` — emitted once on exit; `code` is the integer exit
+  status, or `nil` if the child was terminated by a signal.
+
+This is the exact pattern myedit's `ui-run` loop already uses to fold async pushes
+in (the SSE-poll wrapper does the identical non-blocking `receive` for `[:sse …]`),
+so the editor wiring needs no new mechanism.
+
+**A dedicated `Value::Subprocess(u64)` handle**, not a reused int/ref. Consistent
+with `Value::Socket`: a scalar handle (the GC never traces or moves it) that is a
+global-registry id, type-safe (`expect_subprocess`), and round-trips through
+messages — needed because the reader threads emit the handle in their `[:proc …]`
+messages, and because the handle may cross a `send`/`spawn` (the registry is
+runtime-global, so `proc-send` works from any process; output still lands in the
+owner's mailbox). Not node-portable: the dist wire codec rejects it, exactly as it
+rejects a socket — the id names an OS process on this host.
+
+**Three operations, mirroring `tcp-connect`/`tcp-send`/`tcp-close`:** `proc-spawn`
+(spawn with piped stdio, throws if the program can't start), `proc-send` (write a
+string to stdin + flush, blocking), `proc-close` (kill if running + drop stdin,
+idempotent; the final `[:proc-closed …]` still reaches the owner). Deferred as
+power features until a concrete need (ADR-011): a graceful stdin-EOF-without-kill,
+an explicit exit-code wait, a controlling-process handoff like sockets have.
+
+**Implementation notes.** The registry holds the child's stdin behind its own
+`Arc<Mutex<…>>` so a blocking `proc-send` to a child that never drains its stdin
+serializes per-child *without* holding the global registry lock (a `ChildStdin`
+can't be `try_clone`d the way a `TcpStream` can). Exactly one waiter reaps the
+child: the stdout reader, after stdout EOF, polls `try_wait` with a brief lock + a
+short nap (never holding the lock while blocked, so a concurrent `proc-close`
+`kill` can always take it), then emits `[:proc-closed …]`. **Text-only, like the
+socket mechanism**: inbound bytes are delivered via `from_utf8_lossy`, fine for
+text protocols (JSON-RPC is UTF-8) and lossy for binary — Brood has no
+arbitrary-bytes value kind, and adding one is a separate language-surface decision.
+
+**Consequences.** A 19th runtime `Tag` (`subprocess`), threaded through `value.rs`,
+`types.rs`, `message.rs` (+ dist-wire rejection), the printer, heap hashing/equality
+ordering, and the MCP JSON bridge — the standard cost of a new scalar handle, paid
+once. The editor's multi-source completion (the original motivation) now builds an
+LSP source on top of this with no further kernel work. `%os-cmd` is untouched.

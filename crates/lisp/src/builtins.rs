@@ -46,6 +46,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const string: Ty = Ty::of(Tag::Str);
     const rope: Ty = Ty::of(Tag::Rope);
     const socket_ty: Ty = Ty::of(Tag::Socket);
+    const subprocess_ty: Ty = Ty::of(Tag::Subprocess);
     const kw: Ty = Ty::of(Tag::Keyword);
     const sym: Ty = Ty::of(Tag::Sym);
     const bool_ty: Ty = Ty::of(Tag::Bool);
@@ -774,6 +775,30 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![socket_ty], nil_ty),
         tcp_close,
+    );
+    // Persistent child processes (ADR-104): spawn a co-process with piped stdio,
+    // write its stdin, receive its stdout/stderr as `[:proc …]` mailbox messages.
+    // A `Value::Subprocess` handle, local to this runtime, never sent across nodes.
+    def(
+        heap,
+        "proc-spawn",
+        Arity::exact(2),
+        Sig::new(vec![string, list_ty.union(vec_ty)], subprocess_ty),
+        proc_spawn,
+    );
+    def(
+        heap,
+        "proc-send",
+        Arity::exact(2),
+        Sig::new(vec![subprocess_ty, string], nil_ty),
+        proc_send,
+    );
+    def(
+        heap,
+        "proc-close",
+        Arity::exact(1),
+        Sig::new(vec![subprocess_ty], nil_ty),
+        proc_close,
     );
     def(
         heap,
@@ -2184,6 +2209,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
     ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
     ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
+    ("proc-spawn", &["prog", "args"], "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned."),
+    ("proc-send", &["p", "s"], "Write the whole string s to subprocess p's stdin (blocking) and flush. Returns nil; throws if p is unknown/closed."),
+    ("proc-close", &["p"], "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
@@ -5414,6 +5442,47 @@ fn tcp_local_port(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(crate::net::local_port(id)
         .map(|p| Value::Int(p as i64))
         .unwrap_or(Value::Nil))
+}
+
+// ----- persistent child processes (ADR-104) ----------------------------------
+//
+// Thin mechanism over `crate::proc`: spawn a long-lived child with piped stdio,
+// write its stdin, and receive its output as `[:proc …]` mailbox messages. The
+// framing/protocol policy (e.g. JSON-RPC for an LSP client) is Brood. A child is
+// `Value::Subprocess(id)`. Contrast `%os-cmd`/`run-process`, which run to exit.
+
+fn expect_subprocess(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
+    expect!(heap, who, v, "subprocess",
+        Value::Subprocess(id) => id,
+    )
+}
+
+fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let prog = expect_string(heap, "proc-spawn", arg(args, 0))?;
+    let mut argv = Vec::new();
+    for a in heap.seq_items(arg(args, 1))? {
+        argv.push(expect_string(heap, "proc-spawn", a)?);
+    }
+    let owner = crate::process::self_pid();
+    match crate::proc::spawn(&prog, &argv, owner) {
+        Ok(id) => Ok(Value::Subprocess(id)),
+        Err(e) => Err(LispError::runtime(format!("proc-spawn {}: {}", prog, e))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),
+    }
+}
+
+fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_subprocess(heap, "proc-send", arg(args, 0))?;
+    let data = expect_string(heap, "proc-send", arg(args, 1))?;
+    crate::proc::send(id, data.as_bytes())
+        .map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
+    Ok(Value::Nil)
+}
+
+fn proc_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_subprocess(heap, "proc-close", arg(args, 0))?;
+    crate::proc::close(id);
+    Ok(Value::Nil)
 }
 
 // ----- terminal frontend (ADR-046) -------------------------------------------

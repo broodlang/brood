@@ -1,0 +1,61 @@
+;; Persistent child processes (the kernel proc-* primitives, ADR-104). Real OS
+;; children (`cat`, `sh`) on this host, driven over the mailbox seam (ADR-059):
+;; a child's stdout/stderr/exit are delivered to its *owning* process's mailbox,
+;; so each test owns the child in ONE process and drives it with plain `receive`.
+;; :isolated keeps these (real pipes + reaper threads) off the shared worker churn.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule proc-test (:use test))
+
+(describe "proc: handle + type-of"
+  :isolated
+  (test "proc-spawn returns a distinct :subprocess handle"
+    (let (p (proc-spawn "cat" []))
+      (assert= (type-of p) :subprocess)
+      (refute (= (type-of 5) :subprocess))
+      (refute (= (type-of "x") :subprocess))
+      (proc-close p))))
+
+(describe "proc: stdin echo via mailbox delivery"
+  :isolated
+  (test "proc-send to `cat` comes back as [:proc handle data]"
+    (let (p (proc-spawn "cat" []))
+      (proc-send p "ping over proc")
+      (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
+        (assert= got "ping over proc")
+        ;; proc-close SIGKILLs the child: it exits via a signal, so the final
+        ;; [:proc-closed …] carries a nil code (no exit status).
+        (proc-close p)
+        (let (code (receive ([:proc-closed ~p c] c) (after 5000 :timeout)))
+          (is (nil? code)))))))
+
+(describe "proc: stdout stream + exit code"
+  :isolated
+  (test "a child's stdout then [:proc-closed handle code] with its exit status"
+    (let (p (proc-spawn "sh" ["-c" "printf hello; exit 3"]))
+      (let (out (receive ([:proc ~p d] d) (after 5000 :timeout)))
+        (assert= out "hello")
+        (let (code (receive ([:proc-closed ~p c] c) (after 5000 :timeout)))
+          (assert= code 3))))))
+
+(describe "proc: stderr is a separate channel"
+  :isolated
+  (test "stderr arrives as [:proc-err …], never mixed into [:proc …]"
+    (let (p (proc-spawn "sh" ["-c" "printf oops 1>&2"]))
+      (let (err (receive ([:proc-err ~p d] d) (after 5000 :timeout)))
+        (assert= err "oops")
+        (proc-close p)))))
+
+(describe "proc: the handle crosses processes"
+  :isolated
+  ;; The handle is a global-registry id, so it survives a `send`/`spawn` deep-copy
+  ;; (Message::Subprocess round-trip) and `proc-send` works from a non-owner — but
+  ;; the child's output still lands in the *owner's* (here, the test's) mailbox.
+  (test "a worker process writes to a child this process owns"
+    (let (me (self)
+          p (proc-spawn "cat" []))
+      (spawn (proc-send p "from a worker"))
+      (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
+        (proc-close p)
+        (assert= got "from a worker")))))

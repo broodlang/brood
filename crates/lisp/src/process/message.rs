@@ -70,6 +70,11 @@ pub enum Message {
     /// global to the OS process); the dist wire codec rejects it, since the id is
     /// meaningless on another node.
     Socket(u64),
+    /// A child-process id. Valid only *within one runtime* (the subprocess registry
+    /// is global to the OS process); the dist wire codec rejects it, since the id is
+    /// meaningless on another node. The subprocess reader thread emits this in its
+    /// `[:proc handle …]` mailbox messages.
+    Subprocess(u64),
     /// A serialised closure (Erlang's "send a fun"). Because a closure's body and
     /// its optionals' defaults are S-expression *forms* (plain data), and its free
     /// globals resolve on the receiver, a function can travel as data. Only its free
@@ -227,6 +232,11 @@ fn to_message_rec(
         // per-connection-handler pattern). It is NOT node-portable: the cross-node
         // wire codec rejects it (the id means nothing in another runtime).
         Value::Socket(id) => Message::Socket(id),
+        // A subprocess is a global-registry id like a socket (the owning process
+        // drives it and receives its output as messages); the reader thread emits
+        // `[:proc handle …]`, so the handle must round-trip through a message. Valid
+        // across this runtime's processes; not node-portable.
+        Value::Subprocess(id) => Message::Subprocess(id),
         Value::Transient(_) => {
             // A transient is a process-local, identity-mutable build handle (its
             // root maps slab is LOCAL). Deep-copying it across processes would
@@ -429,6 +439,7 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
             id: *id,
         },
         Message::Socket(id) => Value::Socket(*id),
+        Message::Subprocess(id) => Value::Subprocess(*id),
         Message::Closure(c) => closure_from_message(heap, c),
     }
 }

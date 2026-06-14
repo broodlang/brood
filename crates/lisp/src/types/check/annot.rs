@@ -42,6 +42,7 @@ fn base_ty(name: &str) -> Option<Ty> {
         "pid" => Ty::of(Tag::Pid),
         "ref" => Ty::of(Tag::Ref),
         "socket" => Ty::of(Tag::Socket),
+        "subprocess" => Ty::of(Tag::Subprocess),
         _ => return None,
     })
 }
