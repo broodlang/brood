@@ -2557,3 +2557,37 @@ docstrings for project-defined functions, since a `defn`'s leading string is
 retained on the closure and `(doc fn)` returns it) was already complete and is
 unchanged. `docs/lsp.md` updated. 8 new tests (module_ref ×6, definition ×2 for
 `:use`/`:implements`, hover ×2); `cargo test -p brood-lsp` green (95).
+
+## 2026-06-14 — LSP document links + variadic-callback arity check; verified defdyn isn't statically pinned
+
+A review-driven follow-up to the `defmodule`-clause hover/goto work. Three items
+off a type-system + LSP review:
+
+1. **Verified (no work): redefinable globals aren't statically pinned.** A review
+   flagged a possible gap where the checker might pin a `def`/`defdyn` global's
+   initial signature and then mis-warn after a hot-reload redefinition. Confirmed
+   empirically it doesn't: `crates/lisp/src/types/check/ctx.rs:148` keeps globals
+   out of the local type table (they're `dynamic()`), and a redefined global with
+   no `(sig …)` produces zero warnings. Only an explicit user-written `(sig …)` is
+   enforced — opt-in, and correct per `docs/types.md`. No change needed.
+
+2. **LSP document links** (`textDocument/documentLink`). New
+   `crates/lsp/src/document_link.rs`: underlines every module name in a load
+   position — `(require 'foo)` args and `(:use foo)`/`(:alias foo)` clauses — with
+   the resolved `foo.blsp` URI for Ctrl-click. Same `introspect::module_file`
+   resolution as require-target goto; the passive whole-file counterpart to the
+   cursor-driven goto. Advertised `document_link_provider` (no resolve step). 4 tests.
+
+3. **Variadic-callback arity check** (`crates/lisp/src/types/check/walk.rs`). The
+   ADR-078 callback-arity check already flagged a fixed-arity callback whose arity
+   can't match a HOF's call (`(map cons …)`), and already handled *named* variadic
+   globals via `arity_of`. But `lambda_literal_arity` bailed on **every** inline
+   `&`/`&optional` lambda, missing the real error: a variadic lambda whose
+   *minimum* arity exceeds what the HOF supplies — `(map (fn (a b & c) …) xs)`
+   needs ≥2 but `map` calls with 1. Rewrote it as a phase machine returning
+   `at_least(req)` for `&`, `range(req, req+opt)` for `&optional`, `exact` otherwise
+   — mirroring what `arity_of` computes for named globals. Stays false-positive-free:
+   `(fn (& xs) …)` (min 0) still isn't flagged. 5 catalog cases (2 warn, 3 silent).
+
+All green: `brood-lsp` 99 tests, `brood --lib` 271, `type_check_catalog` +
+`check_string_structured`. `docs/lsp.md` updated for both LSP additions.
