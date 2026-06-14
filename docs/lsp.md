@@ -11,8 +11,9 @@ one server that owns the language knowledge.
 > symbols, goto-definition (in-file, cross-module, stdlib, `require`-target, and
 > `defmodule` `:use`/`:alias`/`:implements` clauses),
 > references, document-highlight, rename, semantic tokens, **document formatting,
-> workspace symbol search, code actions, folding ranges, inlay hints, and
-> document links** (clickable module names in `require`/`:use`/`:alias`).
+> workspace symbol search, code actions, folding ranges, inlay hints,
+> document links** (clickable module names in `require`/`:use`/`:alias`)**, and
+> selection range** (expand/shrink to s-expression).
 > Recorded as
 > [ADR-025](decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value);
 > this document is the full plan it points to (the `types.md` ↔ ADR-024 pattern).
@@ -99,9 +100,23 @@ one server that owns the language knowledge.
 > `arglist` drops `(opt default)` groups); a head resolving to a **local** is
 > skipped; per-name `arglist` memoized per request; range-scoped to the visible
 > region.
+> • **`textDocument/selectionRange`** (`selection_range.rs`) — smart expand/shrink
+> selection along the CST: symbol → enclosing form → outer form → … → file, read
+> off the node chain at each cursor (trivia and same-extent wrappers skipped so
+> each step is a visible jump). Pure tree geometry, no eval.
+> • **Context-aware completion** — inside `(require '…)` or a `(:use …)`/`(:alias
+> …)` clause, `completion.rs` offers requireable **module names** alone (loaded
+> features + top-level `<name>.blsp` on the load-path, via
+> `introspect::loadable_modules`), instead of the generic globals that would be
+> noise there.
+> • **More code actions** — off an `unbound symbol: foo` finding, beyond
+> did-you-mean: **"Add `(require 'mod)`"** when `foo` is a qualified `mod/x` whose
+> module resolves on the load-path (inserted under any `defmodule` header), and
+> **"Create function `foo`"** when `foo` is a call head — a stub `(defn foo (a b
+> …) nil)` at EOF, arity matched to the call site.
 > **Still next:** incremental document sync; range / delta semantic-token
 > requests; finer spans for arity/type findings (wants spans threaded through the
-> checker, not just the call operator); and more code actions (create-missing-`defn`).
+> checker, not just the call operator).
 
 ## Why a server, and why not brute-force it
 
@@ -418,6 +433,7 @@ additive change behind the same feature handlers.
 | **1+** | semantic diagnostics ("unbound" / arity / type misuse), **cross-file & stdlib goto**, `require`-target goto | located `check_file`; project bootstrap; `source-location` + prelude-cache; `require--find` | **done** |
 | **2** | **cross-file** references & rename (+prepareRename), document-highlight, semantic tokens, completion resolve | `scope::references` / `references_to_global`; `project_files`; CST token classification | **done** |
 | **2+** | formatting, workspace symbol, code actions (did-you-mean, remove-unused-require), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
+| **2++** | document links + `defmodule`-clause goto/hover, selection range, context-aware module completion, code actions (add-require, create-defn) | `module_ref` clause classifier; `introspect::module_file`/`module_doc`/`loadable_modules`; CST node-chain | **done** |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the
 CST. Goto-definition landed early with Tier 1 (rather than Tier 2 as first
