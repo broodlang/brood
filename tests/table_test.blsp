@@ -1,0 +1,327 @@
+;; table — the in-memory shared store (Brood's ETS, ADR-107). A thorough suite:
+;; put/get/default/overwrite, absent-vs-stored-nil, structural + handle keys, the
+;; key-must-be-data guard, has?/delete/count, atomic table-incr, snapshot
+;; (empty/after-mutation/as-a-real-map), identity equality, drop + use-after-drop on
+;; every op, table independence, value round-trip (incl. closures + nested data),
+;; error paths (unsendable value, closure key), and the two that matter most — a
+;; handle is SHARED across processes, and concurrent table-incr loses no update.
+;;
+;; Tables are anonymous handles (no global name), so no :isolated needed — each test
+;; makes its own (table). The suite still runs every test in its own green process, so
+;; these run concurrently. Bodies stay tail-recursive (small green-process stack).
+
+(defmodule table-test (:use test))
+
+;; ---- helpers ----------------------------------------------------------------
+(defn tt-await (n)
+  (if (= n 0) :ok
+    (receive (:done (tt-await (- n 1))) (after 5000 :timeout))))
+
+;; Put i -> (* i i) for i in [0,n) (fold is tail-recursive in the kernel).
+(defn tt-fill (t n) (fold (fn (_ i) (table-put t i (* i i))) nil (range n)))
+
+(defn threw? (thunk) (try (do (thunk) false) (catch e true)))
+
+;; ---- basic ------------------------------------------------------------------
+(describe "table: basic put/get"
+  (test "get returns a stored value; default when absent"
+    (let (t (table))
+      (table-put t :a 1)
+      (assert= (table-get t :a) 1)
+      (assert= (table-get t :missing) nil)
+      (assert= (table-get t :missing :default) :default)))
+
+  (test "put overwrites, including with a different type"
+    (let (t (table))
+      (table-put t :a 1)
+      (table-put t :a "two")
+      (assert= (table-get t :a) "two")
+      (assert= (table-count t) 1)))
+
+  (test "put returns the table handle for threading"
+    (let (t (table))
+      (assert= (table-put t :a 1) t))))
+
+(describe "table: stored-nil vs absent"
+  (test "get of a key bound to nil returns nil, NOT the default"
+    (let (t (table))
+      (table-put t :a nil)
+      (assert= (table-get t :a :DEFAULT) nil)
+      (is (table-has? t :a))
+      (assert= (table-get t :b :DEFAULT) :DEFAULT)
+      (is (not (table-has? t :b)))))
+
+  (test "false and 0 and empty-string round-trip as values"
+    (let (t (table))
+      (table-put t :f false)
+      (table-put t :z 0)
+      (table-put t :e "")
+      (assert= (table-get t :f) false)
+      (assert= (table-get t :z) 0)
+      (assert= (table-get t :e) ""))))
+
+;; ---- keys: structural equality ----------------------------------------------
+(describe "table: keys use structural equality"
+  (test "vector / list / map / nested keys"
+    (let (t (table))
+      (table-put t [1 2] :vec)
+      (table-put t (list 1 2) :list)
+      (table-put t {:a 1} :map)
+      (table-put t [[1] [2 3]] :nested)
+      (assert= (table-get t [1 2]) :vec)
+      (assert= (table-get t (list 1 2)) :list)
+      (assert= (table-get t {:a 1}) :map)
+      (assert= (table-get t [[1] [2 3]]) :nested)
+      ;; a vector key and an equal-looking list key are distinct (Brood = distinguishes)
+      (is (table-has? t [1 2]))
+      (is (table-has? t (list 1 2)))))
+
+  (test "scalar key types: int, float, string, keyword, symbol, bool, nil"
+    (let (t (table))
+      (table-put t 42 :int)
+      (table-put t 3.5 :float)
+      (table-put t "k" :str)
+      (table-put t :kw :keyword)
+      (table-put t 'sym :symbol)
+      (table-put t true :bool)
+      (table-put t nil :nil-key)
+      (assert= (table-get t 42) :int)
+      (assert= (table-get t 3.5) :float)
+      (assert= (table-get t "k") :str)
+      (assert= (table-get t :kw) :keyword)
+      (assert= (table-get t 'sym) :symbol)
+      (assert= (table-get t true) :bool)
+      (assert= (table-get t nil) :nil-key)
+      (assert= (table-count t) 7)))
+
+  (test "id-stable handle keys round-trip: ref and pid"
+    (let (t (table) r (ref) p (self))
+      (table-put t r :the-ref)
+      (table-put t p :the-pid)
+      (assert= (table-get t r) :the-ref)
+      (assert= (table-get t p) :the-pid))))
+
+;; ---- the key-must-be-data guard ---------------------------------------------
+(describe "table: keys that could never be looked up are rejected"
+  (test "a closure cannot be a key (it compares by identity)"
+    (let (t (table))
+      (is (threw? (fn () (table-put t (fn () 1) :v))))
+      ;; get/has/delete reject it too (consistent, loud)
+      (is (threw? (fn () (table-get t (fn () 1)))))
+      (is (threw? (fn () (table-has? t (fn () 1)))))
+      (is (threw? (fn () (table-delete t (fn () 1)))))))
+
+  (test "NaN cannot be a key (it never equals itself)"
+    (let (t (table) nan (- (* 1e308 1e308) (* 1e308 1e308)))
+      (is (not (= nan nan)))                       ; confirm we really have a NaN
+      (is (threw? (fn () (table-put t nan :v))))
+      (is (threw? (fn () (table-get t nan))))
+      (is (threw? (fn () (table-incr t nan)))))))
+
+;; ---- has? / delete / count --------------------------------------------------
+(describe "table: has?/delete/count"
+  (test "has? and delete"
+    (let (t (table))
+      (table-put t :a 1)
+      (is (table-has? t :a))
+      (is (not (table-has? t :b)))
+      (table-delete t :a)
+      (is (not (table-has? t :a)))
+      (assert= (table-get t :a) nil)))
+
+  (test "delete of an absent key is a no-op; delete is idempotent"
+    (let (t (table))
+      (table-put t :a 1)
+      (table-delete t :missing)
+      (assert= (table-count t) 1)
+      (table-delete t :a)
+      (table-delete t :a)
+      (assert= (table-count t) 0)))
+
+  (test "count tracks live entries across put/overwrite/delete"
+    (let (t (table))
+      (assert= (table-count t) 0)
+      (table-put t :a 1)
+      (table-put t :b 2)
+      (table-put t :a 9)       ; overwrite, not +1
+      (assert= (table-count t) 2)
+      (table-delete t :a)
+      (assert= (table-count t) 1))))
+
+;; ---- atomic incr ------------------------------------------------------------
+(describe "table: incr"
+  (test "default delta, explicit delta, negative, absent-as-zero"
+    (let (t (table))
+      (assert= (table-incr t :c) 1)
+      (assert= (table-incr t :c) 2)
+      (assert= (table-incr t :c 10) 12)
+      (assert= (table-incr t :c -5) 7)
+      (assert= (table-get t :c) 7)
+      (assert= (table-incr t :fresh 100) 100)))
+
+  (test "incr errors on a non-integer existing value, leaving it unchanged"
+    (let (t (table))
+      (table-put t :k "not-an-int")
+      (is (threw? (fn () (table-incr t :k))))
+      (assert= (table-get t :k) "not-an-int")))
+
+  (test "incr errors (and leaves it) on an out-of-i64-range (bignum) value"
+    (let (t (table) big (* 1000000000000 1000000000000))   ; 1e24, beyond i64
+      (table-put t :k big)
+      (is (threw? (fn () (table-incr t :k))))
+      (assert= (table-get t :k) big))))
+
+;; ---- snapshot ---------------------------------------------------------------
+(describe "table: snapshot"
+  (test "snapshot of an empty table is {}"
+    (assert= (table-snapshot (table)) {}))
+
+  (test "snapshot is a real map: keys/vals/get/count work on it"
+    (let (t (table))
+      (table-put t :a 1)
+      (table-put t :b 2)
+      (let (s (table-snapshot t))
+        (is (map? s))
+        (assert= (get s :a) 1)
+        (assert= (count s) 2)
+        (assert= (sort (keys s)) (sort [:a :b])))))
+
+  (test "snapshot is a consistent point-in-time copy (immune to later mutation)"
+    (let (t (table))
+      (table-put t :a 1)
+      (let (s (table-snapshot t))
+        (table-put t :a 99)
+        (table-put t :c 3)
+        (table-delete t :a)
+        (assert= (get s :a) 1)        ; snapshot unchanged by overwrite OR delete
+        (assert= (get s :c) nil)
+        (assert= (table-get t :a) nil)
+        (assert= (table-get t :c) 3)))))
+
+;; ---- identity ---------------------------------------------------------------
+(describe "table: identity & predicates"
+  (test "tables compare by identity, not contents"
+    (let (a (table) b (table))
+      (is (= a a))
+      (is (not (= a b)))
+      (table-put a :x 1)
+      (table-put b :x 1)
+      (is (not (= a b)))))
+
+  (test "table? and type-of; a table is not a map"
+    (let (t (table))
+      (is (table? t))
+      (is (not (table? {})))
+      (is (not (table? nil)))
+      (is (not (map? t)))
+      (assert= (type-of t) :table)
+      (is (not (= t {})))
+      (is (not (= t nil)))))
+
+  (test "pr-str shows an opaque handle"
+    (is (includes? (pr-str (table)) "#<table"))))
+
+;; ---- drop -------------------------------------------------------------------
+(describe "table: drop"
+  (test "drop frees the table and is idempotent"
+    (let (t (table))
+      (table-put t :a 1)
+      (is (table-drop t))
+      (is (not (table-drop t)))))
+
+  (test "every op errors on a dropped handle"
+    (let (t (table))
+      (table-drop t)
+      (is (threw? (fn () (table-get t :a))))
+      (is (threw? (fn () (table-put t :a 1))))
+      (is (threw? (fn () (table-has? t :a))))
+      (is (threw? (fn () (table-delete t :a))))
+      (is (threw? (fn () (table-incr t :a))))
+      (is (threw? (fn () (table-count t))))
+      (is (threw? (fn () (table-snapshot t)))))))
+
+;; ---- independence + values --------------------------------------------------
+(describe "table: independence and value round-trip"
+  (test "distinct tables don't share state"
+    (let (a (table) b (table))
+      (table-put a :x 1)
+      (assert= (table-get b :x) nil)
+      (table-put b :x 2)
+      (assert= (table-get a :x) 1)
+      (assert= (table-get b :x) 2)))
+
+  (test "a closure value round-trips and stays callable"
+    (let (t (table))
+      (table-put t :double (fn (x) (* x 2)))
+      (assert= ((table-get t :double) 21) 42)))
+
+  (test "a deeply nested value round-trips intact"
+    (let (t (table) v {:xs [1 2 3] :m {:a [4 5] :b "s"} :l (list 1 [2 {:c 3}])})
+      (table-put t :v v)
+      (assert= (table-get t :v) v)))
+
+  (test "a table handle can be stored as a value in another table"
+    (let (outer (table) inner (table))
+      (table-put inner :x 7)
+      (table-put outer :inner inner)
+      (assert= (table-get (table-get outer :inner) :x) 7)))
+
+  (test "an unsendable value (a transient) is rejected as a value"
+    (let (t (table))
+      (is (threw? (fn () (table-put t :k (transient {}))))))))
+
+;; ---- scale ------------------------------------------------------------------
+(describe "table: scale"
+  (test "500 entries: count, gets, snapshot are all correct"
+    (let (t (table))
+      (tt-fill t 500)
+      (assert= (table-count t) 500)
+      (assert= (table-get t 7) 49)
+      (assert= (table-get t 499) (* 499 499))
+      (assert= (table-get t 500) nil)
+      (let (s (table-snapshot t))
+        (assert= (count s) 500)
+        (assert= (get s 123) (* 123 123))))))
+
+;; ---- concurrency ------------------------------------------------------------
+(describe "table: shared across processes"
+  (test "a handle captured by a spawned process sees the same store"
+    (let (t (table) me (self))
+      (spawn (do (table-put t :x 42) (send me :done)))
+      (assert= (tt-await 1) :ok)
+      (assert= (table-get t :x) 42)))
+
+  (test "a handle sent in an explicit message addresses the same store"
+    (let (t (table) me (self))
+      (spawn (receive ([:tbl h] (do (table-put h :y 7) (send me :done))))
+        )
+      ;; deliver the table to the freshly spawned child via its pid
+      (let (child (spawn (receive ([:tbl h] (do (table-put h :y 7) (send me :done))))))
+        (send child [:tbl t])
+        (assert= (tt-await 1) :ok)
+        (assert= (table-get t :y) 7))))
+
+  (test "concurrent table-incr never loses an update (single key)"
+    (let (t (table) me (self) n 200)
+      (fold (fn (_ i) (spawn (do (table-incr t :counter) (send me :done)))) nil (range n))
+      (assert= (tt-await n) :ok)
+      (assert= (table-get t :counter) n)))
+
+  (test "concurrent table-incr across several keys is exact"
+    (let (t (table) me (self) per 50 keys [:a :b :c :d])
+      (fold (fn (_ k)
+              (fold (fn (_ i) (spawn (do (table-incr t k) (send me :done)))) nil (range per)))
+            nil keys)
+      (assert= (tt-await (* per (count keys))) :ok)
+      (assert= (table-get t :a) per)
+      (assert= (table-get t :b) per)
+      (assert= (table-get t :c) per)
+      (assert= (table-get t :d) per)))
+
+  (test "many processes write distinct keys; parent sees them all"
+    (let (t (table) me (self) n 100)
+      (fold (fn (_ i) (spawn (do (table-put t i (* i i)) (send me :done)))) nil (range n))
+      (assert= (tt-await n) :ok)
+      (assert= (table-count t) n)
+      (assert= (table-get t 7) 49)
+      (assert= (table-get t 99) (* 99 99)))))

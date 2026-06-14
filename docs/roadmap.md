@@ -633,6 +633,24 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   (arity/type findings anchor to the call head, not the offending argument —
   wants `Pos` threaded through `types/check.rs`'s walk, a focused refactor of
   that GC-rooting-sensitive pass); and the **create-missing-`defn`** code action.
+- ⬜ **[checker] warn on unused bindings** (post-expansion lint, 2026-06-14) — the
+  checker today is direction-asymmetric: it flags names used but *not* in scope
+  (`unbound symbol`), never bindings present but *unreferenced*. Add an advisory lint
+  for the module-local cases that can be proven dead: unused `:use`/`:alias` imports,
+  unused module-private `defn`s, and unused `let` locals. **Hard constraint: it must
+  run *after* macro expansion.** The canonical trap (Hatch demo, `web/routes`): a
+  `(:use web/layout)` is referenced *nowhere* in the file's surface text — `layout`
+  only materialises inside the `(live …)` macro's expansion — so a syntactic pass
+  would call it dead and delete it, breaking the build. (The existing LSP
+  **remove-unused-`require`** code action, 2026-05-31, is exactly that syntactic
+  shape and would mis-handle this; an expansion-aware lint should supersede it.)
+  Soundness scope, to keep the **zero-false-positive** rule (ADR-011): module-local
+  only — *cannot* judge **exported** `defn`s (consumed by other modules), **dynamic
+  `require`**, or **qualified-symbol** references resolved without an import
+  (`web/views/home/index`); warn only when provably unused post-expansion. Surfaces
+  as a checker diagnostic + a matching expansion-aware LSP remove-unused code action.
+  Motivating case: a stray `(:use web/conn)` survived silently in `web/routes` while
+  the load-bearing `(:use web/layout)` *looks* unused — the asymmetry this closes.
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.
@@ -1062,6 +1080,75 @@ The seam that makes remoteability free later (see architecture.md).
   link freezes on the last snapshot with a `DISCONNECTED` banner. No kernel changes
   (`process-info` maps are send-able); dev-grade auth (shared cookie, LAN/trusted).
   Cross-node `crates/cli/tests/observe_attach.rs`.
+- 🟡 **Telemetry — an event stream for the runtime (Erlang `:telemetry`)**
+  (ADR-106). **✅ Core landed 2026-06-14** (`std/telemetry.blsp`, `require 'telemetry`):
+  `start-telemetry` / `stop-telemetry` / `emit` / `attach` / `detach` / `detach-all` /
+  `forward` / `handlers` / `telemetry-sync` + the `span` macro
+  (`:start`/`:stop`/`:exception`). **Handlers run in an isolated listener process**
+  (emit is a fire-and-forget send), so a buggy handler can **never crash or hang the
+  emitting process — only the listener**; a *throwing* handler doesn't even do that
+  (caught + detached), and the listener is supervisable + restartable (handler table
+  is a `def`-rebound global that survives, ADR-013). `forward` ships heavy work to your
+  own process. `tests/telemetry_test.blsp` (19 cases incl. the crash-isolation
+  guarantee — a handler that hard-`exit`s the listener leaves the emitter running —
+  plus recovery-after-crash and a concurrent block; GC-stress-clean). (Two earlier
+  cuts — an async single registry, then inline-in-caller — were superseded; inline
+  can't guarantee the emitter never crashes on an uncatchable handler fault. See
+  ADR-106.)
+  ⬜ **Still to fold in:** kernel-internal event *sources* (GC collections,
+  scheduler spawn/exit/preempt, dist node up/down — these need a Rust emit seam);
+  unifying the existing `gc-stats`/`vm-stats`/`process-info` snapshots behind it so
+  `nest observe` + `nest mcp` consume the stream; `defevent` + checker-validated event
+  schemas; built-in metric aggregators (counter/gauge/summary/histogram) + sampling;
+  and the location-transparent remote tier over the dist link. Erlang/Elixir
+  `:telemetry` is the de-facto instrumentation seam:
+  code calls `:telemetry.execute(event, measurements, metadata)`, handlers attached
+  to an event name fire on each emit, and `Telemetry.Metrics` + reporters aggregate
+  the stream into counters/gauges/histograms. Brood wants the same *shape* — a
+  uniform "emit a named event with measurements + metadata; attach handlers" seam —
+  but built to fix `:telemetry`'s known rough edges and to lean on Brood's green
+  processes, immutable data, the advisory checker, hot reload, and the dist link.
+  **What we improve over Erlang's `:telemetry`:**
+  - **Async-by-default delivery.** Erlang runs every handler *synchronously in the
+    emitting process*, so a slow or chatty handler degrades the very code it
+    measures (and a throwing handler is silently detached mid-flight). Brood emits by
+    `send` to a collector **process** — the hot path pays only the emit; handlers run
+    off it, and a crashing handler is just a dead process a supervisor restarts, never
+    touching the instrumented code. A `:sync` opt-in stays for the low-overhead `span` case.
+  - **Events as data + a declared schema.** Erlang events are atom-list names with
+    stringly-typed measurement/metadata maps, documented only in prose — typos are
+    silent. Brood adds `(defevent name {:measurements … :metadata …})` so events are
+    *discoverable* (introspect the registry as data) and the **advisory checker**
+    flags an emit whose payload doesn't match the declared shape (advisory, zero
+    false positives, never gates — ADR-011/023).
+  - **Immutable, process-backed registry.** No global mutable ETS handler table; the
+    registry is a process holding state in its loop (the only mutation Brood allows,
+    ADR-026), introspectable via a snapshot like `(process-info pid)`.
+  - **Location-transparent.** A remote node's events ride the existing dist link (M4)
+    to a central collector, reusing the observer's remote-attach pattern (ADR-053) —
+    distributed telemetry with no extra transport.
+  - **Built-in aggregation + sampling.** A `Telemetry.Metrics` analog
+    (counter / gauge / summary / histogram) plus rate-limiting/sampling, in Brood,
+    rather than a separate library + reporters bolted on.
+
+  **Unifies today's ad-hoc instrumentation.** `(gc-stats)`/`(gc-trace …)`, the
+  `(vm-stats)` work-attribution counters, reductions/`REDS-s`, and the
+  `(process-info pid)` snapshots all become *telemetry event sources* — the
+  `nest observe` viewer (M3) and the `nest mcp` introspection tools then consume the
+  event stream instead of each polling its own bespoke snapshot path.
+
+  **Mechanism vs policy (ADR-006).** Almost all of it is Brood (`std/`): the registry
+  process, `emit`/`attach`/`detach`, the `span` macro, `defevent`, the metric
+  aggregators. Rust only *emits* the kernel-internal events the language can't see —
+  GC collections, scheduler spawn/exit/preempt, dist node up/down — plus a cheap
+  "any handler attached?" guard so an unobserved `emit` is near-free (Erlang's same
+  zero-cost-when-unattached property).
+
+  **Sequencing.** The Brood-only core (registry + emit/attach + `span` + metrics) can
+  land now over `spawn`/`send`/`monitor`; the kernel-event sources fold in
+  incrementally; the remote/distributed tier rides M4 distribution. Demand-driven
+  (ADR-011) — the editor/daemon's "what is this instance doing right now" need is the
+  first real consumer, and it supersedes the observer's hand-rolled snapshot polling.
 - ✅ **Resilient `ui-run` — recover to the last good frame (let-it-crash for the
   TEA loop)** (done 2026-06-01). A `view`/`update` throw in `std/editor/ui.blsp` no
   longer kills the app: `ui--loop` threads a **`last-good`** model, catches a throw
@@ -1158,6 +1245,74 @@ is not part of Brood's roadmap.)_
   `gen-call-timeout` for a custom deadline) so a dead/wedged server raises instead
   of hanging. `spawn-server-link`/`spawn-server-named` added. Composes under
   `proc/supervisor`. See [`language.md`](language.md) §"The `proc/gen` server framework".
+- ✅ **In-memory table store — shared concurrent state (Erlang ETS)** — **landed
+  2026-06-14, ADR-107** (`table`/`table-put`/`table-get`/`table-has?`/`table-delete`/
+  `table-incr`/`table-count`/`table-snapshot`/`table-drop` + `table?`). A
+  `Value::Table` handle into a global registry; **sendable** across processes (every
+  copy shares one store, like a `Pid`), the store holding **deep clones in `Message`
+  form** so the moving GC never sees it and get clones a fresh value into the caller's
+  heap (ETS copy-in/copy-out). Keys reuse Brood's `hash_value`/`equal` (identical to
+  map keys). `table-incr` is the one atomic mutator (lock-held read-modify-write — no
+  lost updates); `table-snapshot` gives a consistent point-in-time map (the MVCC win).
+  Keys must be looked-up-able: identity values (closures) and NaN are rejected as keys.
+  `tests/table_test.blsp` (35 cases incl. cross-process sharing, concurrent-incr
+  atomicity, GC-stress-clean); three independent adversarial reviews found no
+  crash/corruption/deadlock/leak. **Deferred (ADR-011):** owner-death GC / `heir`, ordered/bag tables,
+  select/match (derive from `table-snapshot`), and the distributed (Mnesia-like) tier.
+  Original design notes below. Erlang ETS is the shared in-memory key→term store every node leans
+  on: tables of tuples with O(1) key access that **any process reads and writes
+  directly**, bypassing the owning process's mailbox — the escape hatch from "all
+  shared state goes through one process's `receive`". Brood needs the same
+  capability, because today the only ways to share mutable state are a **process
+  holding a map in its loop** (every read costs a `send`/`receive` round-trip + a
+  cross-heap copy) or a `defonce`/`def` global cell — neither gives concurrent,
+  round-trip-free reads against a large shared dataset. This is **genuine mutable
+  state**, so per the immutability contract (ADR-026) it is a **Rust-backed opaque
+  resource handle behind primitives** — the same blessed path as the rope/buffer,
+  *not* a mutable `Value` — built on the existing shared-region machinery (`Arc` +
+  the `map_champ` CHAMP trie + the `promote`/`to_message`/`from_message` cross-heap
+  copy the kernel already has).
+
+  **Mechanism:** a table is a shared CHAMP map behind an `Arc`; a write builds the
+  new persistent map and **atomically swaps the root** (CAS / short lock), a read
+  loads the current immutable root — so reads are concurrent and round-trip-free.
+  Values are deep-copied **in** on insert (promote/freeze into the shared region) and
+  **out** into the reader's LOCAL heap on read (`from_message`), reusing the message
+  path — so the moving GC never sees a cross-heap raw handle. A table is owned by its
+  creating process and freed when that process exits (Erlang's owner model; an
+  `:heir`/named-survives-owner variant can follow).
+
+  **What we improve over ETS:**
+  - **Consistent immutable snapshots, free.** ETS reads are *dirty* — a `select`
+    over a table being written sees torn state. Because the root is an immutable
+    persistent map, a reader grabs a **point-in-time snapshot of the whole table
+    atomically** (just read the root), iterates it with zero locking, and structural
+    sharing keeps old snapshots cheap (MVCC for free).
+  - **Atomic multi-key transactions.** ETS atomicity is per-object (one tuple);
+    multi-key atomicity needs Mnesia. A root swap makes a multi-key `update` atomic
+    trivially — build the new map, CAS the root.
+  - **Real pattern-matching queries, not match specs.** ETS match specs are an
+    awkward `'$1`/`'$_` mini-language. Brood queries the snapshot with its actual
+    pattern matching + predicates (`(table-select t (fn (k v) …))`), and a snapshot
+    *is* a Brood map — `fold`/`filter`/`reduce` over it with the normal sequence
+    library, no special API.
+  - **Optional typed schema** via the advisory checker (like telemetry's
+    `defevent`): declare key/value types, advisory-checked, never gating (ADR-011/023).
+
+  **Surface (ADR-011 — ship the simple form):** a `set`-type key→value table first
+  (`table` / `table-put` / `table-get` / `table-delete` / `table-select` /
+  `table-snapshot`); Erlang's `ordered_set`/`bag`/`duplicate_bag` and the
+  public/protected/private access modes deferred until a consumer needs them.
+
+  **Mechanism vs policy (ADR-006):** the shared structure, atomic root swap, and
+  cross-heap copy are Rust (mechanism — like the blob heap); transactions, query
+  combinators, and the typed schema are Brood. **It also generalizes today's
+  special-case shared stores** — the process registry, `defonce` global cells — into
+  one primitive; the Erlang **`Registry`/`pg`** below would be built *on* it.
+
+  **Sequencing.** Single-node store can land independently of the daemon; the
+  **distributed/replicated tier (the Mnesia analog)** rides M4 distribution and is
+  deferred (ADR-011) until a multi-node consumer demonstrates the need.
 - ⬜ **OTP-parity follow-ups (near-term).** Additive, pure Brood (or a thin dist
   seam), gated on a concrete need: **`send-after`/`send-interval`** timers (Erlang
   `erlang:send_after` — today only the `receive` timeout exists); a **synchronous

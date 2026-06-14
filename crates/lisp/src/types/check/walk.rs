@@ -45,6 +45,15 @@ fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity> {
     }
 }
 
+/// True when `head` is a function-literal head — `fn` or its synonym `lambda`.
+/// Both spell the same special form (`lambda` Just Works, see the evaluator), and
+/// both survive macro expansion as their original head, so every reader of a `fn`
+/// shape (here, [`guards::lambda_ret`], and `protocol`'s arity reader) must accept
+/// the two. Single source of truth so they can't drift.
+pub(super) fn is_fn_head(head: Symbol) -> bool {
+    value::symbol_is(head, kw::FN) || value::symbol_is(head, "lambda")
+}
+
 /// The arity of a **single-clause** `fn` literal — `(fn (a b) …)` → `exact(2)`,
 /// `(fn (a &optional b) …)` → `range(1, 2)`, `(fn (a b & c) …)` → `at_least(2)`.
 /// This mirrors what `arity_of` already computes for a *named* variadic global, so
@@ -61,7 +70,7 @@ fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
     let Some(Value::Sym(head)) = items.first().copied() else {
         return None;
     };
-    if !value::symbol_is(head, kw::FN) {
+    if !is_fn_head(head) {
         return None;
     }
     // Peel an optional leading docstring, matching the evaluator's `fn` parse.

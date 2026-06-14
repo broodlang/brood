@@ -2709,3 +2709,143 @@ commits landed on `main` first and are equivalent/better, so the local fix was
 dropped on rebase.) Full suite green (609). The async `remote-spawn` already worked;
 only the capturing + promoted path was broken, which is why the regression hid
 behind the sync variant and the position-reflection test.
+
+## 2026-06-14 — telemetry: an Erlang-shaped `:telemetry`, inline dispatch (ADR-106)
+
+Added `std/telemetry.blsp` (`require 'telemetry`), the instrumentation seam a web
+framework (`../hatch`) and the daemon want: `emit` a named event with measurements +
+metadata, `attach` handlers to it, `span` to bracket work with
+`:start`/`:stop`/`:exception`. Plus a sibling roadmap item — an ETS-like in-memory
+store — was written up (deferred; "with a better name" than ETS, TBD).
+
+**The design pivot.** The first cut made `emit` an async cast to a single `proc/gen`
+registry process — framed as "improved over Erlang's synchronous handlers." On
+review (the user asked *why* Erlang blocks) that's backwards: Erlang's `:telemetry`
+runs handlers **inline in the calling process** off an ETS table precisely so there's
+**no process in the dispatch path** — concurrent across callers, zero-copy, no
+bottleneck. A single async registry instead funnels every event on the node through
+one mailbox (a throughput ceiling + per-event heap copy) — worse for a web server
+that runs a process per request. So we **matched Erlang's model**:
+
+- Dispatch is **inline** in the emitting process, reading `*telemetry-handlers*`, a
+  **`def`-rebound global** map of event → handlers. `def` is visible across processes
+  on next lookup (ADR-013), so a handler attached anywhere is seen by an `emit`
+  everywhere — the cross-process sharing Erlang gets from ETS, via Brood's one
+  mutation. The hot path only *reads* the global.
+- **Async is opt-in, per handler:** `forward(id, event, pid)` attaches a handler that
+  only `send`s to a process you own — heavy work runs there, off the hot path.
+- A throwing handler is **caught and detached** ("unhook if it fails"): `emit`'s
+  dispatch collects the ids that threw and rebinds the table without them.
+- Events are plain values matched by `=` (`:request` or `[:http :request :stop]`);
+  `span` appends `:start`/`:stop`/`:exception` to a base vector. No-op when nothing's
+  attached.
+
+attach/detach mutate a global, so they're configuration-time (not concurrency-safe
+against each other) — same as Erlang, and the deferred ETS-like store would make them
+atomic later (a clean swap, since dispatch already reads a shared table).
+
+`tests/telemetry_test.blsp` — 11 cases (emit/filter/attach/detach/re-attach,
+crash-detach, the span lifecycle, no-handlers no-op, and a cross-process block where
+the handler runs in each of 40 emitting processes). Registered in `builtins.rs`; docs
+in `language.md` + ADR-106. Dropping the registry process also dropped the test peak
+from ~34 MB to ~9.5 MB. Next: wire it into hatch's request lifecycle; then the
+ETS-like store.
+
+## 2026-06-14 — `table`: an in-memory shared store (Brood's ETS, ADR-107)
+
+Added `table` — shared, concurrently-mutable key→value state, the escape hatch for
+state many processes read/write directly without a per-owner mailbox round-trip
+(Erlang's ETS). Surface (deliberately small, "fewer features but more robust"):
+`table` / `table-put` / `table-get` (+default) / `table-has?` / `table-delete` /
+`table-incr` / `table-count` / `table-snapshot` / `table-drop` + the `table?`
+predicate.
+
+**Representation.** A new `Value::Table(u64)` + `Tag::Table` — a scalar handle into a
+global registry (`crate::table`) of `Arc<Store>`. Unlike `Socket`/`Subprocess`
+(process-local) it is **sendable** (`Message::Table`): every copy of the handle
+indexes the same store, the way a `Pid` names one shared process. Extending the value
+universe touched the usual compatibility-contract sites (`value.rs` tag/name/keyword
+arrays, `heap.rs` `tag_rank`/`hash_value`/`equal`, `printer.rs`, `message.rs` to/from,
+`dist/wire.rs` reject, `types/mod.rs` ALL_TAGS + `table?`, `annot.rs`, and one
+exhaustive match in `nest/mcp.rs`).
+
+**Why it can't corrupt (the design crux).** The store holds **deep clones in
+`Message` form** — the same heap-independent serialization a cross-process send uses.
+Nothing in it is a live GC handle, so the moving collector never traces/moves/dangles
+into it (the whole use-after-GC class is structurally excluded), and `table-get`
+reconstructs a *fresh* value in the caller's heap (ETS copy-in/copy-out — no
+cross-process aliasing). Key equality is **borrowed from the heap**: bucket by
+`hash_value`, resolve the (rare) collision by reconstructing the stored key and
+calling `Heap::equal` — so table keys behave exactly like map keys, no parallel
+equality code. Locking is flat (registry `Mutex` → clone `Arc` out → drop → store
+`Mutex`; never nested).
+
+**The two things that matter.** `table-incr` is the one atomic mutator — a lock-held
+read-modify-write, so concurrent counters never lose an update (no closure-based
+`update`: arbitrary code under the lock can't be made safely atomic). `table-snapshot`
+returns a consistent point-in-time immutable map (the MVCC win over ETS's dirty
+reads), and doubles as the enumeration primitive (`keys`/`vals`/`reduce` over it).
+
+This started as the structure question for telemetry: telemetry's handler table rode a
+`def`-rebound global (ADR-106) — fine for a tiny startup table, but not atomic and it
+churns the *code* region. `table` is the right structure for real shared data, and the
+user's instinct ("clone it") is exactly the safety mechanism. Deferred (ADR-011):
+owner-death GC / `heir`, ordered/bag tables, select/match, the distributed tier.
+
+**Review pass.** Three independent adversarial reviewers (concurrency + GC-safety;
+correctness + message round-trip; Value/Tag-integration completeness) found no crash,
+corruption, deadlock, mutex-poisoning, GC-safety, or leak defect — the GC-safety
+argument (handles are append-only slab indices; GC fires only at the eval safepoint,
+never mid-builtin; the store holds only owned `Message` clones) and the `table-incr`
+atomicity (one continuous lock hold over read+write) both hold. Two real edge-case
+footguns were surfaced and fixed: a **NaN key** (NaN ≠ NaN → unretrievable + leak on
+repeat put) and a **closure key** (identity not preserved across the clone) are now
+rejected by `check_key`; `table-incr` on an out-of-i64 (bignum) value gives a precise
+error instead of a misleading "not an integer". `tests/table_test.blsp` grew to **35
+cases** (put/get/default, stored-nil-vs-absent, structural + handle + rejected keys,
+has?/delete/count, atomic incr, snapshot consistency, identity, drop + use-after-drop
+on every op, value round-trip incl. callable closures, 500-entry scale, and
+concurrency: shared handle, explicit-message handoff, concurrent incr on one and
+several keys with no lost update); green under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+Full suite green (608). Docs: `language.md` (new "In-memory tables" section), ADR-107,
+roadmap ticked.
+
+## 2026-06-14 — telemetry: reverse to a listener process so a handler can never crash the emitter (ADR-106)
+
+Hard requirement from the user: **telemetry must never be able to crash the process
+that emits an event — only a dedicated listener may crash.** The previous cut was
+*inline* dispatch (handlers run in the emitting process, throwing handlers caught via
+try/catch). That can't meet the requirement: an *uncatchable* handler fault — a
+coroutine stack overflow (uncatchable segfault) or `(exit … :kill)` (untrappable) —
+runs in the caller and takes it down. `try` can't wrap that. The only fix is to run
+handlers in a different process.
+
+Rewrote `std/telemetry.blsp` to a **listener model**: `emit` is a fire-and-forget
+`send` to a listener process; handlers run there. So `emit` only builds the payload
+and sends (a send never throws) — no handler code touches the caller, full stop. The
+listener runs each handler under try/catch (a throwing handler is caught + detached,
+so the listener survives normal bugs); only an uncatchable fault kills the listener.
+The handler table stays a `def`-rebound global (not listener state), so the listener
+is a stateless executor — supervise it and a crash restarts it with handlers intact.
+Added `start-telemetry`/`stop-telemetry` (spawn/stop + register `:telemetry`) and
+`telemetry-sync` (a FIFO round-trip to flush, for tests/shutdown; times out rather
+than hanging). `emit`/`attach`/`detach`/`detach-all`/`forward`/`handlers`/`span`
+unchanged in spirit.
+
+The trade-off (one listener = a serialization point + a cross-heap copy per event) is
+accepted deliberately: the requirement is safety, not throughput. Handlers are meant
+to be cheap (log a line, bump a `table` counter) or `forward` heavy work to their own
+process. This is the third and final dispatch shape this session (async-registry →
+inline → listener); inline was right for throughput but wrong for the crash-isolation
+guarantee, which wins.
+
+`tests/telemetry_test.blsp` grew 11 → **19 cases**, including the headline guarantee: a
+handler that does `(exit (self) :kill)` kills the listener (confirmed via a monitor
+`[:down]`) while the emitting process keeps computing; plus recovery-after-crash
+(restart, handlers survive in the global), "handler's `(self)` is the listener not the
+emitter," throwing-handler caught+detached+listener-survives, forward, span
+start/stop/exception, not-started/after-stop no-ops, telemetry-sync ordering, and a
+200-process concurrent emit. Green normally and under `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1`. Updated the hatch request hook's comment (emit is now a
+non-blocking send — a slow handler no longer slows the worker). Full suite green
+(608). Docs: ADR-106 rewritten, `language.md` Telemetry section, roadmap.

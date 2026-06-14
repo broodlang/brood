@@ -448,6 +448,15 @@ pub enum Value {
     /// mechanism (the owning process drives it via the `proc-*` primitives and
     /// receives its output as mailbox messages); **never** sent across processes.
     Subprocess(u64),
+    /// An **in-memory table** (Brood's ETS, ADR-107) — an id into the global table
+    /// registry (`crate::table`). Like a `Socket`/`Subprocess` it is a scalar handle,
+    /// not a heap object: the GC never traces or moves it. **Unlike** them it is
+    /// *shared, not process-local* — the handle is sent by value across processes and
+    /// every copy indexes the same shared store (the way a `Pid` names one shared
+    /// process). The store holds deep clones in `Message` form, so it is genuine
+    /// mutable state behind primitives (`table-*`), never a mutable `Value`. Local to
+    /// this runtime (the registry is global to the OS process); not node-portable.
+    Table(u64),
     /// A **transient map** — Clojure's `(transient m)` / `assoc!` / `persistent!`
     /// fast-building handle into the per-process `transients` slab. A heap object
     /// holding a [`crate::core::heap::TransientCell`]: a mutable `root` (a `Map`),
@@ -493,6 +502,7 @@ pub enum Tag {
     Socket,
     Subprocess,
     Transient,
+    Table,
 }
 
 impl Tag {
@@ -519,6 +529,7 @@ impl Tag {
             Tag::Socket => "socket",
             Tag::Subprocess => "subprocess",
             Tag::Transient => "transient",
+            Tag::Table => "table",
         }
     }
 
@@ -528,14 +539,14 @@ impl Tag {
     /// code that was essentially the entire `intern` cost (~98% of all interns were
     /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
     pub fn keyword(self) -> Symbol {
-        static KW: LazyLock<[Symbol; 19]> = LazyLock::new(|| {
-            const TAGS: [Tag; 19] = [
+        static KW: LazyLock<[Symbol; 20]> = LazyLock::new(|| {
+            const TAGS: [Tag; 20] = [
                 Tag::Nil, Tag::Bool, Tag::Int, Tag::Float, Tag::Sym, Tag::Keyword,
                 Tag::Str, Tag::Pair, Tag::Vector, Tag::Fn, Tag::Macro, Tag::Native,
                 Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Subprocess,
-                Tag::Transient,
+                Tag::Transient, Tag::Table,
             ];
-            let mut out = [0u32; 19];
+            let mut out = [0u32; 20];
             for t in TAGS {
                 out[t as usize] = intern(t.name());
             }
@@ -575,6 +586,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Socket(_) => Tag::Socket,
         Value::Subprocess(_) => Tag::Subprocess,
         Value::Transient(_) => Tag::Transient,
+        Value::Table(_) => Tag::Table,
     }
 }
 

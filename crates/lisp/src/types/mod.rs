@@ -34,7 +34,7 @@ use crate::core::value::{self, Symbol, Tag, Value};
 /// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
 /// order**; the compiler can't enumerate variants, so `tag_universe_is_consistent`
 /// (below) is what guards completeness, ordering, and the universe size.
-const ALL_TAGS: [Tag; 19] = [
+const ALL_TAGS: [Tag; 20] = [
     Tag::Nil,
     Tag::Bool,
     Tag::Int,
@@ -54,6 +54,7 @@ const ALL_TAGS: [Tag; 19] = [
     Tag::Socket,
     Tag::Subprocess,
     Tag::Transient,
+    Tag::Table,
 ];
 
 /// The number of tag atoms — derived from [`ALL_TAGS`], not hand-counted.
@@ -307,6 +308,7 @@ impl Ty {
             "socket?" => Ty::of(Tag::Socket),
             "subprocess?" => Ty::of(Tag::Subprocess),
             "transient?" => Ty::of(Tag::Transient),
+            "table?" => Ty::of(Tag::Table),
             // `fn?` holds for both Brood closures and Rust builtins.
             "fn?" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
             "number?" => Ty::NUMBER,

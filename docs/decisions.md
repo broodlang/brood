@@ -6428,3 +6428,160 @@ tag — two existing checker tests were updated to the sharper output. Literal t
 help code the checker *sees*; a data file read with `read-first` (an editor
 `init.blsp`) is not type-checked, so in-file feedback there remains a separate
 LSP-on-data concern.
+
+## ADR-106 — Telemetry: handlers run in an isolated listener process (never the emitter)
+
+**Status:** accepted (2026-06-14). Implemented: `std/telemetry.blsp`
+(`require 'telemetry`), registered in `crates/lisp/src/builtins.rs`, tested by
+`tests/telemetry_test.blsp` (19 cases incl. the crash-isolation guarantee + a
+concurrent block). The kernel-event sources, metric aggregators, `defevent` schemas,
+and the remote tier are deferred follow-ons (ADR-011) — see the roadmap entry.
+
+This decision **superseded two earlier cuts** in the same session (greenfield, ADR-000
+spirit): first an async single-registry process; then, after asking "why is Erlang
+synchronous," an inline-in-the-caller model (Erlang's own shape). The inline model was
+then reversed for the **hard requirement below**.
+
+**Context.** A web framework (`../hatch`) and a long-lived daemon need an
+instrumentation seam: `emit` a named event (request start/stop, cache hit, GC); let
+operators `attach` handlers (logging, metrics) without editing the instrumented code.
+Erlang/Elixir's `:telemetry` is the established shape (`execute` + `attach`) and
+Phoenix is built on it. The decisive requirement here, stated by the user: **a
+telemetry handler must NEVER be able to crash the process that emitted the event —
+only a dedicated listener may crash.**
+
+**Why inline can't meet that.** Erlang's `:telemetry` (and our inline cut) runs
+handlers *in the caller*. A handler that **throws** can be caught (`try`), but an
+**uncatchable** fault — a coroutine **stack overflow** (an uncatchable segfault in
+Brood) or `(exit … :kill)` (untrappable) — runs in the caller and takes the caller
+down with it. There is no way to wrap that inline. So the only way to guarantee "never
+crash the emitter" is to run handlers in a **different process**.
+
+**Decision.** Handlers run in a dedicated **listener process**; `emit` is a
+fire-and-forget `send` to it. Pure Brood over `spawn`/`send`/`receive`, **zero new
+kernel surface**:
+
+- **Total emitter isolation.** `emit` only computes the payload and `send`s it (a
+  `send` never throws), then returns nil. No handler code runs in the caller, so a
+  handler that throws, hangs, loops, OOMs, or hard-exits cannot affect the emitting
+  process. The single guarantee the requirement demands.
+- **The listener absorbs handler faults.** It runs each handler under `try`/`catch`,
+  so a *throwing* handler is caught and **detached** — the listener survives normal
+  handler bugs. Only an *uncatchable* fault kills the listener.
+- **Restartable, handlers survive.** The handler table is a `def`-rebound global
+  (`*telemetry-handlers*`, visible across processes — ADR-013), **not** listener
+  state. So the listener is a stateless executor: supervise it (an ordinary
+  `:permanent` child) and a crash restarts it with every handler intact.
+  `start-telemetry` spawns + registers it (`:telemetry`); `stop-telemetry` ends it.
+- **`forward(id, event, pid)`** ships events to a process you own — to run heavy
+  handler work off even the listener.
+- **`telemetry-sync`** is a FIFO round-trip to flush pending emits (tests, shutdown);
+  it times out rather than hanging and never runs handler code in the caller.
+- **`span`** brackets a body with `:start`/`:stop`/`:exception` events (vector base);
+  the body runs in the caller (timed), the events are emitted async.
+- **Events are plain Brood values** compared by structural `=`.
+
+**The trade-off, accepted deliberately.** One listener is a serialization point and
+copies each event across heaps — the very thing the inline cut avoided. We accept it
+because the requirement is **safety, not throughput**: a logging/metrics handler bug
+must never take down a request. Handlers are expected to be cheap (log a line, bump a
+`table` counter) or to `forward` heavy work. Sharding the listener is a future option
+if throughput ever demands it.
+
+**Alternatives rejected.** (1) **Inline-in-caller** (the prior cut / Erlang's model)
+— more parallel and zero-copy, but *cannot* guarantee the emitter never crashes
+(uncatchable handler faults). Rejected by the requirement. (2) **A process per handler
+per emit** — perfect isolation but a spawn per event is far too costly; one listener
+is the right grain ("only the listener"). (3) **A built-in self-restart guardian** —
+considered, but left to the app's existing supervision (`proc/supervisor`): telemetry
+stays a plain supervisable child, no bespoke restart logic, and tests stay simple.
+
+**Consequences.** A handler runs in the listener, so it sees the listener's context,
+not the emitter's — all context must travel in the event's metadata (it already does).
+attach/detach update a global, so they're configuration-time (not safe to race from
+many processes). If the listener isn't started, `emit`/`span` are no-ops (span still
+runs and returns its body). Telemetry is the seam `nest observe` / `nest mcp` should
+eventually consume, and where kernel events (GC, scheduler) get published once a Rust
+emit seam is added.
+
+## ADR-107 — `table`: an in-memory shared store (Brood's ETS) as a Rust-backed handle of deep clones
+
+**Status:** accepted (2026-06-14). Implemented: `Value::Table(u64)` + `Tag::Table`
+(`core/value.rs`), the store `crate::table` (`crates/lisp/src/table.rs`), the
+`table`/`table-put`/`table-get`/`table-has?`/`table-delete`/`table-incr`/
+`table-count`/`table-snapshot`/`table-drop` builtins + the `table?` prelude predicate,
+the `Message::Table` codec (cross-process, runtime-local), and
+`tests/table_test.blsp` (17 cases incl. cross-process sharing + concurrent-incr
+atomicity). Deferred: owner-death GC / `heir`, ordered/bag tables, select/match,
+a distributed (Mnesia-like) tier — all gated on a real consumer (ADR-011).
+
+**Context.** Shared, concurrently-read/written state is the one thing the
+process-and-immutable-data model can't express cheaply: a process holding a map
+makes every read a `send`/`receive` round-trip + a cross-heap copy, and a
+`def`-rebound global (what telemetry's handler table uses, ADR-106) isn't atomic and
+pours data into the shared *code* region. Erlang's answer is ETS — an in-memory term
+store any process reads/writes directly. The web framework (`../hatch`) and the
+coming daemon want the same. The user's framing: build it carefully, **fewer features
+but more robust**, and "call it `table`."
+
+**Decision.** A `table` is genuine mutable state, so per the immutability contract
+(ADR-026) it is a **Rust-backed opaque resource behind primitives**, never a mutable
+`Value` — the blessed path (like the rope). `Value::Table(u64)` is a scalar handle
+into a global registry of stores. Unlike `Socket`/`Subprocess` (process-local) it is
+**sendable** (`Message::Table`): every copy of the handle indexes the *same* store,
+the way a `Pid` names one shared process.
+
+**The store holds deep clones in `Message` form — this is the whole robustness
+story.** On `table-put`, key and value are `to_message`'d (the same serialization a
+cross-process send uses) into owned, heap-independent trees; on `table-get` the value
+is `from_message`'d into a **fresh** copy in the *caller's* heap. Consequences:
+
+- **The moving GC never sees the store.** Nothing in it is a live heap handle, so the
+  collector can't trace, move, or dangle into it — the entire use-after-GC class is
+  structurally excluded. `Table(u64)` itself is a GC leaf (like `Socket`).
+- **No cross-process aliasing.** get *clones out*, so two processes never share a
+  mutable object — exactly ETS copy-in/copy-out semantics.
+- **Key equality is borrowed, not reinvented.** The store buckets by Brood's
+  `hash_value`; a (rare) collision is resolved by reconstructing the stored key into
+  the caller's heap and calling `Heap::equal`. So table keys behave *identically* to
+  immutable-map keys, with zero parallel equality code to drift.
+- **Flat locking.** Registry `Mutex` → clone the `Arc<Store>` out → drop it → then the
+  store's own `Mutex`. Never nested, so no deadlock; per-table ops only contend on the
+  same table.
+
+**Surface (fewer features, robust).** `table`, `table-put`, `table-get` (+default),
+`table-has?`, `table-delete`, `table-count`, `table-snapshot` (→ an immutable map,
+the read-all / enumeration primitive; consistent point-in-time, the MVCC win over
+ETS's dirty reads), `table-drop`, `table?`. Plus **`table-incr`** — the one atomic
+mutator: a read-modify-write done entirely under the store lock, so concurrent
+counters never lose an update. **No closure-based `update`** — running arbitrary
+Brood code under the store lock would risk deadlock/reentrancy and can't be made
+atomic safely; `table-incr` covers the real concurrent case (counters/metrics).
+
+**Alternatives rejected.** (1) **Store live `Value` handles in a shared region** —
+rejected: it would fight the moving GC (the cross-heap/dangling hazard), the single
+biggest robustness risk; cloning to `Message` form removes it entirely. (2) **A
+`def`-rebound global** (the telemetry approach) — fine for a tiny startup-configured
+table, wrong here: not atomic, and it churns the code/GC region with data. (3) **A
+process holding a map** — the round-trip + copy per read is the cost `table` exists to
+remove. (4) **A fancier name** (`roost`/`coop`) — the user chose plain `table`.
+
+**Consequences / limits.** A table lives until `table-drop` or runtime exit — no
+owner-death reclamation in v1 (an app-lifetime store created at startup is the model;
+`heir`/owner semantics are deferred), so a forgotten table leaks until exit (safe, not
+UB). Not node-portable: the dist wire codec rejects a `Table` (send its
+`table-snapshot` — a plain map — across nodes instead). Values that can't be messaged
+(another table is fine; a socket/transient is not) can't be stored — a clean error,
+by construction. **Keys must be reliably looked-up-able** — `check_key` rejects values
+that can't match themselves after a clone: identity values (`Fn`/`Macro`/`Native`,
+which round-trip to a new identity) and `NaN` (which never equals itself); plain data
+and id-stable handles (`Pid`/`Ref`/`Socket`/`Subprocess`/`Table`) are fine. (A bad
+value *nested* in a compound key has the same hazard as in a map key — documented, not
+walked.) `table-incr` works in the i64 range (a bignum value is a precise error, not a
+silent miss). Three independent adversarial reviews (concurrency/GC-safety,
+correctness/round-trip, and Value/Tag-integration completeness) found no crash,
+corruption, deadlock, poisoning, GC-safety, or leak defect; the suite
+(`tests/table_test.blsp`, 35 cases) passes under `BROOD_GC_STRESS` + the heap
+verifier. Adding the `Value`/`Tag` extended the type lattice by one (the
+compatibility-contract sites in `value.rs`/`heap.rs`/`types.rs`/`printer.rs`/
+`message.rs`/`wire.rs`); `table?`/`(type-of x) :table` complete it.

@@ -75,6 +75,13 @@ pub enum Message {
     /// meaningless on another node. The subprocess reader thread emits this in its
     /// `[:proc handle …]` mailbox messages.
     Subprocess(u64),
+    /// An in-memory table id (Brood's ETS, ADR-107). Valid only *within one runtime*
+    /// (the table registry is global to the OS process) — it may cross in a message or
+    /// be captured by a `spawn`ed closure, so many processes share one store. NOT
+    /// node-portable: the cross-node wire codec rejects it (the id means nothing in
+    /// another runtime). Only the handle rides the message; the store's contents are
+    /// deep clones already.
+    Table(u64),
     /// A serialised closure (Erlang's "send a fun"). Because a closure's body and
     /// its optionals' defaults are S-expression *forms* (plain data), and its free
     /// globals resolve on the receiver, a function can travel as data. Only its free
@@ -237,6 +244,10 @@ fn to_message_rec(
         // `[:proc handle …]`, so the handle must round-trip through a message. Valid
         // across this runtime's processes; not node-portable.
         Value::Subprocess(id) => Message::Subprocess(id),
+        // A table is a global-registry id like a socket: the handle rides the message
+        // so many processes share one store. Valid across this runtime; not
+        // node-portable (the wire codec rejects it).
+        Value::Table(id) => Message::Table(id),
         Value::Transient(_) => {
             // A transient is a process-local, identity-mutable build handle (its
             // root maps slab is LOCAL). Deep-copying it across processes would
@@ -440,6 +451,7 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
         },
         Message::Socket(id) => Value::Socket(*id),
         Message::Subprocess(id) => Value::Subprocess(*id),
+        Message::Table(id) => Value::Table(*id),
         Message::Closure(c) => closure_from_message(heap, c),
     }
 }
