@@ -1231,6 +1231,22 @@ impl Process {
 /// Erlang-style let-it-crash: an uncaught throw kills the process, monitors
 /// fire `[:down :error …]` immediately.
 pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
+    spawn_impl(heap, f, false)
+}
+
+/// As [`spawn`], but **atomically links** the new child to the spawner *before* it can
+/// run — the Erlang `spawn_link` primitive. Closes the spawn→link gap: a separate
+/// `(link pid)` after the child's pid is returned can miss a child that already exited
+/// (linking a dead pid yields `[:EXIT pid :noproc]`, *losing the real reason*). With the
+/// link registered before the child is enqueued, its eventual exit always reaches the
+/// parent as `[:EXIT pid reason]` with the **true** reason — so a fast `:normal` exit is
+/// never misread as abnormal (which would spuriously restart a `:transient` supervised
+/// child — see `supervisor.blsp`).
+pub fn spawn_linked(heap: &Heap, f: Value) -> Result<u64, LispError> {
+    spawn_impl(heap, f, true)
+}
+
+fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError> {
     // The spawner is the parent. Captured before minting the child pid so the
     // root (whose ctx/pid is lazily minted here on its first spawn) gets the
     // lower id. `ensure_ctx` needs no heap.
@@ -1263,6 +1279,14 @@ pub fn spawn(heap: &Heap, f: Value) -> Result<u64, LispError> {
     crate::core::sync::lock(&PARENTS).insert(pid, parent);
     let mailbox = Mailbox::new();
     crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
+
+    // Atomic link (`spawn_linked`): register the symmetric parent↔child link NOW — while
+    // the child is registered (so `link`'s liveness check passes) but NOT yet enqueued, so
+    // it cannot exit before the link exists. This is what makes the child's exit reason
+    // reliable instead of a racy `:noproc`.
+    if link_parent {
+        super::links::link(parent, pid);
+    }
 
     // State capture is the only engine now (ADR-100 §8.4 step 4 — corosensei removed):
     // the worker drives `vm_run_bc` directly, so a paused process is relocatable heap
