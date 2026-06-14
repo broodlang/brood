@@ -180,6 +180,7 @@ contention races).
 | `BROOD_STACK_BUDGET=<bytes>` | Raise/lower the non-tail-recursion stack guard. |
 | `BROOD_RT_GC_FLOOR=<count>` | Threshold floor (RUNTIME closures) for auto-compacting the shared code region (ADR-091; default 4096). The shared-region counterpart of `BROOD_GC_FLOOR`. |
 | `BROOD_PERF_STATS=1` | Dump the VM work-attribution counters (`(vm-stats)`) to stderr after a file/`--test` run — closure activations, IC hit/miss, prim inline/fallback, env-chain hops, allocs, defers. **Needs `--features perf-stats`** (else prints a hint; counters compile to nothing by default). Counting tool, not timing — see `docs/benchmarking.md`. |
+| `BROOD_JIT_DUMP_IR=1` | Dump each fully-lowered JIT arm's **bytecode opcode fingerprint + Cranelift CLIF** to stderr (`[jit-ir]` lines), for diagnosing a JIT miscompile — read the IR, diff against the intended semantics. **Needs `--features jit`**; only fires for arms that lower (a bailed arm never reaches the dump). Run a *targeted* program to limit which arms compile. |
 | `RUST_BACKTRACE` | `brood`/`nest` **default it to `1`** (set in each `main`); `RUST_BACKTRACE=0` opts out, `full` for verbose. |
 
 **Two layers of use-after-GC detection** (a moving collector relocates LOCAL

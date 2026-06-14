@@ -4304,6 +4304,33 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
     })
 }
 
+/// Opcode name of an `Inst`, for the `BROOD_JIT_DUMP_IR` fingerprint. `Inst` (and its
+/// `ConstVal`/`Value` payloads) are intentionally not `Debug`, so this names the
+/// variant without touching the payload. Exhaustive on purpose — a new `Inst` variant
+/// must be added here.
+#[cfg(feature = "jit")]
+fn inst_opcode_name(inst: &Inst) -> &'static str {
+    match inst {
+        Inst::Const(_) => "Const",
+        Inst::Local(_) => "Local",
+        Inst::Global(_) => "Global",
+        Inst::GlobalIc { .. } => "GlobalIc",
+        Inst::Pop => "Pop",
+        Inst::SetLocal(_) => "SetLocal",
+        Inst::Jump(_) => "Jump",
+        Inst::JumpIfFalse(_) => "JumpIfFalse",
+        Inst::MakeVector(_) => "MakeVector",
+        Inst::MakeMap(_) => "MakeMap",
+        Inst::Prim1 { .. } => "Prim1",
+        Inst::Prim2 { .. } => "Prim2",
+        Inst::Prim2SlotSlot { .. } => "Prim2SlotSlot",
+        Inst::Prim2SlotInt { .. } => "Prim2SlotInt",
+        Inst::Call { .. } => "Call",
+        Inst::SelfCall { .. } => "SelfCall",
+        Inst::MakeClosure { .. } => "MakeClosure",
+    }
+}
+
 /// Compile `arm`'s chunk to a native `extern "C" fn(heap: *mut Heap, base: i64) -> i64`
 /// for the Step-A int subset, or `None` to bail to the VM. The compiled fn reads its
 /// frame slots from `roots[base..]`, computes in registers, **boxes the result into
@@ -5725,6 +5752,31 @@ pub(crate) fn jit_lower_arm(
     b.ins().return_(&[four]);
     b.seal_all_blocks();
     b.finalize();
+
+    // IR inspection (debug): `BROOD_JIT_DUMP_IR=1` dumps each fully-lowered arm's
+    // bytecode + Cranelift CLIF to stderr — the tool for diagnosing a JIT miscompile
+    // (read the IR, diff against the intended semantics). Read once; the compile path
+    // is cold (once per arm) and zero cost when unset.
+    {
+        static DUMP_IR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let on = *DUMP_IR.get_or_init(|| {
+            std::env::var("BROOD_JIT_DUMP_IR")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false)
+        });
+        if on {
+            // A compact bytecode fingerprint (opcode names — `Inst` has no `Debug`,
+            // and `ConstVal`/`Value` are deliberately not `Debug`) to correlate the
+            // CLIF to a source arm, then the CLIF itself.
+            let ops: Vec<&str> = code.iter().map(inst_opcode_name).collect();
+            eprintln!(
+                "[jit-ir] ===== arm: {} insts: {} =====",
+                code.len(),
+                ops.join(" ")
+            );
+            eprintln!("{}", ctx.func.display());
+        }
+    }
 
     m.define_function(id, &mut ctx).ok()?;
     m.clear_context(&mut ctx);
