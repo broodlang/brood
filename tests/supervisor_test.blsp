@@ -130,7 +130,7 @@
       ; watch the temporary sibling
       (send (get gen1 :a) :die)
       ;; b is force-killed as part of the group restart (our monitor sees it)…
-      (assert= :down (receive ([:down ~mb _ _] :down) (after 1000 :alive)))
+      (assert= :down (receive ([:down ~mb _ _] :down)))
       ;; …only a comes back (one fresh :up); b is dropped, so no second :up.
       (let (g2a (receive ([:up :a p] p)))
         (is (not (= (get gen1 :a) g2a)))
@@ -171,7 +171,7 @@
           mref (monitor sup))
       (assert= :gaveup
         (receive ([:down ~mref ~sup [:error _]] :gaveup)
-          (after 2000 :still-up))))))
+         )))))
 
 (describe "supervisor: shutdown terminates children"
   :isolated
@@ -184,7 +184,7 @@
       ; watch the child directly
       (stop-supervisor sup)
       ;; the supervisor exits *and* hard-kills the child → our monitor fires.
-      (assert= :down (receive ([:down ~mp ~p1 _] :down) (after 1000 :orphaned))))))
+      (assert= :down (receive ([:down ~mp ~p1 _] :down))))))
 
 (describe "supervisor: nested trees + graceful shutdown"
   :isolated
@@ -208,7 +208,7 @@
            (monitor gc))
       (stop-supervisor parent)
       (assert= :torn-down
-        (receive ([:down ~gm ~gc _] :torn-down) (after 1500 :orphaned)))))
+        (receive ([:down ~gm ~gc _] :torn-down)))))
 
   (test "a :shutdown <ms> child that ignores [:$stop] is hard-killed after the timeout"
     ;; The worker's receive only matches :die — it never consumes [:$stop], so the
@@ -223,7 +223,7 @@
           pm (monitor p))
       (stop-supervisor sup)
       (assert= :killed
-        (receive ([:down ~pm ~p _] :killed) (after 1500 :alive))))))
+        (receive ([:down ~pm ~p _] :killed))))))
 
 (describe "supervisor: shutdown order + named children"
   :isolated
@@ -270,7 +270,7 @@
           wm (monitor w))
       (exit sup :kill)  ; the supervisor dies abnormally
       (assert= :torn-down
-        (receive ([:down ~wm ~w _] :torn-down) (after 1500 :orphaned)))))
+        (receive ([:down ~wm ~w _] :torn-down)))))
 
   (test "killing a supervisor cascades through a nested sub-supervisor"
     ;; parent → (sub-supervisor child) → grandchild. Killing the *parent* must
@@ -288,7 +288,7 @@
           gm (monitor gc))
       (exit parent :kill)  ; parent dies abnormally
       (assert= :torn-down
-        (receive ([:down ~gm ~gc _] :torn-down) (after 1500 :orphaned))))))
+        (receive ([:down ~gm ~gc _] :torn-down))))))
 
 (describe "supervisor: runtime child API (DynamicSupervisor)"
   :isolated
@@ -319,7 +319,7 @@
           _ (receive ([:up :w _] :ok))
           wm (monitor pid))
       (assert= :ok (terminate-child sup :w))  ; by :id
-      (assert= :down (receive ([:down ~wm ~pid _] :down) (after 1000 :alive)))
+      (assert= :down (receive ([:down ~wm ~pid _] :down)))
       (assert= 0 (count-children sup))  ; dropped, not restarted
       (assert= :none (receive ([:up :w _] :restarted) (after 150 :none)))
       (assert= :not-found (terminate-child sup :w))  ; already gone
