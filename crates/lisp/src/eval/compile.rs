@@ -3871,6 +3871,10 @@ fn vm_run_bc(
             {
                 if try_jit {
                     try_jit = false;
+                    // Clean frame state `jit_tier` runs against: slots set up, operand
+                    // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
+                    // assumes roots return to exactly here.
+                    let pre_roots = heap.roots_len();
                     let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
                     // Work-attribution (perf-stats): native completion (0/4) vs a
                     // mid-run deopt (1) vs preemption (2). A hot arm with high
@@ -3887,6 +3891,27 @@ fn vm_run_bc(
                             crate::perf_bump!(jit_preempt);
                         }
                         _ => {}
+                    }
+                    // Dirty-stack-on-deopt check: a native arm that deopts (1) or is
+                    // preempted (2) must leave `roots` as `jit_tier` found them; if it
+                    // grew, the `exec_chunk` re-run starts on a corrupt operand stack.
+                    if matches!(jit_outcome, Some(1) | Some(2)) {
+                        let now = heap.roots_len();
+                        if now != pre_roots {
+                            crate::perf_bump!(jit_deopt_dirty);
+                            #[cfg(feature = "perf-stats")]
+                            {
+                                static SHOWN: std::sync::atomic::AtomicBool =
+                                    std::sync::atomic::AtomicBool::new(false);
+                                if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                    eprintln!(
+                                        "[jit-dirty] deopt/preempt left roots_len={now} \
+                                         (jit_tier found {pre_roots}) — dirty operand stack \
+                                         before the VM re-run"
+                                    );
+                                }
+                            }
+                        }
                     }
                     match jit_outcome {
                         // Done: result in `roots[cur_base]` → the `Done` arm retires it.
@@ -6079,6 +6104,7 @@ pub(crate) fn jit_dispatch_call(
                 match outcome {
                     // Done: result boxed in `roots[base]`. Take it, drop the frame.
                     0 => {
+                        crate::perf_bump!(jit_link_done);
                         let result = heap.root_at(base);
                         heap.truncate_roots(stage_base);
                         return Some(result);
@@ -6093,6 +6119,7 @@ pub(crate) fn jit_dispatch_call(
                     // survive in the frame's param slots `[base, base+argc)` (params aren't
                     // overwritten by the arm body), so re-read, drop the frame, and `vm_apply`.
                     _ => {
+                        crate::perf_bump!(jit_link_rerun);
                         let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
                         for k in 0..argc {
                             argv2.push(heap.root_at(base + k));
