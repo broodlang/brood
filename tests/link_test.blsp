@@ -23,16 +23,19 @@
         (link p)
         (send p :die)
         (assert= true
-          (receive ([:EXIT ~p [:error _]] true) (after 2000 :NONE))))
+          (receive ([:EXIT ~p [:error _]] true))))
       (trap-exit false)))
 
   (test "a trapping process gets [:EXIT pid :normal] when a linked peer returns"
     (trap-exit true)
-    (let (p (spawn :ok))
-      ; returns immediately → :normal
+    ; The peer waits for `:go` so it's still alive when we `link` it — then returns
+    ; `:normal` *after* the link. (A bare `(spawn :ok)` exits immediately and, under
+    ; load, can be dead before `link` runs → `:noproc`, not `:normal`.)
+    (let (p (spawn (receive (:go :ok))))
       (link p)
+      (send p :go)
       (assert= :normal
-        (receive ([:EXIT ~p r] r) (after 2000 :NONE))))
+        (receive ([:EXIT ~p r] r))))
     (trap-exit false))
 
   (test "linking an already-dead pid notifies immediately with :noproc"
@@ -41,7 +44,7 @@
       (sleep 30)  ; let it finish
       (link p)
       (assert= :noproc
-        (receive ([:EXIT ~p r] r) (after 2000 :NONE))))
+        (receive ([:EXIT ~p r] r))))
     (trap-exit false)))
 
 (describe "links: propagation and unlink"
@@ -51,21 +54,22 @@
     (let (watcher (spawn (do (trap-exit false) (lk-park)))
           wm (monitor watcher))
       (spawn (do (link watcher) (sleep 20) (error "crash")))
-      (is (not (= :SURVIVED (receive ([:down ~wm ~watcher _] :died) (after 2000 :SURVIVED)))))))
+      (is (not (= :SURVIVED (receive ([:down ~wm ~watcher _] :died)))))))
 
   (test "a :normal exit does NOT take down a non-trapping linked peer"
     (let (me (self)
           survivor (spawn
                      (do
                        (trap-exit false)
-                       (let (c (spawn :ok))
-                         ; child returns :normal
-                         (link c)
+                       ; atomic spawn-link: c is linked before it runs, so its instant
+                       ; :normal exit reaches us as :normal (not a racy :noproc that would
+                       ; wrongly take down this non-trapping peer).
+                       (let (c (spawn-link :ok))
                          (sleep 80)  ; outlive the child's normal exit
                          (send me [:alive (self)])
                          (receive (:stop :ok))))))
       (assert= true
-        (receive ([:alive ~survivor] true) (after 2000 false)))
+        (receive ([:alive ~survivor] true)))
       (exit survivor :kill)))
 
   (test "unlink breaks the coupling — a later crash doesn't propagate"
@@ -91,4 +95,4 @@
       (sleep 40)  ; let the chain wire up
       (exit a :stop)  ; abnormal (≠ :normal) → propagates b→c
       (assert= :chain-down
-        (receive ([:down ~cm ~c _] :chain-down) (after 2000 :SURVIVED))))))
+        (receive ([:down ~cm ~c _] :chain-down))))))
