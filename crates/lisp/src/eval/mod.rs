@@ -57,8 +57,14 @@ const SPECIAL_SPELLINGS: &[(&str, SpecialForm)] = &[
     (kw::DO, SpecialForm::Do),
     (kw::DEF, SpecialForm::Def),
     (kw::FN, SpecialForm::Fn),
+    // `lambda` / `let*` are exact synonyms for `fn` / `let` (the macroexpand pass
+    // canonicalises them, so they reach here only on a raw/un-expanded eval path —
+    // e.g. a quasiquote-built or `(eval '(lambda …))` form). `let*` is a plain
+    // alias because Brood's `let` is already sequential.
+    (kw::LAMBDA, SpecialForm::Fn),
     (kw::QUASIQUOTE, SpecialForm::Quasiquote),
     (kw::LET, SpecialForm::Let),
+    (kw::LET_STAR, SpecialForm::Let),
     (kw::LETREC, SpecialForm::Letrec),
 ];
 

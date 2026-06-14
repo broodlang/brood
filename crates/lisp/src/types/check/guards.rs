@@ -36,6 +36,7 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::DO
             | kw::DEF
             | kw::FN
+            | kw::LAMBDA
             | kw::LET
             | kw::LETREC
             | kw::DEFMACRO
@@ -396,14 +397,14 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "keys") && items.len() == 2 {
         let map_arg = *items.get(1)?;
         if let Some((k, _)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
-            return Some(Ty::list_of(k.clone()).union(Ty::of(Tag::Nil)));
+            return list_result(Some(k.clone()));
         }
     }
     // `(vals m)` → `nil | list<V>`.
     if value::symbol_is(head, "vals") && items.len() == 2 {
         let map_arg = *items.get(1)?;
         if let Some((_, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
-            return Some(Ty::list_of(v.clone()).union(Ty::of(Tag::Nil)));
+            return list_result(Some(v.clone()));
         }
     }
     // `(assoc m k1 v1 …)` → `map<K, V>`, preserving the input's refinement.

@@ -2849,3 +2849,50 @@ start/stop/exception, not-started/after-stop no-ops, telemetry-sync ordering, an
 BROOD_GC_VERIFY=1`. Updated the hatch request hook's comment (emit is now a
 non-blocking send — a slow handler no longer slows the worker). Full suite green
 (608). Docs: ADR-106 rewritten, `language.md` Telemetry section, roadmap.
+
+## 2026-06-14 — `lambda`/`let*` are real synonyms; three checker false-positives fixed
+
+Started as a type-system review and turned up a genuine bug: `lambda` and `let*`
+were **documented as working** (the `foreign_construct_hint` comment in `eval/mod.rs`
+listed them under "those Just Work", so it deliberately withheld a "use `fn`/`let`"
+hint) but were actually **unbound at runtime** — `((lambda (x) x) 5)` raised
+`unbound symbol: lambda`. So a Scheme/CL user typing `lambda` got a bare unbound
+error with no guidance, and the advisory checker's "unbound symbol: lambda" warning
+was a *true* positive, not a false one.
+
+Made them **exact synonyms** (the documented intent): `lambda` → `fn`, `let*` → `let`
+(`let` is already sequential). Two touch points: the evaluator's `SPECIAL_SPELLINGS`
+gains both (so a raw/un-expanded eval path — a quasiquote-built or `(eval '(lambda …))`
+form — dispatches them), and `macroexpand_all` **canonicalises the head** right after
+the quote guard (so quoted data keeps its spelling) and before lowering — so the whole
+downstream pipeline (pattern lowering, the VM compile pass, the tree-walker's lowering
+re-entry) only ever sees `fn`/`let`, with no scattered `kw::FN`/`kw::LET` edits. Both
+get full parity: destructuring params, variadic, multi-arity, recursion, and closures
+that round-trip across processes (new `tests/lambda_let_star_test.blsp`, incl. an
+`:isolated` cross-process block). Added to the LSP-facing `SPECIAL_FORMS` list too.
+
+While proving fn-parity, surfaced and fixed **three pre-existing checker
+false-positives** (all fired identically for `fn`/`let`, so not lambda-specific):
+1. **`lambda`/`let*` flagged unbound** in whole-file mode — they were missing from the
+   checker's `SPECIAL_HEAD` / `is_syntactic_keyword`. A new `is_fn_head` helper unifies
+   the `fn`/`lambda` recognition so the callback-arity and return-type checks see through
+   `lambda` too.
+2. **Multi-arity fn clause params** — `check_fn` read the first clause `((a) …)` as a
+   param list, so a param used only in a *later* clause (`((a b) …)`) looked unbound.
+   Now detects the multi-clause shape (reusing the evaluator's `fn_is_arity_multi_clause`,
+   so checker and runtime agree) and binds every clause's params before walking the bodies.
+3. **Self-recursive `let`-bound closure** — `(let (fac (fn (n) … (fac …))) …)` flagged
+   `fac`, though it resolves at runtime (the closure captures the frame, late-binds on
+   call). The checker now pre-binds fn-valued `let` names (widening scope only — an eager
+   forward reference in a non-closure RHS still surfaces).
+
+Also folded in a round of **type-system doc/cleanup** from the review: `docs/types.md`
+gained the three previously-undocumented Step-4 passes (protocol/behaviour conformance,
+the non-tail-recursion lint, the dead-clause lint) and an updated "Where it lives"
+(the `check/` submodule split); deleted dead `ctx::resolve_param`; collapsed a
+`list_result` duplication in `guards.rs`. Suite green: 113 checker unit tests, 273 lib,
+2163 in-language (both engines), GC-stress clean.
+
+Also closed a `nest run` gap: an explicit `nest run FILE.blsp` ran the file via `(load …)` without the advisory pre-check that `nest run` (:main, via `check-project-sources`) and `brood <file>` already do. `cmd_run` now pre-checks the file with `check-file` (single-file, GNU warnings to stderr, `BROOD_NO_CHECK=1` opts out) before running — so every run path checks first.
+
+Decision recorded as ADR-108.

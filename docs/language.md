@@ -237,8 +237,8 @@ eagerly). They are reserved names.
 | `(if test then else?)` | Evaluate `then` if `test` is truthy, else `else` (or `nil`). |
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
-| `(fn (params) body...)` | A lexical closure. |
-| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). |
+| `(fn (params) body...)` | A lexical closure. `lambda` is an exact synonym. |
+| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). `let*` is an exact synonym (Brood's `let` is already sequential). |
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 | `(defmacro name (params) body...)` | Define a macro (see below). |
