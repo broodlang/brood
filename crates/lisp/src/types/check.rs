@@ -279,6 +279,19 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // unresolved operand is genuinely unbound — not the ambiguous free variable a
     // bare fragment might carry).
     ctx.enable_operand_checks();
+    // The set of namespace prefixes the loaded image knows — every `mod/` for which
+    // some `mod/<name>` global exists (the requires above are already evaluated). A
+    // qualified reference whose module isn't here can't be proven unbound (it may be
+    // defined dynamically or in an unloaded file), so the unbound check stays silent
+    // on it; a typo in a *known* module is still flagged. See `Ctx::known_ns`.
+    let mut known_ns = std::collections::HashSet::new();
+    for sym in heap.global_symbols() {
+        let name = crate::core::value::symbol_name(sym);
+        if let Some(slash) = name.rfind('/') {
+            known_ns.insert(name[..=slash].to_string());
+        }
+    }
+    ctx.set_known_ns(known_ns);
     for &form in &expanded {
         collect_def_names(heap, form, &mut ctx);
     }
@@ -1738,6 +1751,31 @@ mod tests {
         assert!(
             w.iter().all(|m| !m.contains("unbound symbol")),
             "a `lambda` literal must not draw unbound-symbol warnings: {w:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_module_qualified_name_is_not_unbound() {
+        // A qualified reference whose module isn't loaded — defined dynamically
+        // (`%load-string`, a required temp module) or in a file a single-file check
+        // didn't load — can't be proven unbound, so it's left alone.
+        for src in [
+            "(some-unloaded-mod/thing 1)",
+            "(a/b/c/deep-thing 1)",
+            "(+ 1 other-mod/value)",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("unbound symbol")),
+                "an unknown-module qualified name must not be flagged ({src}): {w:?}"
+            );
+        }
+        // But a typo in a *known* module (some `mod/*` is loaded) is still flagged:
+        // requiring `test` makes `test/` a known prefix.
+        let w = file_warnings("(require 'test) (test/no-such-fn 1)");
+        assert!(
+            w.iter().any(|m| m.contains("unbound symbol: test/no-such-fn")),
+            "a typo in a known module must still be flagged: {w:?}"
         );
     }
 

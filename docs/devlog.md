@@ -2935,3 +2935,41 @@ the non-tail-recursion lint, the dead-clause lint) and an updated "Where it live
 Also closed a `nest run` gap: an explicit `nest run FILE.blsp` ran the file via `(load …)` without the advisory pre-check that `nest run` (:main, via `check-project-sources`) and `brood <file>` already do. `cmd_run` now pre-checks the file with `check-file` (single-file, GNU warnings to stderr, `BROOD_NO_CHECK=1` opts out) before running — so every run path checks first.
 
 Decision recorded as ADR-108.
+
+## 2026-06-14 — Checker false-positive sweep (bucket A): transient args, unexpandable macros, dynamic-namespace refs
+
+Three remaining advisory-checker false-positive classes, all fixed (the checker's
+prime directive is zero false positives). Project-wide `nest check` over `std/` +
+`tests/` dropped from 38 warnings to 3 — and those 3 are the *intentional* non-tail
+recursion lint on `pattern_matching_test`'s `pm-fac`, a true positive.
+
+1. **Transient as a `count`/`length`/`contains?` argument.** These ops dispatch to
+   `transient-*` kernel hooks when handed a live transient, so a transient is a valid
+   argument — but their curated sigs only admitted `str|map|seq`. Widened `countable`
+   to include `Tag::Transient` and gave `contains?` a `map_or_transient` domain
+   (`sigs.rs`). Domains stay otherwise tight (a number still warns).
+
+2. **Unexpandable macro calls.** A file-local macro the checker can't expand
+   (single-file mode, or one defined inside a deferred `test`/`describe` thunk) had its
+   argument subtree walked as ordinary code, and a name it `def`d went unrecorded — two
+   FPs: `(defmacro wp (v & body) ` `` `(let ((a b) ~v) ~@body)) ``  then `(wp x (+ a b))`
+   flagged `a`/`b` (opaque syntax `wp` splices into a binder), and `(mk qf)` (where `mk`
+   `def`s `qf`) left a later `(qf 5)` flagging `qf`. Fix: track file-local macro names
+   (`Ctx.file_macros`), detecting the lowered `(def name (%make-macro …))` shape since
+   `defmacro` is gone post-expansion; the walk skips descending into such a call's args,
+   and `collect_def_names` absorbs its bare-symbol args as possible globals (sound —
+   only widens the bound set). A genuine unbound head under a known callee still warns.
+
+3. **Qualified references to a dynamically-defined namespace.** `namespace_test` /
+   `package_test` build modules inside `%load-string` strings or temp files loaded at
+   runtime, so `(nsA/greet)` / `(greeter/greet …)` reference names the checker can't see
+   statically — ~25 FPs. Fix: `check_file` records the set of *known namespace prefixes*
+   (every `mod/` for which some `mod/<name>` global is loaded), and the unbound check
+   stays silent on a qualified name whose module isn't among them — we can't prove it
+   unbound. A typo in a *known* module (`(test/no-such-fn …)`) is still flagged, so the
+   useful qualified-typo catch is preserved. (`Arc<HashSet<String>>` in `Ctx` keeps the
+   per-scope clones cheap.)
+
+Regression tests for each in `check.rs`; 116 checker unit tests, 278 lib, 2163
+in-language — green. (Bucket B/C — deeper inference, gradual-assignment checking — stay
+deferred per ADR-011 until a real consumer needs them.)
