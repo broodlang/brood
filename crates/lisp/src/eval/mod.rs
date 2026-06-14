@@ -1058,9 +1058,10 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
             "Brood collections are persistent and immutable — there are no \
              transients; `conj`/`assoc`/`dissoc`/`into` return fresh values."
         }
-        "defprotocol" | "defrecord" | "deftype" | "definterface" | "reify" => {
-            "Brood has no protocols/records/types — model data with plain maps and \
-             behaviour with functions; dispatch with `match` or `cond`."
+        "defrecord" | "deftype" | "definterface" | "reify" => {
+            "Brood has no records/types — model data with plain maps. For \
+             polymorphism, use `defprotocol`/`defimpl` (the `protocol` module), or \
+             dispatch with `match`/`cond`."
         }
         "lazy-seq" | "lazy-cat" => {
             "Brood sequences are eager — use `map`/`filter`/`fold`; for streaming, a \
