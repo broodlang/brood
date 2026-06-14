@@ -241,3 +241,26 @@
     ;; on it is a high-confidence smoke test of the whole walker.
     (let (src (slurp "std/prelude.blsp") once (format-source src) twice (format-source once))
       (assert= once twice))))
+
+;; Tail-recursive (the test green-process stack is small, so O(1) stack): format
+;; the same source `n` times and report whether every result matched the first.
+(defn format--stable? (src want i n)
+  (cond
+    (>= i n) true
+    (= (format-source src) want) (format--stable? src want (+ i 1) n)
+    :else false))
+
+(describe "format: stays correct once the formatter tiers (regression)"
+  ;; Regression for the bool-subset JIT miscompile (brood 613c484, reverted
+  ;; 2026-06-14): admitting `Const(Bool)` to the JIT lowering subset let the
+  ;; formatter's bool-returning predicates (whitespace?/comment?/node?/…) tier to
+  ;; native, where they miscompiled and returned `()` — so `nest format` silently
+  ;; rewrote every form to `()`. A single `format-source` is correct; the
+  ;; corruption only appears once those arms are hot, so this formats the same
+  ;; source many times (past the tier threshold) and asserts the output never
+  ;; drifts from the correct (single-shot) result.
+  ;; NB: only bites under `--features jit` — the JIT is off in the default `make
+  ;; test` build, so run the suite with the JIT to actually exercise this.
+  (test "repeated format-source does not drift under tiering"
+    (let (src "(def y 5)\n(+ a b c)\n(if a b c)\n(defn g (x) x)\n")
+      (is (format--stable? src (format-source src) 0 300)))))
