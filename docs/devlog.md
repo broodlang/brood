@@ -2981,3 +2981,28 @@ deferred per ADR-011 until a real consumer needs them.)
   `string-split--acc` from `std/prelude.blsp`; semantics unchanged (empty sep → chars), so
   `tests/strings_test.blsp` and the ~10 std modules built on split (file/path/text/diff/
   datetime/url/http/sse) are unaffected. 2150 in-language tests green.
+
+## 2026-06-14 — Structured types, fifth slice: element flow through the rest of the sequence library
+
+Bucket B, the additive/low-risk slice (chosen over speculative body inference, which
+ADR-011 defers and which is the historical false-positive source). Extended the
+checker's element-type flow (`seq_aware_call_ty`) from the dozen combinators it
+already handled to the rest of the element-preserving / -extracting sequence library:
+`second`/`third` (extract, `A | nil`), `rest`/`but-last`/`distinct`/`dedupe`/
+`take-last`/`drop-last`/`remove` (preserve, `nil | list<A>`), `keep` (map-then-drop-nil,
+`nil | list<B>`), `interpose` (`nil | list<A | type(sep)>`), and `range`
+(`nil | list<number>`).
+
+So `(+ 1 (first (rest ["a" "b"])))` and `(string-length (first (range 5)))` are now
+caught, where before the result fell back to a flat `list`. Soundness is structural:
+each rule produces the *exact* element type (preserve/extract) or a sound superset
+(`keep`'s callback return keeps `nil`; `range`'s `number` covers int/float; `interpose`
+unions the separator), and `is_disjoint` still decides on tags alone and never inspects
+an element refinement — so a refinement can only *sharpen* a downstream result, never
+manufacture a false positive. Project-wide `nest check` over `std/` + `tests/` stays at
+3 warnings (all the intentional non-tail recursion lint). 117 checker unit tests, 279
+lib, 2163 in-language — green.
+
+Bucket B's other slices (sound branchy-body inference; wiring up the unconsumed
+`GradualTy` for gradual-assignment checking) remain deferred per ADR-011 until a
+concrete consumer needs them.
