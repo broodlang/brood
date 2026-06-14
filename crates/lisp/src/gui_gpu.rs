@@ -147,7 +147,8 @@ impl GlWindow {
     /// Draw one frame: clear, expand the solid-fill ops to quads, one instanced draw,
     /// then present. `cw`/`ch` are the cell pixel size, `inset` the content margin —
     /// the same coordinate contract the CPU `paint` uses, so positions agree.
-    pub fn paint(&mut self, frame: &[Op], cw: usize, ch: usize, inset: usize) {
+    pub fn paint(&mut self, frame: &[Op], renderer: &mut crate::gui::backend::Renderer) {
+        let (cw, ch, inset) = (renderer.cell_w.max(1), renderer.cell_h.max(1), renderer.inset());
         let size = self.window.inner_size();
         let (fw, fh) = (size.width.max(1), size.height.max(1));
         self.resize(fw, fh);
