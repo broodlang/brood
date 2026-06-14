@@ -4414,6 +4414,18 @@ pub(crate) fn jit_lower_arm(
             .map(|k| slot_tags.get(k).copied() == Some(profile_tag_float))
             .collect(),
     );
+    // Per-slot "holds a `Value::Bool`" flag — the boolean analogue of `slot_float`, but
+    // seeded all-false: a bool is rarely a loop *param*, and the case that matters is a
+    // let-binder, e.g. `(and X Y)` → `(let (g X) (if g Y g))` storing a comparison result
+    // to `g`. Set only by an in-arm bool store (`store_op` → `set_slot_bool`), which
+    // dominates the slot's reads in the single lowering pass — so a slot marked bool here
+    // provably holds a `Value::Bool` and needs no per-read tag-check. This lets a bool
+    // carried through a block-param merge (an `(and …)`/`(or …)` returning its bound
+    // operand) be tagged `Op::Bool` on *every* predecessor edge; without it the merge param
+    // is `Op::Int` on the slot edge and a `0` (false) reads as a truthy integer (5770),
+    // looping forever on a condition that should exit.
+    let slot_bool: std::cell::RefCell<Vec<bool>> =
+        std::cell::RefCell::new(vec![false; arm.nslots]);
     // Handle-spill scratch: `[spill_base, spill_base + reserve)` are the frame slots
     // reserved (above the compiler's slot ceiling) for spilling call-result handles
     // that must survive a later call's safepoint. `reserve` matches what arm
@@ -5050,6 +5062,38 @@ pub(crate) fn jit_lower_arm(
             }
         }
     };
+    // Materialise an operand as a block argument. Block params are declared `I64`
+    // (see `leader_block`), but a comparison result is an `i8`; passing it raw would
+    // be an `I8`-into-`I64`-param type mismatch the Cranelift verifier rejects, which
+    // bailed *every* arm that carried a comparison across a block boundary — i.e. every
+    // `(and …)`/`(or …)` (they short-circuit a bool through a merge). Zero-extend the
+    // `i8` (0/1 → bool); the target reconstructs it as `Op::Bool` via the `bool_param`
+    // flag recorded at this jump, so it branches with correct Brood truthiness. Every
+    // other `as_int` result is already `i64`.
+    let as_block_arg = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+        // A slot proven to hold a `Value::Bool` (`slot_bool`): load its payload byte (0/1)
+        // as the i64 arg — the target reconstructs `Op::Bool` via the `bool_param` flag
+        // (`is_bool_op` is true for it too, so every predecessor agrees). `as_int` would
+        // instead tag-check `Int` and deopt on the `Bool`.
+        if let Op::Slot(k) = op {
+            if slot_bool.borrow().get(k).copied().unwrap_or(false) {
+                let roots_base = b.use_var(rb_var);
+                let i = b.ins().iadd_imm(base, k as i64);
+                let o = b.ins().imul_imm(i, STRIDE);
+                let addr = b.ins().iadd(roots_base, o);
+                let pl = b
+                    .ins()
+                    .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                return b.ins().band_imm(pl, 0xff);
+            }
+        }
+        let v = as_int(b, op);
+        if b.func.dfg.value_type(v) == types::I8 {
+            b.ins().uextend(types::I64, v)
+        } else {
+            v
+        }
+    };
     // Materialise an operand to an unboxed `f64`. A `Slot` is tag-checked `== Float` and
     // its payload bit-cast to `f64` (the per-read check is what makes float specialization
     // sound without separate entry guards: a slot whose runtime tag isn't Float deopts). An
@@ -5117,10 +5161,21 @@ pub(crate) fn jit_lower_arm(
             *s = v;
         }
     };
+    // Mirror of `set_slot_float` for the bool flag. A store of any kind updates *both*
+    // (a slot holds one type), so a later read picks the right block-arg representation.
+    let set_slot_bool = |dst: i64, v: bool| {
+        if let Some(s) = slot_bool.borrow_mut().get_mut(dst as usize) {
+            *s = v;
+        }
+    };
     let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| match op {
         Op::Int(v) => {
+            // A comparison `i8` (`store_int`/`box_scalar` boxes it as `Value::Bool`) marks
+            // the slot bool; a real `i64` int does not.
+            let is_b = b.func.dfg.value_type(v) == types::I8;
             store_int(b, dst, v);
             set_slot_float(dst, false);
+            set_slot_bool(dst, is_b);
         }
         Op::Float(v) => {
             let bits = b.ins().bitcast(types::I64, MemFlags::new(), v);
@@ -5128,21 +5183,28 @@ pub(crate) fn jit_lower_arm(
             let zero = b.ins().iconst(types::I64, 0);
             store_words(b, dst, [tag, bits, zero]);
             set_slot_float(dst, true);
+            set_slot_bool(dst, false);
         }
         Op::Bool(v) => {
             let tag = b.ins().iconst(types::I64, TAG_BOOL as i64);
             let zero = b.ins().iconst(types::I64, 0);
             store_words(b, dst, [tag, v, zero]);
             set_slot_float(dst, false);
+            set_slot_bool(dst, true);
         }
         Op::Slot(k) => {
             copy_value(b, k as i64, dst);
+            // Read both source flags into locals *before* mutating (a held `borrow()` would
+            // double-borrow with `set_slot_*`'s `borrow_mut()`).
             let f = slot_float.borrow().get(k).copied().unwrap_or(false);
+            let bl = slot_bool.borrow().get(k).copied().unwrap_or(false);
             set_slot_float(dst, f);
+            set_slot_bool(dst, bl);
         }
         Op::Handle(w0, w1, w2) => {
             store_words(b, dst, [w0, w1, w2]);
             set_slot_float(dst, false);
+            set_slot_bool(dst, false);
         }
     };
     // Return-via-roots: place the single result in `roots[base]` and jump to the
@@ -5216,6 +5278,7 @@ pub(crate) fn jit_lower_arm(
     let is_bool_op = |b: &FunctionBuilder, op: Op| {
         matches!(op, Op::Bool(_))
             || matches!(op, Op::Int(v) if b.func.dfg.value_type(v) == types::I8)
+            || matches!(op, Op::Slot(k) if slot_bool.borrow().get(k).copied().unwrap_or(false))
     };
 
     // Translate each leader block in ip order.
@@ -5584,7 +5647,7 @@ pub(crate) fn jit_lower_arm(
                             Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
                         let args: Vec<BlockArg> = stack
                             .iter()
-                            .map(|&op| BlockArg::Value(as_int(&mut b, op)))
+                            .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
                             .collect();
                         b.ins().jump(leader_block[*t]?, &args);
                     }
@@ -5693,7 +5756,7 @@ pub(crate) fn jit_lower_arm(
                         Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
                     let args: Vec<BlockArg> = stack
                         .iter()
-                        .map(|&op| BlockArg::Value(as_int(&mut b, op)))
+                        .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
                         .collect();
                     match cond {
                         // A comparison result (`i8`) or a boolean that crossed a block
@@ -5772,7 +5835,7 @@ pub(crate) fn jit_lower_arm(
                 bool_param[j] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
                 let args: Vec<BlockArg> = stack
                     .iter()
-                    .map(|&op| BlockArg::Value(as_int(&mut b, op)))
+                    .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
                     .collect();
                 b.ins().jump(leader_block[j]?, &args);
                 break;
