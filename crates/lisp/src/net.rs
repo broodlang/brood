@@ -18,19 +18,25 @@
 //! `Value::Socket(id)` (the GC never traces or moves it). Valid across this
 //! runtime's processes; not node-portable.
 //!
-//! **TEXT-ONLY MECHANISM — BINARY-UNSAFE.** Inbound bytes are delivered as a
-//! Brood string (`Message::Str`) via `from_utf8_lossy`: any byte sequence that
-//! isn't valid UTF-8 is **silently corrupted** (each bad run becomes U+FFFD), so
-//! the bytes you receive may not equal the bytes the peer sent. There is no
-//! lossless path today — Brood has no arbitrary-bytes value kind; `Value::Str`
-//! (and `Message::Str`) are UTF-8 by construction, and adding a byte-string kind
-//! is a deliberate language-surface decision (a new `Value` carries type-system
-//! contract obligations — see CLAUDE.md / `docs/types.md`), not a net.rs change.
-//! This mechanism is fine for text protocols (HTTP headers, line protocols, the
-//! distributed-node handshake is on its *own* codec) and unsafe for binary ones
-//! (raw images, compressed/encrypted streams, length-prefixed binary framing).
-//! See `tcp_data_msg`. (Roadmap item: a faithful binary socket needs a bytes/blob
-//! value kind first.)
+//! **TEXT MODE (default) vs BINARY MODE.** A stream is created in *text mode*:
+//! inbound bytes are delivered as a Brood string (`Message::Str`) via
+//! `from_utf8_lossy`, so any byte sequence that isn't valid UTF-8 is **silently
+//! corrupted** (each bad run becomes U+FFFD) and outbound `tcp-send` writes the
+//! string's UTF-8. That's right for text protocols (HTTP headers, line protocols;
+//! the distributed-node handshake is on its *own* codec) and unsafe for binary
+//! ones (raw images, compressed/encrypted streams, length-prefixed binary framing).
+//!
+//! `tcp-set-binary` switches a socket to *binary mode*, which is byte-faithful in
+//! both directions without a new value kind: Brood strings are sequences of Unicode
+//! codepoints, so we use the **Latin-1 subset** (codepoints 0–255) as a one-byte-
+//! per-codepoint byte carrier. Inbound, each received byte becomes codepoint b
+//! (no UTF-8 interpretation); outbound, `tcp-send` writes each codepoint 0–255 as
+//! one raw byte (and errors on a codepoint > 255). That's enough for WebSocket
+//! framing (control bytes ≥ 0x80, length-prefixed binary frames): the caller
+//! UTF-8-encodes any text payload into this byte-string form itself. A general
+//! bytes/blob value kind is still a separate, larger language-surface decision
+//! (see CLAUDE.md / `docs/types.md`); this is the pragmatic seam until then.
+//! See `tcp_data_msg` and `set_binary`.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -57,6 +63,13 @@ enum Sock {
         stream: TcpStream,
         reader: Option<SubscriberHandle>,
         accepted_at: Option<Instant>,
+        /// Text mode (false, default): inbound is a UTF-8-lossy string, outbound
+        /// is UTF-8. Binary mode (true): inbound is a Latin-1 string (one
+        /// codepoint 0–255 per byte received) and `tcp-send` writes each codepoint
+        /// 0–255 as one raw byte — byte-faithful, for length-prefixed / control-
+        /// byte protocols (WebSocket framing). The reader thread reads this per
+        /// chunk, so `tcp-set-binary` flips an already-running socket mid-stream.
+        binary: Arc<AtomicBool>,
     },
     /// A listening socket — the accept thread owns the `TcpListener`; `alive`
     /// stops it on close. `port` is cached so `local-port` works without it.
@@ -117,11 +130,21 @@ fn reap_unclaimed(reg: &mut HashMap<u64, Sock>) {
 /// socket mechanism (see the module doc): Brood has no arbitrary-bytes value kind
 /// to carry raw bytes, and adding one is a language-surface decision, not a fix
 /// to make here. Lossless for valid UTF-8 (text protocols); lossy otherwise.
-fn tcp_data_msg(id: u64, bytes: &[u8]) -> Message {
+fn tcp_data_msg(id: u64, bytes: &[u8], binary: bool) -> Message {
+    let data = if binary {
+        // Byte-faithful (binary mode): map each byte to its Latin-1 codepoint
+        // (0–255), so the delivered string holds the exact bytes received — one
+        // codepoint per byte, no UTF-8 interpretation. The inverse of the Latin-1
+        // encode `tcp-send` does for a binary socket.
+        bytes.iter().map(|&b| b as char).collect()
+    } else {
+        // Text mode (default): UTF-8, lossy for non-UTF-8 (see module doc).
+        String::from_utf8_lossy(bytes).into_owned()
+    };
     Message::Vector(vec![
         Message::Keyword(value::intern("tcp")),
         Message::Socket(id),
-        Message::Str(String::from_utf8_lossy(bytes).into_owned()),
+        Message::Str(data),
     ])
 }
 
@@ -145,7 +168,12 @@ fn tcp_accept_msg(lid: u64, cid: u64) -> Message {
 /// Start a reader thread for the already-cloned `reader` handle of socket `id`,
 /// delivering `[:tcp id data]` / `[:tcp-closed id]` to `subscriber`. Returns the
 /// retarget handle.
-fn start_reader(id: u64, reader: TcpStream, subscriber: u64) -> SubscriberHandle {
+fn start_reader(
+    id: u64,
+    reader: TcpStream,
+    subscriber: u64,
+    binary: Arc<AtomicBool>,
+) -> SubscriberHandle {
     spawn_io_source(subscriber, "brood-tcp-reader", move |sink| {
         let mut rd = reader;
         let mut buf = [0u8; 65536];
@@ -155,7 +183,7 @@ fn start_reader(id: u64, reader: TcpStream, subscriber: u64) -> SubscriberHandle
                     sink.emit(tcp_closed_msg(id));
                     break;
                 }
-                Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n])),
+                Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n], binary.load(Ordering::Relaxed))),
                 Err(_) => {
                     sink.emit(tcp_closed_msg(id));
                     break;
@@ -185,6 +213,7 @@ fn accept_loop(lid: u64, listener: TcpListener, alive: Arc<AtomicBool>, sink: &M
                             stream,
                             reader: None,
                             accepted_at: Some(Instant::now()),
+                            binary: Arc::new(AtomicBool::new(false)),
                         },
                     );
                     reap_unclaimed(&mut reg);
@@ -209,13 +238,15 @@ pub fn connect(host: &str, port: u16, subscriber: u64) -> std::io::Result<u64> {
     let stream = TcpStream::connect((host, port))?;
     let reader = stream.try_clone()?;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let handle = start_reader(id, reader, subscriber);
+    let binary = Arc::new(AtomicBool::new(false));
+    let handle = start_reader(id, reader, subscriber, binary.clone());
     reg().insert(
         id,
         Sock::Stream {
             stream,
             reader: Some(handle),
             accepted_at: None, // actively connected → never reaped
+            binary,
         },
     );
     Ok(id)
@@ -253,12 +284,13 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
             stream,
             reader,
             accepted_at,
+            binary,
         }) => {
             match reader {
                 Some(h) => h.retarget(pid),
                 None => {
                     let clone = stream.try_clone()?;
-                    *reader = Some(start_reader(id, clone, pid));
+                    *reader = Some(start_reader(id, clone, pid, binary.clone()));
                 }
             }
             // Claimed now: clear the accept stamp so the reaper never drops it.
@@ -269,6 +301,35 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
             "tcp-controlling-process: socket is a listener, not a stream",
         )),
         None => Err(bad_socket()),
+    }
+}
+
+/// `(tcp-set-binary sock on)` — switch `sock` between text mode (default) and
+/// binary mode. Binary mode is byte-faithful in both directions: inbound `[:tcp …]`
+/// data is a Latin-1 string (one codepoint 0–255 per byte received) and `tcp-send`
+/// writes each codepoint 0–255 as one raw byte. For length-prefixed / control-byte
+/// protocols (WebSocket framing). The reader reads the flag per chunk, so this
+/// takes effect for the next inbound chunk. Errors if `sock` is gone or a listener.
+pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
+    let reg = reg();
+    match reg.get(&id) {
+        Some(Sock::Stream { binary, .. }) => {
+            binary.store(on, Ordering::Relaxed);
+            Ok(())
+        }
+        Some(Sock::Listener { .. }) => Err(invalid(
+            "tcp-set-binary: socket is a listener, not a stream",
+        )),
+        None => Err(bad_socket()),
+    }
+}
+
+/// Whether `sock` is in binary mode. A missing or listener socket reports `false`
+/// (text mode) — `tcp-send` then falls back to UTF-8 and surfaces the real error.
+pub fn is_binary(id: u64) -> bool {
+    match reg().get(&id) {
+        Some(Sock::Stream { binary, .. }) => binary.load(Ordering::Relaxed),
+        _ => false,
     }
 }
 
@@ -365,7 +426,9 @@ fn tls_exchange(
     loop {
         match tls.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n])),
+            // TLS is a one-shot request socket with no binary toggle: keep the
+            // text-mode (UTF-8-lossy) delivery it has always used.
+            Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n], false)),
             // Many servers drop the connection without a TLS close_notify; treat
             // that as the end of the response, not an error.
             Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
