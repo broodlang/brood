@@ -88,6 +88,7 @@ impl Jit {
         builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
+        builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         Jit {
             module: JITModule::new(builder),
@@ -324,6 +325,47 @@ pub unsafe extern "C" fn brood_rt_vector_ref(
     }
     *out = v[idx as usize];
     0
+}
+
+/// Loop-invariant-hoist support for the JIT (matmul LICM): resolve a vector value's
+/// inner element storage to a raw `(data_ptr, len)` **once**, so the JIT can inline
+/// `ptr + idx * size_of::<Value>()` element reads for the rest of a loop instead of
+/// calling [`brood_rt_vector_ref`] per element (marshal 6 words + slab lookup + a
+/// 24-byte out-pointer copy, every iteration). Returns the element data pointer and
+/// writes the element count to `*out_len`; returns null (and `*out_len = 0`) if the
+/// value isn't a vector, in which case the JIT deopts (the VM owns the exact result).
+///
+/// Sound only because the JIT gates this to arms that neither allocate nor make a
+/// Brood→Brood call — so no LOCAL GC and no RUNTIME compaction can run mid-arm to
+/// relocate the storage — and Brood vectors are **immutable** (no write can ever
+/// invalidate a hoisted read, so the LICM needs no alias analysis). The pointer is
+/// valid only for the duration of the native arm run; a preempt/deopt re-enters from
+/// the arm's entry block, which re-resolves it from the current frame.
+///
+/// # Safety
+/// `heap` must be the live context pointer; `out_len` a writable `*mut i64`; the word
+/// triple is bytes the JIT read out of a real `Value` (an invariant frame slot).
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_vector_base(
+    heap: *mut Heap,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+    out_len: *mut i64,
+) -> *const u8 {
+    use crate::core::value::Value;
+    let h = &mut *heap;
+    match words_to_val(w0, w1, w2) {
+        Value::Vector(id) => {
+            let v = h.vector(id);
+            *out_len = v.len() as i64;
+            v.as_ptr() as *const u8
+        }
+        _ => {
+            *out_len = 0;
+            std::ptr::null()
+        }
+    }
 }
 
 /// Base pointer of the operand-stack/`roots` buffer. JIT'd code calls this once at
