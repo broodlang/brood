@@ -527,15 +527,17 @@ fn cmd_run(
         None
     };
     // With no explicit FILE but `--watch` paths that *can't* promote to the entry
-    // — a directory, or more than one path — we silently run `:main` and watch
-    // alongside. That's the intended fallback, but a user who typed `nest run
-    // --watch a.blsp --watch b.blsp` expecting one of them to *run* gets no signal
-    // it didn't. Say so once (the silent-wrong-result lesson, as elsewhere here).
-    if file.is_none() && doc_arg.is_none() && promoted.is_none() && !watch.is_empty() {
+    // we run `:main` and watch alongside. That's the intended, unremarkable case for
+    // watching a directory (`nest run --watch src` — the standard hot-reload dev
+    // loop), so stay silent there. Only speak up for the genuinely surprising case:
+    // the user watched *files* (one of which they may have expected to *run*), but
+    // gave more than one, so none was promoted — say so once.
+    let watched_a_file = watch.iter().any(|p| std::path::Path::new(p).is_file());
+    if file.is_none() && doc_arg.is_none() && promoted.is_none() && watched_a_file {
         eprintln!(
-            "nest run: no FILE to run — watching {} path(s) and running :main. (A single \
-             watched *file* is promoted to the entry; a directory or multiple paths can't be, \
-             so :main runs.)",
+            "nest run: watching {} files and running :main — none was run directly. \
+             (A single watched *file* is promoted to the entry to run; multiple files can't \
+             be, so :main runs.)",
             watch.len()
         );
     }
