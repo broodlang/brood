@@ -1,5 +1,12 @@
 # Plan — the `Value` representation decision (the JIT prerequisite)
 
+> **Update (2026-06-14): decision held — the tier-1 JIT shipped on the 16-byte enum
+> (§5, option D), and the easy codegen wins are landed (geomean 19.5× → 13.5×). With a
+> real JIT in hand, the remaining single-threaded gaps profile as
+> *data-structure*-specific (boxcar vectors, eager sequences, allocation) — **not**
+> `Value`-width. NaN-boxing is still net-negative for tier-1 (§4). The post-JIT compute
+> frontier is scoped separately in [`compute-frontier.md`](compute-frontier.md).**
+>
 > **Status: planning (2026-06-08). No code yet.** This is the open architectural
 > prerequisite for the JIT (ADR-101 prerequisite 2; roadmap JIT gate (c)). The
 > compute-workload profile (loop/pfib: 100% prim2-inline, ~100% IC hit, near-zero
