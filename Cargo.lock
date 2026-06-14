@@ -265,6 +265,7 @@ dependencies = [
  "divan",
  "getrandom 0.4.2",
  "hmac",
+ "libc",
  "md-5",
  "num-bigint",
  "num-integer",

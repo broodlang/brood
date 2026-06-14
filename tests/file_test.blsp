@@ -45,6 +45,10 @@
       (refute (get sf :symlink?))
       (is (get sd :dir?))                                  ; the dir itself
       (is (number? (get sf :mtime)))                       ; epoch-ms
+      (is (>= (get sf :nlink) 1))                          ; hard-link count
+      (is (number? (get sf :uid)))
+      (is (string? (get sf :owner)))                       ; resolved name (or numeric id)
+      (is (string? (get sf :group)))
       (assert= (file-stat (path-join d "nope.txt")) nil))) ; missing → nil
   (test "delete-file removes a file and is idempotent"
     (let (p (path-join (ftmp) "d.txt"))
