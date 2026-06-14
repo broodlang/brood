@@ -301,7 +301,7 @@ pub use backend::{
 };
 
 #[cfg(feature = "gui")]
-mod backend {
+pub(crate) mod backend {
     use super::{Key, Mouse, MouseAction, MouseButton, Op};
     use crate::core::value;
     use crate::process::{deliver, Message};
@@ -818,16 +818,37 @@ mod backend {
     }
 
     /// One open window's GUI-thread-side state.
+    /// A window's render backend, chosen ONCE at `build_window`. The default `gui` build
+    /// only has `Cpu` (softbuffer). The `gui-gpu` build also has `Gpu` and picks it when
+    /// `BROOD_GUI_GPU` is set in the environment — so ONE installed binary defaults to the
+    /// CPU softbuffer (safe for every app) and a single project opts into the GPU
+    /// per-process via that env var, without a separate build.
+    enum Backend {
+        Cpu {
+            // Keeps the softbuffer display connection alive for `surface`'s lifetime.
+            _context: softbuffer::Context<Rc<Window>>,
+            surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+        },
+        #[cfg(feature = "gui-gpu")]
+        Gpu(crate::gui_gpu::GlWindow),
+    }
+
+    #[cfg(feature = "gui-gpu")]
+    fn gpu_enabled() -> bool {
+        std::env::var("BROOD_GUI_GPU").map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
+    }
+
+    fn cpu_backend(window: &Rc<Window>) -> Result<Backend, String> {
+        let context =
+            softbuffer::Context::new(window.clone()).map_err(|e| format!("softbuffer context: {e}"))?;
+        let surface = softbuffer::Surface::new(&context, window.clone())
+            .map_err(|e| format!("softbuffer surface: {e}"))?;
+        Ok(Backend::Cpu { _context: context, surface })
+    }
+
     struct Win {
         window: Rc<Window>,
-        // Keeps the softbuffer display connection alive for `surface`'s lifetime.
-        #[cfg(not(feature = "gui-gpu"))]
-        _context: softbuffer::Context<Rc<Window>>,
-        #[cfg(not(feature = "gui-gpu"))]
-        surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
-        // GPU backend (feature "gui-gpu") replaces the softbuffer surface above.
-        #[cfg(feature = "gui-gpu")]
-        gl: crate::gui_gpu::GlWindow,
+        backend: Backend,
         renderer: Renderer,
         size: Arc<Mutex<(u16, u16)>>,
         /// The process this window's input is delivered to (its mailbox).
@@ -888,14 +909,16 @@ mod backend {
             )
             .map_err(|e| format!("window: {e}"))?;
         let window = Rc::new(window);
-        #[cfg(not(feature = "gui-gpu"))]
-        let context = softbuffer::Context::new(window.clone())
-            .map_err(|e| format!("softbuffer context: {e}"))?;
-        #[cfg(not(feature = "gui-gpu"))]
-        let surface = softbuffer::Surface::new(&context, window.clone())
-            .map_err(|e| format!("softbuffer surface: {e}"))?;
+        // The GPU backend only when built AND opted-in via the env; everything else (the
+        // default build, or no env) is the CPU softbuffer — so other apps stay on CPU.
         #[cfg(feature = "gui-gpu")]
-        let gl = crate::gui_gpu::GlWindow::new(window.clone())?;
+        let backend = if gpu_enabled() {
+            Backend::Gpu(crate::gui_gpu::GlWindow::new(window.clone())?)
+        } else {
+            cpu_backend(&window)?
+        };
+        #[cfg(not(feature = "gui-gpu"))]
+        let backend = cpu_backend(&window)?;
         let mut renderer = Renderer::new(window.scale_factor(), families, base_px);
         // honour a global default family set before this window opened
         if let Some(f) = default_family {
@@ -905,12 +928,7 @@ mod backend {
         renderer.set_inset(default_inset);
         Ok(Win {
             window,
-            #[cfg(not(feature = "gui-gpu"))]
-            _context: context,
-            #[cfg(not(feature = "gui-gpu"))]
-            surface,
-            #[cfg(feature = "gui-gpu")]
-            gl,
+            backend,
             renderer,
             size: Arc::new(Mutex::new((80, 24))),
             subscriber,
@@ -1433,13 +1451,13 @@ mod backend {
                         );
                     }
                 }
-                WindowEvent::RedrawRequested => {
-                    #[cfg(not(feature = "gui-gpu"))]
-                    paint(&mut w.surface, &w.window, &mut w.renderer, &w.frame);
+                WindowEvent::RedrawRequested => match &mut w.backend {
+                    Backend::Cpu { surface, .. } => paint(surface, &w.window, &mut w.renderer, &w.frame),
                     #[cfg(feature = "gui-gpu")]
-                    w.gl
-                        .paint(&w.frame, w.renderer.cell_w, w.renderer.cell_h, w.renderer.inset());
-                }
+                    Backend::Gpu(gl) => {
+                        gl.paint(&w.frame, &mut w.renderer);
+                    }
+                },
                 _ => {}
             }
         }
@@ -1661,11 +1679,11 @@ mod backend {
     /// a `color` cluster (emoji) the RGBA is the glyph's own colors; for a monochrome
     /// cluster the RGB is white and only the alpha carries coverage, so the caller
     /// recolors it with the face `fg` at blit time (syntax colors vary per op).
-    struct CachedGlyph {
-        color: bool,
-        width: usize,
-        height: usize,
-        rgba: Vec<u8>, // width*height*4, straight (non-premultiplied) alpha
+    pub(crate) struct CachedGlyph {
+        pub(crate) color: bool,
+        pub(crate) width: usize,
+        pub(crate) height: usize,
+        pub(crate) rgba: Vec<u8>, // width*height*4, straight (non-premultiplied) alpha
     }
 
     /// The grapheme-cluster part of a glyph-cache key. The vast majority of probes
@@ -1772,14 +1790,14 @@ mod backend {
         Rc::new(RefCell::new(FontShared::new()))
     }
 
-    struct Renderer {
+    pub(crate) struct Renderer {
         families: Families,
         default_family: u32,
         base_px: f32,
         scale: f64,
         px: f32,
-        cell_w: usize,
-        cell_h: usize,
+        pub(crate) cell_w: usize,
+        pub(crate) cell_h: usize,
         baseline: i32,   // pixels from a cell's top to the text baseline
         base_inset: f32, // logical-px content margin before the grid (ADR-079); 0 = flush
 
@@ -1811,8 +1829,28 @@ mod backend {
         /// offset every pixel↔cell conversion shares (`update_cells`, `px_to_cell`,
         /// `paint`) so the grid the renderer draws and the one the mouse hit-tests stay
         /// the same. 0 leaves the grid flush to the window edge (the default).
-        fn inset(&self) -> usize {
+        pub(crate) fn inset(&self) -> usize {
             (self.base_inset * self.scale as f32).round().max(0.0) as usize
+        }
+
+        /// Build (and cache) a cluster's rasterised RGBA glyph and hand back a reference —
+        /// the GPU backend uploads it to a texture atlas. Same key/build/cache path as
+        /// `draw_cluster`, minus the CPU blit.
+        pub(crate) fn cluster_glyph(
+            &mut self,
+            g: &str,
+            family: Option<u32>,
+            bold: bool,
+            italic: bool,
+            scale: u16,
+        ) -> &CachedGlyph {
+            let fid = family.unwrap_or(self.default_family);
+            let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1));
+            if !self.cache.contains_key(&key) {
+                let baked = self.build_cluster(g, fid, bold, italic, scale);
+                self.cache.insert(key.clone(), baked);
+            }
+            &self.cache[&key]
         }
 
         /// Set the content inset (logical px). The cell metrics don't change — only the
