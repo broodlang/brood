@@ -192,6 +192,11 @@ pub(super) struct Ctx {
     /// Slice 1 trusts these without runtime enforcement; slice 2 (the strong
     /// arrow) makes that trust sound. See `docs/type-annotations.md`.
     declared: HashMap<Symbol, Sig>,
+    /// `(sig x T)` declarations for **value** names (non-arrow types) — `x : int`.
+    /// The gradual-assignment check reads these to verify a `(def x <expr>)`
+    /// assigns a value consistent with `T` (via [`GradualTy::consistent_with`]).
+    /// Separate from [`declared`] (function arrow sigs); a name has at most one.
+    declared_value_ty: HashMap<Symbol, Ty>,
     /// User-declared sigs that contain type variables (`?A`) — the full
     /// [`SigWithVars`] for unification at call sites.  Populated alongside
     /// [`declared`] when the sig annotation has at least one `?`-symbol.
@@ -399,6 +404,14 @@ impl Ctx {
     /// [`check_file`] like [`add_file_global`](Ctx::add_file_global).
     pub(super) fn add_declared_sig(&mut self, sym: Symbol, sig: Sig) {
         self.declared.insert(sym, sig);
+    }
+    /// The declared **value** type for `sym` from a non-arrow `(sig x T)`, if any.
+    pub(super) fn declared_value_ty(&self, sym: Symbol) -> Option<Ty> {
+        self.declared_value_ty.get(&sym).cloned()
+    }
+    /// Record a `(sig x T)` value-type declaration (`T` non-arrow).
+    pub(super) fn add_declared_value_ty(&mut self, sym: Symbol, ty: Ty) {
+        self.declared_value_ty.insert(sym, ty);
     }
     /// The full (variable-bearing) declared sig for `sym`, if it was parsed
     /// with at least one type variable.

@@ -60,8 +60,12 @@
 //!   `(not …)` flips the assertion. Bindings inside a branch override the
 //!   narrowing as ordinary shadowing.
 //!
-//! Vocabulary is `Option<Ty>` (known / unknown), not `GradualTy` — the
-//! disjointness check only needs "do I know this type?". Forms inside `try` /
+//! The *disjointness* check's vocabulary is `Option<Ty>` (known / unknown), not
+//! `GradualTy` — it only needs "do I know this type?". The one place `GradualTy`
+//! *is* used is the **gradual-assignment check** (`walk::gradual_of` + `check_def`):
+//! `(def x …)` against a non-arrow `(sig x T)` uses **consistent subtyping**, where a
+//! bounded dynamic (`dynamic_within(t)` for a declared-typed redefinable global) is
+//! the thing `Option<Ty>` can't express. Forms inside `try` /
 //! `error-of` / `assert-error` are skipped (they deliberately exercise failures).
 //!
 //! ## Beyond type misuse
@@ -305,6 +309,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         }
         if let Some((name, sv)) = annot::parse_sig_decl_with_vars(heap, form) {
             ctx.add_declared_sig_with_vars(name, sv);
+        }
+        // Non-arrow `(sig x T)` value-type declarations — consumed by the
+        // gradual-assignment check on `(def x …)` (the first `GradualTy` consumer).
+        if let Some((name, ty)) = annot::parse_value_sig_decl(heap, form) {
+            ctx.add_declared_value_ty(name, ty);
         }
     }
     // Pass 2.6: protocol/behaviour conformance. Model `(defprotocol …)` /
@@ -1751,6 +1760,109 @@ mod tests {
         assert!(
             w.iter().all(|m| !m.contains("unbound symbol")),
             "a `lambda` literal must not draw unbound-symbol warnings: {w:?}"
+        );
+    }
+
+    // ---- gradual-assignment check: `(def x …)` vs a non-arrow `(sig x T)` ----
+    // (GradualTy's first consumer — ADR-024.)
+
+    #[test]
+    fn def_against_value_sig_flags_a_literal_mismatch() {
+        // `(sig n int)` then `(def n "hello")` — a precise literal disjoint from
+        // the declared type. stat(string) ⊄ int → flagged.
+        let w = file_warnings(r#"(sig n int) (def n "hello")"#);
+        assert!(
+            w.iter().any(|m| m.contains("n: value of type string")
+                && m.contains("not assignable")
+                && m.contains("int")),
+            "a string literal assigned to an int-declared name must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn def_against_value_sig_catches_a_bounded_dynamic_global() {
+        // The genuine GradualTy value-add: `label` is a redefinable global with a
+        // declared type, so it's dynamic_within(string) — a bounded dynamic that
+        // Option<Ty> can't represent. Assigning it to an int-declared name is
+        // disjoint (string ∩ int = ⊥) → flagged.
+        let w = file_warnings(
+            r#"(sig count int) (sig label string) (def label "x") (def count label)"#,
+        );
+        assert!(
+            w.iter()
+                .any(|m| m.contains("count: value of type string") && m.contains("int")),
+            "a string-typed global assigned to an int-declared name must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn def_against_value_sig_defers_when_consistent_or_unknown() {
+        // Every one of these is consistent (or dynamic) → no assignment warning.
+        for src in [
+            "(sig n int) (def n 5)",                          // exact
+            "(sig m number) (def m 5)",                       // int <: number
+            "(sig n int) (def n (+ 1 2))",                    // call result widened → defer
+            "(sig n int) (def n some-unknown-global)",        // unknown → pure dynamic
+            "(sig a int) (sig b number) (def b 5) (def a b)", // int <- number: ∩≠⊥ → defer
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("not assignable")),
+                "a consistent/dynamic assignment must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_return_type_mismatch_is_flagged() {
+        // Body yields a number, declared return is string → disjoint → flagged.
+        let w = file_warnings("(sig f (int -> string)) (defn f (x) (+ x 1))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("f: declared return type string")
+                    && m.contains("yields number")),
+            "a number body vs a string return must warn: {w:?}"
+        );
+        // A literal body mismatch too.
+        let w = file_warnings(r#"(sig g (int -> int)) (defn g (x) "hello")"#);
+        assert!(
+            w.iter().any(|m| m.contains("g: declared return type int") && m.contains("string")),
+            "a string-literal body vs an int return must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn declared_return_type_defers_when_consistent() {
+        // (+ x 1) : number — int <: number and number ∩ int ≠ ⊥, so neither of
+        // these declared returns warns (a widened body never over-warns).
+        for src in [
+            "(sig inc (int -> int)) (defn inc (x) (+ x 1))",
+            "(sig h (int -> number)) (defn h (x) (+ x 1))",
+            "(sig id (int -> int)) (defn id (x) x)",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("return type")),
+                "a consistent return must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_global_type_flows_into_value_position() {
+        // `(sig g int)` makes `g`'s declared type visible where it's used, so a
+        // disjoint use is caught — even though `g` is a redefinable global.
+        let w = file_warnings("(sig g int) (def g 5) (def r (string-length g))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("string-length") && m.contains("int")),
+            "a declared int global used where a string is wanted must warn: {w:?}"
+        );
+        // A compatible use defers (int ⊆ number).
+        let w = file_warnings("(sig g int) (def g 5) (def r (+ 1 g))");
+        assert!(
+            w.iter().all(|m| !m.contains("expects number")),
+            "a declared int global is fine for +: {w:?}"
         );
     }
 

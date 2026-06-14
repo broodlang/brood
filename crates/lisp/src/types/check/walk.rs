@@ -15,6 +15,7 @@ use crate::core::heap::{Heap, SymbolMap};
 use crate::core::keywords as kw;
 use crate::core::value::{self, Arity, Symbol, Value};
 use crate::error::Pos;
+use crate::types::GradualTy;
 
 use super::ctx::Ctx;
 use super::guards::{expr_ty, guard_assertion, is_syntactic_keyword};
@@ -675,7 +676,7 @@ pub(super) fn check_into(
 /// in the extended scope. Parameter positions (`& rest`, `&optional`) are
 /// binders, not references, so they're not flagged as unbound.
 fn check_fn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
-    check_fn_seeded(heap, items, ctx, out, None);
+    check_fn_seeded(heap, items, ctx, out, None, None);
 }
 
 /// `check_fn`, optionally seeding the parameters from a `(sig …)` signature — used
@@ -690,6 +691,7 @@ fn check_fn_seeded(
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
     sig: Option<&crate::types::Sig>,
+    name: Option<Symbol>,
 ) {
     // Multi-arity `fn` — `(fn ((a) …) ((a b) …))` — isn't one param list + body;
     // each form (after an optional docstring) is a clause `(param-list body…)`.
@@ -743,6 +745,27 @@ fn check_fn_seeded(
     for &body_form in &items[body_start..] {
         check_into(heap, body_form, &scope, out);
     }
+    // Return-type check (a `GradualTy` consumer): the body's last form is the
+    // function's result, which must be *consistent* with the declared return `R`.
+    // `gradual_of` makes an over-approximated result (a call) `dynamic`, so the ∩
+    // relation only warns on a body type provably disjoint from `R` — never on a
+    // widened guess (a `number`-returning body declared `int` defers). A precise
+    // literal return uses `⊆`. Only fires with a seeded (sig-matched) sig.
+    if let Some(s) = sig {
+        if let Some(&ret_form) = items[body_start..].last() {
+            let g = gradual_of(heap, ret_form, &scope);
+            if !g.consistent_with(s.ret.clone()) {
+                let who = name.map(|n| format!("{}: ", name_of(n))).unwrap_or_default();
+                out.push((
+                    heap.form_pos(ret_form),
+                    format!(
+                        "{}declared return type {} but the body yields {}",
+                        who, s.ret, g.bound
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 /// The items of `form` when it is an `(fn …)` form, else `None` —
@@ -753,6 +776,47 @@ fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
     match items.first()? {
         &Value::Sym(s) if is_fn_head(s) => Some(items),
         _ => None,
+    }
+}
+
+/// The **gradual** type of an expression in *assignment* position — the value
+/// flowing into a `(def x …)` whose `x` has a declared value type. This is the
+/// first consumer of [`GradualTy`] (ADR-024): the gradual `dynamic()` is what lets
+/// the check defer on a redefinable reference instead of fighting hot reload.
+///
+/// - A **literal** (non-symbol, non-call) has an exact, non-redefinable type →
+///   `stat(t)` (checked with `⊆` — sound because the type is precise).
+/// - A bare reference to a **redefinable global** is `dynamic`, bounded by its own
+///   declared value type when it has one (`dynamic_within(t)`) or pure `dynamic()`
+///   otherwise — the *bounded-dynamic* case `Option<Ty>` can't represent, and what
+///   lets `(def x g)` be caught when `g`'s declared type is disjoint from `x`'s.
+/// - A **local** or a **call result** carries an *over-approximated* type, so it's
+///   `dynamic_within(t)` — consistency then uses `∩ ≠ ⊥`, which can't over-warn on a
+///   widened type (a number-returning call assigned to an `int` slot defers, not
+///   warns). Unknown → pure `dynamic()` (always consistent — defer).
+fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
+    if let Value::Sym(s) = expr {
+        // A genuine *lexical* local (fn param / let binding) shadows any global,
+        // so a global `(sig …)` doesn't apply; use its narrowed type if known.
+        if ctx.is_lexical_local(s) {
+            return match ctx.get(s) {
+                Some(t) => GradualTy::dynamic_within(t),
+                None => GradualTy::dynamic(),
+            };
+        }
+        // Otherwise a (redefinable) global / file-global: dynamic, bounded by its
+        // own declared value type when it has one — the bounded-dynamic case.
+        return match ctx.declared_value_ty(s) {
+            Some(t) => GradualTy::dynamic_within(t),
+            None => GradualTy::dynamic(),
+        };
+    }
+    match expr_ty(heap, expr, ctx) {
+        // A bare literal (not a call) is exact → static.
+        Some(t) if !matches!(expr, Value::Pair(_)) => GradualTy::stat(t),
+        // A call result is an over-approximation → dynamic (∩-relation, no over-warn).
+        Some(t) => GradualTy::dynamic_within(t),
+        None => GradualTy::dynamic(),
     }
 }
 
@@ -777,8 +841,28 @@ fn check_def(
     if let Some(&Value::Sym(name)) = items.get(1) {
         if let Some(sig) = ctx.declared_sig(name) {
             if let Some(fn_items) = fn_form_items(heap, value_form) {
-                check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig));
+                check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig), Some(name));
                 return;
+            }
+        }
+        // Gradual-assignment check (the first `GradualTy` consumer): when `name`
+        // carries a non-arrow `(sig name T)`, the assigned value must be
+        // *consistent* with `T`. A dynamic value (a redefinable global, an
+        // unknown) defers; a value whose type is provably incompatible with `T`
+        // is flagged. Sound: `consistent_with` only rejects a provable mismatch
+        // (`bound ∩ T = ⊥`, or a precise literal `⊄ T`), never a widened guess.
+        if let Some(t) = ctx.declared_value_ty(name) {
+            let g = gradual_of(heap, value_form, ctx);
+            if !g.consistent_with(t.clone()) {
+                out.push((
+                    heap.form_pos(form),
+                    format!(
+                        "{}: value of type {} is not assignable to declared type {}",
+                        name_of(name),
+                        g.bound,
+                        t,
+                    ),
+                ));
             }
         }
     }

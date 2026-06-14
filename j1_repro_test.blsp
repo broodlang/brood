@@ -1,0 +1,9 @@
+;; Minimal repro: `nest test --max-parallel 1` deadlocks a test that waits on a
+;; message from a process it spawned. Passes at -j2+ and under `nest run` at any -j.
+(defmodule j1-repro-test (:use test))
+
+(describe "spawned process delivers a message to the test"
+  (test "spawn a process that sends me one message, then receive it"
+    (let (me (self))
+      (spawn (send me :hi))
+      (assert= (receive (:hi :ok) (after 1000 :timeout)) :ok))))
