@@ -955,9 +955,26 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
         Value::Pair(p) => heap.pair(p).1,
         _ => return None,
     };
-    if !fn_rest_is_stable(fn_rest) {
+    // A LOCAL `fn_rest` is a `(fn …)` literal on the movable data heap — a top-level
+    // inline lambda (e.g. pipeline's `(map (fn (i) (* i i)) …)`); without help its
+    // whole enclosing form defers to the tree-walker. Freeze it into the immovable
+    // RUNTIME code region (as `const_node` does for a literal) so the form is VM-
+    // compilable. ONLY on a runtime heap: during the prelude *build* (gc disabled) a
+    // macro/defn closure's `fn_rest` is also LOCAL here but is promoted by its own
+    // `def` — promoting it now corrupts it mid-construction (`defn`'s `& body` went
+    // unbound) — so defer there exactly as before. The baked RUNTIME handle is
+    // rewritten in place under a RUNTIME compaction, like every other MakeClosure.
+    let fn_rest = if fn_rest_is_stable(fn_rest) {
+        fn_rest
+    } else if heap.gc_enabled() {
+        let promoted = heap.promote(fn_rest);
+        if !fn_rest_is_stable(promoted) {
+            return None;
+        }
+        promoted
+    } else {
         return None;
-    }
+    };
     let (captures, self_name) = compile_captures(scope)?;
     Some(Node::MakeClosure {
         fn_rest: ConstVal::new(fn_rest),

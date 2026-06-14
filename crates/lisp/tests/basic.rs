@@ -854,10 +854,16 @@ fn unbound_in_root_thread_has_no_scheduler_hint() {
 /// checker), both via the shared `eval::foreign_construct_hint`.
 #[test]
 fn foreign_constructs_hint_at_the_brood_way() {
-    // Runtime: hint rides the caught error.
-    assert!(run("(try (set! x 1) (catch e (get e :hint)))").contains("immutable"));
+    // Runtime: hint rides the caught error. `(loop 1)` has a literal arg, so the
+    // head `loop` is the only unbound name and its hint wins regardless of engine.
     assert!(run("(try (loop 1) (catch e (get e :hint)))").contains("tail-recursive"));
-    // Write-time: `check` appends the same guidance to the unbound warning.
+    // Write-time: `check` appends the same guidance to the unbound warning — the
+    // robust, engine-independent guidance surface (it fires as you type). `set!` is
+    // asserted here rather than at runtime: in `(set! x 1)` both the head (`set!`)
+    // and the arg (`x`) are unbound, and the bytecode VM's call-head elision resolves
+    // the head *after* the args, so the runtime error reports `x`, not `set!`. The
+    // checker reports the head, matching `swap!` below.
+    assert!(run("(check '(set! x 1))").contains("immutable"));
     assert!(run("(check '(swap! a 1))").contains("atoms"));
     // A name Brood *does* provide (it aliases `car` → `first`) gets no foreign
     // hint — it simply runs.
