@@ -1,6 +1,8 @@
 # Plan — the post-JIT single-threaded compute frontier
 
-> **Status: planning (2026-06-14). No code yet.** The tier-1 JIT has shipped and the
+> **Status: in progress (2026-06-14). Lever 1 (matmul LICM) shipped** — see the devlog
+> entry "JIT matmul LICM"; matmul 290→250 ms (~14%), the isolated invariant-local read
+> ~7.8→~1.2 ns. Lever 2 (zero-copy messages) is next. The tier-1 JIT has shipped and the
 > easy codegen-shaped wins are landed (geomean **19.5× → 13.5×** off the fastest runtime
 > across the single-threaded suite). This note scopes what's *left* and — importantly —
 > records that the remaining gaps are **data-structure-specific**, not the `Value`-width

@@ -2936,6 +2936,39 @@ Also closed a `nest run` gap: an explicit `nest run FILE.blsp` ran the file via 
 
 Decision recorded as ADR-108.
 
+## 2026-06-14 — JIT matmul LICM: hoist an invariant vector's element base out of the loop
+
+First fruit of the immutability-shortcut framing (`compute-frontier.md` §6): a tight
+loop that reads an immutable vector by a varying index — `(nth rowa k)` in matmul's
+`dot` — was paying a full `brood_rt_vector_ref` call per element (~9.7 ns: marshal 6
+words + a slab lookup + a 24-byte out-pointer copy). Because Brood data is immutable
+(ADR-026), **no write can ever invalidate that read**, so the load is loop-invariant
+with *zero* alias analysis — even this template JIT can hoist it soundly.
+
+The JIT now: (1) computes a self-recursive arm's **loop-invariant parameter slots** at
+the `Node` level — slot `k` is invariant iff every `SelfCall` passes `Node::Local(k)`
+unchanged; (2) for each invariant slot read as a fused `(nth slot idx)`
+(`Prim2SlotSlot{VectorRef}`), resolves the vector's element `(data_ptr, len)` **once**
+in the entry block via a new `brood_rt_vector_base` helper (each Brood vector's inner
+storage is a contiguous `Vec<Value>`, so `ptr + idx*size_of::<Value>()` is a flat read);
+(3) replaces the per-element call with an inline bounds-checked 3-word load.
+
+**Soundness.** The hoisted raw pointer is only valid for one native run, so the hoist is
+gated to arms that neither allocate (`cons`/vector-build → LOCAL GC) nor make a
+Brood→Brood call (could `def` → RUNTIME compaction) — under that gate nothing relocates
+the storage mid-run, and a preempt/deopt re-enters from the entry block (re-hoist). A
+non-vector slot, a non-int index, or an out-of-range index all **deopt** so the VM
+produces the exact result — JIT==tree-walker parity preserved. Globals are deliberately
+*not* hoisted: a `def` rebind from another process between iterations would diverge from
+the VM's late binding.
+
+**Measured.** Isolated invariant-local read: ~7.8 ns → ~1.2 ns (a ~6.5× drop on the read
+itself). matmul N=175: 290 ms → 250 ms (~14%; only `(nth rowa k)` is hoistable — `b` is a
+global and the inner row varies per `k`). Generalizes to any indexed loop over an
+invariant local vector. Verified: matmul + microbench JIT==tree-walker checksum parity,
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean, full in-language suite green under
+`--features jit` (format-tiering canary included), both feature builds compile.
+
 ## 2026-06-14 — Checker false-positive sweep (bucket A): transient args, unexpandable macros, dynamic-namespace refs
 
 Three remaining advisory-checker false-positive classes, all fixed (the checker's
