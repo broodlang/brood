@@ -279,6 +279,19 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // unresolved operand is genuinely unbound — not the ambiguous free variable a
     // bare fragment might carry).
     ctx.enable_operand_checks();
+    // The set of namespace prefixes the loaded image knows — every `mod/` for which
+    // some `mod/<name>` global exists (the requires above are already evaluated). A
+    // qualified reference whose module isn't here can't be proven unbound (it may be
+    // defined dynamically or in an unloaded file), so the unbound check stays silent
+    // on it; a typo in a *known* module is still flagged. See `Ctx::known_ns`.
+    let mut known_ns = std::collections::HashSet::new();
+    for sym in heap.global_symbols() {
+        let name = crate::core::value::symbol_name(sym);
+        if let Some(slash) = name.rfind('/') {
+            known_ns.insert(name[..=slash].to_string());
+        }
+    }
+    ctx.set_known_ns(known_ns);
     for &form in &expanded {
         collect_def_names(heap, form, &mut ctx);
     }
@@ -1742,6 +1755,31 @@ mod tests {
     }
 
     #[test]
+    fn unknown_module_qualified_name_is_not_unbound() {
+        // A qualified reference whose module isn't loaded — defined dynamically
+        // (`%load-string`, a required temp module) or in a file a single-file check
+        // didn't load — can't be proven unbound, so it's left alone.
+        for src in [
+            "(some-unloaded-mod/thing 1)",
+            "(a/b/c/deep-thing 1)",
+            "(+ 1 other-mod/value)",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("unbound symbol")),
+                "an unknown-module qualified name must not be flagged ({src}): {w:?}"
+            );
+        }
+        // But a typo in a *known* module (some `mod/*` is loaded) is still flagged:
+        // requiring `test` makes `test/` a known prefix.
+        let w = file_warnings("(require 'test) (test/no-such-fn 1)");
+        assert!(
+            w.iter().any(|m| m.contains("unbound symbol: test/no-such-fn")),
+            "a typo in a known module must still be flagged: {w:?}"
+        );
+    }
+
+    #[test]
     fn unexpandable_macro_calls_dont_false_flag() {
         // A file-local macro the checker can't expand: its arguments are opaque
         // syntax. (a) A macro that `def`s its symbol arg — the name must not look
@@ -2008,6 +2046,43 @@ mod tests {
             w.iter().any(|s| s.contains("string-length")),
             "filter should preserve the int element type: {w:?}"
         );
+    }
+
+    #[test]
+    fn element_type_flows_through_more_combinators() {
+        // Structured-types extension: second/third/rest/but-last/distinct/dedupe/
+        // take-last/drop-last/remove/keep/interpose/range all flow the element type,
+        // so a downstream string-vs-number mismatch is caught. Each must warn here.
+        for src in [
+            r#"(+ 1 (second ["a" "b"]))"#,
+            r#"(+ 1 (first (rest ["a" "b"])))"#,
+            r#"(+ 1 (first (but-last ["a" "b"])))"#,
+            r#"(+ 1 (first (distinct ["a" "b"])))"#,
+            r#"(+ 1 (first (dedupe ["a" "b"])))"#,
+            r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
+            r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
+            r#"(+ 1 (first (keep (fn (x) x) ["a" "b"])))"#,
+            "(string-length (first (range 5)))",
+        ] {
+            let w = warnings(src);
+            assert!(
+                w.iter().any(|s| s.contains("number") || s.contains("string")),
+                "expected an element-type mismatch for {src}: {w:?}"
+            );
+        }
+        // Negative controls — a valid element type must NOT warn.
+        for src in [
+            "(+ 1 (second [10 20]))",
+            "(+ 1 (first (rest [10 20])))",
+            // interpose unions the separator: int|string includes int → valid for +.
+            r#"(+ 1 (first (interpose "z" [1 2])))"#,
+        ] {
+            let w = warnings(src);
+            assert!(
+                w.iter().all(|s| !s.contains("expects number")),
+                "a valid element type must not warn for {src}: {w:?}"
+            );
+        }
     }
 
     #[test]

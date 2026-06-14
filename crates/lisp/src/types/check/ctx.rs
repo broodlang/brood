@@ -22,6 +22,7 @@
 //!   these aren't in `heap`'s globals; the checker tracks them itself.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::core::value::Symbol;
 use crate::types::{Sig, Ty};
@@ -217,6 +218,15 @@ pub(super) struct Ctx {
     /// an unbound callee is reliably a real error. Threads through every cloned
     /// sub-scope.
     check_operands: bool,
+    /// Known namespace prefixes — every `mod/` (the segment up to and including the
+    /// last `/`) for which *some* `mod/<name>` global is loaded in the heap. Lets
+    /// the unbound check stay silent on a qualified reference whose module we don't
+    /// know (a module defined dynamically — `%load-string`, a required temp module —
+    /// or in another file a single-file check didn't load): we can't prove such a
+    /// name unbound. A typo in a *known* module (`mod/` present) is still flagged.
+    /// `Arc` so per-scope `Ctx` clones don't copy the set. Populated by
+    /// [`check_file`]; empty in fragment mode (so any qualified name is left alone).
+    known_ns: Arc<HashSet<String>>,
 }
 
 impl Ctx {
@@ -359,6 +369,17 @@ impl Ctx {
     /// Is `sym` a file-local macro name accumulated by [`check_file`]?
     pub(super) fn is_file_macro(&self, sym: Symbol) -> bool {
         self.file_macros.contains(&sym)
+    }
+    /// Record the set of known namespace prefixes (each ends in `/`). See
+    /// [`known_ns`](Ctx::known_ns).
+    pub(super) fn set_known_ns(&mut self, prefixes: HashSet<String>) {
+        self.known_ns = Arc::new(prefixes);
+    }
+    /// Is `prefix` (a `mod/` segment, trailing slash included) a namespace the
+    /// loaded image knows? Used to decide whether an unresolved *qualified* name is
+    /// a real unbound reference or a dynamically/elsewhere-defined one.
+    pub(super) fn module_is_known(&self, prefix: &str) -> bool {
+        self.known_ns.contains(prefix)
     }
     /// Record that file-local `sym`'s value is a **variadic** `fn` (has a `&`
     /// rest param). Consulted by the arity check so a `(sig …)`-derived *exact*
