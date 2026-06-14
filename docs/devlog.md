@@ -2469,3 +2469,50 @@ by default (`make test` builds default features), so the JIT path is uncovered i
 normal CI — and under `--features jit` the in-language suite is flaky run-to-run
 (different unrelated tests fail each run; two `jit_*` unit tests are stale-red on
 clean `main`). Worth a dedicated CI lane + a flake/staleness sweep.
+
+## 2026-06-14 — JIT: top-level-lambda promotion (pipeline ~4.1×, matmul ~2.2×)
+
+Continuing the benchmark audit, two more rows were pinned to the **tree-walker** —
+`pipeline` (552 ms, last by a wide margin) and `matmul`'s matrix construction. The
+cause was the same: a top-level inline `(fn …)` literal. `pipeline`'s `filter`/`map`
+stages (`(->> (range n) (filter (fn …)) (map (fn …)) (reduce + 0))`) and `matmul`'s
+`(into [] (map (fn (i) … (map (fn (j) …))) …))` are `(fn …)` literals written directly
+in a *top-level* form. Their body (`fn_rest`) sits on the movable **LOCAL** data heap,
+so `compile_make_closure`'s `fn_rest_is_stable` guard bailed (a movable handle can't be
+baked into a `MakeClosure` node), and the **whole enclosing form** deferred to the
+tree-walker (perf-stats confirmed: `pipeline` ran with `jit_native=0`, `tw_defer=1`).
+
+- **Promote a top-level lambda's `fn_rest` into RUNTIME** (`dfa4f67`). When `fn_rest` is
+  LOCAL, `heap.promote()` it into the immovable RUNTIME code region (exactly what
+  `const_node` does for a literal), so the form is VM-compilable and tiers. Gated on
+  `heap.gc_enabled()` — **runtime heap only**. During the prelude *build* (gc disabled)
+  a macro/`defn` closure's `fn_rest` is *also* LOCAL here but is promoted by its own
+  `def`; promoting it now corrupts it mid-construction (an earlier ungated attempt
+  crashed universally — `defn`'s `& body` rest param went unbound), so the build path
+  defers exactly as before. The baked RUNTIME handle is rewritten in place under a
+  compaction, like every other `MakeClosure`. Result: **pipeline 552 → 134 ms (~4.1×)**,
+  **matmul 542 → 243 ms (~2.2×)** — one fix, two rows. (`matmul`'s inner `nth` multiply
+  loop still under-tiers data-dependently; that's the residual gap.)
+
+Verified: prelude + macros intact (`defn`/`& body` work), per-benchmark JIT ==
+tree-walker parity (matching checksums across the suite), `make test` green, the
+`format` tiering regression test green, full `--features jit` suite green.
+
+Also closed the stale-test aside from the entry above:
+
+- **Two stale `jit_*` unit tests fixed** (`6a66673`). Both reflect *deliberate*
+  committed behaviour, not regressions (real `fib`/`primes` still tier — `jit_native`
+  > 0, `jit_deopt = 0`), and went red unseen because `make test` runs without
+  `--features jit`. (1) The bail example was a `Const(Nil)` arm, but the bool/nil/float
+  subset admission (`9dfc00f`) made scalar `Const`s in-subset — switched it to a
+  `MakeMap(0)` arm (map-build has no lowering path). (2) A test asserted a *free-global*
+  tail call lowers, but `jit_lower_arm` now bails those by design (`jit_dispatch_tail`
+  reads a staged callee an elided head never leaves — the common mutual-recursion shape
+  stays on the correct VM path); rewrote it to assert the *computed*-callee tail call
+  lowers and pinned the free-global bail as an explicit counter-case.
+- **`set!` foreign-construct hint test → the write-time checker.** In `(set! x 1)` both
+  the head (`set!`) and the arg (`x`) are unbound; the bytecode VM's call-head elision
+  resolves the head *after* the args, so the runtime error reports `x`, not `set!`
+  (the tree-walker reports the head). Rather than reorder the hot call path, the test
+  now asserts `(check '(set! x 1))` — the robust, engine-independent guidance surface;
+  `(loop 1)` (literal arg) stays as the runtime example.
