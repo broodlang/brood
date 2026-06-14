@@ -4218,7 +4218,7 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         )
     };
     code.iter().all(|inst| match inst {
-        Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil),
+        Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil | Value::Float(_)),
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)
@@ -4246,8 +4246,12 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
 /// `roots[base]`**, and returns `0` (Done) or `1` (deopt — an operand wasn't an `Int`).
 /// The returned pointer is valid for the life of `jit` (its module owns the code).
 #[cfg(feature = "jit")]
-pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*const u8> {
-    use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_INT, TAG_PAIR};
+pub(crate) fn jit_lower_arm(
+    jit: &mut crate::jit::Jit,
+    arm: &CompiledArm,
+    slot_tags: &[u8],
+) -> Option<*const u8> {
+    use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_PAIR};
     use cranelift_codegen::ir::{
         condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, StackSlotData,
         StackSlotKind,
@@ -4260,6 +4264,23 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let code = &chunk.code;
     let len = code.len();
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
+    // Per-slot "holds an f64" flag, for picking float vs integer arith on each op.
+    // Seeded from the tier-time profile (params; `slot_tags[k] == TAG_FLOAT`) and
+    // updated during lowering when a float result is stored to a slot (let-binders,
+    // which read nil at the entry snapshot). For a pure-int arm every entry is false,
+    // so the lowering takes the exact pre-float integer path (no behaviour change).
+    // The per-read tag-check in `as_f64`/`as_int` is what makes it *sound* (a slot whose
+    // runtime tag disagrees deopts to the VM); this flag only chooses the opcode.
+    // NB: the profile snapshots the *lattice* `Tag` enum (`tag(v) as u8`), whose
+    // `Float` discriminant is 3 — distinct from `jit_layout::TAG_FLOAT` (4), the
+    // in-memory `Value` discriminant byte used when boxing/reading floats. Compare
+    // the profile against `Tag::Float`, not the layout byte.
+    let profile_tag_float = crate::core::value::Tag::Float as u8;
+    let slot_float: std::cell::RefCell<Vec<bool>> = std::cell::RefCell::new(
+        (0..arm.nslots)
+            .map(|k| slot_tags.get(k).copied() == Some(profile_tag_float))
+            .collect(),
+    );
     // Handle-spill scratch: `[spill_base, spill_base + reserve)` are the frame slots
     // reserved (above the compiler's slot ceiling) for spilling call-result handles
     // that must survive a later call's safepoint. `reserve` matches what arm
@@ -4755,6 +4776,19 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     #[derive(Clone, Copy)]
     enum Op {
         Int(cranelift_codegen::ir::Value),
+        // An unboxed `f64` SSA value (a `Const(Float)`, a float-slot read, or a float
+        // arith result). Boxed back to a `Value::Float` (TAG_FLOAT + the bits) when stored
+        // to a slot / self-call arg / returned. Float *comparisons* (`<`/`<=`/`=`) yield an
+        // `Op::Int` i8 (a Bool), like integer compares, so branch handling is shared.
+        Float(cranelift_codegen::ir::Value),
+        // A boolean SSA value (`i64` 0/1) that has crossed a block boundary. A comparison
+        // result is normally an `Op::Int` with `i8` type (and `box_scalar` boxes it as a
+        // `Value::Bool`); but when it flows through a block param (e.g. an `(and …)`
+        // short-circuit carrying its result to the merge) it is zero-extended to the `i64`
+        // block-param width, which erases the `i8`-means-bool signal. The lowering tags such
+        // params as `Op::Bool` (via `bool_param` recorded at the jump) so they still box as
+        // `Bool`, not `Int`, and branch correctly in `JumpIfFalse`.
+        Bool(cranelift_codegen::ir::Value),
         Slot(usize),
         Handle(
             cranelift_codegen::ir::Value,
@@ -4828,6 +4862,19 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8);
                 [w0, w1, w2]
             }
+            Op::Float(v) => {
+                // Box an unboxed `f64` as a whole `Value::Float`: [TAG_FLOAT, bits, 0].
+                let bits = b.ins().bitcast(types::I64, MemFlags::new(), v);
+                let tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
+                let zero = b.ins().iconst(types::I64, 0);
+                [tag, bits, zero]
+            }
+            Op::Bool(v) => {
+                // A crossed-boundary boolean (already `i64` 0/1) → `Value::Bool`.
+                let tag = b.ins().iconst(types::I64, TAG_BOOL as i64);
+                let zero = b.ins().iconst(types::I64, 0);
+                [tag, v, zero]
+            }
             Op::Handle(w0, w1, w2) => [w0, w1, w2],
         }
     };
@@ -4849,6 +4896,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
     let as_int = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
         match op {
             Op::Int(v) => v,
+            Op::Bool(v) => v,
             Op::Slot(k) => load_slot_int(b, k as i64),
             Op::Handle(w0, w1, _) => {
                 let tagb = b.ins().band_imm(w0, 0xff);
@@ -4858,15 +4906,111 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 b.switch_to_block(cont);
                 w1
             }
+            // A float where an int is required (a mixed-type op the lowering didn't
+            // specialize) — deopt to the VM. Shouldn't arise once arith dispatches by
+            // operand type, but kept sound. (Dead block after the unconditional jump.)
+            Op::Float(_) => {
+                b.ins().jump(deopt, &[]);
+                let dead = b.create_block();
+                b.switch_to_block(dead);
+                b.ins().iconst(types::I64, 0)
+            }
         }
+    };
+    // Materialise an operand to an unboxed `f64`. A `Slot` is tag-checked `== Float` and
+    // its payload bit-cast to `f64` (the per-read check is what makes float specialization
+    // sound without separate entry guards: a slot whose runtime tag isn't Float deopts). An
+    // int/handle used as a float is a mixed op we don't lower → deopt.
+    let as_f64 = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+        match op {
+            Op::Float(v) => v,
+            Op::Slot(k) => {
+                let roots_base = b.use_var(rb_var);
+                let i = b.ins().iadd_imm(base, k as i64);
+                let o = b.ins().imul_imm(i, STRIDE);
+                let addr = b.ins().iadd(roots_base, o);
+                let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+                let is_f = b.ins().icmp_imm(IntCC::Equal, tag, TAG_FLOAT as i64);
+                let cont = b.create_block();
+                b.ins().brif(is_f, cont, &[], deopt, &[]);
+                b.switch_to_block(cont);
+                let bits = b
+                    .ins()
+                    .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                b.ins().bitcast(types::F64, MemFlags::new(), bits)
+            }
+            Op::Int(_) | Op::Bool(_) | Op::Handle(..) => {
+                b.ins().jump(deopt, &[]);
+                let dead = b.create_block();
+                b.switch_to_block(dead);
+                b.ins().f64const(0.0)
+            }
+        }
+    };
+    // Integer-vs-float dispatch for a binary op: an operand is float if it's an
+    // `Op::Float`, or a `Slot` the profile/tracking marks float. (`Op::Int`/`Handle` are
+    // integer/non-number.)
+    let op_is_float = |op: Op| -> bool {
+        match op {
+            Op::Float(_) => true,
+            Op::Slot(k) => slot_float.borrow().get(k).copied().unwrap_or(false),
+            _ => false,
+        }
+    };
+    // Float arith / comparison. Arith → `Op::Float`; a comparison → an `i8` boxed as a
+    // Bool (`Op::Int`, exactly like the integer compares). `/` and the integer-only ops
+    // aren't lowered for floats → `None` bails the arm to the VM.
+    let emit_float_arith = |b: &mut FunctionBuilder, op: PrimOp, x, y| -> Option<Op> {
+        use cranelift_codegen::ir::condcodes::FloatCC;
+        Some(match op {
+            PrimOp::Add => Op::Float(b.ins().fadd(x, y)),
+            PrimOp::Sub => Op::Float(b.ins().fsub(x, y)),
+            PrimOp::Mul => Op::Float(b.ins().fmul(x, y)),
+            PrimOp::Lt => Op::Int(b.ins().fcmp(FloatCC::LessThan, x, y)),
+            PrimOp::Le => Op::Int(b.ins().fcmp(FloatCC::LessThanOrEqual, x, y)),
+            PrimOp::Eq => Op::Int(b.ins().fcmp(FloatCC::Equal, x, y)),
+            _ => return None,
+        })
     };
     // Store an operand into frame slot `dst`: an `Int` is boxed; a `Slot` is copied
     // verbatim; a `Handle` stores its three words (so a handle binder / self-call arg /
     // return keeps its type).
+    // Also tracks `slot_float[dst]` so a later read of `dst` picks the right arith: a
+    // float store marks it float, an int/handle store clears it, a slot-copy inherits the
+    // source's flag. (Lets let-binders — nil at the entry snapshot — get their type from
+    // the body's writes, which precede their reads in the single lowering pass.)
+    let set_slot_float = |dst: i64, v: bool| {
+        if let Some(s) = slot_float.borrow_mut().get_mut(dst as usize) {
+            *s = v;
+        }
+    };
     let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| match op {
-        Op::Int(v) => store_int(b, dst, v),
-        Op::Slot(k) => copy_value(b, k as i64, dst),
-        Op::Handle(w0, w1, w2) => store_words(b, dst, [w0, w1, w2]),
+        Op::Int(v) => {
+            store_int(b, dst, v);
+            set_slot_float(dst, false);
+        }
+        Op::Float(v) => {
+            let bits = b.ins().bitcast(types::I64, MemFlags::new(), v);
+            let tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
+            let zero = b.ins().iconst(types::I64, 0);
+            store_words(b, dst, [tag, bits, zero]);
+            set_slot_float(dst, true);
+        }
+        Op::Bool(v) => {
+            let tag = b.ins().iconst(types::I64, TAG_BOOL as i64);
+            let zero = b.ins().iconst(types::I64, 0);
+            store_words(b, dst, [tag, v, zero]);
+            set_slot_float(dst, false);
+        }
+        Op::Slot(k) => {
+            copy_value(b, k as i64, dst);
+            let f = slot_float.borrow().get(k).copied().unwrap_or(false);
+            set_slot_float(dst, f);
+        }
+        Op::Handle(w0, w1, w2) => {
+            store_words(b, dst, [w0, w1, w2]);
+            set_slot_float(dst, false);
+        }
     };
     // Return-via-roots: place the single result in `roots[base]` and jump to the
     // param-less Done block. The result is a whole `Value`, so it can be a handle.
@@ -4927,18 +5071,49 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
         Op::Handle(w0, w1, w2)
     };
 
+    // For each leader, which of its operand-stack block params carry a boolean (so the
+    // entry reconstruction tags them `Op::Bool`, not `Op::Int`). Populated by the jump
+    // sites (`Jump`/`JumpIfFalse`/leader fall-through), which run before the target block is
+    // translated (forward edges, in ip order) — so the flags are set by the time the target
+    // is reached. A back-edge target with params would see no flags and default to `Int`;
+    // self-tail back-edges target the param-less leader 0, so this doesn't arise in practice.
+    let mut bool_param: Vec<Option<Vec<bool>>> = vec![None; len + 1];
+    // True if `op` is a boolean value: a comparison result (`Op::Int` with `i8` type) or a
+    // boolean that already crossed a block boundary (`Op::Bool`).
+    let is_bool_op = |b: &FunctionBuilder, op: Op| {
+        matches!(op, Op::Bool(_))
+            || matches!(op, Op::Int(v) if b.func.dfg.value_type(v) == types::I8)
+    };
+
     // Translate each leader block in ip order.
     for ip in 0..len {
         let Some(blk) = leader_block[ip] else {
             continue;
         };
         b.switch_to_block(blk);
-        let mut stack: Vec<Op> = b.block_params(blk).iter().map(|&v| Op::Int(v)).collect();
+        let params: Vec<cranelift_codegen::ir::Value> = b.block_params(blk).to_vec();
+        let mut stack: Vec<Op> = params
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let is_bool = bool_param[ip]
+                    .as_ref()
+                    .and_then(|f| f.get(i).copied())
+                    .unwrap_or(false);
+                if is_bool {
+                    Op::Bool(v)
+                } else {
+                    Op::Int(v)
+                }
+            })
+            .collect();
         let mut j = ip;
         loop {
             match &code[j] {
                 Inst::Const(cv) => match cv.load() {
                     Value::Int(n) => stack.push(Op::Int(b.ins().iconst(types::I64, n))),
+                    // A float literal (`4.0`, `2.0` in mandelbrot's `esc`) → an unboxed f64.
+                    Value::Float(f) => stack.push(Op::Float(b.ins().f64const(f))),
                     // `nil` (e.g. bintree `make`'s `(= d 0)` then-branch): a scalar atom,
                     // tag 0 / no payload — push it as a constant 3-word handle. A consumer
                     // that wants an int (`as_int`) tag-checks and deopts; a binder/return
@@ -5163,6 +5338,14 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                         let idx = read_words(&mut b, bb_op);
                         let h = vector_ref(&mut b, vec, idx);
                         stack.push(h);
+                    } else if op_is_float(aa_op) || op_is_float(bb_op) {
+                        // Float arith/compare (an operand is a float). `pick` selects f64
+                        // values the same as i64.
+                        let aa = as_f64(&mut b, aa_op);
+                        let bb = as_f64(&mut b, bb_op);
+                        let x = pick(aa, bb, map[0]);
+                        let y = pick(aa, bb, map[1]);
+                        stack.push(emit_float_arith(&mut b, *op, x, y)?);
                     } else {
                         // Arithmetic/comparison: materialise to int, apply `map`.
                         let aa = as_int(&mut b, aa_op);
@@ -5196,6 +5379,13 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                         let idx = read_words(&mut b, Op::Slot(*slot_b));
                         let h = vector_ref(&mut b, vec, idx);
                         stack.push(h);
+                    } else if op_is_float(Op::Slot(*slot_a)) || op_is_float(Op::Slot(*slot_b)) {
+                        // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`).
+                        let sa = as_f64(&mut b, Op::Slot(*slot_a));
+                        let sb = as_f64(&mut b, Op::Slot(*slot_b));
+                        let x = pick(sa, sb, map[0]);
+                        let y = pick(sa, sb, map[1]);
+                        stack.push(emit_float_arith(&mut b, *op, x, y)?);
                     } else {
                         // Source 0 = slot_a, source 1 = slot_b (the VM's `[sa, sb]` order).
                         let sa = load_slot_int(&mut b, *slot_a as i64);
@@ -5218,13 +5408,23 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     if matches!(op, PrimOp::VectorRef) {
                         return None;
                     }
-                    // Source 0 = slot_a, source 1 = the literal `int_b` (the fusion of
-                    // `(Const, Local)` already inverted `map` so the slot is source 0).
-                    let sa = load_slot_int(&mut b, *slot_a as i64);
-                    let sb = b.ins().iconst(types::I64, *int_b);
-                    let x = pick(sa, sb, map[0]);
-                    let y = pick(sa, sb, map[1]);
-                    stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                    if op_is_float(Op::Slot(*slot_a)) {
+                        // `(op floatslot int-literal)` — Brood coerces the int to f64
+                        // (`(+ 1.5 1)` = 2.5). Promote the literal and do float arith.
+                        let sa = as_f64(&mut b, Op::Slot(*slot_a));
+                        let sb = b.ins().f64const(*int_b as f64);
+                        let x = pick(sa, sb, map[0]);
+                        let y = pick(sa, sb, map[1]);
+                        stack.push(emit_float_arith(&mut b, *op, x, y)?);
+                    } else {
+                        // Source 0 = slot_a, source 1 = the literal `int_b` (the fusion of
+                        // `(Const, Local)` already inverted `map` so the slot is source 0).
+                        let sa = load_slot_int(&mut b, *slot_a as i64);
+                        let sb = b.ins().iconst(types::I64, *int_b);
+                        let x = pick(sa, sb, map[0]);
+                        let y = pick(sa, sb, map[1]);
+                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                    }
                 }
                 Inst::Jump(t) => {
                     if *t == len {
@@ -5243,6 +5443,8 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                             b.ins().jump(deopt, &[]);
                         }
                     } else {
+                        bool_param[*t] =
+                            Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
                         let args: Vec<BlockArg> = stack
                             .iter()
                             .map(|&op| BlockArg::Value(as_int(&mut b, op)))
@@ -5306,6 +5508,18 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                                     (PAYLOAD_OFFSET as i32 + 8, w2),
                                 ]);
                             }
+                            // A float arg — box as Value::Float (TAG_FLOAT + bits). The
+                            // next iteration reads it back via `as_f64` (tag-checked).
+                            Op::Float(v) => {
+                                let bits = b.ins().bitcast(types::I64, MemFlags::new(), v);
+                                let tag = b.ins().iconst(types::I8, TAG_FLOAT as i64);
+                                vals.push(vec![(0, tag), (PAYLOAD_OFFSET as i32, bits)]);
+                            }
+                            // A crossed-boundary boolean (already `i64` 0/1) → Value::Bool.
+                            Op::Bool(v) => {
+                                let tag = b.ins().iconst(types::I8, TAG_BOOL as i64);
+                                vals.push(vec![(0, tag), (PAYLOAD_OFFSET as i32, v)]);
+                            }
                         }
                     }
                     let roots_base = b.use_var(rb_var);
@@ -5337,32 +5551,62 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                     let cond = stack.pop()?;
                     let tgt = leader_block[*t]?; // falsy → else
                     let fall = leader_block[j + 1]?; // truthy → fall-through
-                                                     // A comparison `I8` branches; any other value is always truthy in Brood
-                                                     // — but a `Slot` condition must still be tag-checked to an `Int` (a
-                                                     // non-int local condition, e.g. `nil`/`false`, deopts to the VM, matching
-                                                     // the eager-int behaviour the JIT had before lazy slots).
-                    let brif_cond = match cond {
-                        // A comparison result (`I8`) is the only thing we branch on — an
-                        // `Op::Int` whose value type isn't `i64` (so a `<`/`=` boolean).
-                        Op::Int(v) if b.func.dfg.value_type(v) != types::I64 => Some(v),
-                        // Anything else is a raw value, always truthy in Brood — but a
-                        // `Slot`/`Handle` is tag-checked to an `Int` first (a non-int local
-                        // condition, e.g. `nil`/`false`, deopts to the VM, matching the
-                        // eager-int behaviour the JIT had before lazy slots).
-                        other => {
-                            let _ = as_int(&mut b, other);
-                            None
-                        }
-                    };
+                    bool_param[*t] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
+                    bool_param[j + 1] =
+                        Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
                     let args: Vec<BlockArg> = stack
                         .iter()
                         .map(|&op| BlockArg::Value(as_int(&mut b, op)))
                         .collect();
-                    match brif_cond {
-                        Some(c) => {
-                            b.ins().brif(c, fall, &args, tgt, &args);
+                    match cond {
+                        // A comparison result (`i8`) or a boolean that crossed a block
+                        // boundary (`Op::Bool`, already `i64`): branch directly — nonzero
+                        // (true) → truthy → fall-through, zero → else.
+                        Op::Int(v) if b.func.dfg.value_type(v) != types::I64 => {
+                            b.ins().brif(v, fall, &args, tgt, &args);
                         }
-                        None => {
+                        Op::Bool(v) => {
+                            b.ins().brif(v, fall, &args, tgt, &args);
+                        }
+                        // A boxed condition in a slot/handle — e.g. `(and a b)` boxes its
+                        // result to a temp slot (`box_scalar` tags it `Bool`), then reads it
+                        // back. Load the tag (and payload) and branch on Brood truthiness:
+                        // only `nil` and `false` are falsy, everything else truthy. (Before,
+                        // this tag-checked `== Int` and *deopted* on a Bool/Nil, so every
+                        // `and`/`or` in a hot arm fell to the VM. Branching here keeps it
+                        // native and matches the VM's truthiness exactly.)
+                        Op::Slot(_) | Op::Handle(..) => {
+                            let (tagv, payload) = match cond {
+                                Op::Slot(k) => {
+                                    let roots_base = b.use_var(rb_var);
+                                    let i = b.ins().iadd_imm(base, k as i64);
+                                    let o = b.ins().imul_imm(i, STRIDE);
+                                    let addr = b.ins().iadd(roots_base, o);
+                                    let t8 = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+                                    let tagv = b.ins().uextend(types::I64, t8);
+                                    let pl = b.ins().load(
+                                        types::I64,
+                                        MemFlags::new(),
+                                        addr,
+                                        PAYLOAD_OFFSET as i32,
+                                    );
+                                    (tagv, pl)
+                                }
+                                Op::Handle(w0, w1, _) => (b.ins().band_imm(w0, 0xff), w1),
+                                _ => unreachable!(),
+                            };
+                            // falsy = (tag == Nil) || (tag == Bool && payload == 0). Nil's
+                            // discriminant is 0.
+                            let is_nil = b.ins().icmp_imm(IntCC::Equal, tagv, 0);
+                            let is_bool = b.ins().icmp_imm(IntCC::Equal, tagv, TAG_BOOL as i64);
+                            let pl_false = b.ins().icmp_imm(IntCC::Equal, payload, 0);
+                            let false_bool = b.ins().band(is_bool, pl_false);
+                            let falsy = b.ins().bor(is_nil, false_bool);
+                            b.ins().brif(falsy, tgt, &args, fall, &args);
+                        }
+                        // Any other unboxed SSA value (raw `Op::Int(i64)`, `Op::Float`) is
+                        // always truthy in Brood.
+                        _ => {
                             b.ins().jump(fall, &args);
                         }
                     }
@@ -5380,6 +5624,7 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
                 break;
             }
             if is_leader[j] {
+                bool_param[j] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
                 let args: Vec<BlockArg> = stack
                     .iter()
                     .map(|&op| BlockArg::Value(as_int(&mut b, op)))
@@ -5441,10 +5686,14 @@ pub(crate) fn jit_lower_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Opt
 /// thread is detached and lives for the process; sends after a (theoretical) hangup are
 /// swallowed.
 #[cfg(feature = "jit")]
-static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<Arc<CompiledArm>>> =
+// The work item carries a **slot-tag profile** (`Vec<u8>`, one `Tag as u8` per frame
+// slot, snapshotted from a live frame at tier time) alongside the arm, so the
+// background compiler can type-specialize float arms without a `CompiledArm` field.
+// Empty means "no profile" (integer-only lowering, the pre-float behaviour).
+static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<(Arc<CompiledArm>, Vec<u8>)>> =
     std::sync::LazyLock::new(|| {
         use std::sync::atomic::Ordering::Release;
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<CompiledArm>>(256);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(Arc<CompiledArm>, Vec<u8>)>(256);
         std::thread::Builder::new()
             .name("brood-jit".into())
             .spawn(move || {
@@ -5458,7 +5707,7 @@ static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<Arc<Compile
                 // interpreter. A single panic still prints once via the default hook — a
                 // loud, actionable signal — but doesn't spam or crash.
                 let mut codegen_poisoned = false;
-                for arm in rx {
+                for (arm, slot_tags) in rx {
                     if codegen_poisoned {
                         arm.jit_code.store(crate::jit::BAILED, Release);
                         continue;
@@ -5467,7 +5716,7 @@ static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<Arc<Compile
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        jit_lower_arm(&mut jit, &arm)
+                        jit_lower_arm(&mut jit, &arm, &slot_tags)
                     }));
                     drop(jit); // install the pointer outside the module lock
                     match lowered {
@@ -5906,8 +6155,16 @@ pub(crate) fn jit_tier(
             .jit_code
             .compare_exchange(std::ptr::null_mut(), crate::jit::QUEUED, AcqRel, Acquire)
             .is_ok()
-            && JIT_COMPILER.try_send(arm.clone()).is_err()
         {
+            // Snapshot the live frame's slot tags (this is the elected enqueuer; the frame
+            // at `roots[base..base+nslots]` holds the hot activation's params). Used to
+            // type-specialize float arms; let-binder slots read nil here and get their type
+            // from the body's writes during lowering. Sent with the arm — empty Vec is fine
+            // (the lowerer treats absent/non-float profiles as integer-only).
+            let slot_tags: Vec<u8> = (0..arm.nslots)
+                .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
+                .collect();
+            if JIT_COMPILER.try_send((arm.clone(), slot_tags)).is_err() {
             // The background compile queue is full (a burst of distinct hot arms — e.g.
             // thousands of short-lived green processes each tiering their own arm copy,
             // overwhelming the bounded channel). Reset to untried AND back the hotness
@@ -5919,6 +6176,7 @@ pub(crate) fn jit_tier(
             // drains (a long-lived process re-reaches the threshold and re-enqueues).
             arm.jit_code.store(std::ptr::null_mut(), Release);
             arm.jit_calls.store(0, Relaxed);
+            }
         }
         return None;
     }
@@ -6252,7 +6510,7 @@ mod tests {
         };
 
         let mut jit = crate::jit::Jit::new();
-        let ptr = jit_lower_arm(&mut jit, &arm).expect("straight-line int arm should JIT");
+        let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("straight-line int arm should JIT");
         let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
         // Frame: x = 41 at roots[base].
@@ -6308,7 +6566,7 @@ mod tests {
         };
 
         let mut jit = crate::jit::Jit::new();
-        let ptr = jit_lower_arm(&mut jit, &arm).expect("if/cmp arm should JIT");
+        let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("if/cmp arm should JIT");
         let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
         for (x, want) in [(-5i64, 5i64), (3, 3), (0, 0)] {
@@ -6374,7 +6632,7 @@ mod tests {
         };
 
         let mut jit = crate::jit::Jit::new();
-        let ptr = jit_lower_arm(&mut jit, &arm).expect("self-recursive int loop should JIT");
+        let ptr = jit_lower_arm(&mut jit, &arm, &[]).expect("self-recursive int loop should JIT");
         let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
 
         // Prime the reduction budget so these short loops run to completion (the
@@ -6473,7 +6731,7 @@ mod tests {
         };
         let mut jit = crate::jit::Jit::new();
         assert!(
-            jit_lower_arm(&mut jit, &arm).is_some(),
+            jit_lower_arm(&mut jit, &arm, &[]).is_some(),
             "an arm ending in a tail call (past the body-weight gate) must lower, not bail"
         );
 
@@ -6514,7 +6772,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
         };
         assert!(
-            jit_lower_arm(&mut jit, &thin_arm).is_none(),
+            jit_lower_arm(&mut jit, &thin_arm, &[]).is_none(),
             "a thin tail-call arm (2 work ops) must be gated out (stays on the VM)"
         );
     }
@@ -6583,7 +6841,7 @@ mod tests {
             2,
         );
         let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe {
-            std::mem::transmute(jit_lower_arm(&mut jit, &sumto).expect("fused sumto JITs"))
+            std::mem::transmute(jit_lower_arm(&mut jit, &sumto, &[]).expect("fused sumto JITs"))
         };
         crate::process::yield_now(); // prime the reduction budget so the loop completes
         for (n, want) in [(5i64, 15i64), (100, 5050), (1, 1), (0, 0)] {
@@ -6619,7 +6877,7 @@ mod tests {
             1,
         );
         let g: extern "C" fn(*mut Heap, i64) -> i64 =
-            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &gt).expect("(> x 5) JITs")) };
+            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &gt, &[]).expect("(> x 5) JITs")) };
         for (x, want) in [(10i64, 100i64), (3, 200)] {
             let mut heap = Heap::new();
             let base = heap.roots_len();
@@ -6648,7 +6906,7 @@ mod tests {
             1,
         );
         let s: extern "C" fn(*mut Heap, i64) -> i64 =
-            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &sq).expect("(* x x) JITs")) };
+            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &sq, &[]).expect("(* x x) JITs")) };
         let mut heap = Heap::new();
         let base = heap.roots_len();
         heap.push_root(Value::Int(3));
