@@ -2369,15 +2369,38 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 (def *module-docs* {})
 ; module name (string) -> its docstring (or nil)
 
-;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:refer [a b]])` clause:
-;; load the module, then import its names. `:refer [a b]` imports just those;
-;; otherwise all of `mod`'s public (non-`--`) names. Used at `defmodule` expand time.
+;; ---- deprecation ------------------------------------------------------------
+;; A deprecated construct keeps working but says so. `deprecation-warning` is the
+;; primitive: print a message to stderr ONCE per key (so a re-required module or a
+;; hot loop doesn't spam), then stay silent. A macro calls it from its expansion
+;; when it lowers a deprecated form — see `(:use … :refer …)` below.
+(def *deprecation-seen* nil)
+(defn deprecation-warning (key message)
+  "Print `message` to stderr once per `key` (deduplicated); returns nil. The
+deprecation primitive — emit it from a macro's expansion to flag a deprecated use."
+  (unless (member? key *deprecation-seen*)
+    (def *deprecation-seen* (cons key *deprecation-seen*))
+    (eprintln "deprecation: " message))
+  nil)
+
+;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:only [a b]])` clause:
+;; load the module, then import its names. `:only [a b]` imports just those; with no
+;; marker, all of `mod`'s public (non-`--`) names. `:refer` is the deprecated
+;; spelling of `:only` — still accepted, but it warns once. Used at `defmodule`
+;; expand time.
 (defn defmodule--use-clause (clause)
-  (let (mod (second clause)
-        opts (rest (rest clause))
-        subset (if (= (first opts) :refer) (second opts) nil))
-    (list (list 'require (list 'quote mod))
-      (list '%refer (list 'quote mod) (list 'quote subset)))))
+  (let (mod    (second clause)
+        opts   (rest (rest clause))
+        marker (first opts)
+        subset (if (or (= marker :only) (= marker :refer)) (second opts) nil)
+        forms  (list (list 'require (list 'quote mod))
+                 (list '%refer (list 'quote mod) (list 'quote subset))))
+    (if (= marker :refer)
+      (cons (list 'deprecation-warning
+              (list 'quote (list :refer mod))
+              (str "(:use " mod " :refer ...) is deprecated — use :only"))
+        forms)
+      forms)))
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
@@ -2385,6 +2408,26 @@ degrades to a plain case-insensitive name/docstring search, e.g.
   (apply concat
     (map defmodule--use-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
+
+;; web/views/counter → counter  (a module name's last `/`-segment, as a symbol).
+(defn defmodule--last-segment (mod)
+  (symbol (last (string-split (name mod) "/"))))
+
+;; The `(require …)`+`(%alias …)` forms for one `(:alias mod [:as short])` clause:
+;; load the module, then register a prefix alias so a later `short/name` resolves to
+;; `mod/name` (Elixir-style `alias`). `short` defaults to `mod`'s last path segment;
+;; `:as` overrides it (needed when two modules share a last segment).
+(defn defmodule--alias-clause (clause)
+  (let (mod   (second clause)
+        opts  (rest (rest clause))
+        short (if (= (first opts) :as) (second opts) (defmodule--last-segment mod)))
+    (list (list 'require (list 'quote mod))
+      (list '%alias (list 'quote mod) (list 'quote short)))))
+
+(defn defmodule--alias-forms (clauses)
+  (apply concat
+    (map defmodule--alias-clause
+      (filter (fn (c) (and (pair? c) (= (first c) :alias))) clauses))))
 
 ;; A file declares itself a **module = namespace** at the top with `defmodule`
 ;; (ADR-065): each `def`/`defn`/`defmacro` defines `mod/name`, and a bare reference
@@ -2405,7 +2448,8 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
        (def *module-docs* (assoc *module-docs* ~key ~doc))
        (provide ~key)
        (%in-ns '~mod)
-       ~@(defmodule--use-forms clauses))))
+       ~@(defmodule--use-forms clauses)
+       ~@(defmodule--alias-forms clauses))))
 
 (defn module-doc (mod)
   "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."
