@@ -4282,7 +4282,7 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // the same alloc path — is unaffected, so the bug is cons-specific.)
     };
     code.iter().all(|inst| match inst {
-        Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil | Value::Float(_) | Value::Bool(_)),
+        Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil | Value::Float(_)),
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)
@@ -5185,14 +5185,6 @@ pub(crate) fn jit_lower_arm(
                     Value::Nil => {
                         let z = b.ins().iconst(types::I64, 0);
                         stack.push(Op::Handle(z, z, z));
-                    }
-                    // `true`/`false` (e.g. primes' `divides-none?` cond arms returning a
-                    // bool literal): an unboxed 0/1 tagged `Op::Bool`, so it boxes back to
-                    // `Value::Bool` (read_words) and branches correctly (JumpIfFalse), exactly
-                    // like a comparison result that crossed a block boundary.
-                    Value::Bool(bv) => {
-                        let v = b.ins().iconst(types::I64, if bv { 1 } else { 0 });
-                        stack.push(Op::Bool(v));
                     }
                     _ => return None,
                 },
