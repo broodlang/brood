@@ -4307,7 +4307,7 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // the same alloc path — is unaffected, so the bug is cons-specific.)
     };
     code.iter().all(|inst| match inst {
-        Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil | Value::Float(_)),
+        Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil | Value::Float(_) | Value::Bool(_)),
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)
@@ -5238,6 +5238,10 @@ pub(crate) fn jit_lower_arm(
                         let z = b.ins().iconst(types::I64, 0);
                         stack.push(Op::Handle(z, z, z));
                     }
+                    Value::Bool(bv) => {
+                        let v = b.ins().iconst(types::I64, if bv { 1 } else { 0 });
+                        stack.push(Op::Bool(v));
+                    }
                     _ => return None,
                 },
                 // Lazy: push a reference to the frame slot. Consumers tag-check it to an int
@@ -5715,7 +5719,15 @@ pub(crate) fn jit_lower_arm(
                             // discriminant is 0.
                             let is_nil = b.ins().icmp_imm(IntCC::Equal, tagv, 0);
                             let is_bool = b.ins().icmp_imm(IntCC::Equal, tagv, TAG_BOOL as i64);
-                            let pl_false = b.ins().icmp_imm(IntCC::Equal, payload, 0);
+                            // A `Value::Bool`'s payload word is only meaningful in its low
+                            // byte (the `bool`): Rust leaves the upper 7 bytes of the union
+                            // slot uninitialised, so comparing the full `i64` to 0 spuriously
+                            // reads `false` (byte 0, garbage above) as *truthy*. Mask to the
+                            // bool byte — matching the VM's `Value::Bool(b)` read. (This is
+                            // the bug that corrupted `nest format` once `not`/bool-const arms
+                            // tiered: `(if x false true)` read its `false` arg as truthy.)
+                            let pl_byte = b.ins().band_imm(payload, 0xff);
+                            let pl_false = b.ins().icmp_imm(IntCC::Equal, pl_byte, 0);
                             let false_bool = b.ins().band(is_bool, pl_false);
                             let falsy = b.ins().bor(is_nil, false_bool);
                             b.ins().brif(falsy, tgt, &args, fall, &args);
