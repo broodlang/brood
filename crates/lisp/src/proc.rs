@@ -152,16 +152,31 @@ fn start_stdout_reader(id: u64, out: ChildStdout, child: Arc<Mutex<Child>>, subs
 
 // ---- the primitive operations ----
 
-/// `(proc-spawn prog args)` — spawn `prog` with `args`, piping its stdin/stdout/
-/// stderr. The stdout/stderr readers deliver to `subscriber`. Returns the handle
-/// id. Errors if the program can't be spawned (not found, not executable, …).
-pub fn spawn(prog: &str, args: &[String], subscriber: u64) -> std::io::Result<u64> {
-    let mut child = Command::new(prog)
+/// `(proc-spawn prog args opts)` — spawn `prog` with `args`, piping its stdin/
+/// stdout/stderr. `cwd` (if set) is the child's working directory; otherwise it
+/// inherits ours. `env` entries are added on top of the inherited environment.
+/// The stdout/stderr readers deliver to `subscriber`. Returns the handle id.
+/// Errors if the program can't be spawned (not found, not executable, …).
+pub fn spawn(
+    prog: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    env: &[(String, String)],
+    subscriber: u64,
+) -> std::io::Result<u64> {
+    let mut command = Command::new(prog);
+    command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    let mut child = command.spawn()?;
     // Take the three pipe ends; piped() guarantees they are Some.
     let stdin: ChildStdin = child.stdin.take().expect("piped stdin");
     let stdout: ChildStdout = child.stdout.take().expect("piped stdout");

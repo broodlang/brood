@@ -6360,6 +6360,18 @@ ordering, and the MCP JSON bridge — the standard cost of a new scalar handle, 
 once. The editor's multi-source completion (the original motivation) now builds an
 LSP source on top of this with no further kernel work. `%os-cmd` is untouched.
 
+**Update (2026-06-14) — an optional options map: `:cwd` and `:env`.** `proc-spawn`
+took only `prog` + `args`, so a child always inherited the editor's working
+directory. myedit's project shell (`C-x p e`) must run commands *in the project
+root*, not wherever the editor was launched — the same prime-directive signal that
+motivated this ADR. Rather than have the editor wrap every command in
+`sh -c "cd <root> && …"`, `proc-spawn` grew an optional third argument: an options
+map `{:cwd "dir" :env {"K" "V" …}}`. `:cwd` sets `Command::current_dir`; `:env`
+adds variables on top of the inherited environment. Both are the natural `Command`
+knobs and are generally useful (LSP servers and the web mirror want a cwd too); the
+arity becomes `range(2, 3)` and the absent/`nil` cases preserve the old behaviour.
+Tests: `tests/proc_test.blsp` (`pwd` under `:cwd`, an env var under `:env`).
+
 ## ADR-105 — Keyword-literal (singleton) types: a literal-set refinement on `Ty`
 
 **Status:** accepted (2026-06-14). Implemented: the `lit` refinement on `Ty`

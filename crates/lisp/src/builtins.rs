@@ -789,8 +789,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "proc-spawn",
-        Arity::exact(2),
-        Sig::new(vec![string, list_ty.union(vec_ty)], subprocess_ty),
+        Arity::range(2, 3),
+        Sig::with_rest(vec![string, list_ty.union(vec_ty)], map_ty, subprocess_ty),
         proc_spawn,
     );
     def(
@@ -2247,7 +2247,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
     ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
     ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
-    ("proc-spawn", &["prog", "args"], "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned."),
+    ("proc-spawn", &["prog", "args", "opts"], "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned."),
     ("proc-send", &["p", "s"], "Write the whole string s to subprocess p's stdin (blocking) and flush. Returns nil; throws if p is unknown/closed."),
     ("proc-close", &["p"], "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
@@ -5544,8 +5544,26 @@ fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     for a in heap.seq_items(arg(args, 1))? {
         argv.push(expect_string(heap, "proc-spawn", a)?);
     }
+    // Optional 3rd argument: an options map `{:cwd "dir" :env {"K" "V" …}}`.
+    let mut cwd: Option<String> = None;
+    let mut env: Vec<(String, String)> = Vec::new();
+    if let Value::Map(opts) = arg(args, 2) {
+        if let Some(v) = heap.map_get(opts, Value::Keyword(value::intern("cwd"))) {
+            if !matches!(v, Value::Nil) {
+                cwd = Some(expect_string(heap, "proc-spawn :cwd", v)?);
+            }
+        }
+        if let Some(Value::Map(e)) = heap.map_get(opts, Value::Keyword(value::intern("env"))) {
+            for (k, v) in heap.map_entries(e) {
+                env.push((
+                    expect_string(heap, "proc-spawn :env key", k)?,
+                    expect_string(heap, "proc-spawn :env value", v)?,
+                ));
+            }
+        }
+    }
     let owner = crate::process::self_pid();
-    match crate::proc::spawn(&prog, &argv, owner) {
+    match crate::proc::spawn(&prog, &argv, cwd.as_deref(), &env, owner) {
         Ok(id) => Ok(Value::Subprocess(id)),
         Err(e) => Err(LispError::runtime(format!("proc-spawn {}: {}", prog, e))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),

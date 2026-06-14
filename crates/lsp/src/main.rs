@@ -31,14 +31,15 @@ use lsp_types::notification::{
     Notification as NotificationTrait, PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
-    FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest, InlayHintRequest,
-    PrepareRenameRequest, References, Rename, Request as RequestTrait, ResolveCompletionItem,
-    SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
+    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
+    DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
+    InlayHintRequest, PrepareRenameRequest, References, Rename, Request as RequestTrait,
+    ResolveCompletionItem, SemanticTokensFullRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeActionParams, CodeActionProviderCapability, CompletionItem, CompletionOptions,
     CompletionParams, Diagnostic, DiagnosticSeverity, DocumentFormattingParams,
+    DocumentLinkOptions, DocumentLinkParams,
     DocumentHighlightParams, DocumentSymbolParams, FoldingRangeParams,
     FoldingRangeProviderCapability, GotoDefinitionParams, HoverParams, HoverProviderCapability,
     InlayHintParams, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
@@ -60,11 +61,13 @@ mod completion;
 mod definition;
 mod defs;
 mod diagnostics;
+mod document_link;
 mod folding;
 mod formatting;
 mod hover;
 mod inlay_hints;
 mod line_index;
+mod module_ref;
 mod references;
 mod rename;
 mod semantic_tokens;
@@ -110,6 +113,13 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         // formatting isn't offered — the formatter works on whole files.
         document_formatting_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        // Clickable links over module names that resolve to a file — `(require
+        // 'foo)` arguments and `(:use foo)`/`(:alias foo)` clauses. No resolve
+        // step: each link carries its target URI up front.
+        document_link_provider: Some(DocumentLinkOptions {
+            resolve_provider: Some(false),
+            work_done_progress_options: Default::default(),
+        }),
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         // Rename, with `prepareRename` so the editor validates/highlights the
@@ -308,6 +318,22 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
                     )
                 }
                 None => None,
+            };
+            Response::new_ok(id, result)
+        }
+        DocumentLinkRequest::METHOD => {
+            let (id, p) = match extract::<DocumentLinkParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            // Like goto-definition, this needs `&mut interp` (module resolution runs
+            // `require--find`) alongside the `docs` borrow — inline the lookup.
+            let result = match docs.get(&p.text_document.uri) {
+                Some(doc) => {
+                    let a = &doc.analysis;
+                    document_link::document_links(interp, &doc.text, &a.cst, &a.line_index)
+                }
+                None => Vec::new(),
             };
             Response::new_ok(id, result)
         }
