@@ -46,6 +46,14 @@ pub fn document_links(
 /// quoted argument(s) of a `(require …)` call, and the name in a `(:use …)` /
 /// `(:alias …)` clause. Recurses into every node so nested clauses are found.
 fn collect_module_names<'a>(node: &'a Node, src: &str, out: &mut Vec<&'a Node>) {
+    // Don't descend into quoted / quasiquoted forms: a `(require 'foo)` (or a
+    // `(:use foo)`) written as *data* — `'(require 'foo)`, or a macro template —
+    // isn't a real load position, so it shouldn't get a link. (A genuine
+    // `(require 'foo)`'s own `'foo` argument is collected at the List level below,
+    // before this recursion reaches the quote, so real requires still link.)
+    if matches!(node.kind, NodeKind::Quote | NodeKind::Quasi) {
+        return;
+    }
     if node.kind == NodeKind::List {
         let mut forms = node.forms();
         if let Some(head) = forms.next() {
@@ -153,5 +161,12 @@ mod tests {
     fn links_both_positions_in_one_file() {
         let src = "(defmodule app (:use greeter))\n(require 'greeter)";
         assert_eq!(linked_names("both", src), vec!["greeter", "greeter"]);
+    }
+
+    #[test]
+    fn does_not_link_a_require_inside_quoted_data() {
+        // `'(require 'greeter)` is data, not a load — must produce no link, even
+        // though `greeter.blsp` exists on the path.
+        assert!(linked_names("quoted", "(def x '(require 'greeter))").is_empty());
     }
 }
