@@ -2638,19 +2638,22 @@ defects fell out:
 1. **Source positions lost** (`source_positions_survive_a_cross_node_send`). The
    per-process `form_pos` map only keys LOCAL pairs; once a positioned form is
    `promote`d into RUNTIME its position vanished, so `(form-pos …)` — and a closure
-   shipped to a peer — returned `nil`. Fix: a sparse, interior-mutable `pair_pos`
-   map on the shared `CodeSlabs`, populated by `promote_list` (which holds `&self`)
-   and consulted by `form_pos` for RUNTIME pairs. (heap.rs, + a unit test.)
+   shipped to a peer — returned `nil`. Fixed in **`8b79069`**: a `RwLock<HashMap>`
+   RUNTIME position table (the shared-region counterpart of the LOCAL `form_pos`
+   map), carried by `promote_list` and read by `form_pos` for RUNTIME pairs — which
+   also restores positions for `defn` bodies (never preserved over the wire).
 
 2. **Captures lost** (`remote_spawn_sync_returns_a_usable_remote_pid` — the remote
    child died `unbound symbol: me`). `compile_make_closure` promoted a closure that
    captures an *enclosing* lexical, but `compile_captures` snapshots those by name
    (`Node::Global`), which resolves via the local env chain yet does NOT survive
-   being shipped to another node. Fix: only promote a **non-capturing** inline
-   lambda (`captures.is_empty() && self_name.is_none()`); a capturing one defers to
-   the tree-walker as before. The targeted win (pipeline/matmul's non-capturing
-   compute lambdas) is unaffected. (compile.rs.)
+   being shipped to another node. Fixed at the root in **`84c70e7`**: actually
+   capture enclosing lexicals when compiling a `def` RHS inside a `let` (so the
+   capturing closure keeps its VM-compiled fast path *and* ships correctly).
 
-Full suite green (609). The async `remote-spawn` already worked; only the capturing
-+ promoted path was broken, which is why the regression hid behind the sync variant
-and the position-reflection test.
+(A parallel local fix was written from the same bisect — a `CodeSlabs.pair_pos`
+table for #1 and a "don't promote capturing lambdas" gate for #2 — but the above
+commits landed on `main` first and are equivalent/better, so the local fix was
+dropped on rebase.) Full suite green (609). The async `remote-spawn` already worked;
+only the capturing + promoted path was broken, which is why the regression hid
+behind the sync variant and the position-reflection test.
