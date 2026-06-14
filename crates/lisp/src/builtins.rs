@@ -6410,6 +6410,7 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let col_resize_t = value::intern("col-resize");
     let row_resize_t = value::intern("row-resize");
     let vspans_t = value::intern("vspans");
+    let cells_t = value::intern("cells");
     let rect_t = value::intern("rect");
     let mut ops = Vec::with_capacity(parsed.len());
     for (tag, parts) in parsed {
@@ -6491,6 +6492,21 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 cols.push(segs);
             }
             ops.push(crate::gui::Op::VSpans { row0, col0, cols });
+        } else if tag == cells_t {
+            // [:cells row0 col0 w aspect bits color] — blit a whole BITBOARD in one op.
+            // `bits` is an arbitrary-precision integer (set bit `y*w + x` = cell `(x,y)`
+            // live); each live cell fills an `aspect`×1 screen-cell block in `color`,
+            // anchored at screen cell `(row0, col0)`. The set-bit enumeration + rect
+            // expansion run natively in `gui::paint` (O(live)), so a frame of thousands
+            // of cells is ONE op for the Brood side. `color` is a face keyword / [r g b]
+            // / nil (as `:vspans`). GUI-only; the terminal has no arm, so it's skipped.
+            let row0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
+            let col0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+            let w = expect_int(heap, "gui-draw", arg(&parts, 3))?.max(1) as u32;
+            let aspect = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?).max(1);
+            let bits = expect_bigint(heap, "gui-draw", arg(&parts, 5))?;
+            let color = span_color(heap, arg(&parts, 6));
+            ops.push(crate::gui::Op::Cells { row0, col0, w, aspect, bits, color });
         }
     }
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;
