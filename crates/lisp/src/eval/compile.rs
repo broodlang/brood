@@ -590,6 +590,9 @@ enum ChunkExit {
     /// at ip 0 with `try_jit` set — counting toward the threshold while untried, and
     /// running the native code (which loops internally) once it's installed. Without this
     /// a self-tail loop is one arm entry and never reaches the per-entry tier threshold.
+    /// Only ever constructed under `--features jit`; dead (but kept for the match) in a
+    /// non-jit build such as `brood-lsp`.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     SelfTail,
 }
 
@@ -4213,9 +4216,16 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
                 | PrimOp::Rem
                 | PrimOp::Quot
                 | PrimOp::Div
-                | PrimOp::Cons
                 | PrimOp::VectorRef
         )
+        // NB: `Cons` is deliberately NOT here. The JIT'd `cons` path miscompiles —
+        // an arm that conses (e.g. the `reverse` accumulator behind `last`) returns a
+        // corrupted pair list once tiered, so reads off it (`first`/`last`) yield the
+        // wrong element (surfaced as a `nil` cursor-zone shape in the editor; repro in
+        // tests/jit_cons_test.blsp). Bailing cons-containing arms to the (correct)
+        // bytecode VM restores correctness at a bounded perf cost; re-admitting `Cons`
+        // needs the lowering fixed first. (Tracked as a follow-up; `make_vector2` —
+        // the same alloc path — is unaffected, so the bug is cons-specific.)
     };
     code.iter().all(|inst| match inst {
         Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil | Value::Float(_)),
