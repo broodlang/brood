@@ -63,7 +63,7 @@ land in a later slice."
 (defn package--manifest-deps (manifest-path)
   (if (not (file-exists? manifest-path))
     nil
-    (let (form (read-string (slurp manifest-path)))
+    (let (form (read-first (slurp manifest-path)))
       (if (and (pair? form) (= (first form) 'project))
         (project/project--parse-deps (plist-get (rest form) :dependencies))
         nil))))
@@ -172,7 +172,7 @@ land in a later slice."
   (let (meta (package--pkg-meta-path target))
     (and (dir? target)
       (file-exists? meta)
-      (let (form (read-string (slurp meta)))
+      (let (form (read-first (slurp meta)))
         (and (pair? form)
           (= (first form) 'brood-pkg)
           (= commit (plist-get (rest form) :commit)))))))
@@ -268,7 +268,7 @@ land in a later slice."
 ;; The (defmodule X) name a source file claims (a symbol), or nil if it declares
 ;; none. That name — not the filename — is the global-table namespace that clobbers.
 (defn package--module-name-of (file)
-  (let (form (read-string (slurp file)))
+  (let (form (read-first (slurp file)))
     (if (and (pair? form) (= (first form) 'defmodule)) (second form) nil)))
 
 ;; The module names a source dir provides: the (defmodule …) name of each
@@ -358,7 +358,7 @@ land in a later slice."
   (let (path (package--lockfile-path root))
     (if (not (file-exists? path))
       nil
-      (let (form (read-string (slurp path)))
+      (let (form (read-first (slurp path)))
         (if (and (pair? form) (= (first form) 'lock))
           (plist-get (rest form) :dependencies)
           nil)))))
@@ -393,7 +393,7 @@ land in a later slice."
 ;; own manifest read.
 (defn package--load-manifest (path)
   (when (file-exists? path)
-    (let (form (read-string (slurp path)))
+    (let (form (read-first (slurp path)))
       (when (and (pair? form) (= (first form) 'project))
         (project/project--apply (rest form))))))
 

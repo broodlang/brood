@@ -14,9 +14,18 @@
   (test "blank / comment-only source is the empty list"
     (is (empty? (read-all "")))
     (is (empty? (read-all "   \n  ;; just a comment\n"))))
-  (test "the all-forms sibling of read-string (first only)"
+  (test "read-string strict; read-first leading form; read-all every form"
     (let (src "(a) (b) (c)")
-      (assert= (read-string src) '(a))
+      ;; read-string parses a *single* form: trailing content is a loud error, not a
+      ;; silent drop (the old behaviour, which masked typos / multi-form mistakes).
+      (assert= (try (do (read-string src) :no-throw) (catch e :threw)) :threw)
+      ;; read-first reads the leading form, ignoring the rest (peek-a-header).
+      (assert= (read-first src) '(a))
+      ;; read-all reads them all.
+      (assert= (read-all src) (list '(a) '(b) '(c)))
       (assert= (last (read-all src)) '(c))))
+  (test "read-string tolerates trailing whitespace and comments (trivia, not a form)"
+    (assert= (read-string "  42  \n") 42)
+    (assert= (read-string "(+ 1 2) ; trailing comment") '(+ 1 2)))
   (test "raises on an incomplete form (like read-string)"
     (assert= (try (do (read-all "(+ 1 2") :no-throw) (catch e :threw)) :threw)))
