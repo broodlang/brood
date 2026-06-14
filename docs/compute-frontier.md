@@ -39,7 +39,7 @@ NaN-boxing to close the rows below. (Tracked there; not re-opened here.)
 
 Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_IR`.
 
-### 3a. `matmul` (~39× — now the largest gap) — **flat vector storage / inline VectorRef**
+### 3a. `matmul` (~45× — the largest gap; LICM shipped 2026-06-15) — **inline VectorRef via hoisted immutable base**
 
 - The hot `dot` loop **already runs native** (it lowers, `define_function` succeeds, it's
   dispatched native; the high `prim2_fallback` is the one-time matrix *construction*, not
@@ -116,10 +116,12 @@ and are where the language's identity lives.
 
 Priority if/when this is picked up:
 
-1. **`matmul` — hoist the immutable vector base + inline `VectorRef`** (§3a, §6) — best
-   measured leverage (~half of the largest gap), and **immutability makes the LICM sound
-   without a flat-storage rewrite or alias analysis**. Start here. Verify it beats the
-   current ~7.3 ns/read microbenchmark before wiring the whole change.
+1. **`matmul` — hoist the immutable vector base + inline `VectorRef`** (§3a, §6) —
+   **SHIPPED 2026-06-15** (see the "JIT matmul LICM" devlog entry). The hoist inlined the
+   one *invariant-local* read (`(nth rowa k)`): isolated read ~7.8 → ~1.2 ns, `matmul`
+   compute ~241 → ~212 ms. The residual two reads are a **global** (`b`, parity-unsound to
+   hoist — a `def` rebind would diverge from the VM's late binding) and the **per-`k` row**
+   (varies), so the gap stays the suite's largest (~45×, noise-sensitive denominator).
 2. **zero-copy message passing** (§3c, §6) — share immutable structures by handle instead of
    deep-copying across processes; attacks the `strings` ~180 MB outlier and `spawn`/`pfib`
    message cost. Also opens **lazy combinators** as the eager-list fix.
