@@ -35,10 +35,11 @@ ordinary symbol, so `(number -> number)` is a plain list the parser splits on
 ### Type-expression grammar (slice 1)
 
 ```
-type   ::= base | typevar | arrow | seq | map-kv | union | inter
+type   ::= base | literal | typevar | arrow | seq | map-kv | union | inter
 base   ::= any | never | int | float | number | string | symbol
          | keyword | bool | nil | pair | vector | list | map | fn
          | rope | pid | ref | socket
+literal ::= <keyword>                          ; a bare keyword, e.g. :maximized
 typevar ::= ? <name>                           ; e.g. ?A, ?el — static only
 arrow  ::= ( type* -> type )                   ; fixed arity
          | ( type* & type -> type )            ; fixed leading params + variadic rest
@@ -47,6 +48,15 @@ map-kv ::= (map key-type val-type)             ; key/val checked at runtime
 union  ::= (or type type+)
 inter  ::= (and type+)                         ; intersection; (and) = any
 ```
+
+**Keyword-literal (singleton) types (ADR-105).** A *bare* keyword in type position
+is a literal type — the value must be exactly that keyword. Enumerate a closed set
+with `(or …)`: `(or :maximized :fullboth :fullscreen nil)`. Write keywords bare, not
+`'`-quoted — they're self-evaluating and unambiguous in type position, and bare is
+what the runtime `(sig! …)` contract matches by equality. A keyword outside the set
+is flagged by the checker/LSP and throws under a runtime contract; the diagnostic
+names the exact value (`got :bogus`). `false` is *not* a literal type — use `nil`
+for an "off" arm. (Bool/int/string literals are the same machinery, deferred.)
 
 Base names map to the same lattice points the predicates imply (`number` =
 `int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …). Deferred: map K/V
