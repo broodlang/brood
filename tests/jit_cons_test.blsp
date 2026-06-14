@@ -1,0 +1,29 @@
+;; Regression test for a JIT miscompile of `cons`-building arms (ADR-101).
+;;
+;; `reverse` is a cons-accumulator; once it tiered to native, the JIT'd `cons`
+;; returned a corrupted pair list, so reads off the reversed list (`count`/`first`,
+;; and `last` = `(first (reverse xs))`) gave the wrong answer. It surfaced in the
+;; editor as a `nil` cursor-zone shape (`ed-divider-ops`). The fix removes `Cons`
+;; from the JIT subset (`chunk_in_jit_subset`) so cons-arms run on the bytecode VM.
+;;
+;; These tests hammer cons-built lists past the tier threshold (8) in a single
+;; process (`:serial`), so they'd fail deterministically against the buggy JIT and
+;; pass on the VM / fixed JIT. `make test` also runs the whole suite through both
+;; engines (ADR-076), so the differential gate catches any re-divergence too.
+(defmodule jit-cons-test
+  (:use test))
+
+;; mixed int+handle elements — the shape `ed-divider-ops` builds; len 6, last :z
+(def V [:cursor-zone 0 0 80 1 :z])
+
+(defn h-count (i bad) (if (= i 0) bad (h-count (- i 1) (if (= (count (reverse V)) 6) bad (+ bad 1)))))
+(defn h-first (i bad) (if (= i 0) bad (h-first (- i 1) (if (= (first (reverse V)) :z) bad (+ bad 1)))))
+(defn h-last  (i bad) (if (= i 0) bad (h-last  (- i 1) (if (= (last V) :z) bad (+ bad 1)))))
+
+(describe "JIT cons correctness (regression)" :serial
+  (test "reverse length stays correct after the arm tiers"
+    (assert= (h-count 4000 0) 0))
+  (test "first of a reversed list stays correct after tiering"
+    (assert= (h-first 4000 0) 0))
+  (test "last (= first of reverse) stays correct after tiering"
+    (assert= (h-last 4000 0) 0)))

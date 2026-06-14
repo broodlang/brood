@@ -1012,16 +1012,23 @@ pub struct Heap {
     /// The executing JIT'd arm's env (its compiled `fn(heap, base)` carries none, but a
     /// Brood→Brood call needs it to resolve a free-global callee). Save/restored around each
     /// native-arm entry ([`jit_tier`]) so re-entry nests correctly.
+    // These four are read only from JIT-gated code paths, so a non-jit build
+    // (e.g. `brood-lsp`) sees them as dead. Keep them (they're written by the
+    // shared initializers) and silence the lint only when jit is off.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_call_env: EnvRoot,
     /// Native-to-native call recursion depth — bounds the native stack (which `MAX_BC_FRAMES`
     /// doesn't), draining deeper recursion onto the VM instead of overflowing.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_native_depth: u32,
     /// Set while draining an over-deep native-recursion subtree on the VM ([`jit_tier`]
     /// reads it and declines to run native, keeping the recursion in the bounded heap-frame
     /// loop).
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_force_vm: bool,
     /// An error parked by a JIT runtime callback (the C ABI can't return a `Value` *and* an
     /// error); the arm returns the error outcome and [`vm_run_bc`] takes this to propagate.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_pending_error: Option<crate::error::LispError>,
 }
 
