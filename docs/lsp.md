@@ -11,7 +11,8 @@ one server that owns the language knowledge.
 > symbols, goto-definition (in-file, cross-module, stdlib, `require`-target, and
 > `defmodule` `:use`/`:alias`/`:implements` clauses),
 > references, document-highlight, rename, semantic tokens, **document formatting,
-> workspace symbol search, code actions, folding ranges, and inlay hints**.
+> workspace symbol search, code actions, folding ranges, inlay hints, and
+> document links** (clickable module names in `require`/`:use`/`:alias`).
 > Recorded as
 > [ADR-025](decisions.md#adr-025--a-lossless-span-carrying-cst-for-tooling-separate-from-the-eval-value);
 > this document is the full plan it points to (the `types.md` ↔ ADR-024 pattern).
@@ -356,6 +357,15 @@ module/behaviour names there also bind nothing, so they're recognized
   (`introspect::protocol_ops`). A behaviour defined only in an external package
   (not a project file) has no goto target; hover still shows its ops if the
   declaring package is loaded.
+
+**Document links** (`document_link.rs`) are the *passive* counterpart to goto:
+rather than waiting for the cursor, the server underlines **every** module name in
+a load position at once — a `(require 'foo)` argument and a `(:use foo)` /
+`(:alias foo)` clause — each carrying the resolved `foo.blsp` URI so the editor
+Ctrl-click opens it. Same `introspect::module_file` resolution as the
+require-target goto; a name with no file gets no underline. (`:implements` isn't
+linked — its target is found by a project scan, not a single file URI; goto still
+covers it.)
 
 **Navigating into the standard library.** The prelude is `include_str!`'d, so it
 has no source file at runtime — `M-.` on `map` would have nowhere to land. The
