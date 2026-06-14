@@ -2516,3 +2516,44 @@ Also closed the stale-test aside from the entry above:
   (the tree-walker reports the head). Rather than reorder the hot call path, the test
   now asserts `(check '(set! x 1))` — the robust, engine-independent guidance surface;
   `(loop 1)` (literal arg) stays as the runtime example.
+
+## 2026-06-14 — `proc-spawn` options map: `:cwd` + `:env` (ADR-104 update)
+
+Surfaced by myedit's project shell (`C-x p e`): commands like `nest format` must run
+*in the project root*, but `proc-spawn` took only `prog` + `args` and a child always
+inherited the editor's working directory. The prime-directive fix is in the language,
+not a `sh -c "cd <root> && …"` wrapper in the editor — so `proc-spawn` grew an optional
+third argument, an options map `{:cwd "dir" :env {"K" "V" …}}`. `:cwd` →
+`Command::current_dir`; `:env` adds variables on top of the inherited environment.
+Arity is now `range(2, 3)`; an absent map (or `nil` `:cwd`) keeps the old behaviour, so
+every existing caller is unchanged. `crate::proc::spawn` took `cwd: Option<&str>` +
+`env: &[(String, String)]` params; the builtin parses the map with `heap.map_get` /
+`heap.map_entries`. Tests in `tests/proc_test.blsp`: `pwd` under `:cwd "/"` reports `/`,
+and a var set via `:env` is visible to the child. Both general knobs LSP servers and the
+web mirror will want too.
+
+## 2026-06-14 — LSP: hover + goto on `defmodule` `:use`/`:alias`/`:implements` clauses
+
+Closed a gap in the editor surface: the module/behaviour *names in a `defmodule`
+header* had no hover and no goto target. They bind nothing (a module isn't a
+value), so scope analysis resolves them `Free` and the generic hover/goto paths
+rendered nothing. Added `crates/lsp/src/module_ref.rs` — `clause_ref_at` recognizes
+them structurally from the CST (the form right after a `:use`/`:alias`/
+`:implements` keyword), shared by both `hover.rs` and `definition.rs`:
+- `(:use foo)` / `(:alias foo)` → **goto** jumps to `foo.blsp` via
+  `introspect::module_file` (same `require--find` lookup `require` uses); **hover**
+  shows `(module foo)` + the docstring its `defmodule` declared, via a new
+  `introspect::module_doc` (reads `*module-docs*`).
+- `(:implements Bar)` → **goto** scans the project's files
+  (`introspect::project_files`) for `(defbehaviour Bar …)`/`(defprotocol Bar …)`
+  and lands on its name — the interface registry (`*protocols*`) records ops but no
+  def-site, so there's nothing to ask `source-location`. **Hover** shows
+  `(behaviour Bar)` + its ops/arities via `introspect::protocol_ops`. A behaviour
+  living only in an external package (e.g. hatch's `protocol.blsp`) has no goto
+  target; hover still lists its ops when that package is loaded.
+
+The existing symbol hover (locals, document defs, prelude/builtins — incl. real
+docstrings for project-defined functions, since a `defn`'s leading string is
+retained on the closure and `(doc fn)` returns it) was already complete and is
+unchanged. `docs/lsp.md` updated. 8 new tests (module_ref ×6, definition ×2 for
+`:use`/`:implements`, hover ×2); `cargo test -p brood-lsp` green (95).
