@@ -3039,3 +3039,29 @@ lib, 2163 in-language — green.
 Bucket B's other slices (sound branchy-body inference; wiring up the unconsumed
 `GradualTy` for gradual-assignment checking) remain deferred per ADR-011 until a
 concrete consumer needs them.
+
+## 2026-06-15 — scheduler: floor the worker pool at 2 (a single worker can't drain a dirty-block)
+
+A native-nested `receive` *blocks its worker thread* like a BEAM dirty scheduler (§7.4)
+instead of capturing a continuation; `drain_worker_queue` re-routes anything queued
+behind it off the now-stranded worker. With a **single** worker there is nowhere to
+re-route to — `assign_worker` hands the work straight back to the same dirty worker — so
+a process queued behind the block never runs. Repro: a test that `(spawn (send me :hi))`
+then `(receive (:hi …))` deadlocks (the child is stranded, the receive times out) under
+`nest test --max-parallel 1`; it passes at `--max-parallel 2`. `nest run -j1` is fine
+because user code runs on the *root* thread, which owns no worker and strands nothing.
+
+Fix: `worker_count()` is floored at 2 (gated off the deterministic `set_test_no_workers`
+driver, which starts no threads and *wants* the exact requested count). The pool always
+keeps a spare thread to drain a dirty-blocked worker — exactly as BEAM runs dirty
+schedulers in addition to its normal scheduler count. `--max-parallel` still caps how
+many tests the framework runs concurrently; it just can't starve the runtime of the spare
+a dirty-block needs. The reported repro now passes 10/10 at `--max-parallel 1`; the full
+suite (616 cargo cases incl. `brood_suite_passes`) and the scheduler tests stay green.
+
+KNOWN FOLLOW-UP: the test framework runs up to `*parallel-batch* = 4` units concurrently,
+each of which can dirty-block *and* spawn a child — so files with several such tests
+(`link_test`, `exit_test`) still deadlock when the pool is smaller than ~2×batch
+(`-j2..4`); they pass at `-j8`+ and at the default ≈nproc. The complete fix is on-demand
+dirty-scheduler growth (spawn an overflow drainer when dirty-blocks exhaust the live
+workers) — a larger kernel change, tracked separately.
