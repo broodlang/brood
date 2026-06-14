@@ -237,6 +237,9 @@ mod disabled {
     pub fn grab(_id: u64, _on: bool) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
+    pub fn maximize(_id: u64, _on: bool) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
     pub fn fullscreen(_id: u64, _on: bool) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
@@ -268,14 +271,14 @@ mod disabled {
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    close, draw, focus, font, fullscreen, grab, held_key, icon, inset, open, register_family, size,
-    title,
+    close, draw, focus, font, fullscreen, grab, held_key, icon, inset, maximize, open,
+    register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    close, draw, focus, font, fullscreen, grab, held_key, icon, inset, open, register_family, size,
-    title,
+    close, draw, focus, font, fullscreen, grab, held_key, icon, inset, maximize, open,
+    register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
@@ -396,9 +399,13 @@ mod backend {
         /// `gui-grab-cursor` — keeps the cursor inside the window for mouse-look so
         /// it can't slip out and click another app.
         Grab { id: u64, on: bool },
-        /// Make window `id` borderless-fullscreen (`on`) or restore it to a normal
-        /// window. Behind `gui-fullscreen!` — what an editor `init.blsp` toggles to
-        /// open maximised over the whole screen.
+        /// Maximise window `id` (`on`) or restore it. Unlike fullscreen this keeps
+        /// the title bar / decorations — it just fills the screen's work area. Behind
+        /// `gui-maximize!` — what an editor `init.blsp` toggles to open big.
+        Maximize { id: u64, on: bool },
+        /// Make window `id` borderless-fullscreen (`on`) or restore it — fills the
+        /// whole monitor with no title bar / decorations (distraction-free). Behind
+        /// `gui-fullscreen!`; the title-keeping sibling is `Maximize`.
         Fullscreen { id: u64, on: bool },
         /// Set a cell font — family and/or pixel size; `None` fields are left
         /// unchanged. `id: None` is the **global default**: applied to every open
@@ -553,6 +560,22 @@ mod backend {
             .lock()
             .unwrap()
             .send_event(UserEvent::Grab { id, on })
+            .map_err(|_| "gui thread is gone".to_string())
+    }
+
+    /// `(gui-maximize! id on)` — maximise window `id` (`on` true) or restore it,
+    /// keeping the title bar. Dispatched to the GUI thread like `grab`.
+    pub fn maximize(id: u64, on: bool) -> Result<(), String> {
+        {
+            let w = windows().lock().unwrap();
+            if !w.contains_key(&id) {
+                return Err("gui window not open".into());
+            }
+        }
+        gui()?
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::Maximize { id, on })
             .map_err(|_| "gui thread is gone".to_string())
     }
 
@@ -1042,9 +1065,16 @@ mod backend {
                         }
                     }
                 }
-                // Borderless-fullscreen the window (`Borderless(None)` = the current
-                // monitor), or restore it. The resize that follows republishes the new
-                // cell grid like any other, so the loop re-renders at the bigger size.
+                // Maximise the window (fill the work area, keep the title bar) or
+                // restore it. The resize that follows republishes the new cell grid
+                // like any other, so the loop re-renders at the bigger size.
+                UserEvent::Maximize { id, on } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        w.window.set_maximized(on);
+                    }
+                }
+                // Borderless-fullscreen (`Borderless(None)` = the current monitor) or
+                // restore. Like Maximize the resize that follows re-renders the grid.
                 UserEvent::Fullscreen { id, on } => {
                     if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
                         w.window
