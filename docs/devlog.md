@@ -2433,3 +2433,39 @@ client frames byte-accurately (`string->utf8-bytes`) so small/medium responses a
 a *fully* faithful client wants `proc` to deliver **raw bytes** — reinforcing the
 bytes-value-kind roadmap item already flagged here and in net.rs. Not needed for the
 common case; noted as the next proc increment when a byte-framed protocol needs it.
+
+## 2026-06-14 — JIT: two small codegen wins from a cross-language benchmark audit
+
+Profiling the [`brood-benchmarks`](../../brood-benchmarks) suite (isolated `taskset`
+re-run on `whklat`) pinned two benchmarks to the **bytecode VM** that should tier,
+both one-line-ish JIT-subset gaps — the machinery already existed.
+
+- **Bool consts in the lowering subset** (`613c484`). `chunk_in_jit_subset` admitted
+  `Int`/`Nil`/`Float` constants but not `Bool`, so a self-tail loop whose exit arm
+  returns a `true`/`false` literal (e.g. `primes`' `divides-none?` via `cond`) bailed
+  to the VM and never tiered. The codegen already had `Op::Bool` + `bool_param`
+  block-arg tracking + Bool handling in `read_words`/`as_int`/`JumpIfFalse` (from the
+  float-JIT work); only the subset gate and the `Const(Bool)` lowering case were
+  missing. Result: **primes 351 → 43 ms (~8×, last → 3rd of six)**; also tiers
+  `nqueens`' bool `safe?` arms (**933 → 512 ms**). A 30M-iter bool-returning loop:
+  ~1.4 s → 0.28 s, identical to the int form.
+
+- **N-ary `+`/`*` left-fold** (`dcb4232`). `resolve_prim` inlines a *2-arg* `+`/`*` to
+  a native `Prim2`, but a 3+-arg call (`bintree`'s `(+ 1 (check …) (check …))`) fell
+  through to the variadic prelude `fold`, keeping the arm off the native path. Now an
+  n-ary call whose head is a free reference to the prelude `+`/`*` (associative, map
+  `[0,1]`) left-folds into nested `Prim2(Add/Mul)` — each step deopting on i64 overflow
+  exactly as `%add`/`%mul` promote to BigInt, so results are bit-identical. Result:
+  **bintree 1123 → 452 ms (~2.4×)**. Comparisons (`<`/`=` chain pairwise) and swapped
+  wrappers (`>`) are excluded.
+
+Verified: per-benchmark JIT == tree-walker parity across the suite, BigInt/float/10-arg
+n-ary cases match, `jit_cons_test` green. **Not fixed:** `matmul` (~100×) — its inner
+`nth` loop under-tiers in a *data-dependent* way (a deopt, not a missing codegen path);
+under investigation with a new `jit_native`/`jit_deopt`/`jit_preempt` perf counter.
+
+Aside (caught during this work): the full test suite isn't run with `--features jit`
+by default (`make test` builds default features), so the JIT path is uncovered in
+normal CI — and under `--features jit` the in-language suite is flaky run-to-run
+(different unrelated tests fail each run; two `jit_*` unit tests are stale-red on
+clean `main`). Worth a dedicated CI lane + a flake/staleness sweep.
