@@ -6,9 +6,15 @@
 //! This is its own test binary, so the process-wide `set_max_parallel(1)` is
 //! isolated from the other test binaries (which run with the default ≈`nproc`).
 //!
-//! The test is bounded by a `receive` timeout: if preemption regresses, the
-//! responder is starved and the root's `(after 3000 …)` fires, so the assertion
-//! fails with `:starved` instead of hanging CI.
+//! The test is bounded by a `receive` timeout that is a **hang-guard, not a timing
+//! assertion**: if preemption regresses, the responder is starved and the root's
+//! `(after …)` fires, so the assertion fails with `:starved` instead of hanging CI.
+//! Under *correct* preemption the responder replies within milliseconds of CPU time,
+//! so the guard is sized (30 s) to never false-fire under realistic CI contention —
+//! even if the OS gives this single-worker process a small slice of wall-clock, 30 s
+//! contains orders of magnitude more reductions than the handful needed to reply.
+//! (A 3 s guard flaked once under peak load — a full release build + benchmark suite
+//! + the test runner all at once — where 3 wall-clock seconds held almost no CPU.)
 
 use brood::{process, Interp};
 
@@ -27,7 +33,7 @@ fn cpu_bound_process_does_not_starve_peers_on_one_worker() {
         (spawn (hog))
         (def r (spawn (responder me)))
         (send r :ping)
-        (receive (:pong :alive) (after 3000 :starved))
+        (receive (:pong :alive) (after 30000 :starved))
     "#;
     let v = interp.eval_str(prog).expect("program errored");
     assert_eq!(
