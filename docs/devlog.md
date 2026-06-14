@@ -3075,3 +3075,32 @@ type-annotations.md / the check.rs module doc.
 This is the first slice of bucket B's gradual-typing work; return-type and
 declared-param assignment checks remain deferred (the return check needs the
 sound body inference ADR-011 still defers).
+
+## 2026-06-15 — Gradual typing, slice 2: return-type checking + declared globals in value position
+
+Two more `GradualTy`-backed checks on top of the `(def x …)` assignment check, both
+FP-clean across `std/` + `tests/` (project-wide `nest check` stays at 3 — the
+intentional recursion lint).
+
+**Return-type checking.** A `(sig f (P… -> R))` now also checks that the body's last
+form yields a value *consistent* with `R`. Reuses `gradual_of`, so the soundness is the
+same: an over-approximated body (a call) is `dynamic_within(t)` and the `∩` relation
+only warns on a body type provably disjoint from `R` — `(sig f (int -> string))` with
+body `(+ x 1)` flags (`number ∩ string = ⊥`), while `(sig inc (int -> int))` with the
+same body *defers* (`number ∩ int ≠ ⊥`), no false positive. A precise literal body uses
+`⊆`. Threaded the function name through `check_fn_seeded` for the diagnostic
+(`f: declared return type string but the body yields number`). Single-clause sig'd fns
+only (multi-arity return checking deferred).
+
+**Declared globals in value position.** `expr_ty` for a bare global now falls back to a
+`(sig g T)` value-type declaration, so `g`'s declared type flows into the disjointness
+check: `(string-length g)` with `(sig g int)` is flagged, and it threads through a `let`
+binding too. A redefinable global is still only ever warned on a *provable* mismatch
+with its declared (contract) type and deferred on overlap — exactly `dynamic(T)`'s
+behaviour, honouring contract #4; a lexical local shadows it.
+
+`walk::gradual_of` is now the shared expression→`GradualTy` bridge for all three
+gradual checks. 123 checker unit tests, 282 lib, 2163 in-language — green. Still deferred
+(ADR-011): branchy-body inference for *precise* return types (today's return check is
+disjointness-sound but can't catch a body merely *wider* than R), and gradual
+intersection/negation.

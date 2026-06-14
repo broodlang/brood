@@ -232,8 +232,19 @@ fn literal_eq_guard(a: Value, b: Value) -> Option<(Symbol, Ty)> {
 pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
     match form {
         // A bare symbol is a variable reference — looked up in the local ctx
-        // (let-bound RHS / if-guard narrowing). A miss = unknown, not flagged.
-        Value::Sym(s) => ctx.get(s),
+        // (let-bound RHS / if-guard narrowing). A miss falls back to a `(sig x T)`
+        // value-type declaration on a *global*: a redefinable global with a declared
+        // type contributes `T` to the disjointness check, so `(string-length g)` for
+        // `(sig g int)` is caught. Sound — the disjointness check only warns on a
+        // provable mismatch with the declared (contract) type and defers on overlap,
+        // exactly `dynamic(T)`'s behaviour (contract #4). A lexical local shadows it.
+        Value::Sym(s) => ctx.get(s).or_else(|| {
+            if ctx.is_lexical_local(s) {
+                None
+            } else {
+                ctx.declared_value_ty(s)
+            }
+        }),
         // A vector literal `[a b c]` — its elements are evaluated, so the element
         // type is the union of their types (Step 5+, ADR-078). Any unknown element
         // → unrefined `vector`.

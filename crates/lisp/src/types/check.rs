@@ -1814,6 +1814,59 @@ mod tests {
     }
 
     #[test]
+    fn declared_return_type_mismatch_is_flagged() {
+        // Body yields a number, declared return is string → disjoint → flagged.
+        let w = file_warnings("(sig f (int -> string)) (defn f (x) (+ x 1))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("f: declared return type string")
+                    && m.contains("yields number")),
+            "a number body vs a string return must warn: {w:?}"
+        );
+        // A literal body mismatch too.
+        let w = file_warnings(r#"(sig g (int -> int)) (defn g (x) "hello")"#);
+        assert!(
+            w.iter().any(|m| m.contains("g: declared return type int") && m.contains("string")),
+            "a string-literal body vs an int return must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn declared_return_type_defers_when_consistent() {
+        // (+ x 1) : number — int <: number and number ∩ int ≠ ⊥, so neither of
+        // these declared returns warns (a widened body never over-warns).
+        for src in [
+            "(sig inc (int -> int)) (defn inc (x) (+ x 1))",
+            "(sig h (int -> number)) (defn h (x) (+ x 1))",
+            "(sig id (int -> int)) (defn id (x) x)",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("return type")),
+                "a consistent return must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn declared_global_type_flows_into_value_position() {
+        // `(sig g int)` makes `g`'s declared type visible where it's used, so a
+        // disjoint use is caught — even though `g` is a redefinable global.
+        let w = file_warnings("(sig g int) (def g 5) (def r (string-length g))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("string-length") && m.contains("int")),
+            "a declared int global used where a string is wanted must warn: {w:?}"
+        );
+        // A compatible use defers (int ⊆ number).
+        let w = file_warnings("(sig g int) (def g 5) (def r (+ 1 g))");
+        assert!(
+            w.iter().all(|m| !m.contains("expects number")),
+            "a declared int global is fine for +: {w:?}"
+        );
+    }
+
+    #[test]
     fn unknown_module_qualified_name_is_not_unbound() {
         // A qualified reference whose module isn't loaded — defined dynamically
         // (`%load-string`, a required temp module) or in a file a single-file check
