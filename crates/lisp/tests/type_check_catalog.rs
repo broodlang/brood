@@ -41,6 +41,8 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(map cons (list 1 2 3))", "callback"),         // cons is 2-ary; map calls with 1
     ("(map (fn (a b) a) (list 1 2 3))", "callback"), // 2-ary lambda under map
     ("(reduce (fn (a) a) 0 (list 1 2 3))", "callback"), // 1-ary callback; reduce calls with 2
+    ("(map (fn (a b & c) a) (list 1 2 3))", "callback"), // variadic lambda needs >=2; map calls with 1
+    ("(map (fn (a b &optional c) a) (list 1 2 3))", "callback"), // 2 required + optional; min 2 > 1
     // ---- element types from literals / constructors ----
     ("(string-length (first [1 2 3]))", "string-length"),       // vector literal → int
     (r#"(+ 1 (first (list "a" "b")))"#, "+"),                    // (list …) → string
@@ -96,6 +98,9 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(map (fn (x) (+ x 1)) (list 1 2 3))",      // right-arity lambda
     "(reduce + 0 (list 1 2 3))",                // right-arity, numeric
     "(reduce (fn (acc x) (+ acc x)) 0 (list 1 2 3))", // 2-ary lambda for reduce
+    "(map (fn (& xs) (apply + xs)) (list 1 2 3))", // variadic lambda (min 0) accepts 1
+    "(map (fn (x &optional y) x) (list 1 2 3))", // 1 required + optional accepts 1
+    "(reduce (fn (acc x & more) (+ acc x)) 0 (list 1 2 3))", // variadic min 2 == reduce's 2
     // ---- parametric results used correctly (number element is fine for +) ----
     "(+ 1 (first (map inc (list 1 2 3))))",
     "(+ 1 (reduce + 0 (list 1 2 3)))",

@@ -801,6 +801,11 @@ fn deregister(pid: u64, reason: Message) {
     // Balances the `live_process_inc` in `spawn` (see the process-count-aware
     // `gc_floor`). `deregister` runs exactly once per spawned green process.
     crate::core::heap::live_process_dec();
+    // Close any sockets this process still owns (an OS-process model: fds are
+    // reclaimed on exit). Done before `notify_peers` below, so a linked supervisor
+    // that restarts a dead listener finds its port already being freed. A process
+    // that `tcp-close`d its sockets has none left here — this is a no-op then.
+    crate::net::close_process_sockets(pid);
     crate::core::sync::lock(&PARENTS).remove(&pid);
     // Drop any registered names that pointed at this pid — Erlang semantics
     // (a name lives only as long as its process). Without this, named-spawn

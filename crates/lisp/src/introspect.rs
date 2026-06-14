@@ -397,6 +397,22 @@ pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
     out
 }
 
+/// The docstring a `(defmodule mod "…")` header declared for module `module`, or
+/// `None` if it declared none / the module isn't loaded. Read straight off the
+/// `*module-docs*` table the `defmodule` macro populates (keyed by the module's
+/// name string), so it answers for any module the server's `Interp` has loaded.
+/// Powers hover on the module name in a `(:use …)` / `(:alias …)` clause.
+pub fn module_doc(interp: &mut Interp, module: &str) -> Option<String> {
+    let cp = interp.heap.checkpoint();
+    let expr = format!("(get *module-docs* \"{}\")", escape_brood_string(module));
+    let out = match interp.eval_str(&expr) {
+        Ok(Value::Str(id)) => Some(interp.heap.string(id).to_string()),
+        _ => None,
+    };
+    interp.heap.reset_local_to(cp);
+    out
+}
+
 /// Lift the `[file line col]` vector `source-location` returns into a
 /// [`SourceLoc`]. `Nil` (no recorded site) and any other shape become `None`.
 fn parse_source_location(heap: &Heap, v: Value) -> Option<SourceLoc> {

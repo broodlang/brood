@@ -47,6 +47,24 @@
         (assert= err "oops")
         (proc-close p)))))
 
+(describe "proc: :cwd runs the child in a chosen directory"
+  :isolated
+  ;; Without :cwd the child inherits ours; with it, `pwd` reports the given dir.
+  (test "proc-spawn opts :cwd sets the working directory"
+    (let (p (proc-spawn "sh" ["-c" "pwd"] {:cwd "/"}))
+      (let (out (receive ([:proc ~p d] d) (after 5000 :timeout)))
+        (assert= out "/\n")
+        (let (code (receive ([:proc-closed ~p c] c) (after 5000 :timeout)))
+          (assert= code 0))))))
+
+(describe "proc: :env adds environment variables"
+  :isolated
+  (test "proc-spawn opts :env is visible to the child"
+    (let (p (proc-spawn "sh" ["-c" "printf %s \"$MYVAR\""] {:env {"MYVAR" "hello"}}))
+      (let (out (receive ([:proc ~p d] d) (after 5000 :timeout)))
+        (assert= out "hello")
+        (proc-close p)))))
+
 (describe "proc: the handle crosses processes"
   :isolated
   ;; The handle is a global-registry id, so it survives a `send`/`spawn` deep-copy
