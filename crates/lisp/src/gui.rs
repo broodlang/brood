@@ -2219,8 +2219,19 @@ mod backend {
                 Op::Text { row, col, s, face } => {
                     let (mut fg, mut bg) =
                         (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG));
+                    // Only paint a cell background when the face specifies one (or is
+                    // reversed). A face with no `:bg` is TRANSPARENT — the glyph composites
+                    // over whatever's already there (the frame clear, or an hl-line /
+                    // selection `rect` band drawn under the text), so the current-line
+                    // highlight shows behind the text too, exactly like Emacs. (Before,
+                    // every glyph filled its cell with DEFAULT_BG, painting over the band so
+                    // hl-line only showed in the line's trailing empty space.) For an
+                    // un-banded line the pixel beneath is already DEFAULT_BG, so this is
+                    // visually identical there — only banded lines change.
+                    let mut paint_bg = face.bg.is_some();
                     if face.reverse {
                         std::mem::swap(&mut fg, &mut bg);
+                        paint_bg = true;
                     }
                     // `:scale n` draws each glyph n× larger, occupying an n×n block
                     // of base cells anchored at this op's (row, col); positions stay
@@ -2241,7 +2252,9 @@ mod backend {
                         }
                         let block_w = cells * cw * scale; // the cluster's pixel span
                         let left = inset + cx * cw;
-                        fill_cell(&mut buf, fb_w, fb_h, left, top, block_w, ch_s, bg_packed);
+                        if paint_bg {
+                            fill_cell(&mut buf, fb_w, fb_h, left, top, block_w, ch_s, bg_packed);
+                        }
                         r.draw_cluster(
                             &mut buf,
                             fb_w,
