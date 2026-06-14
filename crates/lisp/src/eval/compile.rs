@@ -6844,12 +6844,18 @@ mod tests {
         );
     }
 
-    /// An arm *ending* in a **tail call to a different global** (`Inst::Call { tail: true }`)
-    /// must lower (return `Some`), not bail — this is the jit-tier2 §6.2 payoff. The body
-    /// is deliberately past the body-weight gate (4 work ops: `=`, `-`, `*`, `*`), since a
-    /// thinner tail-call arm is gated out on purpose. We can't run it in isolation (outcome
-    /// 4 needs the driver to dispatch the staged callee), so this asserts the *lowering*
-    /// succeeds; `tests/jit.rs` proves the end-to-end result.
+    /// An arm *ending* in a **tail call with a staged (computed) callee**
+    /// (`Inst::Call { tail: true, head: None }`) must lower (return `Some`), not bail —
+    /// the jit-tier2 §6.2 payoff. The body is deliberately past the body-weight gate
+    /// (4 work ops: `=`, `-`, `*`, `*`), since a thinner tail-call arm is gated out.
+    /// We can't run it in isolation (outcome 4 needs the driver to dispatch the staged
+    /// callee), so this asserts the *lowering* succeeds; `tests/jit.rs` proves the result.
+    ///
+    /// Also pins the deliberate counter-case: a **free-global** tail call
+    /// (`head: Some`, the head elided from the operand stack) *bails*. The tail path
+    /// (`jit_dispatch_tail`, outcome 4) reads a *staged* callee, which an elided head
+    /// doesn't leave behind — so such arms (the common mutual-recursion shape) stay on
+    /// the correct VM path rather than lower into a stale-callee read.
     #[cfg(feature = "jit")]
     #[test]
     fn jit_lowers_an_arm_ending_in_a_tail_call() {
@@ -6884,7 +6890,10 @@ mod tests {
                     tail: true,
                     pos: None,
                     site: NO_SITE,
-                    head: Some(fb),
+                    // Computed callee: `fb` is staged on the operand stack (the `Global(fb)`
+                    // at ip 6 above), so `head` is `None`. This is the shape that lowers — the
+                    // staged callee is exactly what `jit_dispatch_tail` reads back.
+                    head: None,
                 }, // 15
             ],
         };
@@ -6904,7 +6913,54 @@ mod tests {
         let mut jit = crate::jit::Jit::new();
         assert!(
             jit_lower_arm(&mut jit, &arm, &[]).is_some(),
-            "an arm ending in a tail call (past the body-weight gate) must lower, not bail"
+            "an arm ending in a computed-callee tail call (past the body-weight gate) must lower"
+        );
+
+        // The deliberate counter-case: the *same* 4-work-op arm whose tail call is a
+        // **free-global** head (`head: Some(fb)`, no staged callee — the elided shape the
+        // real compiler emits for `(fb …)` in tail position) *bails*. `jit_dispatch_tail`
+        // reads a staged callee an elided head never leaves, so the arm stays on the VM.
+        let elided = Chunk {
+            code: vec![
+                Inst::Local(0),                            // 0: n
+                Inst::Const(ConstVal::new(Value::Int(0))), // 1: 0
+                prim2(PrimOp::Eq, "="),                    // 2: n == 0    (work 1)
+                Inst::JumpIfFalse(6),                      // 3: false → else (ip 6)
+                Inst::Local(1),                            // 4: then: acc
+                Inst::Jump(15),                            // 5: → done (len)
+                Inst::Local(0),                            // 6: else: n (no staged callee — elided)
+                Inst::Const(ConstVal::new(Value::Int(1))), // 7: 1
+                prim2(PrimOp::Sub, "-"),                   // 8: (- n 1) = arg0   (work 2)
+                Inst::Local(1),                            // 9: acc
+                Inst::Local(1),                            // 10: acc
+                prim2(PrimOp::Mul, "*"),                   // 11: (* acc acc)     (work 3)
+                Inst::Local(1),                            // 12: acc
+                prim2(PrimOp::Mul, "*"),                   // 13: (* … acc) = arg1 (work 4)
+                Inst::Call {
+                    argc: 2,
+                    tail: true,
+                    pos: None,
+                    site: NO_SITE,
+                    head: Some(fb), // free-global head, elided from the stack
+                }, // 14
+            ],
+        };
+        let elided_arm = CompiledArm {
+            nrequired: 2,
+            noptional: 0,
+            optional_defaults: Box::new([]),
+            rest_slot: None,
+            nslots: 2,
+            body: Node::Const(ConstVal::new(Value::Nil)),
+            chunk: Some(elided),
+            has_runtime_handles: false,
+            jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            jit_calls: std::sync::atomic::AtomicU32::new(0),
+            compile_epoch: std::sync::atomic::AtomicU64::new(0),
+        };
+        assert!(
+            jit_lower_arm(&mut jit, &elided_arm, &[]).is_none(),
+            "an elided free-global tail call must bail (the tail path needs a staged callee)"
         );
 
         // ...and a *thin* tail-call arm (2 work ops: `=`, `-`) is gated out — stays on the
@@ -7190,12 +7246,13 @@ mod tests {
         }
         assert!(ran_native > 0, "the hot arm should tier up to native code");
 
-        // An out-of-subset arm (a non-int `Const` — only `Const(Int)` is lowered) is
-        // marked BAILED and never runs native. (A bare `Global` now *is* in subset — it
-        // lowers to a `brood_rt_global` resolve — so it's no longer the bail example.)
+        // An out-of-subset arm is marked BAILED and never runs native. `MakeMap` has no
+        // JIT lowering path (there's no map-build codegen), so a map-building arm is
+        // always out of subset. (Scalar `Const`s — `Int`/`Nil`/`Float`/`Bool` — and a
+        // bare `Global` now *are* in subset, so neither is the bail example any more.)
         let bailing = Arc::new(mk_arm(
             Chunk {
-                code: vec![Inst::Const(ConstVal::new(Value::Nil))],
+                code: vec![Inst::MakeMap(0)],
             },
             0,
             1,
