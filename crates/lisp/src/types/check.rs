@@ -285,11 +285,14 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
             ctx.add_declared_sig_with_vars(name, sv);
         }
     }
-    // Pass 2.6: protocol conformance — model `(defprotocol …)` and check that each
-    // `(defimpl …)` provides every declared op at the right arity. Read from the
-    // un-expanded forms (the macros lower past recognition, like `sig`/`defmodule`).
+    // Pass 2.6: protocol/behaviour conformance. Model `(defprotocol …)` /
+    // `(defbehaviour …)` (from the un-expanded forms + the runtime registry of
+    // imported ones), then check that every `(defimpl …)` provides each declared op
+    // at the right arity, and every `(:implements …)` module *defines* them (read
+    // from the expanded tree, so macro-generated defns count).
     let protocols = protocol::collect(heap, &forms);
     protocol::check_impls(heap, &forms, &protocols, &mut out);
+    protocol::check_behaviours(heap, &forms, &expanded, &protocols, &mut out);
     // Pass 3: check each expanded form with the accumulated file-globals.
     for &form in &expanded {
         check_into(heap, form, &ctx, &mut out);

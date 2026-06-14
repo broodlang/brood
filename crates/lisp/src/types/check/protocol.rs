@@ -30,16 +30,40 @@ pub(super) struct Protocol {
     ops: Vec<Op>,
 }
 
-/// Build the protocol model from a file's un-expanded top-level forms. A duplicate
-/// `defprotocol` of the same name keeps the first.
+/// The known interfaces (`defprotocol` *and* `defbehaviour`), keyed by name. Starts
+/// from the runtime `*protocols*` registry — imported interfaces, populated by Pass
+/// 1's `(:use …)` evals, so a behaviour declared in another module (the common case:
+/// a framework declares it, an app implements it) is known — then the file's own
+/// declarations fill in / override.
 pub(super) fn collect(heap: &Heap, forms: &[Value]) -> HashMap<String, Protocol> {
-    let mut protos = HashMap::new();
+    let mut ifaces = from_registry(heap);
     for &form in forms {
         if let Some((name, proto)) = parse_protocol(heap, form) {
-            protos.entry(name).or_insert(proto);
+            ifaces.insert(name, proto);
         }
     }
-    protos
+    ifaces
+}
+
+/// Read the runtime `*protocols*` registry (a name-symbol → raw-op-specs map that
+/// `defprotocol`/`defbehaviour` populate). Empty when the registry isn't loaded.
+fn from_registry(heap: &Heap) -> HashMap<String, Protocol> {
+    let mut out = HashMap::new();
+    let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern("*protocols*")) else {
+        return out;
+    };
+    for (key, specs) in heap.map_entries(id) {
+        let Some(name) = sym_name(key) else {
+            continue;
+        };
+        let ops = list_items(heap, specs)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|&op| parse_op(heap, op))
+            .collect();
+        out.insert(name, Protocol { ops });
+    }
+    out
 }
 
 /// Check each `(defimpl Proto key method…)` against `protos`: a diagnostic per op
@@ -99,10 +123,12 @@ pub(super) fn check_impls(
     }
 }
 
-/// `(defprotocol Name doc? (op [args] …) …)` → (name, model), else `None`.
+/// `(defprotocol Name doc? (op [args] …) …)` or `(defbehaviour Name …)` → (name,
+/// model), else `None`. Protocols and behaviours share the op-spec shape; they
+/// differ only in *who* implements them (a `defimpl` vs a module's own functions).
 fn parse_protocol(heap: &Heap, form: Value) -> Option<(String, Protocol)> {
     let items = list_items(heap, form)?;
-    if !head_is(&items, "defprotocol") {
+    if !head_is(&items, "defprotocol") && !head_is(&items, "defbehaviour") {
         return None;
     }
     let pname = sym_name(*items.get(1)?)?;
@@ -134,10 +160,170 @@ fn head_is(items: &[Value], name: &str) -> bool {
     matches!(items.first(), Some(&Value::Sym(s)) if value::symbol_is(s, name))
 }
 
-/// The name of a symbol `Value`, or `None` if it isn't a symbol.
+/// The name of a symbol `Value` (and of a keyword, whose inner is a symbol), or
+/// `None` otherwise.
 fn sym_name(v: Value) -> Option<String> {
     match v {
-        Value::Sym(s) => Some(value::symbol_name(s)),
+        Value::Sym(s) | Value::Keyword(s) => Some(value::symbol_name(s)),
         _ => None,
     }
+}
+
+// ---- behaviour conformance: `(:implements Name)` on a module ----------------
+
+/// Check every module that declares `(:implements Name)` against the named interface
+/// (`defbehaviour`/`defprotocol`): the module must *define* each declared op as a
+/// function at the declared arity. Providers are read from the **expanded** tree, so
+/// functions a macro generates (a `deflive` view's `mount`/`render`/…) count.
+pub(super) fn check_behaviours(
+    heap: &Heap,
+    forms: &[Value],
+    expanded: &[Value],
+    ifaces: &HashMap<String, Protocol>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let claims = implements_claims(heap, forms);
+    if claims.is_empty() {
+        return;
+    }
+    let provided = defn_arities(heap, expanded);
+    for (bname, pos) in claims {
+        let Some(iface) = ifaces.get(&bname) else {
+            // Unknown behaviour — declared in a module this file doesn't import, or
+            // not yet defined. Stay quiet rather than false-flag.
+            continue;
+        };
+        for op in &iface.ops {
+            match provided.get(&op.name) {
+                None => out.push((
+                    pos,
+                    format!(
+                        "behaviour {}: this module is missing `{}` ({} arg(s))",
+                        bname, op.name, op.arity
+                    ),
+                )),
+                Some(&Some(arity)) if arity != op.arity => out.push((
+                    pos,
+                    format!(
+                        "behaviour {}: `{}` takes {} arg(s), the behaviour needs {}",
+                        bname, op.name, arity, op.arity
+                    ),
+                )),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The behaviour names a file's `(defmodule … (:implements Name) …)` header claims,
+/// each with the module form's position for the diagnostic.
+fn implements_claims(heap: &Heap, forms: &[Value]) -> Vec<(String, Option<Pos>)> {
+    let mut out = Vec::new();
+    for &form in forms {
+        let Some(items) = list_items(heap, form) else {
+            continue;
+        };
+        if !head_is(&items, "defmodule") {
+            continue;
+        }
+        let pos = heap.form_pos(form);
+        for &clause in items.get(2..).unwrap_or(&[]) {
+            let Some(citems) = list_items(heap, clause) else {
+                continue;
+            };
+            let is_implements =
+                matches!(citems.first(), Some(&Value::Keyword(k)) if value::symbol_is(k, "implements"));
+            if is_implements {
+                if let Some(name) = citems.get(1).and_then(|&v| sym_name(v)) {
+                    out.push((name, pos));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every function defined in the expanded tree → its arity, as `name → arity`. The
+/// name is the *bare* last segment (`mod/render` → `render`) so it matches a
+/// behaviour's bare op names; the arity is `None` for a variadic or multi-arity fn
+/// (present, but no single arity to pin). Mirrors `walk::collect_def_names`'s
+/// recursion (a `def` can nest inside a macro's `do`).
+fn defn_arities(heap: &Heap, forms: &[Value]) -> HashMap<String, Option<usize>> {
+    let mut out = HashMap::new();
+    for &form in forms {
+        collect_arity(heap, form, &mut out);
+    }
+    out
+}
+
+fn collect_arity(heap: &Heap, form: Value, out: &mut HashMap<String, Option<usize>>) {
+    let Some(items) = list_items(heap, form) else {
+        return;
+    };
+    let Some(&Value::Sym(head)) = items.first() else {
+        return;
+    };
+    if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
+        return;
+    }
+    // `defn` has expanded to `(def name (fn …))` by now; `defmacro` stays itself.
+    if value::symbol_is(head, "def") {
+        if let Some(&Value::Sym(name)) = items.get(1) {
+            let arity = items.get(2).and_then(|&v| fn_arity(heap, v));
+            out.insert(bare_name(name), arity);
+        }
+    }
+    for &item in items.get(1..).unwrap_or(&[]) {
+        collect_arity(heap, item, out);
+    }
+}
+
+/// The fixed arity of a `(fn …)`/`(lambda …)` value form, or `None` for a non-`fn`,
+/// a variadic (`&` rest), or a multi-arity fn.
+fn fn_arity(heap: &Heap, v: Value) -> Option<usize> {
+    let items = list_items(heap, v)?;
+    let is_fn = matches!(items.first(),
+        Some(&Value::Sym(s)) if value::symbol_is(s, "fn") || value::symbol_is(s, "lambda"));
+    if !is_fn {
+        return None;
+    }
+    // After `fn`: the param list (single-arity), skipping a docstring.
+    let rest = items.get(1..)?;
+    let rest = match rest.first() {
+        Some(Value::Str(_)) if rest.len() > 1 => &rest[1..],
+        _ => rest,
+    };
+    let params = *rest.first()?;
+    // Multi-arity: the "param list" is really a clause `((a) body…)` whose head is
+    // itself a param list/vector → can't pin one arity.
+    if let Some(pitems) = list_items(heap, params) {
+        if matches!(pitems.first(), Some(Value::Pair(_)) | Some(Value::Vector(_))) {
+            return None;
+        }
+    }
+    param_count(heap, params)
+}
+
+/// The number of fixed parameters in a param list/vector, or `None` if it's variadic.
+fn param_count(heap: &Heap, params: Value) -> Option<usize> {
+    let items = match params {
+        Value::Nil => return Some(0),
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Pair(_) => list_items(heap, params)?,
+        _ => return None,
+    };
+    if items.iter().any(|&p| is_rest_marker(p)) {
+        return None;
+    }
+    Some(items.len())
+}
+
+fn is_rest_marker(v: Value) -> bool {
+    matches!(v, Value::Sym(s) if value::symbol_is(s, "&") || value::symbol_is(s, "&rest"))
+}
+
+/// A symbol's bare name — its last `/`-segment (`mod/render` → `render`).
+fn bare_name(name: value::Symbol) -> String {
+    let full = value::symbol_name(name);
+    full.rsplit('/').next().unwrap_or(&full).to_string()
 }
