@@ -428,40 +428,6 @@ fn runtime_collect_iterates_long_promoted_list_spine() {
     );
 }
 
-/// Regression: a **transient held across a tenuring collection** must stay
-/// correct. A live transient is *mutable*, so once tenured to the old gen an
-/// `assoc!` repoints its `root` at a fresh young node — an OLD->YOUNG edge. A
-/// minor *flip* skips the old gen (immutable data never points young), so without
-/// a write barrier it relocated the young root and left the old cell's `root`
-/// dangling: a use-after-GC (debug panic / silent corruption in release). The fix
-/// records mutated old transients in a `remembered_transients` set the next minor
-/// flushes (see `Heap::remember_transient`).
-///
-/// A low floor + tenure makes a few-thousand-entry `assoc!` build cycle
-/// tenure/flip many times deterministically. The env is read once via `OnceLock`;
-/// safe here because nextest runs each test in its own process. Pre-fix this
-/// panics inside the build; post-fix it returns the correct map.
-#[test]
-fn transient_survives_tenure_then_flip() {
-    std::env::set_var("BROOD_GC_FLOOR", "1000");
-    std::env::set_var("BROOD_GC_TENURE", "500");
-    let mut interp = Interp::new();
-    let prog = r#"
-        (def m (persistent!
-                 (reduce (fn (t i) (assoc! t i (* i i))) (transient {}) (range 3000))))
-        (list (count m) (get m 2999) (get m 0))
-    "#;
-    let v = interp
-        .eval_str(prog)
-        .expect("transient build across a tenuring collection errored");
-    assert_eq!(
-        interp.print(v),
-        "(3000 8994001 0)",
-        "a transient tenured mid-build then mutated lost its root across a flip — \
-         the transient write barrier (remembered_transients) regressed",
-    );
-}
-
 /// Pull `:field N` out of a printed Brood map (`{... :field 123 ...}`). The map
 /// printer separates a key from its value by one space; values here are
 /// non-negative integers.

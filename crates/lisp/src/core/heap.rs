@@ -45,9 +45,9 @@ use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
     BigIntId, BsId, Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId,
-    Passthrough, RopeId, StrId, Symbol, TransientId, Value, VecId, LOCAL, PRELUDE, RUNTIME,
+    Passthrough, RopeId, StrId, Symbol, Value, VecId, LOCAL, PRELUDE, RUNTIME,
 };
-use crate::error::{LispError, LispResult};
+use crate::error::LispError;
 
 /// A LOCAL (and transitively PRELUDE-builder) string slab entry. Small strings
 /// stay inline; strings of [`SHARED_BLOB_THRESHOLD`] bytes or more route through
@@ -244,7 +244,6 @@ fn tag_rank(v: Value) -> u8 {
         Value::Rope(_) => 14,
         Value::Socket(_) => 15,
         Value::Subprocess(_) => 16,
-        Value::Transient(_) => 17,
         Value::Table(_) => 18,
         Value::Bitset(_) => 19,
     }
@@ -470,14 +469,6 @@ struct Slabs {
     closures: Vec<Closure>,
     natives: Vec<NativeFn>,
     envs: Vec<EnvFrame>,
-    /// **Transient maps** (Clojure's `transient`/`assoc!`/`persistent!`). Each
-    /// [`TransientCell`] is an identity-mutable build handle into the maps slab:
-    /// a `root` Map (the child the GC traces), a build **watermark** (an index
-    /// into `maps` — nodes at or past it are owned by this transient and rewritten
-    /// in place), the LOCAL **epoch** that watermark is valid in, and a `live`
-    /// flag. Process-local; never frozen into PRELUDE/RUNTIME (no `CodeSlabs`
-    /// field) and never sent across processes.
-    transients: Vec<TransientCell>,
 }
 
 /// Live object count of a [`Slabs`] (`Σ slab.len()`). The collector is a moving
@@ -497,7 +488,6 @@ fn slab_live_count(s: &Slabs) -> usize {
         + s.ropes.len()
         + s.closures.len()
         + s.envs.len()
-        + s.transients.len()
 }
 
 /// Byte-weighted footprint of a [`Slabs`] (`Σ slab.len() * size_of::<elem>`) —
@@ -516,33 +506,6 @@ fn slab_bytes(s: &Slabs) -> usize {
         + s.closures.len() * size_of::<Closure>()
         + s.natives.len() * size_of::<NativeFn>()
         + s.envs.len() * size_of::<EnvFrame>()
-        + s.transients.len() * size_of::<TransientCell>()
-}
-
-/// The mutable cell behind a [`Value::Transient`] — Clojure's transient map.
-///
-/// **GC safety.** `watermark` is an index into the LOCAL `maps` slab; the moving
-/// collector relocates that slab and bumps [`Heap::local_epoch`] on *every*
-/// collection (minor or major — both run [`Heap::minor_collect`], which bumps the
-/// epoch). So a watermark captured before a collection is meaningless after it.
-/// `epoch` records the `local_epoch` the watermark was set in; `assoc!`/`dissoc!`
-/// compare it against the current epoch and, on a mismatch, reset the watermark to
-/// the current slab length. After a reset the transient's own previously-owned
-/// nodes (now relocated to indices *below* the new watermark) read as non-owned,
-/// so the next mutation path-copies them once — re-establishing fresh owned nodes.
-/// Correctness preserved; one path-copy of efficiency lost right after a GC.
-#[derive(Clone, Copy, Debug)]
-struct TransientCell {
-    /// The current map root. A `Value::Map`; the GC traces this child and
-    /// rewrites it on flush like any other handle.
-    root: Value,
-    /// `self.local.maps.len()` at the moment the watermark was (re)set — nodes
-    /// allocated at or after this index are owned by this transient.
-    watermark: usize,
-    /// The `local_epoch` `watermark` is valid in (the epoch guard's reference).
-    epoch: u32,
-    /// `false` once `persistent!` has run; further `assoc!`/`dissoc!` error.
-    live: bool,
 }
 
 /// Use-after-GC tripwire bits, one per LOCAL slot in each slab. **Debug-only**:
@@ -572,7 +535,6 @@ struct PoisonBits {
     ropes: Vec<bool>,
     closures: Vec<bool>,
     envs: Vec<bool>,
-    transients: Vec<bool>,
 }
 
 #[cfg(debug_assertions)]
@@ -615,7 +577,6 @@ pub struct LocalCheckpoint {
     ropes: usize,
     closures: usize,
     envs: usize,
-    transients: usize,
     // The `local_epoch` the checkpoint was taken in. A collection between the
     // checkpoint and its `reset_local_to` bumps the epoch and rewrites the
     // nursery (a flip compacts survivors into fresh slabs; a tenure empties it),
@@ -958,21 +919,11 @@ pub struct Heap {
     /// still mid-bind, e.g. a collection during a `let` rhs eval, then bound
     /// further). A minor collection scans these as extra roots and rewrites their
     /// bindings to the promoted handles, then clears the set. Empty on the common
-    /// path (binds finish in the nursery). Env-frame binding is *one* of the two
-    /// data mutations Brood allows — the other is a live transient (see
-    /// [`Self::remembered_transients`]); every other value is immutable.
+    /// path (binds finish in the nursery). Env-frame binding (late binding / `def`
+    /// rebinding, ADR-013) is the **only** data mutation the collector must track;
+    /// every Lisp value is immutable, so the minor flip can safely rely on the
+    /// invariant that old never points to young everywhere else.
     remembered: Vec<EnvId>,
-    /// **Write-barrier remembered set for transients** — the transient analogue of
-    /// [`Self::remembered`]. A transient cell is mutable: once tenured to the old
-    /// gen, an `assoc!`/`dissoc!` repoints its `root` at a *fresh nursery* node,
-    /// creating an OLD→YOUNG edge. A minor *flip* skips the old gen (relying on the
-    /// immutability invariant that old never points young), so without recording
-    /// the edge it would relocate the young root and leave the old cell's `root`
-    /// dangling. [`transient_assoc`](Self::transient_assoc) /
-    /// [`transient_dissoc`](Self::transient_dissoc) record the cell here when it is
-    /// old; the next minor flushes each cell's root and rewrites it in place (then
-    /// drops the set on a tenure, retains it on a flip — the edge persists).
-    remembered_transients: Vec<TransientId>,
     /// The **old-generation** epoch — stamped into tenured handles
     /// (`local_old_gen`) and bumped only by a *major* collection (which moves old
     /// objects). A minor collection leaves old objects in place, so it does **not**
@@ -1153,7 +1104,6 @@ pub fn is_movable(v: Value) -> bool {
         Value::Str(id) => id.region() == LOCAL,
         Value::BigInt(id) => id.region() == LOCAL,
         Value::Bitset(id) => id.region() == LOCAL,
-        Value::Transient(id) => id.region() == LOCAL,
         Value::Rope(id) => id.region() == LOCAL,
         Value::Fn(id) | Value::Macro(id) => id.region() == LOCAL,
         _ => false,
@@ -1184,9 +1134,6 @@ pub fn needs_root_slot(v: Value) -> bool {
         Value::Str(id) => shared(id.region()),
         Value::BigInt(id) => shared(id.region()),
         Value::Bitset(id) => shared(id.region()),
-        // A transient is LOCAL-only (never RUNTIME), but it still needs a slot so
-        // the copying collector rewrites a transient held across a safepoint.
-        Value::Transient(id) => id.region() == LOCAL,
         Value::Rope(id) => shared(id.region()),
         Value::Fn(id) | Value::Macro(id) => shared(id.region()),
         _ => false,
@@ -1196,7 +1143,7 @@ pub fn needs_root_slot(v: Value) -> bool {
 /// A rooted value handle from [`Heap::root`]: either a truly-fixed value kept
 /// inline (no operand-stack slot) or the index of a slot a collector rewrites.
 /// Read back with [`Heap::read_root`] after any potential collection. Running
-/// prelude code or handling atoms pays no `Vec` churn; LOCAL transients **and**
+/// prelude code or handling atoms pays no `Vec` churn; LOCAL handles **and**
 /// RUNTIME handles (which `runtime_collect` evacuates) take a slot — see
 /// [`needs_root_slot`].
 #[derive(Clone, Copy)]
@@ -1277,7 +1224,6 @@ impl Heap {
             gc_enabled: false,
             local_epoch: 0,
             remembered: Vec::new(),
-            remembered_transients: Vec::new(),
             old_epoch: 0,
             major_threshold: usize::MAX,
             gc_runs: 0,
@@ -1321,7 +1267,6 @@ impl Heap {
             gc_enabled: true,
             local_epoch: 0,
             remembered: Vec::new(),
-            remembered_transients: Vec::new(),
             old_epoch: 0,
             major_threshold: major_floor(),
             gc_runs: 0,
@@ -1371,11 +1316,6 @@ impl Heap {
         debug_assert!(
             slabs.ropes.is_empty(),
             "a Rope cannot appear in the prelude — it is pure Brood with no rope literals",
-        );
-        debug_assert!(
-            slabs.transients.is_empty(),
-            "a transient cannot appear in the prelude — its root/watermark point into the \
-             about-to-be-frozen LOCAL slabs and would dangle",
         );
         // Inline-extract any `Shared` string entries the builder created
         // (~9 prelude docstrings exceed `SHARED_BLOB_THRESHOLD` at the time
@@ -1475,7 +1415,6 @@ impl Heap {
             ropes: self.local.ropes.len(),
             closures: self.local.closures.len(),
             envs: self.local.envs.len(),
-            transients: self.local.transients.len(),
             epoch: self.local_epoch,
         }
     }
@@ -1515,7 +1454,6 @@ impl Heap {
         self.local.ropes.truncate(cp.ropes);
         self.local.closures.truncate(cp.closures);
         self.local.envs.truncate(cp.envs);
-        self.local.transients.truncate(cp.transients);
         // Drop position metadata for the pairs just reclaimed (indices reused).
         // Keys pack the age bit at bit 32; this checkpoint path is nursery-only,
         // so compare the low-32 slab index against the checkpoint length.
@@ -2241,10 +2179,12 @@ impl Heap {
     /// reader path and `(hash-map …)`. Folds `assoc` over a fresh empty
     /// root — O(N log N) overall, in line with CHAMP's per-op cost.
     pub fn map_from_pairs(&mut self, pairs: Vec<(Value, Value)>) -> Value {
-        // Transient build (see `docs/transients.md`): the fresh root is allocated
-        // at `watermark`, so it and every node below it is build-owned and
-        // rewritten in place — no per-`assoc` path-copy. The result is the
-        // byte-identical canonical CHAMP shape a copy-on-write fold would yield.
+        // GC-quiet in-place build: the fresh root is allocated at `watermark`, so
+        // it and every node below it is build-owned and rewritten in place — no
+        // per-`assoc` path-copy. This is purely an implementation detail of
+        // *constructing* a fresh immutable map (no `Value` is ever mutable, and GC
+        // can't fire mid-builtin); the result is the byte-identical canonical CHAMP
+        // shape a copy-on-write fold would yield.
         let watermark = Some(self.local.maps.len());
         let mut current = match self.alloc_empty_map() {
             Value::Map(id) => id,
@@ -2325,168 +2265,6 @@ impl Heap {
     /// walk.
     pub fn map_contains(&self, id: MapId, key: Value) -> bool {
         self.map_get(id, key).is_some()
-    }
-
-    // ----- transient maps (Clojure's transient/assoc!/persistent!) -----
-    //
-    // A `Value::Transient` is an identity-mutable build handle over a `Map`.
-    // `transient` snapshots a fresh `TransientCell { root, watermark, epoch,
-    // live }`; `assoc!`/`dissoc!` mutate that cell in place — calling the
-    // watermarked CHAMP build so nodes the transient owns are rewritten in place
-    // instead of path-copied — and return the *same* handle; `persistent!` flips
-    // `live` off and hands back the (now immutable) root Map.
-
-    /// `(transient m)` — open a transient build over the Map `m`. The watermark
-    /// is the current maps-slab length: every node `m` already owns was allocated
-    /// *before* it, so it reads as shared and is path-copied on first touch, while
-    /// every node this transient subsequently allocates is owned and mutated in
-    /// place. `epoch` pins the LOCAL epoch the watermark is valid in (the GC guard).
-    pub fn alloc_transient(&mut self, root: MapId) -> Value {
-        let cell = TransientCell {
-            root: Value::Map(root),
-            watermark: self.local.maps.len(),
-            epoch: self.local_epoch,
-            live: true,
-        };
-        let idx = alloc_slot!(self, transients, cell);
-        Value::Transient(TransientId::local_gen(idx, self.local_epoch))
-    }
-
-    /// Resolve a transient handle to its cell (a `Copy` snapshot). Honours the
-    /// GC poison/epoch tripwires like every LOCAL accessor. Transients are
-    /// process-local and never frozen, so only the LOCAL region is valid.
-    fn transient_cell(&self, id: TransientId) -> TransientCell {
-        match id.region() {
-            LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, transients, "transient", "transients");
-                self.old.transients[id.index()]
-            }
-            LOCAL => {
-                local_gc_check!(nursery, self, id, transients, "transient", "transients");
-                self.local.transients[id.index()]
-            }
-            _ => unreachable!("a transient is always LOCAL (never frozen/shared)"),
-        }
-    }
-
-    /// Mutable handle to a transient cell's slot, for the in-place rewrite that
-    /// `assoc!`/`dissoc!`/`persistent!` perform. LOCAL-only (see
-    /// [`transient_cell`](Self::transient_cell)).
-    fn transient_cell_mut(&mut self, id: TransientId) -> &mut TransientCell {
-        match id.region() {
-            LOCAL if id.is_old() => &mut self.old.transients[id.index()],
-            LOCAL => &mut self.local.transients[id.index()],
-            _ => unreachable!("a transient is always LOCAL (never frozen/shared)"),
-        }
-    }
-
-    /// The transient's current root Map, for lookups (`get`/`count`/`contains?`)
-    /// — Clojure allows reads on a live transient. Errors if it isn't `live`.
-    pub fn transient_root(&self, id: TransientId) -> LispResult {
-        let cell = self.transient_cell(id);
-        if !cell.live {
-            return Err(LispError::runtime(
-                "this transient has been made persistent (persistent!); it can no longer be used",
-            ));
-        }
-        Ok(cell.root)
-    }
-
-    /// The current LOCAL epoch — the value `assoc!`/`dissoc!` compare a cell's
-    /// `epoch` against to detect a collection since the watermark was set.
-    /// Re-anchor the watermark if a collection has moved the maps slab since this
-    /// transient last touched it: if `cell.epoch` no longer matches `local_epoch`,
-    /// a flip relocated everything (the transient's own owned nodes among it) to
-    /// fresh indices *below* the current slab length. Reset the watermark to the
-    /// current length so those relocated nodes read as non-owned (path-copied once
-    /// on the next mutation, re-establishing owned nodes), and re-pin the epoch.
-    /// Returns the cell's (possibly-refreshed) watermark.
-    fn transient_reanchor(&mut self, id: TransientId) -> usize {
-        let cur = self.local_epoch;
-        let maps_len = self.local.maps.len();
-        let cell = self.transient_cell_mut(id);
-        if cell.epoch != cur {
-            cell.watermark = maps_len;
-            cell.epoch = cur;
-        }
-        cell.watermark
-    }
-
-    /// Record a write-barrier hit for transient `id` after its `root` was just
-    /// repointed. Only an **old-gen** cell matters: it may now hold an OLD→YOUNG
-    /// edge a minor flip would miss (see [`Self::remembered_transients`]). A young
-    /// cell is flushed wholesale by every minor, so it needs no barrier. De-duped
-    /// like the env barrier — a tight `assoc!` loop into one tenured transient
-    /// records it once per minor, not once per call.
-    fn remember_transient(&mut self, id: TransientId) {
-        if id.is_old() && !self.remembered_transients.contains(&id) {
-            self.remembered_transients.push(id);
-        }
-    }
-
-    /// `(assoc! t k v)` — mutate the transient in place, returning the same handle.
-    /// Errors if `t` is no longer live. Runs the watermarked CHAMP `assoc`, so the
-    /// transient's owned nodes are rewritten in place. The epoch guard
-    /// ([`transient_reanchor`](Self::transient_reanchor)) keeps this GC-safe across
-    /// the safepoint that may fire between successive `assoc!` calls.
-    pub fn transient_assoc(&mut self, id: TransientId, key: Value, val: Value) -> LispResult {
-        let cell = self.transient_cell(id);
-        if !cell.live {
-            return Err(LispError::runtime(
-                "assoc! on a transient that has been made persistent (persistent!)",
-            ));
-        }
-        let root = match cell.root {
-            Value::Map(m) => m,
-            _ => unreachable!("a transient's root is always a Map"),
-        };
-        let watermark = self.transient_reanchor(id);
-        let hash = self.hash_value(key);
-        let new_root = self.champ_assoc(root, key, val, hash, 0, Some(watermark));
-        self.transient_cell_mut(id).root = Value::Map(new_root);
-        self.remember_transient(id);
-        Ok(Value::Transient(id))
-    }
-
-    /// `(dissoc! t k)` — remove `k` from the transient in place, returning the same
-    /// handle. Errors if `t` is no longer live. The CHAMP `dissoc` path-copies the
-    /// touched nodes; the fresh nodes it allocates land at or past the watermark, so
-    /// they become owned for subsequent `assoc!`s. Correct and GC-safe; the
-    /// in-place win is `assoc!`'s (dissoc on a transient is rare in practice).
-    pub fn transient_dissoc(&mut self, id: TransientId, key: Value) -> LispResult {
-        let cell = self.transient_cell(id);
-        if !cell.live {
-            return Err(LispError::runtime(
-                "dissoc! on a transient that has been made persistent (persistent!)",
-            ));
-        }
-        let root = match cell.root {
-            Value::Map(m) => m,
-            _ => unreachable!("a transient's root is always a Map"),
-        };
-        // Re-anchor so the cell's epoch tracks the current one (a collection may
-        // have fired since the last op); the fresh nodes dissoc allocates are
-        // naturally >= the resulting watermark.
-        let _ = self.transient_reanchor(id);
-        let hash = self.hash_value(key);
-        let new_root = self.champ_dissoc(root, key, hash, 0);
-        self.transient_cell_mut(id).root = Value::Map(new_root);
-        self.remember_transient(id);
-        Ok(Value::Transient(id))
-    }
-
-    /// `(persistent! t)` — close the transient: flip `live` off and hand back the
-    /// root as a normal immutable Map. Errors if already persistent. After this any
-    /// `assoc!`/`dissoc!`/`persistent!` on `t` errors (use-after-persistent!).
-    pub fn transient_persistent(&mut self, id: TransientId) -> LispResult {
-        let cell = self.transient_cell(id);
-        if !cell.live {
-            return Err(LispError::runtime(
-                "persistent! called twice on the same transient",
-            ));
-        }
-        self.transient_cell_mut(id).live = false;
-        Ok(cell.root)
     }
 
     /// Allocate a new map node — the path-copy primitive every assoc /
@@ -2975,14 +2753,6 @@ impl Heap {
             }
             Value::Fn(id) if id.region() == LOCAL => Value::Fn(self.promote_closure(id, fwd)),
             Value::Macro(id) if id.region() == LOCAL => Value::Macro(self.promote_closure(id, fwd)),
-            // A transient is a process-local, identity-mutable build handle — it
-            // must never be promoted into the shared RUNTIME region (its `maps`
-            // slab is LOCAL, so a frozen handle would dangle, and a shared mutable
-            // build cell would break the immutable-shared-code invariant). Storing
-            // one in a global is a programmer error; fail loudly, not silently.
-            Value::Transient(_) => panic!(
-                "cannot promote/def a transient into shared code — call (persistent! t) first"
-            ),
             // Atoms, and values already in PRELUDE/RUNTIME, need no copy.
             _ => v,
         }
@@ -3248,7 +3018,6 @@ impl Heap {
             self.poison.ropes.clear();
             self.poison.closures.clear();
             self.poison.envs.clear();
-            self.poison.transients.clear();
         }
         // GC observability (Tier-1). After the flip the fresh slabs hold exactly
         // the survivors, so `local_live_count()` is the survivor count. Saturating
@@ -3625,14 +3394,6 @@ impl Heap {
                 19u8.hash(h);
                 id.hash(h);
             }
-            Value::Transient(id) => {
-                // Identity-hashed (tag 18; 17 is BigInt's): a transient is a
-                // mutable build handle, compared by identity like a closure, so
-                // its canonical handle bits are the hash. (Using one as a key is
-                // unusual but must not panic.)
-                18u8.hash(h);
-                id.hash(h);
-            }
             Value::Table(id) => {
                 // Identity-hashed (tag 20; a table is shared mutable state addressed
                 // by its registry handle, like a socket — compared by identity).
@@ -3754,10 +3515,6 @@ impl Heap {
             // (the same store), like a pid. Two distinct tables never compare equal,
             // even with equal contents (identity, not value).
             (Table(x), Table(y)) => x == y,
-            // Transients are identity-mutable: equal iff the same handle (like a
-            // closure). Two distinct transients are never `=`, even with equal
-            // contents — mutating one mustn't make the other "change".
-            (Transient(x), Transient(y)) => x == y,
             _ => false,
         }
     }
@@ -5118,28 +4875,6 @@ impl Heap {
         if !tenure {
             self.remembered = remembered;
         }
-        // Same barrier for transients: an old-gen transient cell whose `root` an
-        // `assoc!` repointed at a young node. Flush that root into `dest` and write
-        // it back in place (the cell lives in `dest` while tenuring — we took the
-        // old gen into `dest` — or in `self.old` while flipping). A tenure makes
-        // the edge old->old (drop the set); a flip keeps the root young (retain).
-        let remembered_tr = std::mem::take(&mut self.remembered_transients);
-        for &t in &remembered_tr {
-            let root = if tenure {
-                dest.transients[t.index()].root
-            } else {
-                self.old.transients[t.index()].root
-            };
-            let nv = flush_value(&young, &mut dest, &mut fwd, root);
-            if tenure {
-                dest.transients[t.index()].root = nv;
-            } else {
-                self.old.transients[t.index()].root = nv;
-            }
-        }
-        if !tenure {
-            self.remembered_transients = remembered_tr;
-        }
         // form_pos re-key: a surviving nursery pair moves to its new slot with the
         // destination's age bit (old when tenuring, young when flipping); dead
         // nursery entries drop; existing OLD entries are untouched (old didn't move
@@ -5164,7 +4899,6 @@ impl Heap {
             self.poison.ropes.clear();
             self.poison.closures.clear();
             self.poison.envs.clear();
-            self.poison.transients.clear();
         }
         // Install the relocated space. Tenure: `dest` is the grown old gen; the
         // nursery stays the empty Slabs left by the take. Flip: `dest` is the fresh
@@ -5232,21 +4966,6 @@ impl Heap {
                     fwd.envs
                         .get(&(e.index() as u32))
                         .map(|&n| fwd.mint_env(n as usize))
-                })
-                .collect();
-        }
-        // Same stale-handle remap for the transient barrier set: a flip retains
-        // old TransientIds whose roots are still young, and this major just moved
-        // those cells into fresh old slabs. Rewrite each through `fwd.transients`
-        // (populated by `flush_roots`), dropping any whose cell wasn't copied.
-        if !self.remembered_transients.is_empty() {
-            let rt = std::mem::take(&mut self.remembered_transients);
-            self.remembered_transients = rt
-                .into_iter()
-                .filter_map(|t| {
-                    fwd.transients
-                        .get(&(t.index() as u32))
-                        .map(|&n| fwd.mint_transient(n as usize))
                 })
                 .collect();
         }
@@ -5543,23 +5262,6 @@ impl Heap {
                             id.0,
                         );
                     }
-                    Value::Transient(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad(
-                            "transient",
-                            id.is_old(),
-                            id.generation(),
-                            id.index(),
-                            slabs.transients.len(),
-                            parent,
-                            id.0,
-                        );
-                        // Its one child is `root` — walk it so a stale handle
-                        // stored in the cell surfaces here with the path.
-                        if id.index() < slabs.transients.len() {
-                            work.push(W::V(slabs.transients[id.index()].root, id.0));
-                        }
-                    }
                     Value::Rope(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
@@ -5702,7 +5404,6 @@ struct FlushForward {
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
     envs: HashMap<u32, u32>,
-    transients: HashMap<u32, u32>,
 }
 
 impl FlushForward {
@@ -5738,7 +5439,6 @@ mint_fn!(mint_map, MapId);
 mint_fn!(mint_string, StrId);
 mint_fn!(mint_bigint, BigIntId);
 mint_fn!(mint_bitset, BsId);
-mint_fn!(mint_transient, TransientId);
 mint_fn!(mint_rope, RopeId);
 mint_fn!(mint_closure, ClosureId);
 mint_fn!(mint_env, EnvId);
@@ -5832,9 +5532,6 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
         }
         Value::Bitset(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::Bitset(flush_bitset(old, new, fwd, id))
-        }
-        Value::Transient(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Transient(flush_transient(old, new, fwd, id))
         }
         Value::Rope(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::Rope(flush_rope(old, new, fwd, id))
@@ -5964,38 +5661,6 @@ fn flush_bitset(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BsId) 
     new.bitsets.push(b);
     fwd.bitsets.insert(key, new_idx as u32);
     fwd.mint_bitset(new_idx)
-}
-
-/// Relocate a transient cell. Reserves the destination slot (so a cycle through
-/// `root` resolves to the placeholder — there are none today, but the
-/// reserve-then-flush shape mirrors `flush_vector` and is robust), then flushes
-/// the `root` child. The `watermark`/`epoch`/`live` scalars copy verbatim — the
-/// epoch is now stale relative to the post-flip `local_epoch`, so the next
-/// `assoc!`/`dissoc!` hits the epoch guard and re-anchors the watermark. No
-/// special collector hook beyond tracing/relocating `root`.
-fn flush_transient(
-    old: &Slabs,
-    new: &mut Slabs,
-    fwd: &mut FlushForward,
-    id: TransientId,
-) -> TransientId {
-    let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.transients.get(&key) {
-        return fwd.mint_transient(new_idx as usize);
-    }
-    let cell = old.transients[flush_bound!(old.transients, id, fwd, "transient")];
-    let new_idx = new.transients.len();
-    // Placeholder with a Nil root; patched after the child flush below.
-    new.transients.push(TransientCell {
-        root: Value::Nil,
-        watermark: cell.watermark,
-        epoch: cell.epoch,
-        live: cell.live,
-    });
-    fwd.transients.insert(key, new_idx as u32);
-    let new_root = flush_value(old, new, fwd, cell.root);
-    new.transients[new_idx].root = new_root;
-    fwd.mint_transient(new_idx)
 }
 
 fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) -> RopeId {

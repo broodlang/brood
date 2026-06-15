@@ -53,16 +53,11 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Map]);
     #[allow(non_upper_case_globals)]
     const bool_ty: Ty = Ty::of(Tag::Bool);
-    // `count`/`length` accept a string, map, sequence, or live transient (the
-    // prelude `count` dispatches string?/map?/transient?/else-fold; the kernel
-    // hooks a transient to `transient-count`) — but not a number/keyword/etc.
+    // `count`/`length` accept a string, map, or sequence (the prelude `count`
+    // dispatches string?/map?/else-fold) — but not a number/keyword/etc.
     #[allow(non_upper_case_globals)]
     const countable: Ty =
-        Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector, Tag::Transient]);
-    // A map *or* a live transient — the domain of the map-reading ops the prelude
-    // hooks to a `transient-*` kernel primitive when handed a transient.
-    #[allow(non_upper_case_globals)]
-    const map_or_transient: Ty = Ty::of_tags(&[Tag::Map, Tag::Transient]);
+        Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector]);
     #[allow(non_upper_case_globals)]
     const str_ty: Ty = Ty::of(Tag::Str);
     #[allow(non_upper_case_globals)]
@@ -130,7 +125,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     //   contains? — map-key probe (map or a live transient); bool result.
     //   member?   — linear scan over a sequence; first arg is the needle.
-    put("contains?", Sig::new(vec![map_or_transient, any], bool_ty));
+    put("contains?", Sig::new(vec![Ty::of(Tag::Map), any], bool_ty));
     put("member?", Sig::new(vec![any, seq], bool_ty));
     // some?/every?: both take a 1-ary callback and a sequence, return bool.
     // Curated because the body is a cond-recursive closure; infer_sig bails.

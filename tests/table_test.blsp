@@ -266,9 +266,9 @@
       (table-put outer :inner inner)
       (assert= (table-get (table-get outer :inner) :x) 7)))
 
-  (test "an unsendable value (a transient) is rejected as a value"
+  (test "an unsendable value (an unrealised lazy seq-view) is rejected as a value"
     (let (t (table))
-      (is (threw? (fn () (table-put t :k (transient {}))))))))
+      (is (threw? (fn () (table-put t :k (lmap inc [1 2 3]))))))))
 
 ;; ---- scale ------------------------------------------------------------------
 (describe "table: scale"

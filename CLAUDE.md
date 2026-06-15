@@ -255,20 +255,38 @@ co-author trailer, overriding any default that would append one.
 - **Symbols are interned `u32`s.** Compare with `==`; get the spelling via
   `value::symbol_name`.
 - **Truthiness:** only `nil` and `false` are falsy (`eval::truthy`).
-- **Brood is an immutable language** (ADR-026; `docs/language.md` §Immutability).
-  Data is immutable — there are **no data-mutation primitives** (no `set-car!`,
-  `vector-set!`, `string-set!`, no atoms/cells) and none may be added; every
-  builtin returns a fresh `Value` rather than mutating one. `let`/`fn` bindings
-  never change after creation. The language's **only** mutation is `def`
-  rebinding a *global* — binding mutation, not data mutation, and load-bearing for
-  Erlang-style hot reload (ADR-013). There is **no `set!` and no `while`**: loops
-  are recursion (proper tail calls give O(1) stack) or, for evolving state,
-  processes (`spawn`/`receive`). Genuine mutable state is expressed only two ways
-  — a **process** holding state in its loop, or a **Rust-backed opaque resource
-  handle** (e.g. the coming rope/buffer) behind primitives — never a mutable
-  `Value`. Don't reintroduce mutation to make something convenient; it underpins
-  the tracing GC (no write barriers), `Send` per-process heaps + copy-on-send
-  messages, and the append-only shared `RUNTIME` region.
+- **Brood data is immutable. This is absolute — do not weaken it** (ADR-026;
+  `docs/language.md` §Immutability). Every `Value` is immutable: there are **no
+  data-mutation primitives** (no `set-car!`, `vector-set!`, `string-set!`, no
+  atoms/cells/refs, **no `transient`/`assoc!`/`persistent!`**) and **none may
+  ever be added**. Every builtin returns a *fresh* `Value` rather than mutating
+  one. **Do NOT add a "sneaky" mutable structure** — not a transient, not a
+  builder cell, not a mutable buffer, not an identity-mutable anything exposed to
+  the language — no matter how much it would speed up a build. We tried a
+  user-facing transient once; it was removed precisely because it violated this
+  rule. If you need fast bulk construction, do it as a **GC-quiet in-place build
+  *inside one Rust builtin*** that still returns a fresh immutable `Value` (e.g.
+  `%map-into` / `map_from_pairs`'s watermarked CHAMP build) — that is an
+  implementation detail of *constructing* the value, never a mutable `Value` the
+  language can observe.
+  - **The ONE and ONLY mutable structure is `Value::Table`** (Brood's ETS): a
+    shared, identity-mutable key→value store behind an opaque handle, which
+    deep-clones keys/values in and out so no two processes ever alias stored
+    data. Everything else is immutable. Reach for a `Table` (or a **process**
+    holding state in its loop) when you genuinely need mutable state — never a
+    mutable data value.
+  - `let`/`fn` bindings never change after creation. The only *binding* mutation
+    (not data mutation) is `def` rebinding a *global* — load-bearing for
+    Erlang-style hot reload (ADR-013). There is **no `set!` and no `while`**:
+    loops are recursion (proper tail calls give O(1) stack) or processes.
+  - **Assume immutability everywhere and keep the code simpler for it.** Because
+    data never mutates, the kernel needs **no write barriers for data** — the
+    tracing GC's minor flip relies on the invariant that *old never points to
+    young* for every value (the sole remembered-set is for `def`/env-frame
+    *binding* rebinding, ADR-013), values are safe to share/freeze/send, and the
+    append-only shared `RUNTIME` region stays sound. Don't add machinery
+    (barriers, epoch re-anchors, defensive copies) that only a mutable structure
+    would require — there are none to support.
 - **Types are set-theoretic, gradual, and advisory** (ADR-023/024;
   `docs/types.md`). A type *is* a set of runtime `Tag`s; subtyping is set
   inclusion; redefinable globals are `dynamic()`, never `Any`; checking never

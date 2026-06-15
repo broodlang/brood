@@ -337,7 +337,6 @@ handle!(VecId);
 handle!(StrId);
 handle!(BigIntId);
 handle!(BsId);
-handle!(TransientId);
 handle!(RopeId);
 handle!(ClosureId);
 handle!(NativeId);
@@ -474,16 +473,6 @@ pub enum Value {
     /// mutable state behind primitives (`table-*`), never a mutable `Value`. Local to
     /// this runtime (the registry is global to the OS process); not node-portable.
     Table(u64),
-    /// A **transient map** — Clojure's `(transient m)` / `assoc!` / `persistent!`
-    /// fast-building handle into the per-process `transients` slab. A heap object
-    /// holding a [`crate::core::heap::TransientCell`]: a mutable `root` (a `Map`),
-    /// a build **watermark**, the LOCAL **epoch** the watermark is valid in, and a
-    /// `live` flag. Identity-mutable (unlike every other Value): `assoc!`/`dissoc!`
-    /// rewrite the cell in place and return *the same handle*, mutating nodes the
-    /// transient owns rather than path-copying. Process-local — never frozen into
-    /// PRELUDE/RUNTIME, never sent across processes. `type-of` is `:transient`; it
-    /// is **not** a `map?`. See `Heap::transient` and the epoch guard.
-    Transient(TransientId),
     /// A **bitset** — a fixed-size immutable bit array backed by raw bytes
     /// (`crate::core::blob::SharedBlob`), a heap leaf handle into the per-process
     /// `bitsets` slab (mirrors [`Value::BigInt`]: an immutable leaf holding no `Value`
@@ -528,7 +517,6 @@ pub enum Tag {
     Rope,
     Socket,
     Subprocess,
-    Transient,
     Table,
     Bitset,
 }
@@ -556,7 +544,6 @@ impl Tag {
             Tag::Rope => "rope",
             Tag::Socket => "socket",
             Tag::Subprocess => "subprocess",
-            Tag::Transient => "transient",
             Tag::Table => "table",
             Tag::Bitset => "bitset",
         }
@@ -573,7 +560,7 @@ impl Tag {
                 Tag::Nil, Tag::Bool, Tag::Int, Tag::Float, Tag::Sym, Tag::Keyword,
                 Tag::Str, Tag::Pair, Tag::Vector, Tag::Fn, Tag::Macro, Tag::Native,
                 Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Subprocess,
-                Tag::Transient, Tag::Table,
+                Tag::Table, Tag::Bitset,
             ];
             let mut out = [0u32; 20];
             for t in TAGS {
@@ -618,7 +605,6 @@ pub fn tag(v: Value) -> Tag {
         Value::Rope(_) => Tag::Rope,
         Value::Socket(_) => Tag::Socket,
         Value::Subprocess(_) => Tag::Subprocess,
-        Value::Transient(_) => Tag::Transient,
         Value::Table(_) => Tag::Table,
         Value::Bitset(_) => Tag::Bitset,
     }

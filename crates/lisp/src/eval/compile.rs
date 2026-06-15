@@ -875,13 +875,12 @@ fn value_is_immovable(v: Value) -> bool {
         Value::Rope(id) => id.region() != value::LOCAL,
         Value::Fn(id) | Value::Macro(id) => id.region() != value::LOCAL,
         // A `Range` is a `VecId` and a `Transient` a `TransientId` — both movable when
-        // LOCAL, so they must be checked too (else this tripwire would wrongly pass a
-        // movable LOCAL `Range`/`Transient` baked into a Const).
+        // LOCAL, so it must be checked too (else this tripwire would wrongly pass a
+        // movable LOCAL `Range` baked into a Const).
         Value::Range(id) => id.region() != value::LOCAL,
         // A `SeqView` is a `VecId` too — movable when LOCAL, so it must be checked
         // (else this tripwire would wrongly pass a movable LOCAL view in a Const).
         Value::SeqView(id) => id.region() != value::LOCAL,
-        Value::Transient(id) => id.region() != value::LOCAL,
         // Inline scalars (Int/Float/Bool/Nil), interned Sym/Keyword, and the
         // remaining handle-free kinds carry nothing the GC relocates.
         _ => true,
