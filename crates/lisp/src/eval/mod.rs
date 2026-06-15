@@ -620,6 +620,14 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 }
                 let last = cur_argv.pop().expect("argv non-empty (checked above)");
                 let real = cur_argv.remove(0);
+                // A lazy seq-view as the spliced arg list realises first —
+                // `seq_items` can't run its transducer.
+                let last = if matches!(last, Value::SeqView(_)) {
+                    crate::builtins::realize_seqview(heap, env, last)
+                        .map_err(|e| e.or_form_pos(heap, call_form))?
+                } else {
+                    last
+                };
                 cur_argv.extend(
                     heap.seq_items(last)
                         .map_err(|e| e.or_form_pos(heap, call_form))?,

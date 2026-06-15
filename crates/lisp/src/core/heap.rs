@@ -232,6 +232,8 @@ fn tag_rank(v: Value) -> u8 {
         Value::Pair(_) => 6,
         // A range sorts among lists (it is one, lazily).
         Value::Range(_) => 6,
+        // A lazy seq-view sorts among lists too (it is one, lazily).
+        Value::SeqView(_) => 6,
         Value::Vector(_) => 7,
         Value::Map(_) => 8,
         Value::Fn(_) => 9,
@@ -419,6 +421,7 @@ fn to_prelude(v: Value) -> Value {
         Value::Pair(id) => Value::Pair(PairId::prelude(id.index())),
         Value::Vector(id) => Value::Vector(VecId::prelude(id.index())),
         Value::Range(id) => Value::Range(VecId::prelude(id.index())),
+        Value::SeqView(id) => Value::SeqView(VecId::prelude(id.index())),
         Value::Map(id) => Value::Map(MapId::prelude(id.index())),
         Value::Str(id) => Value::Str(StrId::prelude(id.index())),
         Value::BigInt(id) => Value::BigInt(BigIntId::prelude(id.index())),
@@ -1145,6 +1148,7 @@ pub fn is_movable(v: Value) -> bool {
         Value::Pair(id) => id.region() == LOCAL,
         Value::Vector(id) => id.region() == LOCAL,
         Value::Range(id) => id.region() == LOCAL,
+        Value::SeqView(id) => id.region() == LOCAL,
         Value::Map(id) => id.region() == LOCAL,
         Value::Str(id) => id.region() == LOCAL,
         Value::BigInt(id) => id.region() == LOCAL,
@@ -1175,6 +1179,7 @@ pub fn needs_root_slot(v: Value) -> bool {
         Value::Pair(id) => shared(id.region()),
         Value::Vector(id) => shared(id.region()),
         Value::Range(id) => shared(id.region()),
+        Value::SeqView(id) => shared(id.region()),
         Value::Map(id) => shared(id.region()),
         Value::Str(id) => shared(id.region()),
         Value::BigInt(id) => shared(id.region()),
@@ -1714,6 +1719,23 @@ impl Heap {
             vec![Value::Int(lo), Value::Int(hi), Value::Int(step)]
         );
         Value::Range(VecId::local_gen(idx, self.local_epoch))
+    }
+
+    /// Allocate a lazy **seq-view** backed by a 2-element `[source xform]`
+    /// vector. `source` is the underlying collection, `xform` a transducer
+    /// composing every pending `map`/`filter`/`keep`/`remove` stage. Rides the
+    /// vector slab exactly like [`Heap::alloc_range`], but its backing holds heap
+    /// values (not just ints), so GC promote/flush/verify recurse into them.
+    pub fn alloc_seqview(&mut self, source: Value, xform: Value) -> Value {
+        let idx = alloc_slot!(self, vectors, vec![source, xform]);
+        Value::SeqView(VecId::local_gen(idx, self.local_epoch))
+    }
+
+    /// The `(source, xform)` of a seq-view handle's backing `[source xform]`
+    /// vector.
+    pub fn seqview_parts(&self, id: VecId) -> (Value, Value) {
+        let v = self.vector(id);
+        (v[0], v[1])
     }
 
     /// The `(lo, hi, step)` of a range handle's backing `[lo hi step]` vector.
@@ -2932,6 +2954,18 @@ impl Heap {
                 let items = self.vector(id).to_vec();
                 Value::Range(VecId::runtime(self.runtime.code.vectors.push(items)))
             }
+            // A seq-view's backing `[source xform]` holds heap values (a
+            // collection and a transducer closure), so promote each across like a
+            // vector and keep the `SeqView` wrapper.
+            Value::SeqView(id) if id.region() == LOCAL => {
+                let items: Vec<Value> = self
+                    .vector(id)
+                    .to_vec()
+                    .into_iter()
+                    .map(|x| self.promote_in(x, fwd))
+                    .collect();
+                Value::SeqView(VecId::runtime(self.runtime.code.vectors.push(items)))
+            }
             Value::Map(id) if id.region() == LOCAL => {
                 // Recursively promote the trie depth-first. Children are
                 // promoted before their parent so the parent's `children`
@@ -3518,6 +3552,15 @@ impl Heap {
                 0xFFu8.hash(h);
                 self.hash_value_into(Value::Nil, h);
             }
+            // A lazy seq-view cannot be realised here (no evaluator to run its
+            // transducer), so it hashes to a single sentinel bucket — consistent
+            // with `equal`'s identity fallback below (two views are `equal` only
+            // when the same handle, and same handle ⇒ same hash). The prelude
+            // realises a view before it can reach a hash-keyed map in normal use;
+            // this is the safe, never-panic fallback for an escaped raw view.
+            Value::SeqView(_) => {
+                0x5E_u8.hash(h);
+            }
             Value::Vector(id) => {
                 8u8.hash(h);
                 let xs = self.vector(id);
@@ -3646,6 +3689,12 @@ impl Heap {
             (Range(x), Range(y)) => self.range_eq_range(x, y),
             (Range(x), Pair(_)) => self.range_eq_list(x, b),
             (Pair(_), Range(y)) => self.range_eq_list(y, a),
+            // A lazy seq-view can't be realised here (no evaluator for its
+            // transducer), so it compares only by handle identity — the safe,
+            // never-panic fallback. The prelude `=` realises a view first, so a
+            // structural compare against a list/another view goes through the
+            // realised lists; this arm only catches an escaped raw view.
+            (SeqView(x), SeqView(y)) => x == y,
             (Bool(x), Bool(y)) => x == y,
             (Int(x), Int(y)) => x == y,
             // Two bignums compare by value. An Int vs a BigInt is never equal —
@@ -5405,6 +5454,32 @@ impl Heap {
                             id.0,
                         );
                     }
+                    // A seq-view's backing `[source xform]` holds heap values, so
+                    // validate the handle then descend into them — same as a
+                    // vector (it shares the vectors slab, so it dedups via
+                    // `seen_vec`).
+                    Value::SeqView(id) if id.region() == LOCAL => {
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad(
+                            "seq-view",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.vectors.len(),
+                            parent,
+                            id.0,
+                        );
+                        if !id.is_old()
+                            && !std::mem::replace(
+                                &mut seen_vec[id.is_old() as usize][id.index()],
+                                true,
+                            )
+                        {
+                            for &el in &slabs.vectors[id.index()] {
+                                work.push(W::V(el, id.0));
+                            }
+                        }
+                    }
                     Value::Map(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
@@ -5739,6 +5814,12 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
         // a vector, keeping the `Range` wrapper.
         Value::Range(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::Range(flush_vector(old, new, fwd, id))
+        }
+        // A seq-view is backed by a `[source xform]` vector — `flush_vector`
+        // recurses into the elements (forwarding the source + transducer), so
+        // forward it like a vector and keep the `SeqView` wrapper.
+        Value::SeqView(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::SeqView(flush_vector(old, new, fwd, id))
         }
         Value::Map(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::Map(flush_map(old, new, fwd, id))
@@ -6096,6 +6177,11 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
         Value::Range(id) if id.region() == RUNTIME => {
             Value::Range(flush_rt_vector(old, new, fwd, id))
         }
+        // Like a range, a seq-view's backing vector moves under a runtime
+        // compaction; `flush_rt_vector` forwards its elements. Keep the wrapper.
+        Value::SeqView(id) if id.region() == RUNTIME => {
+            Value::SeqView(flush_rt_vector(old, new, fwd, id))
+        }
         Value::Map(id) if id.region() == RUNTIME => Value::Map(flush_rt_map(old, new, fwd, id)),
         Value::Str(id) if id.region() == RUNTIME => Value::Str(flush_rt_string(old, new, fwd, id)),
         Value::BigInt(id) if id.region() == RUNTIME => {
@@ -6377,7 +6463,11 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
     let ok = |v: Value| -> bool {
         match v {
             Value::Pair(id) if id.region() == RUNTIME => id.index() < np,
-            Value::Vector(id) | Value::Range(id) if id.region() == RUNTIME => id.index() < nv,
+            Value::Vector(id) | Value::Range(id) | Value::SeqView(id)
+                if id.region() == RUNTIME =>
+            {
+                id.index() < nv
+            }
             Value::Map(id) if id.region() == RUNTIME => id.index() < nm,
             Value::Str(id) if id.region() == RUNTIME => id.index() < ns,
             Value::BigInt(id) if id.region() == RUNTIME => id.index() < nb,

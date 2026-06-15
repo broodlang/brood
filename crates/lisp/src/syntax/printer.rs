@@ -93,6 +93,12 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
             out.push(')');
         }
+        // A lazy seq-view can't be realised here (the printer has no evaluator to
+        // run its transducer). The prelude print path realises a view first, so
+        // in normal use this is unreachable; print an opaque marker as the
+        // never-panic fallback for an escaped raw view (e.g. inside a kernel
+        // error message).
+        Value::SeqView(_) => out.push_str("#<seq-view>"),
         Value::Vector(id) => {
             out.push('[');
             for (i, &item) in heap.vector(id).iter().enumerate() {

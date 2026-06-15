@@ -209,6 +209,16 @@ fn to_message_rec(
             }
             Message::List(out, pos)
         }
+        // A lazy seq-view can't be realised here (`to_message` has only `&Heap`,
+        // no evaluator to run its transducer). The prelude `send`/`!` realise a
+        // view before it crosses, so this is the never-panic fallback for an
+        // escaped raw view: a clear error rather than silent corruption.
+        Value::SeqView(_) => {
+            return Err(LispError::type_err(
+                "cannot send a lazy seq-view in a message; realise it first \
+                 (e.g. with `seq`, `vec`, or `into`)",
+            ))
+        }
         Value::Map(id) => {
             let entries = heap.map_entries(id);
             let mut out = Vec::with_capacity(entries.len());

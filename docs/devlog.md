@@ -3239,3 +3239,40 @@ marked resolved). The one deferred frontier is **precise body inference** (a val
 wider* than a declared type), which needs overloaded arithmetic sigs or occurrence typing —
 the historical FP source — and stays gated on a consumer (ADR-011). Docs synced: ADR-110,
 type-annotations.md §The-gradual-checks, types.md status note, roadmap, CLAUDE.md.
+
+## 2026-06-15 — Lazy seq-views: fusing map/filter pipelines, opt-in (compute-frontier lever 3c)
+
+Shipped the fusing-pipeline lever as a new kernel value kind **`Value::SeqView(VecId)`**,
+mirroring `Value::Range` exactly: a distinct tag over the existing vector slab, backing
+`[source xform]`, `tag = Pair` (so it *is* the list it stands for), reusing all the vector
+GC machinery — promote/flush(LOCAL+RUNTIME)/verify recurse into the backing (unlike `Range`,
+whose backing is only ints). New builtins `%seqview` / `%seqview-parts` / `seqview?`.
+`fold` **fuses** over a view in the prelude — `(fold (xform rf) init source)` — so a chain
+folds in one pass with no intermediate lists; `seq` realises a view (`(reverse (fold
+flip-cons nil sv))`), and `count`/`empty?`/`join` handle it.
+
+**The pivot.** The original design (memory `lazy-seq-view-design`) had `map`/`filter`
+become lazy *by default*. Implemented fully — then `nest test` died: the module loader does
+`(map require-one …)` and the test runner does `(map run-test …)` **for side effects**, and
+a lazy view silently drops them (the design's "footgun is benign because Brood is immutable"
+was wrong — immutability covers *data*, not *I/O*; ~180 effectful-ish `map` sites across
+`std/` + `tests/`). Baseline was green (2088 tests); the lazy default was the cause. So
+`map`/`filter`/`keep`/`remove` stay **eager**, and fusion is **opt-in**:
+`lmap`/`lfilter`/`lkeep`/`lremove` and the general `eduction` (compose transducers over a
+source). Matches ADR-011 (ship the simple form, defer the powerful one).
+
+The kernel can't run a view's transducer from the pure-heap paths, so: `first`/`rest`/`=`
+(`prim_eq`)/`apply` realise via the prelude `%seqview-realize` (a bridge resolving the
+global and applying it; GC-rooted like `%range-reduce`); the stringifiers
+(`str`/`pr-str`/`print`/`%render`/`eprint`) realise their args; `equal`/`hash`/printer/
+`to_message` get safe non-panic fallbacks (identity / sentinel / `#<seq-view>` / a clear
+"realise it first" error) since the prelude realises before those in normal use.
+
+Measured `pipeline` (n = 1e6): eager ≈ 2.0 s / 173 MB → fused `eduction` ≈ 0.63 s / 13 MB
+(~3.3× faster, ~13× less memory). `strings` still materialises (its `join` realises the
+view — `%string-join` walks via `seq_items`, which can't run a transducer); full fusion
+needs a string-builder reducer, deferred. Full suite green (2169 in-language; the one
+`make test` red is the pre-existing flaky `clean_peer_exit_fires_nodedown_promptly`
+distribution timing test — passes 3/3 in isolation). Clean under `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1`. Tests: `tests/sequence_test.blsp` "lazy seq-views" (incl. a
+`with-out-str` guard that eager `map` runs effects while a view defers them).

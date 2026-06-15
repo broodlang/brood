@@ -1104,6 +1104,20 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 - `sort` orders ascending (or with a strict less-than predicate:
   `(sort > xs)`); `sort-by` orders by a key function. Both are a **stable**
   merge sort. All of these are tail-recursive (stack-safe on long inputs).
+- **Lazy, fusing pipelines.** `map`/`filter`/`keep`/`remove` are **eager** — they
+  return a concrete list and run their function immediately (so `(map f xs)` for
+  side effects works). When you want a pipeline to **fuse** — fold/reduce in a
+  single pass with no intermediate lists — use the lazy combinators: `lmap`,
+  `lfilter`, `lkeep`, `lremove`, and the general `eduction` (compose transducers
+  over a final collection: `(eduction (xfilter odd?) (xmap sq) (range n))`). These
+  return a **lazy seq-view** — an O(1) value (like a [lazy range](#lists--sequences))
+  that stands in for the list it would produce. Chaining composes the stages onto
+  one view, so `(reduce + 0 (lmap sq (lfilter p (range n))))` walks the range once,
+  building nothing in between. `(seqview? x)` tests for an unrealised view; consume
+  one with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`/`first`, or realise it
+  with `(seq v)` / `(into [] v)`. Like any lazy value, a view defers its work (and
+  any `throw` in its functions) until realised — **don't build a view for side
+  effects**; use eager `map` or `doseq` for that.
 
 ### Maps
 `hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`
