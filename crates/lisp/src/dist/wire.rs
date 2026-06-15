@@ -528,6 +528,17 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 "cannot send a table across nodes; it is local to its runtime",
             ));
         }
+        Message::Bitset(_) => {
+            // A bitset's `Arc<SharedBlob>` is runtime-local (separate runtimes have
+            // independent blob lifetimes), and its bytes are NOT UTF-8 so it can't ride
+            // the `M_STR` path that `StrShared` uses. Refuse across nodes for now (a
+            // dedicated raw-byte `M_BITSET` tag could make it node-portable later); send
+            // its `bitset-positions` / a snapshot across nodes instead. (KI-4.)
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot send a bitset across nodes; it is local to its runtime",
+            ));
+        }
     }
     Ok(())
 }

@@ -8,7 +8,7 @@ Newest first. For the narrative discovery writeup of the scheduler race, see
 
 ## KI-4 — bitset stored as a non-UTF-8 `Value::Str` corrupts the GC on promote
 
-**Status:** **root-caused 2026-06-15; fix in progress (distinct `Value::Bitset` type)** ·
+**Status:** **fixed (2026-06-15)** — bitsets are now a distinct `Value::Bitset` kind ·
 **Severity:** high (memory-unsafety / silent corruption / hard crash, reachable from pure
 Brood) · **First seen:** via the brood-life `--fair` Game-of-Life demo (the refc-shared
 `bitboard-bs` board), ~1 in 3–4 uncapped 6 s runs.
@@ -45,12 +45,22 @@ RUSTFLAGS="-C debug-assertions=on" cargo build --release -p nest --features broo
 cd brood-life && ./run brood --fair --for 6s   # SIM (process 2) panics in promote; see .brood_crash_dump
 ```
 
-### Fix
+### Fix (shipped 2026-06-15)
 
-Give bitsets a distinct **`Value::Bitset`** kind (its own slab of `Arc<SharedBlob>` raw
-bytes, mirroring the `bigint` immutable-leaf slab), so a bitset is never read as UTF-8 text
-and `promote`/GC/message copy it byte-clean (the Arc, by reference — its intended
-cross-process behaviour). In progress.
+Bitsets are now a distinct **`Value::Bitset`** kind — its own slab of `Arc<SharedBlob>` raw
+bytes (LOCAL `Vec` + RUNTIME `boxcar`), mirroring the `bigint` immutable-leaf slab, with its
+own `Tag::Bitset`, accessor (`Heap::bitset`, byte-clean), `alloc_bitset`, GC flush
+(LOCAL + RUNTIME), `promote_in` (clones the `Arc` byte-clean — no UTF-8 read), equality/hash
+(raw bytes), printer (`#<bitset N bytes>`), and `Message::Bitset` (ships the Arc by
+reference within a runtime; the dist wire rejects it as runtime-local). The `bitset-*`
+builtins switched from `Value::Str`/`alloc_string_from_shared` to `Value::Bitset`/
+`alloc_bitset`. A bitset can no longer reach a string accessor or the UTF-8 RUNTIME string
+slab, so `promote`/GC are byte-clean.
+
+**Verified:** the spawn-promote-a-bitset path (the exact crash) runs clean + tree-walker
+bit-identical + `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`-clean; the real `--fair` demo on an
+armed build did **0 crashes in 12 runs** (was ~1 in 3–4); kernel suite 623/623; JIT suite
+green.
 
 ---
 

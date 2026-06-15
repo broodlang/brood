@@ -48,6 +48,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const socket_ty: Ty = Ty::of(Tag::Socket);
     const subprocess_ty: Ty = Ty::of(Tag::Subprocess);
     const table_ty: Ty = Ty::of(Tag::Table);
+    const bitset_ty: Ty = Ty::of(Tag::Bitset);
     const kw: Ty = Ty::of(Tag::Keyword);
     const sym: Ty = Ty::of(Tag::Sym);
     const bool_ty: Ty = Ty::of(Tag::Bool);
@@ -203,32 +204,33 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         bit_positions,
     );
     // --- bitset: a fixed-size bit array backed by a refc SharedBlob (POC, ADR-107-adjacent).
-    // A `bitset` is a `Str` whose bytes are raw bit-data (LSB-first, bit i = byte i/8 bit i%8),
-    // ALWAYS stored shared, so it crosses `send`/`table` by reference (Arc bump), not a copy —
-    // unlike a bignum, which serialises to decimal. Bitwise ops are O(bytes) native loops.
-    def(heap, "bitset", Arity::exact(1), Sig::new(vec![int], string), bs_make);
-    def(heap, "bitset-ones", Arity::exact(1), Sig::new(vec![int], string), bs_ones);
-    def(heap, "bitset-and", Arity::exact(2), Sig::new(vec![string, string], string), bs_and);
-    def(heap, "bitset-or", Arity::exact(2), Sig::new(vec![string, string], string), bs_or);
-    def(heap, "bitset-xor", Arity::exact(2), Sig::new(vec![string, string], string), bs_xor);
-    def(heap, "bitset-shl", Arity::exact(2), Sig::new(vec![string, int], string), bs_shl);
-    def(heap, "bitset-shr", Arity::exact(2), Sig::new(vec![string, int], string), bs_shr);
-    def(heap, "bitset-set", Arity::exact(2), Sig::new(vec![string, int], string), bs_set);
-    def(heap, "bitset-count", Arity::exact(1), Sig::new(vec![string], int), bs_count);
-    def(heap, "bitset-positions", Arity::exact(1), Sig::new(vec![string], vec_ty), bs_positions);
+    // A `bitset` is its own `Value::Bitset` kind (KI-4) — raw bit-data bytes (LSB-first, bit i
+    // = byte i/8 bit i%8) in an `Arc<SharedBlob>`, NEVER a UTF-8 `Str` (that corrupted the GC
+    // on promote). ALWAYS stored shared, so it crosses `send`/`table` by reference (Arc bump),
+    // not a copy — unlike a bignum, which serialises to decimal. Ops are O(bytes) native loops.
+    def(heap, "bitset", Arity::exact(1), Sig::new(vec![int], bitset_ty), bs_make);
+    def(heap, "bitset-ones", Arity::exact(1), Sig::new(vec![int], bitset_ty), bs_ones);
+    def(heap, "bitset-and", Arity::exact(2), Sig::new(vec![bitset_ty, bitset_ty], bitset_ty), bs_and);
+    def(heap, "bitset-or", Arity::exact(2), Sig::new(vec![bitset_ty, bitset_ty], bitset_ty), bs_or);
+    def(heap, "bitset-xor", Arity::exact(2), Sig::new(vec![bitset_ty, bitset_ty], bitset_ty), bs_xor);
+    def(heap, "bitset-shl", Arity::exact(2), Sig::new(vec![bitset_ty, int], bitset_ty), bs_shl);
+    def(heap, "bitset-shr", Arity::exact(2), Sig::new(vec![bitset_ty, int], bitset_ty), bs_shr);
+    def(heap, "bitset-set", Arity::exact(2), Sig::new(vec![bitset_ty, int], bitset_ty), bs_set);
+    def(heap, "bitset-count", Arity::exact(1), Sig::new(vec![bitset_ty], int), bs_count);
+    def(heap, "bitset-positions", Arity::exact(1), Sig::new(vec![bitset_ty], vec_ty), bs_positions);
     def(heap, "bitset-planes", Arity::exact(1), Sig::new(vec![vec_ty], vec_ty), bs_planes);
     def(
         heap,
         "bitset-neighbour-sum",
         Arity::exact(7),
-        Sig::new(vec![string, string, string, string, string, int, int], vec_ty),
+        Sig::new(vec![bitset_ty, bitset_ty, bitset_ty, bitset_ty, bitset_ty, int, int], vec_ty),
         bs_neighbour_sum,
     );
     def(
         heap,
         "bitset-life-step",
         Arity::exact(7),
-        Sig::new(vec![string, string, string, string, string, int, int], string),
+        Sig::new(vec![bitset_ty, bitset_ty, bitset_ty, bitset_ty, bitset_ty, int, int], bitset_ty),
         bs_life_step,
     );
 
@@ -2972,32 +2974,29 @@ fn bit_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 // (a refcount bump), so the bitwise ops touch the blob in place and only the
 // RESULT is allocated. (An inline string — only happens off the bitset path —
 // falls back to a one-time copy.)
-enum BsData {
-    Shared(std::sync::Arc<crate::core::blob::SharedBlob>),
-    Owned(Vec<u8>),
-}
+// A bitset is now always an `Arc<SharedBlob>` (KI-4: its own `Value::Bitset` kind, never a
+// UTF-8 `Str`), so this is just the shared bytes. Kept as a thin wrapper so the bitset ops
+// read through one `.bytes()` accessor.
+struct BsData(std::sync::Arc<crate::core::blob::SharedBlob>);
 impl BsData {
     fn bytes(&self) -> &[u8] {
-        match self {
-            BsData::Shared(a) => a.as_bytes(),
-            BsData::Owned(v) => v,
-        }
+        self.0.as_bytes()
     }
 }
 
 fn bs_arc(heap: &Heap, v: Value, who: &str) -> Result<BsData, LispError> {
     match v {
-        Value::Str(id) => Ok(match heap.local_shared_blob(id) {
-            Some(a) => BsData::Shared(a),
-            None => BsData::Owned(heap.string(id).as_bytes().to_vec()),
-        }),
+        // A bitset is its own `Value::Bitset` kind (KI-4) — raw bytes via an
+        // `Arc<SharedBlob>`, never a UTF-8 `Value::Str`. Read the Arc byte-clean.
+        Value::Bitset(id) => Ok(BsData(std::sync::Arc::clone(heap.bitset(id)))),
         _ => Err(LispError::wrong_type(heap, who, "bitset", v)),
     }
 }
 
-// Allocate a bitset from raw bytes — ALWAYS shared, so send/table ship it by reference.
+// Allocate a bitset from raw bytes — a distinct `Value::Bitset` (KI-4), ALWAYS shared so
+// send/table ship it by reference. Byte-clean: the bytes are arbitrary, never UTF-8.
 fn bs_alloc(heap: &mut Heap, bytes: &[u8]) -> Value {
-    heap.alloc_string_from_shared(crate::core::blob::SharedBlob::new(bytes))
+    heap.alloc_bitset(crate::core::blob::SharedBlob::new(bytes))
 }
 
 fn bs_nbytes(nbits: i64) -> usize {

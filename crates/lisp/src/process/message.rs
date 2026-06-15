@@ -46,6 +46,13 @@ pub enum Message {
     /// `Arc<BlobHeap>`). The dist wire encoder downgrades this back to
     /// `Str` because separate runtimes have independent blob lifetimes.
     StrShared(Arc<SharedBlob>),
+    /// A **bitset** sent by handle (KI-4). Always Arc-backed, so a bitset *always*
+    /// crosses by reference (a refcount bump, no byte copy) — its defining advantage
+    /// over the bignum board. Within one runtime only; the dist wire encoder **rejects**
+    /// it (separate runtimes have independent blob lifetimes, and the bytes aren't UTF-8
+    /// so they can't ride the `StrShared`→`M_STR` path). A receiver in the same runtime
+    /// reconstructs it with `alloc_bitset`. Never decoded as UTF-8 text.
+    Bitset(Arc<SharedBlob>),
     Sym(Symbol),
     Keyword(Symbol),
     /// A cons-list value, plus the **source position** of the original pair
@@ -160,6 +167,9 @@ fn to_message_rec(
         Value::Bool(b) => Message::Bool(b),
         Value::Int(n) => Message::Int(n),
         Value::BigInt(id) => Message::BigInt(heap.bigint(id).to_string()),
+        // A bitset always ships its Arc<SharedBlob> by reference (no byte copy) — its
+        // whole point. Byte-clean: never read as a UTF-8 string.
+        Value::Bitset(id) => Message::Bitset(Arc::clone(heap.bitset(id))),
         Value::Float(f) => Message::Float(f),
         Value::Sym(s) => Message::Sym(s),
         Value::Keyword(s) => Message::Keyword(s),
@@ -413,6 +423,7 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
         Message::Keyword(s) => Value::Keyword(*s),
         Message::Str(s) => heap.alloc_string(s),
         Message::StrShared(blob) => heap.alloc_string_from_shared(Arc::clone(blob)),
+        Message::Bitset(blob) => heap.alloc_bitset(Arc::clone(blob)),
         Message::List(items, pos) => {
             let mut vals = Vec::with_capacity(items.len());
             for item in items {
