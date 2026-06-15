@@ -6660,3 +6660,61 @@ builtin, but allocates a heap string per *character* (~30× more), slower and GC
 (b) Byte-offset `index-of` + byte-slice `substring` — exposes raw UTF-8 byte offsets
 (boundary footguns) and adds two builtins. (c) Route through the native regex engine —
 heavier (compile per call), wrong semantics (literal vs pattern), removes nothing.
+
+## ADR-110 — Gradual typing earns its place: `GradualTy`'s first consumers (assignment / return / value-position checks)
+
+**Status:** accepted (2026-06-15). Implemented: `annot::parse_value_sig_decl` (non-arrow
+`(sig x T)`), `Ctx.declared_value_ty`, `walk::gradual_of` (expression → `GradualTy`), the
+gradual-assignment check in `check_def`, the return-type check in `check_fn_seeded`, and
+`expr_ty`'s declared-global fallback (`crates/lisp/src/types/check/{walk,guards,ctx,annot}.rs`).
+Tests in `check.rs`; supersedes the "foundation-only, unconsumed" status note in `types.md`
+(refines ADR-024).
+
+**Context.** `GradualTy`/`consistent_with` had been built and unit-tested but had **zero
+production callers** — referenced only by their own tests, with a standing note to "wire it
+in only when a real gradual-assignment consumer arrives." The question was delete it
+(greenfield: drop dead weight) or give it the consumer. The compatibility answer settled it:
+`GradualTy` is the *set-theoretic* way to do gradual typing (consistent subtyping derived
+from set inclusion, not a Siek–Taha bolt-on — ADR-024), so it's the right direction; what it
+lacked was a job.
+
+**The key insight (why this isn't just disjointness rebranded).** The existing advisory
+checker is a **disjointness** pass over `Option<Ty>` — it warns only when an argument's type
+is *provably disjoint* from what's wanted. For that rule `GradualTy` adds **nothing**: an
+"unknown" is already silent, which is `dynamic()`'s behaviour for free. `GradualTy` earns its
+place **only in a check with assignment / subtyping semantics** — one that *errors when
+something is not a subtype*, where consistency gives the gradual benefit-of-the-doubt. So the
+consumers are assignment sites, not the disjointness walk:
+
+- **`(def x <expr>)` vs `(sig x T)`** — the value must be *consistent* with `T`.
+- **Return type** — a `(sig f (P… -> R))` body's last form must be consistent with `R`.
+- **Declared globals in value position** — `(sig g int)` flows `g`'s type into the
+  disjointness check, so `(string-length g)` is caught.
+
+**The capability `Option<Ty>` structurally can't provide:** a reference to a redefinable
+global with a declared type is `dynamic_within(t)` — a **bounded dynamic**. `Option<Ty>` has
+only known/unknown; it can't say "unknown but definitely numeric." So `(def count label)`
+with `label : string`, `count : int` is flagged (`string ∩ int = ⊥`), where the disjointness
+pass — treating every global as an untracked `None` — sees nothing. This is the genuine
+value-add, and it's exactly the hot-reload-safety motivation of ADR-024 (a global is
+`dynamic(t)`, never assumed static): it warns on a provable mismatch with the declared
+*contract*, and defers when the bound merely overlaps.
+
+**The false-positive discipline (the load-bearing design rule).** The checker's inferred
+types are sound *over-approximations* (`(+ int int)` is typed `number`). So:
+- An **over-approximated** value (a call result, a `let` local) is `dynamic_within(t)` →
+  consistency uses `∩ ≠ ⊥`, which can only fire on a *provable disjointness* and **never
+  over-warns on a widened guess** (`(def n (+ 1 2))` vs `int` *defers*).
+- A **precise** value — a literal, or a `(sig …)`-typed **parameter** (its exact contract
+  type) — is `stat(t)` → consistency uses `⊆`, which can additionally catch a value *merely
+  wider* than the target (`(defn f (x) x)` returning a `number` param where `int` is
+  declared). This is the first diagnostic disjointness structurally cannot produce.
+
+The result held the zero-false-positive bar through every slice: project-wide `nest check`
+over `std/` + `tests/` stayed at 3 warnings (all the intentional non-tail recursion lint).
+
+**Deferred (ADR-011).** Catching a wider *call-result* body (body typed `number`, declared
+`int`) needs **precise** result types — overloaded/dependent arithmetic sigs, or full
+occurrence-typing body inference (the historical false-positive source). Both wait for a
+concrete consumer that justifies trading the perfect no-FP record. The bounded option
+(overloaded `(+ int int) : int` sigs) is the recommended next step if one arrives.
