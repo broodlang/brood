@@ -82,15 +82,33 @@ or a JIT cons fast path — but note `Cons` is deliberately out of the JIT subse
 miscompile; see the `chunk_in_jit_subset` comment). Entry: `core/heap.rs` (allocation,
 `gc_floor`, nursery), `jit-stage1.md`.
 
-### 3c. `strings` / `pipeline` — **lazy sequence combinators**
+### 3c. `strings` / `pipeline` — **lazy sequence combinators** — *shipped (pipeline)*
 
 `strings` (~19×) and `pipeline` (the eager part) materialize a full cons list per stage
 (`(map number->string (range n))`) which the copying GC then relocates — `strings` is also
-the memory outlier (~180 MB). The lever is a **lazy/streaming `map`/`filter`** (a
-`Value::Range`-style reducible already exists — extend that model to the combinators) so a
-pipeline fuses instead of building intermediate lists. Design-level; touches `std/prelude`
-+ the sequence protocol. Entry: search the prelude for `map`/`filter`/`reduce`, and
-`Value::Range` (the existing reducible).
+the memory outlier (~180 MB). The lever is a **lazy/streaming, fusing pipeline** so a
+chain folds instead of building intermediate lists.
+
+**Shipped** (ADR lazy-seq-view): a `Value::SeqView(VecId)` kernel kind mirroring
+`Value::Range` (a distinct tag over the vector slab, backing `[source xform]`, `tag = Pair`).
+`fold` fuses over it — `(fold (xform rf) init source)` — so the pipeline walks the source
+once with no intermediate lists; `seq`/`first`/`count`/… realise on demand.
+
+**Design choice — fusion is opt-in, `map`/`filter` stay eager.** Making `map`/`filter`
+lazy *by default* breaks Brood's entrenched "iterate for side effects" idiom — the module
+loader (`(map require-one …)`) and the test runner (`(map run-test …)`) rely on eager
+evaluation, and a lazy view silently drops those effects (immutability covers *data*, not
+*I/O*). So the eager combinators are unchanged and the fusing views are explicit:
+`lmap`/`lfilter`/`lkeep`/`lremove` and the general `eduction` (compose transducers over a
+source). Measured `pipeline` (n = 1e6): eager `(->> … filter map (reduce +))` ≈ 2.0 s / 173 MB
+→ fused `(reduce + 0 (eduction (xfilter …) (xmap …) (range n)))` ≈ 0.63 s / 13 MB
+(~3.3× faster, ~13× less memory).
+
+**`strings` still open.** `join` realises a view before the native `%string-join`
+(`seq_items` can't run a transducer), so `(join "," (lmap number->string (range n)))` still
+materialises the parts list — no win yet. Full fusion needs a **string-builder reducer**
+(a transient/mutable buffer the transducer appends into, O(n)); deferred as a follow-up.
+Entry: `%string-join` in `builtins.rs`, and the transient machinery (`%map-into`).
 
 A second, immutability-enabled lever for the memory side (and for `spawn`/`pfib`'s
 message cost): **zero-copy message passing.** Today `to_message` *deep-copies* a value

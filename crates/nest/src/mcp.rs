@@ -802,6 +802,9 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         // is a live OS resource — likewise no JSON shape.
         // A table is a live shared resource — no JSON shape; a tool that wants its
         // contents should return `(table-snapshot t)` (a map) explicitly.
+        // A lazy seq-view has no JSON shape until realised, and this read-only
+        // projection has no evaluator to run its transducer — a tool that wants
+        // its items should realise it first (e.g. `(vec (map …))`).
         Value::Fn(_)
         | Value::Macro(_)
         | Value::Native(_)
@@ -810,6 +813,7 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         | Value::Subprocess(_)
         | Value::Table(_)
         | Value::Bitset(_)
+        | Value::SeqView(_)
         | Value::Transient(_) => Err(format!(
             "value of kind {:?} has no JSON representation",
             value::tag(v)

@@ -62,8 +62,13 @@
 ;; empty list is `nil`, and every other collection's emptiness is a length the
 ;; kernel already exposes.)
 (defn empty? (x)
-  "True if `x` is an empty collection (`nil`, `()`, `[]`, `\"\"`, or `{}`)."
-  (if (%eq (type-of x) :nil)
+  "True if `x` is an empty collection (`nil`, `()`, `[]`, `\"\"`, `{}`, or a seq-view that realises to nothing)."
+  ;; A lazy seq-view reports `type-of` `:pair` (it stands in for a list), but a
+  ;; `filter` may have dropped everything — so realise to find out. Guarded first,
+  ;; before the `:pair`-is-non-empty shortcut below would wrongly answer false.
+  (if (seqview? x)
+    (empty? (seq x))
+   (if (%eq (type-of x) :nil)
     true
     (if (%eq (type-of x) :pair)
       false
@@ -73,7 +78,7 @@
           (%eq (vector-length x) 0)
           (if (%eq (type-of x) :map)
             (%eq (map-count x) 0)
-            (throw (str "empty?: not a collection: " (pr-str x)))))))))
+            (throw (str "empty?: not a collection: " (pr-str x))))))))))
 
 ;; ---- universal list view ----
 ;; `seq` is what lets every list-shaped op (map/filter/fold/reduce/…) walk a
@@ -83,9 +88,10 @@
 ;; `type-of`, `map-pairs`) because `fold` calls it before the `map?` predicate /
 ;; `cond` macro are available.
 (defn seq (coll)
-  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range is realised to a list; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
+  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
   (if (range? coll) (%range->list coll)
-    (if (%eq (type-of coll) :map) (map-pairs coll) coll)))
+    (if (seqview? coll) (%seqview-realize coll)
+      (if (%eq (type-of coll) :map) (map-pairs coll) coll))))
 (def entries map-pairs)
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
@@ -93,8 +99,16 @@
 ;; list form for the recursion, so a map costs one extra `map-pairs` pass total
 ;; rather than O(n) per step.
 (defn fold (f acc coll)
-  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised."
-  (if (range? coll) (%range-reduce f acc coll) (fold--loop f acc (seq coll))))
+  "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no intermediate lists."
+  (if (range? coll) (%range-reduce f acc coll)
+    (if (seqview? coll)
+      ;; Fuse: `(xform f)` is the wrapped reducer; fold it over the source (a
+      ;; range → counted loop, a list → fold--loop, a nested view → fuses again).
+      ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
+      ;; `cond`/`second`.
+      (let (parts (%seqview-parts coll))
+        (fold ((vector-ref parts 1) f) acc (vector-ref parts 0)))
+      (fold--loop f acc (seq coll)))))
 (defn fold--loop (f acc coll)
   (if (empty? coll) acc (fold--loop f (f acc (first coll)) (rest coll))))
 
@@ -110,6 +124,14 @@
 ;; whole library. Coerce a map to its pairs once via `seq`, as `fold` did.
 (defn reverse--acc (coll acc) (if (empty? coll) acc (reverse--acc (rest coll) (cons (first coll) acc))))
 (defn reverse (coll) "The items of `coll` in reverse order, as a list." (reverse--acc (seq coll) nil))
+
+;; Realise a lazy seq-view to a concrete list by running its transducer. Folding
+;; `flip-cons` over the view hits `fold`'s seq-view branch, which wraps the
+;; transducer around `flip-cons` and folds over the source — producing the
+;; transduced items in reverse, so one `reverse` puts them in order. The kernel
+;; `first`/`rest`/`apply` builtins call this (by name) for a view that escapes the
+;; fusing path; `seq` calls it to coerce. No intermediate list beyond the result.
+(defn %seqview-realize (sv) (reverse (fold flip-cons nil sv)))
 
 ;; reduce supports both (reduce f init coll) and (reduce f coll). The 2-arg
 ;; form must seq-coerce `x` itself before splitting head/tail, because the bare
@@ -496,6 +518,9 @@ current element and `acc` is the current accumulator."
   ;; and nil go through a dedicated tail loop, not a per-element counting closure.
   (cond
     (range? coll) (%range-count coll)
+    ;; A lazy seq-view counts by fusing a counting reducer through `fold` — walks
+    ;; the source once, no list materialised.
+    (seqview? coll) (fold (fn (n _) (%add n 1)) 0 coll)
     (string? coll) (string-length coll)
     (vector? coll) (vector-length coll)
     (map? coll) (map-count coll)
@@ -1819,6 +1844,55 @@ applies to each input first."
   "A transducer that lets each input through as long as `(pred x)` holds; the first input that fails the predicate ends the reduction (the failing item is *not* fed downstream). Stateless — predicate-driven via the `reduced` sentinel."
   (fn (rf) (fn (acc x) (if (pred x) (rf acc x) (reduced acc)))))
 
+;; ---- explicit lazy/fusing views (ADR: lazy seq-view, compute-frontier lever 3)
+;; `map`/`filter`/`keep`/`remove` stay EAGER (they return a concrete list, and
+;; running them for side effects — `(map require-one mods)`, `(map run-test ts)` —
+;; works as it always has). Fusion is **opt-in**, via the combinators below: a
+;; lazy seq-view (`%seqview`) is a non-materialising value carrying a transducer
+;; over a source. Chaining composes the transducers onto one view, so a pipeline
+;; folds/reduces in a single pass with **no intermediate lists**. Consume a view
+;; with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`/`vec`; `pr`/`=`/`send`
+;; realise it at their boundary. Footgun: like any lazy value, a view defers the
+;; work in its fns (and a `throw` therein) until realised — so don't build a view
+;; for side effects; use eager `map`/`doseq` for that.
+(defn %seqview-wrap (coll xf)
+  "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
+view, compose `xf` onto its transducer (same source) so the stages fuse."
+  (if (seqview? coll)
+    (let (parts (%seqview-parts coll))
+      (%seqview (vector-ref parts 0) (comp (vector-ref parts 1) xf)))
+    (%seqview coll xf)))
+
+(defn lmap (f coll)
+  "Lazy, fusing `map`: a seq-view of `(f x)` for each `x` in `coll`. Composes with
+adjacent `l*` stages and folds/reduces in one pass with no intermediate lists.
+Realise with `seq`/`vec`/`into`, or just consume it (`fold`/`reduce`/`count`/…).
+Use eager `map` when you want a concrete list or are iterating for side effects."
+  (%seqview-wrap coll (xmap f)))
+
+(defn lfilter (pred coll)
+  "Lazy, fusing `filter` — see `lmap`."
+  (%seqview-wrap coll (xfilter pred)))
+
+(defn lkeep (f coll)
+  "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `lmap`."
+  (%seqview-wrap coll (xkeep f)))
+
+(defn lremove (pred coll)
+  "Lazy, fusing `remove` — see `lmap`."
+  (%seqview-wrap coll (xremove pred)))
+
+(defn eduction (& xforms+coll)
+  "A lazy, fusing view of a collection (the LAST argument) with the transducers
+(all earlier arguments) composed left-to-right. `(eduction (xfilter odd?) (xmap
+sq) (range n))` folds/reduces in a single pass with no intermediate lists — the
+general form of the `l*` combinators. Realise with `seq`/`vec`/`into`, or consume
+directly. With no transducers it is just a view of the collection."
+  (let (coll (last xforms+coll) xforms (drop-last 1 xforms+coll))
+    (if (empty? xforms)
+      (%seqview-wrap coll (xmap identity))
+      (%seqview-wrap coll (apply comp xforms)))))
+
 ;; ---- early-termination sentinel ---------------------------------------------
 ;; A `reduced`-wrapped accumulator signals "stop the reduction now and unwrap
 ;; me." `xtake-while` returns one when its predicate fails; `transduce` (below)
@@ -2084,9 +2158,14 @@ search rides on."
   ;; parts list, no reverse). The all-Brood path stays as a fallback for an
   ;; exotic (non-string) separator: it builds the interleaved parts list
   ;; (reversed) then concatenates in one `apply str` pass.
-  (if (string? sep)
+  ;; A lazy seq-view is realised first (the native walks it via `seq_items`,
+  ;; which can't run a transducer). NOTE: this materialises the mapped strings —
+  ;; the `strings` benchmark's full fusion would need a string-builder reducer
+  ;; (a follow-up); today join over a view matches the old eager-`map` behaviour.
+  (let (coll (if (seqview? coll) (seq coll) coll))
+   (if (string? sep)
     (%string-join sep coll)
-    (if (empty? coll) "" (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil)))))))
+    (if (empty? coll) "" (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil))))))))
 
 ;; `string-split` is now a native builtin (crates/lisp/src/builtins.rs) — one O(n)
 ;; pass via Rust's `str::split`. The former pure-Brood version re-`substring`ed the

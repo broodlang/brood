@@ -299,6 +299,32 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![callable, any, list_ty], any),
         range_reduce,
     );
+    // Lazy seq-view (ADR: lazy seq-view) — the fused result of `map`/`filter`/
+    // `keep`/`remove`. `%seqview` constructs it from `[source xform]`;
+    // `%seqview-parts` returns that pair as a 2-vector for the prelude `fold`
+    // fusion / realisation; `seqview?` is the fold-family fast-path predicate.
+    // A view carries `tag = Pair` (it is the list it stands in for), hence `pair`.
+    def(
+        heap,
+        "%seqview",
+        Arity::exact(2),
+        Sig::new(vec![any, callable], pair),
+        seqview_make,
+    );
+    def(
+        heap,
+        "%seqview-parts",
+        Arity::exact(1),
+        Sig::new(vec![any], vec_ty),
+        seqview_parts,
+    );
+    def(
+        heap,
+        "seqview?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        seqview_pred,
+    );
     // `%sort-asc` is the Rust fast path for the common `(sort coll)` case
     // (ascending by `<`, no custom comparator). Avoids per-comparison Brood
     // eval overhead — the old in-Brood mergesort was ~1.5 s on 10 000 items
@@ -2784,9 +2810,36 @@ fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::Bool(le))
 }
 
-fn prim_eq(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+fn prim_eq(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, kw::EQ_PRIM)?;
-    Ok(Value::Bool(heap.equal(a, b)))
+    // Fast path: no lazy seq-view operand — the overwhelming common case (and the
+    // only one the inlined `Eq` ever defers here for non-ints). Scalar equality
+    // pays nothing.
+    if !matches!(a, Value::SeqView(_)) && !matches!(b, Value::SeqView(_)) {
+        return Ok(Value::Bool(heap.equal(a, b)));
+    }
+    // A view compares structurally as the list it stands in for — realise it (the
+    // kernel `equal` can't run a transducer). Root both operands across each
+    // realise, since `apply` can collect and move the other handle.
+    heap.root_scope(|heap| {
+        let a_r = heap.root(a);
+        let b_r = heap.root(b);
+        let a = heap.read_root(a_r);
+        let a = if matches!(a, Value::SeqView(_)) {
+            realize_seqview(heap, env, a)?
+        } else {
+            a
+        };
+        let a_r = heap.root(a);
+        let b = heap.read_root(b_r);
+        let b = if matches!(b, Value::SeqView(_)) {
+            realize_seqview(heap, env, b)?
+        } else {
+            b
+        };
+        let a = heap.read_root(a_r);
+        Ok(Value::Bool(heap.equal(a, b)))
+    })
 }
 
 /// Read two arguments as `num_bigint::BigInt`s (`Int`s promote), for the
@@ -3323,19 +3376,51 @@ fn cons(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_pair(a, b))
 }
 
-fn first(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+/// Realise any lazy seq-view among `args`, returning a fresh vec with views
+/// replaced by their realised lists (non-view args untouched). For the
+/// stringifiers/printers, whose `&Heap` printer can't run a transducer. Fast path:
+/// no view ⇒ a plain copy, no eval. Rooting: each `realize_seqview` can collect,
+/// so every input and every already-realised result is kept on the root stack.
+fn realize_seqviews(heap: &mut Heap, env: EnvId, args: &[Value]) -> Result<Vec<Value>, LispError> {
+    if !args.iter().any(|a| matches!(a, Value::SeqView(_))) {
+        return Ok(args.to_vec());
+    }
+    heap.root_scope(|heap| {
+        let in_roots: Vec<_> = args.iter().map(|&a| heap.root(a)).collect();
+        let mut out_roots: Vec<_> = Vec::with_capacity(args.len());
+        for r in &in_roots {
+            let v = heap.read_root(*r);
+            let v = if matches!(v, Value::SeqView(_)) {
+                realize_seqview(heap, env, v)?
+            } else {
+                v
+            };
+            out_roots.push(heap.root(v));
+        }
+        Ok(out_roots.iter().map(|r| heap.read_root(*r)).collect())
+    })
+}
+
+fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
         Value::Pair(p) => Ok(heap.car(p)),
         Value::Vector(id) => Ok(heap.vector(id).first().copied().unwrap_or(Value::Nil)),
         // A range is non-empty by construction, so its head is `lo`.
         Value::Range(id) => Ok(Value::Int(heap.range_parts(id).0)),
+        // A lazy seq-view realises (running its transducer) then yields the head
+        // of the resulting list. Rare — the prelude routes most consumers through
+        // `seq`/`fold`; this serves a direct `(first (map f xs))`.
+        Value::SeqView(_) => match realize_seqview(heap, env, v)? {
+            Value::Pair(p) => Ok(heap.car(p)),
+            _ => Ok(Value::Nil),
+        },
         Value::Nil => Ok(Value::Nil),
         _ => Err(LispError::wrong_type(heap, "first", "list or vector", v)),
     }
 }
 
-fn rest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
         Value::Pair(p) => Ok(heap.cdr(p)),
@@ -3349,6 +3434,11 @@ fn rest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let (lo, hi, step) = heap.range_parts(id);
             Ok(heap.alloc_range(lo + step, hi, step))
         }
+        // A lazy seq-view realises then yields the tail of the resulting list.
+        Value::SeqView(_) => match realize_seqview(heap, env, v)? {
+            Value::Pair(p) => Ok(heap.cdr(p)),
+            _ => Ok(Value::Nil),
+        },
         Value::Nil => Ok(Value::Nil),
         _ => Err(LispError::wrong_type(heap, "rest", "list or vector", v)),
     }
@@ -3394,6 +3484,48 @@ fn range_to_list(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Nil => Ok(Value::Nil),
         v => Err(LispError::wrong_type(heap, "%range->list", "range", v)),
     }
+}
+
+/// `(%seqview source xform)` — construct a lazy seq-view over `source` carrying
+/// the transducer `xform`. The prelude `map`/`filter`/`keep`/`remove` build these
+/// (composing `xform` when `source` is already a view); `fold`/`seq` fuse or
+/// realise them.
+fn seqview_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let source = arg(args, 0);
+    let xform = arg(args, 1);
+    Ok(heap.alloc_seqview(source, xform))
+}
+
+/// `(%seqview-parts sv)` — the view's `[source xform]` as a 2-element vector, for
+/// the prelude to fuse `fold` over the source or realise via the transducer.
+fn seqview_parts(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match arg(args, 0) {
+        Value::SeqView(id) => {
+            let (source, xform) = heap.seqview_parts(id);
+            Ok(heap.alloc_vector(vec![source, xform]))
+        }
+        v => Err(LispError::wrong_type(heap, "%seqview-parts", "seq-view", v)),
+    }
+}
+
+/// `(seqview? x)` — is `x` a lazy seq-view (a `map`/`filter`/… result not yet
+/// realised)? The fold-family fast-path predicate, mirroring `range?`.
+fn seqview_pred(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    Ok(Value::Bool(matches!(arg(args, 0), Value::SeqView(_))))
+}
+
+/// Realise a lazy seq-view to a concrete list. The realisation runs the view's
+/// transducer over its source, which means applying a Brood closure — so it is
+/// delegated to the prelude `%seqview-realize` (`(reverse (fold flip-cons nil
+/// sv))`, which fuses through `fold`'s seq-view branch). Resolved against the
+/// live global env so a user redefinition is honoured. The kernel uses this from
+/// the hot `first`/`rest` builtins; every other consumer realises in the prelude
+/// (via `seq`) or fuses (via `fold`).
+pub(crate) fn realize_seqview(heap: &mut Heap, env: EnvId, sv: Value) -> LispResult {
+    let f = heap
+        .env_get(heap.global(), value::intern("%seqview-realize"))
+        .ok_or_else(|| LispError::runtime("%seqview-realize is not defined".to_string()))?;
+    apply(heap, f, &[sv], env)
 }
 
 /// `(%range-reduce f acc rng)` — left-fold a range with `f` in a native counted
@@ -3826,9 +3958,10 @@ fn type_of(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 // ---------- value <-> text and I/O ----------
 
-fn str_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+fn str_concat(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let args = realize_seqviews(heap, env, args)?;
     let mut s = String::new();
-    for &a in args {
+    for &a in &args {
         s.push_str(&printer::display(heap, a));
     }
     Ok(heap.alloc_string(&s))
@@ -3860,8 +3993,12 @@ fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&s))
 }
 
-fn pr_str(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = printer::print(heap, arg(args, 0));
+fn pr_str(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let v = match arg(args, 0) {
+        sv @ Value::SeqView(_) => realize_seqview(heap, env, sv)?,
+        other => other,
+    };
+    let s = printer::print(heap, v);
     Ok(heap.alloc_string(&s))
 }
 
@@ -3908,7 +4045,8 @@ fn capture_take(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     })
 }
 
-fn print(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+fn print(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let args = realize_seqviews(heap, env, args)?;
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
     let text = parts.join(" ");
     // Divert to the capture buffer if one is active (the MCP channel must stay pure
@@ -3939,7 +4077,8 @@ fn write_stdout(s: &str) {
     }
 }
 
-fn eprint(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+fn eprint(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let args = realize_seqviews(heap, env, args)?;
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
     eprint!("{}", parts.join(" "));
     use std::io::Write;
@@ -3951,7 +4090,8 @@ fn eprint(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// string (no output). The rendering half of `print`, split out so Brood's
 /// `print`/`println` — which route the result through the dynamic `*out*` port —
 /// hand a non-stdout sink (a buffer, a process) the exact text stdout would show.
-fn render(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+fn render(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let args = realize_seqviews(heap, env, args)?;
     let parts: Vec<String> = args.iter().map(|&a| printer::display(heap, a)).collect();
     Ok(heap.alloc_string(&parts.join(" ")))
 }
@@ -8223,7 +8363,13 @@ fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let last = args.len() - 1;
     let f = args[0];
     let mut argv = args[1..last].to_vec();
-    argv.extend(heap.seq_items(args[last])?);
+    // A lazy seq-view as the spliced final arg (`(apply f (map g xs))`) must be
+    // realised first — `seq_items` can't run its transducer.
+    let tail = match args[last] {
+        sv @ Value::SeqView(_) => realize_seqview(heap, env, sv)?,
+        other => other,
+    };
+    argv.extend(heap.seq_items(tail)?);
     // Run the target through the active engine (the VM when on), so `apply`-as-a-value
     // — `(map apply …)`, `(reduce apply …)`, apply stored in data — runs its callee
     // compiled, consistent with a direct `(apply f …)` call. This is safe against the

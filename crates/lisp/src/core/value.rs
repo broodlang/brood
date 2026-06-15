@@ -412,6 +412,22 @@ pub enum Value {
     /// list it stands in for. Constructed only by `%range`, which returns `Nil`
     /// for an empty range — so a `Range` always has at least one element.
     Range(VecId),
+    /// A **lazy seq-view** — the fused, non-materialising result of `map` /
+    /// `filter` / `keep` / `remove` (compute-frontier lever 3). Backed by a
+    /// 2-element `[source xform]` vector (so it rides the `Vector` GC / region /
+    /// forwarding machinery exactly like a [`Range`]): `source` is the underlying
+    /// collection and `xform` a transducer composing every pending stage.
+    /// `fold` fuses straight over it — `(fold (xform rf) init source)` — so a
+    /// `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no
+    /// intermediate lists; `seq` (and the prelude `first`/`rest`/`count`/…)
+    /// realise it to a list on demand by running the transducer. Like `Range`,
+    /// [`tag`] reports it as a [`Tag::Pair`] so the type system treats it as the
+    /// list it stands in for. Constructed only by `%seqview`. Realising it needs
+    /// the Brood transducer (a closure), so unlike `Range` the kernel cannot
+    /// realise it inline — the pure-heap paths (equal/hash/print/message) get a
+    /// safe fallback and the prelude realises before they are reached (ADR: lazy
+    /// seq-view).
+    SeqView(VecId),
     /// An immutable map (`{ }`): key→value associations. Insertion-ordered; keys
     /// compared by structural equality, so any value can be a key. Every
     /// operation (`assoc`/`dissoc`) returns a *fresh* map (ADR-026 immutability).
@@ -588,6 +604,10 @@ pub fn tag(v: Value) -> Tag {
         // it identically. (The fold-family fast path matches `Value::Range`
         // directly in Rust, not via this tag.)
         Value::Range(_) => Tag::Pair,
+        // A lazy seq-view stands in for the list it realises to — report it as a
+        // pair, exactly like a range (the `fold` fast path matches
+        // `Value::SeqView` directly in Brood via `seqview?`, not via this tag).
+        Value::SeqView(_) => Tag::Pair,
         Value::Vector(_) => Tag::Vector,
         Value::Fn(_) => Tag::Fn,
         Value::Macro(_) => Tag::Macro,

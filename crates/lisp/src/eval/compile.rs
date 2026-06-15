@@ -878,6 +878,9 @@ fn value_is_immovable(v: Value) -> bool {
         // LOCAL, so they must be checked too (else this tripwire would wrongly pass a
         // movable LOCAL `Range`/`Transient` baked into a Const).
         Value::Range(id) => id.region() != value::LOCAL,
+        // A `SeqView` is a `VecId` too — movable when LOCAL, so it must be checked
+        // (else this tripwire would wrongly pass a movable LOCAL view in a Const).
+        Value::SeqView(id) => id.region() != value::LOCAL,
         Value::Transient(id) => id.region() != value::LOCAL,
         // Inline scalars (Int/Float/Bool/Nil), interned Sym/Keyword, and the
         // remaining handle-free kinds carry nothing the GC relocates.
@@ -2502,6 +2505,13 @@ fn dispatch(
                     .pop()
                     .expect("cur_argv non-empty (len >= 2, checked)");
                 let real = cur_argv.remove(0);
+                // A lazy seq-view as the spliced arg list must realise first —
+                // `seq_items` can't run its transducer.
+                let list = if matches!(list, Value::SeqView(_)) {
+                    crate::builtins::realize_seqview(heap, genv, list)?
+                } else {
+                    list
+                };
                 cur_argv.extend(heap.seq_items(list)?);
                 cur_callee = real;
                 continue 'apply;

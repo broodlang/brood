@@ -6718,3 +6718,46 @@ over `std/` + `tests/` stayed at 3 warnings (all the intentional non-tail recurs
 occurrence-typing body inference (the historical false-positive source). Both wait for a
 concrete consumer that justifies trading the perfect no-FP record. The bounded option
 (overloaded `(+ int int) : int` sigs) is the recommended next step if one arrives.
+
+## ADR-111 — Lazy seq-views: fusing pipelines as an opt-in combinator, `map`/`filter` stay eager
+
+**Status:** accepted (2026-06-15). Implemented: `Value::SeqView(VecId)` + the `%seqview` /
+`%seqview-parts` / `seqview?` builtins (`core/value.rs`, `core/heap.rs`, `builtins.rs`);
+prelude `lmap`/`lfilter`/`lkeep`/`lremove`/`eduction` + `fold`/`seq`/`count`/`empty?`/`join`
+view-handling (`std/prelude.blsp`); realise-at-boundary in `first`/`rest`/`prim_eq`/`apply`
++ the stringifiers, with safe fallbacks in `equal`/`hash`/printer/`to_message`. Tests:
+`tests/sequence_test.blsp` "lazy seq-views". Implements compute-frontier lever 3c.
+
+**Context.** Idiomatic `(reduce + 0 (map f (filter p (range n))))` materialises a cons list
+per stage — the `pipeline`/`strings` benchmarks' cost and a GC/memory outlier (~180 MB).
+The lever is to **fuse** the pipeline (fold straight through, no intermediate lists), modelled
+on the existing reducible `Value::Range`.
+
+**Decision.** Add a kernel `Value::SeqView(VecId)` mirroring `Value::Range` — a distinct tag
+over the vector slab, backing `[source xform]` (a transducer), `tag = Pair` so it *is* the
+list it stands for. `fold` fuses over it (`(fold (xform rf) init source)`); `seq` realises it.
+**Fusion is opt-in:** `map`/`filter`/`keep`/`remove` stay **eager**, and the fusing views are
+the new `lmap`/`lfilter`/`lkeep`/`lremove` + `eduction`.
+
+**Why not lazy `map`/`filter` by default** (the originally-scoped design). Tried it; it broke
+`nest test`. Brood code pervasively iterates `map` **for side effects** — the module loader
+(`(map require-one …)`), the test runner (`(map run-test …)`), `require` over a list — and a
+lazy view silently drops those effects unless realised. The design's "footgun is benign
+because Brood is immutable" was wrong: immutability constrains *data*, not *I/O*. Making the
+default lazy would force auditing ~180 `map`/`filter` sites and adopting a permanent "never
+map for effect" discipline — a poor trade against ADR-011 (ship the simple form; defer the
+powerful, sharp-edged one). Opt-in fusion keeps the idiom intact and the win available.
+
+**Mechanics.** Realising a view runs its transducer (a Brood closure), which the pure-heap
+paths can't do, so: `first`/`rest`/`prim_eq`/`apply` realise via a kernel→prelude bridge
+(`%seqview-realize`, GC-rooted like `%range-reduce`); the stringifiers realise their args;
+`equal`/`hash`/printer/`to_message` get safe non-panic fallbacks (identity / sentinel /
+`#<seq-view>` / a "realise it first" error) because the prelude realises before those in
+normal use. GC promote/flush/verify treat a view like a vector (its backing holds heap
+values), unlike `Range` (ints only).
+
+**Results & limits.** `pipeline` (n = 1e6): ~2.0 s / 173 MB → ~0.63 s / 13 MB (~3.3× faster,
+~13× less memory). `strings` is **not** yet fused — `join` realises the view because the
+native `%string-join` walks via `seq_items`, which can't run a transducer; full fusion needs
+a string-builder reducer (a transient buffer the transducer appends into), deferred as a
+follow-up.
