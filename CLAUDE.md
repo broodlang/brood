@@ -332,12 +332,18 @@ The language core (M1) is essentially complete: macros/quasiquote, in-language
 `try`/`catch`, maps (CHAMP trie), the string/math/sequence libraries, pattern
 matching, modules, project tooling, **dynamic variables** (`defdyn`/`binding`),
 the set-theoretic **type checker** (Steps 0–4 + Step 5 structured types — arrows,
-element types, parametric HOF results, ADR-078), a per-process tracing **GC**
+element types, parametric HOF results, ADR-078; intersections + `(map K V)` + `?A`
+type variables; **gradual checks** via `GradualTy` — `(def x …)`/return-type/
+value-position assignment checking, ADR-110), a per-process tracing **GC**
 (ADR-035), the **package manager** (ADR-037), the **self-hosted REPL in Brood**
 (ADR-048), **LSP Tier 2** (refs/rename, semantic tokens, cross-file nav), and the
-**closure-compiling VM** (now the default engine, ADR-076) are all done. The
-remaining type-system items (intersections, user-generic type variables) are
-additive and gated on a real consumer.
+**closure-compiling VM** (now the default engine, ADR-076) are all done. The checker
+is **false-positive-clean** across `std/` + `tests/` (the one remaining `nest check`
+warning class is the *intentional* non-tail recursion lint). The remaining
+type-system item — **precise body inference** (catching a value *merely wider* than a
+declared type, e.g. a `number`-returning body declared `int`) — needs overloaded
+arithmetic sigs or occurrence-typing and is the historical false-positive source, so
+it stays deferred (ADR-011) until a consumer justifies the risk.
 
 The later milestones are already underway (vertical-slice style, ADR-045/046):
 **M2 editor data model** — the `ropey`-backed `Value::Rope` kernel + the

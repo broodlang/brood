@@ -107,18 +107,22 @@ operators). The "redefinable/free/global references are `dynamic()`" rule is
 documented (the struct doc + ADR-024); no checker consumes it yet.
 **Done:** the gradual type and its derived relation exist and are unit-tested.
 
-> **Status note:** `GradualTy`/`consistent_with` now have their **first consumer** —
-> the **gradual-assignment check** on `(def x …)` against a non-arrow `(sig x T)`
-> declaration (`walk::gradual_of` + `check_def`). The *disjointness* pass over
-> `Option<Ty>` is still its own thing — a pure disjointness check genuinely doesn't
-> need `GradualTy` (an unknown is silent, which is `dynamic()`'s behaviour for free),
-> so it stays as-is. The gradual machinery earns its place precisely where
-> disjointness can't reach: an *assignment* uses **consistent subtyping**, and a
-> reference to a redefinable global with a declared type is `dynamic_within(t)` — a
-> *bounded dynamic* `Option<Ty>` (only known/unknown) structurally cannot represent.
-> So `(def count label)` with `label : string` and `count : int` is flagged (the
-> bounds are disjoint), while `(def count maybe-int-global)` defers (hot-reload
-> safe). See [`research/set-theoretic-types-in-brood.md`](research/set-theoretic-types-in-brood.md).
+> **Status note:** `GradualTy`/`consistent_with` now have **real consumers** — the
+> three **gradual checks** ([ADR-110](decisions.md), `walk::gradual_of`): (1)
+> *assignment*, `(def x …)` against a non-arrow `(sig x T)`; (2) *return type*, a
+> `(sig f (… -> R))` body's last form vs `R`; (3) *value-position globals*, a declared
+> global's type flowed into the disjointness check. The *disjointness* pass over
+> `Option<Ty>` stays its own thing — it genuinely doesn't need `GradualTy` (an unknown
+> is silent, which is `dynamic()`'s behaviour for free). The gradual machinery earns
+> its place precisely where disjointness can't reach: an *assignment* uses **consistent
+> subtyping**, and a reference to a redefinable global with a declared type is
+> `dynamic_within(t)` — a *bounded dynamic* `Option<Ty>` (only known/unknown)
+> structurally cannot represent. So `(def count label)` with `label : string` and
+> `count : int` is flagged (bounds disjoint), while `(def count maybe-int-global)`
+> defers (hot-reload safe). FP-safe by construction: over-approximated values use `∩`
+> (`dynamic`), only precise ones (literals, sig-params) use `⊆` (`stat`). See
+> [`type-annotations.md`](type-annotations.md) §The-gradual-checks and
+> [`research/set-theoretic-types-in-brood.md`](research/set-theoretic-types-in-brood.md).
 
 ### Step 3 — signatures the checker reads ✅
 A callee's signature (argument `Ty`s + result `Ty`) comes from three sources,

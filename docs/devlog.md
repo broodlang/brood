@@ -3174,3 +3174,39 @@ This is the sound frontier for "wider" detection: going further (a wider *call-r
 body, e.g. body `number` declared `int`) needs precise result types — overloaded
 arithmetic sigs or full occurrence-typing inference — which ADR-011 still defers until a
 consumer justifies the FP-risk.
+
+## 2026-06-15 — Session close: type-checker hardening + gradual typing, and what we learned
+
+A consolidating note on a session that started as "review the type system" and turned into
+a real arc. Shipped, in order: **`lambda`/`let*` as exact synonyms** (ADR-108 — they were
+documented-but-unimplemented, so the checker's "unbound: lambda" was a *true* positive);
+**three false-positive classes fixed** (bucket A — transient args, unexpandable-macro
+arguments, qualified refs to dynamically-defined namespaces); **element-type flow through the
+rest of the sequence library** (bucket B additive); and **gradual typing in three slices**
+(ADR-110) — `GradualTy`'s first consumers.
+
+The durable lessons, worth keeping:
+
+- **A disjointness checker already gets gradual behaviour for free.** An unknown is silent,
+  which is exactly `dynamic()`. So `GradualTy` adds *nothing* to the disjointness pass — it
+  earns its place only in checks with **assignment / subtyping** semantics (error-when-not-a-
+  subtype), where consistency genuinely differs from disjointness. Don't reach for the
+  gradual machinery where `Option<Ty>` already suffices.
+- **The bounded dynamic is the real capability.** `Option<Ty>` is known/unknown; it can't say
+  "unknown but numeric." `dynamic_within(t)` can — and that's what lets a redefinable global
+  with a declared type be checked (`(def count label)` flagged) while staying hot-reload safe.
+- **False-positive safety is a property of which relation you use on which type.** Inferred
+  types are sound *over-approximations*, so `⊆` over them false-positives; `∩` (disjointness)
+  never does. Rule: over-approximated value → `dynamic`/`∩`; precise value (literal, sig-typed
+  param) → `stat`/`⊆`. That single rule kept the zero-FP bar through every slice.
+- **The doc can lie; the runtime is the truth.** `lambda`/`let*` and the J1 `-j1` deadlock
+  were both "known" states that didn't match reality. Verifying against a running program (not
+  the comment) is what surfaced them.
+
+State at close: `nest check` over `std/` + `tests/` is **false-positive-clean** (the only
+warnings are the intentional non-tail recursion lint). The J1 `-j1` scheduler deadlock —
+documented mid-session — was fixed by the dirty-scheduler work and verified (`J1_SCHEDULER_BUG.md`
+marked resolved). The one deferred frontier is **precise body inference** (a value *merely
+wider* than a declared type), which needs overloaded arithmetic sigs or occurrence typing —
+the historical FP source — and stays gated on a consumer (ADR-011). Docs synced: ADR-110,
+type-annotations.md §The-gradual-checks, types.md status note, roadmap, CLAUDE.md.
