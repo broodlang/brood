@@ -6,6 +6,54 @@ Newest first. For the narrative discovery writeup of the scheduler race, see
 
 ---
 
+## KI-4 — bitset stored as a non-UTF-8 `Value::Str` corrupts the GC on promote
+
+**Status:** **root-caused 2026-06-15; fix in progress (distinct `Value::Bitset` type)** ·
+**Severity:** high (memory-unsafety / silent corruption / hard crash, reachable from pure
+Brood) · **First seen:** via the brood-life `--fair` Game-of-Life demo (the refc-shared
+`bitboard-bs` board), ~1 in 3–4 uncapped 6 s runs.
+
+### Symptom
+
+The brood-life report's `flush_oob` slab-OOB (across `map`/`vector`/`bigint`/`env`),
+raw `SIGSEGV`, or glibc `SIGABRT` ("corrupted double-linked list"). On an **armed build**
+(`-C debug-assertions=on`) it surfaces cleanly as a panic at `heap.rs:88` —
+*"shared blob bytes are valid UTF-8: Utf8Error { valid_up_to: 0 }"* — backtrace
+`Heap::string ← promote_in ← promote_map_node ← promote_env ← promote_closure ← promote ←
+spawn_impl ← builtins::spawn`.
+
+### Root cause
+
+A **bitset is a blob-backed `Value::Str` holding raw, non-UTF-8 bytes** (`bs_alloc` →
+`Heap::alloc_string_from_shared`). But `Value::Str` / `SharedBlob` carry the invariant that
+the bytes are valid UTF-8 (`blob.rs`: *"Readers may rely on this invariant"*; the accessor
+`Heap::string`, heap.rs ~88, does `from_utf8`). When a closure capturing a bitset is
+**spawned** (or `def`'d), `Heap::promote_in` (heap.rs ~2844) copies the string via
+`self.string(id).to_string()` and pushes it to the RUNTIME string slab
+(`boxcar::Vec<String>` — UTF-8 only):
+- **armed/debug:** `from_utf8(...).expect()` panics.
+- **release:** `from_utf8_unchecked` is **UB** on the bitset bytes → corrupted string in the
+  GC slabs → the report's `flush_oob` / SIGSEGV / SIGABRT downstream.
+
+One root cause, all the report's faces. `GC_STRESS` is *not* needed; the core data churn
+(bignum + map + cross-process send, verified) is otherwise GC-clean under stress+verify.
+
+### Reproduction
+
+```sh
+RUSTFLAGS="-C debug-assertions=on" cargo build --release -p nest --features brood/gui,brood/jit,brood/treesit
+cd brood-life && ./run brood --fair --for 6s   # SIM (process 2) panics in promote; see .brood_crash_dump
+```
+
+### Fix
+
+Give bitsets a distinct **`Value::Bitset`** kind (its own slab of `Arc<SharedBlob>` raw
+bytes, mirroring the `bigint` immutable-leaf slab), so a bitset is never read as UTF-8 text
+and `promote`/GC/message copy it byte-clean (the Arc, by reference — its intended
+cross-process behaviour). In progress.
+
+---
+
 ## KI-3 — RUNTIME compaction strands live VM / tree-walker constants
 
 **Status:** **fixed (2026-06-01)** · **Severity:** was high (silent data corruption /
