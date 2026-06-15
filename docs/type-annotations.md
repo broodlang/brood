@@ -7,7 +7,12 @@ slice 6 (`(and A B …)` intersections — runtime + checker), slice 7
 (`(map K V)` key/value contracts — runtime), slice 8 (`?A` type variables —
 grammar + runtime passthrough), slice 9 (`(map K V)` full checker refinement
 — `Ty::map_of`, `get`/`keys`/`vals`/`assoc` result rules), slice 10
-(`?A` `SigTerm`/`SigWithVars` unification — per-call return-type resolution).
+(`?A` `SigTerm`/`SigWithVars` unification — per-call return-type resolution),
+and the **gradual checks** — slice 11 (`(def x …)` vs a non-arrow `(sig x T)`
+value type, `GradualTy`'s first consumer), slice 12 (return-type checking +
+declared globals in value position), slice 13 (precise sig-param returns — the
+first non-disjoint "merely wider" catch). See [the gradual checks](#the-gradual-checks-slices-1113)
+and [ADR-110](decisions.md).
 
 This is Brood's answer to "can we be *more sound* given our parameters?"
 (advisory, never-gate, zero-false-positive, hot-reload, policy-in-Brood). The
@@ -136,6 +141,49 @@ and the checker flat-accepts the annotation as `Ty::Map`; and `?A` type
 variables are parsed by both runtime and checker (resolved to `any` / `Ty::ANY`
 — the static-only constraint is not yet unified at call sites). See
 `tests/contract_test.blsp` for coverage.
+
+## The gradual checks (slices 11–13)
+
+These are the first consumers of `GradualTy` (`crates/lisp/src/types/mod.rs`) — the
+*set-theoretic* gradual type `dynamic()` (ADR-024). The key realisation
+([ADR-110](decisions.md)): the existing **disjointness** pass over `Option<Ty>` gets
+gradual behaviour for free (an unknown is silent = `dynamic()`), so `GradualTy` adds
+nothing *there*. It earns its place only in a check with **assignment / subtyping**
+semantics — one that errors when a value is *not a subtype* of where it flows — because
+that's where consistency (and the gradual benefit-of-the-doubt) actually differs from
+disjointness. `walk::gradual_of` maps an expression to a `GradualTy`; `consistent_with`
+decides the check.
+
+- **Slice 11 — assignment.** A non-arrow `(sig x T)` declares `x`'s *value type*;
+  `(def x <expr>)` is checked to assign a value consistent with `T`. `(def n "hi")`
+  against `(sig n int)` flags.
+- **Slice 12 — return types + value-position globals.** A `(sig f (P… -> R))` checks the
+  body's last form yields a value consistent with `R` (`(sig f (int -> string))` with body
+  `(+ x 1)` flags — `number ∩ string = ⊥`). And `expr_ty` now surfaces a declared global's
+  type, so `(string-length g)` with `(sig g int)` is caught.
+- **Slice 13 — precise sig-param returns.** A `(sig …)`-typed parameter carries its *exact*
+  contract type, so returning one where it's *merely wider* than `R` is caught:
+  `(sig f (number -> int)) (defn f (x) x)` flags. This is the first diagnostic the
+  disjointness checker structurally can't produce.
+
+**The capability `Option<Ty>` can't express:** a redefinable global with a declared type is
+`dynamic_within(t)` — a *bounded dynamic* (`Option<Ty>` has only known/unknown). So
+`(def count label)` with `label : string`, `count : int` is flagged (`string ∩ int = ⊥`),
+which the disjointness pass — every global an untracked `None` — misses. This is exactly
+the hot-reload motivation of ADR-024: warn on a provable mismatch with the declared
+*contract*, defer when the bound merely overlaps.
+
+**The false-positive rule (why none of this regressed the zero-FP bar):** an
+over-approximated value (a call result — `(+ int int)` is typed `number`) is
+`dynamic_within(t)`, so consistency uses `∩ ≠ ⊥` and never over-warns on a widened guess
+(`(def n (+ 1 2))` vs `int` *defers*); only a **precise** value — a literal or a sig-param —
+is `stat(t)` and checked with `⊆`. Project-wide `nest check` stayed at 3 (the intentional
+recursion lint) through all three slices.
+
+**Deferred (ADR-011):** catching a wider *call-result* body (typed `number`, declared `int`)
+needs precise result types — overloaded arithmetic sigs (`(+ int int) : int`) or full
+occurrence-typing inference (the historical false-positive source). Gated on a real
+consumer; the overloaded-sig option is the bounded next step.
 
 ## Why this is the right "more sound" move for Brood
 

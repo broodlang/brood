@@ -373,12 +373,19 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   preserves the element, `(reduce + 0 xs) : number` — element types flow *through*
   `map`/`filter`/`reduce`/`fold` (per-HOF rules, no type variables). ✅ **Structural
   combinators**: `reverse`/`sort`/`sort-by`/`take`/`drop`/`take-while`/`drop-while`/
-  `cons`/`append`/`concat` all preserve/propagate element types through
-  `seq_aware_call_ty`, so `(first (reverse [1 2 3])) : int | nil` and element types
-  don't drop at a `sort` or `take` boundary. ⬜ Still: expanded curated sigs
-  (`str`/`println`/… → their result types); rest-param notation in `(sig …)` arrows;
-  `sig!` runtime enforcement (slice 2); inference through simple let-aliases;
-  intersections for overloaded fns; user-generic type variables.
+  `cons`/`append`/`concat`, plus `second`/`third`/`rest`/`but-last`/`distinct`/
+  `dedupe`/`take-last`/`drop-last`/`remove`/`keep`/`interpose`/`range` all
+  preserve/propagate element types through `seq_aware_call_ty`, so `(first (reverse
+  [1 2 3])) : int | nil` and `(+ 1 (first (rest ["a" "b"])))` is flagged — element
+  types don't drop at a `sort`/`take`/`rest` boundary. ✅ **Gradual checks** (ADR-110,
+  `GradualTy`'s first consumers): `(def x …)` vs a non-arrow `(sig x T)` value type,
+  return-type checking against `(sig f (… -> R))`, and declared globals in value
+  position — assignment semantics (consistent subtyping) where disjointness can't
+  reach, with a *bounded-dynamic* (`dynamic_within(t)`) for a redefinable global that
+  `Option<Ty>` can't express. FP-safe by construction (over-approximated → `∩`,
+  precise → `⊆`). ⬜ Still: **precise body inference** — a value *merely wider* than a
+  declared type (body typed `number`, declared `int`) needs overloaded arithmetic
+  sigs or occurrence typing (the historical false-positive source).
   Additive; gated on real need (ADR-011). Advisory throughout — never gates, never
   inhibits the dynamic language; not the TypeScript route.
 - ✅ **Opt-in type annotations + runtime contracts** (ADR-082). `(sig name (… ->

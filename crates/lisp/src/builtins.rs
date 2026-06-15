@@ -798,6 +798,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "tls-listen",
+        Arity::exact(4),
+        Sig::new(vec![string, int, string, string], socket_ty),
+        tls_listen,
+    );
+    def(
+        heap,
+        "tls-self-signed",
+        Arity::exact(1),
+        Sig::new(vec![string], list_ty),
+        tls_self_signed,
+    );
+    def(
+        heap,
         "tcp-send",
         Arity::exact(2),
         Sig::new(vec![socket_ty, string], nil_ty),
@@ -2351,6 +2365,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tcp-connect", &["host", "port"], "Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure."),
     ("tcp-listen", &["host", "port"], "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket."),
     ("tls-request", &["host", "port", "request"], "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). Returns a socket id; pair with tcp-drain. Low-level — prefer http-get."),
+    ("tls-listen", &["host", "port", "cert-pem", "key-pem"], "Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like tcp-listen, connections arrive as [:tcp-accept lsock client]; each accepted socket transparently decrypts inbound to [:tcp …] and encrypts tcp-send, so code above the transport is unchanged. Returns a socket."),
+    ("tls-self-signed", &["host"], "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it)."),
     ("tcp-send", &["sock", "s"], "Write the whole string s to sock (blocking). Text mode (default): s is sent as UTF-8. Binary mode (see tcp-set-binary): each codepoint of s must be 0–255 and is written as one raw byte. Returns nil; throws on error."),
     ("tcp-set-binary", &["sock", "on"], "Switch sock between text mode (default) and binary mode. In binary mode inbound [:tcp …] data is a byte-faithful Latin-1 string (one codepoint 0–255 per byte received) and tcp-send writes each codepoint 0–255 as one raw byte — for length-prefixed / control-byte protocols like WebSocket framing. Returns nil; throws if sock is gone or a listener."),
     ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
@@ -5941,6 +5957,33 @@ fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             LispError::runtime(format!("tcp-listen {}:{}: {}", host, port, e))
                 .with_code(crate::error::error_codes::FILE_IO),
         ),
+    }
+}
+
+fn tls_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let host = expect_string(heap, "tls-listen", arg(args, 0))?;
+    let port = socket_port("tls-listen", expect_int(heap, "tls-listen", arg(args, 1))?)?;
+    let cert = expect_string(heap, "tls-listen", arg(args, 2))?;
+    let key = expect_string(heap, "tls-listen", arg(args, 3))?;
+    let owner = crate::process::self_pid();
+    match crate::net::tls_listen(&host, port, &cert, &key, owner) {
+        Ok(id) => Ok(Value::Socket(id)),
+        Err(e) => Err(
+            LispError::runtime(format!("tls-listen {}:{}: {}", host, port, e))
+                .with_code(crate::error::error_codes::FILE_IO),
+        ),
+    }
+}
+
+fn tls_self_signed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let host = expect_string(heap, "tls-self-signed", arg(args, 0))?.to_string();
+    match crate::net::tls_self_signed(vec![host]) {
+        Ok((cert, key)) => {
+            let c = heap.alloc_string(&cert);
+            let k = heap.alloc_string(&key);
+            Ok(heap.alloc_vector(vec![c, k]))
+        }
+        Err(e) => Err(LispError::runtime(format!("tls-self-signed: {}", e))),
     }
 }
 

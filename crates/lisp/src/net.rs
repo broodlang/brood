@@ -45,8 +45,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
 use crate::core::value;
 use crate::process::{spawn_io_source, MailboxSink, Message, SubscriberHandle};
@@ -82,6 +84,34 @@ enum Sock {
     Listener {
         alive: Arc<AtomicBool>,
         port: u16,
+        owner: u64,
+    },
+    /// A TLS listening socket. Like `Listener`, but its accept thread registers each
+    /// accepted connection as a passive `TlsStream` (carrying the shared `ServerConfig`)
+    /// rather than a plaintext `Stream`.
+    TlsListener {
+        alive: Arc<AtomicBool>,
+        port: u16,
+        owner: u64,
+    },
+    /// A TLS stream. Unlike a plaintext `Stream` (whose fd is read by a reader thread and
+    /// written directly by `tcp-send`), a rustls connection's read+write share encryption
+    /// state and can't be split across threads. So one **actor thread** per connection
+    /// owns the `ServerConnection`: it decrypts inbound bytes → `[:tcp id data]`, and
+    /// encrypts outbound plaintext it receives over `out_tx`. Passive until claimed:
+    /// `pending` holds the raw materials; `tcp-controlling-process` builds the connection
+    /// and starts the actor (clearing `pending`, setting `out_tx`/`actor`).
+    TlsStream {
+        /// Connection materials held until claimed (`Some`), then `None`.
+        pending: Option<(TcpStream, Arc<ServerConfig>)>,
+        /// Outbound plaintext channel to the actor (`Some` once claimed/active).
+        out_tx: Option<Sender<Vec<u8>>>,
+        /// The actor's delivery handle, for `tcp-controlling-process` retarget.
+        actor: Option<SubscriberHandle>,
+        /// Clearing this stops the actor (which then shuts the socket down).
+        alive: Arc<AtomicBool>,
+        accepted_at: Option<Instant>,
+        binary: Arc<AtomicBool>,
         owner: u64,
     },
 }
@@ -123,20 +153,40 @@ fn reap_unclaimed(reg: &mut HashMap<u64, Sock>) {
     let now = Instant::now();
     let mut doomed = Vec::new();
     for (&id, sock) in reg.iter() {
-        if let Sock::Stream {
-            accepted_at: Some(t),
-            ..
-        } = sock
-        {
-            if now.duration_since(*t) >= ACCEPT_REAP_AFTER {
+        let stamp = match sock {
+            Sock::Stream { accepted_at, .. } => *accepted_at,
+            Sock::TlsStream { accepted_at, .. } => *accepted_at,
+            _ => None,
+        };
+        if let Some(t) = stamp {
+            if now.duration_since(t) >= ACCEPT_REAP_AFTER {
                 doomed.push(id);
             }
         }
     }
     for id in doomed {
-        if let Some(Sock::Stream { stream, .. }) = reg.remove(&id) {
+        shutdown_sock(reg.remove(&id));
+    }
+}
+
+/// Tear a socket down regardless of variant: shut a stream's fd, stop a listener's accept
+/// loop, or (for a TLS stream) shut a still-passive fd and clear `alive` so its actor
+/// thread exits and closes the connection. Idempotent; `None` is a no-op.
+fn shutdown_sock(sock: Option<Sock>) {
+    match sock {
+        Some(Sock::Stream { stream, .. }) => {
             let _ = stream.shutdown(Shutdown::Both);
         }
+        Some(Sock::Listener { alive, .. }) | Some(Sock::TlsListener { alive, .. }) => {
+            alive.store(false, Ordering::Relaxed)
+        }
+        Some(Sock::TlsStream { pending, alive, .. }) => {
+            if let Some((stream, _)) = pending {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            alive.store(false, Ordering::Relaxed);
+        }
+        None => {}
     }
 }
 
@@ -337,7 +387,39 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
             *owner = pid;
             Ok(())
         }
-        Some(Sock::Listener { .. }) => Err(invalid(
+        // A TLS stream: on the first claim, build the rustls connection and start the
+        // actor thread (which decrypts inbound → `pid` and encrypts outbound from
+        // `out_tx`); a later claim just retargets the actor's delivery.
+        Some(Sock::TlsStream {
+            pending,
+            out_tx,
+            actor,
+            alive,
+            accepted_at,
+            binary,
+            owner,
+        }) => {
+            match actor {
+                Some(h) => h.retarget(pid),
+                None => {
+                    let (tcp, config) = pending.take().ok_or_else(bad_socket)?;
+                    let conn = ServerConnection::new(config)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                    let bin = binary.clone();
+                    let al = alive.clone();
+                    let handle = spawn_io_source(pid, "brood-tls-conn", move |sink| {
+                        tls_server_loop(id, tcp, conn, rx, bin, al, sink)
+                    });
+                    *out_tx = Some(tx);
+                    *actor = Some(handle);
+                }
+            }
+            *accepted_at = None;
+            *owner = pid;
+            Ok(())
+        }
+        Some(Sock::Listener { .. }) | Some(Sock::TlsListener { .. }) => Err(invalid(
             "tcp-controlling-process: socket is a listener, not a stream",
         )),
         None => Err(bad_socket()),
@@ -353,14 +435,14 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
 pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
     let reg = reg();
     match reg.get(&id) {
-        Some(Sock::Stream { binary, .. }) => {
-            // Release so the reader thread's Acquire load (in `start_reader`) is
-            // guaranteed to observe this flip — the binary-mode switch must be visible
-            // to the reader before it decodes the next inbound chunk.
+        Some(Sock::Stream { binary, .. }) | Some(Sock::TlsStream { binary, .. }) => {
+            // Release so the reader/actor thread's Acquire load is guaranteed to observe
+            // this flip — the binary-mode switch must be visible before it decodes the
+            // next inbound chunk.
             binary.store(on, Ordering::Release);
             Ok(())
         }
-        Some(Sock::Listener { .. }) => Err(invalid(
+        Some(Sock::Listener { .. }) | Some(Sock::TlsListener { .. }) => Err(invalid(
             "tcp-set-binary: socket is a listener, not a stream",
         )),
         None => Err(bad_socket()),
@@ -371,7 +453,9 @@ pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
 /// (text mode) — `tcp-send` then falls back to UTF-8 and surfaces the real error.
 pub fn is_binary(id: u64) -> bool {
     match reg().get(&id) {
-        Some(Sock::Stream { binary, .. }) => binary.load(Ordering::Relaxed),
+        Some(Sock::Stream { binary, .. }) | Some(Sock::TlsStream { binary, .. }) => {
+            binary.load(Ordering::Relaxed)
+        }
         _ => false,
     }
 }
@@ -379,31 +463,44 @@ pub fn is_binary(id: u64) -> bool {
 /// `(tcp-send sock data)` — write all of `data` (blocking; clones the handle so
 /// the registry lock isn't held during the write).
 pub fn send(id: u64, data: &[u8]) -> std::io::Result<()> {
-    let stream = {
+    // A plaintext stream is written directly; a TLS stream's bytes go to its actor's
+    // outbound channel to be encrypted + written (the actor owns the rustls connection).
+    enum Target {
+        Plain(TcpStream),
+        Tls(Sender<Vec<u8>>),
+    }
+    let target = {
         let reg = reg();
         match reg.get(&id) {
-            Some(Sock::Stream { stream, .. }) => stream.try_clone()?,
-            Some(Sock::Listener { .. }) => {
+            Some(Sock::Stream { stream, .. }) => Target::Plain(stream.try_clone()?),
+            Some(Sock::TlsStream {
+                out_tx: Some(tx), ..
+            }) => Target::Tls(tx.clone()),
+            Some(Sock::TlsStream { .. }) => {
+                return Err(invalid(
+                    "tcp-send: TLS socket not yet claimed (tcp-controlling-process)",
+                ))
+            }
+            Some(Sock::Listener { .. }) | Some(Sock::TlsListener { .. }) => {
                 return Err(invalid("tcp-send: socket is a listener, not a stream"))
             }
             None => return Err(bad_socket()),
         }
     };
-    (&stream).write_all(data)?;
-    (&stream).flush()
+    match target {
+        Target::Plain(stream) => {
+            (&stream).write_all(data)?;
+            (&stream).flush()
+        }
+        // The actor has gone (connection closed) → surface a closed-socket error.
+        Target::Tls(tx) => tx.send(data.to_vec()).map_err(|_| bad_socket()),
+    }
 }
 
 /// `(tcp-close sock)` — shut a stream down (its reader, if any, sees EOF and
 /// exits) or stop a listener's accept loop. Idempotent.
 pub fn close(id: u64) {
-    let removed = reg().remove(&id);
-    match removed {
-        Some(Sock::Stream { stream, .. }) => {
-            let _ = stream.shutdown(Shutdown::Both);
-        }
-        Some(Sock::Listener { alive, .. }) => alive.store(false, Ordering::Relaxed),
-        None => {}
-    }
+    shutdown_sock(reg().remove(&id));
 }
 
 /// Close every socket owned by green-process `pid`. Called from the scheduler's
@@ -419,6 +516,8 @@ pub fn close_process_sockets(pid: u64) {
             let owner = match sock {
                 Sock::Stream { owner, .. } => *owner,
                 Sock::Listener { owner, .. } => *owner,
+                Sock::TlsListener { owner, .. } => *owner,
+                Sock::TlsStream { owner, .. } => *owner,
             };
             if owner == pid {
                 Some(id)
@@ -428,13 +527,7 @@ pub fn close_process_sockets(pid: u64) {
         })
         .collect();
     for id in doomed {
-        match reg.remove(&id) {
-            Some(Sock::Stream { stream, .. }) => {
-                let _ = stream.shutdown(Shutdown::Both);
-            }
-            Some(Sock::Listener { alive, .. }) => alive.store(false, Ordering::Relaxed),
-            None => {}
-        }
+        shutdown_sock(reg.remove(&id));
     }
 }
 
@@ -443,7 +536,12 @@ pub fn local_port(id: u64) -> Option<u16> {
     let reg = reg();
     match reg.get(&id)? {
         Sock::Stream { stream, .. } => stream.local_addr().ok().map(|a| a.port()),
-        Sock::Listener { port, .. } => Some(*port),
+        Sock::Listener { port, .. } | Sock::TlsListener { port, .. } => Some(*port),
+        Sock::TlsStream {
+            pending: Some((stream, _)),
+            ..
+        } => stream.local_addr().ok().map(|a| a.port()),
+        Sock::TlsStream { .. } => None,
     }
 }
 
@@ -528,6 +626,237 @@ pub fn tls_request(host: &str, port: u16, request: String, subscriber: u64) -> u
         },
     );
     id
+}
+
+// ---- TLS server (tls-listen) ----
+//
+// A rustls server connection's read+write share encryption state, so (unlike a raw fd)
+// it can't be split into a reader thread + worker-side `tcp-send`. Instead one **actor
+// thread** per accepted connection owns the `ServerConnection`: it decrypts inbound bytes
+// into `[:tcp id data]` and encrypts plaintext it receives over a channel (`tcp-send`).
+// To everything above the transport a TLS socket looks exactly like a plaintext one — the
+// same `[:tcp-accept]` / `[:tcp …]` / `tcp-send` interface — so the web stack is unchanged.
+
+/// Build a rustls `ServerConfig` from a PEM certificate chain + private key (the app
+/// supplies them; reading files/secrets is Brood-side policy).
+fn build_server_config(cert_pem: &str, key_pem: &str) -> std::io::Result<Arc<ServerConfig>> {
+    let mut cert_rd = cert_pem.as_bytes();
+    let certs = rustls_pemfile::certs(&mut cert_rd)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| invalid(&format!("tls: bad certificate PEM: {e}")))?;
+    if certs.is_empty() {
+        return Err(invalid("tls: no certificates in cert PEM"));
+    }
+    let mut key_rd = key_pem.as_bytes();
+    let key = rustls_pemfile::private_key(&mut key_rd)
+        .map_err(|e| invalid(&format!("tls: bad key PEM: {e}")))?
+        .ok_or_else(|| invalid("tls: no private key in key PEM"))?;
+    ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map(Arc::new)
+        .map_err(|e| invalid(&format!("tls: {e}")))
+}
+
+/// `(tls-self-signed names)` — generate a self-signed certificate + private key (PEM) for
+/// the given DNS `names` (e.g. `["localhost"]`). For zero-config dev TLS: pair it with
+/// `tls-listen`. Returns `(cert_pem, key_pem)`. Not for production (browsers/clients
+/// reject a self-signed cert unless told to trust it).
+pub fn tls_self_signed(names: Vec<String>) -> std::io::Result<(String, String)> {
+    let ck = rcgen::generate_simple_self_signed(names)
+        .map_err(|e| invalid(&format!("tls: self-signed cert generation failed: {e}")))?;
+    Ok((ck.cert.pem(), ck.key_pair.serialize_pem()))
+}
+
+/// `(tls-listen host port cert-pem key-pem)` — bind a TLS listener with the given PEM
+/// cert chain + key. Accepted connections are announced via `[:tcp-accept lid client]`
+/// just like `tcp-listen`; each accepted socket transparently decrypts inbound to
+/// `[:tcp id data]` and encrypts `tcp-send`. Port 0 = OS-assigned.
+pub fn tls_listen(
+    host: &str,
+    port: u16,
+    cert_pem: &str,
+    key_pem: &str,
+    subscriber: u64,
+) -> std::io::Result<u64> {
+    let config = build_server_config(cert_pem, key_pem)?;
+    let listener = TcpListener::bind((host, port))?;
+    let local = listener.local_addr()?.port();
+    listener.set_nonblocking(true)?;
+    let alive = Arc::new(AtomicBool::new(true));
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    reg().insert(
+        id,
+        Sock::TlsListener {
+            alive: alive.clone(),
+            port: local,
+            owner: subscriber,
+        },
+    );
+    spawn_io_source(subscriber, "brood-tls-accept", move |sink| {
+        tls_accept_loop(id, listener, alive, subscriber, config, sink)
+    });
+    Ok(id)
+}
+
+/// Like `accept_loop`, but registers each accepted connection as a passive `TlsStream`
+/// carrying the shared `ServerConfig`; `tcp-controlling-process` later starts its actor.
+fn tls_accept_loop(
+    lid: u64,
+    listener: TcpListener,
+    alive: Arc<AtomicBool>,
+    owner: u64,
+    config: Arc<ServerConfig>,
+    sink: &MailboxSink,
+) {
+    while alive.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let cid = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                {
+                    let mut reg = reg();
+                    reg.insert(
+                        cid,
+                        Sock::TlsStream {
+                            pending: Some((stream, config.clone())),
+                            out_tx: None,
+                            actor: None,
+                            alive: Arc::new(AtomicBool::new(true)),
+                            accepted_at: Some(Instant::now()),
+                            binary: Arc::new(AtomicBool::new(false)),
+                            owner,
+                        },
+                    );
+                    reap_unclaimed(&mut reg);
+                }
+                sink.emit(tcp_accept_msg(lid, cid));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(2))
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// The per-connection TLS actor (one thread per accepted TLS socket). Owns the rustls
+/// `ServerConnection` + `TcpStream`: decrypts inbound bytes into `[:tcp id data]`, and
+/// encrypts plaintext arriving on `out_rx` (`tcp-send`). A short socket read timeout lets
+/// it interleave reading with draining `out_rx` without a busy spin. Exits — shutting the
+/// connection and emitting `[:tcp-closed id]` — on peer close, a TLS/socket error, or
+/// `alive` being cleared (`close` / owner death).
+fn tls_server_loop(
+    id: u64,
+    mut tcp: TcpStream,
+    mut conn: ServerConnection,
+    out_rx: Receiver<Vec<u8>>,
+    binary: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+    sink: &MailboxSink,
+) {
+    // Wake at least this often to check `out_rx` / `alive`; reads return immediately when
+    // bytes arrive, so this only bounds (a) outbound latency when a `tcp-send` lands while
+    // we're blocked reading the next request, and (b) how fast a `close` is noticed. Lower
+    // = snappier, more idle wakeups per connection.
+    const POLL: Duration = Duration::from_millis(10);
+    let _ = tcp.set_read_timeout(Some(POLL));
+    let _ = tcp.set_write_timeout(Some(WRITE_TIMEOUT));
+    let mut peer_closed = false;
+    loop {
+        if !alive.load(Ordering::Relaxed) {
+            break;
+        }
+        let mut disconnected = false;
+        // 1) Outbound plaintext (tcp-send) → TLS writer.
+        loop {
+            match out_rx.try_recv() {
+                Ok(bytes) => {
+                    if conn.writer().write_all(&bytes).is_err() {
+                        disconnected = true;
+                        break;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        // 2) Flush pending TLS records (handshake output + encrypted app data).
+        while conn.wants_write() {
+            match conn.write_tls(&mut tcp) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        if disconnected || peer_closed {
+            break;
+        }
+        // 3) Read TLS bytes (blocks up to POLL), drive the handshake, deliver plaintext.
+        // We always attempt a read rather than gating on `conn.wants_read()`: after a TLS
+        // 1.3 server flight rustls reports `wants_read() == false` (it may send 0.5-RTT
+        // app data) even though the client's Finished / request is still inbound, so
+        // gating would stall the handshake. The read timeout (POLL) paces an idle socket.
+        match conn.read_tls(&mut tcp) {
+            Ok(0) => break, // peer closed the TCP connection
+            Ok(_) => match conn.process_new_packets() {
+                Ok(io) => {
+                    let n = io.plaintext_bytes_to_read();
+                    if n > 0 {
+                        let mut buf = vec![0u8; n];
+                        let mut got = 0;
+                        while got < n {
+                            match conn.reader().read(&mut buf[got..]) {
+                                Ok(0) => break,
+                                Ok(m) => got += m,
+                                Err(_) => break,
+                            }
+                        }
+                        if got > 0 {
+                            sink.emit(tcp_data_msg(id, &buf[..got], binary.load(Ordering::Acquire)));
+                        }
+                    }
+                    if io.peer_has_closed() {
+                        peer_closed = true;
+                    }
+                }
+                Err(_) => break, // TLS protocol error
+            },
+            // No data within the poll window — loop to recheck out_rx / alive.
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
+    }
+    // Graceful exit: flush any plaintext queued just before close — `tcp-send` then
+    // `tcp-close` (e.g. a `Connection: close` / error / timeout response) sets `alive`
+    // false and drops the channel's sender, but the already-sent bytes stay buffered in
+    // the channel until drained. Write them, then a TLS close_notify, before shutting the
+    // socket, so the final response isn't truncated.
+    while let Ok(bytes) = out_rx.try_recv() {
+        if conn.writer().write_all(&bytes).is_err() {
+            break;
+        }
+    }
+    if !conn.is_handshaking() {
+        conn.send_close_notify();
+    }
+    while conn.wants_write() {
+        match conn.write_tls(&mut tcp) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let _ = tcp.shutdown(Shutdown::Both);
+    sink.emit(tcp_closed_msg(id));
 }
 
 fn invalid(msg: &str) -> std::io::Error {

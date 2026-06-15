@@ -431,6 +431,13 @@ impl Ctx {
         c.sig_params.insert(sym);
         c
     }
+    /// Is `sym` a parameter seeded from a `(sig …)` declaration? Its tracked type
+    /// is then the *exact* contract type (or a guard-narrowed subset), so the
+    /// gradual checks can treat it as `stat` (precise, `⊆`) rather than an
+    /// over-approximated `dynamic`.
+    pub(super) fn is_sig_param(&self, sym: Symbol) -> bool {
+        self.sig_params.contains(&sym)
+    }
     /// After a guard narrowed this scope from `before`, return a **sig-typed
     /// param that has just become the empty type** (with the type it had in
     /// `before`), if any — i.e. a parameter whose declared type is disjoint from
