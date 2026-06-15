@@ -4035,6 +4035,14 @@ impl Heap {
         self.roots.push(v);
     }
 
+    /// Grow `roots` to `len`, filling any new slots with `Nil` — a call frame's slot
+    /// pre-fill in one `Vec::resize` instead of a per-slot `push_root` loop on the
+    /// (hot) call path. `len` must be ≥ the current length (frames only grow here).
+    pub fn extend_roots_to_nil(&mut self, len: usize) {
+        debug_assert!(len >= self.roots.len());
+        self.roots.resize(len, Value::Nil);
+    }
+
     /// Pop the most recently pushed root (the matching unwind of `push_root`).
     pub fn pop_root(&mut self) -> Option<Value> {
         self.roots.pop()

@@ -762,6 +762,23 @@ fn assign_worker() -> usize {
     best
 }
 
+/// Pick the worker a freshly **spawned** `Process` is placed on — cheaply, without
+/// the O(workers) least-loaded scan [`assign_worker`] does. The BEAM model: a process
+/// spawned from inside a worker goes on **that worker's own queue** (cache locality, and
+/// the spawner is about to keep running anyway), and work-stealing ([`try_steal`])
+/// rebalances lazily — so a spawn burst doesn't pay an O(n) `try_lock` scan per child.
+/// Off-worker (the root program on the main thread, or an overflow drainer) there is no
+/// "own" queue, so round-robin — one relaxed atomic add, still no scan. A dirty-blocked
+/// current worker (parked in a native-nested receive, §7.4) won't drain its queue, so
+/// fall back to round-robin rather than strand the child there.
+fn pick_spawn_worker() -> usize {
+    let n = WORKERS.len().max(1);
+    match CURRENT_WORKER.with(|c| c.get()) {
+        Some(w) if w < n && !WORKER_DIRTY[w].load(Ordering::Relaxed) => w,
+        _ => NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n,
+    }
+}
+
 /// Total processes spawned since program start (read by `(spawn-count)`).
 pub fn spawn_count() -> u64 {
     SPAWNED.load(Ordering::SeqCst)
@@ -1460,7 +1477,10 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
     child.set_global(EnvId::GLOBAL);
 
     ensure_workers();
-    let worker_id = assign_worker();
+    // Spawn placement is scan-free (BEAM model): local worker if we're on one, else
+    // round-robin; work-stealing rebalances. The O(workers) least-loaded `assign_worker`
+    // scan stays only on the wake/migration path (`wake_enqueue`), not the spawn hot path.
+    let worker_id = pick_spawn_worker();
     enqueue(Box::new(Process {
         pid,
         mailbox,
