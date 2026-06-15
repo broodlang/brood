@@ -150,6 +150,10 @@ crossterm = "0.29"
 # crypto provider — builds with cc + cmake.
 rustls = "0.23"
 webpki-roots = "1"
+# Server-side TLS (tls-listen): parse PEM cert/key the app provides, and rcgen
+# generates a self-signed cert for zero-config dev TLS (tls-self-signed).
+rustls-pemfile = "2"
+rcgen = "0.13"
 
 # The optional `gui` frontend's stack (see the [features] note above). All three
 # are pulled in only with `--features gui`; a default build links none of them.

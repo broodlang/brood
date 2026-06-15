@@ -1832,6 +1832,32 @@ mod tests {
     }
 
     #[test]
+    fn wider_sig_param_returned_as_narrower_is_flagged() {
+        // A sig-typed param carries its exact contract type, so returning a
+        // `number` param where the declared return is `int` is caught via the
+        // precise `⊆` path — the first non-disjoint ("merely wider") mismatch the
+        // disjointness checker structurally can't produce.
+        let w = file_warnings("(sig f (number -> int)) (defn f (x) x)");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("f: declared return type int") && m.contains("number")),
+            "a number param returned as int must warn: {w:?}"
+        );
+        // Same or narrower param, and a param narrowed by a guard, must not warn.
+        for src in [
+            "(sig g (int -> int)) (defn g (x) x)",
+            "(sig h (int -> number)) (defn h (x) x)",
+            "(sig k (number -> int)) (defn k (x) (if (int? x) x 0))",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("return type")),
+                "a consistent/narrowed param return must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
     fn declared_return_type_defers_when_consistent() {
         // (+ x 1) : number — int <: number and number ∩ int ≠ ⊥, so neither of
         // these declared returns warns (a widened body never over-warns).
