@@ -71,6 +71,13 @@ jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "de
 treesit = ["dep:tree-sitter", "dep:tree-sitter-ruby", "dep:tree-sitter-elixir"]
 
 [dependencies]
+# Allocator backend for the counting global allocator (core/alloc.rs). Brood is a
+# long-running runtime (editors, web servers) whose immutable data path-copies on
+# every update, so allocation throughput is load-bearing; mimalloc's per-thread
+# heaps cut that churn ~15-28% on alloc-heavy workloads (it holds freed pages for
+# reuse — a deliberate memory-for-speed trade, fine for a long-running app). The
+# byte-counting wrapper (ADR-043) still tallies requested sizes around it.
+mimalloc = { version = "0.1", default-features = false }
 # The tree-sitter runtime + the Ruby/Elixir grammars (feature `treesit`). All
 # three are pulled in only with `--features treesit`; a build without it links no
 # parser. The grammar crates expose a `tree_sitter_language::LanguageFn` (`LANGUAGE`)

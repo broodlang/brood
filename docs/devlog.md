@@ -3309,3 +3309,19 @@ table — removing `Transient` and adding `Bitset` makes both match the 20-varia
 Updated CLAUDE.md to state the rule absolutely (no sneaky mutable structures; assume
 immutability everywhere to stay simpler). `make test` green; clean under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` on a map-build-heavy load.
+
+## 2026-06-15 — mimalloc backend: spend memory for speed (Brood is for long-running apps)
+
+Set the counting global allocator's backend (`core/alloc.rs`) to **mimalloc** instead of system
+malloc (ADR-113). Profiling the `wordcount`/`assoc` hot path showed ~10% in `malloc`/`free`/`Drop`
+on top of the immutable path-copy `memmove` floor — Brood path-copies on every update, so alloc
+throughput is load-bearing. mimalloc's per-thread heaps cut that broadly: ~15% `wordcount`, ~28%
+`bintree` (a separate weak row), single-thread **geomean ~12× → ~9.9×**, startup unchanged (~38 ms).
+
+The trade is higher RSS (mimalloc holds freed pages: `wordcount` 54→90 MB) — accepted on the
+explicit direction that **Brood targets long-running editors/web servers, where steady-state
+speed beats peak memory** (boot time is the guardrail, and it's untouched). Reverted once over
+the RSS bump under a wrong "memory is the brand" assumption, then put back when the owner
+clarified the priority. Not vendored (33k LOC of C); normal cargo dep. The byte-counting limit
+logic (ADR-043) is unchanged. Subsumes the planned CHAMP arena (same malloc-churn target);
+orthogonal map-perf levers (`map-update`, memcpy floor) tracked for follow-up.
