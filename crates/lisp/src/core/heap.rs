@@ -4102,6 +4102,15 @@ impl Heap {
         self.runtime.version.load(Ordering::Relaxed)
     }
 
+    /// Is `sym` bound in the global table (prelude + user `def`s)? An authoritative,
+    /// non-racy read of `runtime.globals` (which is seeded with the prelude). Used by
+    /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the
+    /// fan-out race) apart from a genuinely-undefined name (a typo) — so the
+    /// scheduler-race hint only fires for the former.
+    pub fn global_defined(&self, sym: Symbol) -> bool {
+        self.runtime.globals_read().get(&sym).is_some()
+    }
+
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
         if env == EnvId::GLOBAL {
             // Dedup an unchanged hot-reload redefinition (Stage 5): if `sym` is
