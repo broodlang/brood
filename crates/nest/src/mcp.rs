@@ -809,6 +809,7 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         | Value::Socket(_)
         | Value::Subprocess(_)
         | Value::Table(_)
+        | Value::Bitset(_)
         | Value::Transient(_) => Err(format!(
             "value of kind {:?} has no JSON representation",
             value::tag(v)

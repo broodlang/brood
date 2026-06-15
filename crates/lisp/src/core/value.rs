@@ -336,6 +336,7 @@ handle!(PairId);
 handle!(VecId);
 handle!(StrId);
 handle!(BigIntId);
+handle!(BsId);
 handle!(TransientId);
 handle!(RopeId);
 handle!(ClosureId);
@@ -467,6 +468,16 @@ pub enum Value {
     /// PRELUDE/RUNTIME, never sent across processes. `type-of` is `:transient`; it
     /// is **not** a `map?`. See `Heap::transient` and the epoch guard.
     Transient(TransientId),
+    /// A **bitset** — a fixed-size immutable bit array backed by raw bytes
+    /// (`crate::core::blob::SharedBlob`), a heap leaf handle into the per-process
+    /// `bitsets` slab (mirrors [`Value::BigInt`]: an immutable leaf holding no `Value`
+    /// children). **Distinct from `Value::Str`**: a bitset's bytes are arbitrary (NOT
+    /// valid UTF-8), so it must never flow through the string accessors / the
+    /// UTF-8-only RUNTIME string slab — that is exactly the KI-4 bug. Like a large
+    /// string it shares its `Arc<SharedBlob>` across processes by reference (a refcount
+    /// bump, not a byte copy); `promote`/GC copy the Arc byte-clean. The `bitset-*`
+    /// primitives are its only operations; `type-of` is `:bitset`.
+    Bitset(BsId),
 }
 
 /// The runtime type tags — the discriminant of [`Value`] made first-class, so it
@@ -503,6 +514,7 @@ pub enum Tag {
     Subprocess,
     Transient,
     Table,
+    Bitset,
 }
 
 impl Tag {
@@ -530,6 +542,7 @@ impl Tag {
             Tag::Subprocess => "subprocess",
             Tag::Transient => "transient",
             Tag::Table => "table",
+            Tag::Bitset => "bitset",
         }
     }
 
@@ -587,6 +600,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Subprocess(_) => Tag::Subprocess,
         Value::Transient(_) => Tag::Transient,
         Value::Table(_) => Tag::Table,
+        Value::Bitset(_) => Tag::Bitset,
     }
 }
 
