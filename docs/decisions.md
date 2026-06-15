@@ -6797,3 +6797,32 @@ sole remembered-set is the `def`/env-frame *binding* barrier (ADR-013, binding m
 data). ~840 net lines removed. CLAUDE.md now states the rule absolutely so it isn't
 re-litigated. Reaffirms and hardens ADR-026; reverts the transient half of the work in
 `docs/transients.md`.
+
+## ADR-113 — mimalloc as the allocator backend (spend memory for speed; Brood targets long-running apps)
+
+**Status:** accepted (2026-06-15). `core/alloc.rs`'s `Counting` global allocator delegates to
+`mimalloc::MiMalloc` (`BACKEND`) instead of `System`; byte-counting/limits (ADR-043) unchanged.
+`mimalloc` added to the `brood` lib deps.
+
+**Context.** Brood is built for **long-running applications — editors and web servers — not
+short scripts**, so steady-state throughput matters more than peak RSS, and spending memory to
+go faster is the right trade (boot time is the one guardrail — must stay fast). Its immutable
+data path-copies on every update (a CHAMP `assoc` clones each node on the root→leaf path; a
+fresh `Value` per builtin), so allocation throughput is load-bearing. Profiling showed ~10% of
+the `wordcount`/`assoc` hot path in `malloc`/`free`/`Drop`.
+
+**Decision.** Route the counting allocator's backend through **mimalloc** (per-thread heaps +
+size-segregated free lists → ~bump-speed alloc/free). Drop-in `GlobalAlloc`, MIT, no correctness
+surface (byte counter tallies requested `Layout` sizes around it; `BROOD_MEM_LIMIT` still works;
+startup unchanged at ~38 ms). Relaxes ADR-005's dependency-free rule for genuine runtime
+infrastructure — the bar `boxcar` already cleared.
+
+**Trade.** Faster (~15% `wordcount`, ~28% `bintree`, single-thread geomean ~12× → ~9.9× off the
+fastest), at higher RSS (mimalloc holds freed pages for reuse: `wordcount` 54→90 MB). Accepted:
+for a long-running runtime that's the correct direction, and it can't be tuned to both
+(`MIMALLOC_PURGE_DELAY=0` restores low RSS but tanks throughput below system malloc). Not
+vendored (it's ~33k LOC of C); taken as a normal cargo dep.
+
+**Note.** This subsumes the once-considered in-tree CHAMP node-array arena (its purpose was the
+same malloc churn). Remaining map-perf levers (single-pass `map-update`, shrinking the path-copy
+memcpy) are orthogonal and tracked separately (`champ-map-perf`).

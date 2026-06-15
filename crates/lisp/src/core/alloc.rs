@@ -9,7 +9,11 @@
 //! allocation in the process (the interpreter included), not just Brood values.
 //! For "how much memory did this run use," that whole-process number is the one
 //! you want. The `(mem-bytes)` / `(mem-peak)` primitives in `builtins.rs` read
-//! these counters. Dependency-free (std only), per ADR-005.
+//! these counters. The wrapper itself is std-only; its backend is **mimalloc**
+//! (see [`BACKEND`]) — allocation throughput is load-bearing for a long-running,
+//! immutable, path-copying runtime, so it's the one allocator dependency we take
+//! (ADR-005's dependency-free rule relaxed for genuine runtime infrastructure,
+//! like `boxcar`).
 //!
 //! ## Memory limits (ADR-043)
 //!
@@ -34,8 +38,21 @@
 //! both on ([`init_limits_with_default`]) so an adversarial test can't take the
 //! machine down.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
+
+/// The real allocator the [`Counting`] wrapper delegates to. **mimalloc**, not
+/// the system malloc: Brood is a long-running runtime (editors, web servers) whose
+/// immutable data path-copies on every update (a CHAMP `assoc` clones each node on
+/// the root→leaf path; a fresh `Value` per builtin), so allocation throughput is
+/// load-bearing. mimalloc's per-thread heaps + size-segregated free lists turn that
+/// churn into ~bump-speed alloc/free — measured ~15% on `wordcount`, ~28% on
+/// `bintree`, broadly across every allocation-heavy path (alloc-light code and boot
+/// time are unchanged). It holds freed pages for reuse rather than returning them to
+/// the OS — a deliberate memory-for-speed trade, the right one for a long-running
+/// app. The byte-counting in [`Counting`] (ADR-043 `BROOD_MEM_LIMIT`) is unaffected:
+/// it tallies the requested `Layout` size around this backend exactly as before.
+const BACKEND: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Live-bytes accounting is **sharded** across cache-line-padded counters, one
@@ -105,7 +122,8 @@ pub const TEST_DEFAULT_HARD: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
 /// *cleanly* (catchable `E0043`) before the hard abort and far below host RAM.
 pub const TEST_DEFAULT_SOFT: usize = 1024 * 1024 * 1024; // 1 GiB
 
-/// System allocator wrapper that tallies bytes in/out and enforces [`HARD_LIMIT`].
+/// Allocator wrapper that tallies bytes in/out and enforces [`HARD_LIMIT`],
+/// delegating the actual alloc/free to [`BACKEND`] (mimalloc).
 pub struct Counting;
 
 fn record_alloc(size: usize) {
@@ -150,7 +168,7 @@ unsafe impl GlobalAlloc for Counting {
             // aborts the process. The host survives; the brood process doesn't.
             return std::ptr::null_mut();
         }
-        let ptr = System.alloc(layout);
+        let ptr = BACKEND.alloc(layout);
         if !ptr.is_null() {
             record_alloc(layout.size());
         }
@@ -158,7 +176,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout);
+        BACKEND.dealloc(ptr, layout);
         record_dealloc(layout.size());
     }
 
@@ -167,7 +185,7 @@ unsafe impl GlobalAlloc for Counting {
         if new_size > layout.size() && would_exceed_hard(new_size - layout.size()) {
             return std::ptr::null_mut();
         }
-        let new_ptr = System.realloc(ptr, layout, new_size);
+        let new_ptr = BACKEND.realloc(ptr, layout, new_size);
         if !new_ptr.is_null() {
             let old = layout.size();
             if new_size >= old {
