@@ -148,12 +148,18 @@ fn clean_peer_exit_fires_nodedown_promptly() {
     let port_a = free_port();
     let port_b = free_port();
 
-    // Node B: come up, accept A's link, stay briefly, then *return* — a clean exit
-    // that closes the socket (the `/quit` path, not a `kill`).
+    // Node B: come up, **wait until A has actually linked in** (not a blind timer —
+    // under load A's startup can outlast any fixed sleep, which would close B's
+    // listener before A connects and flake with ECONNREFUSED), give A a beat to
+    // finish `monitor-node`, then *return* — a clean exit that closes the socket
+    // (the `/quit` path, not a `kill`). Same `wait-link` coordination the
+    // `disconnect` test below uses.
     let quitter = format!(
         r#"
 (node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(sleep 1500)
+(defn wait-link () (if (empty? (nodes)) (do (sleep 25) (wait-link)) (first (nodes))))
+(wait-link)
+(sleep 200)
 "#
     );
 
