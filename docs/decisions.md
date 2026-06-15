@@ -6761,3 +6761,39 @@ values), unlike `Range` (ints only).
 native `%string-join` walks via `seq_items`, which can't run a transducer; full fusion needs
 a string-builder reducer (a transient buffer the transducer appends into), deferred as a
 follow-up.
+
+## ADR-112 — Brood data is immutable, absolutely: remove user-facing transients; `Table` is the only mutable structure
+
+**Status:** accepted (2026-06-15). Implemented: removed `Value::Transient`,
+`Tag::Transient`, the `transient`/`assoc!`/`dissoc!`/`persistent!`/`transient?`/
+`transient-get`/`transient-count`/`transient-contains?` builtins, the `transients`
+slab + its GC write barrier (`remembered_transients`) and epoch re-anchor
+(`transient_reanchor`), and the prelude callers (reverted to `into`/`%map-into` or
+immutable `assoc` folds). Kept the kernel-internal watermarked CHAMP build
+(`%map-into`/`map_from_pairs`). See devlog 2026-06-15 and `docs/transients.md`.
+
+**Context.** A user-facing transient (`Value::Transient` + `assoc!`) had been shipped
+(the "Phase 2 overruled" note in `docs/transients.md`) for fast map building. But a
+Lisp-callable, identity-mutable data structure directly contradicts ADR-026's first,
+absolute bullet — *"Lisp data is immutable. No primitive mutates a `Value`; none may be
+added."* `docs/transients.md`'s own Phase-1 section had argued exactly this and rejected
+the user-facing surface; it was overruled, then the cost showed up: the GC grew a
+transient-specific write barrier + epoch re-anchor purely to keep a mutable cell safe
+across collections.
+
+**Decision.** Immutability of Brood data is **absolute and non-negotiable**. The **only**
+mutable structure in the language is `Value::Table` (ETS — a shared store behind an opaque
+handle that deep-clones keys/values in and out, so no data value is ever aliased-and-
+mutated). No other mutable structure — transient, builder cell, mutable buffer, anything —
+may be added, regardless of build-performance appeal. Fast bulk construction is done as a
+**GC-quiet in-place build inside a single Rust builtin** that returns a fresh immutable
+`Value` (the kept `%map-into` watermark trick) — an implementation detail of *constructing*
+the value, never observable as mutation.
+
+**Consequence (the upside).** Removing the mutable transient let the GC delete the write
+barrier and epoch re-anchor that existed only for it. The minor flip's founding invariant —
+*old never points to young, no write barriers for data* — holds for every value again; the
+sole remembered-set is the `def`/env-frame *binding* barrier (ADR-013, binding mutation, not
+data). ~840 net lines removed. CLAUDE.md now states the rule absolutely so it isn't
+re-litigated. Reaffirms and hardens ADR-026; reverts the transient half of the work in
+`docs/transients.md`.
