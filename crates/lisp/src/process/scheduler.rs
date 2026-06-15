@@ -471,23 +471,48 @@ static WORKER_DIRTY: LazyLock<Vec<AtomicBool>> =
 /// clears the flag on drop. A no-op off a worker thread (the root, which owns no queue).
 /// Called by the native-nested `receive` block (`wait_for_message`).
 pub(crate) fn dirty_block() -> DirtyBlockGuard {
-    match CURRENT_WORKER.with(|c| c.get()) {
-        Some(wid) => {
-            WORKER_DIRTY[wid].store(true, Ordering::Relaxed);
-            drain_worker_queue(wid);
-            DirtyBlockGuard(Some(wid))
-        }
-        None => DirtyBlockGuard(None),
+    if !IS_EXECUTOR.with(|e| e.get()) {
+        // Root thread (or any non-executor): it blocks on its own mailbox but owns no
+        // queue and runs no other process, so it strands nothing and isn't a vanishing
+        // executor — no accounting, no re-route.
+        return DirtyBlockGuard {
+            executor: false,
+            wid: None,
+        };
+    }
+    let wid = CURRENT_WORKER.with(|c| c.get());
+    if let Some(wid) = wid {
+        // A fixed worker: exclude it from `assign_worker` and re-route its backlog so a
+        // *live* idle peer can steal it within `STEAL_BACKOFF` without spawning a drainer.
+        WORKER_DIRTY[wid].store(true, Ordering::Relaxed);
+        drain_worker_queue(wid);
+    }
+    // One fewer executor can run anything. If that was the *last* live one and work is
+    // queued behind the blocks, no fixed worker can reach it (a dirty worker won't steal,
+    // and an idle one would — but there is none) — so spawn an on-demand drainer.
+    let remaining = LIVE_EXECUTORS.fetch_sub(1, Ordering::SeqCst) - 1;
+    if remaining == 0 && STEALABLE.load(Ordering::SeqCst) > 0 {
+        spawn_overflow_drainer();
+    }
+    DirtyBlockGuard {
+        executor: true,
+        wid,
     }
 }
 
-/// Clears the current worker's dirty-blocked flag when the native-nested receive's
-/// blocking wait returns.
-pub(crate) struct DirtyBlockGuard(Option<usize>);
+/// Restores the executor accounting when a native-nested receive's blocking wait returns:
+/// clears the worker's dirty flag and re-counts it as a live executor.
+pub(crate) struct DirtyBlockGuard {
+    executor: bool,
+    wid: Option<usize>,
+}
 impl Drop for DirtyBlockGuard {
     fn drop(&mut self) {
-        if let Some(wid) = self.0 {
+        if let Some(wid) = self.wid {
             WORKER_DIRTY[wid].store(false, Ordering::Relaxed);
+        }
+        if self.executor {
+            LIVE_EXECUTORS.fetch_add(1, Ordering::SeqCst);
         }
     }
 }
@@ -611,6 +636,27 @@ static PEAK_RUNNING: AtomicUsize = AtomicUsize::new(0);
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0); // 0 = default (≈ nproc)
 static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0); // worker threads actually started
 static WORKERS_STARTED: Once = Once::new();
+
+/// Executor threads (fixed workers + on-demand overflow drainers) that are **not**
+/// currently dirty-blocked — i.e. the count able to run a runnable process *right now*.
+/// A native-nested `receive` blocks its executor thread (§7.4); when every executor is
+/// blocked this hits 0 and any work queued behind the blocks is stranded (no live thread
+/// to drain or steal it). The scheduler then spawns an [`overflow_drain`] thread — an
+/// on-demand "dirty scheduler", exactly as BEAM grows dirty schedulers — so progress is
+/// always possible. Incremented when an executor starts running and on a dirty-block
+/// wake; decremented when an executor dirty-blocks and when an overflow drainer exits.
+static LIVE_EXECUTORS: AtomicUsize = AtomicUsize::new(0);
+/// Overflow drainer threads alive right now (diagnostics + a spawn-churn guard).
+static OVERFLOW_DRAINERS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// True on a thread that runs green processes (a fixed worker or an overflow
+    /// drainer) — so [`dirty_block`] does the [`LIVE_EXECUTORS`] accounting for it. The
+    /// **root** thread (which blocks on its own mailbox but owns no queue and runs no
+    /// other process) leaves this `false`: its block strands nothing and must not be
+    /// counted as a vanishing executor.
+    static IS_EXECUTOR: Cell<bool> = const { Cell::new(false) };
+}
 
 /// One worker's run queue + the condvar that parks it when the queue is empty.
 type WorkerQueue = (Mutex<VecDeque<Box<Process>>>, Condvar);
@@ -754,20 +800,38 @@ pub fn worker_threads() -> u64 {
 /// Resolve the pool size: `BROOD_J` env override, else `set_max_parallel`'s
 /// value, else ≈ `nproc`. Called exactly once — at the `WORKERS` LazyLock
 /// init — so the env read never lands on the spawn hot path.
+///
+/// **Floored at 2.** A native-nested `receive` *blocks* its worker thread like a BEAM
+/// dirty scheduler (§7.4) instead of capturing a continuation, and `drain_worker_queue`
+/// re-routes anything queued behind it off the (now stranded) worker. With a single
+/// worker there is nowhere to re-route to — `assign_worker` hands the work back to the
+/// same dirty worker — so a process queued behind the block never runs. That deadlocks
+/// e.g. a test that spawns a child and then receives from it under `--max-parallel 1`
+/// (the spawned child is stranded; the receive times out). The pool therefore always
+/// keeps at least one spare thread to drain a dirty-blocked worker, exactly as BEAM
+/// runs dirty schedulers in addition to its normal scheduler count. `--max-parallel`
+/// still caps how many tests the framework runs *concurrently*; it just can't starve
+/// the runtime of the spare a dirty-block needs.
 fn worker_count() -> usize {
-    if let Some(s) = std::env::var_os("BROOD_J") {
-        if let Some(n) = s.to_str().and_then(|t| t.parse::<usize>().ok()) {
-            if n > 0 {
-                return n;
-            }
-        }
-    }
-    match WORKER_COUNT.load(Ordering::SeqCst) {
-        0 => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
-        n => n,
-    }
+    let requested = std::env::var_os("BROOD_J")
+        .and_then(|s| s.to_str().and_then(|t| t.parse::<usize>().ok()))
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| match WORKER_COUNT.load(Ordering::SeqCst) {
+            0 => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            n => n,
+        });
+    // The floor applies only to the real OS-thread pool. The deterministic test driver
+    // (`set_test_no_workers`) starts no threads and drives quanta by hand, so it can't
+    // dirty-block a worker and *wants* the exact requested count (e.g. the one-worker
+    // preemption test pins both processes to worker 0).
+    let floor = if TEST_NO_WORKERS.load(Ordering::SeqCst) {
+        1
+    } else {
+        2
+    };
+    requested.max(floor)
 }
 
 /// A human descriptor for a process in death/crash diagnostics: its registered
@@ -870,10 +934,19 @@ pub(super) fn enqueue(proc: Box<Process>) {
     proc.mailbox.status.store(ST_RUNNABLE, Ordering::Relaxed); // queued, awaiting a worker turn
                                                                // Count it as stealable runnable work (the `try_steal` fast-path hint). Balanced by
                                                                // the single decrement in `run_one` when it's pulled to run (by its owner or a thief).
-    STEALABLE.fetch_add(1, Ordering::Relaxed);
+                                                               // SeqCst (not Relaxed) so the dirty-block / drainer exhaustion checks reliably observe
+                                                               // this newly-queued work in the same total order as their `LIVE_EXECUTORS` updates —
+                                                               // the guarantee that work is never stranded with no live executor (see `dirty_block`).
+    STEALABLE.fetch_add(1, Ordering::SeqCst);
     let (lock, cv) = &WORKERS[wid];
     crate::core::sync::lock(lock).push_back(proc);
     cv.notify_one();
+    // If no executor is live to run this (every fixed worker is dirty-blocked), spawn an
+    // on-demand drainer. Closes the window the per-block check can't see: work woken (a
+    // timer fire, a cross-worker wake) *after* the last executor already blocked.
+    if LIVE_EXECUTORS.load(Ordering::SeqCst) == 0 {
+        spawn_overflow_drainer();
+    }
 }
 
 /// Enqueue a process that is **waking from a park** (a `receive`/timer/exit wake, or a
@@ -942,6 +1015,89 @@ fn try_steal(thief_wid: usize) -> Option<Box<Process>> {
     None
 }
 
+/// Steal one queued process from **any** worker's queue — the [`overflow_drain`] variant
+/// of [`try_steal`] (no home worker to exclude). The stolen process keeps its existing
+/// `worker_id` (a valid index, used only by `run_one` for the `WORKER_BUSY` load gauge),
+/// since the drainer owns no queue of its own. Returns `None` if nothing is stealable.
+fn try_steal_any() -> Option<Box<Process>> {
+    if STEALABLE.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let n = WORKERS.len();
+    let start = NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
+    for off in 0..n {
+        let victim = (start + off) % n;
+        let mut q = match WORKERS[victim].0.try_lock() {
+            Ok(q) => q,
+            Err(_) => continue,
+        };
+        if let Some(proc) = q.pop_back() {
+            drop(q);
+            STOLEN.fetch_add(1, Ordering::Relaxed);
+            return Some(proc); // keep its worker_id; STEALABLE decremented in run_one
+        }
+    }
+    None
+}
+
+/// Spawn an on-demand overflow drainer (ADR-100 §7.4, dirty-scheduler growth): a transient
+/// thread that runs any queued process until the pool is drained, then exits. Called when
+/// a dirty-block or an `enqueue` finds no live executor left to run stranded work. A no-op
+/// under the deterministic `TEST_NO_WORKERS` driver (it starts no threads and can't
+/// dirty-block). The drainer is counted live (`LIVE_EXECUTORS`) **before** the thread
+/// starts, so a racing second exhaustion check sees it and doesn't spawn a redundant one.
+fn spawn_overflow_drainer() {
+    if TEST_NO_WORKERS.load(Ordering::SeqCst) {
+        return;
+    }
+    LIVE_EXECUTORS.fetch_add(1, Ordering::SeqCst);
+    OVERFLOW_DRAINERS.fetch_add(1, Ordering::SeqCst);
+    let ok = std::thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(overflow_drain)
+        .is_ok()
+        || std::thread::Builder::new().spawn(overflow_drain).is_ok();
+    if !ok {
+        // Couldn't start a thread — undo the accounting rather than leave it inflated
+        // (which would suppress every future spawn and re-strand the work).
+        OVERFLOW_DRAINERS.fetch_sub(1, Ordering::SeqCst);
+        LIVE_EXECUTORS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// An on-demand "dirty scheduler" thread: drain any worker's run queue (the same steal
+/// path a fixed worker uses) until nothing is runnable, then exit. Spawned by
+/// [`spawn_overflow_drainer`] when every executor is dirty-blocked and work is stranded.
+/// Counts as a live executor while it runs (so a *further* exhaustion spawns another),
+/// and can itself dirty-block inside `run_one` (a process it runs does a native-nested
+/// receive) — that goes through `dirty_block` like any executor.
+fn overflow_drain() {
+    IS_EXECUTOR.with(|e| e.set(true));
+    // (`LIVE_EXECUTORS` was already incremented by `spawn_overflow_drainer`.)
+    loop {
+        match try_steal_any() {
+            Some(p) => run_one(p),
+            None => {
+                // Nothing runnable. Tentatively retire — but decrement-then-recheck, so a
+                // process enqueued in the same instant (whose `enqueue` saw us still live
+                // and skipped spawning) isn't stranded. Mirrors `dirty_block`'s ordering:
+                // in the SeqCst total order, either we see the new work and stay, or that
+                // `enqueue`'s `LIVE_EXECUTORS` load sees our decrement and spawns afresh.
+                if STEALABLE.load(Ordering::SeqCst) != 0 {
+                    std::thread::yield_now();
+                    continue;
+                }
+                LIVE_EXECUTORS.fetch_sub(1, Ordering::SeqCst);
+                if STEALABLE.load(Ordering::SeqCst) == 0 {
+                    OVERFLOW_DRAINERS.fetch_sub(1, Ordering::SeqCst);
+                    return;
+                }
+                LIVE_EXECUTORS.fetch_add(1, Ordering::SeqCst); // work raced in — keep draining
+            }
+        }
+    }
+}
+
 /// Test-only: when set, [`ensure_workers`] starts **no** OS worker threads, so a test
 /// can drive scheduling quanta synchronously and deterministically via
 /// [`test_drive_quanta`] (bounded by work units, not wall-clock). Inert (`false`) in
@@ -994,6 +1150,11 @@ fn ensure_workers() {
         if TEST_NO_WORKERS.load(Ordering::SeqCst) {
             return;
         }
+        // The pool's `n` fixed workers are all live executors from the moment they're
+        // started (each will run work). Seed the gauge here — not per-worker on entry —
+        // so it's correct before the first `enqueue` can observe it (which would otherwise
+        // see 0 and spawn a spurious startup drainer).
+        LIVE_EXECUTORS.store(n, Ordering::SeqCst);
         // A process body runs directly on its worker thread (ADR-100 §8.4 — no coroutine
         // stack), and nested native / tree-walked sub-calls recurse here, so the worker
         // stack must be at least `stack_budget`'s reference size (`WORKER_STACK_BYTES`),
@@ -1013,6 +1174,7 @@ fn ensure_workers() {
 
 fn worker_loop(wid: usize) {
     CURRENT_WORKER.with(|c| c.set(Some(wid)));
+    IS_EXECUTOR.with(|e| e.set(true));
     loop {
         // 1. Our own queue first (FIFO).
         //
