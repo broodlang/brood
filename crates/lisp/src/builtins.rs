@@ -3840,6 +3840,26 @@ fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         s @ Value::Str(_) => printer::display(heap, s),
         v => return Err(LispError::wrong_type(heap, "%string-join", "string", v)),
     };
+    // Streaming fast path for a lazy int range (`(join "," (range n))`): format
+    // each integer straight into the buffer in one pass — no intermediate Vec of
+    // `Value`s, no per-element string allocation. The range stays immutable; this
+    // only changes how its joined string is *constructed*.
+    if let Value::Range(id) = arg(args, 1) {
+        use std::fmt::Write;
+        let (lo, hi, step) = heap.range_parts(id);
+        let mut s = String::new();
+        let mut first = true;
+        let mut i = lo;
+        while if step > 0 { i < hi } else { i > hi } {
+            if !first {
+                s.push_str(&sep);
+            }
+            first = false;
+            let _ = write!(s, "{i}");
+            i += step;
+        }
+        return Ok(heap.alloc_string(&s));
+    }
     let items = heap.seq_items(arg(args, 1))?;
     // Rough pre-size (separators + a small per-element allowance) to avoid most
     // re-grows without a second display pass just to compute the exact length.
