@@ -1022,7 +1022,13 @@ pub(crate) fn unbound_error(heap: &Heap, sym: Symbol) -> LispError {
     // node (late-bound on the receiver, and simply not there). Don't misdirect
     // those with the prelude-race story; `unbound_namespace_hint` already treats
     // a qualified miss as a different problem.
-    if crate::process::in_green_process() && !name.contains('/') {
+    //
+    // AND only when the name is actually a **known global** (`global_defined`): if it
+    // resolves in the global table now, this unbound was a *spurious* race; if it's
+    // undefined everywhere (a typo / a macro that doesn't exist, e.g. `assert` instead
+    // of `is`), the race story is actively misleading (it cost real debugging time
+    // during the KI-4 hunt) — give the plain "unbound" error instead.
+    if crate::process::in_green_process() && !name.contains('/') && heap.global_defined(sym) {
         e.with_hint(
             "this fired inside a spawned process — if it happens only under \
              fan-out load, the scheduler may be racing prelude lookups; \

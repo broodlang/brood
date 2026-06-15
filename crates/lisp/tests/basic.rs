@@ -805,21 +805,22 @@ fn throw_and_catch() {
     assert_eq!(run("(try 1 2 3)"), "3");
 }
 
-/// The scheduler-race hint fires for unbound errors raised inside a *green*
-/// process (the under-load failure mode `docs/claude-demo-findings.md`
-/// flagged). The root thread doesn't get the hint — that's the contract
-/// `eval::unbound_error` enforces via `process::in_green_process()`.
+/// KI-4 follow-up: the scheduler-race hint fires ONLY for a *known global* that
+/// spuriously failed to resolve under fan-out (`fold`/`acc`/`%eq`) — NOT for a symbol
+/// undefined *everywhere* (a typo, or a macro that doesn't exist, e.g. `assert` instead
+/// of `is`). A misleading race hint on a plain typo sent the KI-4 GC-crash investigation
+/// down a wrong path. So a genuinely-undefined symbol in a green process now matches the
+/// root-thread case: no hint. (The hint-fires path needs a real known-global race, which
+/// isn't deterministically reproducible.) `eval::unbound_error` + `Heap::global_defined`.
 #[test]
-fn scheduler_race_hint_attaches_to_unbound_in_green_processes() {
-    // `spawn` takes an *expression* (ADR-033), so the body is the form to
-    // evaluate in the new process — not a `(fn () …)`-wrapped thunk.
+fn genuinely_undefined_in_green_process_has_no_scheduler_hint() {
+    // `spawn` takes an *expression* (ADR-033), so the body is the form to evaluate.
     let src = r#"
         (let (me (self))
-          (spawn (send me (try (no-such-fn) (catch e e))))
-          (let (msg (receive))
-            (string? (get msg :hint))))
+          (spawn (send me (try (no-such-fn) (catch e (get e :hint)))))
+          (receive))
     "#;
-    assert_eq!(run(src), "true");
+    assert_eq!(run(src), "nil");
 }
 
 /// A *qualified* unbound miss (`mod/name`) inside a green process does NOT get
