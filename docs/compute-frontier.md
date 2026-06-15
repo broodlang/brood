@@ -1,8 +1,10 @@
 # Plan — the post-JIT single-threaded compute frontier
 
-> **Status: in progress (2026-06-14). Lever 1 (matmul LICM) shipped** — see the devlog
-> entry "JIT matmul LICM"; matmul 290→250 ms (~14%), the isolated invariant-local read
-> ~7.8→~1.2 ns. Lever 2 (zero-copy messages) is next. The tier-1 JIT has shipped and the
+> **Status: in progress (2026-06-15). Lever 1 (matmul LICM) shipped — local AND global
+> hoist** — see the devlog entries "JIT matmul LICM" + "the global lever". Both invariant
+> `nth`s inlined (the local `rowa`; the global `b` via a back-edge `global_epoch` guard):
+> matmul **~241 → ~171 ms compute / ~30× gap** (was ~45×), now beating both interpreters;
+> isolated invariant read ~7.8→~1.2 ns. Lever 2 (zero-copy messages) is next. The JIT and
 > easy codegen-shaped wins are landed (geomean **19.5× → 13.5×** off the fastest runtime
 > across the single-threaded suite). This note scopes what's *left* and — importantly —
 > records that the remaining gaps are **data-structure-specific**, not the `Value`-width
@@ -39,7 +41,7 @@ NaN-boxing to close the rows below. (Tracked there; not re-opened here.)
 
 Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_IR`.
 
-### 3a. `matmul` (~45× — the largest gap; LICM shipped 2026-06-15) — **inline VectorRef via hoisted immutable base**
+### 3a. `matmul` (~30× — the largest gap; LICM local+global shipped 2026-06-15) — **inline VectorRef via hoisted immutable base**
 
 - The hot `dot` loop **already runs native** (it lowers, `define_function` succeeds, it's
   dispatched native; the high `prim2_fallback` is the one-time matrix *construction*, not
@@ -117,11 +119,14 @@ and are where the language's identity lives.
 Priority if/when this is picked up:
 
 1. **`matmul` — hoist the immutable vector base + inline `VectorRef`** (§3a, §6) —
-   **SHIPPED 2026-06-15** (see the "JIT matmul LICM" devlog entry). The hoist inlined the
-   one *invariant-local* read (`(nth rowa k)`): isolated read ~7.8 → ~1.2 ns, `matmul`
-   compute ~241 → ~212 ms. The residual two reads are a **global** (`b`, parity-unsound to
-   hoist — a `def` rebind would diverge from the VM's late binding) and the **per-`k` row**
-   (varies), so the gap stays the suite's largest (~45×, noise-sensitive denominator).
+   **SHIPPED 2026-06-15, local AND global** (see the "JIT matmul LICM" + "the global lever"
+   devlog entries). Inlined the invariant-local read (`(nth rowa k)`) *and* the global
+   (`(nth b k)`) — the global is hoisted with a back-edge `global_epoch` guard that deopts
+   on a concurrent rebind, so it stays bit-identical to the VM's late binding (the earlier
+   "parity-unsound" worry is solved by the guard). Isolated read ~7.8 → ~1.2 ns; `matmul`
+   compute ~241 → ~171 ms, now beating both interpreters. The one residual read is the
+   **per-`k` row** (varies — not hoistable), so the gap stays the suite's largest (~30×,
+   noise-sensitive denominator) — bounded ultimately by the boxed 24-byte `Value`.
 2. **zero-copy message passing** (§3c, §6) — share immutable structures by handle instead of
    deep-copying across processes; attacks the `strings` ~180 MB outlier and `spawn`/`pfib`
    message cost. Also opens **lazy combinators** as the eager-list fix.
