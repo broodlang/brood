@@ -3104,3 +3104,25 @@ gradual checks. 123 checker unit tests, 282 lib, 2163 in-language — green. Sti
 (ADR-011): branchy-body inference for *precise* return types (today's return check is
 disjointness-sound but can't catch a body merely *wider* than R), and gradual
 intersection/negation.
+
+## 2026-06-15 — Gradual typing, slice 3: precise sig-param returns (the first non-disjoint catch)
+
+A small but qualitatively new step: the gradual checks now catch a value that's *merely
+wider* than its target, not only one that's provably disjoint. The blocker for "wider"
+detection is that most inferred types are sound over-approximations (`(+ int int)` is
+typed `number`), so `⊆` over them would false-positive. The one source that's *precise*
+is a `(sig …)`-typed **parameter** — it carries its exact contract type. So `gradual_of`
+now treats a sig-param as `stat` (precise, `⊆`) instead of `dynamic` (`∩`):
+
+`(sig f (number -> int)) (defn f (x) x)` now flags — `f` returns its `number` param where
+it declared `int` (a number can be a float). `(sig g (int -> int)) (defn g (x) x)` and a
+guard-narrowed `(defn k (x) (if (int? x) x 0))` stay quiet. This is the first diagnostic
+the disjointness checker structurally can't produce — `GradualTy::stat`'s `⊆` arm doing
+real work beyond the `∩` of disjointness. A plain `let` local stays `dynamic` (its RHS
+may be an over-approximation), so no false positives — project-wide `nest check` holds at
+3. 123 checker / 282 lib / 2163 in-language — green.
+
+This is the sound frontier for "wider" detection: going further (a wider *call-result*
+body, e.g. body `number` declared `int`) needs precise result types — overloaded
+arithmetic sigs or full occurrence-typing inference — which ADR-011 still defers until a
+consumer justifies the FP-risk.

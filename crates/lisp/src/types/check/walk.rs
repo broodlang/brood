@@ -800,6 +800,13 @@ fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
         // so a global `(sig …)` doesn't apply; use its narrowed type if known.
         if ctx.is_lexical_local(s) {
             return match ctx.get(s) {
+                // A `(sig …)`-seeded param carries its *exact* contract type, so
+                // it's `stat` (precise, `⊆`): returning/assigning it where a
+                // narrower type is wanted is a real mismatch (`number` param → `int`
+                // slot). A plain `let` local's type can be an over-approximation
+                // (its RHS was a call), so it stays `dynamic` (the `∩` relation,
+                // which never over-warns on a widened type).
+                Some(t) if ctx.is_sig_param(s) => GradualTy::stat(t),
                 Some(t) => GradualTy::dynamic_within(t),
                 None => GradualTy::dynamic(),
             };
