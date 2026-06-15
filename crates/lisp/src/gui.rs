@@ -1851,6 +1851,9 @@ pub(crate) mod backend {
         /// Build (and cache) a cluster's rasterised RGBA glyph and hand back a reference —
         /// the GPU backend uploads it to a texture atlas. Same key/build/cache path as
         /// `draw_cluster`, minus the CPU blit.
+        // Prep for the `gui-gpu` glyph-atlas upload path (a later increment, see the
+        // `gui-gpu` feature note in Cargo.toml); not yet called from the CPU `gui` build.
+        #[allow(dead_code)]
         pub(crate) fn cluster_glyph(
             &mut self,
             g: &str,
