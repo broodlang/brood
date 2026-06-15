@@ -3276,3 +3276,36 @@ needs a string-builder reducer, deferred. Full suite green (2169 in-language; th
 distribution timing test — passes 3/3 in isolation). Clean under `BROOD_GC_STRESS=1
 BROOD_GC_VERIFY=1`. Tests: `tests/sequence_test.blsp` "lazy seq-views" (incl. a
 `with-out-str` guard that eager `map` runs effects while a view defers them).
+
+## 2026-06-15 — Remove user-facing transients: Brood data is immutable, full stop (only Table is mutable)
+
+Ripped out the **Phase-2 user-facing transient surface** — `Value::Transient`, the
+`transient`/`assoc!`/`dissoc!`/`persistent!`/`transient?`/`transient-get`/
+`transient-count`/`transient-contains?` builtins, and `Tag::Transient`. It was a
+Lisp-callable, identity-mutable data structure, which contradicts ADR-026's absolute
+"Lisp data is immutable; no primitive mutates a `Value`; none may be added" — exactly
+what `docs/transients.md`'s own Phase-1 section argued before being "overruled". The
+owner's rule is now unambiguous and enforced: **the only mutable structure in Brood is
+`Value::Table`** (ETS, deep-clones in/out); everything else is immutable.
+
+**Kept:** the *kernel-internal* watermarked CHAMP build (`%map-into` / `map_from_pairs`
+/ `champ_assoc`'s `watermark`) — it's an implementation detail of *constructing* a fresh
+immutable map inside one GC-quiet builtin, never a mutable `Value`. So `into`/`merge`/
+`update-vals`/`update-keys`/`select-keys` stay fast by routing through it; `merge-with`
+(read-modify-write) folds immutable `assoc`.
+
+**The simplification immutability buys (the point):** removing the mutable transient
+let the GC shed the machinery that existed *only* for it — the **transient write barrier**
+(`remembered_transients` + `remember_transient`, flushed in the minor flip and remapped
+in the major) and the **epoch re-anchor** (`transient_reanchor`). The minor flip's
+founding invariant — *old never points to young*, no write barriers for data — now holds
+for every value again; the sole remembered-set is the pre-existing `def`/env-frame
+*binding* barrier (ADR-013). Also dropped: the `transients` slab + its poison bits +
+checkpoint save/restore, `flush_transient`/`mint_transient`, and the verify/hash/equal/
+promote/message arms. Net ~250 lines and a whole class of GC edge-cases gone. (Fixed two
+latent bugs in passing: `Tag::Bitset` was missing from `ALL_TAGS` and `Tag::keyword()`'s
+table — removing `Transient` and adding `Bitset` makes both match the 20-variant enum.)
+
+Updated CLAUDE.md to state the rule absolutely (no sneaky mutable structures; assume
+immutability everywhere to stay simpler). `make test` green; clean under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` on a map-build-heavy load.

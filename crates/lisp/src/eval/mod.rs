@@ -387,17 +387,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             );
                         }
                     }
-                    // A transient is a process-local, identity-mutable build handle:
-                    // defining it as a global would promote it into the shared,
-                    // immutable RUNTIME region (its `maps` slab is LOCAL — the frozen
-                    // handle would dangle). Reject cleanly here rather than panic deep
-                    // in `promote`.
-                    if matches!(val, Value::Transient(_)) {
-                        return Err(LispError::runtime(format!(
-                            "def: cannot define a transient as a global ({}) — call (persistent! t) first",
-                            value::symbol_name(name)
-                        )));
-                    }
                     heap.env_define(root, name, val);
                     return Ok(Value::Sym(name));
                 }

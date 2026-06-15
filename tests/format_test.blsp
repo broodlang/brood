@@ -62,7 +62,7 @@
             "(some-test-form x y z) (some-result-form a b)\n  (another-test-form")))))
 
 (describe "format: assoc pairs its key/value args"
-  ;; `assoc`/`assoc!` take a collection then trailing key/value PAIRS. Broken,
+  ;; `assoc` takes a collection then trailing key/value PAIRS. Broken,
   ;; the collection rides the head line and each k/v pair sits on one body line
   ;; (the *format-pair-body* shape), not one element per line.
   (test "a broken assoc pairs key+value, collection on the head line"

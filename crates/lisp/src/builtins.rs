@@ -56,7 +56,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const pair: Ty = Ty::of(Tag::Pair);
     const vec_ty: Ty = Ty::of(Tag::Vector);
     const map_ty: Ty = Ty::of(Tag::Map);
-    const transient_ty: Ty = Ty::of(Tag::Transient);
     const pid_ty: Ty = Ty::of(Tag::Pid);
     const ref_ty: Ty = Ty::of(Tag::Ref);
     const list_ty: Ty = Ty::LIST;
@@ -452,67 +451,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![map_ty, any], map_ty),
         map_into,
-    );
-
-    // transient maps (Clojure's transient/assoc!/dissoc!/persistent!)
-    def(
-        heap,
-        "transient",
-        Arity::exact(1),
-        Sig::new(vec![map_ty], transient_ty),
-        transient,
-    );
-    def(
-        heap,
-        "assoc!",
-        Arity::exact(3),
-        Sig::new(vec![transient_ty, any, any], transient_ty),
-        transient_assoc,
-    );
-    def(
-        heap,
-        "dissoc!",
-        Arity::exact(2),
-        Sig::new(vec![transient_ty, any], transient_ty),
-        transient_dissoc,
-    );
-    def(
-        heap,
-        "persistent!",
-        Arity::exact(1),
-        Sig::new(vec![transient_ty], map_ty),
-        transient_persistent,
-    );
-    def(
-        heap,
-        "transient?",
-        Arity::exact(1),
-        Sig::new(vec![any], bool_ty),
-        transient_pred,
-    );
-    // `transient-get` / `transient-count` / `transient-contains?` — the kernel
-    // hooks the prelude's `get`/`count`/`contains?` dispatch to when handed a
-    // transient (a live transient supports lookups, Clojure-style).
-    def(
-        heap,
-        "transient-get",
-        Arity::range(2, 3),
-        Sig::with_rest(vec![transient_ty, any], any, any),
-        transient_get,
-    );
-    def(
-        heap,
-        "transient-count",
-        Arity::exact(1),
-        Sig::new(vec![transient_ty], int),
-        transient_count,
-    );
-    def(
-        heap,
-        "transient-contains?",
-        Arity::exact(2),
-        Sig::new(vec![transient_ty, any], bool_ty),
-        transient_contains,
     );
 
     // string
@@ -2347,14 +2285,6 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("map-dissoc", &["m", "k"], "A fresh map like m with key k removed."),
     ("map-pairs", &["m"], "The entries of m as a list of [k v] vectors, in insertion order."),
     ("map-count", &["m"], "The number of entries in map m. O(1) — the CHAMP root tracks its size."),
-    ("transient", &["m"], "Open a transient (mutable-while-building) copy of map m for fast assoc!/dissoc!, à la Clojure. Build it up with assoc!/dissoc! (each mutates and returns the same handle), then call persistent! to get an immutable map back. Building a big map this way is ~an order of magnitude cheaper than folding assoc over a persistent map (no path-copy per step)."),
-    ("assoc!", &["t", "k", "v"], "Set key k to v in transient t, mutating it in place and returning the same transient. Errors after persistent!. The fast counterpart to assoc on a persistent map."),
-    ("dissoc!", &["t", "k"], "Remove key k from transient t in place, returning the same transient. Errors after persistent!."),
-    ("persistent!", &["t"], "Close transient t and return its contents as a normal immutable map. After this, any assoc!/dissoc!/persistent! on t errors."),
-    ("transient?", &["x"], "True if x is a transient map (from transient), live or already persistent!-ed."),
-    ("transient-get", &["t", "k", "default"], "The value at key k in live transient t, or default (else nil). Lookups are allowed on a live transient (Clojure-style); errors after persistent!. The kernel hook get dispatches to for a transient."),
-    ("transient-count", &["t"], "The number of entries in live transient t, O(1). The kernel hook count dispatches to for a transient."),
-    ("transient-contains?", &["t", "k"], "True if live transient t has key k. The kernel hook contains? dispatches to for a transient."),
     ("string-length", &["s"], "The number of characters in string s."),
     ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length."),
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
@@ -3848,76 +3778,6 @@ fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn map_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_map(heap, "map-count", arg(args, 0))?;
     Ok(Value::Int(heap.map_size(id) as i64))
-}
-
-// ---------- transient maps ----------
-
-/// Pull a `TransientId` out of `v` or raise a self-identifying type error.
-fn expect_transient(heap: &Heap, who: &str, v: Value) -> Result<value::TransientId, LispError> {
-    expect!(heap, who, v, "transient",
-        Value::Transient(id) => id,
-    )
-}
-
-/// `(transient m)` — open a transient build over the immutable map `m`.
-fn transient(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_map(heap, "transient", arg(args, 0))?;
-    Ok(heap.alloc_transient(id))
-}
-
-/// `(assoc! t k v)` — mutate the transient in place; returns the same handle.
-fn transient_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_transient(heap, "assoc!", arg(args, 0))?;
-    heap.transient_assoc(id, arg(args, 1), arg(args, 2))
-}
-
-/// `(dissoc! t k)` — remove `k` from the transient in place; returns the handle.
-fn transient_dissoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_transient(heap, "dissoc!", arg(args, 0))?;
-    heap.transient_dissoc(id, arg(args, 1))
-}
-
-/// `(persistent! t)` — close the transient, returning its root as an immutable map.
-fn transient_persistent(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_transient(heap, "persistent!", arg(args, 0))?;
-    heap.transient_persistent(id)
-}
-
-/// `(transient? x)` — true iff `x` is a transient (regardless of live state).
-fn transient_pred(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Transient(_))))
-}
-
-/// `(transient-get t k [default])` — lookup against a live transient's root.
-fn transient_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_transient(heap, "transient-get", arg(args, 0))?;
-    let root = match heap.transient_root(id)? {
-        Value::Map(m) => m,
-        _ => unreachable!("a transient root is a Map"),
-    };
-    Ok(heap
-        .map_get(root, arg(args, 1))
-        .unwrap_or_else(|| arg(args, 2)))
-}
-
-/// `(transient-count t)` — entry count of a live transient, O(1).
-fn transient_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_transient(heap, "transient-count", arg(args, 0))?;
-    let root = match heap.transient_root(id)? {
-        Value::Map(m) => m,
-        _ => unreachable!("a transient root is a Map"),
-    };
-    Ok(Value::Int(heap.map_size(root) as i64))
-}
-
-/// `(transient-contains? t k)` — membership against a live transient's root.
-fn transient_contains(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let id = expect_transient(heap, "transient-contains?", arg(args, 0))?;
-    let root = match heap.transient_root(id)? {
-        Value::Map(m) => m,
-        _ => unreachable!("a transient root is a Map"),
-    };
-    Ok(Value::Bool(heap.map_contains(root, arg(args, 1))))
 }
 
 fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

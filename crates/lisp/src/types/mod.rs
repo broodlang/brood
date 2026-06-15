@@ -53,8 +53,8 @@ const ALL_TAGS: [Tag; 20] = [
     Tag::Rope,
     Tag::Socket,
     Tag::Subprocess,
-    Tag::Transient,
     Tag::Table,
+    Tag::Bitset,
 ];
 
 /// The number of tag atoms — derived from [`ALL_TAGS`], not hand-counted.
@@ -307,7 +307,6 @@ impl Ty {
             "rope?" => Ty::of(Tag::Rope),
             "socket?" => Ty::of(Tag::Socket),
             "subprocess?" => Ty::of(Tag::Subprocess),
-            "transient?" => Ty::of(Tag::Transient),
             "table?" => Ty::of(Tag::Table),
             // `fn?` holds for both Brood closures and Rust builtins.
             "fn?" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),

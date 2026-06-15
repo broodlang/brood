@@ -524,7 +524,6 @@ current element and `acc` is the current accumulator."
     (string? coll) (string-length coll)
     (vector? coll) (vector-length coll)
     (map? coll) (map-count coll)
-    (transient? coll) (transient-count coll)
     else (count--acc coll 0)))
 (def length count)
 
@@ -566,19 +565,16 @@ Maps look up by key; vectors, lists, and strings index by integer position
   ((coll k)
     (cond
       (map? coll) (map-get coll k nil)
-      (transient? coll) (transient-get coll k nil)
       (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) nil)
       :else (nth coll k nil)))
   ((coll k default)
     (cond
       (map? coll) (map-get coll k default)
-      (transient? coll) (transient-get coll k default)
       (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) default)
       :else (nth coll k default)))
   ((coll k & default)
     (cond
       (map? coll) (map-get coll k (first default))
-      (transient? coll) (transient-get coll k (first default))
       (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) (first default))
       :else (nth coll k (first default)))))
 
@@ -614,12 +610,10 @@ with two distinct sentinels — a present key returns its stored value both time
 an absent key returns each sentinel, and those differ. (One sentinel can't tell
 absence from a key whose *stored value* happens to equal it; two distinct ones
 can.)"
-  (if (transient? m)
-    (transient-contains? m k)
-    (let (a (map-get m k :%contains-miss-a))
-      (if (= a :%contains-miss-a)
-        (not (= (map-get m k :%contains-miss-b) :%contains-miss-b))
-        true))))
+  (let (a (map-get m k :%contains-miss-a))
+    (if (= a :%contains-miss-a)
+      (not (= (map-get m k :%contains-miss-b) :%contains-miss-b))
+      true)))
 (defn reduce-kv (f init m)
   "Fold over the entries of map `m`, calling `(f acc k v)`, starting from `init`."
   (fold (fn (acc p) (f acc (first p) (second p))) init (map-pairs m)))
@@ -630,24 +624,23 @@ can.)"
 ;; immutable (ADR-026). The builders fold with the 3-arg kernel `map-assoc` (no
 ;; per-step rest-list, unlike variadic `assoc`).
 
-;; Built through one transient (assoc! mutates owned nodes in place) instead of
-;; folding immutable `map-assoc` — same result, but no path-copy per entry. The
-;; transient is read-through (`contains?`/`get` dispatch to it), so merge-with's
-;; running combine sees prior entries.
-(defn merge--into! (t m) (if (nil? m) t (reduce-kv assoc! t m)))
+;; `into` bulk-builds through the kernel's GC-quiet CHAMP builder (`%map-into`):
+;; an implementation detail of *constructing* a fresh immutable map (no `Value` is
+;; ever mutable, no path-copy per entry), so the merge family rides it for speed
+;; while staying fully immutable.
 (defn merge (& maps)
   "A single map combining the given maps left to right; on a duplicate key the rightmost map wins. `nil` maps are skipped, so `(merge)` is `{}`."
-  (persistent! (fold merge--into! (transient {}) maps)))
+  (reduce (fn (acc m) (if (nil? m) acc (into acc m))) {} maps))
 
 ;; merge-with: on a shared key, combine with `(f existing new)` instead of replacing.
-(defn merge-with--step! (f t k v)
-  (if (contains? t k) (assoc! t k (f (get t k) v)) (assoc! t k v)))
+;; Read-modify-write per key, so it folds immutable `assoc` (each returns a fresh map).
 (defn merge-with (f & maps)
   "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped."
-  (persistent!
-    (fold (fn (t m) (if (nil? m) t (reduce-kv (fn (a k v) (merge-with--step! f a k v)) t m)))
-      (transient {})
-      maps)))
+  (fold (fn (acc m)
+          (if (nil? m) acc
+            (reduce-kv (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))) acc m)))
+    {}
+    maps))
 
 (defn update (coll k f & args)
   "A collection like `coll` with the value at key/index `k` replaced by
@@ -657,10 +650,10 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 
 (defn update-vals (m f)
   "A map like `m` with `f` applied to every value."
-  (persistent! (reduce-kv (fn (acc k v) (assoc! acc k (f v))) (transient {}) m)))
+  (into {} (map (fn (p) [(first p) (f (second p))]) (map-pairs m))))
 (defn update-keys (m f)
   "A map like `m` with `f` applied to every key (later keys win on a collision)."
-  (persistent! (reduce-kv (fn (acc k v) (assoc! acc (f k) v)) (transient {}) m)))
+  (into {} (map (fn (p) [(f (first p)) (second p)]) (map-pairs m))))
 
 (defn select-keys (m ks)
   "A map of just the entries of `m` whose key is in `ks` (keys absent from `m` are skipped)."
@@ -669,14 +662,13 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
   ;; stored value (used directly); only when that value happens to equal the
   ;; first sentinel do we disambiguate present-vs-absent with a second sentinel,
   ;; so a key stored with `nil`/`false` is still kept (contains?'s guarantee).
-  (persistent!
-    (fold (fn (acc k)
+  (into {}
+    (keep (fn (k)
             (let (v (map-get m k :%select-miss-a))
               (if (= v :%select-miss-a)
                 (let (v2 (map-get m k :%select-miss-b))
-                  (if (= v2 :%select-miss-b) acc (assoc! acc k v2)))
-                (assoc! acc k v))))
-      (transient {})
+                  (if (= v2 :%select-miss-b) nil [k v2]))
+                [k v])))
       ks)))
 
 (defn zipmap (ks vs)
@@ -1621,10 +1613,11 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
 (defn into (to from)
   "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
   (cond
-    ;; Map target: build via the transient kernel hook (docs/transients.md) —
-    ;; mutates only build-local trie nodes, so O(result-nodes) allocation, not
-    ;; O(n) fresh path-copies. A map `from` is read as its entries first
-    ;; (`%map-into` takes a list/vector of `[k v]`, not a map).
+    ;; Map target: build via the kernel's GC-quiet CHAMP builder (`%map-into`) —
+    ;; an implementation detail of *constructing* a fresh immutable map (it writes
+    ;; only build-local trie nodes inside one GC-quiet builtin; no `Value` is ever
+    ;; mutable), so O(result-nodes) allocation, not O(n) fresh path-copies. A map
+    ;; `from` is read as its entries first (`%map-into` takes a list/vector of `[k v]`).
     (map? to) (%map-into to (if (map? from) (map-pairs from) from))
     ;; `append to from` is always a list (fold-of-flip-cons), so we re-vectorise.
     ;; That's an extra O(n) pass — acceptable; the previous code silently

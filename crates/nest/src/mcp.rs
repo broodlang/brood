@@ -813,8 +813,7 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         | Value::Subprocess(_)
         | Value::Table(_)
         | Value::Bitset(_)
-        | Value::SeqView(_)
-        | Value::Transient(_) => Err(format!(
+        | Value::SeqView(_) => Err(format!(
             "value of kind {:?} has no JSON representation",
             value::tag(v)
         )),

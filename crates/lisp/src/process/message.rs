@@ -268,16 +268,6 @@ fn to_message_rec(
         // so many processes share one store. Valid across this runtime; not
         // node-portable (the wire codec rejects it).
         Value::Table(id) => Message::Table(id),
-        Value::Transient(_) => {
-            // A transient is a process-local, identity-mutable build handle (its
-            // root maps slab is LOCAL). Deep-copying it across processes would
-            // both break identity-mutation and dangle the watermark. Make it
-            // persistent first and send the resulting immutable map.
-            return Err(LispError::type_err(
-                "cannot send a transient in a message; call (persistent! t) and \
-                 send the resulting map",
-            ));
-        }
     })
 }
 

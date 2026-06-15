@@ -1,9 +1,18 @@
 # Design note — internal transients for fast map building
 
-**Status:** implemented (Phase 1 — bulk build). Supersedes the
-externally-suggested "user-facing transients" sketch. The read-modify-write case
-(`frequencies`/`group-by`/the Conway tally) remains deferred and is the open
-follow-up question (see "Deferred" below). Not yet an ADR.
+**Status (updated 2026-06-15):** Phase 1 (the **kernel-internal** watermarked CHAMP
+build behind `%map-into` / `map_from_pairs`) is the live, blessed design and remains.
+**Phase 2 — the user-facing `Value::Transient` + `transient` / `assoc!` / `dissoc!` /
+`persistent!` surface — has been REMOVED** (see devlog 2026-06-15). It was a
+Lisp-callable, identity-mutable data structure, which violates ADR-026's absolute
+"Lisp data is immutable; no primitive mutates a `Value`; none may be added" — exactly
+what *this note's own Phase-1 section argued*. The owner's rule is now unambiguous:
+**the only mutable structure in Brood is `Value::Table`**; everything else is
+immutable. Fast bulk building lives entirely inside the kernel (Phase 1), never as a
+mutable value the language can observe. The read-modify-write builders (`merge-with`)
+fold immutable `assoc`; the non-RMW ones (`merge`/`update-vals`/`update-keys`/
+`select-keys`) route through `into`/`%map-into`. The history below is kept for the
+rationale — treat the "Phase 2 shipped — overruled" update as reverted.
 
 **Landed:** `champ_assoc` is parameterized over a `watermark: Option<usize>`
 (copy-on-write when `None`; transient in-place when `Some`); `Heap::map_from_pairs`
