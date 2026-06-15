@@ -3152,3 +3152,33 @@ gradual checks. 123 checker unit tests, 282 lib, 2163 in-language — green. Sti
 (ADR-011): branchy-body inference for *precise* return types (today's return check is
 disjointness-sound but can't catch a body merely *wider* than R), and gradual
 intersection/negation.
+
+## 2026-06-15 — JIT LICM, the global lever: hoist an invariant *global* vector's base + epoch-guard the back-edge
+
+Extends the matmul LICM to the second hot read, `(nth b k)`, where `b` is a **global**
+(`matmul`'s `dot`). A global is loop-invariant within a no-call arm — only another
+process's `def` can change it — so its element base can be resolved once at entry and the
+read inlined, exactly like the invariant *local* (`rowa`). The wrinkle the local case
+didn't have: the VM re-reads a global every iteration (late binding), so a naive hoist
+would diverge if the global were rebound mid-loop.
+
+- **Detection** (Node level): `invariant_global_vecs` collects globals read as the vector
+  operand of a `Node::Prim2{op: VectorRef, a: Global/GlobalIc}`.
+- **Hoist**: at entry, resolve each such global (`brood_rt_global` → words; unbound ⇒
+  `error`), then its element base (`brood_rt_vector_base` → ptr/len; non-vector ⇒ `deopt`),
+  and capture `global_epoch`. A new `Op::HoistedVec { ptr, len, w0, w1, w2 }` carries both
+  the base (for the inline read) and the resolved words (for any non-`VectorRef` use, where
+  it behaves exactly like `Op::Handle`). A `GlobalIc{sym}` for a hoisted global pushes it
+  with **no** per-iteration global read.
+- **Parity guard**: on the loop back-edge, re-check `global_epoch`; if it changed (a
+  concurrent `def`), **deopt** so the VM re-runs the loop against the live binding — keeping
+  it bit-identical to the VM's late binding. (Tighter than the once-per-entry guard the
+  inlined operators already rely on; the no-call gate means only another process can trip
+  it, and single-process compute loops never do.)
+
+Same `hoist_safe` (no-alloc/no-call) gate as the local hoist, so the boxcar/LOCAL storage
+can't relocate mid-run. Measured: `matmul` wall ~0.25 → ~0.21 s (the `b` read of 2 residual
+inlined; the per-`k` row read can't hoist). Verified: matmul + a global-vector hot-reload
+program are JIT==tree-walker bit-identical (the reload correctly picks up the redefined
+vector on the next call), `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean, full in-language
+suite green under `--features jit`, both feature builds compile.

@@ -89,6 +89,7 @@ impl Jit {
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
+        builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         Jit {
             module: JITModule::new(builder),
@@ -366,6 +367,21 @@ pub unsafe extern "C" fn brood_rt_vector_base(
             std::ptr::null()
         }
     }
+}
+
+/// The process global-rebind epoch ([`Heap::global_epoch`]). Used by the JIT's
+/// global-vector hoist: a no-call arm captures the epoch at entry, then re-checks it on
+/// each loop back-edge and **deopts** if it changed — so hoisting a global's element base
+/// out of the loop stays bit-identical to the VM's per-iteration late binding (a `def`
+/// rebinding the global from another process bumps the epoch → the arm deopts and the VM
+/// re-runs against the live binding). Checking on the back-edge (not per read) is enough:
+/// a deopt always re-runs from the current frame on the VM.
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> i64 {
+    (*heap).global_epoch() as i64
 }
 
 /// Base pointer of the operand-stack/`roots` buffer. JIT'd code calls this once at

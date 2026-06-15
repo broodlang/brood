@@ -4467,6 +4467,74 @@ fn invariant_param_slots(body: &Node, nrequired: usize) -> Vec<bool> {
     inv
 }
 
+/// Free **global** symbols read as the *vector* operand of a `(nth …)` / `vector-ref`
+/// (`Node::Prim2 { op: VectorRef, a: Global/GlobalIc }`). A global is loop-invariant
+/// within a no-call arm (only another process's `def` can change it, caught by the
+/// back-edge epoch guard), so its element base can be hoisted out of the loop exactly
+/// like an invariant local vector (§matmul LICM, the global lever — `matmul`'s `(nth b k)`).
+#[cfg(feature = "jit")]
+fn invariant_global_vecs(node: &Node, out: &mut std::collections::HashSet<Symbol>) {
+    if let Node::Prim2 {
+        op: PrimOp::VectorRef,
+        a,
+        ..
+    } = node
+    {
+        match &**a {
+            Node::Global(s) | Node::GlobalIc { sym: s, .. } => {
+                out.insert(*s);
+            }
+            _ => {}
+        }
+    }
+    match node {
+        Node::If(a, b, c) => {
+            invariant_global_vecs(a, out);
+            invariant_global_vecs(b, out);
+            invariant_global_vecs(c, out);
+        }
+        Node::Do(xs) | Node::Vector(xs) => {
+            for x in xs.iter() {
+                invariant_global_vecs(x, out);
+            }
+        }
+        Node::Map(kvs) => {
+            for (k, v) in kvs.iter() {
+                invariant_global_vecs(k, out);
+                invariant_global_vecs(v, out);
+            }
+        }
+        Node::Call { callee, args, .. } => {
+            invariant_global_vecs(callee, out);
+            for x in args.iter() {
+                invariant_global_vecs(x, out);
+            }
+        }
+        Node::SelfCall { args, .. } => {
+            for x in args.iter() {
+                invariant_global_vecs(x, out);
+            }
+        }
+        Node::LetBind { binds, body } => {
+            for (_, n) in binds.iter() {
+                invariant_global_vecs(n, out);
+            }
+            invariant_global_vecs(body, out);
+        }
+        Node::MakeClosure { captures, .. } => {
+            for (_, n) in captures.iter() {
+                invariant_global_vecs(n, out);
+            }
+        }
+        Node::Prim2 { a, b, .. } => {
+            invariant_global_vecs(a, out);
+            invariant_global_vecs(b, out);
+        }
+        Node::Prim1 { a, .. } => invariant_global_vecs(a, out),
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
+    }
+}
+
 /// Compile `arm`'s chunk to a native `extern "C" fn(heap: *mut Heap, base: i64) -> i64`
 /// for the Step-A int subset, or `None` to bail to the VM. The compiled fn reads its
 /// frame slots from `roots[base..]`, computes in registers, **boxes the result into
@@ -4536,6 +4604,14 @@ pub(crate) fn jit_lower_arm(
                 }
             }
         }
+    }
+    // The global lever: globals read as a `(nth GLOBAL idx)` vector operand. A global is
+    // loop-invariant within this (no-call) arm; we resolve its element base once at entry
+    // and guard the back-edge on `global_epoch` so a concurrent `def` rebind deopts (keeping
+    // it bit-identical to the VM's late binding). Same `hoist_safe` gate as the local hoist.
+    let mut hoist_globals: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+    if hoist_safe {
+        invariant_global_vecs(&arm.body, &mut hoist_globals);
     }
     // Per-slot "holds an f64" flag, for picking float vs integer arith on each op.
     // Seeded from the tier-time profile (params; `slot_tags[k] == TAG_FLOAT`) and
@@ -4853,6 +4929,15 @@ pub(crate) fn jit_lower_arm(
     let vbase_id = m
         .declare_function("brood_rt_vector_base", Linkage::Import, &vbase_sig)
         .ok()?;
+    // brood_rt_global_epoch(heap) -> i64: the process global-rebind epoch, for the
+    // back-edge guard that keeps a hoisted global vector bit-identical to the VM's late
+    // binding (deopt if the global was rebound). Only declared/used when hoisting a global.
+    let mut gepoch_sig = m.make_signature();
+    gepoch_sig.params.push(AbiParam::new(ptr_ty));
+    gepoch_sig.returns.push(AbiParam::new(types::I64));
+    let gepoch_id = m
+        .declare_function("brood_rt_global_epoch", Linkage::Import, &gepoch_sig)
+        .ok()?;
 
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
@@ -4871,6 +4956,7 @@ pub(crate) fn jit_lower_arm(
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
+    let gepoch_ref = m.declare_func_in_func(gepoch_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
     let has_cons = code.iter().any(|i| {
@@ -4949,7 +5035,20 @@ pub(crate) fn jit_lower_arm(
         usize,
         (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value),
     > = std::collections::HashMap::new();
-    if !hoist_slots.is_empty() {
+    // Hoisted global vectors: sym → (ptr, len, w0, w1, w2). The word triple is the global's
+    // entry-resolved `Value` (for any non-`VectorRef` use); the ptr/len drive the inline
+    // element read. `entry_epoch` is the `global_epoch` at entry, re-checked on the back-edge.
+    type HoistedGlobal = (
+        cranelift_codegen::ir::Value,
+        cranelift_codegen::ir::Value,
+        cranelift_codegen::ir::Value,
+        cranelift_codegen::ir::Value,
+        cranelift_codegen::ir::Value,
+    );
+    let mut hoisted_global: std::collections::HashMap<Symbol, HoistedGlobal> =
+        std::collections::HashMap::new();
+    let mut entry_epoch: Option<cranelift_codegen::ir::Value> = None;
+    if !hoist_slots.is_empty() || !hoist_globals.is_empty() {
         let len_slot = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             8,
@@ -4976,6 +5075,33 @@ pub(crate) fn jit_lower_arm(
             b.switch_to_block(cont);
             let vlen = b.ins().load(types::I64, MemFlags::new(), len_addr, 0);
             hoisted.insert(slot, (ptr, vlen));
+        }
+        // Resolve each hoisted global once (sorted for deterministic codegen). Unbound ⇒
+        // `error` (matches the VM's unbound-global error); non-vector ⇒ `deopt`.
+        let mut gsyms: Vec<Symbol> = hoist_globals.iter().copied().collect();
+        gsyms.sort_unstable();
+        for sym in gsyms {
+            let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+            let symv = b.ins().iconst(types::I32, sym as i64);
+            let c = b.ins().call(glob_ref, &[heap, out_addr, symv]);
+            let status = b.inst_results(c)[0];
+            let okb = b.create_block();
+            b.ins().brif(status, error, &[], okb, &[]);
+            b.switch_to_block(okb);
+            let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+            let w1 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            let c = b.ins().call(vbase_ref, &[heap, w0, w1, w2, len_addr]);
+            let ptr = b.inst_results(c)[0];
+            let cont = b.create_block();
+            b.ins().brif(ptr, cont, &[], deopt, &[]);
+            b.switch_to_block(cont);
+            let vlen = b.ins().load(types::I64, MemFlags::new(), len_addr, 0);
+            hoisted_global.insert(sym, (ptr, vlen, w0, w1, w2));
+        }
+        if !hoisted_global.is_empty() {
+            let c = b.ins().call(gepoch_ref, &[heap]);
+            entry_epoch = Some(b.inst_results(c)[0]);
         }
     }
     b.ins().jump(leader_block[0].unwrap(), &[]);
@@ -5132,6 +5258,19 @@ pub(crate) fn jit_lower_arm(
             cranelift_codegen::ir::Value,
             cranelift_codegen::ir::Value,
         ),
+        // A hoisted invariant **global vector** (matmul LICM, the global lever): its
+        // resolved `Value` words (`w0..w2`, like a `Handle` — used for any non-`VectorRef`
+        // consumer) PLUS its element storage base (`ptr`, `len`), resolved **once** at the
+        // arm entry. A `(nth thisglobal idx)` reads `ptr + idx*STRIDE` inline instead of
+        // calling `brood_rt_vector_ref`; the back-edge epoch guard deopts if the global was
+        // rebound, keeping it bit-identical to the VM's per-iteration late binding.
+        HoistedVec {
+            ptr: cranelift_codegen::ir::Value,
+            len: cranelift_codegen::ir::Value,
+            w0: cranelift_codegen::ir::Value,
+            w1: cranelift_codegen::ir::Value,
+            w2: cranelift_codegen::ir::Value,
+        },
     }
     let done_block = leader_block[len]?;
     // Store an unboxed scalar `Op::Int` value into frame slot `k`, boxing it as `Int` or
@@ -5213,6 +5352,9 @@ pub(crate) fn jit_lower_arm(
                 [tag, v, zero]
             }
             Op::Handle(w0, w1, w2) => [w0, w1, w2],
+            // A hoisted global vector used as a whole `Value` (any non-`VectorRef`
+            // consumer): its entry-resolved words move verbatim, exactly like a `Handle`.
+            Op::HoistedVec { w0, w1, w2, .. } => [w0, w1, w2],
         }
     };
     // Store the three words of a `Value` into frame slot `dst`.
@@ -5236,6 +5378,16 @@ pub(crate) fn jit_lower_arm(
             Op::Bool(v) => v,
             Op::Slot(k) => load_slot_int(b, k as i64),
             Op::Handle(w0, w1, _) => {
+                let tagb = b.ins().band_imm(w0, 0xff);
+                let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
+                let cont = b.create_block();
+                b.ins().brif(is_int, cont, &[], deopt, &[]);
+                b.switch_to_block(cont);
+                w1
+            }
+            // A hoisted global vector used as an int (a vector value isn't one) — tag-check
+            // its word like a `Handle` and deopt; sound, never expected to fire.
+            Op::HoistedVec { w0, w1, .. } => {
                 let tagb = b.ins().band_imm(w0, 0xff);
                 let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
                 let cont = b.create_block();
@@ -5308,7 +5460,7 @@ pub(crate) fn jit_lower_arm(
                     .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
                 b.ins().bitcast(types::F64, MemFlags::new(), bits)
             }
-            Op::Int(_) | Op::Bool(_) | Op::Handle(..) => {
+            Op::Int(_) | Op::Bool(_) | Op::Handle(..) | Op::HoistedVec { .. } => {
                 b.ins().jump(deopt, &[]);
                 let dead = b.create_block();
                 b.switch_to_block(dead);
@@ -5394,6 +5546,12 @@ pub(crate) fn jit_lower_arm(
             set_slot_bool(dst, bl);
         }
         Op::Handle(w0, w1, w2) => {
+            store_words(b, dst, [w0, w1, w2]);
+            set_slot_float(dst, false);
+            set_slot_bool(dst, false);
+        }
+        Op::HoistedVec { w0, w1, w2, .. } => {
+            // Stored as a whole `Value` (its entry-resolved words), like a `Handle`.
             store_words(b, dst, [w0, w1, w2]);
             set_slot_float(dst, false);
             set_slot_bool(dst, false);
@@ -5529,26 +5687,40 @@ pub(crate) fn jit_lower_arm(
                 // unbound symbol parks an error and exits via `error` (outcome 3). The
                 // resolved value is an arbitrary `Value`, so it's a `Handle`.
                 Inst::Global(s) | Inst::GlobalIc { sym: s, .. } => {
-                    let sym = b.ins().iconst(types::I32, *s as i64);
-                    let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
-                    let c = if let Inst::GlobalIc { site, .. } = &code[j] {
-                        let site_v = b.ins().iconst(types::I32, *site as i64);
-                        b.ins().call(globic_ref, &[heap, out_addr, sym, site_v])
+                    // Hoisted invariant global vector: push the entry-resolved base + words
+                    // (no per-iteration global read). The back-edge epoch guard deopts on a
+                    // rebind, so this stays bit-identical to the VM's late binding. Falls
+                    // through to the normal loop tail like the resolved-`Handle` path.
+                    if let Some(&(ptr, len, w0, w1, w2)) = hoisted_global.get(s) {
+                        stack.push(Op::HoistedVec {
+                            ptr,
+                            len,
+                            w0,
+                            w1,
+                            w2,
+                        });
                     } else {
-                        b.ins().call(glob_ref, &[heap, out_addr, sym])
-                    };
-                    let status = b.inst_results(c)[0];
-                    let cont = b.create_block();
-                    b.ins().brif(status, error, &[], cont, &[]);
-                    b.switch_to_block(cont);
-                    let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-                    let w1 = b
-                        .ins()
-                        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                    let w2 = b
-                        .ins()
-                        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-                    stack.push(Op::Handle(w0, w1, w2));
+                        let sym = b.ins().iconst(types::I32, *s as i64);
+                        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        let c = if let Inst::GlobalIc { site, .. } = &code[j] {
+                            let site_v = b.ins().iconst(types::I32, *site as i64);
+                            b.ins().call(globic_ref, &[heap, out_addr, sym, site_v])
+                        } else {
+                            b.ins().call(glob_ref, &[heap, out_addr, sym])
+                        };
+                        let status = b.inst_results(c)[0];
+                        let cont = b.create_block();
+                        b.ins().brif(status, error, &[], cont, &[]);
+                        b.switch_to_block(cont);
+                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let w1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let w2 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        stack.push(Op::Handle(w0, w1, w2));
+                    }
                 }
                 Inst::Call {
                     argc,
@@ -5726,10 +5898,34 @@ pub(crate) fn jit_lower_arm(
                     } else if matches!(op, PrimOp::VectorRef) {
                         // `(vector-ref v i)` / inlined `(nth v i)`: map is `[0,1]`, so
                         // source 0 (`aa`) is the vector, source 1 (`bb`) the index.
-                        let vec = read_words(&mut b, aa_op);
-                        let idx = read_words(&mut b, bb_op);
-                        let h = vector_ref(&mut b, vec, idx);
-                        stack.push(h);
+                        if let Op::HoistedVec { ptr, len, .. } = aa_op {
+                            // Hoisted invariant global vector: inline `ptr + idx*STRIDE`
+                            // (no slab-lookup call). Index tag-checks to int (deopt else);
+                            // out-of-range deopts so the VM gives `nth`'s exact result.
+                            let idx = as_int(&mut b, bb_op);
+                            let oob = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
+                            let cont = b.create_block();
+                            b.ins().brif(oob, deopt, &[], cont, &[]);
+                            b.switch_to_block(cont);
+                            let off = b.ins().imul_imm(idx, STRIDE);
+                            let elem = b.ins().iadd(ptr, off);
+                            let w0 = b.ins().load(types::I64, MemFlags::new(), elem, 0);
+                            let w1 =
+                                b.ins()
+                                    .load(types::I64, MemFlags::new(), elem, PAYLOAD_OFFSET as i32);
+                            let w2 = b.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                elem,
+                                PAYLOAD_OFFSET as i32 + 8,
+                            );
+                            stack.push(Op::Handle(w0, w1, w2));
+                        } else {
+                            let vec = read_words(&mut b, aa_op);
+                            let idx = read_words(&mut b, bb_op);
+                            let h = vector_ref(&mut b, vec, idx);
+                            stack.push(h);
+                        }
                     } else if op_is_float(aa_op) || op_is_float(bb_op) {
                         // Float arith/compare (an operand is a float). `pick` selects f64
                         // values the same as i64.
@@ -5930,6 +6126,15 @@ pub(crate) fn jit_lower_arm(
                                     (PAYLOAD_OFFSET as i32 + 8, w2),
                                 ]);
                             }
+                            // A hoisted global vector passed as a self-call arg — moves its
+                            // three entry-resolved words verbatim, exactly like a `Handle`.
+                            Op::HoistedVec { w0, w1, w2, .. } => {
+                                vals.push(vec![
+                                    (0, w0),
+                                    (PAYLOAD_OFFSET as i32, w1),
+                                    (PAYLOAD_OFFSET as i32 + 8, w2),
+                                ]);
+                            }
                             // A float arg — box as Value::Float (TAG_FLOAT + bits). The
                             // next iteration reads it back via `as_f64` (tag-checked).
                             Op::Float(v) => {
@@ -5960,6 +6165,20 @@ pub(crate) fn jit_lower_arm(
                     // valid. (`car`/`rest` don't allocate, so non-cons arms skip it.)
                     if has_cons {
                         b.ins().call(sp_ref, &[heap]);
+                    }
+                    // Global-vector hoist guard: if any global was rebound since entry
+                    // (`global_epoch` changed — only possible via another process's `def`,
+                    // since this arm makes no Brood call), deopt so the VM re-runs the loop
+                    // against the live binding. Keeps a hoisted global bit-identical to the
+                    // VM's per-iteration late binding. Frame slots already hold the next
+                    // iteration's args, so the VM resumes there.
+                    if let Some(entry_ep) = entry_epoch {
+                        let now = b.ins().call(gepoch_ref, &[heap]);
+                        let now_ep = b.inst_results(now)[0];
+                        let changed = b.ins().icmp(IntCC::NotEqual, now_ep, entry_ep);
+                        let ck = b.create_block();
+                        b.ins().brif(changed, deopt, &[], ck, &[]);
+                        b.switch_to_block(ck);
                     }
                     // Preemption (ADR-027): poll the reduction budget on the back-edge. On
                     // yield, deopt to `preempt` (return 2) — the frame slots already hold the
