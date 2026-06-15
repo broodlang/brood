@@ -2,8 +2,22 @@
 
 > **Status (2026-06-09): landed — `let`-bindings, return-via-roots, the hybrid operand
 > model, and `cons`/`car`/`cdr`.** The JIT now fires on real list code, not just
-> arithmetic. **Remaining: Brood→Brood calls** (`Inst::Call`) — see §6. This doc is the
-> pickup reference; it assumes `docs/jit-stage1.md` (the tier-1 int JIT) as background.
+> arithmetic.
+>
+> **Update (2026-06-15): Brood→Brood calls (`Inst::Call`) are DONE** — §6's "remaining"
+> work shipped. `brood_rt_call_slow` is implemented (no longer `unimplemented!`) and
+> `jit_dispatch_call` does full **native-to-native call linking** through the call-site IC
+> (epoch-guarded), so a recursive callee like `fib` runs entirely native (verified:
+> `jit_native` + ~30M `jit_link_done`, zero deopt). **The current frontier is per-call
+> dispatch *overhead*, not "calls bail":** profiling `fib` shows ~69% of time in
+> `jit_dispatch_call` itself (the IC probe + per-call Arc clone + several Acquire atomic
+> loads + the `roots`-Vec frame setup/teardown), only ~14% in the compiled arm. BeamAsm
+> resolves a local call to a compile-time label + a register frame; Brood re-validates the
+> target and rebuilds a heap-`Vec` frame every call. Leaning that protocol (drop the
+> per-call Arc clone, `resize` the nil-fill, fewer atomics) and — the bigger lever — *true
+> inlining* (splice the callee, no call protocol at all) is the next work. See §6.
+
+> This doc is the pickup reference; it assumes `docs/jit-stage1.md` (the tier-1 int JIT) as background.
 
 Everything here lives behind `--features jit`. The codegen is `jit_lower_arm` in
 `crates/lisp/src/eval/compile.rs`; the runtime callbacks are in
@@ -99,7 +113,13 @@ A moving collector relocates handles; the rules that keep the JIT correct:
 allocates a pair per iteration, so the verifier walks the whole live graph at every
 collection.
 
-## 6. Remaining: Brood→Brood calls (the payoff)
+## 6. Brood→Brood calls — SHIPPED (the payoff)
+
+> **DONE (2026-06-15).** Everything below is implemented: `Inst::Call` lowers, `brood_rt_call_slow`
+> is real (not `unimplemented!`), and `jit_dispatch_call` native-to-native links through the
+> call-site IC. The remaining work is *overhead*, not *coverage* — see the top-of-file 2026-06-15
+> note (profiling: ~69% of `fib` is in `jit_dispatch_call`'s per-call protocol). The plan-text
+> below is kept for historical context.
 
 A body that calls a *helper* (`(f (g x))`, `(map h xs)` open-coded, etc.) is the common
 real-code shape and currently **bails** (any `Inst::Call` is out of subset). Plan:

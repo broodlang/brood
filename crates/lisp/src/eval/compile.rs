@@ -2572,10 +2572,8 @@ fn push_frame(
     // Pre-allocate the whole frame as nil: every slot (params, optionals, rest, and
     // the body's `let`/`letrec` binders) must exist before anything writes it via
     // `set_root_at` — including a real `&optional` default whose body may bind its
-    // own `let` slots.
-    for _ in 0..arm.nslots {
-        heap.push_root(Value::Nil);
-    }
+    // own `let` slots. One `resize` rather than a per-slot push loop (call hot path).
+    heap.extend_roots_to_nil(base + arm.nslots);
     // Consume ALL provided args into their (now-rooted) slots FIRST, before any
     // default is evaluated: a default's eval can collect, which would strand the
     // still-live `args` slice (LOCAL handles) if it were read afterwards.
@@ -6629,9 +6627,7 @@ pub(crate) fn jit_dispatch_call(
                     }
                 }
                 heap.truncate_roots(stage_base + argc);
-                for _ in argc..arm.nslots {
-                    heap.push_root(Value::Nil);
-                }
+                heap.extend_roots_to_nil(stage_base + arm.nslots);
                 let base = stage_base;
                 // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
                 // `jit_lower_arm`, living for the process in `GLOBAL_JIT`; the frame is set
