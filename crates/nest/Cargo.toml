@@ -28,3 +28,6 @@ clap = { version = "4", features = ["derive"] }
 # real project workload (e.g. brood-edit redisplay) through `nest test`/`run`.
 # Off by default — zero cost.
 perf-stats = ["brood/perf-stats"]
+# Forward the JIT (ADR-101) so `nest test`/`run` can exercise a real project
+# workload through the JIT. Mirrors cli; off by default — zero cost when absent.
+jit = ["brood/jit"]
