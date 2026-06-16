@@ -15,7 +15,9 @@
 > resolves a local call to a compile-time label + a register frame; Brood re-validates the
 > target and rebuilds a heap-`Vec` frame every call. Leaning that protocol (drop the
 > per-call Arc clone, `resize` the nil-fill, fewer atomics) and — the bigger lever — *true
-> inlining* (splice the callee, no call protocol at all) is the next work. See §6.
+> inlining* (splice the callee, no call protocol at all) is the next work — **scoped in
+`docs/jit-optimizing-tier.md`** (the per-call protocol is now ~40% of `fib`/`spawn`; that
+doc plans the Cranelift inline-cache direct call + true inlining to remove it). See §6.
 
 > This doc is the pickup reference; it assumes `docs/jit-stage1.md` (the tier-1 int JIT) as background.
 

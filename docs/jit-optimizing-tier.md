@@ -1,0 +1,147 @@
+# JIT optimizing tier — killing the per-call protocol (scope)
+
+> **Status: SCOPE / design (2026-06-16).** Not yet implemented. This is the plan for the
+> next big JIT lever after the tier-2 template JIT (`docs/jit-tier2.md`) and the two 2026-06-16
+> call-path wins (`e672cee` no-clone fast-link, `eebfbd3` shared native code across processes).
+> Background assumed: `docs/jit-tier2.md` (the hybrid operand model + the Brood→Brood call ABI).
+
+## 1. The problem this solves
+
+After native-to-native linking + the no-clone fast-link + shared-arm code, the two hottest
+benchmarks (`fib`, `spawn`) are **bound by the per-call dispatch protocol**, not the compiled
+body. Re-profiled `spawn` (0.17s): `jit_dispatch_call` 29.6%, `brood_jit_arm_0` (the actual fib
+body) 16%, `brood_rt_push` 5.5%, `brood_rt_call_slow` 4.8% — i.e. **~40% is the protocol**. `fib`
+is the same shape. The protocol is shared by every Brood→Brood call, so cutting it pays off across
+`fib`/`pfib`/`spawn`/`nqueens`/any call-heavy code at once.
+
+### What a single non-tail call costs today (the `Inst::Call` lowering, `compile.rs:~5732`)
+
+1. **Stage operands** `[callee?, arg0..argc-1]` onto `roots` — **one `brood_rt_push` FFI call per
+   operand** (`compile.rs:5834`; the callback is `jit/mod.rs:410`, a `push_root`).
+2. **`brood_rt_call_slow`** (FFI, `jit/mod.rs:477`) → **`jit_dispatch_call`** (`compile.rs:~6560`):
+   the IC probe (`vm_call_ic_fast_link`), `truncate_roots` + `extend_roots_to_nil` to lay out the
+   callee frame, env save/restore, `jit_native_depth` bump, `transmute` + call the callee's native
+   `fn(*mut Heap, base)`, then outcome handling (0=ok/3=err/1,2,4=deopt-preempt-tail).
+3. **`brood_rt_roots_base`** (FFI) to re-fetch the (possibly relocated) frame base afterward
+   (`compile.rs:5860`).
+
+So every call crosses the FFI boundary **2 + argc times** and runs a chunk of Rust dispatch — even
+on the fast (no-clone, epoch-current, native-linked) path. The compiled callee body is often
+*smaller* than this wrapper (fib's body is 16% vs the protocol's 40%).
+
+## 2. Two distinct techniques (often conflated as "inlining")
+
+**A. Cranelift-emitted inline-cache + direct native call (BeamAsm-style).** Keep the *call*, but
+emit the whole dispatch **inside the JIT'd arm in Cranelift IR** instead of trampolining out to
+Rust: load the call site's cached `(callee_code_ptr, epoch)`, guard it (`epoch == global_epoch` &&
+ptr matches the cached callee), lay the args into the callee frame, and `call_indirect` the callee's
+native entry directly. On a guard miss, branch to the existing slow path (`brood_rt_call_slow`). This
+**removes the `brood_rt_push`/`call_slow`/`roots_base` FFI boundaries and the Rust-side per-call
+dispatch** for the hot (monomorphic, epoch-current) case — which is ~100% of `fib`/`spawn` calls.
+It does **not** remove the call itself (the callee still runs as its own frame), so it works for
+**recursive** callees with no unrolling. Medium effort, broad payoff, lower risk (no body splicing).
+
+**B. True inlining (splicing).** For a call to a statically-known callee, copy the callee's lowered
+body into the caller's arm, allocating the callee's slots in the caller's frame. **Removes the call
+entirely** — no frame setup, no dispatch, no protocol. Clean and total for **non-recursive / leaf**
+callees (`(defn sq (x) (* x x))` in a hot loop). For a **recursive** callee (`fib`, nqueens `check`)
+it becomes **bounded unrolling**: inline N levels, then emit a real call (technique A) for depth > N
+— so you pay the protocol every N levels instead of every level (an N× reduction, not elimination).
+Higher effort; recursion-unroll + slot accounting + inlining heuristics are the cost.
+
+**Recommendation: do A first, then B.** A is the foundation (a direct native call site is what B's
+"depth > N" fallback emits anyway), delivers the bulk of the `fib`/`spawn` win on its own (kills the
+FFI boundaries + Rust dispatch for the recursive hot path), and is far lower risk. B then layers on
+top for leaf/helper calls and bounded recursion.
+
+## 3. Why the hard parts are already mostly handled here
+
+- **Hot-reload / deopt safety is FREE.** `global_epoch` is `runtime.version`, bumped on **any** `def`
+  and on RUNTIME compaction (`heap.rs`). The arm's `compile_epoch == global_epoch` guard (`jit_tier`)
+  already invalidates a JIT'd arm on any def — *including a redefinition of an inlined/inline-called
+  callee or its operators*. So an arm that inlines `g` (B) or hard-links `g`'s code (A) is
+  automatically re-tiered when `g`, `+`, `<`, … are redefined. **No new invalidation machinery** —
+  the existing per-arm epoch guard covers callee changes because the epoch is global. (The IC guard
+  for A must still re-check the callee *identity* per call in case the *call site* now resolves to a
+  different function at the same epoch — same `(sym, argc, epoch)` validation `vm_call_ic_probe`
+  already does.)
+- **GC discipline is the existing per-arm discipline** (`docs/jit-tier2.md §5`). A spliced callee
+  body (B) or an inline-dispatched call (A) is still one arm: handles live across the call/safepoint
+  must be in `roots`/slots, not registers — exactly the handle-spill the `Inst::Call` lowering does
+  today (`compile.rs:5806`). For B the callee's slots extend the caller's `nslots` (GC-visible,
+  nil-init'd by `push_frame` like any frame slot). `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` is the gate.
+- **The native code is position-independent + shareable** (proven by `eebfbd3`): it embeds only
+  immediates + epoch-guarded globals and lives in the process-lifetime `GLOBAL_JIT` module. So a
+  `call_indirect` to a callee's code ptr (A) is sound across processes/threads, and the shared
+  `jit_code_cache` already maps `(closure_id, argc) → (code, epoch)` — **A can read the callee's
+  code ptr straight from there** (or from the call-site IC).
+
+## 4. The genuinely new work
+
+- **Compile-time callee resolution.** B (and A's "bake the callee ptr at compile time" variant) needs
+  to resolve a call's `head` symbol → callee closure → its `CompiledArm` **in the background
+  compiler thread**. Today `JIT_COMPILER` receives `(arm, slot_tags)` only; it would also need the
+  runtime `Arc` (to read `runtime.globals` + the shared `jit_code_cache`). Plumbing change, bounded.
+  *A's pure-IC variant avoids this* — it reads the cached ptr at **run time** from the IC the
+  interpreter already populates, so no compile-time resolution is needed for the first increment.
+- **Emitting the frame setup in Cranelift (A).** Replicate `jit_dispatch_call`'s `truncate_roots` +
+  `extend_roots_to_nil` + arg placement as IR. The `roots` `Vec` is `{ptr,len,cap}`; the JIT already
+  reads `roots_base`. Writing slots inline means reading `roots.ptr`/`len`, bounds/capacity check,
+  store the arg words, bump `len` — with a slow-path call to a `reserve` helper only when capacity is
+  exceeded (rare). This is the fiddliest IR; a conservative first cut can still call **one** helper
+  (`brood_rt_setup_frame`) that does the truncate/extend, keeping only the `call_indirect` inline —
+  that alone removes `call_slow` + the Rust dispatch + per-arg `push`.
+- **Recursion-unroll bound + inlining heuristics (B).** A depth/size budget: inline callees with
+  body-size ≤ K, recursion unroll depth ≤ N (tune like `TAIL_CALL_MIN_WORK` / `jit_spill_reserve`
+  were). Must be deterministic (same arm → same lowering, for the differential + journal-resume).
+- **Polymorphic call sites (B/A phase 3).** HOF closures (`reduce`/`map` over a Brood fn — the
+  nqueens/sort path) have a *computed* head: the IC is monomorphic-in-practice but not static. Handle
+  with a guarded speculative inline/direct-call + deopt to the slow path on a guard miss. Defer.
+
+## 5. Phasing (each phase ships + commits independently, gates green)
+
+- **Phase 0 — A, run-time-IC variant.** Emit in Cranelift: load the call-site IC's cached
+  `(code, epoch)`; guard `epoch == global_epoch` + callee-identity; `call_indirect` direct; miss →
+  existing `brood_rt_call_slow`. Keep the frame setup in one helper at first. Removes the FFI
+  boundaries + Rust dispatch for the hot path. **Expected: the bulk of the `fib`/`spawn` protocol
+  win.** No compile-time callee resolution, no splicing — lowest risk.
+- **Phase 1 — A, inline frame setup.** Move `truncate`/`extend`/arg-store into IR (slow-path
+  `reserve` helper only on capacity miss). Removes `brood_rt_push` + `roots_base`.
+- **Phase 2 — B, leaf inlining.** Splice non-recursive callees with body-size ≤ K (needs compile-time
+  callee resolution via the runtime `Arc`). Helps helper-call-heavy code; foundation for unrolling.
+- **Phase 3 — B, bounded recursive unrolling.** Inline a recursive callee to depth N, falling back to
+  a Phase-0 direct call at the leaf. Helps `fib`/`nqueens`.
+- **Phase 4 — speculative/polymorphic** inline for HOF-closure call sites (guard + deopt). Helps
+  `reduce`/`map`/`sort`/nqueens. Highest risk; defer until 0–3 are banked.
+
+## 6. Risk + validation (non-negotiable, per increment)
+
+HIGH risk — this is moving-GC JIT codegen. Per `docs/jit-tier2.md §7` + CLAUDE.md, **every increment**:
+`cargo test --features jit --test jit` (the JIT≡VM differential — add a warmed case per new call
+shape) **under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`**; `--test differential` (VM≡tree-walker);
+`--lib jit` (lowering units); the full in-language suite through the JIT (`nest test` with the `jit`
+feature — both engines run via ADR-076 so the differential catches re-divergence); `make test` for
+the default build; and a hot-reload-across-call/spawn check (a `def` between warmed batches must take
+effect — `tests/jit_shared_spawn_test.blsp` is the template). Lowering must be **deterministic** (no
+`Date`/`rand`; same arm → same IR) so the differential + workflow-resume stay sound. Commit only when
+all gates are green; never ship a half-built lowering (pre-bail like `chunk_in_jit_subset` does).
+
+## 7. Concrete first increment (Phase 0)
+
+A `(defn use (x) (+ (helper x) 1))` with `helper` warmed, plus the `fib` two-call shape. Emit the
+IC-guarded direct `call_indirect` for the non-tail `Inst::Call` when the site is a free-global head
+(`site != NO_SITE`) and the IC is populated + epoch-current; else fall through to today's
+`brood_rt_call_slow`. Differential vs the VM (warmed), under GC stress, then measure `fib`/`spawn`:
+the target is `jit_dispatch_call` + `brood_rt_call_slow` dropping out of the profile for the hot path.
+
+## 8. Key files & symbols
+
+- `crates/lisp/src/eval/compile.rs` — `jit_lower_arm` (the `Inst::Call` handler, `~5732`),
+  `jit_dispatch_call` (`~6560`, the dispatch to replace/inline), `vm_call_ic_fast_link` /
+  `vm_call_ic_probe` (the IC, `core/heap.rs`), `jit_tier`, `chunk_in_jit_subset`, `CompiledArm`
+  (`share_key`, `jit_code`, `compile_epoch`).
+- `crates/lisp/src/jit/mod.rs` — `brood_rt_push`/`brood_rt_call_slow`/`brood_rt_roots_base` (the FFI
+  callbacks Phase 0/1 remove from the hot path), `Jit::new` (symbol registration).
+- `crates/lisp/src/core/heap.rs` — `RuntimeCode::jit_code_cache` (shared callee code ptrs),
+  `global_epoch` (= `runtime.version`, the free deopt guard), `roots` layout (frame setup).
+- Background: `docs/jit-tier2.md`, `docs/jit-stage1.md`, `docs/decisions.md` (ADR-101).
