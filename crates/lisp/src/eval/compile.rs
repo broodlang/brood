@@ -4695,6 +4695,24 @@ pub(crate) fn jit_lower_arm(
     if hoist_safe {
         invariant_global_vecs(&arm.body, &mut hoist_globals);
     }
+    // The scalar-global lever (#1, the late-binding tax): a global read in value position
+    // (`n` in `loop--acc`'s `(>= i n)`) is loop-invariant within a no-call arm, but was
+    // re-resolved through the inline cache (`brood_rt_global_ic`) **every iteration** —
+    // ~39% of the `loop` benchmark. Resolve each once at entry and reuse its words in the
+    // body; the back-edge `entry_epoch` guard deopts on a concurrent `def` rebind, so it
+    // stays bit-identical to the VM's late binding. Excludes globals already hoisted as
+    // vectors (those carry the ptr/len too). Same `hoist_safe` gate.
+    let mut hoist_scalar_globals: std::collections::HashSet<Symbol> =
+        std::collections::HashSet::new();
+    if hoist_safe {
+        for i in code.iter() {
+            if let Inst::Global(s) | Inst::GlobalIc { sym: s, .. } = i {
+                if !hoist_globals.contains(s) {
+                    hoist_scalar_globals.insert(*s);
+                }
+            }
+        }
+    }
     // Per-slot "holds an f64" flag, for picking float vs integer arith on each op.
     // Seeded from the tier-time profile (params; `slot_tags[k] == TAG_FLOAT`) and
     // updated during lowering when a float result is stored to a slot (let-binders,
@@ -5129,8 +5147,18 @@ pub(crate) fn jit_lower_arm(
     );
     let mut hoisted_global: std::collections::HashMap<Symbol, HoistedGlobal> =
         std::collections::HashMap::new();
+    // Hoisted scalar globals (#1): sym → the global's entry-resolved `Value` words. Read in
+    // value position via `Op::Handle` in the body (no per-access `brood_rt_global_ic`).
+    let mut hoisted_scalar: std::collections::HashMap<
+        Symbol,
+        (
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+        ),
+    > = std::collections::HashMap::new();
     let mut entry_epoch: Option<cranelift_codegen::ir::Value> = None;
-    if !hoist_slots.is_empty() || !hoist_globals.is_empty() {
+    if !hoist_slots.is_empty() || !hoist_globals.is_empty() || !hoist_scalar_globals.is_empty() {
         let len_slot = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             8,
@@ -5181,7 +5209,24 @@ pub(crate) fn jit_lower_arm(
             let vlen = b.ins().load(types::I64, MemFlags::new(), len_addr, 0);
             hoisted_global.insert(sym, (ptr, vlen, w0, w1, w2));
         }
-        if !hoisted_global.is_empty() {
+        // Scalar globals (#1): resolve each once at entry into its `Value` words — no vector
+        // base, no per-access IC. Unbound ⇒ `error` (matches the VM's late-bound lookup).
+        let mut ssyms: Vec<Symbol> = hoist_scalar_globals.iter().copied().collect();
+        ssyms.sort_unstable();
+        for sym in ssyms {
+            let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+            let symv = b.ins().iconst(types::I32, sym as i64);
+            let c = b.ins().call(glob_ref, &[heap, out_addr, symv]);
+            let status = b.inst_results(c)[0];
+            let okb = b.create_block();
+            b.ins().brif(status, error, &[], okb, &[]);
+            b.switch_to_block(okb);
+            let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+            let w1 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            hoisted_scalar.insert(sym, (w0, w1, w2));
+        }
+        if !hoisted_global.is_empty() || !hoisted_scalar.is_empty() {
             let c = b.ins().call(gepoch_ref, &[heap]);
             entry_epoch = Some(b.inst_results(c)[0]);
         }
@@ -5773,7 +5818,12 @@ pub(crate) fn jit_lower_arm(
                     // (no per-iteration global read). The back-edge epoch guard deopts on a
                     // rebind, so this stays bit-identical to the VM's late binding. Falls
                     // through to the normal loop tail like the resolved-`Handle` path.
-                    if let Some(&(ptr, len, w0, w1, w2)) = hoisted_global.get(s) {
+                    if let Some(&(w0, w1, w2)) = hoisted_scalar.get(s) {
+                        // Hoisted scalar global (#1): the value was resolved once at entry;
+                        // reuse its words as a `Handle` (no per-access `brood_rt_global_ic`).
+                        // The back-edge epoch guard deopts on a rebind (late-binding-exact).
+                        stack.push(Op::Handle(w0, w1, w2));
+                    } else if let Some(&(ptr, len, w0, w1, w2)) = hoisted_global.get(s) {
                         stack.push(Op::HoistedVec {
                             ptr,
                             len,
