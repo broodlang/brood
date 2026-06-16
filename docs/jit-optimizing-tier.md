@@ -163,11 +163,22 @@ bigger + has more non-tail calls, so it **bails the JIT subset entirely** (`jit_
 
 **Lesson:** source-level inlining is counter-productive *as long as the bigger arm falls out of
 the JIT*. The protocol it removes is worth less than the native execution it loses. So Phase 3
-is **blocked on the JIT lowering handling larger multi-call inlined bodies** — the JIT subset /
-benefit gates (`2call+walks-structure`, the handle-spill reserve) must admit the inlined shape
-first. That's the same "make the JIT cover more shapes" problem as nqueens/bintree, and the real
-prerequisite for any inlining win. **Do not retry source-level inlining before the JIT can keep
-the inlined arm native.**
+was **blocked on the JIT lowering handling larger multi-call inlined bodies**.
+
+**UPDATE (2026-06-16) — the dominant blocker is fixed (Phase A landed).** Re-diagnosed: the inlined
+arm did *not* fall out of the JIT **subset** (`chunk_in_jit_subset` gates on opcode *kind*, not
+count — an inlined `fib` is all in-subset). It bailed on the **handle-spill reserve**: it was a
+hardcoded **one slot**, and a depth-1 inlined body keeps >1 call result live across a safepoint, so
+it tripped `spill_next >= reserve → None` and ran interpreted. `jit_spill_reserve` now reserves
+`producers − 1` slots (liveness-driven, sound; see devlog 2026-06-16), proven by `BROOD_JIT_DUMP_IR`
+to lower a 3-spill arm that bailed before. **`fib` itself is unchanged** (reserve still 1). The
+benefit gate (`2call+walks-structure`) is a *separate*, still-standing gate, but it never fired on
+`fib`/inlined-`fib` (no structure walk) — it's the bintree/nqueens concern, not the inlining one.
+
+**So Phase 3 is now unblocked for the `fib`/recursive case** — retry the §6b self-inliner *fresh*
+against the uncapped spill (the regression cause is removed). Keep the conservative gates (no
+`SelfCall`/`MakeClosure`, body-size bound). Still do not inline a *structure-walking* body until
+the benefit gate is revisited (that's the lever-2/allocation interaction, `allocation-elimination.md`).
 
 ## 6b. Phase 3 — recursive self-inlining (the fib lever), designed 2026-06-16 (see 6c: regressed)
 

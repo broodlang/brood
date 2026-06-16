@@ -186,6 +186,24 @@ fn nested_ifs_and_multiple_args_under_jit() {
 }
 
 #[test]
+fn deep_handle_spill_under_jit() {
+    // Multi-slot handle spill (`docs/jit-optimizing-tier.md` §6b prerequisite). A
+    // right-nested `(+ (g a) (+ (g b) (+ (g c) (g d))))` keeps THREE call-result handles
+    // live across later call safepoints at once, so the arm needs 3 spill slots. Before
+    // the liveness-driven `jit_spill_reserve` (it was a hardcoded `1`) this bailed to the
+    // VM at the second spill; now it lowers natively. Warmed 50k× so it tiers; the result
+    // must stay bit-identical to the interpreter. (`g` is `(* x 2)` so the answer is
+    // deterministic and independent of evaluation order.)
+    is(
+        "(defn g (x) (* x 2))
+         (defn h (n) (+ (g n) (+ (g (+ n 1)) (+ (g (+ n 2)) (g (+ n 3))))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (h 10))))
+         (run 50000 0)",
+        "92", // 2*(10 + 11 + 12 + 13) = 2*46
+    );
+}
+
+#[test]
 fn integer_division_family_under_jit() {
     // rem / quot mixed with mul / add — the classic collatz step counter, fully in the
     // (now division-capable) int subset. collatz(27) takes 111 steps.
