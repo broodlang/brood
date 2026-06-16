@@ -490,6 +490,24 @@ pub struct CompiledArm {
     /// once per activation (not per loop iteration) is sufficient and keeps hot loops
     /// fast. Only meaningful once `jit_code` holds a real pointer.
     pub compile_epoch: std::sync::atomic::AtomicU64,
+    /// Shared-JIT key (the spawn lever, ADR-101): `Some((runtime_id, argc))` for a
+    /// simple fixed-arity **RUNTIME/PRELUDE** closure arm — the stable identity under
+    /// which this arm's compiled native code can be shared across all processes of a
+    /// runtime. Every process recompiles the same bytecode from the same shared
+    /// closure, and the JIT'd native code embeds no per-process state (the subset's
+    /// only consts are immediates; globals resolve via callbacks; any embedded global
+    /// is epoch-guarded), so the code pointer is interchangeable between processes.
+    /// `None` for LOCAL closures (recycled handles) and optional/rest arms (no
+    /// unambiguous `(id, argc)` key). When set, [`jit_tier`] installs an epoch-current
+    /// entry from [`RuntimeCode`]'s shared cache instead of re-tiering + recompiling
+    /// the arm in every process — without it, N spawned workers each recompile + swamp
+    /// the background compiler, so most run interpreted (the spawn-14× cause).
+    pub share_key: Option<(u64, u16)>,
+    /// True once this process has published its native code to the shared cache (or
+    /// installed the code *from* it) — so the publish costs one lock acquire per
+    /// arm-instance, not one per call. Reset when the arm is epoch-invalidated so the
+    /// recompiled code re-publishes.
+    pub shared_published: std::sync::atomic::AtomicBool,
 }
 
 /// One arm of a closure: its arity shape plus the compiled body **if** it was
@@ -1471,6 +1489,8 @@ fn compile_arm(
         jit_code: AtomicPtr::new(std::ptr::null_mut()),
         jit_calls: AtomicU32::new(0),
         compile_epoch: AtomicU64::new(0),
+        share_key: None,
+        shared_published: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -1535,7 +1555,20 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
             self_name,
             defn_name,
         )
-        .map(Arc::new);
+        .map(|mut arm| {
+            // Shared-JIT identity (the spawn lever, ADR-101): a simple fixed-arity
+            // RUNTIME/PRELUDE closure arm has a stable, process-independent `(id, argc)`
+            // key (the same key `cache_key` uses), so its JIT'd native code can be
+            // shared across all of the runtime's processes instead of being recompiled
+            // per process. See `CompiledArm::share_key`.
+            if noptional == 0
+                && !has_rest
+                && matches!(id.region(), value::RUNTIME | value::PRELUDE)
+            {
+                arm.share_key = Some((id.0, nrequired as u16));
+            }
+            Arc::new(arm)
+        });
         specs.push(ArmSpec {
             nrequired,
             noptional,
@@ -4174,6 +4207,8 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 jit_code: AtomicPtr::new(std::ptr::null_mut()),
                 jit_calls: AtomicU32::new(0),
                 compile_epoch: AtomicU64::new(0),
+                share_key: None,
+                shared_published: std::sync::atomic::AtomicBool::new(false),
             });
             let arm_slot = if arm.has_runtime_handles {
                 heap.live_arm_push(arm.clone())
@@ -6878,9 +6913,31 @@ pub(crate) fn jit_tier(
     if heap.jit_force_vm {
         return None;
     }
-    let code = arm.jit_code.load(Acquire);
+    let mut code = arm.jit_code.load(Acquire);
     if code == crate::jit::BAILED || code == crate::jit::QUEUED {
         return None; // out of subset, or compile in flight — run the VM
+    }
+    // Shared-JIT install (the spawn lever): before this process spends THRESHOLD
+    // interpreted calls + a background compile on its OWN copy of a RUNTIME/PRELUDE
+    // arm, check whether another process of this runtime already compiled it. If so,
+    // and the code is epoch-current, install the shared pointer directly and run it
+    // now — so a hot shared function (`fib` under `spawn`) compiles to native ONCE,
+    // not once per process. Stale entries (a `def`/compaction bumped the epoch) skip.
+    if code.is_null() {
+        if let Some(key) = arm.share_key {
+            if let Some((ptr, epoch)) = heap.jit_shared_lookup(key) {
+                if epoch == heap.global_epoch()
+                    && !ptr.is_null()
+                    && ptr != crate::jit::BAILED
+                    && ptr != crate::jit::QUEUED
+                {
+                    arm.compile_epoch.store(epoch, Release);
+                    arm.jit_code.store(ptr, Release);
+                    arm.shared_published.store(true, Relaxed); // already in the cache
+                    code = ptr;
+                }
+            }
+        }
     }
     if code.is_null() {
         // Count the invocation; only enqueue once the arm is hot.
@@ -6934,7 +6991,17 @@ pub(crate) fn jit_tier(
     if arm.compile_epoch.load(Acquire) != heap.global_epoch() {
         arm.jit_code.store(std::ptr::null_mut(), Release);
         arm.jit_calls.store(THRESHOLD, Release); // re-tier promptly (already proven hot)
+        arm.shared_published.store(false, Relaxed); // recompiled code must re-publish
         return None;
+    }
+    // Publish freshly-compiled native code to the shared cache so the runtime's other
+    // processes install it directly instead of recompiling (the spawn lever). The
+    // `swap` guard makes this one lock acquire per arm-instance, not one per call; a
+    // process that installed the code *from* the cache already has the flag set.
+    if let Some(key) = arm.share_key {
+        if !arm.shared_published.swap(true, Relaxed) {
+            heap.jit_shared_publish(key, code, arm.compile_epoch.load(Acquire));
+        }
     }
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base) -> i64` produced by
     // `jit_lower_arm`, living in the process-lifetime GLOBAL_JIT module. The frame is set
@@ -7067,6 +7134,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
 
         rewrite_arm_handles(&arm, &mut |v| bump(v, 100));
@@ -7172,6 +7241,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         });
 
         // First run: the native suspends, so the driver captures the continuation
@@ -7254,6 +7325,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -7310,6 +7383,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -7376,6 +7451,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -7484,6 +7561,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
         let mut jit = crate::jit::Jit::new();
         assert!(
@@ -7532,6 +7611,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(
             jit_lower_arm(&mut jit, &elided_arm, &[]).is_none(),
@@ -7573,6 +7654,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(
             jit_lower_arm(&mut jit, &thin_arm, &[]).is_none(),
@@ -7623,6 +7706,8 @@ mod tests {
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
         let mut jit = crate::jit::Jit::new();
 
@@ -7756,6 +7841,8 @@ mod tests {
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
             compile_epoch: AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
         let sumto = Arc::new(mk_arm(
             Chunk {
@@ -7901,6 +7988,8 @@ mod tests {
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
             compile_epoch: AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         });
 
         // Warm it past the threshold so jit_tier hands it to the background compiler;
@@ -7988,6 +8077,8 @@ mod tests {
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
             compile_epoch: AtomicU64::new(0),
+            share_key: None,
+            shared_published: std::sync::atomic::AtomicBool::new(false),
         };
         let n = 100_000i64; // iterations per sumto call
         let reps = 300;

@@ -701,6 +701,21 @@ pub struct RuntimeCode {
     /// cross-node send (`Message::List`). Append-only in practice (a RUNTIME pair never
     /// moves), so entries stay valid; shared across the runtime's processes via `Arc`.
     positions: RwLock<HashMap<usize, crate::error::Pos>>,
+    /// Shared JIT native-code cache (ADR-101, the spawn lever): maps a simple
+    /// fixed-arity RUNTIME/PRELUDE closure arm's `(closure_id, argc)` key (see
+    /// `CompiledArm::share_key`) to its compiled native code as
+    /// `(code_ptr_as_usize, compile_epoch)`. The first process to JIT such an arm
+    /// publishes here; every other process of this runtime installs the pointer
+    /// directly (epoch-checked) instead of re-tiering + recompiling its own copy — so
+    /// a hot shared function (`fib` under `spawn`) compiles to native ONCE, not once
+    /// per process (the spawn-14× cause). The code lives in the process-lifetime
+    /// GLOBAL_JIT module (never freed or moved), so the raw pointer is valid across
+    /// processes/threads; the `compile_epoch` is checked against `version` (this
+    /// struct's `global_epoch`) on install, so a `def` or RUNTIME compaction — both
+    /// bump `version` — invalidates every entry without a sweep. Stored as `usize`
+    /// because a raw code pointer isn't `Send`/`Sync`; reconstituted on read. Empty
+    /// unless the JIT runs.
+    jit_code_cache: RwLock<HashMap<(u64, u16), (usize, u64)>>,
 }
 
 /// Where a global was defined: the file, and the start position of its
@@ -720,6 +735,7 @@ impl Default for RuntimeCode {
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
+            jit_code_cache: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -739,6 +755,7 @@ impl RuntimeCode {
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
+            jit_code_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -3908,6 +3925,30 @@ impl Heap {
         self.runtime.version.load(Ordering::Relaxed)
     }
 
+    /// Shared-JIT cache lookup (ADR-101, the spawn lever): the native code published
+    /// for a RUNTIME/PRELUDE arm's `(closure_id, argc)` `share_key`, as
+    /// `(code_ptr, compile_epoch)`. The caller ([`crate::eval::compile::jit_tier`])
+    /// checks `compile_epoch == global_epoch()` before installing — a `def` or RUNTIME
+    /// compaction bumps `version`, so a stale entry is never used. See
+    /// `RuntimeCode::jit_code_cache`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_shared_lookup(&self, key: (u64, u16)) -> Option<(*mut u8, u64)> {
+        let cache = self.runtime.jit_code_cache.read().ok()?;
+        cache.get(&key).map(|&(ptr, epoch)| (ptr as *mut u8, epoch))
+    }
+
+    /// Publish a RUNTIME/PRELUDE arm's freshly-installed native code to the shared
+    /// cache so the runtime's other processes can install it directly instead of
+    /// recompiling. Idempotent overwrite (last writer wins — all writers store the
+    /// same code for the same epoch; a newer epoch's recompile correctly replaces an
+    /// older entry). See `RuntimeCode::jit_code_cache`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_shared_publish(&self, key: (u64, u16), code: *mut u8, epoch: u64) {
+        if let Ok(mut cache) = self.runtime.jit_code_cache.write() {
+            cache.insert(key, (code as usize, epoch));
+        }
+    }
+
     /// Is `sym` bound in the global table (prelude + user `def`s)? An authoritative,
     /// non-racy read of `runtime.globals` (which is seeded with the prelude). Used by
     /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the
@@ -4432,6 +4473,13 @@ impl Heap {
             let rt = Arc::get_mut(&mut self.runtime).unwrap();
             rt.code = new;
             rt.version.fetch_add(1, Ordering::Relaxed);
+            // Drop the shared JIT-code cache: compaction rewrites closure ids, so its
+            // `(id, argc)` keys no longer denote the same closures. The version bump
+            // already makes every entry epoch-stale (never installed), but clearing
+            // reclaims it and prevents a recycled id from lingering.
+            if let Ok(c) = rt.jit_code_cache.get_mut() {
+                c.clear();
+            }
         }
         let after = self.runtime.code.closures.count();
         Some((before, after))

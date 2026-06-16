@@ -1,0 +1,43 @@
+;; Regression test for the shared-JIT-code cache (ADR-101, the spawn lever).
+;;
+;; A simple fixed-arity RUNTIME/PRELUDE closure arm's JIT'd native code is shared
+;; across all of a runtime's processes (RuntimeCode::jit_code_cache, keyed by the
+;; arm's `share_key`): the first process to compile `calc`/`fib` publishes the
+;; native code, and every other spawned worker installs that pointer directly
+;; instead of re-tiering + recompiling its own copy. Without it, N workers each
+;; recompile and swamp the background compiler, so most run interpreted (spawn 14x).
+;;
+;; These two tests prove the shared install is CORRECT, not just fast:
+;;  - a fan-out past the tier threshold (8) returns the right checksum (the shared
+;;    native code computes the same value as the VM), and
+;;  - a redefinition between batches takes effect (the `def` bumps the runtime epoch,
+;;    which must invalidate the shared cache entry — a stale shared pointer would
+;;    make the second batch still compute the old function).
+;; `make test` also runs the whole suite through both engines (ADR-076), so the
+;; differential gate catches any re-divergence.
+(defmodule jit-shared-spawn-test
+  (:use test))
+
+(defn ss-worker (me x) (send me [:r (calc x)]))
+(defn ss-fan (i k x) (if (>= i k) nil (do (spawn (ss-worker (self) x)) (ss-fan (+ i 1) k x))))
+(defn ss-collect (got k acc) (if (= got k) acc (ss-collect (+ got 1) k (receive ([:r v] (+ acc v))))))
+
+;; v1: x^2 + 1.  500 workers > the tier threshold, so `calc` JITs and the native
+;; code is shared across the spawned workers.
+(defn calc (x) (+ (* x x) 1))
+
+(describe "shared JIT code across spawned processes (regression)" :serial
+  (test "fan-out over a shared JIT'd fn returns the correct checksum"
+    ;; NB: `(self)` is captured per worker via ss-fan's arg, so the parent collects.
+    (let (me (self))
+      (defn ss-fan2 (i k x) (if (>= i k) nil (do (spawn (ss-worker me x)) (ss-fan2 (+ i 1) k x))))
+      (ss-fan2 0 500 10)
+      (assert= (ss-collect 0 500 0) 50500)))    ;; 500 * (10*10+1)
+
+  (test "redefining the shared fn invalidates the shared JIT code"
+    ;; redefine calc -> x^2 + 2; the runtime epoch bump must drop the shared entry.
+    (defn calc (x) (+ (* x x) 2))
+    (let (me (self))
+      (defn ss-fan3 (i k x) (if (>= i k) nil (do (spawn (ss-worker me x)) (ss-fan3 (+ i 1) k x))))
+      (ss-fan3 0 500 10)
+      (assert= (ss-collect 0 500 0) 51000))))    ;; 500 * (10*10+2)
