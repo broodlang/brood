@@ -151,6 +151,64 @@ already-set-up frame). For the recursive hot benchmarks (fib/spawn), **B is the 
 go straight to it. The two shipped 2026-06-16 wins (no-clone fast-link, shared native code) already
 cut the cheap parts; what remains is intrinsic and needs B.
 
+## 6c. Phase 3 (source-level self-inlining) — TRIED, measured REGRESSION (2026-06-16)
+
+Implemented the depth-1 self-inliner designed in §6b (the `copy_shift` slot-shift + `LetBind`
+wrap, gated to top-level no-capture recursive defns). It was **correct** (fib = 832040 on both
+engines, JIT≡VM + VM≡tree-walker differentials green) but a **severe regression**: fib 0.56 →
+1.82s (3×), collatz 0.57 → 2.92s (5×). Cause (confirmed by perf-stats): the inlined arm is
+bigger + has more non-tail calls, so it **bails the JIT subset entirely** (`jit_native=0`,
+`jit_link_done=0`) → runs interpreted → far slower than the native non-inlined arm. Reverted
+(patch: `/tmp/phase3-inliner.patch`).
+
+**Lesson:** source-level inlining is counter-productive *as long as the bigger arm falls out of
+the JIT*. The protocol it removes is worth less than the native execution it loses. So Phase 3
+is **blocked on the JIT lowering handling larger multi-call inlined bodies** — the JIT subset /
+benefit gates (`2call+walks-structure`, the handle-spill reserve) must admit the inlined shape
+first. That's the same "make the JIT cover more shapes" problem as nqueens/bintree, and the real
+prerequisite for any inlining win. **Do not retry source-level inlining before the JIT can keep
+the inlined arm native.**
+
+## 6b. Phase 3 — recursive self-inlining (the fib lever), designed 2026-06-16 (see 6c: regressed)
+
+Confirmed the right lever for `fib`/recursive benchmarks: fib is **63% call protocol, 26%
+body**, and the protocol is dominated by per-call frame setup the dispatch-cell can't remove
+(the roots-`Vec` frame-rep blocker, §6a). **Inlining sidesteps that** — the inlined body runs
+in the *caller's* already-set-up frame, no new frame per level. Depth-1 self-inline collapses
+~2 levels per protocol entry (~2.6–3× fewer protocol calls → fib protocol ~63%→~22%, toward
+Elixir parity); depth-2 more.
+
+**The transform (Node-level, in `compile_arm` after `compile_body`, before `compile_chunk`).**
+A non-tail self-recursive call is `Node::Call { callee: GlobalIc{sym}|Global(sym), args, tail:
+false, .. }` with `sym == defn_name` and `args.len() == nrequired`. Replace each with an
+inlined block:
+```
+LetBind { binds: [(M*i + k, args[k]) for k in 0..nrequired],
+          body: shift_slots(&body, M*i) }
+```
+where `M = scope.max` (the original arm's slot count) and `i` is the inline-block index
+(1,2,… per self-call site). `shift_slots` deep-copies the body adding `M*i` to every slot
+reference; the copy's own self-calls **stay as `Node::Call` (leaf protocol calls)** — that's
+the depth-1 bound. `nslots = M*(1+#blocks) + jit_spill_reserve(new chunk)`.
+
+**Why it's clean (the subtleties, resolved):**
+- **No alpha-renaming** — slots are numeric, so inlining is a numeric shift + a `LetBind`
+  wrapper. Args are bound in the *outer* scope (they reference outer slots) and written to the
+  shifted param slots; the shifted body reads the shifted slots. No capture hazard.
+- **Call sites are shareable** — the copied `Call`/`GlobalIc` nodes keep their `site` ids; all
+  copies call the same function, so they hit the same (correct) IC entry. No site re-alloc.
+- **`pos` shareable** — diagnostics only.
+
+**The work + risk:** `shift_slots` is a **manual deep-copy of 14 `Node` variants** (`Node` is
+NOT `Clone` — `Prim2`/`Prim1`/`ConstVal` carry `AtomicU64`s to reconstruct with their current
+value). Gate conservatively: only arms with `defn_name`, **no `SelfCall`** (its frame reuse is
+incompatible with shifting) and **no `MakeClosure`** (separate arm), a body-size bound (avoid
+2^D blowup), and ≥1 qualifying self-call. ~200 lines, **miscompile-sensitive** (a missed slot
+shift = silent wrong result). Validation net: the JIT≡VM + VM≡tree-walker differential corpora
+run fib + the 2156-test suite through both engines, so a common-path miscompile fails the
+gate; pair with GC_STRESS + a hot-reload check. Implement fresh (not at the tail of a long
+session) — the design above is mechanical-but-careful, not exploratory.
+
 ## 7. Concrete first increment (Phase 0)
 
 A `(defn use (x) (+ (helper x) 1))` with `helper` warmed, plus the `fib` two-call shape. Emit the
