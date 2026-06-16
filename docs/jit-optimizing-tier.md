@@ -126,6 +126,31 @@ effect — `tests/jit_shared_spawn_test.blsp` is the template). Lowering must be
 `Date`/`rand`; same arm → same IR) so the differential + workflow-resume stay sound. Commit only when
 all gates are green; never ship a half-built lowering (pre-bail like `chunk_in_jit_subset` does).
 
+## 6a. Phase 0 (FFI-collapse variant) — TRIED, measured NON-WIN (2026-06-16)
+
+The first Phase-0 cut collapsed the **3 FFI calls per non-tail call** (per-arg `brood_rt_push` +
+`brood_rt_call_slow` + `brood_rt_roots_base`) into **one** combined `brood_rt_call`: the JIT'd arm
+stages operands into a stack buffer, the helper pushes them + dispatches + returns the refreshed
+roots base. Built, correct (link stats unchanged: 3.71M links, 0 deopt; full correctness held), but
+a clean interleaved A/B showed **fib regressed ~0.59→~0.72s and spawn was flat**. Reverted (patch:
+`/tmp/phase0-combined-call.patch`). **Why it lost:** the dominant calls are **argc=1** (fib/spawn),
+so it removed only ~2 cheap FFI calls while *adding* a stack-buffer round-trip (3 stores + the
+helper's 3 loads) + an 8-arg call — and it still does the same `push_root` work (just moved into the
+helper). **Lesson: the per-call protocol cost is NOT the FFI boundaries** (those are cheap); it's the
+*intrinsic dispatch* — `jit_dispatch_call`'s IC validation + the `roots` frame setup
+(`truncate_roots` + `extend_roots_to_nil` per call, the latter Nil-fills locals for GC safety and
+can't be skipped). FFI-collapse doesn't touch any of that.
+
+**Revised recommendation:** skip the FFI-collapse Phase 0 entirely. The only levers that remove the
+*intrinsic* dispatch are: (i) emitting the IC guard + frame setup **inline in Cranelift** — but that
+needs the JIT to grow `roots` (update `Vec::len`) without an FFI, which the current design
+deliberately routes through `push_root` (the encapsulation is load-bearing for GC length-safety);
+fragile, and (ii) **true inlining / bounded recursive unrolling (technique B)** — which removes the
+frame setup + dispatch entirely for inlined levels (the inlined body runs in the caller's
+already-set-up frame). For the recursive hot benchmarks (fib/spawn), **B is the only real win**;
+go straight to it. The two shipped 2026-06-16 wins (no-clone fast-link, shared native code) already
+cut the cheap parts; what remains is intrinsic and needs B.
+
 ## 7. Concrete first increment (Phase 0)
 
 A `(defn use (x) (+ (helper x) 1))` with `helper` warmed, plus the `fib` two-call shape. Emit the
