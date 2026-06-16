@@ -1423,6 +1423,161 @@ fn node_has_rt_handles(node: &Node) -> bool {
     }
 }
 
+/// Is `(a b)` the operand pair of a safe element read `(nth slot K)` — `a` is `Local(slot)`
+/// and `b` a constant index in `0..nelems`? Such a use consumes only an *element* of the
+/// vector in `slot`, never the vector itself, so it doesn't make the vector escape.
+fn is_elem_read(a: &Node, b: &Node, slot: usize, nelems: usize) -> Option<usize> {
+    if let (Node::Local(k), Node::Const(cv)) = (a, b) {
+        if *k == slot {
+            if let Value::Int(idx) = cv.load() {
+                if idx >= 0 && (idx as usize) < nelems {
+                    return Some(idx as usize);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Does the value in frame `slot` **escape** — appear anywhere other than as the vector
+/// operand of an in-range `(nth slot K)`? Immutability makes this a pure reachability walk
+/// (no alias analysis — BEAM does none): a value is only reachable through references the
+/// code explicitly creates, so any `Local(slot)` outside an element read means it's returned,
+/// passed to a call, captured, or stored — i.e. escapes. Used by EA scalar replacement.
+fn local_escapes(node: &Node, slot: usize, nelems: usize) -> bool {
+    if let Node::Prim2 { op: PrimOp::VectorRef, a, b, .. } = node {
+        if is_elem_read(a, b, slot, nelems).is_some() {
+            return local_escapes(b, slot, nelems); // `a` consumed safely; `b` is the const index
+        }
+    }
+    match node {
+        Node::Local(k) => *k == slot,
+        Node::Const(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
+        Node::If(a, b, c) => {
+            local_escapes(a, slot, nelems) || local_escapes(b, slot, nelems) || local_escapes(c, slot, nelems)
+        }
+        Node::Do(xs) | Node::Vector(xs) => xs.iter().any(|n| local_escapes(n, slot, nelems)),
+        Node::Map(kvs) => kvs.iter().any(|(k, v)| local_escapes(k, slot, nelems) || local_escapes(v, slot, nelems)),
+        Node::Call { callee, args, .. } => {
+            local_escapes(callee, slot, nelems) || args.iter().any(|n| local_escapes(n, slot, nelems))
+        }
+        Node::SelfCall { args, .. } => args.iter().any(|n| local_escapes(n, slot, nelems)),
+        Node::LetBind { binds, body } => {
+            binds.iter().any(|(_, n)| local_escapes(n, slot, nelems)) || local_escapes(body, slot, nelems)
+        }
+        Node::MakeClosure { captures, .. } => captures.iter().any(|(_, n)| local_escapes(n, slot, nelems)),
+        Node::Prim2 { a, b, .. } => local_escapes(a, slot, nelems) || local_escapes(b, slot, nelems),
+        Node::Prim1 { a, .. } => local_escapes(a, slot, nelems),
+    }
+}
+
+/// In-place: replace every safe element read `(nth slot K)` with a direct `Local(base + K)`
+/// read (the scalar-replaced element slots). Paired with `local_escapes` having returned
+/// false, so every `Local(slot)` is exactly such a read.
+fn rewrite_elem_reads(node: &mut Node, slot: usize, base: usize, nelems: usize) {
+    if let Node::Prim2 { op: PrimOp::VectorRef, a, b, .. } = node {
+        if let Some(k) = is_elem_read(a, b, slot, nelems) {
+            *node = Node::Local(base + k);
+            return;
+        }
+    }
+    match node {
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
+        Node::If(a, b, c) => {
+            rewrite_elem_reads(a, slot, base, nelems);
+            rewrite_elem_reads(b, slot, base, nelems);
+            rewrite_elem_reads(c, slot, base, nelems);
+        }
+        Node::Do(xs) | Node::Vector(xs) => xs.iter_mut().for_each(|n| rewrite_elem_reads(n, slot, base, nelems)),
+        Node::Map(kvs) => kvs.iter_mut().for_each(|(k, v)| {
+            rewrite_elem_reads(k, slot, base, nelems);
+            rewrite_elem_reads(v, slot, base, nelems);
+        }),
+        Node::Call { callee, args, .. } => {
+            rewrite_elem_reads(callee, slot, base, nelems);
+            args.iter_mut().for_each(|n| rewrite_elem_reads(n, slot, base, nelems));
+        }
+        Node::SelfCall { args, .. } => args.iter_mut().for_each(|n| rewrite_elem_reads(n, slot, base, nelems)),
+        Node::LetBind { binds, body } => {
+            binds.iter_mut().for_each(|(_, n)| rewrite_elem_reads(n, slot, base, nelems));
+            rewrite_elem_reads(body, slot, base, nelems);
+        }
+        Node::MakeClosure { captures, .. } => {
+            captures.iter_mut().for_each(|(_, n)| rewrite_elem_reads(n, slot, base, nelems))
+        }
+        Node::Prim2 { a, b, .. } => {
+            rewrite_elem_reads(a, slot, base, nelems);
+            rewrite_elem_reads(b, slot, base, nelems);
+        }
+        Node::Prim1 { a, .. } => rewrite_elem_reads(a, slot, base, nelems),
+    }
+}
+
+/// Escape-analysis scalar replacement (lever 2 / `modern-perf-bets` #2). A non-escaping
+/// `(let (p [e0 … eN]) …)` whose `p` is read only as `(nth p K)` is rewritten so each element
+/// binds to its own frame slot and the reads become direct `Local` reads — the vector is
+/// **never allocated**, and the arm gets *simpler* (so it JITs better, not worse). Immutability
+/// makes the escape test a pure reachability walk; BEAM does no EA, so this is a structural
+/// edge. Conservative: a single-binder `let` of a small vector literal, all uses in-range
+/// constant `nth`. Bumps `next_slot` by the element count. Recurses (nested lets covered).
+fn ea_scalar_replace(node: &mut Node, next_slot: &mut usize) -> bool {
+    const MAX_ELEMS: usize = 8;
+    let mut changed = false;
+    match node {
+        Node::If(a, b, c) => {
+            changed |= ea_scalar_replace(a, next_slot);
+            changed |= ea_scalar_replace(b, next_slot);
+            changed |= ea_scalar_replace(c, next_slot);
+        }
+        Node::Do(xs) | Node::Vector(xs) => xs.iter_mut().for_each(|n| changed |= ea_scalar_replace(n, next_slot)),
+        Node::Map(kvs) => kvs.iter_mut().for_each(|(k, v)| {
+            changed |= ea_scalar_replace(k, next_slot);
+            changed |= ea_scalar_replace(v, next_slot);
+        }),
+        Node::Call { callee, args, .. } => {
+            changed |= ea_scalar_replace(callee, next_slot);
+            args.iter_mut().for_each(|n| changed |= ea_scalar_replace(n, next_slot));
+        }
+        Node::SelfCall { args, .. } => args.iter_mut().for_each(|n| changed |= ea_scalar_replace(n, next_slot)),
+        Node::LetBind { binds, body } => {
+            binds.iter_mut().for_each(|(_, n)| changed |= ea_scalar_replace(n, next_slot));
+            changed |= ea_scalar_replace(body, next_slot);
+        }
+        Node::Prim2 { a, b, .. } => {
+            changed |= ea_scalar_replace(a, next_slot);
+            changed |= ea_scalar_replace(b, next_slot);
+        }
+        Node::Prim1 { a, .. } => changed |= ea_scalar_replace(a, next_slot),
+        _ => {}
+    }
+    if let Node::LetBind { binds, body } = node {
+        if binds.len() == 1 {
+            let slot = binds[0].0;
+            let n = match &binds[0].1 {
+                Node::Vector(e) => e.len(),
+                _ => 0,
+            };
+            if (1..=MAX_ELEMS).contains(&n) && !local_escapes(body, slot, n) {
+                let base = *next_slot;
+                *next_slot += n;
+                rewrite_elem_reads(body, slot, base, n);
+                let elems = match &mut binds[0].1 {
+                    Node::Vector(e) => std::mem::replace(e, Box::new([])),
+                    _ => unreachable!(),
+                };
+                *binds = elems
+                    .into_vec()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, e)| (base + k, e))
+                    .collect();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 fn compile_arm(
     heap: &Heap,
     required: &[Symbol],
@@ -1485,7 +1640,12 @@ fn compile_arm(
         }
     }
     let capture_names = capture_names.into_boxed_slice();
-    let body = compile_body(heap, body, &mut scope, true)?;
+    let mut body = compile_body(heap, body, &mut scope, true)?;
+    // Escape-analysis scalar replacement (lever 2): eliminate non-escaping `(let (p […]) …)`
+    // vector allocations, binding their elements to fresh slots `[scope.max ..]` and rewriting
+    // `(nth p K)` to direct reads. Bumps `scope.max` for the element slots; makes the arm
+    // simpler (fewer allocs, no `nth`), so it JITs better. No-op for arms without the pattern.
+    ea_scalar_replace(&mut body, &mut scope.max);
     let optional_defaults = optional_defaults.into_boxed_slice();
     let has_runtime_handles =
         node_has_rt_handles(&body) || optional_defaults.iter().flatten().any(node_has_rt_handles);

@@ -1,0 +1,45 @@
+;; Regression test for escape-analysis scalar replacement (lever 2 / modern-perf-bets #2).
+;;
+;; A non-escaping `(let (p [..]) ..)` whose `p` is read only via `(nth p K)` is rewritten so
+;; the elements bind to fresh frame slots and the vector is never allocated. These tests pin
+;; the CORRECTNESS — both that the eliminated case computes the same value, and that the
+;; escape analysis is conservative: a vector that is returned, passed to a call, captured, or
+;; indexed dynamically must keep its real allocation (the elements would otherwise be wrong).
+;; `make test` runs the whole suite through both engines (ADR-076), so the VM≡tree-walker
+;; differential also guards the rewrite.
+(defmodule jit-escape-test
+  (:use test))
+
+;; hammer past the JIT tier threshold so the scalar-replaced (and the escaping) arms tier.
+(defn loop-acc (f i acc) (if (= i 0) acc (loop-acc f (- i 1) (+ acc (f i)))))
+
+(describe "escape-analysis scalar replacement (lever 2)"
+  ;; ELIMINATED: p never escapes -> scalar-replaced, must stay correct.
+  (defn ea-sum (x) (let (p [x (+ x 1) (+ x 2)]) (+ (nth p 0) (+ (nth p 1) (nth p 2)))))
+  (test "non-escaping vector is eliminated but computes the same value"
+    (assert= (ea-sum 10) 33)                  ;; 10 + 11 + 12
+    (assert= (loop-acc ea-sum 1000 0) 1504500)) ;; sum_{i=1}^{1000}(3i+3) = 3*500500 + 3000
+
+  ;; ESCAPES (returned): the vector itself is the result -> must NOT be scalar-replaced.
+  (defn ea-ret (x) (let (p [x (+ x 1)]) p))
+  (test "a returned vector keeps its real allocation"
+    (assert= (nth (ea-ret 5) 0) 5)
+    (assert= (nth (ea-ret 5) 1) 6)
+    (assert= (count (ea-ret 5)) 2))
+
+  ;; ESCAPES (passed to a call): the callee could retain it.
+  (defn ea-pass (x) (let (p [x (* x 2)]) (count p)))   ;; count takes the whole vector
+  (test "a vector passed to a call keeps its allocation"
+    (assert= (ea-pass 9) 2))
+
+  ;; ESCAPES (dynamic index): can't prove which element -> must NOT replace.
+  (defn ea-dyn (x i) (let (p [x (+ x 1) (+ x 2)]) (nth p i)))
+  (test "a dynamically-indexed vector is not scalar-replaced"
+    (assert= (ea-dyn 10 0) 10)
+    (assert= (ea-dyn 10 2) 12))
+
+  ;; Mixed: read via nth AND returned -> escapes (the return use), keep allocation.
+  (defn ea-mixed (x) (let (p [x (+ x 1)]) (if (> (nth p 0) 0) p [0 0])))
+  (test "a vector both indexed and returned keeps its allocation"
+    (assert= (nth (ea-mixed 7) 0) 7)
+    (assert= (nth (ea-mixed 7) 1) 8)))
