@@ -3325,3 +3325,48 @@ the RSS bump under a wrong "memory is the brand" assumption, then put back when 
 clarified the priority. Not vendored (33k LOC of C); normal cargo dep. The byte-counting limit
 logic (ADR-043) is unchanged. Subsumes the planned CHAMP arena (same malloc-churn target);
 orthogonal map-perf levers (`map-update`, memcpy floor) tracked for follow-up.
+
+## 2026-06-16 — Call-path + escape-analysis perf round (BEAM-grounded), and what didn't work
+
+A session attacking the Elixir-gap campaign on the call/dispatch and allocation axes, with a
+hard discipline: **measure the ceiling before building** (a microbench isolating the cost or an
+A/B vs a `git worktree` of HEAD), because several "obvious" wins turned out ~0 or negative.
+
+**Shipped (each its own commit, all gated by the JIT≡tree-walker + VM≡tree-walker differentials,
+GC_STRESS+VERIFY, the in-language suite, and a hot-reload check):**
+- **No-clone fast-link** (`e672cee`): `vm_call_ic_fast_link` validates the call-site IC + returns
+  Copy `(code, nslots, env)` inside the borrow — no per-call `Arc` clone. fib ~23%.
+- **Shared JIT native code across a runtime's processes** (`eebfbd3`): a spawned worker installs an
+  already-compiled arm's code pointer (keyed by the process-independent `(closure_id, argc)`) instead
+  of recompiling its own copy and swamping the background compiler. **spawn 0.65→0.17s (~3.8×), from
+  ~7.7× to ~2.5× of Elixir** — the biggest single jump. `RuntimeCode::jit_code_cache` + epoch guard.
+- **Captured-variable lexical addressing** (`4fe15a3`): a closure reads captures as flat frame slots
+  (filled at `push_frame` via `Heap::capture_value`, index fast-path + `env_get` fallback for chained/
+  letrec envs), not env-chain symbol scans. ~21% on capture-heavy closures.
+- **Scalar-global LICM hoist** (`13a0e71`): extend the invariant-global hoist from vectors to scalars
+  — `loop--acc` reads its bound `n` once at entry, not through the inline cache each iteration.
+  **loop 1.6×→~1.0× of Elixir (BEAM parity).** Epoch-guarded → late binding exact (incl. cross-process).
+- **Cached call-site fast-link** (`b01b9fe`): memoise the validated `(code, nslots, env)` in the IC
+  entry so the hot path skips the per-call atomic loads + arm-shape checks. fib ~8%.
+- **Escape-analysis scalar replacement** (`e2f4686`): a non-escaping `(let (p […]) …)` whose `p` is
+  read only as `(nth p K)` is rewritten so elements bind to fresh slots and the vector is never
+  allocated (`local_escapes` = pure reachability, immutability ⇒ no alias analysis; BEAM does none).
+  ~40% on the pattern, but **~0 on the campaign benchmarks** (they allocate *escaping* structures) —
+  the strategic BEAM-beating edge for app code, not a scoreboard mover.
+
+**Decided:** keep Emacs-style hot reload; make it cheap by paying at `def`-time (a repointable
+dispatch cell, BEAM's model), not per call. `docs/call-dispatch-and-hot-reload.md` (researched
+against the OTP source).
+
+**Negative results (recorded so they aren't re-attempted):** re-admitting `cons` to the JIT subset
+(now correct, the old miscompile is fixed — but ~0, cons arms are alloc-bound) · GC `Vec<u32>`
+forward tables vs `HashMap` (~0) · collapsing the per-call FFI into one helper (regressed — the FFI
+is cheaper than the buffering) · **source-level recursive self-inlining (regressed 3-5×: the bigger
+inlined arm bails the JIT subset → interpreted)**. The through-line: the gating constraint is **JIT
+subset coverage**, not the call protocol — making arms bigger backfires.
+
+**Standings:** beats Elixir on strings/http/primes/mandelbrot + loop parity; geomean ~2× of Elixir;
+worst remaining nqueens 11.8× / bintree 8.0× / wordcount 5.0× / fib 4.4×. The campaign is near its
+ceiling with this architecture; further movement needs a frame-representation change (so the JIT sets
+up frames without an FFI — the dispatch-cell's deeper half) or a real optimizing tier (inlining that
+keeps arms native). See `docs/jit-optimizing-tier.md` §6a/6c, `docs/allocation-elimination.md`.
