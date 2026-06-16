@@ -3370,3 +3370,35 @@ worst remaining nqueens 11.8× / bintree 8.0× / wordcount 5.0× / fib 4.4×. Th
 ceiling with this architecture; further movement needs a frame-representation change (so the JIT sets
 up frames without an FFI — the dispatch-cell's deeper half) or a real optimizing tier (inlining that
 keeps arms native). See `docs/jit-optimizing-tier.md` §6a/6c, `docs/allocation-elimination.md`.
+
+## 2026-06-16 — JIT: liveness-driven multi-slot handle spill (the inlining prerequisite)
+
+Phase A of the optimizing tier (`docs/jit-optimizing-tier.md` §6b). The JIT's call-result
+**handle spill** — the slots that hold a `Value` returned by one Brood→Brood call while a *later*
+call's safepoint runs — was capped at a **hardcoded one slot** (`jit_spill_reserve` returned `1`).
+An arm needing a second simultaneous spill bailed at translation (`spill_next >= reserve → None`)
+and ran interpreted. This was the concrete cause of the §6c source-inliner regression: a depth-1
+inlined `fib` body keeps >1 call result live across a safepoint, blew the 1-slot ceiling, bailed
+the JIT, and ran 3–5× slower interpreted — *not* the "arm got too big for the subset" the note
+guessed (the subset gates on opcode *kind*, not count; inlined fib is all in-subset).
+
+Fix: `jit_spill_reserve` now reserves `producers − 1` slots, where `producers` counts the
+handle-*producing* instructions (non-tail `Call`, `MakeVector`, `Prim1`, `Cons`). Sound because
+each handle is spilled **at most once** (a spill rewrites the `Op::Handle` to an `Op::Slot`, never
+re-spilled) and the chronologically-last handle never needs a slot (no later safepoint crosses it).
+The bound only ever *raises* the reserve, and the existing `chunk_in_jit_subset` / `!walks_structure`
+gates keep it off arms that don't lower — so the dead-frame-weight that regressed `spawn` ~1.8× with
+a flat reserve stays absent. **`fib` is unchanged** (producers = 2 → reserve 1, bit-identical to the
+old hardcoded value), so no currently-lowering arm changes; the reserve only grows for deeper-nested
+bodies (inlined/unrolled recursion).
+
+Proven: `BROOD_JIT_DUMP_IR=1` shows a right-nested 4-call arithmetic arm
+(`(+ (g n) (+ (g …) (+ (g …) (g …))))`, 3 spills) now lowering to native — it bailed before. New
+differential `deep_handle_spill_under_jit` (warmed 50k×); the existing
+`nested_ifs_and_multiple_args_under_jit` already exercises a 2-spill arm that previously bailed.
+Gates green: `--lib jit` (9), `--test jit` (20) + `--test differential` under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, full `nest test` (2161) through the JIT under GC stress.
+
+**This unblocks Phase B (recursive self-inlining, §6b)** — the spill ceiling was the dominant cause
+of its §6c regression, so the inliner should be retried *fresh* against the now-uncapped spill. That
+is the actual `fib` win; Phase A alone moves no benchmark (it changes a reserve only deeper arms hit).

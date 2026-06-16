@@ -4514,12 +4514,49 @@ fn jit_spill_reserve(code: &[Inst]) -> usize {
     if chunk_walks_structure(code) {
         return 0;
     }
-    // A pure-arithmetic two-call recursion (`fib`'s `(+ (fib …) (fib …))`) spills exactly
-    // one live call-result handle: the first call's result waits in a slot across the
-    // second call's safepoint, and the `+` of the two results reduces back to an int (so
-    // chains like `(+ (f a) (f b) (f c))` still need only one). One slot; arms that would
-    // need more bail at translation (`spill_next >= reserve`) and run on the VM.
-    1
+    // How many spill slots `jit_lower_arm`'s monotonic `spill_next` can reach. A spill
+    // fires when a non-tail call's safepoint finds a live `Op::Handle` *below* its
+    // operands; the spill rewrites that handle to an `Op::Slot`, so **each handle is
+    // spilled at most once** (a `Slot` is never re-spilled). Hence total spills ≤ the
+    // number of handle-*producing* instructions, and the chronologically-last handle is
+    // never spilled (no later safepoint can cross it — it's consumed or returned-via-
+    // roots), giving the tight bound `producers − 1`.
+    //
+    // Handle producers in the lowering: a non-tail Brood→Brood `Call` (its `Value`
+    // result), a `MakeVector` (`[a b]`), a `Prim1` (`first`/`rest`), and a `Cons` prim.
+    // (`chunk_walks_structure` already returned for `Prim1`/`VectorRef` arms, and `Cons`
+    // is out of `chunk_in_jit_subset` — but count them anyway so the bound stays sound if
+    // those gates move.) For plain two-call recursion (`fib`) producers == 2 → reserve 1,
+    // **bit-identical to the prior hardcoded `1`** — so no arm that lowered before changes.
+    // A deeper-nested body — an inlined / bounded-unrolled `fib` arm
+    // (`docs/jit-optimizing-tier.md` §6b) — has more simultaneously-live call results, so
+    // it reserves one slot per producer beyond the last instead of bailing at translation.
+    // This only ever *raises* the reserve, and the gates above keep it off arms that don't
+    // lower (the dead-frame-weight that regressed `spawn` ~1.8× with a flat reserve).
+    let producers = code
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                Inst::Call { tail: false, .. }
+                    | Inst::MakeVector(_)
+                    | Inst::Prim1 { .. }
+                    | Inst::Prim2 {
+                        op: PrimOp::Cons,
+                        ..
+                    }
+                    | Inst::Prim2SlotSlot {
+                        op: PrimOp::Cons,
+                        ..
+                    }
+                    | Inst::Prim2SlotInt {
+                        op: PrimOp::Cons,
+                        ..
+                    }
+            )
+        })
+        .count();
+    producers.saturating_sub(1)
 }
 #[cfg(not(feature = "jit"))]
 fn jit_spill_reserve(_code: &[Inst]) -> usize {
