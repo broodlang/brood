@@ -508,6 +508,15 @@ pub struct CompiledArm {
     /// arm-instance, not one per call. Reset when the arm is epoch-invalidated so the
     /// recompiled code re-publishes.
     pub shared_published: std::sync::atomic::AtomicBool,
+    /// Captured enclosing-lexical names, in capture-slot order (#3 lexical addressing).
+    /// Empty for a top-level / non-capturing arm. When non-empty, each name occupies a
+    /// **capture slot** at `[capture_base + k]` where `capture_base = nrequired +
+    /// noptional + (rest_slot.is_some())`; the body resolves the name to that
+    /// `Node::Local(slot)` instead of an `env_get` symbol-scan, and [`push_frame`] fills
+    /// the slot from the closure's captured env at call setup (an index fast-path for a
+    /// flat capture frame — the VM-built common case — with an `env_get`-by-name fallback
+    /// for a chained/tree-walker env, so it's correct in both engines).
+    pub capture_names: Box<[Symbol]>,
 }
 
 /// One arm of a closure: its arity shape plus the compiled body **if** it was
@@ -1462,6 +1471,20 @@ fn compile_arm(
     if let Some(r) = rest {
         scope.bind(r);
     }
+    // #3 lexical addressing: bind each captured enclosing lexical to a **capture slot**
+    // (right after params/optionals/rest, so `capture_base = nrequired + noptional +
+    // rest_count`), so a body reference resolves to a fast `Node::Local(slot)` instead of
+    // an `env_get` symbol-scan through the captured env. `push_frame` fills these slots at
+    // call setup. A name already bound (a param shadows the enclosing lexical) is skipped —
+    // the param wins, and `push_frame`'s by-name fill stays correct for the misaligned rest.
+    let mut capture_names: Vec<Symbol> = Vec::new();
+    for &name in &scope.enclosing.clone() {
+        if scope.lookup(name).is_none() {
+            scope.bind(name);
+            capture_names.push(name);
+        }
+    }
+    let capture_names = capture_names.into_boxed_slice();
     let body = compile_body(heap, body, &mut scope, true)?;
     let optional_defaults = optional_defaults.into_boxed_slice();
     let has_runtime_handles =
@@ -1491,6 +1514,7 @@ fn compile_arm(
         compile_epoch: AtomicU64::new(0),
         share_key: None,
         shared_published: std::sync::atomic::AtomicBool::new(false),
+        capture_names,
     })
 }
 
@@ -2623,6 +2647,21 @@ fn push_frame(
         let start = (arm.nrequired + arm.noptional).min(args.len());
         let rest = heap.list_from_slice(&args[start..]);
         heap.set_root_at(base + rslot, rest);
+    }
+    // #3 lexical addressing: fill the capture slots from the closure's captured env, so
+    // the body reads captured lexicals as fast `Node::Local` slots rather than `env_get`
+    // symbol-scans. Each `capture_names[k]` occupies slot `capture_base + k`. `capture_value`
+    // takes an index fast-path when the captured env is a flat frame (`vars[k]` is that name
+    // — the VM-built common case) and falls back to a by-name `env_get` for a chained /
+    // tree-walker env, so it's correct in both engines. Filled before optional defaults so a
+    // default form may reference a capture. No GC between here and the body (no alloc).
+    if !arm.capture_names.is_empty() {
+        let cenv = heap.read_root_env(genv);
+        let capture_base = arm.nrequired + arm.noptional + arm.rest_slot.is_some() as usize;
+        for (k, &name) in arm.capture_names.iter().enumerate() {
+            let v = heap.capture_value(cenv, k, name);
+            heap.set_root_at(base + capture_base + k, v);
+        }
     }
     // Missing optionals take their default, left-to-right (so a later default sees an
     // earlier one). `None` is a nil-default — the slot is already nil. A real default
@@ -4209,6 +4248,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 compile_epoch: AtomicU64::new(0),
                 share_key: None,
                 shared_published: std::sync::atomic::AtomicBool::new(false),
+                capture_names: Box::new([]),
             });
             let arm_slot = if arm.has_runtime_handles {
                 heap.live_arm_push(arm.clone())
@@ -7136,6 +7176,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
 
         rewrite_arm_handles(&arm, &mut |v| bump(v, 100));
@@ -7243,6 +7284,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         });
 
         // First run: the native suspends, so the driver captures the continuation
@@ -7327,6 +7369,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -7385,6 +7428,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -7453,6 +7497,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -7563,6 +7608,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
         let mut jit = crate::jit::Jit::new();
         assert!(
@@ -7613,6 +7659,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
         assert!(
             jit_lower_arm(&mut jit, &elided_arm, &[]).is_none(),
@@ -7656,6 +7703,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
         assert!(
             jit_lower_arm(&mut jit, &thin_arm, &[]).is_none(),
@@ -7708,6 +7756,7 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
         let mut jit = crate::jit::Jit::new();
 
@@ -7843,6 +7892,7 @@ mod tests {
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
         let sumto = Arc::new(mk_arm(
             Chunk {
@@ -7990,6 +8040,7 @@ mod tests {
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         });
 
         // Warm it past the threshold so jit_tier hands it to the background compiler;
@@ -8079,6 +8130,7 @@ mod tests {
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            capture_names: Box::new([]),
         };
         let n = 100_000i64; // iterations per sumto call
         let reps = 300;
