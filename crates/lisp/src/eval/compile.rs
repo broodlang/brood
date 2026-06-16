@@ -6558,6 +6558,72 @@ pub(crate) fn jit_dispatch_call(
     let elided = site != NO_SITE;
     let stage_base = if elided { n - argc } else { n - argc - 1 };
 
+    // ---- Fast native link (no per-call Arc clone) ----
+    // The hot recursive case (`fib`, a free-global head). `vm_call_ic_fast_link` validates
+    // the whole link (sym/argc/epoch + installed + simple arm) and returns Copy data — no
+    // `Arc::clone` (the one atomic-RMW per call the older cloning path below pays ~30M
+    // times). Args are already staged at `[stage_base, stage_base+argc)`. Mirrors the
+    // cloning path's frame setup + outcome handling; deopt (rare) re-probes for the arm.
+    if elided && !over_cap {
+        if let Some((code, nslots, callee_env)) =
+            heap.vm_call_ic_fast_link(site, head, argc as u32, epoch)
+        {
+            heap.truncate_roots(stage_base + argc);
+            heap.extend_roots_to_nil(stage_base + nslots);
+            let base = stage_base;
+            // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
+            // `jit_lower_arm`, kept for the process in `GLOBAL_JIT`; the frame is at
+            // `roots[base..]`. Validated current by the fast-link epoch check above.
+            let f: extern "C" fn(*mut Heap, i64) -> i64 =
+                unsafe { std::mem::transmute(code as *mut u8) };
+            let depth = heap.jit_native_depth;
+            let saved = std::mem::replace(&mut heap.jit_call_env, EnvRoot::Stable(callee_env));
+            heap.jit_native_depth = depth + 1;
+            let outcome = f(heap as *mut Heap, base as i64);
+            heap.jit_native_depth = depth;
+            heap.jit_call_env = saved;
+            match outcome {
+                0 => {
+                    crate::perf_bump!(jit_link_done);
+                    let result = heap.root_at(base);
+                    heap.truncate_roots(stage_base);
+                    return Some(result);
+                }
+                3 => {
+                    heap.truncate_roots(stage_base);
+                    return None;
+                }
+                // deopt (1) / preempt (2) / tail (4): re-run on the VM. The args survive in
+                // the param slots `[base, base+argc)`. Re-probe for the arm (clones — but
+                // only on this rare path) and `vm_apply`, exactly like the cloning path.
+                _ => {
+                    crate::perf_bump!(jit_link_rerun);
+                    let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+                    for k in 0..argc {
+                        argv2.push(heap.root_at(base + k));
+                    }
+                    heap.truncate_roots(stage_base);
+                    if let Some((_, Some((arm, cenv)))) =
+                        heap.vm_call_ic_probe(site, head, argc as u32, epoch)
+                    {
+                        return match vm_apply(heap, arm, &argv2, cenv) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                heap.jit_pending_error = Some(e);
+                                None
+                            }
+                        };
+                    }
+                    // IC changed under us (astronomically rare in a hot loop): restage the
+                    // args so the elided slow path below finds them, and fall through.
+                    for a in &argv2 {
+                        heap.push_root(*a);
+                    }
+                }
+            }
+        }
+    }
+
     // ---- Native-to-native call linking ----
     // Link straight to the callee's installed, epoch-current native code — set up its frame
     // at `stage_base` and call its entry — skipping `dispatch → vm_apply → vm_run_bc →

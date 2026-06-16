@@ -4661,6 +4661,43 @@ impl Heap {
         }
     }
 
+    /// Fast-link probe for the JIT's native-to-native call path — like
+    /// [`Self::vm_call_ic_probe`] but does the *entire* fast-link validation (sym/argc/
+    /// epoch match, native code installed + epoch-current, simple arm: `nslots > 0`, no
+    /// optional, no rest) inside the borrow and returns only **Copy** data: the native
+    /// entry pointer, the frame `nslots`, and the captured env. **No `Arc` clone** — the
+    /// one real atomic-RMW the hot recursive call (`fib` &c.) otherwise pays per call
+    /// (~30M times). Returns `None` when not fast-linkable; the caller falls back to the
+    /// cloning [`Self::vm_call_ic_probe`] / slow path (which also covers deopt). Mirrors
+    /// `jit_dispatch_call`'s native-link guard — the two must stay in sync.
+    #[cfg(feature = "jit")]
+    pub fn vm_call_ic_fast_link(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+    ) -> Option<(*const u8, usize, EnvId)> {
+        use std::sync::atomic::Ordering::Acquire;
+        let t = self.vm_call_ics.borrow();
+        let e = t.get(site as usize)?.as_ref()?;
+        if e.sym != sym || e.argc != argc || e.epoch != epoch {
+            return None;
+        }
+        let (arm, env) = e.arm.as_ref()?;
+        let code = arm.jit_code.load(Acquire);
+        if code.is_null() || code == crate::jit::BAILED || code == crate::jit::QUEUED {
+            return None;
+        }
+        if arm.nslots == 0 || arm.noptional != 0 || arm.rest_slot.is_some() {
+            return None;
+        }
+        if arm.compile_epoch.load(Acquire) != epoch {
+            return None;
+        }
+        Some((code as *const u8, arm.nslots, *env))
+    }
+
     /// Install (or overwrite) call-site `site`'s inline cache entry. An
     /// out-of-range site (a live arm compiled before the last
     /// [`Self::runtime_collect`] table clear) is ignored. Refuses to cache a
