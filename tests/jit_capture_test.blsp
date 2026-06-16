@@ -1,0 +1,50 @@
+;; Regression test for #3 lexical addressing of captured variables.
+;;
+;; A nested closure's captured enclosing lexicals are bound to **capture slots** in the
+;; arm's frame (resolved to fast `Node::Local` reads), filled at call setup from the
+;; closure's captured env (`push_frame` / `Heap::capture_value`) — an index fast-path for
+;; a flat VM-built capture frame, with a by-name `env_get` fallback for a chained /
+;; tree-walker env. These tests pin the CORRECTNESS of that across the cases that could
+;; break the slot↔env alignment: plain captures, many captures, a param shadowing a
+;; captured name (the param must win), nested capture-of-a-capture, and captures that are
+;; heap handles (so the slot holds a movable value the GC relocates). `make test` runs the
+;; whole suite through both engines (ADR-076), so the VM≡tree-walker differential also
+;; guards the flat-vs-chained fill paths.
+(defmodule jit-capture-test
+  (:use test))
+
+(describe "captured-variable lexical addressing (#3)"
+  (test "a closure reads its captured lexicals correctly"
+    (let (a 10 b 20 c 30)
+      (let (f (fn (x) (+ x (+ a (+ b c)))))
+        (assert= (f 1) 61)
+        (assert= (f 100) 160))))
+
+  (test "a param shadowing a captured name resolves to the param, not the capture"
+    (let (a 1000)
+      ;; inner `a` is the param — must win over the captured `a`
+      (let (f (fn (a) (+ a 1)))
+        (assert= (f 5) 6))))
+
+  (test "nested closure capturing an outer capture (capture-of-a-capture)"
+    (let (base 100)
+      (let (outer (fn (y)
+                    (let (inner (fn (z) (+ z (+ base y))))
+                      (inner 1))))
+        (assert= (outer 10) 111)
+        (assert= (outer 20) 121))))
+
+  (test "captures that are heap handles (lists) round-trip correctly"
+    (let (xs (list 1 2 3) ys (list 4 5))
+      (let (f (fn (n) (+ n (+ (first xs) (first ys)))))
+        (assert= (f 0) 5)
+        (assert= (f 10) 15))))
+
+  ;; Hammer a capture-heavy closure past the JIT tier threshold so the JIT'd path
+  ;; (capture slots read as Local) is exercised, not just the interpreter.
+  (defn cap-loop (f i acc) (if (= i 0) acc (cap-loop f (- i 1) (+ acc (f i)))))
+  (test "a hot capture-reading closure stays correct after it tiers"
+    (let (k 7)
+      (let (g (fn (x) (+ x k)))
+        ;; sum_{i=1}^{1000} (i + 7) = 500500 + 7000 = 507500
+        (assert= (cap-loop g 1000 0) 507500)))))

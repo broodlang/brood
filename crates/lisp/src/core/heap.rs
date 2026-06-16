@@ -3863,6 +3863,30 @@ impl Heap {
         None
     }
 
+    /// Read the `k`-th captured lexical (`#3` lexical addressing). Fast path: when the
+    /// captured env is a **flat frame** whose `vars[k]` is exactly `name` — the VM-built
+    /// closure's snapshot, the common case — return it by direct index, no symbol scan or
+    /// chain walk. Fallback: a chained / tree-walker env (or a shadowed misalignment)
+    /// resolves by name through [`env_get`] (correct, the old cost). `name` makes the fast
+    /// path self-verifying, so the two engines stay in lockstep (the differential gate).
+    #[inline]
+    pub fn capture_value(&self, env: EnvId, k: usize, name: Symbol) -> Value {
+        if env != EnvId::GLOBAL {
+            let frame = self.env_frame(env);
+            if let Some(&(s, v)) = frame.vars.get(k) {
+                // Fast path only if `vars[k]` is `name` AND is its **last** binding in
+                // this frame — i.e. exactly what `env_get`'s reverse scan returns. A
+                // `letrec` env binds a name twice (a nil placeholder + the wired value),
+                // so a bare forward index would read the placeholder; the no-later-dup
+                // check rejects that and falls through to `env_get` (correct for both).
+                if s == name && !frame.vars[k + 1..].iter().any(|&(s2, _)| s2 == name) {
+                    return v;
+                }
+            }
+        }
+        self.env_get(env, name).unwrap_or(Value::Nil)
+    }
+
     /// The distinct lexical names bound along `env`'s frame chain, innermost-first,
     /// stopping at the global scope (whose names are runtime globals, not lexicals).
     /// Used by the compiling VM (ADR-076 §2c): a nested `(fn …)` must snapshot the
