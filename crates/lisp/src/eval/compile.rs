@@ -2407,6 +2407,7 @@ fn exec_call(
                                 epoch: probe_epoch,
                                 callee: v,
                                 arm,
+                                fast: std::cell::Cell::new(None),
                             },
                         );
                     }
@@ -3467,6 +3468,7 @@ fn exec_chunk(
                                         epoch,
                                         callee: v,
                                         arm,
+                                        fast: std::cell::Cell::new(None),
                                     },
                                 );
                             }
@@ -6776,6 +6778,7 @@ pub(crate) fn jit_dispatch_call(
                                         epoch,
                                         callee: Value::Fn(id),
                                         arm: Some((a.clone(), env)),
+                                        fast: std::cell::Cell::new(None),
                                     },
                                 );
                             }

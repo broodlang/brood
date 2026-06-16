@@ -1070,6 +1070,14 @@ pub struct CallIcEntry {
     /// The VM fast path: the callee's compiled arm for `argc` + its captured env,
     /// when the callee resolved to a non-passthrough VM-eligible closure.
     pub arm: Option<(Arc<crate::eval::compile::CompiledArm>, EnvId)>,
+    /// Cached JIT fast-link result `(code_ptr_as_usize, nslots, env)` — the validated
+    /// output of [`Heap::vm_call_ic_fast_link`], memoised so the hot recursive call
+    /// skips the per-call atomic loads (`jit_code`/`compile_epoch`) + arm-shape checks.
+    /// Populated lazily once the arm is installed + fast-linkable, and only valid at this
+    /// entry's `epoch` (a `def` bumps the epoch → the entry is re-resolved fresh via
+    /// [`Heap::vm_call_ic_put`], which clears this). Within an epoch an installed arm's
+    /// code pointer is stable (a recompile bumps the epoch), so the cache can't go stale.
+    pub fast: std::cell::Cell<Option<(usize, usize, EnvId)>>,
 }
 
 impl Default for Heap {
@@ -4756,6 +4764,14 @@ impl Heap {
         if e.sym != sym || e.argc != argc || e.epoch != epoch {
             return None;
         }
+        // Memoised hot path: the entry matched at this epoch and the arm was already
+        // validated as fast-linkable — return the cached `(code, nslots, env)` directly,
+        // skipping the two atomic `Acquire` loads + the arm-shape checks below. Valid
+        // because within an epoch an installed arm's code pointer is stable (a `def`
+        // bumps the epoch → a fresh entry; a recompile bumps it too).
+        if let Some((code, nslots, env)) = e.fast.get() {
+            return Some((code as *const u8, nslots, env));
+        }
         let (arm, env) = e.arm.as_ref()?;
         let code = arm.jit_code.load(Acquire);
         if code.is_null() || code == crate::jit::BAILED || code == crate::jit::QUEUED {
@@ -4767,6 +4783,8 @@ impl Heap {
         if arm.compile_epoch.load(Acquire) != epoch {
             return None;
         }
+        // Fully validated + installed at this epoch — memoise for subsequent calls.
+        e.fast.set(Some((code as usize, arm.nslots, *env)));
         Some((code as *const u8, arm.nslots, *env))
     }
 
