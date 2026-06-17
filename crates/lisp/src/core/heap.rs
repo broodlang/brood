@@ -3957,6 +3957,20 @@ impl Heap {
         self.runtime.version.load(Ordering::Relaxed)
     }
 
+    /// Bump the global epoch and return the new value — the JIT two-stage tiering swap
+    /// (devlog 2026-06-17) uses this to install a deferred *inlined* native arm in place
+    /// of its small original. Bumping the epoch invalidates every per-process global +
+    /// call inline cache exactly as a `def` would, so the call sites that were fast-linked
+    /// to the small native (with the small frame size) re-validate and pick up the inlined
+    /// code with its larger frame (`CompiledArm::active_nslots`). Fired at most once per
+    /// arm per epoch (latched by `inline_installed`), so the one-time re-tier of unrelated
+    /// arms is negligible — and under a spawn-style storm the inlined upgrade never lands,
+    /// so this never fires there.
+    #[cfg(feature = "jit")]
+    pub(crate) fn bump_global_epoch(&self) -> u64 {
+        self.runtime.version.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     /// Shared-JIT cache lookup (ADR-101, the spawn lever): the native code published
     /// for a RUNTIME/PRELUDE arm's `(closure_id, argc)` `share_key`, as
     /// `(code_ptr, compile_epoch)`. The caller ([`crate::eval::compile::jit_tier`])
@@ -4783,9 +4797,14 @@ impl Heap {
         if arm.compile_epoch.load(Acquire) != epoch {
             return None;
         }
+        // Two-stage tiering: the frame the *installed* native runs against — the inlined
+        // upgrade (post-swap) needs the larger `inline_nslots`. The small→inlined swap
+        // bumps the epoch, so a stale memo here (with the small `nslots`) is invalidated
+        // and re-validated through the IC miss path, picking up the new active size.
+        let active_ns = arm.active_nslots();
         // Fully validated + installed at this epoch — memoise for subsequent calls.
-        e.fast.set(Some((code as usize, arm.nslots, *env)));
-        Some((code as *const u8, arm.nslots, *env))
+        e.fast.set(Some((code as usize, active_ns, *env)));
+        Some((code as *const u8, active_ns, *env))
     }
 
     /// Install (or overwrite) call-site `site`'s inline cache entry. An

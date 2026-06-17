@@ -517,6 +517,65 @@ pub struct CompiledArm {
     /// flat capture frame — the VM-built common case — with an `env_get`-by-name fallback
     /// for a chained/tree-walker env, so it's correct in both engines).
     pub capture_names: Box<[Symbol]>,
+    /// Recursive self-inlining (Phase B, the two-stage tiering upgrade, devlog
+    /// 2026-06-17). `Some(name)` when this arm qualifies as a top-level no-capture
+    /// recursive `defn` whose body the JIT can splice depth-1 of into its own frame
+    /// (removing the per-call protocol for the inlined level — the fib lever). The
+    /// VM keeps the ORIGINAL small `body`/`chunk`/`nslots`; the inlined body is
+    /// re-derived fresh in `jit_lower_arm` (`shift_slots` clone → `inline_self_calls`),
+    /// so nothing here grows the interpreted frame. `None` = the arm doesn't qualify
+    /// (the common case).
+    #[cfg(feature = "jit")]
+    pub inline_name: Option<Symbol>,
+    /// The per-block slot stride for inlining (`m` = the original arm's slot
+    /// high-water mark `scope.max`); each inlined call site occupies a disjoint
+    /// shifted range `[m*i .. m*(i+1))`. Only meaningful when `inline_name.is_some()`.
+    #[cfg(feature = "jit")]
+    pub inline_stride: usize,
+    /// The inlined arm's frame high-water mark (the spliced layout's `scope.max`
+    /// plus its own chunk spill reserve) — computed once at arm construction by
+    /// running the inliner on a CLONE of `body` (then discarded). The frame the
+    /// **inlined** native version runs against is `[base .. base+inline_nslots)`;
+    /// the small native + the VM use the original (smaller) `nslots`. Per-engine
+    /// frame sizing keys on which version is installed (`inline_installed`).
+    #[cfg(feature = "jit")]
+    pub inline_nslots: usize,
+    /// Two-stage tiering: the **deferred** inlined native code pointer (null =
+    /// not compiled, `QUEUED`, `BAILED`, else callable). Compiled as a separate,
+    /// lower-priority background upgrade *after* the small original arm has tiered
+    /// — so short-lived processes (spawn's `fib 15`) finish on the small native and
+    /// never wait on the bigger inlined compile, while a long-lived workload (fib 35)
+    /// picks up the inlined upgrade once it lands. Installed into `jit_code` by
+    /// `jit_tier` (epoch-bumped swap), at which point `inline_installed` flips true.
+    #[cfg(feature = "jit")]
+    pub inline_code: std::sync::atomic::AtomicPtr<u8>,
+    /// True once the deferred inlined compile has been enqueued (so we enqueue it at
+    /// most once per arm-instance per epoch). Reset on epoch invalidation.
+    #[cfg(feature = "jit")]
+    pub inline_queued: std::sync::atomic::AtomicBool,
+    /// True once the inlined native code has been installed into `jit_code` (the
+    /// small→inlined swap fired). **This is the per-engine frame-sizing key**: while
+    /// false the active native is the small original arm (frame `nslots`); once true
+    /// the active native is the inlined arm (frame `inline_nslots`). One-way false→true
+    /// within an epoch; reset on epoch invalidation. See `active_nslots`.
+    #[cfg(feature = "jit")]
+    pub inline_installed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "jit")]
+impl CompiledArm {
+    /// The frame size the **currently installed** native version runs against —
+    /// the per-engine frame-sizing key for two-stage tiering. The VM always uses the
+    /// original `nslots` (it runs the original `chunk`); only a native entry consults
+    /// this. Small native → `nslots`; inlined native (post-swap) → `inline_nslots`.
+    #[inline]
+    pub fn active_nslots(&self) -> usize {
+        if self.inline_installed.load(std::sync::atomic::Ordering::Acquire) {
+            self.inline_nslots
+        } else {
+            self.nslots
+        }
+    }
 }
 
 /// One arm of a closure: its arity shape plus the compiled body **if** it was
@@ -1890,51 +1949,83 @@ fn inline_self_calls(
     count
 }
 
-/// Depth-1 self-inline the arm body in place (Phase B, §6b). `m` is the original arm's
-/// slot high-water mark (`scope.max`), used as the per-block slot stride. Returns the new
-/// slot high-water mark (`m * (1 + blocks)`) when ≥1 site was inlined, else `None`
-/// (no-op: the caller leaves the body and `scope.max` unchanged). The conservative gate
-/// (top-level no-capture recursive defn) is enforced by the caller via `defn_name`.
+/// Is the JIT self-inliner enabled? **Default ON** (the two-stage tiering build, devlog
+/// 2026-06-17) — `BROOD_NO_INLINE=1` opts out (the A/B baseline lever). Replaces the old
+/// `BROOD_JIT_INLINE` opt-in: the dual-body + per-engine frame sizing + deferred-upgrade
+/// tiering removes the regressions that kept it shelved (the VM keeps the original small
+/// body; the inlined arm tiers only as a low-priority background upgrade).
 #[cfg(feature = "jit")]
-fn self_inline_arm(body: &mut Node, defn_name: Symbol, nrequired: usize, m: usize) -> Option<usize> {
-    // **Default OFF — opt-in via `BROOD_JIT_INLINE=1`.** The source-level self-inliner is
-    // a *win only when the arm tiers to native* (fib(35) ~1.7×), but a *loss when it
-    // doesn't*: it inflates the shared `Node` body, so a non-tiering arm runs the bigger
-    // body on the bytecode VM — spawn (10k× `fib 15`, too short-lived to tier) regressed
-    // ~6.5× and bintree (alloc-bound, bails the JIT) ~4.8×. A compile-time gate can't tell
-    // the cases apart (`fib 15` and `fib 35` are the *same arm*). The correct fix is a
-    // JIT-only inlined body (the VM keeps the original) + per-engine frame sizing — the
-    // frame-representation change in `docs/jit-optimizing-tier.md` §6a/§6c — so the inliner
-    // is shelved opt-in until that lands. See devlog 2026-06-17.
+fn self_inline_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var_os("BROOD_JIT_INLINE").is_some()) {
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_INLINE").is_none())
+}
+
+/// **Non-mutating** probe: does `body` qualify for depth-1 self-inlining, and if so what
+/// is the inlined frame's slot high-water mark? Runs the inliner on a CLONE (discarded),
+/// so the original `body` is never touched — the VM keeps the small layout. `m` is the
+/// original arm's slot high-water mark (`scope.max`), the per-block slot stride. Returns
+/// the inlined `scope.max` (= `m * (1 + blocks)`) when ≥1 site inlines, else `None`. The
+/// gate (top-level no-capture recursive defn) is partly the caller's (`defn_name` +
+/// fixed-arity); here we enforce no `SelfCall`/`MakeClosure`, the body-size bound, and
+/// ≥1 qualifying call. The *spill reserve* for the inlined chunk is added by the caller's
+/// re-derivation; this returns the slot count only.
+#[cfg(feature = "jit")]
+fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize) -> Option<usize> {
+    if !self_inline_enabled() {
         return None;
     }
     // Frame-reuse self-calls and nested closures are incompatible with naive slot
     // shifting; skip an oversized body to avoid blow-up.
-    if node_has_self_call(body) || node_has_make_closure(body) || node_count(body) > SELF_INLINE_MAX_BODY {
+    if node_has_self_call(body) || node_has_make_closure(body) || node_count(body) > SELF_INLINE_MAX_BODY
+    {
         return None;
     }
-    // Snapshot the original body to splice (deep copies are taken from this).
+    // Clone the body and run the inliner on the copy to count blocks / the new max.
+    let mut clone = shift_slots(body, 0);
     let orig = shift_slots(body, 0);
     let mut next_block = 1usize;
-    let inlined = inline_self_calls(body, &orig, defn_name, nrequired, m, &mut next_block);
+    let inlined = inline_self_calls(&mut clone, &orig, defn_name, nrequired, m, &mut next_block);
     if inlined == 0 {
         return None;
     }
+    let inline_max = m * next_block;
+    // The inlined frame must also reserve the inlined chunk's call-result spill slots
+    // (above `inline_max`) — exactly as `compile_arm` adds `jit_spill_reserve` to the
+    // original `nslots`. The inlined body has MORE non-tail calls (the spliced leaf
+    // calls), so it needs at least as much. Compile the spliced chunk to measure it; if
+    // it doesn't lower to a chunk, the inliner can't help — bail (the small arm tiers).
+    let spliced_chunk = compile_chunk(&clone)?;
+    let inline_nslots = inline_max + jit_spill_reserve(&spliced_chunk.code);
     if std::env::var("BROOD_INLINE_DBG").is_ok() {
         eprintln!(
-            "[inline-dbg] {} nrequired={} m={} inlined={} new_max={}",
+            "[inline-dbg] probe {} nrequired={} m={} inlined={} new_max={} inline_nslots={}",
             crate::core::value::symbol_name(defn_name),
             nrequired,
             m,
             inlined,
-            m * next_block
+            inline_max,
+            inline_nslots
         );
     }
-    // `next_block` advanced to 1 + (#blocks); the highest block index used is
-    // `next_block - 1`, occupying slots `[m*(next_block-1) .. m*next_block)`.
-    Some(m * next_block)
+    Some(inline_nslots)
+}
+
+/// Re-derive the inlined body fresh from `body` (the small original), for the JIT to
+/// lower as the deferred upgrade. Mirrors `self_inline_probe`'s mutation on a fresh clone
+/// of `body`, then `m * stride` placement — so the result is bit-identical to what the
+/// probe measured. Returns the spliced `Node` (or `None` if it no longer qualifies, which
+/// can't happen for an arm whose probe set `inline_name`). The caller compiles it to a
+/// chunk and lowers against `inline_nslots`.
+#[cfg(feature = "jit")]
+fn rederive_inlined_body(body: &Node, defn_name: Symbol, nrequired: usize, m: usize) -> Option<Node> {
+    let mut spliced = shift_slots(body, 0);
+    let orig = shift_slots(body, 0);
+    let mut next_block = 1usize;
+    let inlined = inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
+    if inlined == 0 {
+        return None;
+    }
+    Some(spliced)
 }
 
 fn compile_arm(
@@ -2005,22 +2096,30 @@ fn compile_arm(
     // `(nth p K)` to direct reads. Bumps `scope.max` for the element slots; makes the arm
     // simpler (fewer allocs, no `nth`), so it JITs better. No-op for arms without the pattern.
     ea_scalar_replace(&mut body, &mut scope.max);
-    // Recursive self-inlining (Phase B, §6b): splice depth-1 of a top-level no-capture
-    // recursive `defn`'s body into its own frame, removing the per-call protocol for the
-    // inlined level. Gated to a clean fixed-arity layout (no `&optional`/`&` rest — `M =
-    // scope.max` must be the whole frame so shifted blocks don't collide), with a
+    // Recursive self-inlining (Phase B, §6b — two-stage tiering, devlog 2026-06-17):
+    // PROBE depth-1 inlining of a top-level no-capture recursive `defn`'s body WITHOUT
+    // mutating the original. The VM keeps the original small `body`/`chunk`/`nslots`;
+    // the inlined body is re-derived fresh in `jit_lower_arm` and compiled as a deferred
+    // upgrade. Here we only record whether the arm qualifies + the inlined frame
+    // high-water mark (`inline_nslots`), by running the inliner on a CLONE (then
+    // discarding it). Gated to a clean fixed-arity layout (no `&optional`/`&` rest —
+    // `M = scope.max` must be the whole frame so shifted blocks don't collide), with a
     // `defn_name` (top-level recursive, set only when the closure doesn't capture). The
-    // inliner enforces the rest of the gate (no `SelfCall`/`MakeClosure`, body-size
-    // bound, ≥1 qualifying call). Deterministic: same arm → same shifted IR.
+    // probe enforces the rest of the gate (no `SelfCall`/`MakeClosure`, body-size bound,
+    // ≥1 qualifying call). Deterministic: same arm → same shifted IR.
     #[cfg(feature = "jit")]
-    if let Some(name) = defn_name {
-        if noptional == 0 && rest.is_none() {
-            let m = scope.max;
-            if let Some(new_max) = self_inline_arm(&mut body, name, nrequired, m) {
-                scope.max = new_max;
+    let (inline_name, inline_stride, inline_nslots): (Option<Symbol>, usize, usize) = {
+        let m = scope.max;
+        match defn_name {
+            Some(name) if noptional == 0 && rest.is_none() => {
+                match self_inline_probe(&body, name, nrequired, m) {
+                    Some(inline_max) => (Some(name), m, inline_max),
+                    None => (None, 0, 0),
+                }
             }
+            _ => (None, 0, 0),
         }
-    }
+    };
     let optional_defaults = optional_defaults.into_boxed_slice();
     let has_runtime_handles =
         node_has_rt_handles(&body) || optional_defaults.iter().flatten().any(node_has_rt_handles);
@@ -2050,6 +2149,18 @@ fn compile_arm(
         share_key: None,
         shared_published: std::sync::atomic::AtomicBool::new(false),
         capture_names,
+        #[cfg(feature = "jit")]
+        inline_name,
+        #[cfg(feature = "jit")]
+        inline_stride,
+        #[cfg(feature = "jit")]
+        inline_nslots,
+        #[cfg(feature = "jit")]
+        inline_code: AtomicPtr::new(std::ptr::null_mut()),
+        #[cfg(feature = "jit")]
+        inline_queued: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "jit")]
+        inline_installed: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -4504,11 +4615,38 @@ fn vm_run_bc(
             {
                 if try_jit {
                     try_jit = false;
+                    // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
+                    // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
+                    // *installed* native version is the deferred inlined upgrade does the
+                    // native entry need the larger `inline_nslots` frame (the spliced blocks'
+                    // shifted slot ranges). `inline_installed` is false for every arm that
+                    // doesn't inline (the overwhelming common case — fib is the exception),
+                    // so the hot path pays nothing: it calls `jit_tier` exactly as before.
+                    // Only the inlined arm grows `roots` and restores the small top on a
+                    // non-`Done` outcome (deopt re-runs the ORIGINAL small body from params).
+                    let inlined_active =
+                        cur_arm.inline_installed.load(std::sync::atomic::Ordering::Acquire);
+                    let small_top = cur_base + cur_arm.nslots;
+                    if inlined_active {
+                        heap.extend_roots_to_nil(cur_base + cur_arm.inline_nslots);
+                    }
                     // Clean frame state `jit_tier` runs against: slots set up, operand
                     // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
                     // assumes roots return to exactly here.
                     let pre_roots = heap.roots_len();
                     let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
+                    // Restore the small frame top on every non-Done path so the `exec_chunk`
+                    // re-run sees the original layout (Done retires the whole frame anyway).
+                    // The inlined native keeps operands in registers, so it leaves `roots`
+                    // exactly at the frame top it was entered with (`cur_base+inline_nslots`).
+                    // A Some(4) tail outcome stages callee+args ABOVE that top, read by
+                    // `jit_dispatch_tail` relative to `active_nslots` — don't disturb those.
+                    if inlined_active
+                        && matches!(jit_outcome, Some(1) | Some(2) | None)
+                        && heap.roots_len() == cur_base + cur_arm.inline_nslots
+                    {
+                        heap.truncate_roots(small_top);
+                    }
                     // Work-attribution (perf-stats): native completion (0/4) vs a
                     // mid-run deopt (1) vs preemption (2). A hot arm with high
                     // `jit_deopt` vs `jit_native` compiles but keeps falling off the
@@ -4786,6 +4924,18 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 share_key: None,
                 shared_published: std::sync::atomic::AtomicBool::new(false),
                 capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
             });
             let arm_slot = if arm.has_runtime_handles {
                 heap.live_arm_push(arm.clone())
@@ -5202,6 +5352,35 @@ pub(crate) fn jit_lower_arm(
     arm: &CompiledArm,
     slot_tags: &[u8],
 ) -> Option<*const u8> {
+    jit_lower_arm_inner(jit, arm, slot_tags, None)
+}
+
+/// Lower the **inlined** (deferred upgrade) body of a qualifying recursive arm. Re-derives
+/// the spliced body fresh from `arm.body` (the small original — the VM keeps it), compiles
+/// an ephemeral chunk, and lowers it against the larger `arm.inline_nslots` frame. Returns
+/// the inlined native pointer, or `None` if the spliced body falls out of the JIT subset.
+/// Per-engine frame sizing (`active_nslots`) keys on which version `jit_tier` installs.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_lower_inlined_arm(
+    jit: &mut crate::jit::Jit,
+    arm: &CompiledArm,
+    slot_tags: &[u8],
+) -> Option<*const u8> {
+    let name = arm.inline_name?;
+    let spliced = rederive_inlined_body(&arm.body, name, arm.nrequired, arm.inline_stride)?;
+    let chunk = compile_chunk(&spliced)?;
+    jit_lower_arm_inner(jit, arm, slot_tags, Some((&spliced, &chunk, arm.inline_nslots)))
+}
+
+/// Shared lowering core. `inline` overrides the body/chunk/nslots when lowering the
+/// re-derived inlined body; `None` lowers the arm's own (original) body — the small native.
+#[cfg(feature = "jit")]
+fn jit_lower_arm_inner(
+    jit: &mut crate::jit::Jit,
+    arm: &CompiledArm,
+    slot_tags: &[u8],
+    inline: Option<(&Node, &Chunk, usize)>,
+) -> Option<*const u8> {
     use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_PAIR};
     use cranelift_codegen::ir::{
         condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, StackSlotData,
@@ -5211,7 +5390,14 @@ pub(crate) fn jit_lower_arm(
     use cranelift_module::{Linkage, Module};
     use std::sync::atomic::Ordering;
 
-    let chunk = arm.chunk.as_ref()?;
+    // The body/chunk/frame-size this lowering runs against: either the arm's own
+    // (original, small — the small native) or a re-derived inlined body (deferred upgrade).
+    // `nrequired` is identical for both (inlining doesn't change the param count).
+    let (lower_body, chunk, nslots): (&Node, &Chunk, usize) = match inline {
+        Some((b, c, ns)) => (b, c, ns),
+        None => (&arm.body, arm.chunk.as_ref()?, arm.nslots),
+    };
+    let nrequired = arm.nrequired;
     let code = &chunk.code;
     let len = code.len();
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
@@ -5222,7 +5408,7 @@ pub(crate) fn jit_lower_arm(
     // arms that neither allocate (`cons`/vector build → LOCAL GC) nor make a Brood→Brood
     // call (could `def` → RUNTIME compaction): under that gate nothing runs mid-arm to
     // relocate the storage, and a preempt/deopt re-enters from the entry block (re-hoist).
-    let invariant = invariant_param_slots(&arm.body, arm.nrequired);
+    let invariant = invariant_param_slots(lower_body, nrequired);
     let hoist_safe = !code.iter().any(|i| {
         matches!(
             i,
@@ -5267,7 +5453,7 @@ pub(crate) fn jit_lower_arm(
     // it bit-identical to the VM's late binding). Same `hoist_safe` gate as the local hoist.
     let mut hoist_globals: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
     if hoist_safe {
-        invariant_global_vecs(&arm.body, &mut hoist_globals);
+        invariant_global_vecs(lower_body, &mut hoist_globals);
     }
     // The scalar-global lever (#1, the late-binding tax): a global read in value position
     // (`n` in `loop--acc`'s `(>= i n)`) is loop-invariant within a no-call arm, but was
@@ -5300,7 +5486,7 @@ pub(crate) fn jit_lower_arm(
     // the profile against `Tag::Float`, not the layout byte.
     let profile_tag_float = crate::core::value::Tag::Float as u8;
     let slot_float: std::cell::RefCell<Vec<bool>> = std::cell::RefCell::new(
-        (0..arm.nslots)
+        (0..nslots)
             .map(|k| slot_tags.get(k).copied() == Some(profile_tag_float))
             .collect(),
     );
@@ -5315,19 +5501,19 @@ pub(crate) fn jit_lower_arm(
     // is `Op::Int` on the slot edge and a `0` (false) reads as a truthy integer (5770),
     // looping forever on a condition that should exit.
     let slot_bool: std::cell::RefCell<Vec<bool>> =
-        std::cell::RefCell::new(vec![false; arm.nslots]);
+        std::cell::RefCell::new(vec![false; nslots]);
     // Handle-spill scratch: `[spill_base, spill_base + reserve)` are the frame slots
     // reserved (above the compiler's slot ceiling) for spilling call-result handles
     // that must survive a later call's safepoint. `reserve` matches what arm
     // construction added to `nslots`, so `spill_base` is exactly the old `scope.max`.
     let reserve = jit_spill_reserve(code);
-    let spill_base = arm.nslots - reserve;
+    let spill_base = nslots - reserve;
     let mut spill_next = 0usize;
     // Return-via-roots writes/reads the result at `roots[base]` (slot 0), and the VM hooks
     // read it back the same way — both require slot 0 to exist. A 0-slot arm (a 0-arg,
     // 0-local fn like `(defn k () 7)`) has `base == roots_len`, so `roots[base]` is out of
     // bounds. Such arms are trivial; bail and let the VM run them.
-    if arm.nslots == 0 {
+    if nslots == 0 {
         return None;
     }
 
@@ -7070,48 +7256,102 @@ pub(crate) fn jit_lower_arm(
 // slot, snapshotted from a live frame at tier time) alongside the arm, so the
 // background compiler can type-specialize float arms without a `CompiledArm` field.
 // Empty means "no profile" (integer-only lowering, the pre-float behaviour).
-static JIT_COMPILER: std::sync::LazyLock<std::sync::mpsc::SyncSender<(Arc<CompiledArm>, Vec<u8>)>> =
-    std::sync::LazyLock::new(|| {
-        use std::sync::atomic::Ordering::Release;
-        let (tx, rx) = std::sync::mpsc::sync_channel::<(Arc<CompiledArm>, Vec<u8>)>(256);
-        std::thread::Builder::new()
-            .name("brood-jit".into())
-            .spawn(move || {
-                // If codegen ever *panics* (a Cranelift verifier/finalize failure, e.g. an
-                // unregistered `brood_rt_*` symbol, or any future lowering bug), don't let
-                // the panic kill this thread — that would abandon the receiver, fill the
-                // bounded queue, and silently disable the JIT process-wide while the program
-                // ran on none the wiser. Catch it, mark the offending arm BAILED, and stop
-                // compiling further (the module may be left half-mutated, so subsequent
-                // compiles can't be trusted): the process keeps running, correctly, on the
-                // interpreter. A single panic still prints once via the default hook — a
-                // loud, actionable signal — but doesn't spam or crash.
-                let mut codegen_poisoned = false;
-                for (arm, slot_tags) in rx {
-                    if codegen_poisoned {
-                        arm.jit_code.store(crate::jit::BAILED, Release);
-                        continue;
+struct JitCompiler {
+    /// Primary (initial-tier) queue: the small ORIGINAL arm. Drained first, always.
+    primary: std::sync::mpsc::SyncSender<(Arc<CompiledArm>, Vec<u8>)>,
+    /// Deferred (lower-priority) queue: the re-derived **inlined** upgrade. The bg thread
+    /// pulls from it only when `primary` is empty — so under a spawn-style initial-tier
+    /// storm (thousands of short-lived processes tiering their small arms) the inlined
+    /// upgrades sit behind the backlog and never compete; a long-lived workload (fib 35)
+    /// drains its primary, then the deferred inlined compile lands and the swap fires.
+    deferred: std::sync::mpsc::SyncSender<(Arc<CompiledArm>, Vec<u8>)>,
+}
+
+#[cfg(feature = "jit")]
+static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new(|| {
+    use std::sync::atomic::Ordering::Release;
+    use std::sync::mpsc::{sync_channel, TryRecvError};
+    let (ptx, prx) = sync_channel::<(Arc<CompiledArm>, Vec<u8>)>(256);
+    let (dtx, drx) = sync_channel::<(Arc<CompiledArm>, Vec<u8>)>(256);
+    std::thread::Builder::new()
+        .name("brood-jit".into())
+        .spawn(move || {
+            // If codegen ever *panics* (a Cranelift verifier/finalize failure, e.g. an
+            // unregistered `brood_rt_*` symbol, or any future lowering bug), don't let
+            // the panic kill this thread — that would abandon the receivers, fill the
+            // bounded queues, and silently disable the JIT process-wide while the program
+            // ran on none the wiser. Catch it, mark the offending arm BAILED, and stop
+            // compiling further (the module may be left half-mutated, so subsequent
+            // compiles can't be trusted): the process keeps running, correctly, on the
+            // interpreter. A single panic still prints once via the default hook — a
+            // loud, actionable signal — but doesn't spam or crash.
+            let mut codegen_poisoned = false;
+            // Lower one work item: `inlined=false` → the small original arm, store into
+            // `jit_code`; `inlined=true` → the re-derived inlined body, store into
+            // `inline_code` (jit_tier swaps it into `jit_code` later, epoch-bumped).
+            let mut compile = |arm: &Arc<CompiledArm>, slot_tags: &[u8], inlined: bool| {
+                let slot = if inlined { &arm.inline_code } else { &arm.jit_code };
+                if codegen_poisoned {
+                    slot.store(crate::jit::BAILED, Release);
+                    return;
+                }
+                let mut jit = crate::jit::GLOBAL_JIT
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if inlined {
+                        jit_lower_inlined_arm(&mut jit, arm, slot_tags)
+                    } else {
+                        jit_lower_arm(&mut jit, arm, slot_tags)
                     }
-                    let mut jit = crate::jit::GLOBAL_JIT
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        jit_lower_arm(&mut jit, &arm, &slot_tags)
-                    }));
-                    drop(jit); // install the pointer outside the module lock
-                    match lowered {
-                        Ok(Some(ptr)) => arm.jit_code.store(ptr as *mut u8, Release),
-                        Ok(None) => arm.jit_code.store(crate::jit::BAILED, Release),
-                        Err(_) => {
-                            codegen_poisoned = true;
-                            arm.jit_code.store(crate::jit::BAILED, Release);
-                        }
+                }));
+                drop(jit); // install the pointer outside the module lock
+                match lowered {
+                    Ok(Some(ptr)) => slot.store(ptr as *mut u8, Release),
+                    Ok(None) => slot.store(crate::jit::BAILED, Release),
+                    Err(_) => {
+                        codegen_poisoned = true;
+                        slot.store(crate::jit::BAILED, Release);
                     }
                 }
-            })
-            .expect("spawn brood-jit compiler thread");
-        tx
-    });
+            };
+            loop {
+                // 1. Drain the entire primary queue before touching deferred — the
+                //    initial-tier work always wins the compiler.
+                match prx.try_recv() {
+                    Ok((arm, tags)) => {
+                        compile(&arm, &tags, false);
+                        continue;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => break,
+                }
+                // 2. Primary empty: take one deferred inlined upgrade if any.
+                match drx.try_recv() {
+                    Ok((arm, tags)) => {
+                        compile(&arm, &tags, true);
+                        continue;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
+                }
+                // 3. Both empty: block on the primary (initial tier latency matters), but
+                //    only briefly — so a deferred item enqueued while we slept is picked up
+                //    promptly once primary stays quiet. A 1ms idle poll is free (the thread
+                //    is otherwise sleeping) and never delays a primary send (which wakes it).
+                match prx.recv_timeout(std::time::Duration::from_millis(1)) {
+                    Ok((arm, tags)) => compile(&arm, &tags, false),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .expect("spawn brood-jit compiler thread");
+    JitCompiler {
+        primary: ptx,
+        deferred: dtx,
+    }
+});
 
 /// Are all the arm chunk's inlined 2-ary primitives still bound to their native
 /// implementations (ADR-096 §4.A epoch-guard, evaluated eagerly)? The JIT lowers
@@ -7393,7 +7633,10 @@ pub(crate) fn jit_dispatch_call(
                     }
                 }
                 heap.truncate_roots(stage_base + argc);
-                heap.extend_roots_to_nil(stage_base + arm.nslots);
+                // Two-stage tiering: size the callee frame to its *installed* native version
+                // (inlined upgrade → `inline_nslots`; small → `nslots`). The epoch guard above
+                // matched, so the installed code and its active size are consistent.
+                heap.extend_roots_to_nil(stage_base + arm.active_nslots());
                 let base = stage_base;
                 // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
                 // `jit_lower_arm`, living for the process in `GLOBAL_JIT`; the frame is set
@@ -7510,7 +7753,10 @@ fn jit_dispatch_tail(
     arm: &CompiledArm,
     env: EnvRoot,
 ) -> Result<ChunkExit, LispError> {
-    let top = base + arm.nslots;
+    // Two-stage tiering: a tail call is staged by the native code ABOVE its own frame top,
+    // which is `active_nslots` (the inlined upgrade runs with the bigger frame). Use the
+    // active size so the staged `[callee, args…]` is read at the right offset.
+    let top = base + arm.active_nslots();
     let n = heap.roots_len();
     let argc = n - top - 1;
     let callee = heap.root_at(top);
@@ -7633,7 +7879,7 @@ pub(crate) fn jit_tier(
             let slot_tags: Vec<u8> = (0..arm.nslots)
                 .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
                 .collect();
-            if JIT_COMPILER.try_send((arm.clone(), slot_tags)).is_err() {
+            if JIT_COMPILER.primary.try_send((arm.clone(), slot_tags)).is_err() {
             // The background compile queue is full (a burst of distinct hot arms — e.g.
             // thousands of short-lived green processes each tiering their own arm copy,
             // overwhelming the bounded channel). Reset to untried AND back the hotness
@@ -7657,15 +7903,78 @@ pub(crate) fn jit_tier(
         arm.jit_code.store(std::ptr::null_mut(), Release);
         arm.jit_calls.store(THRESHOLD, Release); // re-tier promptly (already proven hot)
         arm.shared_published.store(false, Relaxed); // recompiled code must re-publish
+        arm.inline_installed.store(false, Relaxed); // re-decide the inline swap at the new epoch
+        arm.inline_queued.store(false, Relaxed); // re-enqueue the inlined upgrade if still hot
         return None;
+    }
+    // ---- Two-stage tiering (devlog 2026-06-17): the deferred inlined upgrade ----
+    // The small original native is installed and running (the spawn-friendly fast path).
+    // For an arm that qualifies for recursive self-inlining, the *inlined* body is compiled
+    // separately on the lower-priority deferred queue and swapped in here once ready:
+    //
+    //  (1) Enqueue once. The first time we run the small native, hand the inlined compile to
+    //      the DEFERRED queue (drained only when the primary initial-tier queue is empty).
+    //      Under spawn's storm the primary queue never empties, so this never compiles until
+    //      the storm clears — spawn finishes on the small native, no regression. A long-lived
+    //      workload (fib 35) drains its primary and the inlined upgrade lands.
+    //
+    //  (2) Swap once. When `inline_code` holds a real installed pointer, atomically swap it
+    //      into `jit_code`, bump the global epoch (so every fast-linked call site re-validates
+    //      and picks up the inlined code WITH its larger `inline_nslots` frame — the per-engine
+    //      sizing key), set `inline_installed`, and run the VM this one activation. The next
+    //      entry sizes the frame to `active_nslots()` (= `inline_nslots`) and runs the inlined
+    //      native. One VM activation on the transition — negligible.
+    if arm.inline_name.is_some() {
+        if !arm.inline_installed.load(Acquire) {
+            let ic = arm.inline_code.load(Acquire);
+            if ic.is_null() {
+                // Not yet compiled/enqueued. Elect a single enqueuer via the queued flag.
+                if !arm.inline_queued.swap(true, AcqRel) {
+                    let slot_tags: Vec<u8> = (0..arm.nslots)
+                        .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
+                        .collect();
+                    // Deferred (low-priority). On a full queue, un-set `inline_queued` so a
+                    // later call re-attempts — but DON'T disturb the running small native.
+                    if JIT_COMPILER
+                        .deferred
+                        .try_send((arm.clone(), slot_tags))
+                        .is_err()
+                    {
+                        arm.inline_queued.store(false, Relaxed);
+                    }
+                }
+            } else if ic != crate::jit::BAILED && ic != crate::jit::QUEUED {
+                // The inlined upgrade is ready — swap it in. Bump the epoch FIRST, then stamp
+                // `compile_epoch` to the new value and publish the inlined pointer, so a
+                // concurrent fast-link sees a consistent (new-epoch, inlined-code) pair or
+                // misses (re-validates). `inline_installed` last: it gates `active_nslots`,
+                // and must only read true once the bigger code is genuinely in `jit_code`.
+                let new_epoch = heap.bump_global_epoch();
+                arm.compile_epoch.store(new_epoch, Release);
+                arm.jit_code.store(ic, Release);
+                arm.inline_installed.store(true, Release);
+                // Run the VM this activation; the next entry sizes the frame to inline_nslots
+                // (the call site reads `active_nslots()`) and runs the inlined native.
+                return None;
+            }
+            // `ic == BAILED`: the inlined body fell out of subset — leave the small native
+            // installed forever (it's correct + fast). No retry.
+        }
     }
     // Publish freshly-compiled native code to the shared cache so the runtime's other
     // processes install it directly instead of recompiling (the spawn lever). The
     // `swap` guard makes this one lock acquire per arm-instance, not one per call; a
     // process that installed the code *from* the cache already has the flag set.
-    if let Some(key) = arm.share_key {
-        if !arm.shared_published.swap(true, Relaxed) {
-            heap.jit_shared_publish(key, code, arm.compile_epoch.load(Acquire));
+    // NEVER publish an INLINED arm to the shared `(id, argc)` cache: a peer process that
+    // installed it would run the inlined code with its OWN small `nslots` frame (it has its
+    // own `CompiledArm` with `inline_installed == false`) → frame undersize / corruption.
+    // The inlined upgrade is per-process by design; only the small native is shared (which
+    // is the spawn-friendly path anyway). Guard on `inline_installed`.
+    if !arm.inline_installed.load(Acquire) {
+        if let Some(key) = arm.share_key {
+            if !arm.shared_published.swap(true, Relaxed) {
+                heap.jit_shared_publish(key, code, arm.compile_epoch.load(Acquire));
+            }
         }
     }
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base) -> i64` produced by
@@ -7802,6 +8111,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
 
         rewrite_arm_handles(&arm, &mut |v| bump(v, 100));
@@ -7910,6 +8231,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         });
 
         // First run: the native suspends, so the driver captures the continuation
@@ -7995,6 +8328,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -8054,6 +8399,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -8123,6 +8480,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -8234,6 +8603,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         let mut jit = crate::jit::Jit::new();
         assert!(
@@ -8285,6 +8666,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(
             jit_lower_arm(&mut jit, &elided_arm, &[]).is_none(),
@@ -8329,6 +8722,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(
             jit_lower_arm(&mut jit, &thin_arm, &[]).is_none(),
@@ -8382,6 +8787,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         let mut jit = crate::jit::Jit::new();
 
@@ -8518,6 +8935,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         let sumto = Arc::new(mk_arm(
             Chunk {
@@ -8666,6 +9095,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         });
 
         // Warm it past the threshold so jit_tier hands it to the background compiler;
@@ -8756,6 +9197,18 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
+                #[cfg(feature = "jit")]
+                inline_name: None,
+                #[cfg(feature = "jit")]
+                inline_stride: 0,
+                #[cfg(feature = "jit")]
+                inline_nslots: 0,
+                #[cfg(feature = "jit")]
+                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                #[cfg(feature = "jit")]
+                inline_queued: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         let n = 100_000i64; // iterations per sumto call
         let reps = 300;
