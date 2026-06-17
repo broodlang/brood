@@ -3472,3 +3472,29 @@ prerequisite for the eventual JIT-only re-land.
 Brood/Elixir ratios are `reduce` (5.7×), `pipeline` (6.5×), `wordcount` (~5.6×), `bintree`, `nqueens`,
 all cons/vector/map-allocation + GC traffic. Next work follows `docs/allocation-elimination.md`
 (lever 2): GC `Vec<u32>` forward tables → inline small vectors → one-pass list builders.
+
+## 2026-06-17 — Allocation levers measured NEUTRAL; the lever is frame representation
+
+Tried two of `allocation-elimination.md`'s lever-2 items, both **measured neutral** and
+reverted (no-vibes rule):
+- **GC `Vec<u32>` forward tables** (replace the 8 per-collection `HashMap`s): bintree flat.
+  The forwarding bookkeeping is ~rounding error next to the interpreted tree walk.
+- **Inline small vectors** (`Vec<Vec<Value>>` → `Vec<SmallVec<[Value;4]>>`): bintree 461→489ms
+  (slightly *worse*), matmul/reduce/pipeline/nqueens flat. The 4×-bigger slab slot costs as
+  much GC-copy traffic as the saved inner `malloc` recovers — and **mimalloc already makes
+  small allocations cheap**, so killing them buys nothing. Clean drop-in (SmallVec derefs to
+  `&[Value]`, only LOCAL `Slabs` touched, RUNTIME `CodeSlabs` left as `Vec<Value>`); fully
+  gated green (2161 + gc/jit/differential under stress/verify) — just not a win.
+
+**Conclusion (confirms the 2026-06-16 ceiling note):** the worst benchmarks bail the JIT and
+run **interpreted** (bintree 57% `vm_run_bc`, nqueens 100%); allocation is ~5%. Incremental
+allocation/dispatch levers are exhausted — the inliner is net-negative, forward-tables and
+inline-vectors are neutral. The remaining global wins are **structural**, and they share one
+root cause: the JIT can't manage the `roots` call frame itself (every frame op goes through
+an FFI, and `nslots` is one-size-for-both-engines). Scoped the fix in
+**`docs/frame-representation.md`** — a JIT-managed frame (write call operands + lay out the
+callee frame in IR; per-engine frame sizing) that unblocks *three* wins at once: the
+intrinsic per-call protocol cost (fib/spawn ~40%), the inliner shipping default-on (fib
+~1.7× with no spawn/bintree regression), and widening JIT coverage to the bailing shapes
+(bintree/nqueens/reduce → native). Multi-session, miscompile-sensitive; phased 0–4 with the
+full GC-stress gate per increment.
