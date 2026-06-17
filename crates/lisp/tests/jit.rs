@@ -260,6 +260,41 @@ fn inlined_self_call_with_tail_helper_does_not_drop_wrapper() {
 }
 
 #[test]
+fn inlined_two_stage_swap_then_deopt_stays_correct() {
+    // Two-stage tiering (devlog 2026-06-17): a qualifying recursive arm tiers to the SMALL
+    // original native first, then the deferred *inlined* upgrade compiles and swaps in (an
+    // epoch-bumped `jit_code` swap + per-engine frame growth to `inline_nslots`). This run
+    // drives `fib 30` 4000× — far past both the small-arm threshold AND the deferred
+    // inlined-compile latency, so the arm provably runs small-native, then inlined-native.
+    // fib(30) = 832040, well within i64, so it returns via the inlined native path; the
+    // result must be bit-identical to the interpreter (the swap + the bigger frame must not
+    // corrupt the params or the spilled call results).
+    is(
+        "(defn fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (fib 30))))
+         (run 4000 0)",
+        "832040",
+    );
+}
+
+#[test]
+fn inlined_arm_deopts_to_bignum_after_swap() {
+    // The swap→inlined→deopt path. `p` is a depth-1-inlinable non-tail recursion
+    // (`(* 2 (p (- n 1)))`); warmed with `p 40` (in i64) so the small native tiers and the
+    // deferred inlined upgrade swaps in. The final `(p 70)` computes 2^70, which overflows
+    // i64 — so the inlined native must DEOPT mid-recursion (an inner `*` overflows), restore
+    // the small frame from the param `n`, re-run on the VM, and propagate the exact bignum
+    // the interpreter would. Guards that the per-engine frame transition + the swapped
+    // inlined arm stay correct on the overflow→deopt boundary.
+    is(
+        "(defn p (n) (if (< n 1) 1 (* 2 (p (- n 1)))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (p 40))))
+         (do (run 50000 0) (p 70))",
+        "1180591620717411303424",
+    );
+}
+
+#[test]
 fn integer_division_family_under_jit() {
     // rem / quot mixed with mul / add — the classic collatz step counter, fully in the
     // (now division-capable) int subset. collatz(27) takes 111 steps.

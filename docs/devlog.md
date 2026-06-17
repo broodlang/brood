@@ -3676,3 +3676,66 @@ short-lived spawn procs use the small native and only sustained workloads get th
 (b) a runtime contention signal that backs off inlining when the shared-JIT install path is hot;
 (c) defer inlining until an arm proves long-lived by a per-process (not shared) signal. The dual-body
 + per-engine-sizing machinery is correct and reusable; only the tiering *policy* needs this last fix.
+
+## 2026-06-17 — JIT recursive self-inliner ships DEFAULT-ON via two-stage tiering (fib 1.7×, spawn flat) — the campaign's first real perf win
+
+11th experiment, and the win lands. Re-created the proven dual-body inliner + per-engine
+frame sizing (10th experiment) and added the **two-stage tiering** policy that was the
+last blocker. Default-on (`BROOD_NO_INLINE=1` opts out; the old `BROOD_JIT_INLINE` opt-in
+is gone).
+
+**The mechanism.** A qualifying arm (top-level no-capture recursive `defn`, fixed arity, no
+`SelfCall`/`MakeClosure`, body-size-bounded, ≥1 non-tail self-call) records `inline_name`/
+`inline_stride`/`inline_nslots` at compile time — measured by running the inliner on a
+CLONE of the body (plus the inlined chunk's spill reserve), then discarding it; `body`/
+`chunk`/`nslots` stay ORIGINAL small (the VM never sees the bigger body). It tiers in two
+stages:
+
+1. **Small native first** (spawn-friendly): the original arm tiers + installs + shares
+   exactly as today — short-lived processes get native fast.
+2. **Inlined upgrade, deferred** (the fib lever): the inlined body is re-derived fresh in
+   `jit_lower_inlined_arm` (`shift_slots` clone → `inline_self_calls` → ephemeral
+   `compile_chunk` → lower against `inline_nslots`) and enqueued on a **separate
+   lower-priority channel** the background compiler drains only when the primary
+   initial-tier queue is empty. Under spawn's storm the primary never empties, so the
+   upgrade never compiles until the storm clears — spawn finishes on the small native. A
+   long-lived workload (fib) drains its primary and the upgrade lands. When ready, `jit_tier`
+   atomically swaps `inline_code → jit_code`, **bumps the global epoch** (invalidating every
+   fast-linked call site so it re-validates and picks up the inlined code with its larger
+   frame), and latches `inline_installed`.
+
+**Per-engine frame sizing keys on `inline_installed`** (`CompiledArm::active_nslots()`):
+the VM + the small native use the original `nslots`; the inlined native uses
+`inline_nslots`. The `vm_run_bc` jit_tier call site grows `roots` to `inline_nslots` only
+for an arm whose inlined upgrade is installed (the common non-inlining arm pays nothing on
+the hot path), and truncates back to the small frame on deopt/preempt — so a deopt re-runs
+the ORIGINAL small body from the params, correct. `jit_dispatch_call`/`vm_call_ic_fast_link`/
+`jit_dispatch_tail` all size the callee frame to `active_nslots()`. The inlined code is
+**per-process only** (never published to the shared `(id,argc)` cache — a peer would run it
+with its own small frame), which is exactly right: the shared path is the spawn-friendly
+small native.
+
+**Correctness:** jit 25/25 (incl. two new tests: a small-native→inlined-native *swap* that
+returns via the inlined path, and a swap→inlined→*deopt* that overflows to a bignum and
+must restore the small frame from the param), differential 2/2, gc 11/11 under
+STRESS+VERIFY; full suite 2161/0; clean default build. The miscompile caught in
+development — `inline_nslots` must include the inlined chunk's spill reserve, else
+`spill_base` underflows into the params (fib 20 → garbage) — is the lesson: the inlined
+frame's high-water mark is `m*(1+blocks) + jit_spill_reserve(inlined_chunk)`, not just the
+slot count.
+
+**A/B (median-of-9 wall, BROOD_VM=1, HEAD worktree baseline; debug-assertions off):**
+
+| bench         | baseline (med) | new (med) | speedup | spread (new min/max) |
+|---------------|----------------|-----------|---------|----------------------|
+| fib(32)       | 0.16s          | 0.09s     | **1.78×** | 0.09 / 0.10        |
+| pfib(35)      | 11.48s         | 10.84s    | ~1.06× (min 1.15×) | 7.95 / 13.86 |
+| spawn         | ~FLAT          | ~FLAT     | flat    | no bimodality        |
+| bintree(2000) | 1.40s          | 1.37s     | flat    | 1.36 / 1.60          |
+| nqueens(11)   | 1.81s          | 1.84s     | flat    | 1.82 / 2.13          |
+
+**The spawn bimodality is gone** — every spawn run is min=med=max (no 101–625ms spread); the
+deferred upgrade provably sits behind the initial-tier backlog and never lands during the
+storm. The 5% nqueens gap seen with a naive call-site (an extra atomic load per *every*
+activation) vanished once the per-engine sizing was gated on `inline_installed` — non-
+inlining arms now take the identical hot path as baseline. Ships UNCOMMITTED for review.
