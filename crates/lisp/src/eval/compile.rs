@@ -1897,10 +1897,17 @@ fn inline_self_calls(
 /// (top-level no-capture recursive defn) is enforced by the caller via `defn_name`.
 #[cfg(feature = "jit")]
 fn self_inline_arm(body: &mut Node, defn_name: Symbol, nrequired: usize, m: usize) -> Option<usize> {
-    // Escape hatch (A/B + debugging), mirroring `BROOD_VM=0` / `BROOD_BYTECODE=0`:
-    // `BROOD_NO_INLINE=1` disables the self-inliner so the same binary can be measured
-    // with it on and off. The default (unset) inlines.
-    if std::env::var_os("BROOD_NO_INLINE").is_some() {
+    // **Default OFF — opt-in via `BROOD_JIT_INLINE=1`.** The source-level self-inliner is
+    // a *win only when the arm tiers to native* (fib(35) ~1.7×), but a *loss when it
+    // doesn't*: it inflates the shared `Node` body, so a non-tiering arm runs the bigger
+    // body on the bytecode VM — spawn (10k× `fib 15`, too short-lived to tier) regressed
+    // ~6.5× and bintree (alloc-bound, bails the JIT) ~4.8×. A compile-time gate can't tell
+    // the cases apart (`fib 15` and `fib 35` are the *same arm*). The correct fix is a
+    // JIT-only inlined body (the VM keeps the original) + per-engine frame sizing — the
+    // frame-representation change in `docs/jit-optimizing-tier.md` §6a/§6c — so the inliner
+    // is shelved opt-in until that lands. See devlog 2026-06-17.
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("BROOD_JIT_INLINE").is_some()) {
         return None;
     }
     // Frame-reuse self-calls and nested closures are incompatible with naive slot
