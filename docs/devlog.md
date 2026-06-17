@@ -3642,3 +3642,37 @@ truncate back to `original_nslots` on deopt) using the RootStack reserve/set-len
 frame-rep prototype already built (`docs/frame-representation.md` Phase 3). That ships fib ~1.55× /
 pfib ~1.6× default-on with **no** spawn/bintree regression — the first real perf win of the campaign.
 Per-engine frame sizing is now confirmed **mandatory, not optional**, and is the next build.
+
+## 2026-06-17 — Per-engine frame sizing WORKS (fib 1.61×, bintree/nqueens flat); spawn-tiering-contention is the corrected last blocker
+
+10th experiment. Built the dual-body inliner + per-engine frame sizing: `CompiledArm` records
+`inline_name`/`inline_stride`/`inline_nslots`, keeps `body`/`chunk`/`nslots` ORIGINAL (small); the
+native inlined arm grows its frame to `inline_nslots` at the `jit_tier` call site and truncates back
+to original on deopt; `jit_dispatch_tail`/`vm_call_ic_fast_link`/`jit_dispatch_call` size the callee
+frame to the native nslots. Correct — jit 24/24 (incl. a new deopt-mid-run frame-transition test),
+differential 2/2, gc 11/11 under STRESS+VERIFY; full suite 2161/0; clean default build.
+
+**A/B (median wall, BROOD_VM=1):** fib(32) 161→100ms (**1.61×**), pfib 68→61ms; **bintree(2000) flat
+(9.38→9.44s), nqueens flat** — the 15× interpreted-frame-bloat regression from the shared-`nslots`
+attempt is GONE. Per-engine sizing did exactly its job: the VM keeps the original small frame, so
+non-tiering interpreted arms pay nothing.
+
+**But spawn still regressed ~2.7× (bimodal 101–625ms), and the root cause is NOT frame bloat** —
+`BROOD_NO_INLINE=1` matched baseline spawn exactly, and an isolated single-process `10k×fib15` loop
+was 1.6× *faster* with inlining. The cause: **spawn's `fib 15` tiers** (~2k recursions/proc, and the
+shared-JIT lever shares the compiled code), so 10k short-lived processes race to compile/install the
+now-2×-bigger inlined arm through the bounded `JIT_COMPILER` channel — pathological compile/install
+latency variance while processes run interpreted waiting for native. The earlier premise ("fib15
+never tiers → always VM → per-engine sizing fixes spawn") was **wrong**: fib15 tiers, so per-engine
+sizing (which fixed the interpreted bintree/nqueens) cannot neutralize spawn.
+
+**The win is real and one step away; the corrected blocker is the inlined arm's tiering-compile cost
+under many short-lived processes.** A compile-time gate can't separate fib35 (wins) from fib15-in-
+spawn (loses) — same arm, and the shared call-counter crosses any threshold near-instantly under
+spawn's aggregate volume. Candidate fixes (each non-trivial, uncertain): (a) **two-stage native** —
+tier the small original arm first (fast install, spawn-friendly), compile the inlined arm as a
+lower-priority background *upgrade* that atomically swaps `jit_code` once ready (epoch-guarded), so
+short-lived spawn procs use the small native and only sustained workloads get the inlined upgrade;
+(b) a runtime contention signal that backs off inlining when the shared-JIT install path is hot;
+(c) defer inlining until an arm proves long-lived by a per-process (not shared) signal. The dual-body
++ per-engine-sizing machinery is correct and reusable; only the tiering *policy* needs this last fix.
