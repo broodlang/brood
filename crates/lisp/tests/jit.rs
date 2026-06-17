@@ -204,6 +204,58 @@ fn deep_handle_spill_under_jit() {
 }
 
 #[test]
+fn inlined_recursive_fib_under_jit() {
+    // Recursive self-inlining (`docs/jit-optimizing-tier.md` §6b, Phase B). The non-tail
+    // self-calls in `fib`'s body are spliced depth-1 into the arm's own frame (shifted
+    // slot ranges), so the inlined arm has 4 leaf `Call`s + 3 live call-result handles
+    // spilled across safepoints. A missed slot-shift in `shift_slots` is a silent wrong
+    // result, so the warmed JIT result must stay bit-identical to the interpreter.
+    // fib(20) = 6765; driven 50k× so the inlined arm tiers to native.
+    is(
+        "(defn fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (fib 20))))
+         (run 50000 0)",
+        "6765",
+    );
+}
+
+#[test]
+fn inlined_recursive_collatz_under_jit() {
+    // Self-inlining over a body with two non-tail recursive call shapes (the two `if`
+    // arms), exercising `shift_slots` across nested `if`/`Prim2` and the integer-division
+    // family. collatz-count(27) = 111. Warmed 50k×.
+    is(
+        "(defn cc (n)
+           (if (= n 1) 0
+             (if (= (rem n 2) 0)
+               (+ 1 (cc (quot n 2)))
+               (+ 1 (cc (+ (* 3 n) 1))))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (cc 27))))
+         (run 50000 0)",
+        "111",
+    );
+}
+
+#[test]
+fn inlined_self_call_with_tail_helper_does_not_drop_wrapper() {
+    // Regression for the tail-flag bug in self-inlining (`shift_slots` must demote spliced
+    // `Call`s to non-tail). `s`'s body has a non-tail self-call `(/ 1 (s b (- e)))` AND, in
+    // the `else` branch, a call to a *different* fn `(r2acc …)` that sits in `s`'s TAIL
+    // position (so it compiled as `tail: true`). When the self-call is inlined, that helper
+    // call is spliced into the `(/ 1 …)` operand (non-tail) position; if it stayed
+    // `tail: true` it would return from the whole frame and **drop the `(/ 1 …)`** — `s 2
+    // -2` came back `4` (= 2^2) instead of `0.25`, failing 32 stdlib tests (`pow`, `sort`,
+    // `assoc-in`, …). Warmed 50k× so the inlined arm tiers; the wrapped reciprocal must hold.
+    is(
+        "(defn r2acc (b e acc) (if (= e 0) acc (r2acc b (- e 1) (* acc b))))
+         (defn s (b e) (cond (< e 0) (/ 1 (s b (- e))) else (r2acc b e 1)))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (s 2 -2))))
+         (run 50000 0)",
+        "0.25", // 1 / (s 2 2) = 1 / 4
+    );
+}
+
+#[test]
 fn integer_division_family_under_jit() {
     // rem / quot mixed with mul / add — the classic collatz step counter, fully in the
     // (now division-capable) int subset. collatz(27) takes 111 steps.
