@@ -3402,3 +3402,41 @@ Gates green: `--lib jit` (9), `--test jit` (20) + `--test differential` under
 **This unblocks Phase B (recursive self-inlining, §6b)** — the spill ceiling was the dominant cause
 of its §6c regression, so the inliner should be retried *fresh* against the now-uncapped spill. That
 is the actual `fib` win; Phase A alone moves no benchmark (it changes a reserve only deeper arms hit).
+
+## 2026-06-17 — JIT Phase B: recursive self-inlining (the fib lever) — ~1.7× on fib
+
+Phase B of the optimizing tier (`docs/jit-optimizing-tier.md` §6b), built on Phase A's uncapped
+spill. A non-tail self-recursive call to a **top-level, non-capturing** `defn` is replaced — at the
+`Node` level in `compile_arm`, after `compile_body`/`ea_scalar_replace`, before `compile_chunk` — by
+an inlined block: `LetBind { binds: [(M*i+k, args[k])], body: shift_slots(orig_body, M*i) }`, where
+`M = scope.max` is the per-block slot stride and `i` is the block index. Depth-1: the spliced copy's
+own self-calls stay real `Node::Call`s (leaf protocol calls). `shift_slots` is a manual deep-copy of
+every `Node` variant adding `M*i` to each slot reference (`Node` isn't `Clone` — the `AtomicU64`
+guards / `ConstVal` handles are reconstructed from their loaded value). Gated conservatively: no
+`SelfCall` (frame-reuse is incompatible with shifting), no `MakeClosure`, fixed arity (no
+`&optional`/rest), a body-size bound (`SELF_INLINE_MAX_BODY = 64`), ≥1 qualifying call. Deterministic
+(same arm → same shifted IR). `BROOD_NO_INLINE=1` disables it (A/B), `BROOD_INLINE_DBG=1` traces.
+
+**Result (plain-release, `--features jit`):** fib(35) median-of-5 **0.53 s → 0.31 s, ~1.7×**
+(fib(33) 0.22 → 0.13). `BROOD_JIT_DUMP_IR` confirms the inlined fib arm lowers to native (4 leaf
+`Call`s, 3-handle spill — which is why Phase A's uncapped reserve was the prerequisite). fib was
+~4.4× of Elixir; this puts it ~2.6×.
+
+**A real miscompile was caught and fixed before shipping** — exactly the §6b "silent wrong result"
+risk. The first cut passed the curated JIT≡VM differential (fib/collatz) but **failed 32 stdlib
+tests** (`pow`, `sort`, `assoc-in`, `pane-map`, `fuzzy`, …) in the full `nest test`. Root cause:
+`shift_slots` copied each `Call`'s `tail` flag verbatim. A body like `pow`'s
+`(cond (< exp 0) (/ 1 (pow base (- exp))) else (pow--acc …))` has the `else` helper call in `pow`'s
+**tail** position (`tail: true`). Splicing the body into the `(/ 1 …)` **operand** (non-tail)
+position left it `tail: true`, so the inlined `else` returned from the whole frame and **dropped the
+`(/ 1 …)`** — `(pow 2 -2)` gave `4` instead of `0.25`. Fix: `shift_slots` demotes every spliced
+`Call` to `tail: false` (a spliced body is always non-tail; leaf self-calls were already non-tail).
+The tree-walker was correct throughout (it doesn't lower the chunk), which localized the bug to the
+splice, not the transform. New regression test `inlined_self_call_with_tail_helper_does_not_drop_wrapper`
+locks the shape the fib/collatz differentials missed.
+
+Gates green: `--lib jit`, `--test jit` (23, incl. the three inlining cases) + `--test differential`
+under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; full `nest test` (**2161/2161**) through the JIT under GC
+stress; clean default (no-jit) build. **Lesson for the doc:** a differential corpus of *symmetric*
+recursion (fib's `(+ (f)(f))`) does not exercise a self-call wrapped in an asymmetric op with a
+tail-helper sibling — add that shape to any inlining corpus up front.

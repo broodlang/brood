@@ -1578,6 +1578,358 @@ fn ea_scalar_replace(node: &mut Node, next_slot: &mut usize) -> bool {
     changed
 }
 
+// ===================== recursive self-inlining (Phase B, §6b) =====================
+//
+// `docs/jit-optimizing-tier.md` §6b. A non-tail self-recursive call to a top-level
+// `defn` is replaced by an *inlined block* — the callee's body spliced into the
+// caller's frame at a shifted slot range — so the inlined level runs without the
+// per-call protocol (no frame setup, no dispatch). Depth-1 only: the copied body's
+// own self-calls stay as `Node::Call` (a real call at the leaf). Removes ~1 protocol
+// entry per ~2 levels for `fib`-shaped two-call recursion.
+//
+// Gated conservatively (see `self_inline_arm`): top-level no-capture recursive defn,
+// no `SelfCall` (its frame-reuse is incompatible with slot-shifting), no `MakeClosure`,
+// a body-size bound, and ≥1 qualifying non-tail self-call.
+
+/// Largest original-arm body (node count) we will inline. Inlining roughly doubles the
+/// body, and an oversized arm both blows the i-cache and risks the JIT's lowering
+/// limits; `fib`/`collatz`-shaped recursive kernels are tiny (well under this). Picked
+/// conservatively to avoid 2^D blow-up while comfortably admitting the target shapes.
+#[cfg(feature = "jit")]
+const SELF_INLINE_MAX_BODY: usize = 64;
+
+/// Total node count of `node` (every variant counted, children recursed).
+#[cfg(feature = "jit")]
+fn node_count(node: &Node) -> usize {
+    1 + match node {
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => 0,
+        Node::If(a, b, c) => node_count(a) + node_count(b) + node_count(c),
+        Node::Do(xs) | Node::Vector(xs) => xs.iter().map(node_count).sum(),
+        Node::Map(kvs) => kvs.iter().map(|(k, v)| node_count(k) + node_count(v)).sum(),
+        Node::Call { callee, args, .. } => node_count(callee) + args.iter().map(node_count).sum::<usize>(),
+        Node::SelfCall { args, .. } => args.iter().map(node_count).sum(),
+        Node::LetBind { binds, body } => {
+            binds.iter().map(|(_, n)| node_count(n)).sum::<usize>() + node_count(body)
+        }
+        Node::MakeClosure { captures, .. } => captures.iter().map(|(_, n)| node_count(n)).sum(),
+        Node::Prim2 { a, b, .. } => node_count(a) + node_count(b),
+        Node::Prim1 { a, .. } => node_count(a),
+    }
+}
+
+/// True if `node` (or any descendant) is a `Node::SelfCall`.
+#[cfg(feature = "jit")]
+fn node_has_self_call(node: &Node) -> bool {
+    match node {
+        Node::SelfCall { .. } => true,
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
+        Node::If(a, b, c) => node_has_self_call(a) || node_has_self_call(b) || node_has_self_call(c),
+        Node::Do(xs) | Node::Vector(xs) => xs.iter().any(node_has_self_call),
+        Node::Map(kvs) => kvs.iter().any(|(k, v)| node_has_self_call(k) || node_has_self_call(v)),
+        Node::Call { callee, args, .. } => {
+            node_has_self_call(callee) || args.iter().any(node_has_self_call)
+        }
+        Node::LetBind { binds, body } => {
+            binds.iter().any(|(_, n)| node_has_self_call(n)) || node_has_self_call(body)
+        }
+        Node::MakeClosure { captures, .. } => captures.iter().any(|(_, n)| node_has_self_call(n)),
+        Node::Prim2 { a, b, .. } => node_has_self_call(a) || node_has_self_call(b),
+        Node::Prim1 { a, .. } => node_has_self_call(a),
+    }
+}
+
+/// True if `node` (or any descendant) is a `Node::MakeClosure`.
+#[cfg(feature = "jit")]
+fn node_has_make_closure(node: &Node) -> bool {
+    match node {
+        Node::MakeClosure { .. } => true,
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
+        Node::If(a, b, c) => {
+            node_has_make_closure(a) || node_has_make_closure(b) || node_has_make_closure(c)
+        }
+        Node::Do(xs) | Node::Vector(xs) => xs.iter().any(node_has_make_closure),
+        Node::Map(kvs) => kvs.iter().any(|(k, v)| node_has_make_closure(k) || node_has_make_closure(v)),
+        Node::Call { callee, args, .. } => {
+            node_has_make_closure(callee) || args.iter().any(node_has_make_closure)
+        }
+        Node::SelfCall { args, .. } => args.iter().any(node_has_make_closure),
+        Node::LetBind { binds, body } => {
+            binds.iter().any(|(_, n)| node_has_make_closure(n)) || node_has_make_closure(body)
+        }
+        Node::Prim2 { a, b, .. } => node_has_make_closure(a) || node_has_make_closure(b),
+        Node::Prim1 { a, .. } => node_has_make_closure(a),
+    }
+}
+
+/// Is `node` a non-tail self-recursive call to `defn_name` with exactly `nrequired`
+/// args? The call head is a free-global reference — `compile_node` lowers a free symbol
+/// in head position to `Node::Global(sym)` (never `GlobalIc`, since the call site's own
+/// IC caches the resolution), so that's the only shape to match. A computed/local callee
+/// (`NO_SITE`) can resolve to a different function per call and is never inlined.
+#[cfg(feature = "jit")]
+fn is_inlinable_self_call(node: &Node, defn_name: Symbol, nrequired: usize) -> bool {
+    if let Node::Call {
+        callee,
+        args,
+        tail: false,
+        ..
+    } = node
+    {
+        if args.len() == nrequired {
+            return matches!(
+                &**callee,
+                Node::Global(s) | Node::GlobalIc { sym: s, .. } if *s == defn_name
+            );
+        }
+    }
+    false
+}
+
+/// Deep-copy `node`, adding `delta` to every frame-slot reference it contains
+/// (`Local`, `SetLocal`/`LetBind` targets). `Node` is **not** `Clone` — `Const`/`Prim2`/
+/// `Prim1` carry `AtomicU64`s reconstructed here with their current loaded value, and
+/// `ConstVal`/`MakeClosure.fn_rest` handles are rebuilt via `ConstVal::new(cv.load())`
+/// (an atom stays inline; a handle is re-split — its bits stay live for the next runtime
+/// compaction). The copy's own `Call`/`GlobalIc` keep their `site` ids (all copies share
+/// the same correct IC entry); `pos` is shared (diagnostics only). A missed slot shift is
+/// a silent wrong result — every slot-bearing variant is enumerated.
+#[cfg(feature = "jit")]
+fn shift_slots(node: &Node, delta: usize) -> Node {
+    match node {
+        Node::Const(cv) => Node::Const(ConstVal::new(cv.load())),
+        Node::Local(i) => Node::Local(i + delta),
+        Node::Global(s) => Node::Global(*s),
+        Node::GlobalIc { sym, site } => Node::GlobalIc {
+            sym: *sym,
+            site: *site,
+        },
+        Node::If(a, b, c) => Node::If(
+            Box::new(shift_slots(a, delta)),
+            Box::new(shift_slots(b, delta)),
+            Box::new(shift_slots(c, delta)),
+        ),
+        Node::Do(xs) => Node::Do(xs.iter().map(|n| shift_slots(n, delta)).collect()),
+        Node::Vector(xs) => Node::Vector(xs.iter().map(|n| shift_slots(n, delta)).collect()),
+        Node::Map(kvs) => Node::Map(
+            kvs.iter()
+                .map(|(k, v)| (shift_slots(k, delta), shift_slots(v, delta)))
+                .collect(),
+        ),
+        Node::Call {
+            callee,
+            args,
+            tail: _,
+            pos,
+            site,
+        } => Node::Call {
+            callee: Box::new(shift_slots(callee, delta)),
+            args: args.iter().map(|n| shift_slots(n, delta)).collect(),
+            // **Demote to non-tail.** A spliced body always lands in the *operand*
+            // (non-tail) position the inlined self-call occupied (the inliner only
+            // inlines `tail: false` self-calls), so NOTHING in the copy is in the arm's
+            // tail position any more. A call that was tail-of-the-original-fn (e.g. the
+            // `else (helper …)` clause of a `cond` body) must NOT stay `tail: true`: a
+            // tail call returns from the whole frame, which would discard the expression
+            // wrapping the inlined block (`(/ 1 <block>)` returned `<block>` — the pow /
+            // `s` 32-test regression). Leaf self-calls were already `tail: false`; forcing
+            // false is a no-op for them. (`shift_slots` is used only by the inliner, and
+            // only to splice into non-tail position, so the demotion is always correct.)
+            tail: false,
+            pos: *pos,
+            site: *site,
+        },
+        Node::SelfCall { args, pos } => Node::SelfCall {
+            args: args.iter().map(|n| shift_slots(n, delta)).collect(),
+            pos: *pos,
+        },
+        Node::LetBind { binds, body } => Node::LetBind {
+            binds: binds
+                .iter()
+                .map(|(slot, n)| (slot + delta, shift_slots(n, delta)))
+                .collect(),
+            body: Box::new(shift_slots(body, delta)),
+        },
+        Node::MakeClosure {
+            fn_rest,
+            captures,
+            self_name,
+        } => Node::MakeClosure {
+            fn_rest: ConstVal::new(fn_rest.load()),
+            captures: captures
+                .iter()
+                .map(|(sym, n)| (*sym, shift_slots(n, delta)))
+                .collect(),
+            self_name: *self_name,
+        },
+        Node::Prim2 {
+            op,
+            a,
+            b,
+            map,
+            head,
+            guard,
+            pos,
+            broot,
+        } => Node::Prim2 {
+            op: *op,
+            a: Box::new(shift_slots(a, delta)),
+            b: Box::new(shift_slots(b, delta)),
+            map: *map,
+            head: *head,
+            guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
+            pos: *pos,
+            broot: *broot,
+        },
+        Node::Prim1 {
+            op,
+            a,
+            head,
+            guard,
+            pos,
+        } => Node::Prim1 {
+            op: *op,
+            a: Box::new(shift_slots(a, delta)),
+            head: *head,
+            guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
+            pos: *pos,
+        },
+    }
+}
+
+/// Replace, in place, each qualifying non-tail self-call in `node` with an inlined block:
+/// `LetBind { binds: [(M*i + k, args[k])], body: shift_slots(orig_body, M*i) }`. Each
+/// distinct call site gets the next inline-block index `i` (1, 2, …), so simultaneous
+/// inlined results occupy disjoint shifted slot ranges. The args bind in the *outer*
+/// scope (so they read the caller's unshifted slots); the shifted body reads the shifted
+/// param slots. The copied body's own self-calls stay `Node::Call` (depth-1 bound).
+/// Returns the number of sites inlined.
+#[cfg(feature = "jit")]
+fn inline_self_calls(
+    node: &mut Node,
+    orig_body: &Node,
+    defn_name: Symbol,
+    nrequired: usize,
+    m: usize,
+    next_block: &mut usize,
+) -> usize {
+    // Bottom-up: rewrite children first, so an inlined block's *args* (which stay in the
+    // outer scope) are never themselves re-inlined — only the original-body calls are.
+    let mut count = 0;
+    match node {
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
+        Node::If(a, b, c) => {
+            count += inline_self_calls(a, orig_body, defn_name, nrequired, m, next_block);
+            count += inline_self_calls(b, orig_body, defn_name, nrequired, m, next_block);
+            count += inline_self_calls(c, orig_body, defn_name, nrequired, m, next_block);
+        }
+        Node::Do(xs) | Node::Vector(xs) => {
+            for n in xs.iter_mut() {
+                count += inline_self_calls(n, orig_body, defn_name, nrequired, m, next_block);
+            }
+        }
+        Node::Map(kvs) => {
+            for (k, v) in kvs.iter_mut() {
+                count += inline_self_calls(k, orig_body, defn_name, nrequired, m, next_block);
+                count += inline_self_calls(v, orig_body, defn_name, nrequired, m, next_block);
+            }
+        }
+        Node::Call { callee, args, .. } => {
+            count += inline_self_calls(callee, orig_body, defn_name, nrequired, m, next_block);
+            for n in args.iter_mut() {
+                count += inline_self_calls(n, orig_body, defn_name, nrequired, m, next_block);
+            }
+        }
+        Node::SelfCall { args, .. } => {
+            for n in args.iter_mut() {
+                count += inline_self_calls(n, orig_body, defn_name, nrequired, m, next_block);
+            }
+        }
+        Node::LetBind { binds, body } => {
+            for (_, n) in binds.iter_mut() {
+                count += inline_self_calls(n, orig_body, defn_name, nrequired, m, next_block);
+            }
+            count += inline_self_calls(body, orig_body, defn_name, nrequired, m, next_block);
+        }
+        Node::MakeClosure { captures, .. } => {
+            for (_, n) in captures.iter_mut() {
+                count += inline_self_calls(n, orig_body, defn_name, nrequired, m, next_block);
+            }
+        }
+        Node::Prim2 { a, b, .. } => {
+            count += inline_self_calls(a, orig_body, defn_name, nrequired, m, next_block);
+            count += inline_self_calls(b, orig_body, defn_name, nrequired, m, next_block);
+        }
+        Node::Prim1 { a, .. } => {
+            count += inline_self_calls(a, orig_body, defn_name, nrequired, m, next_block);
+        }
+    }
+    // Now consider *this* node (children already inlined). The args we move out keep
+    // their (already-recursed) form; the spliced body is a fresh copy of the *original*
+    // body shifted into this block's slot range — so the copy's own calls are untouched.
+    if is_inlinable_self_call(node, defn_name, nrequired) {
+        let i = *next_block;
+        *next_block += 1;
+        let shift = m * i;
+        // Take the call's args out of the node.
+        let args = match node {
+            Node::Call { args, .. } => std::mem::take(args),
+            _ => unreachable!(),
+        };
+        let binds: Box<[(usize, Node)]> = args
+            .into_vec()
+            .into_iter()
+            .enumerate()
+            .map(|(k, a)| (shift + k, a))
+            .collect();
+        *node = Node::LetBind {
+            binds,
+            body: Box::new(shift_slots(orig_body, shift)),
+        };
+        count += 1;
+    }
+    count
+}
+
+/// Depth-1 self-inline the arm body in place (Phase B, §6b). `m` is the original arm's
+/// slot high-water mark (`scope.max`), used as the per-block slot stride. Returns the new
+/// slot high-water mark (`m * (1 + blocks)`) when ≥1 site was inlined, else `None`
+/// (no-op: the caller leaves the body and `scope.max` unchanged). The conservative gate
+/// (top-level no-capture recursive defn) is enforced by the caller via `defn_name`.
+#[cfg(feature = "jit")]
+fn self_inline_arm(body: &mut Node, defn_name: Symbol, nrequired: usize, m: usize) -> Option<usize> {
+    // Escape hatch (A/B + debugging), mirroring `BROOD_VM=0` / `BROOD_BYTECODE=0`:
+    // `BROOD_NO_INLINE=1` disables the self-inliner so the same binary can be measured
+    // with it on and off. The default (unset) inlines.
+    if std::env::var_os("BROOD_NO_INLINE").is_some() {
+        return None;
+    }
+    // Frame-reuse self-calls and nested closures are incompatible with naive slot
+    // shifting; skip an oversized body to avoid blow-up.
+    if node_has_self_call(body) || node_has_make_closure(body) || node_count(body) > SELF_INLINE_MAX_BODY {
+        return None;
+    }
+    // Snapshot the original body to splice (deep copies are taken from this).
+    let orig = shift_slots(body, 0);
+    let mut next_block = 1usize;
+    let inlined = inline_self_calls(body, &orig, defn_name, nrequired, m, &mut next_block);
+    if inlined == 0 {
+        return None;
+    }
+    if std::env::var("BROOD_INLINE_DBG").is_ok() {
+        eprintln!(
+            "[inline-dbg] {} nrequired={} m={} inlined={} new_max={}",
+            crate::core::value::symbol_name(defn_name),
+            nrequired,
+            m,
+            inlined,
+            m * next_block
+        );
+    }
+    // `next_block` advanced to 1 + (#blocks); the highest block index used is
+    // `next_block - 1`, occupying slots `[m*(next_block-1) .. m*next_block)`.
+    Some(m * next_block)
+}
+
 fn compile_arm(
     heap: &Heap,
     required: &[Symbol],
@@ -1646,6 +1998,22 @@ fn compile_arm(
     // `(nth p K)` to direct reads. Bumps `scope.max` for the element slots; makes the arm
     // simpler (fewer allocs, no `nth`), so it JITs better. No-op for arms without the pattern.
     ea_scalar_replace(&mut body, &mut scope.max);
+    // Recursive self-inlining (Phase B, §6b): splice depth-1 of a top-level no-capture
+    // recursive `defn`'s body into its own frame, removing the per-call protocol for the
+    // inlined level. Gated to a clean fixed-arity layout (no `&optional`/`&` rest — `M =
+    // scope.max` must be the whole frame so shifted blocks don't collide), with a
+    // `defn_name` (top-level recursive, set only when the closure doesn't capture). The
+    // inliner enforces the rest of the gate (no `SelfCall`/`MakeClosure`, body-size
+    // bound, ≥1 qualifying call). Deterministic: same arm → same shifted IR.
+    #[cfg(feature = "jit")]
+    if let Some(name) = defn_name {
+        if noptional == 0 && rest.is_none() {
+            let m = scope.max;
+            if let Some(new_max) = self_inline_arm(&mut body, name, nrequired, m) {
+                scope.max = new_max;
+            }
+        }
+    }
     let optional_defaults = optional_defaults.into_boxed_slice();
     let has_runtime_handles =
         node_has_rt_handles(&body) || optional_defaults.iter().flatten().any(node_has_rt_handles);

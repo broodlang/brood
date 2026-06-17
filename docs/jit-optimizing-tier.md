@@ -180,6 +180,19 @@ against the uncapped spill (the regression cause is removed). Keep the conservat
 `SelfCall`/`MakeClosure`, body-size bound). Still do not inline a *structure-walking* body until
 the benefit gate is revisited (that's the lever-2/allocation interaction, `allocation-elimination.md`).
 
+**DONE (2026-06-17) — Phase B / Phase 3 shipped, ~1.7× on fib.** The §6b self-inliner landed on top
+of Phase A: `shift_slots` + `inline_self_calls` + `self_inline_arm` in `compile.rs`, gated exactly as
+designed (top-level no-capture recursive `defn`, no `SelfCall`/`MakeClosure`, fixed arity,
+`SELF_INLINE_MAX_BODY = 64`). fib(35) 0.53 → 0.31 s (~1.7×, ~4.4× → ~2.6× of Elixir); the inlined arm
+lowers to native (4 leaf calls, 3-handle spill — Phase A was the prerequisite). `BROOD_NO_INLINE=1`
+disables for A/B. **One miscompile was caught + fixed before shipping** (the §6b silent-wrong-result
+risk): `shift_slots` must **demote spliced `Call`s to `tail: false`** — a body's tail-position helper
+call (e.g. `pow`'s `else (pow--acc …)`) spliced into operand position would otherwise return from the
+whole frame and drop the wrapping expression (`(pow 2 -2)` → `4` not `0.25`; failed 32 stdlib tests
+that the symmetric fib/collatz differential missed). See devlog 2026-06-17. **Next inlining levers
+(deferred):** depth-N unrolling (the leaf still pays the protocol); polymorphic/HOF-closure call
+sites (§Phase 4); and inlining structure-walking bodies once lever-2 allocation work lands.
+
 ## 6b. Phase 3 — recursive self-inlining (the fib lever), designed 2026-06-16 (see 6c: regressed)
 
 Confirmed the right lever for `fib`/recursive benchmarks: fib is **63% call protocol, 26%
