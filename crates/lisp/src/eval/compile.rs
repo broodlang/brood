@@ -1969,6 +1969,42 @@ fn self_inline_enabled() -> bool {
 /// fixed-arity); here we enforce no `SelfCall`/`MakeClosure`, the body-size bound, and
 /// ≥1 qualifying call. The *spill reserve* for the inlined chunk is added by the caller's
 /// re-derivation; this returns the slot count only.
+/// True if `node` (or any descendant) does **heap work** — builds a vector/map literal
+/// (`[..]`/`{..}`), `cons`es, or reads a structure (`nth`/`vector-ref`, `first`/`rest`).
+/// Such recursive arms must NOT be inlined. **Measured (devlog 2026-06-17):** inlining
+/// bintree's `make` (which builds `[l r]` per node) regresses bintree **~15×**
+/// (0.45s → 6.4s) and inlining its `nth`-walking `check` ~5.6× — the bigger inlined arm +
+/// its larger per-engine frame, hit on ~1.6M short heap-touching activations, lose far
+/// more than the per-call dispatch they remove. The inline win only materialises for
+/// **pure-arithmetic/control recursion** (fib/collatz/pfib keep their ~1.8×, no heap work).
+#[cfg(feature = "jit")]
+fn node_touches_heap(node: &Node) -> bool {
+    match node {
+        // Allocating literals: `[..]` (bintree's `make`), `{..}`.
+        Node::Vector(_) | Node::Map(_) => true,
+        // `cons` and `nth`/`vector-ref`.
+        Node::Prim2 { op: PrimOp::VectorRef | PrimOp::Cons, .. } => true,
+        // `first`/`rest` (car/cdr) — the only `PrimOp1`s, both heap reads.
+        Node::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. } => true,
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
+        Node::If(a, b, c) => {
+            node_touches_heap(a) || node_touches_heap(b) || node_touches_heap(c)
+        }
+        Node::Do(xs) => xs.iter().any(node_touches_heap),
+        Node::Call { callee, args, .. } => {
+            node_touches_heap(callee) || args.iter().any(node_touches_heap)
+        }
+        Node::SelfCall { args, .. } => args.iter().any(node_touches_heap),
+        Node::LetBind { binds, body } => {
+            binds.iter().any(|(_, n)| node_touches_heap(n)) || node_touches_heap(body)
+        }
+        Node::MakeClosure { captures, .. } => {
+            captures.iter().any(|(_, n)| node_touches_heap(n))
+        }
+        Node::Prim2 { a, b, .. } => node_touches_heap(a) || node_touches_heap(b),
+    }
+}
+
 #[cfg(feature = "jit")]
 fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize) -> Option<usize> {
     if !self_inline_enabled() {
@@ -1978,6 +2014,13 @@ fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize)
     // shifting; skip an oversized body to avoid blow-up.
     if node_has_self_call(body) || node_has_make_closure(body) || node_count(body) > SELF_INLINE_MAX_BODY
     {
+        return None;
+    }
+    // Inline ONLY pure-arithmetic/control recursion. A heap-touching body (builds `[..]`/
+    // `{..}`, `cons`, `nth`, `first`/`rest`) regresses when inlined — the bigger arm + frame
+    // on millions of alloc/walk activations costs more than the dispatch it removes
+    // (bintree's `make` ~15×, `check` ~5.6×; see [`node_touches_heap`], devlog 2026-06-17).
+    if node_touches_heap(body) {
         return None;
     }
     // Clone the body and run the inliner on the copy to count blocks / the new max.

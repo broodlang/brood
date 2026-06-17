@@ -3739,3 +3739,32 @@ deferred upgrade provably sits behind the initial-tier backlog and never lands d
 storm. The 5% nqueens gap seen with a naive call-site (an extra atomic load per *every*
 activation) vanished once the per-engine sizing was gated on `inline_installed` — non-
 inlining arms now take the identical hot path as baseline. Ships UNCOMMITTED for review.
+
+## 2026-06-17 — Correction: inliner must skip heap-touching recursion (fixes a bintree ~15× regression in the shipped inliner)
+
+Investigating the bintree gap surfaced two corrections, one of them to the just-shipped inliner.
+
+**Native `nth` is NEUTRAL on bintree (the "2.64×" was an artifact).** A native inline `vector_ref`
+(replacing the per-access `brood_rt_vector_ref` FFI) was built and is correct, but bintree is
+**allocation-bound** (`make` builds ~1.6M `[l r]` nodes), not `nth`-walk-bound: pre-inliner baseline
+(`ec5570b`, interpreted `check`) bintree N=200 = ~0.45s, and with native `nth` = ~0.44s — identical.
+The earlier "bintree 2.64×" was measured against the *already-regressed* `08fa104` (see below), not
+the true baseline; against the real baseline native `nth` gives nothing here. Reverted (no-vibes;
+keeping a layout-dependent slab-read for no measured win isn't worth it). matmul also flat (its
+invariant `nth` already used the LICM hoist).
+
+**The shipped inliner (`08fa104`) had a latent bintree ~15× regression — now fixed.** The two-stage
+self-inliner inlined bintree's `make` (a 2-call recursion that builds `[l r]`, which lowers + qualifies),
+blowing bintree N=200 from ~0.45s to ~6.4s. I missed it pre-commit (trusted the agent's "bintree flat,"
+which used a different program/N). Root cause, measured twice: **inlining helps pure-arithmetic
+recursion (fib ~1.8×, collatz) but HURTS heap-touching recursion** — `make` (alloc) ~15×, `check`
+(`nth`-walk) ~5.6× — because the bigger inlined arm + its larger per-engine frame, on millions of
+short alloc/walk activations, cost more than the per-call dispatch they remove. Fix: `self_inline_probe`
+now bails on `node_touches_heap(body)` (builds `[..]`/`{..}`, `cons`, `nth`, `first`/`rest`) — the
+inliner inlines ONLY pure-arithmetic/control recursion. bintree restored to ~0.46s; fib keeps ~1.8×.
+
+**Net of the inliner campaign:** fib/pfib **~1.8×** default-on (the one real win), no regressions
+(spawn/bintree/nqueens/matmul flat). The worst gaps (bintree/nqueens/wordcount) remain
+allocation-bound with no cheap lever (mimalloc makes the allocs cheap; inline-small-vectors was
+neutral; FBIP is high-risk). Gates green: jit 25/25 + differential 2/2 + gc 11/11 under
+STRESS+VERIFY, full suite 2161/0, both build configs clean.
