@@ -3613,3 +3613,32 @@ its frame on entry; the frame-rep prototype, devlog 2026-06-17, built correct re
 machinery for this). Known payoff: the inliner A/B already showed **fib ~1.7×**. Extensible to
 bintree's `check` by combining with the (now-proven-correct) native `nth`. This is the convergent
 highest-payoff lever and the next build.
+
+## 2026-06-17 — BREAKTHROUGH: inlining confirmed (fib 1.55×, pfib 1.6×); per-engine frame sizing is the last blocker
+
+The 9th experiment — and the first with a confirmed win. Built the JIT-only-body inliner (dual-body:
+`CompiledArm` records `inline_name`/`inline_stride`, keeps `body`/`chunk` ORIGINAL for the VM,
+re-derives the inlined body fresh in `jit_lower_arm` from `arm.body`), default-on. Correct (no
+miscompile — jit/differential/gc under STRESS+VERIFY all green, full suite 2161/0; fib lowers to 4
+leaf calls inlined vs 2 with `BROOD_NO_INLINE=1`; VM provably runs the original chunk).
+
+**A/B (median-of-5 wall, BROOD_VM=1):** fib(32) 157→101ms (**1.55×**), pfib 387→241ms (**1.6×**) —
+**the inlining win is real**, confirming the 8-experiment convergence: removing per-call dispatch on
+the native path is THE lever. BUT spawn 151→383ms (2.5× slower), bintree(2000) 4.06→61.8s (15×
+slower). Reverted.
+
+**The regression is purely frame bloat, now isolated.** The dual-body keeps the VM on the original
+*chunk*, but `nslots` is still one-size-for-both-engines: sizing the frame to the inlined layout
+adds extra nil slots the GC must scan/copy on every activation. bintree N=200 is ~470ms with
+`BROOD_NO_INLINE=1` (= baseline) vs ~6200ms default — purely the bloat; bintree's `make`/`check`
+nslots 1→3, and being GC-bound with millions of short interpreted activations, the 3× root-scan
+dominates. This re-confirms the frame-rep finding ("bloated frames alone cost ~1.8× on spawn"),
+amplified by allocation traffic.
+
+**The win is one bounded step away.** The dual-body/re-derive mechanism is correct and reusable; it
+just needs **per-engine frame sizing**: `push_frame`/the VM keep `original_nslots`; the native
+inlined arm grows its frame to `inlined_nslots` on entry (extend at the `jit_tier` call site,
+truncate back to `original_nslots` on deopt) using the RootStack reserve/set-len machinery the
+frame-rep prototype already built (`docs/frame-representation.md` Phase 3). That ships fib ~1.55× /
+pfib ~1.6× default-on with **no** spawn/bintree regression — the first real perf win of the campaign.
+Per-engine frame sizing is now confirmed **mandatory, not optional**, and is the next build.
