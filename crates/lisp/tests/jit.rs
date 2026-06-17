@@ -203,6 +203,10 @@ fn deep_handle_spill_under_jit() {
     );
 }
 
+// NOTE: the self-inliner is **default-off** (shelved opt-in via `BROOD_JIT_INLINE=1` — see
+// devlog 2026-06-17). The three `inlined_*` tests below pass either way (the result is
+// engine-independent); run `BROOD_JIT_INLINE=1 cargo test --features jit --test jit` to
+// actually exercise the inliner / guard its lowering.
 #[test]
 fn inlined_recursive_fib_under_jit() {
     // Recursive self-inlining (`docs/jit-optimizing-tier.md` §6b, Phase B). The non-tail

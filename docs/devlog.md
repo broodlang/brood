@@ -3440,3 +3440,35 @@ under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; full `nest test` (**2161/2161**) th
 stress; clean default (no-jit) build. **Lesson for the doc:** a differential corpus of *symmetric*
 recursion (fib's `(+ (f)(f))`) does not exercise a self-call wrapped in an asymmetric op with a
 tail-helper sibling — add that shape to any inlining corpus up front.
+
+## 2026-06-17 — Self-inliner shelved default-OFF; it's net-negative globally (the lesson)
+
+Benchmarked the Phase-B inliner across the full suite (vs Elixir, machine `whklat`). It is a
+**narrow win and a broad loss**, so it ships **default-off** (opt-in `BROOD_JIT_INLINE=1`) until the
+real fix lands. The numbers (in-repo jit build, A/B via the flag):
+
+| bench | inliner ON | OFF | |
+|---|---|---|---|
+| fib(35) | 307 ms | 535 ms | **1.7× faster** (tiers → native) |
+| spawn (10k × `fib 15`) | 945 ms | 145 ms | **6.5× slower** |
+| bintree | 2159 ms | 452 ms | **4.8× slower** |
+| sort / nqueens | ~neutral | | |
+
+**Why:** the inliner mutates the *shared* `Node` body, so the bytecode VM runs the inflated arm too.
+It only pays off when the arm **tiers to native** (fib's long run). When it doesn't — `spawn`'s
+processes are too short-lived to tier; `bintree` is alloc-bound and bails the JIT — the bigger body
+runs *interpreted*, strictly slower than the original. A compile-time gate can't separate the cases:
+`fib 15` and `fib 35` are the **same arm**. Net across the suite it loses far more than it gains.
+
+**The correct fix** is a **JIT-only inlined body** (VM keeps the original) — but that needs
+**per-engine frame sizing**: `nslots` is fixed per-arm and used by `push_frame` for both engines, and
+the project's own flat-reserve experiment showed *bloated frames alone* cost ~1.8× on spawn. So the
+inliner is gated on the **frame-representation change** (`docs/jit-optimizing-tier.md` §6a/§6c,
+`vm-perf-and-jit-runway.md` §4.E), not a quick patch. Shelved opt-in; implementation + tests preserved
+in commit `39191d7` to build on. Phase A (multi-slot spill, `78d1d05`) stays — it's harmless and a
+prerequisite for the eventual JIT-only re-land.
+
+**Pivot:** the global optimisation gaps are **allocation-bound**, not dispatch-bound — the worst
+Brood/Elixir ratios are `reduce` (5.7×), `pipeline` (6.5×), `wordcount` (~5.6×), `bintree`, `nqueens`,
+all cons/vector/map-allocation + GC traffic. Next work follows `docs/allocation-elimination.md`
+(lever 2): GC `Vec<u32>` forward tables → inline small vectors → one-pass list builders.
