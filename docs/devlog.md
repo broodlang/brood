@@ -3557,3 +3557,27 @@ compile to native instead of bailing to `exec_chunk`, and **(b) the JIT-only inl
 on the tiered path) via the frame-representation change (`docs/frame-representation.md`,
 `docs/jit-optimizing-tier.md`). That's where the headroom is — the BEAM proves these workloads run
 fast once compiled, so it's implementation work, not a ceiling.
+
+## 2026-06-17 — Weakness-hunt: isolated CHAMP `assoc` (~2.2µs) as the map-perf target; lever is FBIP reuse
+
+Probed an orthogonal axis (maps) to find a tractable target distinct from the per-call-protocol wall.
+Map-churn micro (`(loop- (assoc m i v) …)` building a 500k map) is ~4.7× Elixir wall. Isolated the
+CHAMP `assoc` cost cleanly: same loop shape with a trivial 3-arg `idf` control = 0.09s; with `assoc`
+= 1.18s → **~2.2µs per `assoc`**, with the call-protocol/loop contribution proven near-free (the
+control tiers to native). So the map gap is the **data structure**, not the loop — a different cost
+class than bintree/nqueens.
+
+Root cause (read `champ_assoc`, `heap.rs:1821`): incremental `assoc` passes `watermark: None`, so
+`owned = false` and it **path-copies every level** (`.clone()` the node's `data` + `children`
+SmallVecs + `alloc_map_node`, ~5 levels deep at 500k). The in-place `owned`/watermark fast-path
+exists but applies **only to bulk `map_from_pairs`/`%map-into` builds**, not incremental `assoc` —
+so `(reduce assoc {} …)` and `wordcount`'s `update` pay the full path-copy each call.
+
+**Tractability:** the broad lever is **FBIP/Perceus in-place reuse** when the map is linearly
+threaded (each `assoc` result feeds the next, unaliased) — `allocation-elimination.md §3.C`, flagged
+**HIGH-risk** (copying-GC, not refcounted; mis-proved reuse → cross-process corruption that
+`GC_VERIFY` does NOT catch; differential testing is the only net). A narrower, lower-risk win: a
+reduce/`into`-style fast path that recognises a direct-`assoc` reducer and routes through the
+watermarked bulk build (helps `(into {} …)` but not `wordcount`'s closure `update`). Node-layout
+tweaks (merge the two SmallVecs, raise inline caps) are likely marginal (cf. the inline-vectors
+neutral). Recorded as the cleanest isolated map target; not yet attempted.
