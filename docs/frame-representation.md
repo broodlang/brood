@@ -6,6 +6,26 @@
 > call. Background: `docs/jit-tier2.md` (the operand model + Brood→Brood ABI),
 > `docs/jit-optimizing-tier.md` (§6a: the per-call cost is intrinsic dispatch, not FFI;
 > §6c: the inliner regression), `docs/vm-perf-and-jit-runway.md` §4.E/§6.2 (the ABI).
+>
+> **UPDATE (2026-06-17) — Phases 1–2 PROTOTYPED, measured NEUTRAL; the protocol-cost
+> motivation is struck, the inliner-unblock motivation stands.** A flag-gated
+> (`BROOD_JIT_FRAME=1`) end-to-end prototype of §3 Phases 1–2 (option A, ~530 lines) had
+> JIT'd code write call operands into `roots[len..]` and lay out the callee frame (set
+> `len`, nil-fill locals) inline in Cranelift IR, linking direct via `fast_link`/`link_run`
+> helpers with a `brood_rt_reserve` cap-miss slow path. It passed **every** gate (JIT≡VM
+> differential + `nest test` 2161 under GC_STRESS+VERIFY, flag on *and* off; the fib arm
+> verifiably lowered through it with `0× brood_rt_push`) and measured **flat** — fib(35)
+> 0.52→0.52s, spawn ~137→~137ms. Reverted. This confirms §6a end-to-end: the dominant call
+> is `argc=1`, so moving the few-word frame setup from a Rust helper into IR does the *same
+> work*, relocated — nothing eliminated. **The §1 per-call protocol cost is the existence of
+> a per-call frame at all, not the frame ops**, so the "removes the protocol cost" motivation
+> below is struck. Two findings stand: (a) **option B (`#[repr(C)] RootStack`) is MANDATORY**
+> — the runtime probe found `Vec` laid out `{cap, ptr, len}` (ptr at **+8**), so a hardcoded
+> `{ptr,cap,len}` would have silently miscompiled (§3.1's footgun, confirmed); (b) the
+> fib/spawn win is **inlining (technique B)**, which removes the frame entirely for inlined
+> levels. **Revised plan: SKIP Phases 1–2 (neutral). Build the RootStack (option B) justified
+> ONLY by Phase 3 (per-engine frame sizing → inliner default-on: fib ~1.7×, no spawn/bintree
+> regression) + Phase 4 (wider coverage).**
 
 ## 1. Why this, and why now
 

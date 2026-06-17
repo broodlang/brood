@@ -3498,3 +3498,26 @@ intrinsic per-call protocol cost (fib/spawn ~40%), the inliner shipping default-
 ~1.7× with no spawn/bintree regression), and widening JIT coverage to the bailing shapes
 (bintree/nqueens/reduce → native). Multi-session, miscompile-sensitive; phased 0–4 with the
 full GC-stress gate per increment.
+
+## 2026-06-17 — Frame-rep prototype: per-call protocol cost is NOT the frame ops (measured)
+
+Validated the frame-representation bet cheaply before building its foundation (the
+measure-first lesson from this session's neutral allocation levers). A flag-gated
+`BROOD_JIT_FRAME=1` prototype (option A, ~530 lines, reverted) had JIT'd code write call
+operands into `roots[len..]` and lay out the callee frame inline in Cranelift IR — removing
+the per-arg `brood_rt_push` FFI and moving `truncate_roots`/`extend_roots_to_nil` from a Rust
+helper into IR. Passed every gate (JIT≡VM differential + 2161 `nest test`, GC_STRESS+VERIFY,
+flag on/off; fib arm lowered through it, `0× brood_rt_push` confirmed) and measured **flat**:
+fib(35) 0.52→0.52s, spawn ~137→~137ms.
+
+This confirms `jit-optimizing-tier.md §6a` end-to-end: the dominant fib/spawn call is
+`argc=1`, so frame setup is a few words — doing it in IR vs a Rust helper is the *same work*,
+just relocated. **The §1 "~40% per-call protocol" cost is the existence of a per-call frame
+at all, not the cost of the frame ops** — so it's not removable by making frame setup cheaper;
+only by *removing frames* (inlining, technique B). Two durable findings: (1) the prototype's
+runtime probe found `Vec` laid out `{cap, ptr, len}` (ptr at +8, not +0) — a hardcoded layout
+would have silently miscompiled, so the production substrate MUST be option B (`#[repr(C)]
+RootStack`), confirming `frame-representation.md §3.1`; (2) the genuinely fragile bits (env
+save/restore, deopt re-run) can't go in IR anyway. **Revised plan (in the doc): skip frame-rep
+Phases 1–2; the RootStack is justified only by the inliner-unblock (per-engine frame sizing,
+Phase 3) and wider JIT coverage (Phase 4), not the per-call protocol.**
