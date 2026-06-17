@@ -3521,3 +3521,39 @@ RootStack`), confirming `frame-representation.md §3.1`; (2) the genuinely fragi
 save/restore, deopt re-run) can't go in IR anyway. **Revised plan (in the doc): skip frame-rep
 Phases 1–2; the RootStack is justified only by the inliner-unblock (per-engine frame sizing,
 Phase 3) and wider JIT coverage (Phase 4), not the per-call protocol.**
+
+## 2026-06-17 — Operand-stack-in-registers measured NEUTRAL; the interpreter micro-opt approach is exhausted
+
+Attacked the profiled frontier: ~60% of an interpreted benchmark (bintree) is in `exec_chunk`,
+where every operand op goes through `heap.roots` Vec methods (push/peek/pop/slot, with bounds +
+capacity checks). Built the BEAM-style fix — hoist the operand stack into a register cursor
+(`sp: *mut Value` + `len`), reserve `code.len()` so it can't realloc mid-segment, sync `roots.len`
++ re-fetch around every helper call (dispatch / prim2 fallback / SelfCall). Fully correct (JIT≡VM≡
+tree-walker differential + GC under STRESS+VERIFY + full `nest test` 2161 + clean default build, all
+green — the GC-stress + debug-assert net would have caught a stale `sp` or bad index). But it
+measured **flat-to-slightly-negative on the target**: bintree (non-JIT) +1–4%, fib +5%, nqueens
+−11%, loop/reduce noise. Reverted.
+
+**Diagnosis (decisive):** operand-stack traffic is *not* the cost. Two reasons: (1) in the
+production `--features jit` config the operand-stack-heavy loops (loop/fib/reduce/collatz) **tier to
+native and bypass `exec_chunk` entirely** — only deep-recursion/backtracking (bintree/nqueens) stay
+interpreted; (2) for those, the time is in the **per-call protocol** — `dispatch`, `push_frame`
+(resize + arg copy), `SmallVec` arg marshalling, the call-site IC probe — and the cursor *adds*
+sync bookkeeping on exactly that hot path (every `Inst::Call` is a sync point), slightly outweighing
+the bounds-checks it saves on the genuinely-inline ops.
+
+**This closes the incremental-lever search. Five rigorous experiments, all neutral/negative:**
+self-inliner (net-negative, VM body inflation — shelved), GC `Vec<u32>` forward tables (neutral),
+inline small vectors (neutral), frame-ops-in-IR prototype (neutral), operand-stack register cursor
+(neutral). Every diagnosis triangulates to the **same root cause: the interpreted per-call
+protocol** (and, for the few benches that tier, the per-call *frame*, which only inlining removes).
+`deadline_exceeded`/`tick`/`gc_due` per-frame checks are already cheap (deadline clock-sampled
+1/1024); there's no single hot spot to peel off.
+
+**The gap is the fundamental interpreted-call cost vs a BeamAsm native call — not closable by
+interpreter/allocation micro-opts.** The only real levers left are structural and BEAM-aligned:
+**(a) widen JIT coverage** so bintree/nqueens-shaped arms (structure-walking + multi-call + closures)
+compile to native instead of bailing to `exec_chunk`, and **(b) the JIT-only inliner** (removes calls
+on the tiered path) via the frame-representation change (`docs/frame-representation.md`,
+`docs/jit-optimizing-tier.md`). That's where the headroom is — the BEAM proves these workloads run
+fast once compiled, so it's implementation work, not a ceiling.
