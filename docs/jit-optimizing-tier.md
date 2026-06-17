@@ -193,6 +193,14 @@ that the symmetric fib/collatz differential missed). See devlog 2026-06-17. **Ne
 (deferred):** depth-N unrolling (the leaf still pays the protocol); polymorphic/HOF-closure call
 sites (§Phase 4); and inlining structure-walking bodies once lever-2 allocation work lands.
 
+**UPDATE (2026-06-17): the inliner ships default-OFF, and the unblock is the frame-rep change.**
+Full-suite benchmarking showed the inliner is net-negative globally (spawn 6.5× / bintree 4.8×,
+because it inflates the *shared* VM body — non-tiering arms run the bigger body interpreted). It is
+shelved opt-in (`BROOD_JIT_INLINE=1`). Re-enabling it default-on (the JIT-only inlined body, VM keeps
+the original) needs **per-engine frame sizing**, which is the same capability that removes the §1
+per-call protocol cost — both are scoped together in **`docs/frame-representation.md`** (the chosen
+structural lever after the incremental allocation levers measured neutral, devlog 2026-06-17).
+
 ## 6b. Phase 3 — recursive self-inlining (the fib lever), designed 2026-06-16 (see 6c: regressed)
 
 Confirmed the right lever for `fib`/recursive benchmarks: fib is **63% call protocol, 26%
