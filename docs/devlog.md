@@ -3581,3 +3581,35 @@ reduce/`into`-style fast path that recognises a direct-`assoc` reducer and route
 watermarked bulk build (helps `(into {} …)` but not `wordcount`'s closure `update`). Node-layout
 tweaks (merge the two SmallVecs, raise inline caps) are likely marginal (cf. the inline-vectors
 neutral). Recorded as the cleanest isolated map target; not yet attempted.
+
+## 2026-06-17 — Native inline `nth` measured NEUTRAL; 8 experiments converge: per-call dispatch is THE cost, inlining is the only lever
+
+Implemented native inline `vector_ref` in the JIT (per-access slab base-resolve + bounds-check +
+3-word load, replacing the `brood_rt_vector_ref` FFI) + relaxed the benefit gate so `nth`-walking
+arms lower. Fully correct (bintree's `check` lowers native, zero `brood_rt_vector_ref` in the CLIF;
+JIT≡VM≡tree-walker differential incl. new bintree-shaped + OOB + variable-index cases, GC under
+STRESS+VERIFY, full suite 2161 — all green). But measured **neutral**: bintree 1.0×, matmul +5% (the
+genuine FFI saving on its inner `nth`), nqueens/fib/loop noise. Reverted.
+
+**Diagnosis (decisive):** the `nth`s were never the bottleneck. bintree's `check`
+(`(if (nil? node) 1 (+ 1 (check (nth node 0)) (check (nth node 1))))`) makes **three dispatched
+calls per node** (`nil?`, `check`, `check`); the per-call dispatch (frame nil-init + handle-arg
+copies + the handle spill across the second call's safepoint + `jit_dispatch_call`) dominates the two
+now-inline `nth` reads. Native `nth` just shifted `check` from FFI-bound to dispatch-bound.
+
+**This is the 8th rigorous perf experiment of the session, and they converge unanimously:** inliner
+(net-negative, VM body inflation), GC forward tables, inline small vectors, frame-ops-in-IR,
+operand-stack register cursor, native `nth` — every lever that does NOT reduce the *number of calls*
+or the *per-call cost* measures neutral, because **the interpreted/JIT-dispatched per-call protocol
+is the dominant cost** of the recursion benchmarks (bintree/nqueens/fib/pfib). The map gap is the
+orthogonal CHAMP path-copy cost. Nothing else moves the needle.
+
+**The only lever that attacks per-call dispatch is removing calls = inlining.** The self-inliner
+exists (Phase B, `39191d7`) and was shelved (`BROOD_JIT_INLINE`, default-off) *only* because it
+inflates the shared VM body (spawn 6.5× / bintree 4.8× regression — non-tiering arms run the bigger
+body interpreted). The fix is a **JIT-only inlined body**: the VM keeps the original small arm (no
+regression), the JIT lowers the inlined arm with **per-engine frame sizing** (the native arm grows
+its frame on entry; the frame-rep prototype, devlog 2026-06-17, built correct reserve/set-len
+machinery for this). Known payoff: the inliner A/B already showed **fib ~1.7×**. Extensible to
+bintree's `check` by combining with the (now-proven-correct) native `nth`. This is the convergent
+highest-payoff lever and the next build.
