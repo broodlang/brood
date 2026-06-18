@@ -3810,3 +3810,30 @@ back to FBIP. Open fork to settle first: the JIT hardcodes the 24B/3-word layout
 it until Stage 4 — do the JIT 1-word rewrite first (rep-stable, no benchmark regression window), or
 swap the rep with the JIT gated to VM to get the go/no-go number fastest and accept a temporary JIT
 regression until Stage 4.
+
+---
+
+## 2026-06-18 — 8-byte Value rep: prototyped and REJECTED (NO-GO)
+
+After Stage 0 (the accessor-layer migration, shipped above), Stage 1 prototyped the actual
+representation win on a branch (`stage1-8b-rep`) to settle the go/no-go before committing to the
+multi-week full rewrite. Rather than the full enum→`struct(u64)` swap (which needs ~1000 match
+sites rewritten first), the prototype targeted the dominant lever directly: **inline-packed vector
+storage** (a `VecStore` = `SmallVec<[Packed;3]>` packed | `Vec<Value>` boxed), shrinking a bintree
+`[l r]` node from a 24B header + a separately-malloc'd 48B buffer to 16B inline. Built correctly,
+GC-traced, gated green (gc 11/0 + nest 2161/2161 under `GC_STRESS+VERIFY`, both builds clean).
+
+**Result (VM-mode, median-of-5, vs 24B baseline): NO-GO.** bintree 1.059×; decomposed,
+`make`(alloc) 1.025× and `check`(read) 1.025×; nqueens 1.05×; matmul 1.10×. The decomposition is
+the decisive part: the read path is **not** slower, so there is no hidden alloc-side gain for the
+real 8B rep to recover — the heap-footprint lever is intrinsically ~2.5%. Per-node mallocs are
+already cheap (mimalloc) and GC-copy volume isn't the bottleneck; **per-call dispatch dominates**
+these recursion benchmarks (the same convergent finding as the inliner campaign), and the rep change
+doesn't touch dispatch. A full 8B rep (boxed floats, Pid-GC, handle repack, JIT 1-word rewrite)
+would be multi-week for a ~2.5–6% ceiling on the benchmarks it was meant to fix.
+
+**Decision.** Abandon the 8-byte rep. Branch retained as evidence, NOT merged. Stage 0's accessor
+layer stays on main (perf-neutral, cleaner construction surface) though the rep swap it prepared is
+cancelled. **Redirect to the dispatch lever** — the shipped self-inliner already gives ~1.8× on
+fib/pfib by removing calls; that (safe inlining of heap-touching recursion, call-site IC, tiering)
+is where Brood closes the gap to the BEAM. See `docs/value-representation.md` for the full verdict.
