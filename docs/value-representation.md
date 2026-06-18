@@ -144,3 +144,45 @@ cross-process suite blocks. Bench A/B on the alloc-bound set is the go/no-go.
 - `crates/lisp/src/process/` — the `Pid` registry + message codec (the `Pid`-boxing surface).
 - Background: `docs/vm-perf-and-jit-runway.md` §4.E (the original flag), `docs/jit-tier2.md` §3
   (the 24-byte/3-word ABI), `docs/types.md` (the `Tag` lattice).
+
+## 8. Staged plan for the full 8-byte rep (chosen 2026-06-18; multi-session)
+
+The 16→box-Pid prototype validated the direction (regression-free ~1.15× on the alloc-bound set,
+spawn flat) but was sub-bar and needs pid-GC; reverted. We go straight for the full 8-byte
+BEAM-style fixnum word (the ~3× prize). The rep swap is **atomic** (a tagged `u64` can't hold
+`i64`/`f64`/2-word-`Pid`/62-bit-handles — they all change together), so it CANNOT be flag-gated. The
+safe path is **accessor-first**: migrate every call site off direct enum matching, *then* swap the
+rep behind the accessors. Stages, each independently gated (differential + GC STRESS+VERIFY + 2161
+suite) and (where perf-relevant) A/B'd:
+
+- **Stage 0 — accessor abstraction (behaviour-preserving; rep UNCHANGED → JIT + fib-win intact).**
+  Rename today's `enum Value` → `enum ValueRef` (the unpacked view). Introduce `Value` as a thin
+  wrapper that, *for now*, still IS the 24-byte enum, exposing: constructors (`Value::int(i)`,
+  `Value::float(f)`, `Value::pair(id)`, …), `unpack(&self) -> ValueRef` (for matching), `tag()`, and
+  hot accessors (`as_int()`, `as_f64()`, `as_pair()`, …). Mechanically migrate the codebase:
+  `match v { Value::X(..) => }` → `match v.unpack() { ValueRef::X(..) => }`, constructs → the
+  `Value::*` fns. Thousands of sites — **incremental** (both coexist, so a partial migration
+  compiles); do it module-by-module, gated each chunk. No perf change expected (assert flat).
+- **Stage 1 — swap the rep to the 8-byte tagged word**, localized behind the Stage-0 accessors.
+  `struct Value(u64)`; low-bit tags; **fixnum ints** (~60-bit inline, overflow→`BigInt` — extend the
+  existing overflow path; keep a distinct int tag so `int?`/`type-of` stay correct); **handles
+  repacked** 62→~60 bit (shrink the generation/index fields — re-check the 30-bit GC epoch tripwire
+  budget); **`Ref`/`Socket`/`Subprocess`** fit-or-box. `unpack()` decodes the word. **Defer floats
+  + pids to Stages 2–3** by *temporarily boxing them with the existing 24-bit-safe path* OR keeping
+  the JIT off during this stage (see Stage 4). Confirm `size_of::<Value>() == 8`. A/B the alloc set.
+- **Stage 2 — boxed floats** (BEAM scheme): `Value::Float` → a handle into a float slab; update
+  `float?`/float arithmetic/the printer. A/B mandelbrot (the BEAM beats Brood here *with* boxed
+  floats, so expect ≤ parity, not a regression).
+- **Stage 3 — pid-GC** (the productionized pid table the prototype leaked): pids are distributed
+  identities (registry, monitors, in-flight messages, cross-node) — design a reclaiming scheme
+  (owner-death sweep / generation) before this can ship. The hardest correctness piece.
+- **Stage 4 — JIT 1-word rewrite.** The JIT hardcodes the 3-word/24-byte model (`Op::Handle` = 3
+  registers, `read_words`/`store_words`, `STRIDE`). It must become 1-word. **Coupling:** Stages 1–3
+  change the rep out from under the JIT, so either rewrite the JIT in lockstep with Stage 1 (hard) or
+  **run Stages 1–3 with the JIT disabled** (tree-walker/bytecode-VM only — temporarily forfeits the
+  fib 1.8× win) and land the JIT 1-word rewrite here to restore + extend it. The latter is cleaner
+  to gate; note the transient fib regression in the interim.
+
+**Go/no-go gates between stages:** Stage 0 must be perf-flat (else the abstraction is too costly).
+Stage 1's alloc-set A/B must beat the 16B prototype's ~1.15× (else 8B isn't worth the cruxes — fall
+back to FBIP). Each stage commits only green.
