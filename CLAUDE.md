@@ -163,6 +163,15 @@ test is killed on its own and the run still finishes. Get it with
 environment metadata to `docs/benchmarks/<UTC-timestamp>.md`. `make -j$(nproc)`
 parallelism isn't relevant — it's a Cargo workspace, not a recursive make.
 
+> **Perf-benchmark builds: use `cargo build --release --features jit --bin brood`, NEVER `-p brood`.**
+> The `brood` *binary* is the `crates/cli` package; `-p brood` builds only the `crates/lisp`
+> *lib* and does **not** relink `target/release/brood`, so an A/B with `-p brood` can silently
+> compare **stale binaries** (this produced a fully bogus 8B go/no-go + a phantom "JIT regression"
+> on 2026-06-18 — see devlog). Always `--bin brood`, and sanity-check binaries differ
+> (size/mtime) before trusting an A/B. Engines: `BROOD_VM=0` = tree-walker (legacy, ~10× slow);
+> unset/`BROOD_VM=1` = bytecode VM; the tier-1 JIT tiers *within* the VM path (so disabling the
+> JIT means a no-jit **build**, not an env var).
+
 ### Debug tooling — knobs, env flags, and crash artifacts
 
 The kit for chasing GC / use-after-GC and other kernel faults. **Build with
