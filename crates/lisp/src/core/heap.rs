@@ -45,7 +45,7 @@ use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
     BigIntId, BsId, Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId,
-    Passthrough, RopeId, StrId, Symbol, Value, VecId, LOCAL, PRELUDE, RUNTIME,
+    Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
@@ -222,30 +222,30 @@ fn bigint_cmp_float(b: &num_bigint::BigInt, f: f64) -> std::cmp::Ordering {
 /// reproducible. Numbers come first (most common), then strings/keywords/
 /// symbols (text), then collections, then everything else.
 fn tag_rank(v: Value) -> u8 {
-    match v {
-        Value::Nil => 0,
-        Value::Bool(_) => 1,
-        Value::Int(_) | Value::BigInt(_) | Value::Float(_) => 2,
-        Value::Str(_) => 3,
-        Value::Keyword(_) => 4,
-        Value::Sym(_) => 5,
-        Value::Pair(_) => 6,
+    match v.unpack() {
+        ValueRef::Nil => 0,
+        ValueRef::Bool(_) => 1,
+        ValueRef::Int(_) | ValueRef::BigInt(_) | ValueRef::Float(_) => 2,
+        ValueRef::Str(_) => 3,
+        ValueRef::Keyword(_) => 4,
+        ValueRef::Sym(_) => 5,
+        ValueRef::Pair(_) => 6,
         // A range sorts among lists (it is one, lazily).
-        Value::Range(_) => 6,
+        ValueRef::Range(_) => 6,
         // A lazy seq-view sorts among lists too (it is one, lazily).
-        Value::SeqView(_) => 6,
-        Value::Vector(_) => 7,
-        Value::Map(_) => 8,
-        Value::Fn(_) => 9,
-        Value::Native(_) => 10,
-        Value::Macro(_) => 11,
-        Value::Ref(_) => 12,
-        Value::Pid { .. } => 13,
-        Value::Rope(_) => 14,
-        Value::Socket(_) => 15,
-        Value::Subprocess(_) => 16,
-        Value::Table(_) => 18,
-        Value::Bitset(_) => 19,
+        ValueRef::SeqView(_) => 6,
+        ValueRef::Vector(_) => 7,
+        ValueRef::Map(_) => 8,
+        ValueRef::Fn(_) => 9,
+        ValueRef::Native(_) => 10,
+        ValueRef::Macro(_) => 11,
+        ValueRef::Ref(_) => 12,
+        ValueRef::Pid { .. } => 13,
+        ValueRef::Rope(_) => 14,
+        ValueRef::Socket(_) => 15,
+        ValueRef::Subprocess(_) => 16,
+        ValueRef::Table(_) => 18,
+        ValueRef::Bitset(_) => 19,
     }
 }
 
@@ -416,22 +416,22 @@ fn gc_trace_default() -> bool {
 /// Re-tag a value's handle from the local region to the immutable **prelude**
 /// region (same slab index, region bits set). Atoms are unchanged.
 fn to_prelude(v: Value) -> Value {
-    match v {
-        Value::Pair(id) => Value::Pair(PairId::prelude(id.index())),
-        Value::Vector(id) => Value::Vector(VecId::prelude(id.index())),
-        Value::Range(id) => Value::Range(VecId::prelude(id.index())),
-        Value::SeqView(id) => Value::SeqView(VecId::prelude(id.index())),
-        Value::Map(id) => Value::Map(MapId::prelude(id.index())),
-        Value::Str(id) => Value::Str(StrId::prelude(id.index())),
-        Value::BigInt(id) => Value::BigInt(BigIntId::prelude(id.index())),
-        Value::Bitset(id) => Value::Bitset(BsId::prelude(id.index())),
-        Value::Fn(id) => Value::Fn(ClosureId::prelude(id.index())),
-        Value::Macro(id) => Value::Macro(ClosureId::prelude(id.index())),
-        Value::Native(id) => Value::Native(NativeId::prelude(id.index())),
+    match v.unpack() {
+        ValueRef::Pair(id) => Value::pair(PairId::prelude(id.index())),
+        ValueRef::Vector(id) => Value::vector(VecId::prelude(id.index())),
+        ValueRef::Range(id) => Value::range(VecId::prelude(id.index())),
+        ValueRef::SeqView(id) => Value::seqview(VecId::prelude(id.index())),
+        ValueRef::Map(id) => Value::map(MapId::prelude(id.index())),
+        ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
+        ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
+        ValueRef::Bitset(id) => Value::bitset(BsId::prelude(id.index())),
+        ValueRef::Fn(id) => Value::func(ClosureId::prelude(id.index())),
+        ValueRef::Macro(id) => Value::macro_(ClosureId::prelude(id.index())),
+        ValueRef::Native(id) => Value::native(NativeId::prelude(id.index())),
         // The prelude is pure Brood (no rope literals), so a rope can never
         // exist at freeze time. Guard the invariant rather than silently
         // re-tagging a LOCAL handle into PRELUDE.
-        Value::Rope(_) => unreachable!("a Rope cannot appear in the prelude region"),
+        ValueRef::Rope(_) => unreachable!("a Rope cannot appear in the prelude region"),
         other => other,
     }
 }
@@ -1120,17 +1120,17 @@ fn form_pos_key(id: PairId) -> u64 {
 /// operand-stack slot — see [`needs_root_slot`], which [`Heap::root`] uses.
 #[inline]
 pub fn is_movable(v: Value) -> bool {
-    match v {
-        Value::Pair(id) => id.region() == LOCAL,
-        Value::Vector(id) => id.region() == LOCAL,
-        Value::Range(id) => id.region() == LOCAL,
-        Value::SeqView(id) => id.region() == LOCAL,
-        Value::Map(id) => id.region() == LOCAL,
-        Value::Str(id) => id.region() == LOCAL,
-        Value::BigInt(id) => id.region() == LOCAL,
-        Value::Bitset(id) => id.region() == LOCAL,
-        Value::Rope(id) => id.region() == LOCAL,
-        Value::Fn(id) | Value::Macro(id) => id.region() == LOCAL,
+    match v.unpack() {
+        ValueRef::Pair(id) => id.region() == LOCAL,
+        ValueRef::Vector(id) => id.region() == LOCAL,
+        ValueRef::Range(id) => id.region() == LOCAL,
+        ValueRef::SeqView(id) => id.region() == LOCAL,
+        ValueRef::Map(id) => id.region() == LOCAL,
+        ValueRef::Str(id) => id.region() == LOCAL,
+        ValueRef::BigInt(id) => id.region() == LOCAL,
+        ValueRef::Bitset(id) => id.region() == LOCAL,
+        ValueRef::Rope(id) => id.region() == LOCAL,
+        ValueRef::Fn(id) | ValueRef::Macro(id) => id.region() == LOCAL,
         _ => false,
     }
 }
@@ -1150,17 +1150,17 @@ pub fn is_movable(v: Value) -> bool {
 #[inline]
 pub fn needs_root_slot(v: Value) -> bool {
     let shared = |r| r == LOCAL || r == RUNTIME;
-    match v {
-        Value::Pair(id) => shared(id.region()),
-        Value::Vector(id) => shared(id.region()),
-        Value::Range(id) => shared(id.region()),
-        Value::SeqView(id) => shared(id.region()),
-        Value::Map(id) => shared(id.region()),
-        Value::Str(id) => shared(id.region()),
-        Value::BigInt(id) => shared(id.region()),
-        Value::Bitset(id) => shared(id.region()),
-        Value::Rope(id) => shared(id.region()),
-        Value::Fn(id) | Value::Macro(id) => shared(id.region()),
+    match v.unpack() {
+        ValueRef::Pair(id) => shared(id.region()),
+        ValueRef::Vector(id) => shared(id.region()),
+        ValueRef::Range(id) => shared(id.region()),
+        ValueRef::SeqView(id) => shared(id.region()),
+        ValueRef::Map(id) => shared(id.region()),
+        ValueRef::Str(id) => shared(id.region()),
+        ValueRef::BigInt(id) => shared(id.region()),
+        ValueRef::Bitset(id) => shared(id.region()),
+        ValueRef::Rope(id) => shared(id.region()),
+        ValueRef::Fn(id) | ValueRef::Macro(id) => shared(id.region()),
         _ => false,
     }
 }
@@ -1494,7 +1494,7 @@ impl Heap {
     /// Record the source position of a LOCAL list form (no-op for atoms and
     /// forms in the shared regions). Called by the reader as it builds lists.
     pub fn set_form_pos(&mut self, v: Value, pos: crate::error::Pos) {
-        if let Value::Pair(id) = v {
+        if let Some(id) = v.as_pair() {
             if id.region() == crate::core::value::LOCAL {
                 self.form_pos.insert(form_pos_key(id), pos);
             }
@@ -1506,7 +1506,7 @@ impl Heap {
     /// carried the position into (so `form-pos` works on a frozen `defn`/lambda body
     /// and a position survives a cross-node send). PRELUDE forms carry none.
     pub fn form_pos(&self, v: Value) -> Option<crate::error::Pos> {
-        if let Value::Pair(id) = v {
+        if let Some(id) = v.as_pair() {
             match id.region() {
                 crate::core::value::LOCAL => return self.form_pos.get(&form_pos_key(id)).copied(),
                 crate::core::value::RUNTIME => return self.runtime.position_of(id.index()),
@@ -1610,8 +1610,10 @@ impl Heap {
     /// and first argument from the *un-expanded* form. `None` for anything else
     /// (including `(def (pattern) …)`, which has no plain name — deferred).
     fn def_form_name(&self, form: Value) -> Option<Symbol> {
-        let Value::Pair(p) = form else { return None };
-        let Value::Sym(head) = self.car(p) else {
+        let ValueRef::Pair(p) = form.unpack() else {
+            return None;
+        };
+        let ValueRef::Sym(head) = self.car(p).unpack() else {
             return None;
         };
         if !(crate::core::value::symbol_is(head, kw::DEF)
@@ -1620,14 +1622,14 @@ impl Heap {
         {
             return None;
         }
-        let Value::Pair(rest) = self.cdr(p) else {
+        let ValueRef::Pair(rest) = self.cdr(p).unpack() else {
             return None;
         };
-        match self.car(rest) {
+        match self.car(rest).unpack() {
             // Qualify the recorded name to the current namespace (ADR-065) so the
             // def-site key matches the global the resolver will actually define
             // (`foo/name`); a no-op at root or for an already-qualified name.
-            Value::Sym(name) => Some(match self.compile_ns {
+            ValueRef::Sym(name) => Some(match self.compile_ns {
                 Some(ns) => {
                     crate::eval::macros::qualify_name(&crate::core::value::symbol_name(ns), name)
                 }
@@ -1659,12 +1661,12 @@ impl Heap {
 
     pub fn alloc_pair(&mut self, head: Value, tail: Value) -> Value {
         let idx = alloc_slot!(self, pairs, (head, tail));
-        Value::Pair(PairId::local_gen(idx, self.local_epoch))
+        Value::pair(PairId::local_gen(idx, self.local_epoch))
     }
 
     pub fn alloc_vector(&mut self, items: Vec<Value>) -> Value {
         let idx = alloc_slot!(self, vectors, items);
-        Value::Vector(VecId::local_gen(idx, self.local_epoch))
+        Value::vector(VecId::local_gen(idx, self.local_epoch))
     }
 
     /// Allocate a lazy integer range `lo..hi` by `step`. Returns `Nil` when the
@@ -1674,14 +1676,14 @@ impl Heap {
     pub fn alloc_range(&mut self, lo: i64, hi: i64, step: i64) -> Value {
         let empty = if step > 0 { lo >= hi } else { hi >= lo };
         if empty {
-            return Value::Nil;
+            return Value::nil();
         }
         let idx = alloc_slot!(
             self,
             vectors,
-            vec![Value::Int(lo), Value::Int(hi), Value::Int(step)]
+            vec![Value::int(lo), Value::int(hi), Value::int(step)]
         );
-        Value::Range(VecId::local_gen(idx, self.local_epoch))
+        Value::range(VecId::local_gen(idx, self.local_epoch))
     }
 
     /// Allocate a lazy **seq-view** backed by a 2-element `[source xform]`
@@ -1691,7 +1693,7 @@ impl Heap {
     /// values (not just ints), so GC promote/flush/verify recurse into them.
     pub fn alloc_seqview(&mut self, source: Value, xform: Value) -> Value {
         let idx = alloc_slot!(self, vectors, vec![source, xform]);
-        Value::SeqView(VecId::local_gen(idx, self.local_epoch))
+        Value::seqview(VecId::local_gen(idx, self.local_epoch))
     }
 
     /// The `(source, xform)` of a seq-view handle's backing `[source xform]`
@@ -1704,10 +1706,7 @@ impl Heap {
     /// The `(lo, hi, step)` of a range handle's backing `[lo hi step]` vector.
     pub fn range_parts(&self, id: VecId) -> (i64, i64, i64) {
         let v = self.vector(id);
-        let int = |x: Value| match x {
-            Value::Int(n) => n,
-            _ => 0,
-        };
+        let int = |x: Value| x.as_int().unwrap_or(0);
         (int(v[0]), int(v[1]), int(v[2]))
     }
 
@@ -1727,7 +1726,7 @@ impl Heap {
         let mut out = Vec::with_capacity(self.range_len(id).max(0) as usize);
         let mut i = lo;
         while if step > 0 { i < hi } else { i > hi } {
-            out.push(Value::Int(i));
+            out.push(Value::int(i));
             i += step;
         }
         out
@@ -1746,7 +1745,7 @@ impl Heap {
     /// point for `map_from_pairs`.
     pub fn alloc_empty_map(&mut self) -> Value {
         let idx = alloc_slot!(self, maps, MapNode::default());
-        Value::Map(MapId::local_gen(idx, self.local_epoch))
+        Value::map(MapId::local_gen(idx, self.local_epoch))
     }
 
     /// The value `key` maps to, by structural equality, or `None` if absent.
@@ -1790,7 +1789,7 @@ impl Heap {
         let hash = self.hash_value(key);
         // A lone assoc has no build-local node to reuse — copy-on-write (`None`).
         let new_root = self.champ_assoc(id, key, val, hash, 0, None);
-        Value::Map(new_root)
+        Value::map(new_root)
     }
 
     /// True iff `id` names a node *this transient build allocated*, so it is
@@ -2082,7 +2081,7 @@ impl Heap {
     pub fn map_dissoc(&mut self, id: MapId, key: Value) -> Value {
         let hash = self.hash_value(key);
         let new_root = self.champ_dissoc(id, key, hash, 0);
-        Value::Map(new_root)
+        Value::map(new_root)
     }
 
     fn champ_dissoc(&mut self, id: MapId, key: Value, hash: u64, depth: u32) -> MapId {
@@ -2211,15 +2210,15 @@ impl Heap {
         // can't fire mid-builtin); the result is the byte-identical canonical CHAMP
         // shape a copy-on-write fold would yield.
         let watermark = Some(self.local.maps.len());
-        let mut current = match self.alloc_empty_map() {
-            Value::Map(id) => id,
+        let mut current = match self.alloc_empty_map().unpack() {
+            ValueRef::Map(id) => id,
             _ => unreachable!("alloc_empty_map returns Value::Map"),
         };
         for (k, v) in pairs {
             let hash = self.hash_value(k);
             current = self.champ_assoc(current, k, v, hash, 0, watermark);
         }
-        Value::Map(current)
+        Value::map(current)
     }
 
     /// Pour `pairs` into the existing map `into` via a transient build. The
@@ -2235,7 +2234,7 @@ impl Heap {
             let hash = self.hash_value(k);
             current = self.champ_assoc(current, k, v, hash, 0, watermark);
         }
-        Value::Map(current)
+        Value::map(current)
     }
 
     /// All entries in the map, walked depth-first through the trie.
@@ -2336,7 +2335,7 @@ impl Heap {
         };
         let idx = self.local.strings.len();
         self.local.strings.push(entry);
-        Value::Str(StrId::local_gen(idx, self.local_epoch))
+        Value::str_(StrId::local_gen(idx, self.local_epoch))
     }
 
     /// Materialise a `Value::Rope` into LOCAL from an owned `ropey::Rope`
@@ -2345,7 +2344,7 @@ impl Heap {
     pub fn alloc_rope(&mut self, r: ropey::Rope) -> Value {
         let idx = self.local.ropes.len();
         self.local.ropes.push(r);
-        Value::Rope(RopeId::local_gen(idx, self.local_epoch))
+        Value::rope(RopeId::local_gen(idx, self.local_epoch))
     }
 
     /// Resolve a rope handle to its `&ropey::Rope`. LOCAL slots are the common
@@ -2382,7 +2381,7 @@ impl Heap {
     pub fn int_from_bigint(&mut self, n: num_bigint::BigInt) -> Value {
         use num_traits::ToPrimitive;
         match n.to_i64() {
-            Some(i) => Value::Int(i),
+            Some(i) => Value::int(i),
             None => self.alloc_bigint(n),
         }
     }
@@ -2403,7 +2402,7 @@ impl Heap {
         );
         let idx = self.local.bigints.len();
         self.local.bigints.push(n);
-        Value::BigInt(BigIntId::local_gen(idx, self.local_epoch))
+        Value::bigint(BigIntId::local_gen(idx, self.local_epoch))
     }
 
     /// Resolve a bignum handle to its `&num_bigint::BigInt`. LOCAL is the common
@@ -2437,7 +2436,7 @@ impl Heap {
     pub fn alloc_bitset(&mut self, blob: Arc<SharedBlob>) -> Value {
         let idx = self.local.bitsets.len();
         self.local.bitsets.push(blob);
-        Value::Bitset(BsId::local_gen(idx, self.local_epoch))
+        Value::bitset(BsId::local_gen(idx, self.local_epoch))
     }
 
     /// Resolve a bitset handle to its `&Arc<SharedBlob>` (KI-4 fix; mirrors
@@ -2469,9 +2468,9 @@ impl Heap {
     /// primitives use to compute in a single (big) domain. Returns `None` for a
     /// non-integer value.
     pub fn as_bigint(&self, v: Value) -> Option<num_bigint::BigInt> {
-        match v {
-            Value::Int(i) => Some(num_bigint::BigInt::from(i)),
-            Value::BigInt(id) => Some(self.bigint(id).clone()),
+        match v.unpack() {
+            ValueRef::Int(i) => Some(num_bigint::BigInt::from(i)),
+            ValueRef::BigInt(id) => Some(self.bigint(id).clone()),
             _ => None,
         }
     }
@@ -2490,7 +2489,7 @@ impl Heap {
     pub(crate) fn alloc_string_from_shared(&mut self, blob: Arc<SharedBlob>) -> Value {
         let idx = self.local.strings.len();
         self.local.strings.push(LocalString::Shared(blob));
-        Value::Str(StrId::local_gen(idx, self.local_epoch))
+        Value::str_(StrId::local_gen(idx, self.local_epoch))
     }
 
     /// A LOCAL string slot, routed to the nursery or old generation by the
@@ -2629,12 +2628,12 @@ impl Heap {
         if !arm.optionals.is_empty() || arm.rest.is_some() || arm.body.len() != 1 {
             return None;
         }
-        let (head, mut rest) = match arm.body[0] {
-            Value::Pair(p) => self.pair(p),
+        let (head, mut rest) = match arm.body[0].unpack() {
+            ValueRef::Pair(p) => self.pair(p),
             _ => return None,
         };
-        let head_sym = match head {
-            Value::Sym(s) => s,
+        let head_sym = match head.unpack() {
+            ValueRef::Sym(s) => s,
             _ => return None,
         };
         if crate::eval::is_special_form(head_sym) || arm.params.iter().any(|&p| p == head_sym) {
@@ -2642,12 +2641,12 @@ impl Heap {
         }
         let mut map: SmallVec<[usize; 4]> = SmallVec::new();
         loop {
-            match rest {
-                Value::Nil => break,
-                Value::Pair(p) => {
+            match rest.unpack() {
+                ValueRef::Nil => break,
+                ValueRef::Pair(p) => {
                     let (a, next) = self.pair(p);
-                    let asym = match a {
-                        Value::Sym(s) => s,
+                    let asym = match a.unpack() {
+                        ValueRef::Sym(s) => s,
                         _ => return None, // a literal / nested call — not a pure forward
                     };
                     map.push(arm.params.iter().position(|&p| p == asym)?);
@@ -2665,12 +2664,12 @@ impl Heap {
         // collected.
         let idx = self.local.natives.len();
         self.local.natives.push(f);
-        Value::Native(NativeId::local_gen(idx, self.local_epoch))
+        Value::native(NativeId::local_gen(idx, self.local_epoch))
     }
 
     /// Build a proper list from a vector of items.
     pub fn list(&mut self, items: Vec<Value>) -> Value {
-        self.list_with_tail(items, Value::Nil)
+        self.list_with_tail(items, Value::nil())
     }
 
     /// Build a list of `items` ending in `tail`. A `Nil` tail gives a proper
@@ -2688,7 +2687,7 @@ impl Heap {
     /// trailing args (every variadic call, which includes all the arithmetic and
     /// comparison operators).
     pub fn list_from_slice(&mut self, items: &[Value]) -> Value {
-        let mut acc = Value::Nil;
+        let mut acc = Value::nil();
         for &item in items.iter().rev() {
             acc = self.alloc_pair(item, acc);
         }
@@ -2719,65 +2718,67 @@ impl Heap {
     /// acyclic by construction (immutable, built bottom-up), so they aren't
     /// forwarded — they just recurse through `fwd` to reach any closures inside.
     fn promote_in(&self, v: Value, fwd: &mut PromoteForward) -> Value {
-        match v {
-            Value::Str(id) if id.region() == LOCAL => {
+        match v.unpack() {
+            ValueRef::Str(id) if id.region() == LOCAL => {
                 let s = self.string(id).to_string();
-                Value::Str(StrId::runtime(self.runtime.code.strings.push(s)))
+                Value::str_(StrId::runtime(self.runtime.code.strings.push(s)))
             }
-            Value::BigInt(id) if id.region() == LOCAL => {
+            ValueRef::BigInt(id) if id.region() == LOCAL => {
                 // A leaf: clone the value into the shared region (no children).
                 let n = self.bigint(id).clone();
-                Value::BigInt(BigIntId::runtime(self.runtime.code.bigints.push(n)))
+                Value::bigint(BigIntId::runtime(self.runtime.code.bigints.push(n)))
             }
-            Value::Bitset(id) if id.region() == LOCAL => {
+            ValueRef::Bitset(id) if id.region() == LOCAL => {
                 // A leaf: share the Arc<SharedBlob> into the shared region byte-clean —
                 // NEVER through the UTF-8 string path (that was KI-4). Just an Arc bump.
                 let b = Arc::clone(self.bitset(id));
-                Value::Bitset(BsId::runtime(self.runtime.code.bitsets.push(b)))
+                Value::bitset(BsId::runtime(self.runtime.code.bitsets.push(b)))
             }
-            Value::Rope(id) if id.region() == LOCAL => {
+            ValueRef::Rope(id) if id.region() == LOCAL => {
                 // Cheap `Arc`-node clone into the shared region; the rope is
                 // immutable, so sibling processes read it concurrently.
                 let r = self.rope(id).clone();
-                Value::Rope(RopeId::runtime(self.runtime.code.ropes.push(r)))
+                Value::rope(RopeId::runtime(self.runtime.code.ropes.push(r)))
             }
-            Value::Pair(id) if id.region() == LOCAL => self.promote_list(id, fwd),
-            Value::Vector(id) if id.region() == LOCAL => {
+            ValueRef::Pair(id) if id.region() == LOCAL => self.promote_list(id, fwd),
+            ValueRef::Vector(id) if id.region() == LOCAL => {
                 let items: Vec<Value> = self
                     .vector(id)
                     .to_vec()
                     .into_iter()
                     .map(|x| self.promote_in(x, fwd))
                     .collect();
-                Value::Vector(VecId::runtime(self.runtime.code.vectors.push(items)))
+                Value::vector(VecId::runtime(self.runtime.code.vectors.push(items)))
             }
             // A range's backing `[lo hi step]` vector holds only ints (atoms) —
             // copy it across and keep the `Range` wrapper.
-            Value::Range(id) if id.region() == LOCAL => {
+            ValueRef::Range(id) if id.region() == LOCAL => {
                 let items = self.vector(id).to_vec();
-                Value::Range(VecId::runtime(self.runtime.code.vectors.push(items)))
+                Value::range(VecId::runtime(self.runtime.code.vectors.push(items)))
             }
             // A seq-view's backing `[source xform]` holds heap values (a
             // collection and a transducer closure), so promote each across like a
             // vector and keep the `SeqView` wrapper.
-            Value::SeqView(id) if id.region() == LOCAL => {
+            ValueRef::SeqView(id) if id.region() == LOCAL => {
                 let items: Vec<Value> = self
                     .vector(id)
                     .to_vec()
                     .into_iter()
                     .map(|x| self.promote_in(x, fwd))
                     .collect();
-                Value::SeqView(VecId::runtime(self.runtime.code.vectors.push(items)))
+                Value::seqview(VecId::runtime(self.runtime.code.vectors.push(items)))
             }
-            Value::Map(id) if id.region() == LOCAL => {
+            ValueRef::Map(id) if id.region() == LOCAL => {
                 // Recursively promote the trie depth-first. Children are
                 // promoted before their parent so the parent's `children`
                 // array can be wired to the freshly-allocated RUNTIME
                 // sub-node handles.
-                Value::Map(self.promote_map_node(id, fwd))
+                Value::map(self.promote_map_node(id, fwd))
             }
-            Value::Fn(id) if id.region() == LOCAL => Value::Fn(self.promote_closure(id, fwd)),
-            Value::Macro(id) if id.region() == LOCAL => Value::Macro(self.promote_closure(id, fwd)),
+            ValueRef::Fn(id) if id.region() == LOCAL => Value::func(self.promote_closure(id, fwd)),
+            ValueRef::Macro(id) if id.region() == LOCAL => {
+                Value::macro_(self.promote_closure(id, fwd))
+            }
             // Atoms, and values already in PRELUDE/RUNTIME, need no copy.
             _ => v,
         }
@@ -2794,10 +2795,10 @@ impl Heap {
         // on it — without this, `(form-pos …)` on a frozen body returns nil and a
         // position is lost across a cross-node send.
         let mut nodes: Vec<(PairId, Value)> = Vec::new();
-        let mut cur = Value::Pair(first);
+        let mut cur = Value::pair(first);
         let tail = loop {
-            match cur {
-                Value::Pair(id) if id.region() == LOCAL => {
+            match cur.unpack() {
+                ValueRef::Pair(id) if id.region() == LOCAL => {
                     let (head, next) = self.pair(id);
                     let promoted_head = self.promote_in(head, fwd);
                     nodes.push((id, promoted_head));
@@ -2812,7 +2813,7 @@ impl Heap {
             if let Some(pos) = self.form_pos.get(&form_pos_key(src)).copied() {
                 self.runtime.set_position(idx, pos);
             }
-            acc = Value::Pair(PairId::runtime(idx));
+            acc = Value::pair(PairId::runtime(idx));
         }
         acc
     }
@@ -3204,9 +3205,9 @@ impl Heap {
         let mut out = Vec::new();
         let mut cur = v;
         loop {
-            match cur {
-                Value::Nil => return Ok(out),
-                Value::Pair(p) => {
+            match cur.unpack() {
+                ValueRef::Nil => return Ok(out),
+                ValueRef::Pair(p) => {
                     let (head, tail) = self.pair(p);
                     out.push(head);
                     cur = tail;
@@ -3218,11 +3219,11 @@ impl Heap {
 
     /// Treat a list or vector as a sequence of items.
     pub fn seq_items(&self, v: Value) -> Result<Vec<Value>, LispError> {
-        match v {
-            Value::Nil => Ok(Vec::new()),
-            Value::Pair(_) => self.list_to_vec(v),
-            Value::Vector(id) => Ok(self.vector(id).to_vec()),
-            Value::Range(id) => Ok(self.range_to_vec(id)),
+        match v.unpack() {
+            ValueRef::Nil => Ok(Vec::new()),
+            ValueRef::Pair(_) => self.list_to_vec(v),
+            ValueRef::Vector(id) => Ok(self.vector(id).to_vec()),
+            ValueRef::Range(id) => Ok(self.range_to_vec(id)),
             _ => Err(LispError::type_err("expected a list or vector")),
         }
     }
@@ -3257,17 +3258,17 @@ impl Heap {
         use std::hash::{Hash, Hasher};
         // A leading byte tags the variant so a `Sym(0)` and an `Int(0)` never
         // collide on the *exact* same hash by accident.
-        match v {
-            Value::Nil => 0u8.hash(h),
-            Value::Bool(b) => {
+        match v.unpack() {
+            ValueRef::Nil => 0u8.hash(h),
+            ValueRef::Bool(b) => {
                 1u8.hash(h);
                 b.hash(h);
             }
-            Value::Int(i) => {
+            ValueRef::Int(i) => {
                 2u8.hash(h);
                 i.hash(h);
             }
-            Value::BigInt(id) => {
+            ValueRef::BigInt(id) => {
                 // A distinct tag byte (17) from Int's (2) so a BigInt never
                 // collides with an Int — they're numerically disjoint by the
                 // normalize invariant, so equal values still hash equal. Hash
@@ -3283,13 +3284,13 @@ impl Heap {
                 sign_byte.hash(h);
                 bytes.hash(h);
             }
-            Value::Bitset(id) => {
+            ValueRef::Bitset(id) => {
                 // Distinct tag byte (19; 17=BigInt, 18=transient) + the raw bytes, so two
                 // equal bitsets hash the same and never collide with a string.
                 19u8.hash(h);
                 self.bitset(id).as_bytes().hash(h);
             }
-            Value::Float(f) => {
+            ValueRef::Float(f) => {
                 3u8.hash(h);
                 if f.is_nan() {
                     u64::MAX.hash(h);
@@ -3300,27 +3301,27 @@ impl Heap {
                     f.to_bits().hash(h);
                 }
             }
-            Value::Sym(s) => {
+            ValueRef::Sym(s) => {
                 4u8.hash(h);
                 s.hash(h);
             }
-            Value::Keyword(s) => {
+            ValueRef::Keyword(s) => {
                 5u8.hash(h);
                 s.hash(h);
             }
-            Value::Str(id) => {
+            ValueRef::Str(id) => {
                 6u8.hash(h);
                 self.string(id).hash(h);
             }
-            Value::Pair(id) => {
+            ValueRef::Pair(id) => {
                 7u8.hash(h);
                 // Walk the cdr spine iteratively (matches `equal`'s loop).
                 let mut cur = id;
                 loop {
                     let (car, cdr) = self.pair(cur);
                     self.hash_value_into(car, h);
-                    match cdr {
-                        Value::Pair(next) => cur = next,
+                    match cdr.unpack() {
+                        ValueRef::Pair(next) => cur = next,
                         other => {
                             // Marker so a 1-pair `(a . b)` doesn't hash the
                             // same as a 2-pair `(a b)` (whose cdr ends Nil).
@@ -3335,16 +3336,16 @@ impl Heap {
             // (it must — `(= (range 5) (list 0 1 2 3 4))`, so they share a hash):
             // the same `7u8` list tag, each `Int` element hashed via the same
             // path, then the `0xFF` + `Nil` end-marker a proper list emits.
-            Value::Range(id) => {
+            ValueRef::Range(id) => {
                 7u8.hash(h);
                 let (lo, hi, step) = self.range_parts(id);
                 let mut i = lo;
                 while if step > 0 { i < hi } else { i > hi } {
-                    self.hash_value_into(Value::Int(i), h);
+                    self.hash_value_into(Value::int(i), h);
                     i += step;
                 }
                 0xFFu8.hash(h);
-                self.hash_value_into(Value::Nil, h);
+                self.hash_value_into(Value::nil(), h);
             }
             // A lazy seq-view cannot be realised here (no evaluator to run its
             // transducer), so it hashes to a single sentinel bucket — consistent
@@ -3352,10 +3353,10 @@ impl Heap {
             // when the same handle, and same handle ⇒ same hash). The prelude
             // realises a view before it can reach a hash-keyed map in normal use;
             // this is the safe, never-panic fallback for an escaped raw view.
-            Value::SeqView(_) => {
+            ValueRef::SeqView(_) => {
                 0x5E_u8.hash(h);
             }
-            Value::Vector(id) => {
+            ValueRef::Vector(id) => {
                 8u8.hash(h);
                 let xs = self.vector(id);
                 (xs.len() as u64).hash(h);
@@ -3363,7 +3364,7 @@ impl Heap {
                     self.hash_value_into(x, h);
                 }
             }
-            Value::Map(id) => {
+            ValueRef::Map(id) => {
                 9u8.hash(h);
                 // Order-insensitive: XOR each entry's hash into an
                 // accumulator (XOR is commutative — works regardless of
@@ -3380,28 +3381,28 @@ impl Heap {
                 (size as u64).hash(h);
                 acc.hash(h);
             }
-            Value::Fn(id) => {
+            ValueRef::Fn(id) => {
                 10u8.hash(h);
                 id.0.hash(h);
             }
-            Value::Macro(id) => {
+            ValueRef::Macro(id) => {
                 11u8.hash(h);
                 id.0.hash(h);
             }
-            Value::Native(id) => {
+            ValueRef::Native(id) => {
                 12u8.hash(h);
                 id.0.hash(h);
             }
-            Value::Ref(id) => {
+            ValueRef::Ref(id) => {
                 13u8.hash(h);
                 id.hash(h);
             }
-            Value::Pid { node, id } => {
+            ValueRef::Pid { node, id } => {
                 14u8.hash(h);
                 node.hash(h);
                 id.hash(h);
             }
-            Value::Rope(id) => {
+            ValueRef::Rope(id) => {
                 15u8.hash(h);
                 // Hash by text content so two ropes with equal text hash equal,
                 // consistent with `equal` below. Materialise the whole string:
@@ -3411,15 +3412,15 @@ impl Heap {
                 // Only paid when a rope is actually used as a map key (rare).
                 self.rope(id).to_string().hash(h);
             }
-            Value::Socket(id) => {
+            ValueRef::Socket(id) => {
                 16u8.hash(h);
                 id.hash(h);
             }
-            Value::Subprocess(id) => {
+            ValueRef::Subprocess(id) => {
                 19u8.hash(h);
                 id.hash(h);
             }
-            Value::Table(id) => {
+            ValueRef::Table(id) => {
                 // Identity-hashed (tag 20; a table is shared mutable state addressed
                 // by its registry handle, like a socket — compared by identity).
                 20u8.hash(h);
@@ -3440,11 +3441,11 @@ impl Heap {
         let mut i = lo;
         loop {
             let in_range = if step > 0 { i < hi } else { i > hi };
-            match (in_range, lst) {
-                (false, Value::Nil) => return true,
-                (true, Value::Pair(p)) => {
+            match (in_range, lst.unpack()) {
+                (false, ValueRef::Nil) => return true,
+                (true, ValueRef::Pair(p)) => {
                     let (car, cdr) = self.pair(p);
-                    if !self.equal(Value::Int(i), car) {
+                    if !self.equal(Value::int(i), car) {
                         return false;
                     }
                     i += step;
@@ -3467,8 +3468,8 @@ impl Heap {
     }
 
     pub fn equal(&self, a: Value, b: Value) -> bool {
-        use Value::*;
-        match (a, b) {
+        use Value::*; // Stage 1: -> use ValueRef::*; (matched via .unpack())
+        match (a.unpack(), b.unpack()) {
             (Nil, Nil) => true,
             // A range equals the list it stands in for (and another range),
             // compared element-wise without materialising either.
@@ -3503,7 +3504,7 @@ impl Heap {
                     if !self.equal(a0, b0) {
                         break false;
                     }
-                    match (a1, b1) {
+                    match (a1.unpack(), b1.unpack()) {
                         (Pair(nx), Pair(ny)) => {
                             x = nx;
                             y = ny;
@@ -3643,8 +3644,8 @@ impl Heap {
     /// them by content isn't well-defined here).
     pub fn value_cmp(&self, a: Value, b: Value) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        use Value::*;
-        match (a, b) {
+        use Value::*; // Stage 1: -> use ValueRef::*; (matched via .unpack())
+        match (a.unpack(), b.unpack()) {
             (Nil, Nil) => Ordering::Equal,
             (Bool(x), Bool(y)) => x.cmp(&y),
             (Int(x), Int(y)) => x.cmp(&y),
@@ -3687,7 +3688,7 @@ impl Heap {
                         Ordering::Equal => {}
                         o => return o,
                     }
-                    match (a1, b1) {
+                    match (a1.unpack(), b1.unpack()) {
                         (Pair(nx), Pair(ny)) => {
                             x = nx;
                             y = ny;
@@ -3830,7 +3831,7 @@ impl Heap {
         let (_, vars) = self.env_frame_ref(env);
         vars.iter()
             .rev()
-            .find(|(_, v)| matches!(v, Value::Fn(fid) if *fid == id))
+            .find(|(_, v)| matches!(v.unpack(), ValueRef::Fn(fid) if fid == id))
             .map(|(s, _)| *s)
     }
 
@@ -3892,7 +3893,7 @@ impl Heap {
                 }
             }
         }
-        self.env_get(env, name).unwrap_or(Value::Nil)
+        self.env_get(env, name).unwrap_or(Value::nil())
     }
 
     /// The distinct lexical names bound along `env`'s frame chain, innermost-first,
@@ -4014,9 +4015,11 @@ impl Heap {
             // structurally and falls through to the normal promote+rebind.
             let existing = self.runtime.globals_read().get(&sym).copied();
             if let Some(old) = existing {
-                let unchanged = match (old, val) {
-                    (Value::Fn(o), Value::Fn(n)) => self.closures_structurally_equal(o, n),
-                    (Value::Macro(o), Value::Macro(n)) => self.closures_structurally_equal(o, n),
+                let unchanged = match (old.unpack(), val.unpack()) {
+                    (ValueRef::Fn(o), ValueRef::Fn(n)) => self.closures_structurally_equal(o, n),
+                    (ValueRef::Macro(o), ValueRef::Macro(n)) => {
+                        self.closures_structurally_equal(o, n)
+                    }
                     _ => false,
                 };
                 if unchanged {
@@ -4127,7 +4130,7 @@ impl Heap {
     /// (hot) call path. `len` must be ≥ the current length (frames only grow here).
     pub fn extend_roots_to_nil(&mut self, len: usize) {
         debug_assert!(len >= self.roots.len());
-        self.roots.resize(len, Value::Nil);
+        self.roots.resize(len, Value::nil());
     }
 
     /// Pop the most recently pushed root (the matching unwind of `push_root`).
@@ -4335,8 +4338,8 @@ impl Heap {
         work.extend(self.runtime.globals_read().values().copied());
         work.extend(self.roots.iter().copied());
         while let Some(v) = work.pop() {
-            match v {
-                Value::Fn(id) | Value::Macro(id) if id.region() == RUNTIME => {
+            match v.unpack() {
+                ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => {
                     if visited.insert(id.index()) {
                         let cl = self.closure(id);
                         for arm in &cl.arms {
@@ -4356,15 +4359,15 @@ impl Heap {
                         }
                     }
                 }
-                Value::Pair(id) if id.region() == RUNTIME => {
+                ValueRef::Pair(id) if id.region() == RUNTIME => {
                     let (h, t) = self.pair(id);
                     work.push(h);
                     work.push(t);
                 }
-                Value::Vector(id) if id.region() == RUNTIME => {
+                ValueRef::Vector(id) if id.region() == RUNTIME => {
                     work.extend(self.vector(id).iter().copied());
                 }
-                Value::Map(id) if id.region() == RUNTIME => {
+                ValueRef::Map(id) if id.region() == RUNTIME => {
                     // `fold_entries` walks the trie in place — no intermediate Vec
                     // (unlike `map_entries`), which matters on this diagnostics walk.
                     self.fold_entries(id, &mut |k, val| {
@@ -5268,8 +5271,8 @@ impl Heap {
         // Routed slab views: young vs old by the handle's age bit.
         while let Some(w) = work.pop() {
             match w {
-                W::V(v, parent) => match v {
-                    Value::Pair(id) if id.region() == LOCAL => {
+                W::V(v, parent) => match v.unpack() {
+                    ValueRef::Pair(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "pair",
@@ -5291,7 +5294,7 @@ impl Heap {
                             work.push(W::V(b, id.0));
                         }
                     }
-                    Value::Vector(id) if id.region() == LOCAL => {
+                    ValueRef::Vector(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "vector",
@@ -5315,7 +5318,7 @@ impl Heap {
                     }
                     // A range's backing vector holds only ints — validate the
                     // handle itself (bounds + epoch), nothing to descend into.
-                    Value::Range(id) if id.region() == LOCAL => {
+                    ValueRef::Range(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "range",
@@ -5331,7 +5334,7 @@ impl Heap {
                     // validate the handle then descend into them — same as a
                     // vector (it shares the vectors slab, so it dedups via
                     // `seen_vec`).
-                    Value::SeqView(id) if id.region() == LOCAL => {
+                    ValueRef::SeqView(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "seq-view",
@@ -5353,7 +5356,7 @@ impl Heap {
                             }
                         }
                     }
-                    Value::Map(id) if id.region() == LOCAL => {
+                    ValueRef::Map(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "map",
@@ -5376,11 +5379,11 @@ impl Heap {
                                 work.push(W::V(mv, id.0));
                             }
                             for &c in &node.children {
-                                work.push(W::V(Value::Map(c), id.0));
+                                work.push(W::V(Value::map(c), id.0));
                             }
                         }
                     }
-                    Value::Str(id) if id.region() == LOCAL => {
+                    ValueRef::Str(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "string",
@@ -5392,7 +5395,7 @@ impl Heap {
                             id.0,
                         );
                     }
-                    Value::BigInt(id) if id.region() == LOCAL => {
+                    ValueRef::BigInt(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "bigint",
@@ -5404,7 +5407,7 @@ impl Heap {
                             id.0,
                         );
                     }
-                    Value::Bitset(id) if id.region() == LOCAL => {
+                    ValueRef::Bitset(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "bitset",
@@ -5416,7 +5419,7 @@ impl Heap {
                             id.0,
                         );
                     }
-                    Value::Rope(id) if id.region() == LOCAL => {
+                    ValueRef::Rope(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "rope",
@@ -5428,7 +5431,7 @@ impl Heap {
                             id.0,
                         );
                     }
-                    Value::Fn(id) | Value::Macro(id) if id.region() == LOCAL => {
+                    ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "closure",
@@ -5657,44 +5660,44 @@ macro_rules! flush_bound {
 }
 
 fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
-    match v {
-        Value::Pair(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Pair(flush_pair(old, new, fwd, id))
+    match v.unpack() {
+        ValueRef::Pair(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::pair(flush_pair(old, new, fwd, id))
         }
-        Value::Vector(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Vector(flush_vector(old, new, fwd, id))
+        ValueRef::Vector(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::vector(flush_vector(old, new, fwd, id))
         }
         // A range is backed by a `[lo hi step]` vector — forward it exactly like
         // a vector, keeping the `Range` wrapper.
-        Value::Range(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Range(flush_vector(old, new, fwd, id))
+        ValueRef::Range(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::range(flush_vector(old, new, fwd, id))
         }
         // A seq-view is backed by a `[source xform]` vector — `flush_vector`
         // recurses into the elements (forwarding the source + transducer), so
         // forward it like a vector and keep the `SeqView` wrapper.
-        Value::SeqView(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::SeqView(flush_vector(old, new, fwd, id))
+        ValueRef::SeqView(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::seqview(flush_vector(old, new, fwd, id))
         }
-        Value::Map(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Map(flush_map(old, new, fwd, id))
+        ValueRef::Map(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::map(flush_map(old, new, fwd, id))
         }
-        Value::Str(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Str(flush_string(old, new, fwd, id))
+        ValueRef::Str(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::str_(flush_string(old, new, fwd, id))
         }
-        Value::BigInt(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::BigInt(flush_bigint(old, new, fwd, id))
+        ValueRef::BigInt(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::bigint(flush_bigint(old, new, fwd, id))
         }
-        Value::Bitset(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Bitset(flush_bitset(old, new, fwd, id))
+        ValueRef::Bitset(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::bitset(flush_bitset(old, new, fwd, id))
         }
-        Value::Rope(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Rope(flush_rope(old, new, fwd, id))
+        ValueRef::Rope(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::rope(flush_rope(old, new, fwd, id))
         }
-        Value::Fn(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Fn(flush_closure(old, new, fwd, id))
+        ValueRef::Fn(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::func(flush_closure(old, new, fwd, id))
         }
-        Value::Macro(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::Macro(flush_closure(old, new, fwd, id))
+        ValueRef::Macro(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::macro_(flush_closure(old, new, fwd, id))
         }
         // Atoms, shared (PRELUDE/RUNTIME), and LOCAL handles of the *other*
         // generation are left unchanged (no copy this pass).
@@ -5716,17 +5719,17 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
     // and flush the spine's terminal (a non-pair tail, or the handle a shared/
     // already-copied cell joins).
     let mut spine: Vec<(usize, Value)> = Vec::new(); // (new slot, original car)
-    let mut cur = Value::Pair(id);
+    let mut cur = Value::pair(id);
     let tail = loop {
-        match cur {
-            Value::Pair(p) if fwd.copies(p.region(), p.is_old()) => {
+        match cur.unpack() {
+            ValueRef::Pair(p) if fwd.copies(p.region(), p.is_old()) => {
                 let key = p.index() as u32;
                 if let Some(&n) = fwd.pairs.get(&key) {
-                    break Value::Pair(fwd.mint_pair(n as usize));
+                    break Value::pair(fwd.mint_pair(n as usize));
                 }
                 let (car, cdr) = old.pairs[flush_bound!(old.pairs, p, fwd, "pair")];
                 let new_idx = new.pairs.len();
-                new.pairs.push((Value::Nil, Value::Nil));
+                new.pairs.push((Value::nil(), Value::nil()));
                 fwd.pairs.insert(key, new_idx as u32);
                 spine.push((new_idx, car));
                 cur = cdr;
@@ -5743,10 +5746,10 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
     for &(new_idx, car) in spine.iter().rev() {
         let new_car = flush_value(old, new, fwd, car);
         new.pairs[new_idx] = (new_car, next);
-        next = Value::Pair(fwd.mint_pair(new_idx));
+        next = Value::pair(fwd.mint_pair(new_idx));
     }
-    match next {
-        Value::Pair(pid) => pid,
+    match next.unpack() {
+        ValueRef::Pair(pid) => pid,
         _ => unreachable!("the spine always has at least the head pair"),
     }
 }
@@ -5986,33 +5989,41 @@ struct RuntimeForward {
 /// handles rewritten to their new indices. Non-RUNTIME values (atoms, LOCAL,
 /// PRELUDE) are returned unchanged — only the runtime region moves.
 fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v: Value) -> Value {
-    match v {
-        Value::Pair(id) if id.region() == RUNTIME => Value::Pair(flush_rt_pair(old, new, fwd, id)),
-        Value::Vector(id) if id.region() == RUNTIME => {
-            Value::Vector(flush_rt_vector(old, new, fwd, id))
+    match v.unpack() {
+        ValueRef::Pair(id) if id.region() == RUNTIME => {
+            Value::pair(flush_rt_pair(old, new, fwd, id))
+        }
+        ValueRef::Vector(id) if id.region() == RUNTIME => {
+            Value::vector(flush_rt_vector(old, new, fwd, id))
         }
         // A range's backing `[lo hi step]` vector moves like any other vector;
         // keep the `Range` wrapper on the forwarded handle.
-        Value::Range(id) if id.region() == RUNTIME => {
-            Value::Range(flush_rt_vector(old, new, fwd, id))
+        ValueRef::Range(id) if id.region() == RUNTIME => {
+            Value::range(flush_rt_vector(old, new, fwd, id))
         }
         // Like a range, a seq-view's backing vector moves under a runtime
         // compaction; `flush_rt_vector` forwards its elements. Keep the wrapper.
-        Value::SeqView(id) if id.region() == RUNTIME => {
-            Value::SeqView(flush_rt_vector(old, new, fwd, id))
+        ValueRef::SeqView(id) if id.region() == RUNTIME => {
+            Value::seqview(flush_rt_vector(old, new, fwd, id))
         }
-        Value::Map(id) if id.region() == RUNTIME => Value::Map(flush_rt_map(old, new, fwd, id)),
-        Value::Str(id) if id.region() == RUNTIME => Value::Str(flush_rt_string(old, new, fwd, id)),
-        Value::BigInt(id) if id.region() == RUNTIME => {
-            Value::BigInt(flush_rt_bigint(old, new, fwd, id))
+        ValueRef::Map(id) if id.region() == RUNTIME => Value::map(flush_rt_map(old, new, fwd, id)),
+        ValueRef::Str(id) if id.region() == RUNTIME => {
+            Value::str_(flush_rt_string(old, new, fwd, id))
         }
-        Value::Bitset(id) if id.region() == RUNTIME => {
-            Value::Bitset(flush_rt_bitset(old, new, fwd, id))
+        ValueRef::BigInt(id) if id.region() == RUNTIME => {
+            Value::bigint(flush_rt_bigint(old, new, fwd, id))
         }
-        Value::Rope(id) if id.region() == RUNTIME => Value::Rope(flush_rt_rope(old, new, fwd, id)),
-        Value::Fn(id) if id.region() == RUNTIME => Value::Fn(flush_rt_closure(old, new, fwd, id)),
-        Value::Macro(id) if id.region() == RUNTIME => {
-            Value::Macro(flush_rt_closure(old, new, fwd, id))
+        ValueRef::Bitset(id) if id.region() == RUNTIME => {
+            Value::bitset(flush_rt_bitset(old, new, fwd, id))
+        }
+        ValueRef::Rope(id) if id.region() == RUNTIME => {
+            Value::rope(flush_rt_rope(old, new, fwd, id))
+        }
+        ValueRef::Fn(id) if id.region() == RUNTIME => {
+            Value::func(flush_rt_closure(old, new, fwd, id))
+        }
+        ValueRef::Macro(id) if id.region() == RUNTIME => {
+            Value::macro_(flush_rt_closure(old, new, fwd, id))
         }
         _ => v,
     }
@@ -6042,12 +6053,12 @@ fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id:
     let tail = loop {
         let (h, t) = *old.pairs.get(cur_id.index()).expect("rt pair");
         spine.push((cur_id.index() as u32, h));
-        match t {
+        match t.unpack() {
             // Another not-yet-copied RUNTIME pair: continue the spine. A
             // shared/already-copied cell resolves via the `fwd` check below
             // (handled by `flush_rt_value` on the terminal), so we only extend
             // the spine for fresh cells.
-            Value::Pair(p)
+            ValueRef::Pair(p)
                 if p.region() == RUNTIME && !fwd.pairs.contains_key(&(p.index() as u32)) =>
             {
                 cur_id = p;
@@ -6065,10 +6076,10 @@ fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id:
         let new_car = flush_rt_value(old, new, fwd, car);
         let new_idx = new.pairs.push((new_car, next));
         fwd.pairs.insert(key, new_idx as u32);
-        next = Value::Pair(PairId::runtime(new_idx));
+        next = Value::pair(PairId::runtime(new_idx));
     }
-    match next {
-        Value::Pair(pid) => pid,
+    match next.unpack() {
+        ValueRef::Pair(pid) => pid,
         _ => unreachable!("the spine always has at least the head pair"),
     }
 }
@@ -6280,19 +6291,19 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
         s.envs.count(),
     );
     let ok = |v: Value| -> bool {
-        match v {
-            Value::Pair(id) if id.region() == RUNTIME => id.index() < np,
-            Value::Vector(id) | Value::Range(id) | Value::SeqView(id)
+        match v.unpack() {
+            ValueRef::Pair(id) if id.region() == RUNTIME => id.index() < np,
+            ValueRef::Vector(id) | ValueRef::Range(id) | ValueRef::SeqView(id)
                 if id.region() == RUNTIME =>
             {
                 id.index() < nv
             }
-            Value::Map(id) if id.region() == RUNTIME => id.index() < nm,
-            Value::Str(id) if id.region() == RUNTIME => id.index() < ns,
-            Value::BigInt(id) if id.region() == RUNTIME => id.index() < nb,
-            Value::Bitset(id) if id.region() == RUNTIME => id.index() < nbs,
-            Value::Rope(id) if id.region() == RUNTIME => id.index() < nr,
-            Value::Fn(id) | Value::Macro(id) if id.region() == RUNTIME => id.index() < nc,
+            ValueRef::Map(id) if id.region() == RUNTIME => id.index() < nm,
+            ValueRef::Str(id) if id.region() == RUNTIME => id.index() < ns,
+            ValueRef::BigInt(id) if id.region() == RUNTIME => id.index() < nb,
+            ValueRef::Bitset(id) if id.region() == RUNTIME => id.index() < nbs,
+            ValueRef::Rope(id) if id.region() == RUNTIME => id.index() < nr,
+            ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => id.index() < nc,
             _ => true,
         }
     };
@@ -6418,8 +6429,8 @@ mod gen_handle_tests {
     #[should_panic(expected = "use-after-GC")]
     fn stale_handle_after_flip_panics() {
         let mut h = Heap::new();
-        let id = match h.alloc_pair(Value::Int(1), Value::Int(2)) {
-            Value::Pair(id) => id,
+        let id = match h.alloc_pair(Value::int(1), Value::int(2)).unpack() {
+            ValueRef::Pair(id) => id,
             _ => unreachable!(),
         };
         // Flush with no roots: the pair isn't relocated, and the epoch bumps.
@@ -6433,13 +6444,13 @@ mod gen_handle_tests {
     #[test]
     fn flushed_root_handle_stays_valid() {
         let mut h = Heap::new();
-        let mut roots = [h.alloc_pair(Value::Int(1), Value::Int(2))];
+        let mut roots = [h.alloc_pair(Value::int(1), Value::int(2))];
         h.flush(&mut roots);
-        let (car, _) = match roots[0] {
-            Value::Pair(id) => h.pair(id),
+        let (car, _) = match roots[0].unpack() {
+            ValueRef::Pair(id) => h.pair(id),
             _ => unreachable!(),
         };
-        assert!(matches!(car, Value::Int(1)));
+        assert!(matches!(car.unpack(), ValueRef::Int(1)));
     }
 
     /// Regression (`docs/kernel-audit-2026-06-03.md` #1): a **major collection
@@ -6477,7 +6488,7 @@ mod gen_handle_tests {
         );
         // Mid-bind define: store a *young* value into the tenured frame, recording
         // an old->young edge in `remembered`.
-        let young = h.alloc_pair(Value::Int(1), Value::Int(2));
+        let young = h.alloc_pair(Value::int(1), Value::int(2));
         h.env_define(keep, x, young);
         assert_eq!(
             h.remembered.len(),
@@ -6527,7 +6538,7 @@ mod gen_handle_tests {
             .find(|(s, _)| *s == x)
             .map(|(_, v)| *v);
         assert!(
-            matches!(bound, Some(Value::Pair(_))),
+            matches!(bound.map(Value::unpack), Some(ValueRef::Pair(_))),
             "the remembered young binding was lost or corrupted: {bound:?}"
         );
     }
@@ -6546,7 +6557,7 @@ mod gen_handle_tests {
         assert!(frame.is_old(), "frame should be tenured into the old gen");
         for i in 0..64 {
             let sym = crate::core::value::intern(&format!("x{i}"));
-            let young = h.alloc_pair(Value::Int(i), Value::Int(i));
+            let young = h.alloc_pair(Value::int(i), Value::int(i));
             h.env_define(frame, sym, young);
         }
         assert_eq!(
