@@ -2503,7 +2503,7 @@ fn primitive_doc(name: &str) -> (&'static [&'static str], &'static str) {
 }
 
 fn arg(args: &[Value], i: usize) -> Value {
-    args.get(i).copied().unwrap_or(Value::Nil)
+    args.get(i).copied().unwrap_or(Value::nil())
 }
 
 /// Destructure exactly two args. The declared `Arity` is the *primary* arity
@@ -2624,7 +2624,7 @@ fn num_bin(
     let (a, b) = two(args, who)?;
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => match int_op(x, y) {
-            Some(r) => Ok(Value::Int(r)),
+            Some(r) => Ok(Value::int(r)),
             // Overflowed i64 — redo in BigInt and demote (route through the
             // normalizer for one code path; here the result is out of range).
             None => {
@@ -2691,7 +2691,7 @@ fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         // `checked_*` guards the one overflowing case (`i64::MIN / -1`), which
         // then falls through to the float path instead of panicking.
         (Value::Int(x), Value::Int(y)) => match (x.checked_rem(y), x.checked_div(y)) {
-            (Some(0), Some(q)) => Ok(Value::Int(q)),
+            (Some(0), Some(q)) => Ok(Value::int(q)),
             _ => Ok(Value::Float(x as f64 / y as f64)),
         },
         // Both integers, at least one a BigInt: exact quotient when it divides
@@ -2723,7 +2723,7 @@ fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         _ if is_integer(a) && is_integer(b) => heap.value_cmp(a, b) == std::cmp::Ordering::Less,
         _ => num_to_f64(heap, "%lt", a)? < num_to_f64(heap, "%lt", b)?,
     };
-    Ok(Value::Bool(lt))
+    Ok(Value::boolean(lt))
 }
 
 /// `(%le a b)` — `a <= b`. The `<=`/`>=` kernel: a direct primitive so the 2-arg
@@ -2737,7 +2737,7 @@ fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         _ if is_integer(a) && is_integer(b) => heap.value_cmp(a, b) != std::cmp::Ordering::Greater,
         _ => num_to_f64(heap, "%le", a)? <= num_to_f64(heap, "%le", b)?,
     };
-    Ok(Value::Bool(le))
+    Ok(Value::boolean(le))
 }
 
 fn prim_eq(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
@@ -2746,7 +2746,7 @@ fn prim_eq(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // only one the inlined `Eq` ever defers here for non-ints). Scalar equality
     // pays nothing.
     if !matches!(a, Value::SeqView(_)) && !matches!(b, Value::SeqView(_)) {
-        return Ok(Value::Bool(heap.equal(a, b)));
+        return Ok(Value::boolean(heap.equal(a, b)));
     }
     // A view compares structurally as the list it stands in for — realise it (the
     // kernel `equal` can't run a transducer). Root both operands across each
@@ -2768,7 +2768,7 @@ fn prim_eq(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             b
         };
         let a = heap.read_root(a_r);
-        Ok(Value::Bool(heap.equal(a, b)))
+        Ok(Value::boolean(heap.equal(a, b)))
     })
 }
 
@@ -2793,11 +2793,11 @@ fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // so handle it directly rather than promoting.
     if let (Value::Int(x), Value::Int(y)) = (a, b) {
         return match x.checked_rem(y) {
-            Some(r) => Ok(Value::Int(r)),
+            Some(r) => Ok(Value::int(r)),
             None if y == 0 => Err(LispError::runtime("rem: division by zero")
                 .with_code(crate::error::error_codes::DIV_BY_ZERO)
                 .with_hint("guard the denominator: (when (not= y 0) (rem x y))")),
-            None => Ok(Value::Int(0)), // i64::MIN % -1
+            None => Ok(Value::int(0)), // i64::MIN % -1
         };
     }
     let (x, y) = bigint_pair(heap, args, "rem")?;
@@ -2819,7 +2819,7 @@ fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "%quot")?;
     if let (Value::Int(x), Value::Int(y)) = (a, b) {
         match x.checked_div(y) {
-            Some(q) => return Ok(Value::Int(q)),
+            Some(q) => return Ok(Value::int(q)),
             None if y == 0 => {
                 return Err(LispError::runtime("quot: division by zero")
                     .with_code(crate::error::error_codes::DIV_BY_ZERO)
@@ -2847,7 +2847,7 @@ fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `pow`/`sqrt` are all Brood over this + `rem`/`/`/`*`/`<` (std/prelude.blsp).
 fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Int(n) => Ok(Value::Int(n)),
+        Value::Int(n) => Ok(Value::int(n)),
         // A bignum is already an integer — it is its own floor.
         v @ Value::BigInt(_) => Ok(v),
         v => {
@@ -2868,7 +2868,7 @@ fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                         .with_code(crate::error::error_codes::INT_OVERFLOW),
                 );
             }
-            Ok(Value::Int(f as i64))
+            Ok(Value::int(f as i64))
         }
     }
 }
@@ -2877,7 +2877,7 @@ fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn bit_and(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let (Value::Int(a), Value::Int(b)) = (arg(args, 0), arg(args, 1)) {
-        return Ok(Value::Int(a & b));
+        return Ok(Value::int(a & b));
     }
     // num-bigint implements bitwise ops on its (infinite) two's-complement
     // model, so this matches the i64 result on small values and extends it.
@@ -2887,7 +2887,7 @@ fn bit_and(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn bit_or(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let (Value::Int(a), Value::Int(b)) = (arg(args, 0), arg(args, 1)) {
-        return Ok(Value::Int(a | b));
+        return Ok(Value::int(a | b));
     }
     let (a, b) = bigint_pair(heap, args, "bit-or")?;
     Ok(heap.int_from_bigint(a | b))
@@ -2895,7 +2895,7 @@ fn bit_or(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn bit_xor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let (Value::Int(a), Value::Int(b)) = (arg(args, 0), arg(args, 1)) {
-        return Ok(Value::Int(a ^ b));
+        return Ok(Value::int(a ^ b));
     }
     let (a, b) = bigint_pair(heap, args, "bit-xor")?;
     Ok(heap.int_from_bigint(a ^ b))
@@ -2903,7 +2903,7 @@ fn bit_xor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn bit_not(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Int(n) => Ok(Value::Int(!n)),
+        Value::Int(n) => Ok(Value::int(!n)),
         Value::BigInt(id) => {
             let n = !heap.bigint(id).clone();
             Ok(heap.int_from_bigint(n))
@@ -2914,13 +2914,13 @@ fn bit_not(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn bit_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Int(n) => Ok(Value::Int(i64::from(n.count_ones()))),
+        Value::Int(n) => Ok(Value::int(i64::from(n.count_ones()))),
         // Popcount of the MAGNITUDE (abs value) — the bitboard only uses
         // non-negative values, so we count the set bits of |n| (`BigUint`'s
         // `count_ones`), sign-independent.
         Value::BigInt(id) => {
             let bits = heap.bigint(id).magnitude().count_ones();
-            Ok(Value::Int(bits as i64))
+            Ok(Value::int(bits as i64))
         }
         v => Err(LispError::wrong_type(heap, "bit-count", "int", v)),
     }
@@ -2936,14 +2936,14 @@ fn bit_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Int(n) => {
             let mut bits = n as u64; // the two's-complement bit pattern (bitboard words are non-negative)
             while bits != 0 {
-                out.push(Value::Int(i64::from(bits.trailing_zeros())));
+                out.push(Value::int(i64::from(bits.trailing_zeros())));
                 bits &= bits - 1; // clear the lowest set bit
             }
         }
         Value::BigInt(id) => {
             let mut mag = heap.bigint(id).magnitude().clone();
             while let Some(i) = mag.trailing_zeros() {
-                out.push(Value::Int(i as i64));
+                out.push(Value::int(i as i64));
                 mag.set_bit(i, false);
             }
         }
@@ -3102,7 +3102,7 @@ fn bs_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn bs_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let srcd = bs_arc(heap, arg(args, 0), "bitset-count")?;
     let n: u32 = srcd.bytes().iter().map(|b| b.count_ones()).sum();
-    Ok(Value::Int(n as i64))
+    Ok(Value::int(n as i64))
 }
 
 fn bs_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -3112,7 +3112,7 @@ fn bs_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     for (bi, &byte) in src.iter().enumerate() {
         let mut b = byte;
         while b != 0 {
-            out.push(Value::Int((bi * 8 + b.trailing_zeros() as usize) as i64));
+            out.push(Value::int((bi * 8 + b.trailing_zeros() as usize) as i64));
             b &= b - 1;
         }
     }
@@ -3276,7 +3276,7 @@ fn bit_shift_left(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 // checked_shl only guards the *shift amount*, not value overflow;
                 // verify the shift is lossless before keeping the i64 result.
                 if (r >> amount) == x {
-                    return Ok(Value::Int(r));
+                    return Ok(Value::int(r));
                 }
             }
         }
@@ -3293,7 +3293,7 @@ fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let Value::Int(x) = a {
         // A right shift ≥ 64 collapses to the sign bit (0 or -1).
         let r = if amount >= 64 { x >> 63 } else { x >> amount };
-        return Ok(Value::Int(r));
+        return Ok(Value::int(r));
     }
     let x = expect_bigint(heap, "bit-shift-right", a)?;
     Ok(heap.int_from_bigint(x >> amount))
@@ -3335,17 +3335,17 @@ fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
         Value::Pair(p) => Ok(heap.car(p)),
-        Value::Vector(id) => Ok(heap.vector(id).first().copied().unwrap_or(Value::Nil)),
+        Value::Vector(id) => Ok(heap.vector(id).first().copied().unwrap_or(Value::nil())),
         // A range is non-empty by construction, so its head is `lo`.
-        Value::Range(id) => Ok(Value::Int(heap.range_parts(id).0)),
+        Value::Range(id) => Ok(Value::int(heap.range_parts(id).0)),
         // A lazy seq-view realises (running its transducer) then yields the head
         // of the resulting list. Rare — the prelude routes most consumers through
         // `seq`/`fold`; this serves a direct `(first (map f xs))`.
         Value::SeqView(_) => match realize_seqview(heap, env, v)? {
             Value::Pair(p) => Ok(heap.car(p)),
-            _ => Ok(Value::Nil),
+            _ => Ok(Value::nil()),
         },
-        Value::Nil => Ok(Value::Nil),
+        Value::Nil => Ok(Value::nil()),
         _ => Err(LispError::wrong_type(heap, "first", "list or vector", v)),
     }
 }
@@ -3367,9 +3367,9 @@ fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         // A lazy seq-view realises then yields the tail of the resulting list.
         Value::SeqView(_) => match realize_seqview(heap, env, v)? {
             Value::Pair(p) => Ok(heap.cdr(p)),
-            _ => Ok(Value::Nil),
+            _ => Ok(Value::nil()),
         },
-        Value::Nil => Ok(Value::Nil),
+        Value::Nil => Ok(Value::nil()),
         _ => Err(LispError::wrong_type(heap, "rest", "list or vector", v)),
     }
 }
@@ -3391,14 +3391,14 @@ fn range_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(range? x)` — true iff `x` is a lazy range handle. (Empty ranges are `Nil`,
 /// so this is false for them — the empty case takes the ordinary list path.)
 fn range_pred(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::Range(_))))
+    Ok(Value::boolean(matches!(arg(args, 0), Value::Range(_))))
 }
 
 /// `(%range-count rng)` — the element count of a range, O(1).
 fn range_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Range(id) => Ok(Value::Int(heap.range_len(id))),
-        Value::Nil => Ok(Value::Int(0)),
+        Value::Range(id) => Ok(Value::int(heap.range_len(id))),
+        Value::Nil => Ok(Value::int(0)),
         v => Err(LispError::wrong_type(heap, "%range-count", "range", v)),
     }
 }
@@ -3411,7 +3411,7 @@ fn range_to_list(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let items = heap.range_to_vec(id);
             Ok(heap.list(items))
         }
-        Value::Nil => Ok(Value::Nil),
+        Value::Nil => Ok(Value::nil()),
         v => Err(LispError::wrong_type(heap, "%range->list", "range", v)),
     }
 }
@@ -3441,7 +3441,7 @@ fn seqview_parts(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(seqview? x)` — is `x` a lazy seq-view (a `map`/`filter`/… result not yet
 /// realised)? The fold-family fast-path predicate, mirroring `range?`.
 fn seqview_pred(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
-    Ok(Value::Bool(matches!(arg(args, 0), Value::SeqView(_))))
+    Ok(Value::boolean(matches!(arg(args, 0), Value::SeqView(_))))
 }
 
 /// Realise a lazy seq-view to a concrete list. The realisation runs the view's
@@ -3492,17 +3492,17 @@ fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             let f = heap.read_root(f_r);
             let acc = heap.read_root(acc_r);
             let next = match prim {
-                Some(op) => match crate::eval::compile::prim_apply_step(op, acc, Value::Int(i))? {
+                Some(op) => match crate::eval::compile::prim_apply_step(op, acc, Value::int(i))? {
                     Some(v) => v,
                     None if use_vm => {
-                        crate::eval::compile::apply_value(heap, f, &[acc, Value::Int(i)], env)?
+                        crate::eval::compile::apply_value(heap, f, &[acc, Value::int(i)], env)?
                     }
-                    None => apply(heap, f, &[acc, Value::Int(i)], env)?,
+                    None => apply(heap, f, &[acc, Value::int(i)], env)?,
                 },
                 None if use_vm => {
-                    crate::eval::compile::apply_value(heap, f, &[acc, Value::Int(i)], env)?
+                    crate::eval::compile::apply_value(heap, f, &[acc, Value::int(i)], env)?
                 }
-                None => apply(heap, f, &[acc, Value::Int(i)], env)?,
+                None => apply(heap, f, &[acc, Value::int(i)], env)?,
             };
             acc_r = heap.advance_root(acc_r, next);
             i += step;
@@ -3590,7 +3590,7 @@ fn compare(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Ordering::Equal => 0,
         Ordering::Greater => 1,
     };
-    Ok(Value::Int(ord))
+    Ok(Value::int(ord))
 }
 
 // ---------- vector ----------
@@ -3619,7 +3619,7 @@ fn vector_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn vector_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
-        Value::Vector(id) => Ok(Value::Int(heap.vector(id).len() as i64)),
+        Value::Vector(id) => Ok(Value::int(heap.vector(id).len() as i64)),
         _ => Err(LispError::wrong_type(heap, "vector-length", "vector", v)),
     }
 }
@@ -3706,15 +3706,15 @@ fn pair_kv(heap: &Heap, who: &str, p: Value) -> Result<(Value, Value), LispError
         Value::Vector(id) => {
             let v = heap.vector(id);
             Ok((
-                v.first().copied().unwrap_or(Value::Nil),
-                v.get(1).copied().unwrap_or(Value::Nil),
+                v.first().copied().unwrap_or(Value::nil()),
+                v.get(1).copied().unwrap_or(Value::nil()),
             ))
         }
         Value::Pair(id) => {
             let (k, rest) = heap.pair(id);
             let val = match rest {
                 Value::Pair(rid) => heap.pair(rid).0,
-                _ => Value::Nil,
+                _ => Value::nil(),
             };
             Ok((k, val))
         }
@@ -3777,13 +3777,13 @@ fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `count`/`empty?` on a map use instead of materialising `map-pairs`.
 fn map_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_map(heap, "map-count", arg(args, 0))?;
-    Ok(Value::Int(heap.map_size(id) as i64))
+    Ok(Value::int(heap.map_size(id) as i64))
 }
 
 fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
-        Value::Str(id) => Ok(Value::Int(heap.string(id).chars().count() as i64)),
+        Value::Str(id) => Ok(Value::int(heap.string(id).chars().count() as i64)),
         _ => Err(LispError::wrong_type(heap, "string-length", "string", v)),
     }
 }
@@ -3796,7 +3796,7 @@ fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
-        Value::Str(id) => Ok(Value::Int(
+        Value::Str(id) => Ok(Value::int(
             crate::text_width::display_width(heap.string(id)) as i64,
         )),
         _ => Err(LispError::wrong_type(heap, "display-width", "string", v)),
@@ -3813,7 +3813,7 @@ fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn type_of(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     // Cached keyword id per tag — `type-of` is hit per element by the seq
     // predicates, so re-interning the tag name here dominated intern cost.
-    Ok(Value::Keyword(value::tag(arg(args, 0)).keyword()))
+    Ok(Value::keyword(value::tag(arg(args, 0)).keyword()))
 }
 
 // ---------- value <-> text and I/O ----------
@@ -3912,7 +3912,7 @@ fn capture_write(s: &str) -> bool {
 /// `%capture-take`. Captures nest, so this composes with an outer MCP capture.
 fn capture_begin(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     begin_stdout_capture();
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(%capture-take)` — pop the current capture buffer and return its text as a
@@ -3921,7 +3921,7 @@ fn capture_begin(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 fn capture_take(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(match take_captured_stdout() {
         Some(s) => heap.alloc_string(&s),
-        None => Value::Nil,
+        None => Value::nil(),
     })
 }
 
@@ -3935,7 +3935,7 @@ fn print(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     if !captured {
         write_stdout(&text);
     }
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// Write `s` to real stdout the way a well-behaved Unix tool does. A **broken
@@ -3963,7 +3963,7 @@ fn eprint(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     eprint!("{}", parts.join(" "));
     use std::io::Write;
     std::io::stderr().flush().ok();
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(%render & xs)` — the space-joined display forms of the arguments as a single
@@ -3986,7 +3986,7 @@ fn write_out(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if !capture_write(&s) {
         write_stdout(&s);
     }
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(%write-err s)` — write the ready string `s` to real stderr (never captured,
@@ -3996,7 +3996,7 @@ fn write_err(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "%write-err", arg(args, 0))?;
     eprint!("{}", s);
     std::io::stderr().flush().ok();
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(stdout-tty?)` — true when stdout is an interactive terminal, false when it's
@@ -4005,7 +4005,7 @@ fn write_err(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// CI reads) stays clean plain text.
 fn stdout_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use std::io::IsTerminal;
-    Ok(Value::Bool(std::io::stdout().is_terminal()))
+    Ok(Value::boolean(std::io::stdout().is_terminal()))
 }
 
 /// `(stdin-tty?)` — true when stdin is an interactive terminal, false when it's
@@ -4014,7 +4014,7 @@ fn stdout_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// the plain `read-line` path, not the interactive editor.
 fn stdin_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use std::io::IsTerminal;
-    Ok(Value::Bool(std::io::stdin().is_terminal()))
+    Ok(Value::boolean(std::io::stdin().is_terminal()))
 }
 
 // ---------- time ----------
@@ -4026,7 +4026,7 @@ fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    Ok(Value::Int(ms))
+    Ok(Value::int(ms))
 }
 
 /// `(now-ns)` — wall-clock nanoseconds since the Unix epoch, as an integer.
@@ -4038,19 +4038,19 @@ fn now_ns(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0);
-    Ok(Value::Int(ns))
+    Ok(Value::int(ns))
 }
 
 // ---------- memory ----------
 
 /// `(mem-bytes)` — bytes currently allocated across the whole process.
 fn mem_bytes(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::core::alloc::live_bytes() as i64))
+    Ok(Value::int(crate::core::alloc::live_bytes() as i64))
 }
 
 /// `(mem-peak)` — high-water mark of allocated bytes since the process started.
 fn mem_peak(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::core::alloc::peak_bytes() as i64))
+    Ok(Value::int(crate::core::alloc::peak_bytes() as i64))
 }
 
 /// `(gc-stats)` — a snapshot map of this process's garbage-collection activity
@@ -4080,20 +4080,20 @@ fn gc_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn gc_stats_map(heap: &mut Heap) -> Value {
     let (runs, copied, reclaimed) = heap.gc_counters();
     let pairs = vec![
-        (value::kw("collections"), Value::Int(runs as i64)),
-        (value::kw("copied"), Value::Int(copied as i64)),
-        (value::kw("reclaimed"), Value::Int(reclaimed as i64)),
+        (value::kw("collections"), Value::int(runs as i64)),
+        (value::kw("copied"), Value::int(copied as i64)),
+        (value::kw("reclaimed"), Value::int(reclaimed as i64)),
         (
             value::kw("live"),
-            Value::Int(heap.local_live_count() as i64),
+            Value::int(heap.local_live_count() as i64),
         ),
         (
             value::kw("live-bytes"),
-            Value::Int(heap.local_bytes() as i64),
+            Value::int(heap.local_bytes() as i64),
         ),
         (
             value::kw("threshold"),
-            Value::Int(heap.gc_threshold() as i64),
+            Value::int(heap.gc_threshold() as i64),
         ),
         // The shared RUNTIME code region (not per-process — every process sees the
         // same figure). `:runtime-closures` is its total promoted-closure count
@@ -4103,11 +4103,11 @@ fn gc_stats_map(heap: &mut Heap) -> Value {
         // by `(runtime-collect)`'s `{:before :after :reclaimed}`, kept out of here.
         (
             value::kw("runtime-closures"),
-            Value::Int(heap.runtime_closure_count() as i64),
+            Value::int(heap.runtime_closure_count() as i64),
         ),
         (
             value::kw("runtime-threshold"),
-            Value::Int(heap.rt_gc_threshold() as i64),
+            Value::int(heap.rt_gc_threshold() as i64),
         ),
         // True iff this binary was built with debug assertions (the GC tripwire /
         // verifier / poison bits are compiled in) — so a benchmark can confirm
@@ -4115,7 +4115,7 @@ fn gc_stats_map(heap: &mut Heap) -> Value {
         // for `make install` / `cargo build --release`.
         (
             value::kw("debug-build"),
-            Value::Bool(cfg!(debug_assertions)),
+            Value::boolean(cfg!(debug_assertions)),
         ),
     ];
     heap.map_from_pairs(pairs)
@@ -4136,14 +4136,14 @@ fn vm_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pairs = match crate::perf::snapshot() {
         Some(counters) => {
             let mut v = Vec::with_capacity(counters.len() + 1);
-            v.push((value::kw("enabled"), Value::Bool(true)));
+            v.push((value::kw("enabled"), Value::boolean(true)));
             for (name, val) in counters {
                 // counter idents are snake_case; expose idiomatic kebab keywords.
-                v.push((value::kw(&name.replace('_', "-")), Value::Int(val as i64)));
+                v.push((value::kw(&name.replace('_', "-")), Value::int(val as i64)));
             }
             v
         }
-        None => vec![(value::kw("enabled"), Value::Bool(false))],
+        None => vec![(value::kw("enabled"), Value::boolean(false))],
     };
     Ok(heap.map_from_pairs(pairs))
 }
@@ -4164,10 +4164,10 @@ fn runtime_collect(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     };
     let pairs = vec![
-        (value::kw("before"), Value::Int(before as i64)),
-        (value::kw("after"), Value::Int(after as i64)),
-        (value::kw("reclaimed"), Value::Int((before - after) as i64)),
-        (value::kw("ran"), Value::Bool(ran)),
+        (value::kw("before"), Value::int(before as i64)),
+        (value::kw("after"), Value::int(after as i64)),
+        (value::kw("reclaimed"), Value::int((before - after) as i64)),
+        (value::kw("ran"), Value::boolean(ran)),
     ];
     Ok(heap.map_from_pairs(pairs))
 }
@@ -4198,17 +4198,17 @@ fn gc_trace(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if let Some(&v) = args.first() {
         heap.set_gc_trace(crate::eval::truthy(v));
     }
-    Ok(Value::Bool(heap.gc_trace()))
+    Ok(Value::boolean(heap.gc_trace()))
 }
 
 /// `(mem-limit)` — the hard memory ceiling in bytes (0 = unlimited). ADR-043.
 fn mem_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::core::alloc::hard_limit() as i64))
+    Ok(Value::int(crate::core::alloc::hard_limit() as i64))
 }
 
 /// `(mem-soft-limit)` — the soft memory ceiling in bytes (0 = unlimited). ADR-043.
 fn mem_soft_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::core::alloc::soft_limit() as i64))
+    Ok(Value::int(crate::core::alloc::soft_limit() as i64))
 }
 
 // ---------- self-hosting ----------
@@ -4270,7 +4270,7 @@ fn parse_source(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Value {
     use cst::NodeKind::*;
-    let tag = |k: &'static str| Value::Keyword(value::intern(k));
+    let tag = |k: &'static str| Value::keyword(value::intern(k));
     match node.kind {
         // Leaves: [kind raw-text].
         Symbol | Keyword | Int | Float | Str | Bool | Nil | Whitespace | Comment | Error => {
@@ -4309,7 +4309,7 @@ fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Value {
                 .forms()
                 .next()
                 .map(|c| cst_to_value(heap, c, src))
-                .unwrap_or(Value::Nil);
+                .unwrap_or(Value::nil());
             heap.alloc_vector(vec![tag(k), child])
         }
         // Containers: [kind [child …]]. Children include trivia (whitespace +
@@ -4398,9 +4398,9 @@ fn cst_node_kind_name(kind: cst::NodeKind) -> &'static str {
 
 fn cst_to_positioned(heap: &mut Heap, node: &cst::Node, src: &str, b2c: &[u32]) -> Value {
     use cst::NodeKind::*;
-    let kw = |k: &'static str| Value::Keyword(value::intern(k));
-    let start = Value::Int(b2c[node.span.start as usize] as i64);
-    let end = Value::Int(b2c[node.span.end as usize] as i64);
+    let kw = |k: &'static str| Value::keyword(value::intern(k));
+    let start = Value::int(b2c[node.span.start as usize] as i64);
+    let end = Value::int(b2c[node.span.end as usize] as i64);
     let mut pairs: Vec<(Value, Value)> = vec![
         (kw("kind"), kw(cst_node_kind_name(node.kind))),
         (kw("start"), start),
@@ -4485,7 +4485,7 @@ fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     };
     let prev_known = heap.set_ns_known_names(known);
     let prev_imports = heap.set_imports(std::collections::HashMap::new());
-    let mut result = Ok(Value::Nil);
+    let mut result = Ok(Value::nil());
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds; re-fetch
     // each from the (relocated) root stack rather than the stale `forms` Vec. Same
@@ -4606,7 +4606,7 @@ fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // stack via `root_at` rather than the stale `forms` Vec. (Living in `load`,
     // the core, means every entry path — `brood`, `nest`, MCP `eval`, the future
     // editor — inherits the bound for free.)
-    let mut result = Ok(Value::Nil);
+    let mut result = Ok(Value::nil());
     let base = heap.roots_len();
     for (form, _) in &forms {
         heap.push_root(*form);
@@ -4674,7 +4674,7 @@ fn eval_string_inner(heap: &mut Heap, env: EnvId, src: &str, reset_ns: bool) -> 
     for &form in &forms {
         heap.push_root(form);
     }
-    let mut result: LispResult = Ok(Value::Nil);
+    let mut result: LispResult = Ok(Value::nil());
     for i in 0..forms.len() {
         let form = heap.root_at(base + i);
         match crate::eval::macros::compile(heap, form, root)
@@ -5018,7 +5018,7 @@ fn lookup_embedded(
     };
     match table.iter().find(|(n, _)| *n == name) {
         Some((_, src)) => Ok(heap.alloc_string(src)),
-        None => Ok(Value::Nil),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -5041,21 +5041,21 @@ fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // its load-path logic (ADR-038). The arg type was already validated above.
     let name = match embedded_name(heap, arg(args, 0)) {
         Some(name) => name,
-        None => return Ok(Value::Nil),
+        None => return Ok(Value::nil()),
     };
     match crate::bundle::mounted() {
         Some(b) => match b.module_src(&name) {
             Some(src) => Ok(heap.alloc_string(src)),
-            None => Ok(Value::Nil),
+            None => Ok(Value::nil()),
         },
-        None => Ok(Value::Nil),
+        None => Ok(Value::nil()),
     }
 }
 
 /// `(%bundled?)` — true when this executable is a release bundle (an app built
 /// by `nest release`), false for a plain `brood`/`nest` runtime.
 fn bundled_p(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(crate::bundle::is_bundled()))
+    Ok(Value::boolean(crate::bundle::is_bundled()))
 }
 
 /// `(%bundle-manifest)` — the embedded `project.blsp` source of a release
@@ -5063,7 +5063,7 @@ fn bundled_p(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 fn bundle_manifest(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match crate::bundle::mounted() {
         Some(b) => Ok(heap.alloc_string(&b.manifest)),
-        None => Ok(Value::Nil),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -5075,7 +5075,7 @@ fn bundle_module_names(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let items: Vec<Value> = b.module_names().map(|n| heap.alloc_string(n)).collect();
             Ok(heap.list(items))
         }
-        None => Ok(Value::Nil),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -5110,10 +5110,10 @@ fn to_symbol(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
         Value::Sym(_) => Ok(v),
-        Value::Keyword(s) => Ok(Value::Sym(s)),
+        Value::Keyword(s) => Ok(Value::symbol(s)),
         Value::Str(id) => {
             let name = heap.string(id).to_string();
-            Ok(Value::Sym(value::intern(&name)))
+            Ok(Value::symbol(value::intern(&name)))
         }
         _ => Err(LispError::wrong_type(
             heap,
@@ -5132,10 +5132,10 @@ fn to_keyword(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
         Value::Keyword(_) => Ok(v),
-        Value::Sym(s) => Ok(Value::Keyword(s)),
+        Value::Sym(s) => Ok(Value::keyword(s)),
         Value::Str(id) => {
             let name = heap.string(id).to_string();
-            Ok(Value::Keyword(value::intern(&name)))
+            Ok(Value::keyword(value::intern(&name)))
         }
         _ => Err(LispError::wrong_type(
             heap,
@@ -5198,7 +5198,7 @@ fn string_span_impl(args: &[Value], heap: &mut Heap, who: &str, in_set: bool) ->
             break;
         }
     }
-    Ok(Value::Int(idx as i64))
+    Ok(Value::int(idx as i64))
 }
 
 /// `(string-span s start chars)` — the char index just past the maximal run of chars
@@ -5242,7 +5242,7 @@ fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "scan-tokens", arg(args, 0))?;
     let chars: Vec<char> = s.chars().collect();
     let n = chars.len();
-    let kw = |k: &'static str| Value::Keyword(value::intern(k));
+    let kw = |k: &'static str| Value::keyword(value::intern(k));
     let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | ',');
     let is_delim = |c: char| is_ws(c) || matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';');
     let mut out: Vec<Value> = Vec::new();
@@ -5292,8 +5292,8 @@ fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         let text: String = chars[start..end].iter().collect();
         let tv = heap.alloc_string(&text);
         let tok = heap.alloc_vector(vec![
-            Value::Int(start as i64),
-            Value::Int(end as i64),
+            Value::int(start as i64),
+            Value::int(end as i64),
             kw(kind),
             tv,
         ]);
@@ -5449,9 +5449,9 @@ fn span_runs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let span_face = if si < spans.len() && spans[si].0 <= a && a < spans[si].1 {
                 spans[si].2
             } else {
-                Value::Nil
+                Value::nil()
             };
-            let mut rf = Value::Nil;
+            let mut rf = Value::nil();
             for (lo, hi, f) in &ranges {
                 if *lo <= a && a < *hi {
                     rf = merge_faces(heap, rf, *f);
@@ -5512,7 +5512,7 @@ fn clipboard_get(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
     #[cfg(not(feature = "clipboard"))]
     let _ = &heap;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(clipboard-set! s)` — copy string `s` to the OS clipboard so other apps can paste
@@ -5541,7 +5541,7 @@ fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Some(byte) => s[..byte].chars().count() as i64,
         None => -1,
     };
-    Ok(Value::Int(idx))
+    Ok(Value::int(idx))
 }
 
 /// `(string-split s sep)` — split `s` into a list of substrings on each occurrence
@@ -5608,7 +5608,7 @@ fn lower(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn char_to_int(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "char->int", arg(args, 0))?;
     match s.chars().next() {
-        Some(c) => Ok(Value::Int(c as i64)),
+        Some(c) => Ok(Value::int(c as i64)),
         None => Err(LispError::runtime("char->int: empty string")),
     }
 }
@@ -5624,7 +5624,7 @@ fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn string_to_utf8_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "string->utf8-bytes", arg(args, 0))?;
-    let items: Vec<Value> = s.as_bytes().iter().map(|&b| Value::Int(b as i64)).collect();
+    let items: Vec<Value> = s.as_bytes().iter().map(|&b| Value::int(b as i64)).collect();
     Ok(heap.alloc_vector(items))
 }
 
@@ -5701,7 +5701,7 @@ macro_rules! math1_unrestricted {
     ($name:ident, $brood:literal, $method:ident) => {
         fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let x = expect_number(heap, $brood, arg(args, 0))?;
-            Ok(Value::Float(x.$method()))
+            Ok(Value::float(x.$method()))
         }
     };
 }
@@ -5716,7 +5716,7 @@ macro_rules! math1_bounded {
                     $brood, x
                 )));
             }
-            Ok(Value::Float(x.$method()))
+            Ok(Value::float(x.$method()))
         }
     };
 }
@@ -5731,7 +5731,7 @@ macro_rules! math1_positive {
                     $brood, x
                 )));
             }
-            Ok(Value::Float(x.$method()))
+            Ok(Value::float(x.$method()))
         }
     };
 }
@@ -5750,7 +5750,7 @@ math1_positive!(math_log10, "log10", log10);
 fn math_atan2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let y = expect_number(heap, "atan2", arg(args, 0))?;
     let x = expect_number(heap, "atan2", arg(args, 1))?;
-    Ok(Value::Float(y.atan2(x)))
+    Ok(Value::float(y.atan2(x)))
 }
 
 // ---------- rope (editor buffer text — ADR-045) ----------
@@ -5785,14 +5785,14 @@ fn rope_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(rope-length r)` — the number of characters in `r`.
 fn rope_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let r = expect_rope(heap, "rope-length", arg(args, 0))?;
-    Ok(Value::Int(r.len_chars() as i64))
+    Ok(Value::int(r.len_chars() as i64))
 }
 
 /// `(rope-line-count r)` — the number of lines in `r` (ropey counts a trailing
 /// newline as ending a line, so `"a\n"` is 2 lines and `""` is 1).
 fn rope_line_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let r = expect_rope(heap, "rope-line-count", arg(args, 0))?;
-    Ok(Value::Int(r.len_lines() as i64))
+    Ok(Value::int(r.len_lines() as i64))
 }
 
 /// `(rope-insert r idx s)` — a fresh rope with string `s` inserted at character
@@ -5857,7 +5857,7 @@ fn rope_char_to_line(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if idx < 0 || idx as usize > len {
         return Err(rope_oob("rope-char->line", "index", idx, len));
     }
-    Ok(Value::Int(r.char_to_line(idx as usize) as i64))
+    Ok(Value::int(r.char_to_line(idx as usize) as i64))
 }
 
 /// `(rope-line->char r n)` — the character index where line `n` (0-based) begins.
@@ -5868,7 +5868,7 @@ fn rope_line_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if n < 0 || n as usize > lines {
         return Err(rope_oob("rope-line->char", "line", n, lines));
     }
-    Ok(Value::Int(r.line_to_char(n as usize) as i64))
+    Ok(Value::int(r.line_to_char(n as usize) as i64))
 }
 
 // ---------- TCP sockets (ADR-062) ----------
@@ -5893,7 +5893,7 @@ fn expect_table(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
 }
 
 fn table_new(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Table(crate::table::create()))
+    Ok(Value::table(crate::table::create()))
 }
 
 fn table_put(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -5911,7 +5911,7 @@ fn table_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn table_has(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-has?", arg(args, 0))?;
     crate::table::check_key("table-has?", arg(args, 1))?;
-    Ok(Value::Bool(crate::table::has(heap, id, arg(args, 1))?))
+    Ok(Value::boolean(crate::table::has(heap, id, arg(args, 1))?))
 }
 
 fn table_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -5932,7 +5932,7 @@ fn table_incr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn table_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-count", arg(args, 0))?;
-    Ok(Value::Int(crate::table::count(id)?))
+    Ok(Value::int(crate::table::count(id)?))
 }
 
 fn table_snapshot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -5942,7 +5942,7 @@ fn table_snapshot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn table_drop(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-drop", arg(args, 0))?;
-    Ok(Value::Bool(crate::table::drop_table(id)))
+    Ok(Value::boolean(crate::table::drop_table(id)))
 }
 
 fn socket_port(who: &str, p: i64) -> Result<u16, LispError> {
@@ -5958,7 +5958,7 @@ fn tcp_connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     )?;
     let owner = crate::process::self_pid();
     match crate::net::connect(&host, port, owner) {
-        Ok(id) => Ok(Value::Socket(id)),
+        Ok(id) => Ok(Value::socket(id)),
         Err(e) => Err(
             LispError::runtime(format!("tcp-connect {}:{}: {}", host, port, e))
                 .with_code(crate::error::error_codes::FILE_IO),
@@ -5971,7 +5971,7 @@ fn tcp_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let port = socket_port("tcp-listen", expect_int(heap, "tcp-listen", arg(args, 1))?)?;
     let owner = crate::process::self_pid();
     match crate::net::listen(&host, port, owner) {
-        Ok(id) => Ok(Value::Socket(id)),
+        Ok(id) => Ok(Value::socket(id)),
         Err(e) => Err(
             LispError::runtime(format!("tcp-listen {}:{}: {}", host, port, e))
                 .with_code(crate::error::error_codes::FILE_IO),
@@ -5986,7 +5986,7 @@ fn tls_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let key = expect_string(heap, "tls-listen", arg(args, 3))?;
     let owner = crate::process::self_pid();
     match crate::net::tls_listen(&host, port, &cert, &key, owner) {
-        Ok(id) => Ok(Value::Socket(id)),
+        Ok(id) => Ok(Value::socket(id)),
         Err(e) => Err(
             LispError::runtime(format!("tls-listen {}:{}: {}", host, port, e))
                 .with_code(crate::error::error_codes::FILE_IO),
@@ -6015,7 +6015,7 @@ fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let request = expect_string(heap, "tls-request", arg(args, 2))?;
     let owner = crate::process::self_pid();
     let id = crate::net::tls_request(&host, port, request.to_string(), owner);
-    Ok(Value::Socket(id))
+    Ok(Value::socket(id))
 }
 
 fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -6041,7 +6041,7 @@ fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         crate::net::send(id, data.as_bytes())
     }
     .map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 fn tcp_set_binary(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -6049,7 +6049,7 @@ fn tcp_set_binary(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let on = !matches!(arg(args, 1), Value::Nil | Value::Bool(false));
     crate::net::set_binary(id, on)
         .map_err(|e| LispError::runtime(format!("tcp-set-binary: {}", e)))?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 fn tcp_controlling_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -6067,20 +6067,20 @@ fn tcp_controlling_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     };
     crate::net::controlling_process(id, pid)
         .map_err(|e| LispError::runtime(format!("tcp-controlling-process: {}", e)))?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 fn tcp_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_socket(heap, "tcp-close", arg(args, 0))?;
     crate::net::close(id);
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 fn tcp_local_port(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_socket(heap, "tcp-local-port", arg(args, 0))?;
     Ok(crate::net::local_port(id)
-        .map(|p| Value::Int(p as i64))
-        .unwrap_or(Value::Nil))
+        .map(|p| Value::int(p as i64))
+        .unwrap_or(Value::nil()))
 }
 
 // ----- persistent child processes (ADR-104) ----------------------------------
@@ -6106,12 +6106,12 @@ fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mut cwd: Option<String> = None;
     let mut env: Vec<(String, String)> = Vec::new();
     if let Value::Map(opts) = arg(args, 2) {
-        if let Some(v) = heap.map_get(opts, Value::Keyword(value::intern("cwd"))) {
+        if let Some(v) = heap.map_get(opts, Value::keyword(value::intern("cwd"))) {
             if !matches!(v, Value::Nil) {
                 cwd = Some(expect_string(heap, "proc-spawn :cwd", v)?);
             }
         }
-        if let Some(Value::Map(e)) = heap.map_get(opts, Value::Keyword(value::intern("env"))) {
+        if let Some(Value::Map(e)) = heap.map_get(opts, Value::keyword(value::intern("env"))) {
             for (k, v) in heap.map_entries(e) {
                 env.push((
                     expect_string(heap, "proc-spawn :env key", k)?,
@@ -6122,7 +6122,7 @@ fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     }
     let owner = crate::process::self_pid();
     match crate::proc::spawn(&prog, &argv, cwd.as_deref(), &env, owner) {
-        Ok(id) => Ok(Value::Subprocess(id)),
+        Ok(id) => Ok(Value::subprocess(id)),
         Err(e) => Err(LispError::runtime(format!("proc-spawn {}: {}", prog, e))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),
     }
@@ -6133,13 +6133,13 @@ fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let data = expect_string(heap, "proc-send", arg(args, 1))?;
     crate::proc::send(id, data.as_bytes())
         .map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 fn proc_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-close", arg(args, 0))?;
     crate::proc::close(id);
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 // ----- terminal frontend (ADR-046) -------------------------------------------
@@ -6174,7 +6174,7 @@ fn term_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
         Hide
     )
     .map_err(term_err)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(term-leave)` — restore the terminal (show cursor, leave alternate screen,
@@ -6191,7 +6191,7 @@ fn term_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     )
     .map_err(term_err)?;
     disable_raw_mode().map_err(term_err)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// Best-effort terminal restore — the abnormal-path backstop a host binary holds
@@ -6252,7 +6252,7 @@ pub fn restore_terminal_on_exit() {
 /// `(term-size)` — the terminal size as `[cols rows]` (character cells).
 fn term_size(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (cols, rows) = crossterm::terminal::size().map_err(term_err)?;
-    Ok(heap.alloc_vector(vec![Value::Int(cols as i64), Value::Int(rows as i64)]))
+    Ok(heap.alloc_vector(vec![Value::int(cols as i64), Value::int(rows as i64)]))
 }
 
 /// `(term-poll ms)` — wait up to `ms` ms for a key; return it (a 1-char string,
@@ -6269,10 +6269,10 @@ fn term_poll(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // enhanced-keyboard protocol) so a keypress isn't seen twice.
             Event::Key(k) if k.kind != KeyEventKind::Release => Ok(key_to_value(heap, k)),
             Event::Mouse(m) => Ok(mouse_to_value(heap, m)),
-            _ => Ok(Value::Nil),
+            _ => Ok(Value::nil()),
         }
     } else {
-        Ok(Value::Nil)
+        Ok(Value::nil())
     }
 }
 
@@ -6291,7 +6291,7 @@ fn mouse_value(
     mods: (bool, bool, bool),
     count: u8,
 ) -> Value {
-    let btn = button.map(value::kw).unwrap_or(Value::Nil);
+    let btn = button.map(value::kw).unwrap_or(Value::nil());
     let (ctrl, alt, shift) = mods;
     let mut ms = Vec::new();
     if ctrl {
@@ -6308,15 +6308,15 @@ fn mouse_value(
         value::kw("mouse"),
         value::kw(action),
         btn,
-        Value::Int(row as i64),
-        Value::Int(col as i64),
+        Value::int(row as i64),
+        Value::int(col as i64),
         ms,
     ];
     // A press carries its click-chain count as a trailing 7th element; other actions
     // (count 0) stay 6-element. The terminal can't detect multi-click, so it reports 1
     // for every press — keeping the GUI and terminal shapes identical.
     if count > 0 {
-        v.push(Value::Int(count as i64));
+        v.push(Value::int(count as i64));
     }
     heap.alloc_vector(v)
 }
@@ -6344,7 +6344,7 @@ fn mouse_to_value(heap: &mut Heap, m: crossterm::event::MouseEvent) -> Value {
         MK::Drag(b) => ("drag", Some(button(b)), 0),
         MK::ScrollUp => ("scroll-up", None, 0),
         MK::ScrollDown => ("scroll-down", None, 0),
-        _ => return Value::Nil,
+        _ => return Value::nil(),
     };
     let mods = (
         m.modifiers.contains(KeyModifiers::CONTROL),
@@ -6364,12 +6364,12 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
         // Ctrl+Alt (Emacs C-M-… — structural sexp motion C-M-f/b/u/d, mark-sexp
         // C-M-SPC). Must precede the ctrl-only / alt-only arms so the second modifier
         // isn't dropped (the `ctrl-meta-` spelling the keymaps bind).
-        KeyCode::Char(c) if ctrl && alt => Value::Keyword(value::intern(&format!(
+        KeyCode::Char(c) if ctrl && alt => Value::keyword(value::intern(&format!(
             "ctrl-meta-{}",
             c.to_ascii_lowercase()
         ))),
         KeyCode::Char(c) if ctrl => {
-            Value::Keyword(value::intern(&format!("ctrl-{}", c.to_ascii_lowercase())))
+            Value::keyword(value::intern(&format!("ctrl-{}", c.to_ascii_lowercase())))
         }
         // Alt/Meta combos (M-f, M-b, … — emacs word motion). Some terminals send
         // these as an Esc prefix; crossterm normalises them to the ALT modifier.
@@ -6383,7 +6383,7 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
             } else {
                 c.to_ascii_lowercase()
             };
-            Value::Keyword(value::intern(&format!("alt-{ch}")))
+            Value::keyword(value::intern(&format!("alt-{ch}")))
         }
         KeyCode::Char(c) => heap.alloc_string(&c.to_string()),
         KeyCode::Up => value::kw("up"),
@@ -6400,7 +6400,7 @@ fn key_to_value(heap: &mut Heap, k: crossterm::event::KeyEvent) -> Value {
         KeyCode::End => value::kw("end"),
         KeyCode::PageUp => value::kw("page-up"),
         KeyCode::PageDown => value::kw("page-down"),
-        _ => Value::Nil,
+        _ => Value::nil(),
     }
 }
 
@@ -6481,7 +6481,7 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
             let w = expect_int(heap, "term-draw", arg(&parts, 3))?.max(0) as usize;
             let h = expect_int(heap, "term-draw", arg(&parts, 4))?;
-            let face = parts.get(5).copied().unwrap_or(Value::Nil);
+            let face = parts.get(5).copied().unwrap_or(Value::nil());
             let fill = " ".repeat(w);
             for i in 0..h.max(0) {
                 crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row + i)))
@@ -6502,7 +6502,7 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
             crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
             // honour the optional style keyword so the caret shape matches the GUI
-            match cursor_style_from(parts.get(3).copied().unwrap_or(Value::Nil)) {
+            match cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil())) {
                 CursorStyle::Bar => {
                     crossterm::queue!(out, SetCursorStyle::SteadyBar).map_err(term_err)?
                 }
@@ -6518,13 +6518,13 @@ fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
             let s = expect_string(heap, "term-draw", arg(&parts, 3))?;
             crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
-            apply_face(&mut out, heap, parts.get(4).copied().unwrap_or(Value::Nil))?;
+            apply_face(&mut out, heap, parts.get(4).copied().unwrap_or(Value::nil()))?;
             crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
                 .map_err(term_err)?;
         }
     }
     write_term_bytes(&out).map_err(term_err)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(term-raw-enter)` — raw mode only: no alternate screen, the cursor stays
@@ -6546,14 +6546,14 @@ fn term_raw_enter(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     use crossterm::event::DisableMouseCapture;
     crossterm::terminal::enable_raw_mode().map_err(term_err)?;
     crossterm::execute!(std::io::stdout(), Show, DisableMouseCapture).map_err(term_err)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(term-raw-leave)` — leave raw mode (the teardown for `term-raw-enter`).
 /// Idempotent with the panic-path `restore_terminal`.
 fn term_raw_leave(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     crossterm::terminal::disable_raw_mode().map_err(term_err)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(term-emit ops)` — inline, relative-motion rendering for an in-place editor
@@ -6588,7 +6588,7 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     for (tag, parts) in parsed {
         if tag == print_t {
             let s = expect_string(heap, "term-emit", arg(&parts, 1))?;
-            apply_face(&mut out, heap, parts.get(2).copied().unwrap_or(Value::Nil))?;
+            apply_face(&mut out, heap, parts.get(2).copied().unwrap_or(Value::nil()))?;
             crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
                 .map_err(term_err)?;
         } else if tag == cr_t {
@@ -6618,7 +6618,7 @@ fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     }
     write_term_bytes(&out).map_err(term_err)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// The face-map keys (`:fg`/`:bg`/`:bold`/…) interned once for the whole process,
@@ -6841,14 +6841,14 @@ fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     };
     let id =
         crate::gui::open(crate::process::self_pid(), title, size).map_err(LispError::runtime)?;
-    Ok(Value::Int(id as i64))
+    Ok(Value::int(id as i64))
 }
 
 /// `(gui-close id)` — close window `id` (the teardown for `gui-open`; idempotent).
 fn gui_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-close", arg(args, 0))?;
     crate::gui::close(id).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-title! id text)` — set window `id`'s OS title-bar text at runtime.
@@ -6856,7 +6856,7 @@ fn gui_title(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-title!", arg(args, 0))?;
     let title = expect_string(heap, "gui-title!", arg(args, 1))?;
     crate::gui::title(id, title).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-icon! id rgba w h)` — set window `id`'s taskbar/title-bar icon from raw RGBA
@@ -6881,7 +6881,7 @@ fn gui_icon(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     };
     crate::gui::icon(id, rgba, w, h).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-focus id)` — raise window `id` and give it OS keyboard focus (un-minimising
@@ -6890,7 +6890,7 @@ fn gui_icon(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn gui_focus(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-focus", arg(args, 0))?;
     crate::gui::focus(id).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-grab-cursor id on)` — confine the pointer to window `id` while `on` is
@@ -6899,7 +6899,7 @@ fn gui_grab_cursor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-grab-cursor", arg(args, 0))?;
     let on = crate::eval::truthy(arg(args, 1));
     crate::gui::grab(id, on).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-fullscreen! id on)` — make window `id` borderless-fullscreen (`on` truthy)
@@ -6908,7 +6908,7 @@ fn gui_fullscreen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-fullscreen!", arg(args, 0))?;
     let on = crate::eval::truthy(arg(args, 1));
     crate::gui::fullscreen(id, on).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-maximize! id on)` — maximise window `id` (`on` truthy) or restore it,
@@ -6917,7 +6917,7 @@ fn gui_maximize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-maximize!", arg(args, 0))?;
     let on = crate::eval::truthy(arg(args, 1));
     crate::gui::maximize(id, on).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-size id)` — window `id`'s size as `[cols rows]` (character cells), same
@@ -6925,7 +6925,7 @@ fn gui_maximize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn gui_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-size", arg(args, 0))?;
     let (cols, rows) = crate::gui::size(id).map_err(LispError::runtime)?;
-    Ok(heap.alloc_vector(vec![Value::Int(cols as i64), Value::Int(rows as i64)]))
+    Ok(heap.alloc_vector(vec![Value::int(cols as i64), Value::int(rows as i64)]))
 }
 
 /// A held `gui::Key` as the same Brood value `gui-open` delivers for that press —
@@ -6935,10 +6935,10 @@ fn gui_key_to_value(heap: &mut Heap, k: crate::gui::Key) -> Value {
     use crate::gui::Key;
     match k {
         Key::Char(c) => heap.alloc_string(&c.to_string()),
-        Key::Ctrl(c) => Value::Keyword(value::intern(&format!("ctrl-{c}"))),
-        Key::Alt(c) => Value::Keyword(value::intern(&format!("alt-{c}"))),
-        Key::CtrlAlt(c) => Value::Keyword(value::intern(&format!("ctrl-meta-{c}"))),
-        Key::Named(s) => Value::Keyword(value::intern(s)),
+        Key::Ctrl(c) => Value::keyword(value::intern(&format!("ctrl-{c}"))),
+        Key::Alt(c) => Value::keyword(value::intern(&format!("alt-{c}"))),
+        Key::CtrlAlt(c) => Value::keyword(value::intern(&format!("ctrl-meta-{c}"))),
+        Key::Named(s) => Value::keyword(value::intern(s)),
     }
 }
 
@@ -6951,7 +6951,7 @@ fn gui_held_key(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = gui_window_id(heap, "gui-held-key", arg(args, 0))?;
     match crate::gui::held_key(id).map_err(LispError::runtime)? {
         Some(k) => Ok(gui_key_to_value(heap, k)),
-        None => Ok(Value::Nil),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -6978,7 +6978,7 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         } else if tag == cursor_t {
             let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
             let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
-            let style = cursor_style_from(parts.get(3).copied().unwrap_or(Value::Nil));
+            let style = cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil()));
             ops.push(crate::gui::Op::Cursor { row, col, style });
         } else if tag == rect_t {
             // [:rect row col w h face] — fill a w×h cell block with the face background.
@@ -6986,7 +6986,7 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
             let w = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 3))?);
             let h = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?);
-            let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::Nil));
+            let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::nil()));
             ops.push(crate::gui::Op::Rect {
                 row,
                 col,
@@ -6998,7 +6998,7 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
             let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
             let s = expect_string(heap, "gui-draw", arg(&parts, 3))?;
-            let face = gui_face(heap, parts.get(4).copied().unwrap_or(Value::Nil));
+            let face = gui_face(heap, parts.get(4).copied().unwrap_or(Value::nil()));
             ops.push(crate::gui::Op::Text { row, col, s, face });
         } else if tag == cursor_zone_t {
             // [:cursor-zone x y w h shape] — a hover hot-zone. Unknown shape: skip.
@@ -7108,7 +7108,7 @@ fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     }
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// A `:vspans` segment colour: a face colour keyword (`:red` → the GUI palette),
@@ -7174,7 +7174,7 @@ fn gui_font(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         _ => None,
     };
     crate::gui::font(win, family, font_px(heap, m)).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-inset! px)` — set the window content inset (logical pixels): a blank margin
@@ -7195,7 +7195,7 @@ fn gui_inset(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     };
     crate::gui::inset(px).map_err(LispError::runtime)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(gui-font-register name styles)` — register font family `name` (a keyword) from
@@ -7249,7 +7249,7 @@ fn gui_font_register(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let bold_italic = style("bold-italic")?;
     crate::gui::register_family(name, regular, bold, italic, bold_italic)
         .map_err(LispError::runtime)?;
-    Ok(Value::Keyword(name))
+    Ok(Value::keyword(name))
 }
 
 /// `(mailbox-size pid)` — the number of queued messages in a local process's
@@ -7260,10 +7260,10 @@ fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             Ok(crate::process::mailbox_len(id)
-                .map(|n| Value::Int(n as i64))
-                .unwrap_or(Value::Nil))
+                .map(|n| Value::int(n as i64))
+                .unwrap_or(Value::nil()))
         }
-        Value::Pid { .. } => Ok(Value::Nil),
+        Value::Pid { .. } => Ok(Value::nil()),
         other => Err(LispError::wrong_type(heap, "mailbox-size", "pid", other)),
     }
 }
@@ -7286,39 +7286,39 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             // Dead/unknown pid → nil (matches `mailbox-size`).
             if !crate::process::is_alive(id) {
-                return Ok(Value::Nil);
+                return Ok(Value::nil());
             }
             let name = crate::dist::name_for_pid(id)
                 .map(Value::Keyword)
-                .unwrap_or(Value::Nil);
+                .unwrap_or(Value::nil());
             let status = crate::process::process_status(id)
                 .map(value::kw)
-                .unwrap_or(Value::Nil);
-            let mailbox = Value::Int(crate::process::mailbox_len(id).unwrap_or(0) as i64);
-            let monitored = Value::Int(crate::process::monitored_by(id) as i64);
+                .unwrap_or(Value::nil());
+            let mailbox = Value::int(crate::process::mailbox_len(id).unwrap_or(0) as i64);
+            let monitored = Value::int(crate::process::monitored_by(id) as i64);
             // `:parent` is the spawner's id, or nil for the root.
             let parent = crate::process::parent_of(id)
-                .map(|p| Value::Int(p as i64))
-                .unwrap_or(Value::Nil);
+                .map(|p| Value::int(p as i64))
+                .unwrap_or(Value::nil());
             // `:memory` — the process's LOCAL heap footprint (bytes), published on
             // its last `receive`; 0 for a process that has never received.
-            let memory = Value::Int(crate::process::process_mem(id).unwrap_or(0) as i64);
+            let memory = Value::int(crate::process::process_mem(id).unwrap_or(0) as i64);
             // `:collections` — the process's cumulative GC count, republished on
             // its last `receive` (0 for one that has never received). The signal
             // for "is this process churning memory?" in the observer.
-            let collections = Value::Int(crate::process::process_gc_runs(id).unwrap_or(0) as i64);
+            let collections = Value::int(crate::process::process_gc_runs(id).unwrap_or(0) as i64);
             // `:reductions` — the process's cumulative reduction count (Erlang's
             // scheduling unit), updated every scheduling quantum. The observer's
             // "is this process doing work / busy?" signal. Exact for spawned
             // processes; coarse (whole-budget increments) for the root.
-            let reductions = Value::Int(crate::process::process_reductions(id).unwrap_or(0) as i64);
+            let reductions = Value::int(crate::process::process_reductions(id).unwrap_or(0) as i64);
             let pairs = vec![
-                (value::kw("id"), Value::Int(id as i64)),
+                (value::kw("id"), Value::int(id as i64)),
                 // The process's actual pid value (not just its numeric id), so a
                 // caller — e.g. the observer's kill command — can act on the
                 // process directly with `exit`/`send`/`monitor`.
-                (value::kw("pid"), Value::Pid { node, id }),
-                (value::kw("node"), Value::Keyword(node)),
+                (value::kw("pid"), Value::pid(node, id)),
+                (value::kw("node"), Value::keyword(node)),
                 (value::kw("name"), name),
                 (value::kw("status"), status),
                 (value::kw("mailbox"), mailbox),
@@ -7330,7 +7330,7 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             ];
             Ok(heap.map_from_pairs(pairs))
         }
-        Value::Pid { .. } => Ok(Value::Nil),
+        Value::Pid { .. } => Ok(Value::nil()),
         other => Err(LispError::wrong_type(heap, "process-info", "pid", other)),
     }
 }
@@ -7343,7 +7343,7 @@ fn process_info(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "string->number", arg(args, 0))?;
     if let Ok(i) = s.parse::<i64>() {
-        Ok(Value::Int(i))
+        Ok(Value::int(i))
     } else if let Ok(n) = s.parse::<num_bigint::BigInt>() {
         // An integer too big for i64 is a bignum — mirroring the reader's
         // over-range literal path — NOT a lossy f64 (which silently rounded
@@ -7352,9 +7352,9 @@ fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         // and `alloc_bigint`'s no-demotion invariant holds.
         Ok(heap.alloc_bigint(n))
     } else if let Ok(f) = s.parse::<f64>() {
-        Ok(Value::Float(f))
+        Ok(Value::float(f))
     } else {
-        Ok(Value::Nil)
+        Ok(Value::nil())
     }
 }
 
@@ -7377,13 +7377,13 @@ fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(file-exists? path)` — true if a file or directory exists at `path`.
 fn file_exists(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file-exists?", arg(args, 0))?;
-    Ok(Value::Bool(std::path::Path::new(&path).exists()))
+    Ok(Value::boolean(std::path::Path::new(&path).exists()))
 }
 
 /// `(dir? path)` — true if `path` exists and is a directory.
 fn is_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "dir?", arg(args, 0))?;
-    Ok(Value::Bool(std::path::Path::new(&path).is_dir()))
+    Ok(Value::boolean(std::path::Path::new(&path).is_dir()))
 }
 
 /// `(list-dir path)` — the entry names (not full paths) directly under a
@@ -7416,7 +7416,7 @@ fn make_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("make-dir: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(spit path content)` — write `content` (a string) to `path`, replacing any
@@ -7436,7 +7436,7 @@ fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("spit: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(%sha256 s)` — the lowercase hex SHA-256 of `s`'s UTF-8 bytes. The single
@@ -7650,7 +7650,7 @@ fn random_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mut bytes = vec![0u8; n as usize];
     getrandom::fill(&mut bytes)
         .map_err(|e| LispError::runtime(format!("%random-bytes: OS RNG unavailable: {e}")))?;
-    let vals: Vec<Value> = bytes.iter().map(|&b| Value::Int(b as i64)).collect();
+    let vals: Vec<Value> = bytes.iter().map(|&b| Value::int(b as i64)).collect();
     Ok(heap.alloc_vector(vals))
 }
 
@@ -7681,7 +7681,7 @@ fn chacha20_encrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_slice())
         .map_err(|e| LispError::runtime(format!("%chacha20-encrypt: {e}")))?;
-    let vals: Vec<Value> = ciphertext.iter().map(|&b| Value::Int(b as i64)).collect();
+    let vals: Vec<Value> = ciphertext.iter().map(|&b| Value::int(b as i64)).collect();
     Ok(heap.alloc_vector(vals))
 }
 
@@ -7710,10 +7710,10 @@ fn chacha20_decrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let nonce = Nonce::from_slice(&nonce_bytes);
     match cipher.decrypt(nonce, ciphertext.as_slice()) {
         Ok(plaintext) => {
-            let vals: Vec<Value> = plaintext.iter().map(|&b| Value::Int(b as i64)).collect();
+            let vals: Vec<Value> = plaintext.iter().map(|&b| Value::int(b as i64)).collect();
             Ok(heap.alloc_vector(vals))
         }
-        Err(_) => Ok(Value::Keyword(value::intern("error"))),
+        Err(_) => Ok(Value::keyword(value::intern("error"))),
     }
 }
 
@@ -7764,7 +7764,7 @@ fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         dk.extend_from_slice(&t);
     }
     dk.truncate(key_len as usize);
-    let vals: Vec<Value> = dk.iter().map(|&b| Value::Int(b as i64)).collect();
+    let vals: Vec<Value> = dk.iter().map(|&b| Value::int(b as i64)).collect();
     Ok(heap.alloc_vector(vals))
 }
 
@@ -7807,7 +7807,7 @@ fn git_resolve_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if looks_like_sha {
         Ok(heap.alloc_string(&r))
     } else {
-        Ok(Value::Nil)
+        Ok(Value::nil())
     }
 }
 
@@ -7907,7 +7907,7 @@ fn read_line(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     if n == 0 {
-        return Ok(Value::Nil); // EOF
+        return Ok(Value::nil()); // EOF
     }
     while line.ends_with('\n') || line.ends_with('\r') {
         line.pop();
@@ -7934,8 +7934,8 @@ fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn file_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file-size", arg(args, 0))?;
     match std::fs::metadata(&path) {
-        Ok(meta) => Ok(Value::Int(meta.len() as i64)),
-        Err(_) => Ok(Value::Nil),
+        Ok(meta) => Ok(Value::int(meta.len() as i64)),
+        Err(_) => Ok(Value::nil()),
     }
 }
 
@@ -7944,8 +7944,8 @@ fn file_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn delete_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "delete-file", arg(args, 0))?;
     match std::fs::remove_file(&path) {
-        Ok(()) => Ok(Value::Nil),
-        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Nil),
+        Ok(()) => Ok(Value::nil()),
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::nil()),
         Err(e) => Err(LispError::runtime(format!("delete-file: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)),
     }
@@ -7957,8 +7957,8 @@ fn delete_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn delete_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "delete-dir", arg(args, 0))?;
     match std::fs::remove_dir_all(&path) {
-        Ok(()) => Ok(Value::Nil),
-        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Nil),
+        Ok(()) => Ok(Value::nil()),
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::nil()),
         Err(e) => Err(LispError::runtime(format!("delete-dir: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)),
     }
@@ -7973,7 +7973,7 @@ fn rename_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("rename-file: {} -> {}: {}", from, to, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(copy-file from to)` — copy the file `from` to `to` (replacing `to` if it
@@ -7987,7 +7987,7 @@ fn copy_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("copy-file: {} -> {}: {}", from, to, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(file-mtime path)` — last-modified time of `path` as epoch-milliseconds, or
@@ -7998,15 +7998,15 @@ fn copy_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn file_mtime(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file-mtime", arg(args, 0))?;
     let Ok(meta) = std::fs::metadata(&path) else {
-        return Ok(Value::Nil);
+        return Ok(Value::nil());
     };
     let Ok(modified) = meta.modified() else {
-        return Ok(Value::Nil);
+        return Ok(Value::nil());
     };
     let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) else {
-        return Ok(Value::Nil);
+        return Ok(Value::nil());
     };
-    Ok(Value::Int(since.as_millis() as i64))
+    Ok(Value::int(since.as_millis() as i64))
 }
 
 /// `(file-stat path)` — one `stat` for `path` as a map, or `nil` if it is missing.
@@ -8020,7 +8020,7 @@ fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "file-stat", arg(args, 0))?;
     // lstat for the link's own nature; stat (follows) for size/mtime/dir?-of-target.
     let Ok(lmeta) = std::fs::symlink_metadata(&path) else {
-        return Ok(Value::Nil);
+        return Ok(Value::nil());
     };
     let symlink = lmeta.file_type().is_symlink();
     // Follow the link for the navigable facts; fall back to the link itself for a
@@ -8030,8 +8030,8 @@ fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let epoch_ms = |t: std::io::Result<std::time::SystemTime>| {
         t.ok()
             .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| Value::Int(d.as_millis() as i64))
-            .unwrap_or(Value::Nil)
+            .map(|d| Value::int(d.as_millis() as i64))
+            .unwrap_or(Value::nil())
     };
     let mtime = epoch_ms(meta.modified());
     let atime = epoch_ms(meta.accessed());
@@ -8045,23 +8045,23 @@ fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     #[cfg(not(unix))]
     let (mode, exec, nlink, uid, gid) = (0_i64, false, 1_i64, 0_u32, 0_u32);
 
-    let kw = |k: &'static str| Value::Keyword(value::intern(k));
+    let kw = |k: &'static str| Value::keyword(value::intern(k));
     // Owner/group names (getpwuid/getgrgid), falling back to the numeric id as a string.
     let owner = uid_name(uid).unwrap_or_else(|| uid.to_string());
     let group = gid_name(gid).unwrap_or_else(|| gid.to_string());
     let owner_v = heap.alloc_string(&owner);
     let group_v = heap.alloc_string(&group);
     let pairs = vec![
-        (kw("dir?"), Value::Bool(meta.is_dir())),
-        (kw("size"), Value::Int(meta.len() as i64)),
+        (kw("dir?"), Value::boolean(meta.is_dir())),
+        (kw("size"), Value::int(meta.len() as i64)),
         (kw("mtime"), mtime),
         (kw("atime"), atime),
-        (kw("symlink?"), Value::Bool(symlink)),
-        (kw("exec?"), Value::Bool(exec)),
-        (kw("mode"), Value::Int(mode)),
-        (kw("nlink"), Value::Int(nlink)),
-        (kw("uid"), Value::Int(uid as i64)),
-        (kw("gid"), Value::Int(gid as i64)),
+        (kw("symlink?"), Value::boolean(symlink)),
+        (kw("exec?"), Value::boolean(exec)),
+        (kw("mode"), Value::int(mode)),
+        (kw("nlink"), Value::int(nlink)),
+        (kw("uid"), Value::int(uid as i64)),
+        (kw("gid"), Value::int(gid as i64)),
         (kw("owner"), owner_v),
         (kw("group"), group_v),
     ];
@@ -8114,7 +8114,7 @@ fn getenv(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_string(heap, "getenv", arg(args, 0))?;
     match std::env::var(&name) {
         Ok(val) => Ok(heap.alloc_string(&val)),
-        Err(_) => Ok(Value::Nil),
+        Err(_) => Ok(Value::nil()),
     }
 }
 
@@ -8154,13 +8154,13 @@ fn argv_builtin(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(%os-type)` — the current OS as a keyword: `:linux`, `:macos`, or `:windows`.
 fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
     #[cfg(target_os = "linux")]
-    return Ok(Value::Keyword(value::intern("linux")));
+    return Ok(Value::keyword(value::intern("linux")));
     #[cfg(target_os = "macos")]
-    return Ok(Value::Keyword(value::intern("macos")));
+    return Ok(Value::keyword(value::intern("macos")));
     #[cfg(target_os = "windows")]
-    return Ok(Value::Keyword(value::intern("windows")));
+    return Ok(Value::keyword(value::intern("windows")));
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    return Ok(Value::Keyword(value::intern("unknown")));
+    return Ok(Value::keyword(value::intern("unknown")));
 }
 
 /// `(%os-cmd prog args)` — run `prog` with `args` (list or vector of strings),
@@ -8181,11 +8181,11 @@ fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let stdout = heap.alloc_string(&String::from_utf8_lossy(&output.stdout));
     let stderr = heap.alloc_string(&String::from_utf8_lossy(&output.stderr));
     let exit_code = output.status.code().unwrap_or(-1) as i64;
-    let kw = |k: &'static str| Value::Keyword(value::intern(k));
+    let kw = |k: &'static str| Value::keyword(value::intern(k));
     Ok(heap.map_from_pairs(vec![
         (kw("stdout"), stdout),
         (kw("stderr"), stderr),
-        (kw("exit"), Value::Int(exit_code)),
+        (kw("exit"), Value::int(exit_code)),
     ]))
 }
 
@@ -8224,7 +8224,7 @@ fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     }
     match std::process::Command::new(&prog).args(&argv).status() {
-        Ok(status) => Ok(Value::Int(status.code().unwrap_or(-1) as i64)),
+        Ok(status) => Ok(Value::int(status.code().unwrap_or(-1) as i64)),
         Err(e) => Err(LispError::runtime(format!("run-process: {}: {}", prog, e))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
             .with_hint("check that the program is on PATH and the args are well-formed")),
@@ -8334,10 +8334,10 @@ fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRe
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let warnings = crate::types::check::check_file(heap, &just_forms);
-    let file_kw = Value::Keyword(value::intern("file"));
-    let line_kw = Value::Keyword(value::intern("line"));
-    let col_kw = Value::Keyword(value::intern("col"));
-    let msg_kw = Value::Keyword(value::intern("message"));
+    let file_kw = Value::keyword(value::intern("file"));
+    let line_kw = Value::keyword(value::intern("line"));
+    let col_kw = Value::keyword(value::intern("col"));
+    let msg_kw = Value::keyword(value::intern("message"));
     let file_val = heap.alloc_string(&path);
     let mut out = Vec::with_capacity(warnings.len());
     for (pos_opt, msg) in &warnings {
@@ -8345,8 +8345,8 @@ fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRe
         let mut entries: Vec<(Value, Value)> = Vec::with_capacity(4);
         entries.push((file_kw, file_val));
         if let Some(p) = pos_opt {
-            entries.push((line_kw, Value::Int(p.line as i64)));
-            entries.push((col_kw, Value::Int(p.col as i64)));
+            entries.push((line_kw, Value::int(p.line as i64)));
+            entries.push((col_kw, Value::int(p.col as i64)));
         }
         entries.push((msg_kw, msg_val));
         out.push(heap.map_from_pairs(entries));
@@ -8370,16 +8370,16 @@ fn check_string_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
     };
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
     let warnings = crate::types::check::check_file(heap, &just_forms);
-    let line_kw = Value::Keyword(value::intern("line"));
-    let col_kw = Value::Keyword(value::intern("col"));
-    let msg_kw = Value::Keyword(value::intern("message"));
+    let line_kw = Value::keyword(value::intern("line"));
+    let col_kw = Value::keyword(value::intern("col"));
+    let msg_kw = Value::keyword(value::intern("message"));
     let mut out = Vec::with_capacity(warnings.len());
     for (pos_opt, msg) in &warnings {
         let msg_val = heap.alloc_string(msg);
         let mut entries: Vec<(Value, Value)> = Vec::with_capacity(3);
         if let Some(p) = pos_opt {
-            entries.push((line_kw, Value::Int(p.line as i64)));
-            entries.push((col_kw, Value::Int(p.col as i64)));
+            entries.push((line_kw, Value::int(p.line as i64)));
+            entries.push((col_kw, Value::int(p.col as i64)));
         }
         entries.push((msg_kw, msg_val));
         out.push(heap.map_from_pairs(entries));
@@ -8394,8 +8394,8 @@ fn check_string_structured(args: &[Value], _env: EnvId, heap: &mut Heap) -> Lisp
 /// capture a test's source line *before* the form expands.
 fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     match heap.form_pos(arg(args, 0)) {
-        Some(p) => Ok(heap.alloc_vector(vec![Value::Int(p.line as i64), Value::Int(p.col as i64)])),
-        None => Ok(Value::Nil),
+        Some(p) => Ok(heap.alloc_vector(vec![Value::int(p.line as i64), Value::int(p.col as i64)])),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -8425,11 +8425,11 @@ fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
             let file = heap.alloc_string(&loc.file);
             Ok(heap.alloc_vector(vec![
                 file,
-                Value::Int(loc.pos.line as i64),
-                Value::Int(loc.pos.col as i64),
+                Value::int(loc.pos.line as i64),
+                Value::int(loc.pos.col as i64),
             ]))
         }
-        None => Ok(Value::Nil),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -8461,7 +8461,7 @@ fn references_in_source(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispRes
         .into_iter()
         .map(|span| {
             let (line, col) = line_col(&src, &starts, span.start as usize);
-            heap.alloc_vector(vec![Value::Int(line as i64), Value::Int(col as i64)])
+            heap.alloc_vector(vec![Value::int(line as i64), Value::int(col as i64)])
         })
         .collect();
     Ok(heap.list(occ))
@@ -8486,7 +8486,7 @@ fn line_col(src: &str, starts: &[usize], b: usize) -> (u32, u32) {
 fn current_file(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     match heap.current_file().map(str::to_string) {
         Some(f) => Ok(heap.alloc_string(&f)),
-        None => Ok(Value::Nil),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -8508,7 +8508,7 @@ fn doc(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     };
     match text {
         Some(s) => Ok(heap.alloc_string(&s)),
-        None => Ok(Value::Nil),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -8524,12 +8524,12 @@ fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
         Value::Native(id) => {
             let params = heap.native(id).params;
             if params.is_empty() {
-                return Ok(Value::Nil);
+                return Ok(Value::nil());
             }
             let items: Vec<Value> = params.iter().map(|p| value::sym(p)).collect();
             return Ok(heap.list(items));
         }
-        _ => return Ok(Value::Nil),
+        _ => return Ok(Value::nil()),
     };
     // Copy the parts out before re-borrowing the heap mutably to build the list.
     // For a multi-arity closure there's no single arglist; show the last clause
@@ -8550,7 +8550,7 @@ fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     }
     if let Some(r) = rest {
         items.push(value::sym("&"));
-        items.push(Value::Sym(r));
+        items.push(Value::symbol(r));
     }
     Ok(heap.list(items))
 }
@@ -8631,7 +8631,7 @@ fn global_names(_args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
 /// reaches the global table). Takes a symbol, so quote it: `(bound? 'foo)`.
 fn bound_p(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Sym(s) => Ok(Value::Bool(heap.env_get(env, s).is_some())),
+        Value::Sym(s) => Ok(Value::boolean(heap.env_get(env, s).is_some())),
         other => Err(LispError::wrong_type(heap, "bound?", "symbol", other)),
     }
 }
@@ -8654,7 +8654,7 @@ fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// plain Brood over a one-line primitive rather than its own core special form.
 fn make_macro(args: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
-        Value::Fn(id) => Ok(Value::Macro(id)),
+        Value::Fn(id) => Ok(Value::macro_(id)),
         other => Err(LispError::type_err(format!(
             "%make-macro: expected a fn, got {}",
             value::tag(other).name()
@@ -8689,8 +8689,8 @@ fn blob_ptr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Str(id) => Ok(heap
             .local_shared_blob_ptr(id)
-            .map(|p| Value::Int(p as i64))
-            .unwrap_or(Value::Nil)),
+            .map(|p| Value::int(p as i64))
+            .unwrap_or(Value::nil())),
         other => Err(LispError::type_err(format!(
             "%blob-ptr: expected a string, got {}",
             value::tag(other).name()
@@ -8707,8 +8707,8 @@ fn blob_strong_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Str(id) => Ok(heap
             .local_shared_blob_strong_count(id)
-            .map(|n| Value::Int(n as i64))
-            .unwrap_or(Value::Nil)),
+            .map(|n| Value::int(n as i64))
+            .unwrap_or(Value::nil())),
         other => Err(LispError::type_err(format!(
             "%blob-strong-count: expected a string, got {}",
             value::tag(other).name()
@@ -8773,7 +8773,7 @@ fn spawn_named(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 fn send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     crate::process::send(heap, arg(args, 0), arg(args, 1))?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(exit pid reason)` — send an exit signal to a local green process (Erlang
@@ -8785,13 +8785,13 @@ fn exit_proc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             crate::process::exit(id, reason);
-            Ok(Value::Nil)
+            Ok(Value::nil())
         }
         // Cross-node exit (ADR-077): ship a non-link `Frame::Exit` routed to the
         // peer's `scheduler::exit` (kill-style, like the local path).
         Value::Pid { node, id } => {
             crate::dist::exit_remote(node, id, reason);
-            Ok(Value::Nil)
+            Ok(Value::nil())
         }
         _ => Err(LispError::type_err("exit: first argument must be a pid")),
     }
@@ -8804,11 +8804,11 @@ fn link_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             crate::process::link_self(id);
-            Ok(Value::Nil)
+            Ok(Value::nil())
         }
         Value::Pid { node, id } => {
             crate::dist::link_remote(node, id, crate::process::self_pid());
-            Ok(Value::Nil)
+            Ok(Value::nil())
         }
         _ => Err(LispError::type_err("link: argument must be a pid")),
     }
@@ -8820,11 +8820,11 @@ fn unlink_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             crate::process::unlink_self(id);
-            Ok(Value::Nil)
+            Ok(Value::nil())
         }
         Value::Pid { node, id } => {
             crate::dist::unlink_remote(node, id, crate::process::self_pid());
-            Ok(Value::Nil)
+            Ok(Value::nil())
         }
         _ => Err(LispError::type_err("unlink: argument must be a pid")),
     }
@@ -8835,7 +8835,7 @@ fn unlink_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 fn trap_exit_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     let on = !matches!(arg(args, 0), Value::Nil | Value::Bool(false));
     let prev = crate::process::set_trap_exit(crate::process::self_pid(), on);
-    Ok(Value::Bool(prev))
+    Ok(Value::boolean(prev))
 }
 
 /// `(monitor pid)` — watch `pid`; returns a monitor `ref`. The caller receives
@@ -8856,7 +8856,7 @@ fn monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             let mref = crate::process::next_ref();
             let watcher = crate::process::self_pid();
             crate::dist::monitor_remote(node, id, watcher, mref);
-            Ok(Value::Ref(mref))
+            Ok(Value::ref_(mref))
         }
         // `{:name n :node node}` address: resolve to a pid via `whereis` and
         // monitor that pid. Only the local-node case is supported — a remote
@@ -8901,7 +8901,7 @@ fn demonitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
             // local demonitor used is reused on the far side via the frame
             // handler.
             crate::process::demonitor_remote_fanout(n);
-            Ok(Value::Nil)
+            Ok(Value::nil())
         }
         _ => Err(LispError::type_err(
             "demonitor: argument must be a monitor ref",
@@ -8922,7 +8922,7 @@ fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// `(ref)` — a fresh, globally-unique reference token. Shares the runtime's ref
 /// counter with `(monitor …)` so every ref is distinct.
 fn make_ref(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Ref(crate::process::next_ref()))
+    Ok(Value::ref_(crate::process::next_ref()))
 }
 
 // ----- distributed nodes -----------------------------------------------------
@@ -8951,7 +8951,7 @@ fn node_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("node-start: {e}"))
             .with_code(crate::error::error_codes::DISTRIBUTION)
     })?;
-    Ok(Value::Keyword(name))
+    Ok(Value::keyword(name))
 }
 
 /// `(%node-also-listen addr)` — add another listener to an already-started node
@@ -8963,7 +8963,7 @@ fn node_also_listen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("node-also-listen: {e}"))
             .with_code(crate::error::error_codes::DISTRIBUTION)
     })?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(%node-connect peer addr)` — the dial mechanism behind the prelude's
@@ -8976,7 +8976,7 @@ fn node_connect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         LispError::runtime(format!("connect: {e}"))
             .with_code(crate::error::error_codes::DISTRIBUTION)
     })?;
-    Ok(Value::Keyword(real))
+    Ok(Value::keyword(real))
 }
 
 /// `(random-token n)` — `n` cryptographically-strong random bytes from the OS
@@ -9026,7 +9026,7 @@ fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // `.mode` only applies on *create*; enforce 0600 on a pre-existing file too.
     let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
     f.write_all(content.as_bytes()).map_err(err)?;
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(register name pid)` — bind a local name so peers can address this process by
@@ -9036,7 +9036,7 @@ fn register_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 1) {
         Value::Pid { node, id } if crate::dist::is_local(node) => {
             crate::dist::register(name, id);
-            Ok(Value::Pid { node, id })
+            Ok(Value::pid(node, id))
         }
         Value::Pid { .. } => Err(LispError::type_err(
             "register: can only register a local pid",
@@ -9049,7 +9049,7 @@ fn register_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 /// `(node-name)` — this runtime's node name (`:nonode` until `node-start`).
 fn node_name(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Keyword(crate::dist::local_node()))
+    Ok(Value::keyword(crate::dist::local_node()))
 }
 
 /// `(whereis name)` — the **local** pid registered under `name`, or `nil`.
@@ -9060,11 +9060,8 @@ fn node_name(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 fn whereis_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "whereis", arg(args, 0))?;
     match crate::dist::whereis(name) {
-        Some(id) => Ok(Value::Pid {
-            node: crate::dist::local_node(),
-            id,
-        }),
-        None => Ok(Value::Nil),
+        Some(id) => Ok(Value::pid(crate::dist::local_node(), id)),
+        None => Ok(Value::nil()),
     }
 }
 
@@ -9073,7 +9070,7 @@ fn whereis_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn monitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "monitor-node", arg(args, 0))?;
     crate::dist::monitor_node(name, crate::process::self_pid());
-    Ok(Value::Keyword(name))
+    Ok(Value::keyword(name))
 }
 
 /// `(demonitor-node name)` — cancel the calling process's node monitor for `name`.
@@ -9081,14 +9078,14 @@ fn monitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn demonitor_node(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "demonitor-node", arg(args, 0))?;
     crate::dist::demonitor_node(name, crate::process::self_pid());
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(disconnect name)` — drop the link to peer `name` now (Erlang's
 /// `disconnect_node`). Returns `true` if a link existed, `false` otherwise.
 fn disconnect(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let name = expect_node_name(heap, "disconnect", arg(args, 0))?;
-    Ok(Value::Bool(crate::dist::disconnect(name)))
+    Ok(Value::boolean(crate::dist::disconnect(name)))
 }
 
 /// `(nodes)` — a list of currently connected peer node names.
@@ -9103,26 +9100,26 @@ fn nodes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(spawn-count)` — how many green processes have been spawned since the program
 /// started. (Green processes are cheap coroutines, not OS threads — step 4b.)
 fn spawn_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::process::spawn_count() as i64))
+    Ok(Value::int(crate::process::spawn_count() as i64))
 }
 
 /// `(peak-threads)` — high-water mark of processes running *simultaneously*
 /// (bounded by the worker-pool size); how much parallelism was actually reached.
 fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::process::peak_threads() as i64))
+    Ok(Value::int(crate::process::peak_threads() as i64))
 }
 
 /// `(worker-threads)` — size of the scheduler's worker-thread pool that runs the
 /// green processes (≈ `nproc`, or the `-j` setting); 0 until the first spawn.
 fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::process::worker_threads() as i64))
+    Ok(Value::int(crate::process::worker_threads() as i64))
 }
 
 /// `(steal-count)` — how many fresh processes the scheduler work-stole across
 /// worker threads since program start. A diagnostic of how much the pool had to
 /// rebalance; 0 means placement-at-spawn kept it even.
 fn steal_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Int(crate::process::steal_count() as i64))
+    Ok(Value::int(crate::process::steal_count() as i64))
 }
 
 /// `(list-processes)` — every currently-live local pid as a `Pid` value
@@ -9254,7 +9251,7 @@ fn try_catch(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 fn declare_dynamic(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let sym = expect_symbol(heap, "%declare-dynamic", arg(args, 0))?;
     value::mark_dynamic(sym);
-    Ok(Value::Sym(sym))
+    Ok(Value::symbol(sym))
 }
 
 /// `(%in-ns 'foo)` — set the namespace being compiled into (ADR-065). Emitted by
@@ -9263,13 +9260,13 @@ fn declare_dynamic(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn in_ns(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let sym = expect_symbol(heap, "%in-ns", arg(args, 0))?;
     heap.set_compile_ns(Some(sym));
-    Ok(Value::Sym(sym))
+    Ok(Value::symbol(sym))
 }
 
 /// `(current-ns)` — the namespace currently being compiled into (a symbol), or
 /// `nil` at root. Reflection + a handle for tests (ADR-065).
 fn current_ns(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    Ok(heap.compile_ns().map(Value::Sym).unwrap_or(Value::Nil))
+    Ok(heap.compile_ns().map(Value::Sym).unwrap_or(Value::nil()))
 }
 
 /// `(%refer 'mod subset)` — add `(:use …)` imports to the current file's import
@@ -9306,7 +9303,7 @@ fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             }
         }
     }
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(%alias module short)` — register a module alias (Elixir-style): a later
@@ -9330,13 +9327,13 @@ fn alias(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         }
     }
     heap.add_import(key, module);
-    Ok(Value::Nil)
+    Ok(Value::nil())
 }
 
 /// `(dynamic? x)` — true when `x` is a symbol declared dynamic with `defdyn`.
 /// A non-symbol is simply not dynamic (no error), so it composes in predicates.
 fn dynamic_p(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::Bool(
+    Ok(Value::boolean(
         matches!(arg(args, 0), Value::Sym(s) if value::is_dynamic(s)),
     ))
 }
@@ -9390,10 +9387,10 @@ mod gui_face_tests {
         let mono = value::intern("mono");
         let face = heap.map_from_pairs(vec![
             (value::kw("fg"), value::kw("red")),
-            (value::kw("bold"), Value::Bool(true)),
-            (value::kw("italic"), Value::Bool(true)),
-            (value::kw("underline"), Value::Bool(true)),
-            (value::kw("family"), Value::Keyword(mono)),
+            (value::kw("bold"), Value::boolean(true)),
+            (value::kw("italic"), Value::boolean(true)),
+            (value::kw("underline"), Value::boolean(true)),
+            (value::kw("family"), Value::keyword(mono)),
         ]);
         let f = gui_face(&heap, face);
         assert_eq!(f.fg, Some([0xcd, 0x31, 0x31]));
@@ -9418,7 +9415,7 @@ mod gui_face_tests {
     #[test]
     fn fg_accepts_rgb_vector_and_hex_string() {
         let mut heap = Heap::new();
-        let triple = heap.alloc_vector(vec![Value::Int(0x28), Value::Int(0x2c), Value::Int(0x34)]);
+        let triple = heap.alloc_vector(vec![Value::int(0x28), Value::int(0x2c), Value::int(0x34)]);
         let by_vec = heap.map_from_pairs(vec![(value::kw("fg"), triple)]);
         assert_eq!(gui_face(&heap, by_vec).fg, Some([0x28, 0x2c, 0x34]));
 
@@ -9455,13 +9452,13 @@ mod color_value_tests {
         // a palette keyword still resolves via the shared path
         assert_eq!(face_rgb(&heap, value::kw("red")), Some([0xcd, 0x31, 0x31]));
         // an explicit vector, clamped to 0..255
-        let v = heap.alloc_vector(vec![Value::Int(300), Value::Int(-5), Value::Int(128)]);
+        let v = heap.alloc_vector(vec![Value::int(300), Value::int(-5), Value::int(128)]);
         assert_eq!(face_rgb(&heap, v), Some([255, 0, 128]));
         // a hex string
         let s = heap.alloc_string("#282c34");
         assert_eq!(face_rgb(&heap, s), Some([0x28, 0x2c, 0x34]));
         // anything else is the default face
-        assert_eq!(face_rgb(&heap, Value::Int(7)), None);
+        assert_eq!(face_rgb(&heap, Value::int(7)), None);
     }
 }
 
