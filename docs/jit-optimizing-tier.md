@@ -263,6 +263,25 @@ the target is `jit_dispatch_call` + `brood_rt_call_slow` dropping out of the pro
 
 ---
 
+## Technique A — increment 1: SHIPPED 2026-06-18 (behind `BROOD_JIT_ICALL`)
+
+**Status: done and gated.** Implemented exactly as the spec below, opt-in via `BROOD_JIT_ICALL`
+(default-on once it bakes). The flat `#[repr(C)]` side table is `Heap::vm_fast_links`
+(`FastLink { epoch, code:u64, nslots, _pad, env }` — `code` as a `u64`, not `*const u8`, to keep the
+table `Send`/`Sync`); base+len via `Heap::vm_fast_links_base` (borrow-free `RefCell::as_ptr`); the two
+callbacks are `brood_rt_fastlink_base` / `brood_rt_fast_frame`. The hot-path body is shared with
+`jit_dispatch_call` through the extracted `jit_run_fast_link` helper (no desync); `jit_dispatch_fast_frame`
+debug-asserts the flat-table read equals the authoritative `vm_call_ic_fast_link` on every hit.
+**Result: fib(35) ≈20% faster** (0.38s→0.31s, clean `--release`). Gate green: `tests/jit.rs` 28/28
+JIT≡VM (ICALL on+off, `-C debug-assertions=on`), `differential` both ways, `nest test` 2161/2161 both
+ways, GC-stress+verify correct. See devlog 2026-06-18 (the Technique A increment-1 entry).
+
+**Next = increment 2** (the open item below): move the frame setup + `call_indirect` fully into IR
+(pre-reserve `roots` capacity so the nil-fill is branchless, no realloc), removing `brood_rt_fast_frame`
+— the last FFI crossing on the hot path.
+
+The original spec, as implemented:
+
 ## Technique A — increment 1 implementation spec (2026-06-18, code-grounded)
 
 Begun by reading the real code (`jit_dispatch_call` compile.rs:7540, the `Inst::Call` lowering

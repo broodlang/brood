@@ -23,7 +23,7 @@
 //! scalars in registers with no stack map — the single hardest part of JIT-ing under a
 //! moving collector, sidestepped (ADR-101 §6.2).
 
-use crate::core::heap::Heap;
+use crate::core::heap::{FastLink, Heap};
 
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::default_libcall_names;
@@ -87,6 +87,8 @@ impl Jit {
         builder.symbol("brood_rt_global", brood_rt_global as *const u8);
         builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
+        builder.symbol("brood_rt_fastlink_base", brood_rt_fastlink_base as *const u8);
+        builder.symbol("brood_rt_fast_frame", brood_rt_fast_frame as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
@@ -487,5 +489,62 @@ pub unsafe extern "C" fn brood_rt_call_slow(
             0
         }
         None => 1,
+    }
+}
+
+/// Base pointer + length of the IR-readable [`FastLink`] mirror (Track B / Technique A).
+/// The JIT loads this at a call site, bounds-checks `site < *out_len`, then reads the
+/// slot's `(epoch, code, nslots, env)` with raw loads — replacing the IC probe +
+/// `RefCell` borrow [`brood_rt_call_slow`] pays. Re-fetched after each Brood→Brood call
+/// (like [`brood_rt_roots_base`]), since a cold nested call may grow + realloc the table.
+///
+/// # Safety
+/// `heap`/`out_len` must be live; the returned pointer is valid until the table next grows.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_fastlink_base(heap: *mut Heap, out_len: *mut u64) -> *const FastLink {
+    let (base, len) = (*heap).vm_fast_links_base();
+    *out_len = len as u64;
+    base
+}
+
+/// Run a JIT'd arm's **non-tail** free-global call via the in-IR fast-link path: the IR has
+/// validated the call site's flat-table entry (`site < len` && epoch-current) and read
+/// `(nslots, code, env)` from it; this sets up the callee frame and runs it, writing the
+/// result to `*out`. Returns the status the IR branches on: `0` = done, `1` = error
+/// (parked for the arm to propagate), `2` = could-not-fast-link (over the native-recursion
+/// cap, or the IC moved) — the IR falls to [`brood_rt_call_slow`] with the args left
+/// staged. See [`crate::eval::compile::jit_dispatch_fast_frame`].
+///
+/// # Safety
+/// `heap`/`out` must be live; the `argc` args are staged on `roots`; `code` is the native
+/// entry pointer the IR read from the (epoch-validated) flat table.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn brood_rt_fast_frame(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    site: u32,
+    head: u32,
+    argc: u32,
+    nslots: u32,
+    code: u64,
+    env: u64,
+) -> i64 {
+    use crate::eval::compile::FastLinkOutcome;
+    match crate::eval::compile::jit_dispatch_fast_frame(
+        &mut *heap,
+        site,
+        head,
+        argc as usize,
+        nslots as usize,
+        code as usize,
+        env,
+    ) {
+        FastLinkOutcome::Done(v) => {
+            *out = v;
+            0
+        }
+        FastLinkOutcome::Error => 1,
+        FastLinkOutcome::Fallthrough => 2,
     }
 }

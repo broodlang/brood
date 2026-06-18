@@ -3896,3 +3896,43 @@ share). Technique B (true inlining / bounded unroll) layers on after A.
 The heap gap (bintree/nqueens 39–187×) is a separate, later layer: tiering the structure-walkers
 *and* making their heap reads inline (`brood_rt_vector_base`-style `ptr+idx*STRIDE`, already proven
 for the hoisted case) rather than per-op FFI — only then does JITing them beat the VM.
+
+## 2026-06-18 — Track B / Technique A increment 1: in-IR epoch-guarded call fast-link (shipped, ~20% on fib)
+
+Implemented the first slice of Technique A behind **`BROOD_JIT_ICALL`** (opt-in until it bakes,
+then default-on). A JIT'd arm's **non-tail free-global call** now resolves its callee straight from
+JIT'd code instead of always trampolining out through `brood_rt_call_slow` + the per-call IC probe.
+
+- **Flat IR-readable mirror.** The call IC (`vm_call_ics: RefCell<Vec<Option<CallIcEntry>>>`, with a
+  `Cell` fast memo) is *not* safe to read from Cranelift IR (RefCell borrow flag, `Option`/`Vec`
+  niche, `Cell`). Added a parallel `#[repr(C)]` side table `vm_fast_links: RefCell<Vec<FastLink>>`
+  (`{ epoch:u64, code:u64, nslots:u32, _pad, env:u64 }`, `code` as a `u64` not a `*const u8` so the
+  table stays `Send`/`Sync` for a migrating process). Written in lockstep with the `Cell` memo in
+  `vm_call_ic_fast_link`, grown by `vm_site_alloc`, cleared with `vm_call_ics` in `runtime_collect`,
+  zeroed on `vm_call_ic_put`. Borrow-free base+len read via `RefCell::as_ptr` (`vm_fast_links_base`).
+- **Two callbacks** (`jit/mod.rs`): `brood_rt_fastlink_base(heap, *out_len) -> *const FastLink` and
+  `brood_rt_fast_frame(heap, out, site, head, argc, nslots, code, env) -> status`.
+- **Codegen** (non-tail elided `Inst::Call`): load base+len (re-fetched per call like `roots_base`),
+  bounds-check `site < len`, load the slot's `epoch`, `brif epoch == global_epoch` → **hit** /
+  **miss**. Hit: read `(code, nslots, env)` and call `brood_rt_fast_frame` (status 0=done → result,
+  1=error, 2=could-not-link → fall to the miss path). Miss: the unchanged `brood_rt_call_slow`. The
+  epoch guard alone covers `def`/hot-reload/compaction and site-recycling (a stale/recycled slot has
+  an old epoch → misses); the bounds-check covers a live arm whose site id outran a post-collect
+  re-grow.
+- **Increment 1 keeps one FFI on the hit path** (`brood_rt_fast_frame`, which still does the frame
+  setup + `call_indirect` internally): it removes the IC probe + `RefCell` borrow (the measured cost),
+  deferring in-IR frame management + the `roots`-realloc-free nil-fill to **increment 2**. The
+  fast-frame body is shared with `jit_dispatch_call` via the extracted `jit_run_fast_link` helper, so
+  the two can't desync; `jit_dispatch_fast_frame` debug-asserts the flat-table values equal the
+  authoritative `vm_call_ic_fast_link` on every hit (armed in the gate).
+- **Result.** A/B fib(35), clean `--release` (`9227465` both ways): **0.38s → 0.31s, ≈20% wall-clock**
+  (the compute share larger, since startup is fixed). Gate green: `tests/jit.rs` 28/28 JIT≡VM with
+  `BROOD_JIT_ICALL` **on and off** under `-C debug-assertions=on` (added warmed-fib, non-tail
+  mutual-recursion, and redefine-a-fast-linked-callee cases); `differential` both ways; `nest test`
+  2161/2161 both ways; fib/mutual/redefine correct under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. (Full
+  nextest under debug-assertions: 452/453 — the lone miss is `inlined_two_stage_swap_then_deopt`
+  exceeding nextest's 120s per-test cap, which *passed* in the non-capped `cargo test` runs and
+  returns `832040` standalone; a cap artifact, not a regression.)
+
+**Next = increment 2:** move the frame setup + `call_indirect` fully into IR (pre-reserve `roots`
+capacity so the nil-fill is branchless, no realloc), removing the last FFI crossing on the hot path.
