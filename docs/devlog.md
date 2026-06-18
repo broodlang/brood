@@ -3856,3 +3856,43 @@ Stage 0's accessor layer stays on main (perf-neutral, cleaner construction surfa
 swap it prepared is cancelled. **Redirect to the dispatch lever** — the shipped self-inliner already gives ~1.8× on
 fib/pfib by removing calls; that (safe inlining of heap-touching recursion, call-site IC, tiering)
 is where Brood closes the gap to the BEAM. See `docs/value-representation.md` for the full verdict.
+
+---
+
+## 2026-06-18 — Track B kickoff: kill the per-call JIT dispatch protocol (Technique A)
+
+After the Eq-fix Track-A win (`12779f8`) and confirming Track A's cheap wins are measured-dry
+(dispatch probe load-bearing, env_get/push_frame tight, prim2_fallback 0 suite-wide), the remaining
+gap to Elixir is structural. Re-measured today with **properly-built `--bin brood`** binaries
+(after the stale-bin correction, see CLAUDE.md):
+
+- **Elixir gap (true compute):** startup 5.3× *faster*; mandelbrot ~tie; arithmetic 3–5× behind
+  (fib 3.9×, primes/collatz 5.2×); matmul/sort ~2.8×; **bintree 39×, nqueens 187×**.
+- **Why (profiled, fresh bins):** two structural causes.
+  1. **JIT'd arithmetic (fib): per-call dispatch protocol.** `jit_dispatch_call` is **40.9%** of
+     fib(35) — the FFI boundary (`brood_rt_push` ×argc + `brood_rt_call_slow` + `brood_rt_roots_base`)
+     + Rust-side dispatch, even on the fast native-linked path. The compiled body is ~16%. This is
+     the 3–5× arithmetic gap, and it's exactly the frontier `docs/jit-optimizing-tier.md` scoped.
+  2. **Heap-heavy code (bintree/nqueens): doesn't beat the VM.** `check`/`safe?` are structure-walkers
+     the benefit gate bails (verified relaxing it is neutral — JIT `nth`/`first`/`rest` go through
+     `brood_rt_*` FFI, no faster than the VM's inline ops); `solve` is higher-order (never tiers).
+
+**Track B = `docs/jit-optimizing-tier.md`, validated.** First slice: **Technique A** — emit the
+call-site inline-cache + `call_indirect` to the callee's native entry **in Cranelift IR inside the
+arm**, instead of trampolining out through `brood_rt_call_slow`. Removes the FFI boundaries + Rust
+dispatch for the hot monomorphic epoch-current case (~100% of fib/spawn calls); keeps the call
+(works for recursion, no unrolling). Hard parts already handled (the per-arm `compile_epoch` guard
+covers deopt/hot-reload; GC discipline is the existing handle-spill; native code is
+position-independent per `eebfbd3`).
+
+**First testable increment:** a non-tail self-call to a known global (fib's `(fib (- n 1))` — a
+monomorphic, epoch-current `Inst::Call`). Emit in IR: load the call site's cached
+`(callee_code_ptr, epoch)`; guard `epoch == global_epoch && ptr == cached`; on hit, lay args into the
+callee frame + `call_indirect` the native entry; on miss, branch to the existing `brood_rt_call_slow`
+slow path. Gate: `tests/jit.rs` differential JIT≡VM (warmed) under `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1`, then A/B fib vs the current bin (target: collapse the 40.9% `jit_dispatch_call`
+share). Technique B (true inlining / bounded unroll) layers on after A.
+
+The heap gap (bintree/nqueens 39–187×) is a separate, later layer: tiering the structure-walkers
+*and* making their heap reads inline (`brood_rt_vector_base`-style `ptr+idx*STRIDE`, already proven
+for the hoisted case) rather than per-op FFI — only then does JITing them beat the VM.
