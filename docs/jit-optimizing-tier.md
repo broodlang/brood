@@ -260,3 +260,48 @@ the target is `jit_dispatch_call` + `brood_rt_call_slow` dropping out of the pro
 - `crates/lisp/src/core/heap.rs` — `RuntimeCode::jit_code_cache` (shared callee code ptrs),
   `global_epoch` (= `runtime.version`, the free deopt guard), `roots` layout (frame setup).
 - Background: `docs/jit-tier2.md`, `docs/jit-stage1.md`, `docs/decisions.md` (ADR-101).
+
+---
+
+## Technique A — increment 1 implementation spec (2026-06-18, code-grounded)
+
+Begun by reading the real code (`jit_dispatch_call` compile.rs:7540, the `Inst::Call` lowering
+~6700, `vm_call_ic_fast_link` + `CallIcEntry` heap.rs). Confirmed frontier with fresh `--bin`
+numbers: `jit_dispatch_call` = **40.9% of fib(35)**. The cost is the Rust dispatch itself (IC probe +
+frame setup + env/depth bookkeeping + the native call + outcome), not the FFI arg-staging (fib stages
+1 arg). So the win requires emitting the **fast-link in IR** with a direct `call_indirect`.
+
+**Critical constraint found:** the IC (`vm_call_ics: RefCell<Vec<Option<CallIcEntry>>>`, with a
+`fast: Cell<Option<(usize,usize,EnvId)>>` memo) is **not safely readable from Cranelift IR** — RefCell
+borrow flag, `Vec`/`Option` niche, `Cell`. So increment 1 must add an **IR-readable flat side table**.
+
+**Increment 1 (the first testable slice — all-or-nothing for the fast-link path):**
+1. **Flat fast-link table** on `Heap`: `Vec<FastLink>` indexed by call-site id, `#[repr(C)]`
+   `struct FastLink { epoch: u64, code: *const u8, nslots: u32, _pad: u32, env: u64 }`. Populate it in
+   `vm_call_ic_fast_link`'s memoise step (mirror of `e.fast`); zero/invalidate it everywhere
+   `vm_call_ics` is cleared (`runtime_collect`) and on `vm_call_ic_put` (epoch bump). A debug-assert
+   cross-checks it against the `Cell` memo so a desync is caught in the gate.
+2. **`brood_rt_fastlink_base(heap) -> *const FastLink`** callback (+ register), so IR can load the
+   table base once at arm entry (like `brood_rt_roots_base`).
+3. **Codegen** in the non-tail elided `Inst::Call` arm (replacing the `callslow_ref` call on the hot
+   path): load `slot = base + site*sizeof(FastLink)`; load `epoch`; `brif epoch == global_epoch` (the
+   JIT already loads `global_epoch` for the hot-reload guard) → hit block / miss block.
+   - **miss block:** the existing `brood_rt_call_slow` path (unchanged) — covers cold, redefined,
+     polymorphic, over-depth.
+   - **hit block:** frame setup is the open question — `extend_roots_to_nil(stage_base+nslots)` may
+     realloc `roots`. Decision for increment 1: keep frame setup + env-save/depth-bump + outcome as
+     **one lean FFI** `brood_rt_fast_frame(heap, stage_base, argc, nslots, env, code) -> status` that
+     does exactly the fast-link body (no IC probe — already done in IR) and `call_indirect`s `code`
+     internally; the IR reads the result from `out_slot` and re-fetches `roots_base`. This removes the
+     **IC probe + RefCell borrow** from the Rust hot path (the measured cost) while deferring the
+     in-IR frame management (roots realloc) to increment 2. Re-profile: target the 40.9% dropping.
+   - increment 2: move the frame setup + `call_indirect` fully into IR (pre-reserve `roots` capacity
+     so the nil-fill is branchless, no realloc), removing the last FFI crossing.
+
+**Gating (non-negotiable, per jit-tier2.md §7):** `tests/jit.rs` JIT≡VM (add a warmed fib + a
+2-call-recursion case) under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; `differential`; `nest test`
+2161; then A/B fib vs the current `--bin brood`. Behind `BROOD_JIT_ICALL` until green, then default-on.
+
+**Risk note:** this is dispatch-critical codegen (a desync or bad guard = silent wrong answer). It is
+the single riskiest change in the runtime and must be implemented incrementally with the full gate
+run per step — a focused effort, not a tail-of-session burst.
