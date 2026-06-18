@@ -2523,6 +2523,24 @@ fn prim2_inline_exec(
         }
         // Int overflow, Div, or Cons with Int operands → fall through to prim_apply.
     }
+    // Interned-immediate `=` fast path: `(%eq (type-of x) :kw)` is the single most
+    // common non-int comparison in Brood — every type predicate (`empty?`/`nil?`/
+    // `cond`/…) runs it, and `type-of` yields a `Keyword`. Comparing two keywords
+    // (or two symbols) is interned-id equality, exactly what `heap.equal` returns
+    // for them, with no heap touch and no native call. Without this, each one missed
+    // both `prim2_int_fast` and `prim_apply` (numeric-only) and took the full
+    // `prim2_dispatch_rooted` slow path (measured: 28% of nqueens' prim2 ops).
+    if op == PrimOp::Eq {
+        let eq = match (x.unpack(), y.unpack()) {
+            (ValueRef::Keyword(a), ValueRef::Keyword(b)) => Some(a == b),
+            (ValueRef::Sym(a), ValueRef::Sym(b)) => Some(a == b),
+            _ => None,
+        };
+        if let Some(r) = eq {
+            crate::perf_bump!(prim2_inline);
+            return Ok(Some(Value::boolean(r)));
+        }
+    }
     // Float, BigInt, overflow, Cons, Div, VectorRef — the cold, type-coercing
     // path (not inlined, so it stays out of exec_chunk's instruction footprint).
     match prim_apply(op, x, y)? {
