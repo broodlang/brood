@@ -3768,3 +3768,45 @@ inliner inlines ONLY pure-arithmetic/control recursion. bintree restored to ~0.4
 allocation-bound with no cheap lever (mimalloc makes the allocs cheap; inline-small-vectors was
 neutral; FBIP is high-risk). Gates green: jit 25/25 + differential 2/2 + gc 11/11 under
 STRESS+VERIFY, full suite 2161/0, both build configs clean.
+
+---
+
+## 2026-06-18 — 8-byte Value rep: Stage 0 complete (accessor-first migration)
+
+**Stage 0 is done.** The five-stage plan in `docs/value-representation.md` opens with an
+accessor-first migration: route every `Value::` construction/inspection across the tree through a
+thin accessor layer on `value.rs`, so that Stage 1 can swap the underlying representation (24B
+`#[repr(C,u8)]` enum → 8B BEAM-style tagged word) by editing mostly `value.rs` + the accessors
+rather than ~1300 call sites. The representation did NOT change in Stage 0 — `size_of::<Value>()`
+stayed 24 throughout, and every chunk was independently verified perf-flat.
+
+Chunks (each committed unsigned, each gated: both build configs clean/0-warning; `value_layout`
+size_of==24; JIT≡VM `differential` 2/0 under `BROOD_GC_STRESS`; `jit` 11/0 + `gc` 25/0 under
+`STRESS+VERIFY`; `nest test` 2161/2161):
+
+- **chunk 1** `85013ce` — accessor layer added to `value.rs` (`ValueRef`, constructors
+  `int/float/nil/boolean/symbol/keyword/pair/pid/ref_/socket/subprocess/table/func/...`,
+  accessors `tag/as_int/as_f64/as_pair/...`); migrated `heap.rs`, `printer.rs`.
+- **chunk 2** `60deed4` — `eval/{compile,macros,mod}.rs` (~392 sites). Hot-path A/B vs 85013ce
+  flat-to-faster (bintree −14.6%, fib −4.4%, collatz −2.7%, median-of-3 pinned).
+- **chunk 3** `33a2e62` — `builtins.rs`, the native primitive kernel (317 construction sites).
+- **chunk 4** `9ac4f05` — `types/` advisory checker (only 4 construction sites; the checker
+  overwhelmingly *inspects* via patterns, which stay on the direct enum).
+- **chunk 5** `f80c963` — `process/*` (incl. the `message.rs` from_message deep-copy, byte-equivalent
+  swaps) + tail (introspect/error/table/treesit/reader/lib).
+
+**What deliberately stays on the direct/raw enum** (it is NOT accessor surface): (a) every
+match/destructure *pattern* tree-wide — constructors are expressions, not patterns; (b) the hot
+arithmetic dispatch in `builtins.rs` (`num_bin`/`prim_lt/le/eq/quot/remainder/prim_div`, `expect!`
+arms), left for perf-flatness; (c) the JIT raw-word codegen in `eval/compile.rs`
+(`jit_layout`/`read_words`/`store_words`/`words_to_val`/`Op::Handle`/`TAG_*`) and the 6 `brood_rt_*`
+FFI callbacks in `jit/mod.rs` — that 24B/3-word layout is rewritten in **Stage 4**.
+
+**Next: Stage 1 — the rep swap, and the go/no-go.** This is the irreversible-ish core change and the
+gate the whole effort hinges on: 8B tagged word (≈60-bit fixnums + bignum overflow, repacked handles
+62→~60-bit, boxed floats, boxed Pid/Ref). The alloc-set A/B (champ_assoc, bintree make/check, list
+building) must beat the earlier 16B prototype's ~1.15× sub-bar, or we abandon the rep-shrink and fall
+back to FBIP. Open fork to settle first: the JIT hardcodes the 24B/3-word layout, so an 8B swap breaks
+it until Stage 4 — do the JIT 1-word rewrite first (rep-stable, no benchmark regression window), or
+swap the rep with the JIT gated to VM to get the go/no-go number fastest and accept a temporary JIT
+regression until Stage 4.
