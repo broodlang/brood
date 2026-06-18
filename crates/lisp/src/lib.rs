@@ -146,7 +146,7 @@ impl Interp {
         // before the next. The final form's result is kept for the caller.
         let cp = self.heap.checkpoint();
         let gc = self.heap.gc_enabled();
-        let mut result = Value::Nil;
+        let mut result = Value::nil();
         let n = forms.len();
         // GC-root the unevaluated forms across the per-form eval: at the
         // outermost-eval safepoint (`GC_BLOCK == 1`) the copying collector
@@ -218,7 +218,7 @@ impl Interp {
         let prev_imports = self.heap.set_imports(std::collections::HashMap::new());
         let cp = self.heap.checkpoint();
         let gc = self.heap.gc_enabled();
-        let mut result = Value::Nil;
+        let mut result = Value::nil();
         let n = forms.len();
         // GC-root the unevaluated forms across the loop (see `eval_str`); re-fetch
         // each form's relocated handle via `root_at` (positions are plain data in

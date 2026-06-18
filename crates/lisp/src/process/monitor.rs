@@ -157,7 +157,7 @@ pub fn monitor(target: u64) -> Value {
             mref,
         },
     );
-    Value::Ref(mref)
+    Value::ref_(mref)
 }
 
 /// The shared "register a watcher" core — used by the local `monitor` builtin

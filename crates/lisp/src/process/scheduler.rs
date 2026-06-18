@@ -1511,10 +1511,7 @@ pub fn in_green_process() -> bool {
 /// identity — what `self`/`spawn` hand back. The node part makes the pid routable
 /// off-node once the holder is on another runtime.
 pub fn pid_value(id: u64) -> Value {
-    Value::Pid {
-        node: crate::dist::local_node(),
-        id,
-    }
+    Value::pid(crate::dist::local_node(), id)
 }
 
 /// The current process's context. A green process has it installed by `run_one` each

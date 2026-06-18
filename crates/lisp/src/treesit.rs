@@ -90,14 +90,14 @@ fn byte_to_char_offsets(s: &str) -> Vec<u32> {
 /// present for fontify); a leaf carries `:text`.
 #[cfg(feature = "treesit")]
 fn node_to_positioned(heap: &mut Heap, node: tree_sitter::Node, src: &str, b2c: &[u32]) -> Value {
-    let kw = |k: &str| Value::Keyword(value::intern(k));
-    let start = Value::Int(b2c[node.start_byte()] as i64);
-    let end = Value::Int(b2c[node.end_byte()] as i64);
+    let kw = |k: &str| Value::keyword(value::intern(k));
+    let start = Value::int(b2c[node.start_byte()] as i64);
+    let end = Value::int(b2c[node.end_byte()] as i64);
     let mut pairs: Vec<(Value, Value)> = vec![
         (kw("kind"), kw(node.kind())),
         (kw("start"), start),
         (kw("end"), end),
-        (kw("named"), Value::Bool(node.is_named())),
+        (kw("named"), Value::boolean(node.is_named())),
     ];
     if node.child_count() == 0 {
         let text = heap.alloc_string(&src[node.start_byte()..node.end_byte()]);
@@ -120,7 +120,7 @@ fn node_to_positioned(heap: &mut Heap, node: tree_sitter::Node, src: &str, b2c: 
 /// calling it without the parser built in gives a clear rebuild hint.
 #[cfg(not(feature = "treesit"))]
 pub fn parse(_heap: &mut crate::core::heap::Heap, _src: &str, lang: &str) -> LispResult {
-    let _ = Value::Nil;
+    let _ = Value::nil();
     Err(LispError::runtime(format!(
         "tree-sitter-parse: :{lang}: this runtime was built without tree-sitter \
          (rebuild with --features treesit)"

@@ -344,26 +344,26 @@ impl LispError {
     /// payload (i.e. it's a built-in error). See `docs/llm-native.md` §4.
     pub fn to_value_map(&self, heap: &mut crate::core::heap::Heap) -> Value {
         use crate::core::value::{intern, Value};
-        let kind_kw = Value::Keyword(intern(self.kind.tag_name()));
+        let kind_kw = Value::keyword(intern(self.kind.tag_name()));
         let msg_str = heap.alloc_string(&self.message);
         let mut entries: Vec<(Value, Value)> = Vec::with_capacity(8);
-        entries.push((Value::Keyword(intern("kind")), kind_kw));
-        entries.push((Value::Keyword(intern("message")), msg_str));
+        entries.push((Value::keyword(intern("kind")), kind_kw));
+        entries.push((Value::keyword(intern("message")), msg_str));
         if let Some(code) = self.code {
             let code_str = heap.alloc_string(code);
-            entries.push((Value::Keyword(intern("code")), code_str));
+            entries.push((Value::keyword(intern("code")), code_str));
         }
         if let Some(file) = &self.file {
             let file_str = heap.alloc_string(file);
-            entries.push((Value::Keyword(intern("file")), file_str));
+            entries.push((Value::keyword(intern("file")), file_str));
         }
         if let Some(pos) = self.pos {
-            entries.push((Value::Keyword(intern("line")), Value::Int(pos.line as i64)));
-            entries.push((Value::Keyword(intern("col")), Value::Int(pos.col as i64)));
+            entries.push((Value::keyword(intern("line")), Value::int(pos.line as i64)));
+            entries.push((Value::keyword(intern("col")), Value::int(pos.col as i64)));
         }
         if let Some(hint) = &self.hint {
             let hint_str = heap.alloc_string(hint);
-            entries.push((Value::Keyword(intern("hint")), hint_str));
+            entries.push((Value::keyword(intern("hint")), hint_str));
         }
         heap.map_from_pairs(entries)
     }
