@@ -861,7 +861,7 @@ mod tests {
         // `nil`) becomes `None`.
         let mut heap = Heap::new();
         let file = heap.alloc_string("foo.blsp");
-        let ok = heap.alloc_vector(vec![file, Value::Int(10), Value::Int(3)]);
+        let ok = heap.alloc_vector(vec![file, Value::int(10), Value::int(3)]);
         assert_eq!(
             parse_source_location(&heap, ok),
             Some(SourceLoc {
@@ -870,8 +870,8 @@ mod tests {
                 col: 3
             })
         );
-        assert_eq!(parse_source_location(&heap, Value::Nil), None);
-        let too_short = heap.alloc_vector(vec![Value::Int(1)]);
+        assert_eq!(parse_source_location(&heap, Value::nil()), None);
+        let too_short = heap.alloc_vector(vec![Value::int(1)]);
         assert_eq!(parse_source_location(&heap, too_short), None);
     }
 

@@ -140,7 +140,7 @@ pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
         Some(i) => bucket[i].1 = vm,
         None => bucket.push((km, vm)),
     }
-    Ok(Value::Table(id))
+    Ok(Value::table(id))
 }
 
 /// `(table-get t k [default])` — a fresh copy of the value under `k`, or `default`.
@@ -184,7 +184,7 @@ pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
     if now_empty {
         data.remove(&hash);
     }
-    Ok(Value::Table(id))
+    Ok(Value::table(id))
 }
 
 /// `(table-incr t k [delta])` — **atomically** add `delta` (default 1) to the integer
@@ -224,7 +224,7 @@ pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
         Some(i) => bucket[i].1 = Message::Int(next),
         None => bucket.push((km, Message::Int(next))),
     }
-    Ok(Value::Int(next))
+    Ok(Value::int(next))
 }
 
 /// `(table-snapshot t)` — a consistent point-in-time copy of the whole table as an

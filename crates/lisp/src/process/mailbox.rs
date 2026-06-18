@@ -292,7 +292,7 @@ pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispEr
 pub(crate) fn read_name_address(heap: &Heap, mid: MapId) -> Result<(Symbol, Symbol), LispError> {
     let field = |key: &str| -> Result<Symbol, LispError> {
         let v = heap
-            .map_get(mid, Value::Keyword(value::intern(key)))
+            .map_get(mid, Value::keyword(value::intern(key)))
             .ok_or_else(|| LispError::type_err("send: name address needs :name and :node keys"))?;
         match v {
             Value::Keyword(s) | Value::Sym(s) => Ok(s),
@@ -730,7 +730,7 @@ mod tests {
         // Empty mailbox, no timeout: the scan finds nothing and the capture branch
         // returns the suspend signal. `matcher`/`on_timeout` are never applied (the
         // queue is empty), so plain `nil`s suffice.
-        let r = receive_match(&mut heap, Value::Nil, Value::Nil, Value::Nil);
+        let r = receive_match(&mut heap, Value::nil(), Value::nil(), Value::nil());
         crate::process::scheduler::set_capture_top_level(prev_top);
         crate::process::scheduler::set_capture_run(false);
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx

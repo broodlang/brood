@@ -407,20 +407,20 @@ fn local_lookup(heap: &Heap, env: EnvId, sym: Symbol) -> Option<Value> {
 /// Rebuild a message into `heap`.
 pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
     match m {
-        Message::Nil => Value::Nil,
-        Message::Bool(b) => Value::Bool(*b),
-        Message::Int(n) => Value::Int(*n),
+        Message::Nil => Value::nil(),
+        Message::Bool(b) => Value::boolean(*b),
+        Message::Int(n) => Value::int(*n),
         Message::BigInt(s) => match s.parse::<num_bigint::BigInt>() {
             // Normalize through `int_from_bigint` so a value that (against the
             // sender's invariant) fits i64 still demotes to `Int`.
             Ok(n) => heap.int_from_bigint(n),
             // A malformed decimal string can only come from a corrupt/forged
             // wire frame; fall back to 0 rather than panic the receiver.
-            Err(_) => Value::Int(0),
+            Err(_) => Value::int(0),
         },
-        Message::Float(f) => Value::Float(*f),
-        Message::Sym(s) => Value::Sym(*s),
-        Message::Keyword(s) => Value::Keyword(*s),
+        Message::Float(f) => Value::float(*f),
+        Message::Sym(s) => Value::symbol(*s),
+        Message::Keyword(s) => Value::keyword(*s),
         Message::Str(s) => heap.alloc_string(s),
         Message::StrShared(blob) => heap.alloc_string_from_shared(Arc::clone(blob)),
         Message::Bitset(blob) => heap.alloc_bitset(Arc::clone(blob)),
@@ -455,14 +455,11 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
             }
             heap.map_from_pairs(pairs)
         }
-        Message::Ref(n) => Value::Ref(*n),
-        Message::Pid { node, id } => Value::Pid {
-            node: *node,
-            id: *id,
-        },
-        Message::Socket(id) => Value::Socket(*id),
-        Message::Subprocess(id) => Value::Subprocess(*id),
-        Message::Table(id) => Value::Table(*id),
+        Message::Ref(n) => Value::ref_(*n),
+        Message::Pid { node, id } => Value::pid(*node, *id),
+        Message::Socket(id) => Value::socket(*id),
+        Message::Subprocess(id) => Value::subprocess(*id),
+        Message::Table(id) => Value::table(*id),
         Message::Closure(c) => closure_from_message(heap, c),
     }
 }
@@ -512,5 +509,5 @@ fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
         doc: c.doc.clone(),
         env,
     });
-    Value::Fn(id)
+    Value::func(id)
 }

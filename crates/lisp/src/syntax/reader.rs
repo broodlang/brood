@@ -218,7 +218,7 @@ impl<'a> Parser<'a> {
         let start = self.s.pos_at(self.s.pos()); // position of the opening delimiter
         self.s.bump(); // opening delimiter
         let mut items = Vec::new();
-        let mut tail = Value::Nil;
+        let mut tail = Value::nil();
         loop {
             self.s.skip_trivia();
             match self.s.peek() {
@@ -338,10 +338,10 @@ impl<'a> Parser<'a> {
         let token_start = self.s.pos();
         let token = self.s.read_atom();
         match atom::classify(token) {
-            AtomKind::Nil => Ok(Value::Nil),
-            AtomKind::Bool(b) => Ok(Value::Bool(b)),
-            AtomKind::Int(i) => Ok(Value::Int(i)),
-            AtomKind::Float(f) => Ok(Value::Float(f)),
+            AtomKind::Nil => Ok(Value::nil()),
+            AtomKind::Bool(b) => Ok(Value::boolean(b)),
+            AtomKind::Int(i) => Ok(Value::int(i)),
+            AtomKind::Float(f) => Ok(Value::float(f)),
             // `atom::classify` only returns `Keyword` for a non-empty `:`-prefixed
             // token, so dropping the `:` always leaves a non-empty name.
             AtomKind::Keyword => Ok(value::kw(&token[1..])),
