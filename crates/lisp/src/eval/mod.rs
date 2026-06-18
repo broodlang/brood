@@ -14,12 +14,12 @@ use smallvec::SmallVec;
 
 use crate::core::heap::{Heap, Root, SymbolMap};
 use crate::core::keywords as kw;
-use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value};
+use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value, ValueRef};
 use crate::error::{LispError, LispResult};
 
 /// Truthiness: only `nil` and `false` are falsy.
 pub fn truthy(v: Value) -> bool {
-    !matches!(v, Value::Nil | Value::Bool(false))
+    !matches!(v.unpack(), ValueRef::Nil | ValueRef::Bool(false))
 }
 
 /// Evaluate `form` and attach its source position to any error.
@@ -128,8 +128,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     }
 
     'tail: loop {
-        match expr {
-            Value::Sym(s) => {
+        match expr.unpack() {
+            ValueRef::Sym(s) => {
                 #[cfg(debug_assertions)]
                 heap.debug_walk_env_chain(env, s);
                 let expr_sym = expr;
@@ -138,7 +138,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     .ok_or_else(|| unbound_error(heap, s))
                     .map_err(|e| e.or_form_pos(heap, expr_sym));
             }
-            Value::Vector(id) => {
+            ValueRef::Vector(id) => {
                 // A vector literal evaluates each element. Those evals can collect
                 // at ANY depth (ADR-061), so keep both the unevaluated elements and
                 // the accumulated results on the operand stack across them.
@@ -158,7 +158,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     Ok(heap.alloc_vector(out))
                 });
             }
-            Value::Map(id) => {
+            ValueRef::Map(id) => {
                 // A map literal evaluates each key and value, then canonicalises
                 // (last-wins on equal keys). Like a vector literal, but in pairs —
                 // and likewise operand-stack-rooted so a deep collection during an
@@ -189,7 +189,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     Ok(heap.map_from_pairs(pairs))
                 });
             }
-            Value::Pair(_) => {} // combination, handled below
+            ValueRef::Pair(_) => {} // combination, handled below
             _ => return Ok(expr),
         }
 
@@ -266,19 +266,19 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             return Err(deadline_error().or_form_pos(heap, expr));
         }
 
-        let (head, rest) = match expr {
-            Value::Pair(p) => heap.pair(p),
+        let (head, rest) = match expr.unpack() {
+            ValueRef::Pair(p) => heap.pair(p),
             _ => unreachable!(),
         };
 
         // --- special forms ---
-        if let Value::Sym(s) = head {
+        if let ValueRef::Sym(s) = head.unpack() {
             match special_form(s) {
                 Some(SpecialForm::Quote) => {
                     // `(quote x)` returns x literally — but only x; reject
                     // `(quote a b)` rather than silently dropping the tail.
                     let (form, r) = uncons(heap, rest);
-                    if !matches!(r, Value::Nil) {
+                    if !matches!(r.unpack(), ValueRef::Nil) {
                         return Err(LispError::arity("quote: expected exactly one argument")
                             .or_form_pos(heap, expr));
                     }
@@ -316,7 +316,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         env = env_r;
                         continue 'tail;
                     }
-                    None => return Ok(Value::Nil),
+                    None => return Ok(Value::nil()),
                 },
                 Some(SpecialForm::Def) => {
                     let args = heap.list_to_vec(rest)?;
@@ -350,7 +350,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         env = new_env;
                         v
                     } else {
-                        Value::Nil
+                        Value::nil()
                     };
                     let val = name_value(heap, val, name);
                     let root = heap.env_root(env);
@@ -380,7 +380,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         // `defmacro` is a macro lowering to `(def name (%make-macro …))`,
                         // so this is the def-side home of what used to live in the
                         // `defmacro` special form.
-                        if matches!(old, Value::Macro(_)) && matches!(val, Value::Macro(_)) {
+                        if matches!(old.unpack(), ValueRef::Macro(_)) && matches!(val.unpack(), ValueRef::Macro(_)) {
                             eprintln!(
                                 "[reload] macro {} redefined; callers expanded before now keep the old expansion — re-eval them",
                                 value::symbol_name(name)
@@ -388,7 +388,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         }
                     }
                     heap.env_define(root, name, val);
-                    return Ok(Value::Sym(name));
+                    return Ok(Value::symbol(name));
                 }
                 Some(SpecialForm::Fn) => {
                     // Fallback: a multi-clause / pattern-parameter `fn` normally
@@ -405,7 +405,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 }
                 Some(SpecialForm::Quasiquote) => {
                     let args = heap.list_to_vec(rest)?;
-                    let template = args.into_iter().next().unwrap_or(Value::Nil);
+                    let template = args.into_iter().next().unwrap_or(Value::nil());
                     // Expand the template into *builder code* (a pure structural
                     // transform — no eval re-entry, so no GC-rooting hazard), then
                     // hand it back to the loop to evaluate. The unquoted sub-forms
@@ -418,7 +418,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 }
                 Some(SpecialForm::Let) => {
                     let (binds_form, body) = uncons(heap, rest);
-                    if !matches!(rest, Value::Pair(_)) {
+                    if !matches!(rest.unpack(), ValueRef::Pair(_)) {
                         return Err(LispError::runtime("let: missing bindings"));
                     }
                     let binds = as_binding_vec(heap, binds_form)?;
@@ -431,7 +431,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     if binds
                         .iter()
                         .step_by(2)
-                        .any(|&b| !matches!(b, Value::Sym(_)))
+                        .any(|&b| !matches!(b.unpack(), ValueRef::Sym(_)))
                     {
                         expr = crate::eval::macros::macroexpand_all(heap, expr, env)?;
                         continue 'tail;
@@ -444,7 +444,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             env = env_r;
                             continue 'tail;
                         }
-                        None => return Ok(Value::Nil),
+                        None => return Ok(Value::nil()),
                     }
                 }
                 Some(SpecialForm::Letrec) => {
@@ -462,7 +462,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // letrec is meant for, the bodies don't fire until call
                     // time, by which point the real value is the latest entry).
                     let (binds_form, body) = uncons(heap, rest);
-                    if !matches!(rest, Value::Pair(_)) {
+                    if !matches!(rest.unpack(), ValueRef::Pair(_)) {
                         return Err(LispError::runtime("letrec: missing bindings"));
                     }
                     let binds = as_binding_vec(heap, binds_form)?;
@@ -477,7 +477,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     if binds
                         .iter()
                         .step_by(2)
-                        .any(|&b| !matches!(b, Value::Sym(_)))
+                        .any(|&b| !matches!(b.unpack(), ValueRef::Sym(_)))
                     {
                         return Err(LispError::runtime(
                             "letrec: binding targets must be plain symbols",
@@ -490,7 +490,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     let mut i = 0;
                     while i < binds.len() {
                         let bind_name = as_symbol(binds[i])?;
-                        heap.env_define(scope, bind_name, Value::Nil);
+                        heap.env_define(scope, bind_name, Value::nil());
                         i += 2;
                     }
                     let (scope, body) = bind_sequential(heap, &binds, scope, body)?;
@@ -500,7 +500,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                             env = env_r;
                             continue 'tail;
                         }
-                        None => return Ok(Value::Nil),
+                        None => return Ok(Value::nil()),
                     }
                 }
                 None => {}
@@ -523,8 +523,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         let mut call_form = expr;
         let mut spine = rest;
 
-        let callee = match head {
-            Value::Sym(s) => {
+        let callee = match head.unpack() {
+            ValueRef::Sym(s) => {
                 #[cfg(debug_assertions)]
                 heap.debug_walk_env_chain(env, s);
                 // An unbound-symbol error from a *tail-position* call (the
@@ -538,7 +538,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     .env_get(env, s)
                     .ok_or_else(|| unbound_error(heap, s))
                     .map_err(|e| e.or_form_pos(heap, call_form))?;
-                if let Value::Macro(mid) = v {
+                if let ValueRef::Macro(mid) = v.unpack() {
                     // Macro expansion can collect at any depth (ADR-061); root
                     // `env` across it so the `continue 'tail` re-reads the
                     // relocated handle. `arg_forms` is consumed by `bind_params`
@@ -573,9 +573,9 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 })?;
                 call_form = new_call_form;
                 env = new_env;
-                spine = match call_form {
-                    Value::Pair(p) => heap.pair(p).1,
-                    _ => Value::Nil,
+                spine = match call_form.unpack() {
+                    ValueRef::Pair(p) => heap.pair(p).1,
+                    _ => Value::nil(),
                 };
                 callee
             }
@@ -603,7 +603,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // closure (`passthrough_arm`) redirects to its inner call — both rewrite
         // `cur_callee`/`cur_argv` and `continue 'dispatch` rather than recursing.
         'dispatch: loop {
-            while let Value::Native(id) = cur_callee {
+            while let ValueRef::Native(id) = cur_callee.unpack() {
                 if heap.native(id).name != "apply" || cur_argv.len() < 2 {
                     break;
                 }
@@ -611,7 +611,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 let real = cur_argv.remove(0);
                 // A lazy seq-view as the spliced arg list realises first —
                 // `seq_items` can't run its transducer.
-                let last = if matches!(last, Value::SeqView(_)) {
+                let last = if matches!(last.unpack(), ValueRef::SeqView(_)) {
                     crate::builtins::realize_seqview(heap, env, last)
                         .map_err(|e| e.or_form_pos(heap, call_form))?
                 } else {
@@ -624,12 +624,12 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 cur_callee = real;
             }
 
-            match cur_callee {
-                Value::Native(id) => {
+            match cur_callee.unpack() {
+                ValueRef::Native(id) => {
                     return call_native(heap, id, &cur_argv, env)
                         .map_err(|e| e.or_form_pos(heap, call_form));
                 }
-                Value::Fn(id) => {
+                ValueRef::Fn(id) => {
                     // Thin-wrapper elision: redirect a pure pass-through arm
                     // (`(%add a b)` for `+`, etc.) straight to its inner call on the
                     // already-evaluated args, skipping the redundant frame + bind +
@@ -648,7 +648,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         // (`(defn hog () (hog))`), not a thin wrapper — fall through to
                         // the normal call path (which re-enters the `'tail:` loop, whose
                         // reduction check can preempt) rather than spinning the redirect.
-                        let self_cycle = matches!(inner, Value::Fn(iid) if iid.0 == id.0);
+                        let self_cycle = matches!(inner.unpack(), ValueRef::Fn(iid) if iid.0 == id.0);
                         if !self_cycle
                             && passthrough_redirect_ok(inner)
                                 .map_err(|e| e.or_form_pos(heap, call_form))?
@@ -669,7 +669,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     let (scope, body) = bind_params(heap, id, &cur_argv)
                         .map_err(|e| e.or_form_pos(heap, call_form))?;
                     if body.is_empty() {
-                        return Ok(Value::Nil);
+                        return Ok(Value::nil());
                     }
                     let (last, init) = body.split_last().expect("checked non-empty");
                     if init.is_empty() {
@@ -709,12 +709,12 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // — `f` then `(x)` — so the inner `(x)` tries to call the *value* of
                     // `x`. Nudge toward the Lisp form instead of a bare type error.
                     if matches!(
-                        other,
-                        Value::Str(_)
-                            | Value::Int(_)
-                            | Value::Float(_)
-                            | Value::Bool(_)
-                            | Value::Keyword(_)
+                        other.unpack(),
+                        ValueRef::Str(_)
+                            | ValueRef::Int(_)
+                            | ValueRef::Float(_)
+                            | ValueRef::Bool(_)
+                            | ValueRef::Keyword(_)
                     ) {
                         err = err.with_hint(
                             "a value can't be called — in Brood the function goes inside the \
@@ -758,9 +758,9 @@ fn eval_arguments(
         let mut args: SmallVec<[Root; 8]> = SmallVec::new();
         loop {
             let cur = heap.read_root(spine_r);
-            let form = match cur {
-                Value::Nil => break,
-                Value::Pair(p) => heap.pair(p).0,
+            let form = match cur.unpack() {
+                ValueRef::Nil => break,
+                ValueRef::Pair(p) => heap.pair(p).0,
                 _ => return Err(LispError::type_err("improper argument list in call")),
             };
             let env_now = heap.read_root_env(env_r);
@@ -768,9 +768,9 @@ fn eval_arguments(
             args.push(heap.root(v));
             // Advance the cursor from the (possibly relocated) handle, not the stale
             // `cur` read before the eval.
-            let next = match heap.read_root(spine_r) {
-                Value::Pair(p) => heap.pair(p).1,
-                _ => Value::Nil,
+            let next = match heap.read_root(spine_r).unpack() {
+                ValueRef::Pair(p) => heap.pair(p).1,
+                _ => Value::nil(),
             };
             spine_r = heap.advance_root(spine_r, next);
         }
@@ -784,9 +784,9 @@ fn eval_arguments(
 }
 
 pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> LispResult {
-    match callee {
-        Value::Native(id) => call_native(heap, id, argv, env),
-        Value::Fn(id) => apply_closure(heap, id, argv),
+    match callee.unpack() {
+        ValueRef::Native(id) => call_native(heap, id, argv, env),
+        ValueRef::Fn(id) => apply_closure(heap, id, argv),
         other => {
             // Same wording as the evaluator's direct-combination path (the
             // `cannot call non-function` message asserted by suite_test) so the two
@@ -804,7 +804,7 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
     // `bind_params` selects the arm for `argv`'s arity and returns its body.
     let (scope, body) = bind_params(heap, cl, argv)?;
     if body.is_empty() {
-        return Ok(Value::Nil);
+        return Ok(Value::nil());
     }
     // Each body-form eval can collect at ANY depth (ADR-061), so keep `scope` and
     // the remaining body forms on the operand stack across them (the intermediate
@@ -814,7 +814,7 @@ pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResu
     heap.root_scope(|heap| {
         let scope_r = heap.root_env(scope);
         let body_r: SmallVec<[Root; 8]> = body.iter().map(|&f| heap.root(f)).collect();
-        let mut result = Value::Nil;
+        let mut result = Value::nil();
         for &fr in &body_r {
             let scope_now = heap.read_root_env(scope_r);
             let form = heap.read_root(fr);
@@ -1157,7 +1157,7 @@ fn unbound_namespace_hint(heap: &Heap, sym: Symbol) -> Option<String> {
 /// the tree-walker vs. a direct `env_get` in the VM) and the per-engine argv
 /// remap stay at the call sites — they're genuinely engine-specific.
 pub(crate) fn passthrough_redirect_ok(inner: Value) -> Result<bool, LispError> {
-    if !matches!(inner, Value::Fn(_) | Value::Native(_)) {
+    if !matches!(inner.unpack(), ValueRef::Fn(_) | ValueRef::Native(_)) {
         return Ok(false);
     }
     crate::process::tick();
@@ -1232,17 +1232,18 @@ pub(crate) fn make_closure(
     // `(param-list body…)` *arity* clause (pattern clauses were lowered to
     // `match*` by the compile pass, so they never reach here). Each clause
     // becomes a `ClosureArm`, dispatched by argument count at call time.
-    let (lead_doc, clause_forms): (Option<Value>, &[Value]) = match parts.first() {
-        Some(&Value::Str(_)) if parts.len() > 1 => (Some(parts[0]), &parts[1..]),
-        _ => (None, &parts[..]),
-    };
+    let (lead_doc, clause_forms): (Option<Value>, &[Value]) =
+        match parts.first().map(|v| v.unpack()) {
+            Some(ValueRef::Str(_)) if parts.len() > 1 => (Some(parts[0]), &parts[1..]),
+            _ => (None, &parts[..]),
+        };
     if !clause_forms.is_empty()
         && clause_forms
             .iter()
             .all(|&f| crate::eval::macros::is_arity_clause(heap, f))
     {
-        let doc = lead_doc.and_then(|d| match d {
-            Value::Str(id) => Some(heap.string(id).to_string()),
+        let doc = lead_doc.and_then(|d| match d.unpack() {
+            ValueRef::Str(id) => Some(heap.string(id).to_string()),
             _ => None,
         });
         let mut arms = Vec::with_capacity(clause_forms.len());
@@ -1263,7 +1264,7 @@ pub(crate) fn make_closure(
             doc,
             env: captured,
         });
-        return Ok(Value::Fn(id));
+        return Ok(Value::func(id));
     }
 
     // Single-arity: `parts[0]` is the param list, `parts[1..]` the body.
@@ -1276,8 +1277,8 @@ pub(crate) fn make_closure(
     // A leading string literal is a docstring *only when more body follows* —
     // a function whose body is a lone string returns that string (CL/Elisp
     // rule). Strip it out so it isn't evaluated for effect each call.
-    let doc = match body.first() {
-        Some(&Value::Str(id)) if body.len() > 1 => {
+    let doc = match body.first().map(|v| v.unpack()) {
+        Some(ValueRef::Str(id)) if body.len() > 1 => {
             let d = heap.string(id).to_string();
             body.remove(0);
             Some(d)
@@ -1287,7 +1288,7 @@ pub(crate) fn make_closure(
     let id = heap.alloc_closure(Closure::single(
         name, params, optionals, rest_param, body, doc, captured,
     ));
-    Ok(Value::Fn(id))
+    Ok(Value::func(id))
 }
 
 /// A parsed parameter list: required params, `&optional` params with their
@@ -1306,7 +1307,7 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
     let mut i = 0;
 
     while i < items.len() {
-        if let Value::Sym(s) = items[i] {
+        if let ValueRef::Sym(s) = items[i].unpack() {
             if value::symbol_is(s, kw::AMP_OPTIONAL) {
                 if in_optional {
                     return Err(LispError::runtime("&optional may appear only once"));
@@ -1346,9 +1347,9 @@ fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
 }
 
 fn parse_optional(heap: &Heap, form: Value) -> Result<(Symbol, Value), LispError> {
-    match form {
-        Value::Sym(s) => Ok((s, Value::Nil)),
-        Value::Pair(_) | Value::Vector(_) => {
+    match form.unpack() {
+        ValueRef::Sym(s) => Ok((s, Value::nil())),
+        ValueRef::Pair(_) | ValueRef::Vector(_) => {
             let parts = heap.seq_items(form)?;
             let name = as_symbol(
                 parts
@@ -1356,7 +1357,7 @@ fn parse_optional(heap: &Heap, form: Value) -> Result<(Symbol, Value), LispError
                     .copied()
                     .ok_or_else(|| LispError::runtime("malformed &optional parameter"))?,
             )?;
-            let default = parts.get(1).copied().unwrap_or(Value::Nil);
+            let default = parts.get(1).copied().unwrap_or(Value::nil());
             Ok((name, default))
         }
         _ => Err(LispError::type_err("malformed &optional parameter")),
@@ -1368,8 +1369,8 @@ fn name_value(heap: &mut Heap, val: Value, name: Symbol) -> Value {
     // Name both `fn` and `macro` closures (a macro is a closure the expander
     // calls) — `(def m (%make-macro (fn …)))`, which `defmacro` lowers to, must
     // name its macro just as the old `defmacro` special form did.
-    let id = match val {
-        Value::Fn(id) | Value::Macro(id) => id,
+    let id = match val.unpack() {
+        ValueRef::Fn(id) | ValueRef::Macro(id) => id,
         _ => return val,
     };
     if heap.closure(id).name.is_some() {
@@ -1378,15 +1379,15 @@ fn name_value(heap: &mut Heap, val: Value, name: Symbol) -> Value {
     let mut c = heap.closure(id).clone();
     c.name = Some(name);
     let fresh = heap.alloc_closure(c);
-    match val {
-        Value::Macro(_) => Value::Macro(fresh),
-        _ => Value::Fn(fresh),
+    match val.unpack() {
+        ValueRef::Macro(_) => Value::macro_(fresh),
+        _ => Value::func(fresh),
     }
 }
 
 fn as_symbol(v: Value) -> Result<Symbol, LispError> {
-    match v {
-        Value::Sym(s) => Ok(s),
+    match v.unpack() {
+        ValueRef::Sym(s) => Ok(s),
         _ => Err(LispError::type_err("expected a symbol")),
     }
 }
@@ -1401,9 +1402,9 @@ fn as_binding_vec(heap: &Heap, v: Value) -> Result<Vec<Value>, LispError> {
 /// reading a fixed number of operands off a form's argument spine (`if`, `let`'s
 /// bindings/body split) without materializing a `Vec`.
 fn uncons(heap: &Heap, v: Value) -> (Value, Value) {
-    match v {
-        Value::Pair(p) => heap.pair(p),
-        _ => (Value::Nil, Value::Nil),
+    match v.unpack() {
+        ValueRef::Pair(p) => heap.pair(p),
+        _ => (Value::nil(), Value::nil()),
     }
 }
 
@@ -1449,11 +1450,11 @@ fn tail_of_cons(
     env: EnvId,
 ) -> Result<Option<(Value, EnvId)>, LispError> {
     // Fast peek: empty body, or a single form (no eval → no GC → no rooting).
-    match body {
-        Value::Nil => return Ok(None),
-        Value::Pair(p) => {
+    match body.unpack() {
+        ValueRef::Nil => return Ok(None),
+        ValueRef::Pair(p) => {
             let (form, next) = heap.pair(p);
-            if matches!(next, Value::Nil) {
+            if matches!(next.unpack(), ValueRef::Nil) {
                 return Ok(Some((form, env)));
             }
         }
@@ -1469,18 +1470,18 @@ fn tail_of_cons(
         let mut cur_r = heap.root(body); // spine cursor
         loop {
             let cur = heap.read_root(cur_r);
-            match cur {
-                Value::Nil => return Ok(None),
-                Value::Pair(p) => {
+            match cur.unpack() {
+                ValueRef::Nil => return Ok(None),
+                ValueRef::Pair(p) => {
                     let (form, next) = heap.pair(p);
-                    if matches!(next, Value::Nil) {
+                    if matches!(next.unpack(), ValueRef::Nil) {
                         return Ok(Some((form, heap.read_root_env(env_rt))));
                     }
                     let env_now = heap.read_root_env(env_rt);
                     eval_at(heap, form, env_now)?;
-                    let next = match heap.read_root(cur_r) {
-                        Value::Pair(p2) => heap.pair(p2).1,
-                        _ => Value::Nil,
+                    let next = match heap.read_root(cur_r).unpack() {
+                        ValueRef::Pair(p2) => heap.pair(p2).1,
+                        _ => Value::nil(),
                     };
                     cur_r = heap.advance_root(cur_r, next);
                 }
@@ -1494,8 +1495,8 @@ fn tail_of_cons(
 /// for non-callables. Used by the `def` arity-change diagnostic to compare an
 /// old binding's shape against a new one's.
 fn value_arity(heap: &Heap, v: Value) -> Option<value::Arity> {
-    match v {
-        Value::Fn(id) | Value::Macro(id) => {
+    match v.unpack() {
+        ValueRef::Fn(id) | ValueRef::Macro(id) => {
             // Across all arms: the smallest min, and the largest max (unbounded if
             // any arm has `&` rest). A single-arity closure has one arm.
             let c = heap.closure(id);
@@ -1506,7 +1507,7 @@ fn value_arity(heap: &Heap, v: Value) -> Option<value::Arity> {
                 .try_fold(0usize, |acc, a| a.max_arity().map(|m| acc.max(m)));
             Some(value::Arity { min, max })
         }
-        Value::Native(id) => Some(heap.native(id).arity),
+        ValueRef::Native(id) => Some(heap.native(id).arity),
         _ => None,
     }
 }

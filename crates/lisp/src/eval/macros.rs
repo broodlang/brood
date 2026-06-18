@@ -15,7 +15,7 @@
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
-use crate::core::value::{self, ClosureId, EnvId, Symbol, Value};
+use crate::core::value::{self, ClosureId, EnvId, Symbol, Value, ValueRef};
 use crate::error::{LispError, LispResult};
 use crate::eval;
 use std::collections::{HashMap, HashSet};
@@ -69,7 +69,7 @@ pub fn expand_quasiquote(heap: &mut Heap, template: Value) -> LispResult {
 /// `~unquote` go through `eval` instead, so a user's `x#` in unquoted code is left
 /// alone. A bare `#` (no prefix) is not rewritten.
 fn maybe_autogensym(v: Value, autogen: &mut AutoGen) -> Value {
-    if let Value::Sym(s) = v {
+    if let ValueRef::Sym(s) = v.unpack() {
         let name = value::symbol_name_ref(s);
         if name.len() > 1 && name.ends_with('#') {
             return *autogen
@@ -83,7 +83,7 @@ fn maybe_autogensym(v: Value, autogen: &mut AutoGen) -> Value {
 /// A symbol Value for a builder-code head the transform emits (`list`,
 /// `append`, `vector`, `hash-map`, `apply`). Interning dedups, so this is cheap.
 fn sym(name: &str) -> Value {
-    Value::Sym(value::intern(name))
+    Value::symbol(value::intern(name))
 }
 
 /// `(quote v)` — the builder form that reproduces a literal symbol/atom datum.
@@ -114,16 +114,16 @@ fn qq_elem(heap: &mut Heap, v: Value, depth: u32, autogen: &mut AutoGen) -> Lisp
             "unquote-splicing (~@) outside a list/vector context",
         ));
     }
-    match v {
-        Value::Pair(_) => {
+    match v.unpack() {
+        ValueRef::Pair(_) => {
             let items = heap.list_to_vec(v)?;
             qq_seq(heap, &items, false, depth + 1, autogen)
         }
-        Value::Vector(id) => {
+        ValueRef::Vector(id) => {
             let items = heap.vector(id).to_vec();
             qq_seq(heap, &items, true, depth + 1, autogen)
         }
-        Value::Map(id) => {
+        ValueRef::Map(id) => {
             // No `~@` splicing into a map (ill-defined); expand each key/value.
             let entries = heap.map_entries(id);
             let mut out = Vec::with_capacity(entries.len() * 2 + 1);
@@ -135,7 +135,7 @@ fn qq_elem(heap: &mut Heap, v: Value, depth: u32, autogen: &mut AutoGen) -> Lisp
             Ok(heap.list(out))
         }
         // A literal symbol is data — quote it (auto-gensym `x#` first).
-        Value::Sym(_) => {
+        ValueRef::Sym(_) => {
             let sv = maybe_autogensym(v, autogen);
             Ok(quote_form(heap, sv))
         }
@@ -193,11 +193,11 @@ fn qq_seq(
 
 /// If `v` is a two-element list `(name x)` with the given head symbol, return `x`.
 fn tagged(heap: &Heap, v: Value, name: &str) -> Option<Value> {
-    if let Value::Pair(p) = v {
+    if let ValueRef::Pair(p) = v.unpack() {
         let (head, tail) = heap.pair(p);
-        if let Value::Sym(s) = head {
+        if let ValueRef::Sym(s) = head.unpack() {
             if value::symbol_is(s, name) {
-                if let Value::Pair(p2) = tail {
+                if let ValueRef::Pair(p2) = tail.unpack() {
                     return Some(heap.car(p2));
                 }
             }
@@ -245,9 +245,9 @@ pub fn file_opens_ns(heap: &Heap, forms: &[Value]) -> bool {
 pub fn file_ns(heap: &Heap, forms: &[Value]) -> Option<Symbol> {
     for &f in forms {
         if let Ok(items) = heap.list_to_vec(f) {
-            if let Some(&Value::Sym(h)) = items.first() {
+            if let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) {
                 if value::symbol_is(h, kw::DEFMODULE) {
-                    if let Some(&Value::Sym(name)) = items.get(1) {
+                    if let Some(ValueRef::Sym(name)) = items.get(1).map(|v| v.unpack()) {
                         return Some(name);
                     }
                 }
@@ -274,7 +274,7 @@ fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
         Ok(i) => i,
         Err(_) => return,
     };
-    let Some(&Value::Sym(h)) = items.first() else {
+    let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) else {
         return;
     };
     if value::symbol_is(h, kw::QUOTE) || value::symbol_is(h, kw::QUASIQUOTE) {
@@ -282,7 +282,7 @@ fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
     }
     let hn = value::symbol_name_ref(h);
     if matches!(hn, kw::DEF | kw::DEFN | kw::DEFMACRO | kw::DEFDYN) {
-        if let Some(&Value::Sym(name)) = items.get(1) {
+        if let Some(ValueRef::Sym(name)) = items.get(1).map(|v| v.unpack()) {
             // Only bare names get pre-recorded; an already-qualified def head needs
             // no forward-ref help.
             if !value::symbol_name_ref(name).contains('/') {
@@ -389,10 +389,10 @@ fn resolve_sym(
 }
 
 fn resolve_walk(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Symbol]) -> Value {
-    match form {
-        Value::Sym(s) => Value::Sym(resolve_sym(heap, s, ns_name, locals)),
-        Value::Pair(_) => resolve_list(heap, form, ns_name, locals),
-        Value::Vector(id) => {
+    match form.unpack() {
+        ValueRef::Sym(s) => Value::symbol(resolve_sym(heap, s, ns_name, locals)),
+        ValueRef::Pair(_) => resolve_list(heap, form, ns_name, locals),
+        ValueRef::Vector(id) => {
             let items = heap.vector(id).to_vec();
             let mut out = Vec::with_capacity(items.len());
             for it in items {
@@ -400,7 +400,7 @@ fn resolve_walk(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Sy
             }
             heap.alloc_vector(out)
         }
-        Value::Map(id) => {
+        ValueRef::Map(id) => {
             let entries = heap.map_entries(id);
             let mut pairs = Vec::with_capacity(entries.len());
             for (k, v) in entries {
@@ -419,7 +419,7 @@ fn resolve_list(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Sy
         Ok(i) => i,
         Err(_) => return form, // improper list — leave verbatim
     };
-    if let Some(&Value::Sym(h)) = items.first() {
+    if let Some(ValueRef::Sym(h)) = items.first().map(|v| v.unpack()) {
         if value::symbol_is(h, kw::QUOTE) {
             return form; // pure data — never descend (ADR-034)
         }
@@ -468,12 +468,11 @@ fn resolve_def(
     ns_name: &str,
     locals: &[value::Symbol],
 ) -> Value {
-    let is_defmacro =
-        matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::DEFMACRO));
+    let is_defmacro = matches!(items.first().map(|v| v.unpack()), Some(ValueRef::Sym(h)) if value::symbol_is(h, kw::DEFMACRO));
     let mut out = Vec::with_capacity(items.len());
     out.push(items[0]); // def / defmacro head, verbatim
-    match items.get(1) {
-        Some(&Value::Sym(name)) => {
+    match items.get(1).map(|v| v.unpack()) {
+        Some(ValueRef::Sym(name)) => {
             // Register the (bare) name as known before resolving the value, so a
             // self-reference in the body — e.g. the recursion in a `defprocess`-
             // generated receive loop — qualifies to the same `ns/name` the head
@@ -484,13 +483,13 @@ fn resolve_def(
             if !value::symbol_name_ref(name).contains('/') {
                 heap.add_ns_known_name(name);
             }
-            out.push(Value::Sym(qualify_name(ns_name, name)));
+            out.push(Value::symbol(qualify_name(ns_name, name)));
         }
-        Some(&other) => out.push(other), // not a symbol — leave (eval will complain)
+        Some(other) => out.push(other), // not a symbol — leave (eval will complain)
         None => return rebuild_list(heap, form, out),
     }
     if is_defmacro {
-        let params = items.get(2).copied().unwrap_or(Value::Nil);
+        let params = items.get(2).copied().unwrap_or(Value::nil());
         out.push(params); // params verbatim
         let mut inner = locals.to_vec();
         collect_param_syms(heap, params, &mut inner);
@@ -515,8 +514,8 @@ fn resolve_fn(
     locals: &[value::Symbol],
 ) -> Value {
     let parts = &items[1..];
-    let (has_doc, clause_start) = match parts.first() {
-        Some(Value::Str(_)) if parts.len() > 1 => (true, 1),
+    let (has_doc, clause_start) = match parts.first().map(|v| v.unpack()) {
+        Some(ValueRef::Str(_)) if parts.len() > 1 => (true, 1),
         _ => (false, 0),
     };
     let clauses = &parts[clause_start..];
@@ -531,7 +530,7 @@ fn resolve_fn(
             out.push(resolve_arity_clause(heap, clause, ns_name, locals));
         }
     } else {
-        let params = parts.first().copied().unwrap_or(Value::Nil);
+        let params = parts.first().copied().unwrap_or(Value::nil());
         out.push(params); // verbatim
         let mut inner = locals.to_vec();
         collect_param_syms(heap, params, &mut inner);
@@ -573,7 +572,7 @@ fn resolve_let(
     ns_name: &str,
     locals: &[value::Symbol],
 ) -> Value {
-    let letrec = matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::LETREC));
+    let letrec = matches!(items.first().map(|v| v.unpack()), Some(ValueRef::Sym(h)) if value::symbol_is(h, kw::LETREC));
     let binds = match items.get(1).and_then(|&b| form_items(heap, b)) {
         Some(b) if b.len() % 2 == 0 => b,
         _ => return generic_resolve(heap, form, items, ns_name, locals),
@@ -581,7 +580,7 @@ fn resolve_let(
     let mut scope = locals.to_vec();
     if letrec {
         for &t in binds.iter().step_by(2) {
-            if let Value::Sym(s) = t {
+            if let ValueRef::Sym(s) = t.unpack() {
                 scope.push(s);
             }
         }
@@ -594,7 +593,7 @@ fn resolve_let(
         new_binds.push(target); // binder verbatim
         new_binds.push(rhs_r);
         if !letrec {
-            if let Value::Sym(s) = target {
+            if let ValueRef::Sym(s) = target.unpack() {
                 scope.push(s);
             }
         }
@@ -673,8 +672,8 @@ fn collect_param_syms(heap: &Heap, params: Value, out: &mut Vec<value::Symbol>) 
         None => return,
     };
     for item in items {
-        match item {
-            Value::Sym(s) => {
+        match item.unpack() {
+            ValueRef::Sym(s) => {
                 if value::symbol_is(s, kw::AMP)
                     || value::symbol_is(s, kw::AMP_OPTIONAL)
                     || value::symbol_is(s, kw::AMP_REST)
@@ -683,10 +682,10 @@ fn collect_param_syms(heap: &Heap, params: Value, out: &mut Vec<value::Symbol>) 
                 }
                 out.push(s);
             }
-            Value::Pair(_) | Value::Vector(_) => {
+            ValueRef::Pair(_) | ValueRef::Vector(_) => {
                 // `(name default)` — the binder is the first element.
                 let inner = form_items(heap, item).unwrap_or_default();
-                if let Some(&Value::Sym(s)) = inner.first() {
+                if let Some(ValueRef::Sym(s)) = inner.first().map(|v| v.unpack()) {
                     out.push(s);
                 }
             }
@@ -698,21 +697,21 @@ fn collect_param_syms(heap: &Heap, params: Value, out: &mut Vec<value::Symbol>) 
 /// Collect every symbol appearing anywhere in `v` (used to over-approximate a
 /// pattern's bound names — see `resolve_match`).
 fn collect_all_syms(heap: &Heap, v: Value, out: &mut Vec<value::Symbol>) {
-    match v {
-        Value::Sym(s) => out.push(s),
-        Value::Pair(_) => {
+    match v.unpack() {
+        ValueRef::Sym(s) => out.push(s),
+        ValueRef::Pair(_) => {
             if let Ok(items) = heap.list_to_vec(v) {
                 for it in items {
                     collect_all_syms(heap, it, out);
                 }
             }
         }
-        Value::Vector(id) => {
+        ValueRef::Vector(id) => {
             for it in heap.vector(id).to_vec() {
                 collect_all_syms(heap, it, out);
             }
         }
-        Value::Map(id) => {
+        ValueRef::Map(id) => {
             for (k, val) in heap.map_entries(id) {
                 collect_all_syms(heap, k, out);
                 collect_all_syms(heap, val, out);
@@ -724,8 +723,8 @@ fn collect_all_syms(heap: &Heap, v: Value, out: &mut Vec<value::Symbol>) {
 
 /// Rebuild a binding container preserving list-vs-vector shape (and position).
 fn rebuild_seq_like(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
-    match original {
-        Value::Vector(_) => heap.alloc_vector(items),
+    match original.unpack() {
+        ValueRef::Vector(_) => heap.alloc_vector(items),
         _ => rebuild_list(heap, original, items),
     }
 }
@@ -738,8 +737,8 @@ fn rebuild_seq_like(heap: &mut Heap, original: Value, items: Vec<Value>) -> Valu
 /// a closure whose body still contains an unexpanded (forward-referenced) macro
 /// call — both must agree on what "is a macro head" means.
 pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Option<ClosureId> {
-    match heap.env_get(env, sym) {
-        Some(Value::Macro(mid)) => Some(mid),
+    match heap.env_get(env, sym).map(|v| v.unpack()) {
+        Some(ValueRef::Macro(mid)) => Some(mid),
         // Directly bound to a non-macro (a local, or a non-macro global): it
         // shadows — never reinterpret it as an imported macro.
         Some(_) => None,
@@ -750,8 +749,8 @@ pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Opti
                 Some(ns) => resolve_sym(heap, sym, value::symbol_name_ref(ns), &[]),
                 None => heap.import_of(sym).unwrap_or(sym),
             };
-            match (q != sym, heap.env_get(value::EnvId::GLOBAL, q)) {
-                (true, Some(Value::Macro(mid))) => Some(mid),
+            match (q != sym, heap.env_get(value::EnvId::GLOBAL, q).map(|v| v.unpack())) {
+                (true, Some(ValueRef::Macro(mid))) => Some(mid),
                 _ => None,
             }
         }
@@ -760,9 +759,9 @@ pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Opti
 
 /// Expand `form` by one step if its head is a macro; returns `(expanded, did_expand)`.
 pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value, bool), LispError> {
-    if let Value::Pair(p) = form {
+    if let ValueRef::Pair(p) = form.unpack() {
         let (head, tail) = heap.pair(p);
-        if let Value::Sym(s) = head {
+        if let ValueRef::Sym(s) = head.unpack() {
             if let Some(mid) = macro_head_id(heap, env, s) {
                 let args = heap.list_to_vec(tail)?;
                 let expanded = eval::apply_closure(heap, mid, &args)?;
@@ -849,13 +848,13 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
     }
     let original = form;
     let form = macroexpand(heap, form, env)?;
-    match form {
-        Value::Pair(_) => {
+    match form.unpack() {
+        ValueRef::Pair(_) => {
             let mut items = match heap.list_to_vec(form) {
                 Ok(items) => items,
                 Err(_) => return Ok(form), // improper list: leave it be
             };
-            if let Some(Value::Sym(head)) = items.first().copied() {
+            if let Some(ValueRef::Sym(head)) = items.first().copied().map(|v| v.unpack()) {
                 // quote/quasiquote contents are data, not calls to expand.
                 if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
                     return Ok(form);
@@ -915,7 +914,7 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
             }
             Ok(rebuild_list(heap, original, out))
         }
-        Value::Vector(id) => {
+        ValueRef::Vector(id) => {
             let items = heap.vector(id).to_vec();
             let mut out = Vec::with_capacity(items.len());
             for item in items {
@@ -923,7 +922,7 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
             }
             Ok(heap.alloc_vector(out))
         }
-        Value::Map(id) => {
+        ValueRef::Map(id) => {
             // Walk a map literal's keys and values so macros inside them expand
             // once here. Keep it a literal map (the evaluator canonicalises it).
             let entries = heap.map_entries(id);
@@ -979,8 +978,8 @@ fn expand_tail(
 /// to `match*`, so by here "all clauses" implies arity-only.
 pub(crate) fn fn_is_arity_multi_clause(heap: &Heap, items: &[Value]) -> bool {
     let forms = &items[1..];
-    let forms = match forms.first() {
-        Some(&Value::Str(_)) if forms.len() > 1 => &forms[1..],
+    let forms = match forms.first().map(|v| v.unpack()) {
+        Some(ValueRef::Str(_)) if forms.len() > 1 => &forms[1..],
         _ => forms,
     };
     !forms.is_empty() && forms.iter().all(|&f| is_clause(heap, f))
@@ -999,7 +998,7 @@ fn expand_fn_clauses(
 ) -> LispResult {
     let mut out = vec![items[0]]; // the `fn`/`lambda` head
     let mut i = 1;
-    if matches!(items.get(1), Some(&Value::Str(_))) && items.len() > 2 {
+    if matches!(items.get(1).map(|v| v.unpack()), Some(ValueRef::Str(_))) && items.len() > 2 {
         out.push(items[1]); // leading docstring
         i = 2;
     }
@@ -1041,8 +1040,8 @@ fn expand_let(
                     x
                 });
             }
-            match bindings {
-                Value::Vector(_) => heap.alloc_vector(nb),
+            match bindings.unpack() {
+                ValueRef::Vector(_) => heap.alloc_vector(nb),
                 _ => rebuild_list(heap, bindings, nb),
             }
         }
@@ -1059,16 +1058,16 @@ fn expand_let(
 
 /// List/vector/`()` -> its element forms; anything else isn't a binding/param list.
 fn form_items(heap: &Heap, v: Value) -> Option<Vec<Value>> {
-    match v {
-        Value::Nil => Some(Vec::new()),
-        Value::Pair(_) => heap.list_to_vec(v).ok(),
-        Value::Vector(id) => Some(heap.vector(id).to_vec()),
+    match v.unpack() {
+        ValueRef::Nil => Some(Vec::new()),
+        ValueRef::Pair(_) => heap.list_to_vec(v).ok(),
+        ValueRef::Vector(id) => Some(heap.vector(id).to_vec()),
         _ => None,
     }
 }
 
 fn is_sym(v: Value) -> bool {
-    matches!(v, Value::Sym(_))
+    matches!(v.unpack(), ValueRef::Sym(_))
 }
 
 fn make_do(heap: &mut Heap, body: &[Value]) -> Value {
@@ -1127,8 +1126,8 @@ fn lower_let(heap: &mut Heap, items: &[Value]) -> Option<Value> {
 /// itself a list (or `()`). A vector head is *not* a clause (param lists are
 /// lists, ADR-010) — that disambiguates a single tuple param from a clause.
 fn is_clause(heap: &Heap, f: Value) -> bool {
-    match f {
-        Value::Pair(p) => matches!(heap.car(p), Value::Pair(_) | Value::Nil),
+    match f.unpack() {
+        ValueRef::Pair(p) => matches!(heap.car(p).unpack(), ValueRef::Pair(_) | ValueRef::Nil),
         _ => false,
     }
 }
@@ -1147,10 +1146,11 @@ pub(crate) fn is_arity_param_list(heap: &Heap, param_form: Value) -> bool {
 
 /// A clause whose parameter list is an arity list (see [`is_arity_param_list`]).
 pub(crate) fn is_arity_clause(heap: &Heap, f: Value) -> bool {
-    match f {
-        Value::Pair(p) => {
+    match f.unpack() {
+        ValueRef::Pair(p) => {
             let head = heap.car(p);
-            matches!(head, Value::Pair(_) | Value::Nil) && is_arity_param_list(heap, head)
+            matches!(head.unpack(), ValueRef::Pair(_) | ValueRef::Nil)
+                && is_arity_param_list(heap, head)
         }
         _ => false,
     }
@@ -1170,8 +1170,8 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
     let forms = &items[1..];
     // Peel a leading docstring (matches `lower_fn`), so a multi-clause fn with a
     // docstring is still recognised as needing lowering.
-    let forms = match forms.first() {
-        Some(&Value::Str(_)) if forms.len() > 1 => &forms[1..],
+    let forms = match forms.first().map(|v| v.unpack()) {
+        Some(ValueRef::Str(_)) if forms.len() > 1 => &forms[1..],
         _ => forms,
     };
     if forms.is_empty() {
@@ -1190,7 +1190,7 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
     };
     let required_end = params
         .iter()
-        .position(|&p| matches!(p, Value::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) || value::symbol_is(s, kw::AMP)))
+        .position(|&p| matches!(p.unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) || value::symbol_is(s, kw::AMP)))
         .unwrap_or(params.len());
     params[..required_end].iter().any(|&p| !is_sym(p))
 }
@@ -1206,8 +1206,8 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     // sits after the param list and is peeled below); keep it as the lowered
     // fn's leading body form so `make_closure` still finds it.
     {
-        let (doc, clauses): (Option<Value>, &[Value]) = match forms.first() {
-            Some(&Value::Str(_)) if forms.len() > 1 => (Some(forms[0]), &forms[1..]),
+        let (doc, clauses): (Option<Value>, &[Value]) = match forms.first().map(|v| v.unpack()) {
+            Some(ValueRef::Str(_)) if forms.len() > 1 => (Some(forms[0]), &forms[1..]),
             _ => (None, forms),
         };
         if !clauses.is_empty() && clauses.iter().all(|&f| is_clause(heap, f)) {
@@ -1244,15 +1244,15 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     // stays the *first* form of the lowered `fn` — otherwise `make_closure`'s
     // docstring detection misses it once the body is wrapped in the refutable
     // bind + `do`. (`(fn ([x y]) "doc" body)` would lose its doc otherwise.)
-    let (doc, body) = match body.first() {
-        Some(&Value::Str(_)) if body.len() > 1 => (Some(body[0]), &body[1..]),
+    let (doc, body) = match body.first().map(|v| v.unpack()) {
+        Some(ValueRef::Str(_)) if body.len() > 1 => (Some(body[0]), &body[1..]),
         _ => (None, body),
     };
 
     // Patterns are allowed only in required slots (before &optional / & rest).
     let required_end = params
         .iter()
-        .position(|&p| matches!(p, Value::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) || value::symbol_is(s, kw::AMP)))
+        .position(|&p| matches!(p.unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) || value::symbol_is(s, kw::AMP)))
         .unwrap_or(params.len());
     if !params[..required_end].iter().any(|&p| !is_sym(p)) {
         return None; // no pattern in the required params — ordinary fn
@@ -1272,8 +1272,8 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     for &(g, pat) in binds.iter().rev() {
         acc = refutable_bind(heap, kw::FN, g, pat, acc);
     }
-    let new_param_form = match param_form {
-        Value::Vector(_) => heap.alloc_vector(new_params),
+    let new_param_form = match param_form.unpack() {
+        ValueRef::Vector(_) => heap.alloc_vector(new_params),
         _ => heap.list(new_params),
     };
     let mut lowered = vec![value::sym(kw::FN), new_param_form];

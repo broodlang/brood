@@ -29,7 +29,8 @@ use std::sync::Arc;
 use crate::core::heap::{EnvRoot, Heap, VmCacheKey};
 use crate::core::keywords as kw;
 use crate::core::value::{
-    self, BigIntId, ClosureId, EnvId, MapId, NativeId, PairId, RopeId, StrId, Symbol, Value, VecId,
+    self, BigIntId, ClosureId, EnvId, MapId, NativeId, PairId, RopeId, StrId, Symbol, Value,
+    ValueRef, VecId,
 };
 use crate::error::{LispError, LispResult, Pos};
 
@@ -194,40 +195,40 @@ impl ConstVal {
     /// Build from a (already-`promote`d, immovable-or-RUNTIME) value: an atom stays
     /// inline; a heap handle is split into `(kind, bits)`.
     fn new(v: Value) -> ConstVal {
-        match v {
-            Value::Str(id) => ConstVal::Handle {
+        match v.unpack() {
+            ValueRef::Str(id) => ConstVal::Handle {
                 kind: HandleKind::Str,
                 bits: AtomicU64::new(id.0),
             },
-            Value::BigInt(id) => ConstVal::Handle {
+            ValueRef::BigInt(id) => ConstVal::Handle {
                 kind: HandleKind::BigInt,
                 bits: AtomicU64::new(id.0),
             },
-            Value::Pair(id) => ConstVal::Handle {
+            ValueRef::Pair(id) => ConstVal::Handle {
                 kind: HandleKind::Pair,
                 bits: AtomicU64::new(id.0),
             },
-            Value::Vector(id) => ConstVal::Handle {
+            ValueRef::Vector(id) => ConstVal::Handle {
                 kind: HandleKind::Vector,
                 bits: AtomicU64::new(id.0),
             },
-            Value::Map(id) => ConstVal::Handle {
+            ValueRef::Map(id) => ConstVal::Handle {
                 kind: HandleKind::Map,
                 bits: AtomicU64::new(id.0),
             },
-            Value::Rope(id) => ConstVal::Handle {
+            ValueRef::Rope(id) => ConstVal::Handle {
                 kind: HandleKind::Rope,
                 bits: AtomicU64::new(id.0),
             },
-            Value::Fn(id) => ConstVal::Handle {
+            ValueRef::Fn(id) => ConstVal::Handle {
                 kind: HandleKind::Fn,
                 bits: AtomicU64::new(id.0),
             },
-            Value::Macro(id) => ConstVal::Handle {
+            ValueRef::Macro(id) => ConstVal::Handle {
                 kind: HandleKind::Macro,
                 bits: AtomicU64::new(id.0),
             },
-            atom => ConstVal::Atom(atom),
+            _ => ConstVal::Atom(v),
         }
     }
 
@@ -239,14 +240,14 @@ impl ConstVal {
             ConstVal::Handle { kind, bits } => {
                 let b = bits.load(Ordering::Relaxed);
                 match kind {
-                    HandleKind::Str => Value::Str(StrId(b)),
-                    HandleKind::BigInt => Value::BigInt(BigIntId(b)),
-                    HandleKind::Pair => Value::Pair(PairId(b)),
-                    HandleKind::Vector => Value::Vector(VecId(b)),
-                    HandleKind::Map => Value::Map(MapId(b)),
-                    HandleKind::Rope => Value::Rope(RopeId(b)),
-                    HandleKind::Fn => Value::Fn(ClosureId(b)),
-                    HandleKind::Macro => Value::Macro(ClosureId(b)),
+                    HandleKind::Str => Value::str_(StrId(b)),
+                    HandleKind::BigInt => Value::bigint(BigIntId(b)),
+                    HandleKind::Pair => Value::pair(PairId(b)),
+                    HandleKind::Vector => Value::vector(VecId(b)),
+                    HandleKind::Map => Value::map(MapId(b)),
+                    HandleKind::Rope => Value::rope(RopeId(b)),
+                    HandleKind::Fn => Value::func(ClosureId(b)),
+                    HandleKind::Macro => Value::macro_(ClosureId(b)),
                 }
             }
         }
@@ -259,14 +260,14 @@ impl ConstVal {
     fn rewrite(&self, f: &mut dyn FnMut(Value) -> Value) {
         if let ConstVal::Handle { bits, .. } = self {
             let new = f(self.load());
-            let nb = match new {
-                Value::Str(id) => id.0,
-                Value::BigInt(id) => id.0,
-                Value::Pair(id) => id.0,
-                Value::Vector(id) => id.0,
-                Value::Map(id) => id.0,
-                Value::Rope(id) => id.0,
-                Value::Fn(id) | Value::Macro(id) => id.0,
+            let nb = match new.unpack() {
+                ValueRef::Str(id) => id.0,
+                ValueRef::BigInt(id) => id.0,
+                ValueRef::Pair(id) => id.0,
+                ValueRef::Vector(id) => id.0,
+                ValueRef::Map(id) => id.0,
+                ValueRef::Rope(id) => id.0,
+                ValueRef::Fn(id) | ValueRef::Macro(id) => id.0,
                 // `f` (flush_rt_value) never changes the handle *kind*, so this is
                 // unreachable; keep the old bits rather than panic if it ever does.
                 _ => return,
@@ -784,10 +785,10 @@ impl Scope {
 /// `(n1 v1 …)` or a vector `[n1 v1 …]` (both accepted in Brood binding position),
 /// or `None` if it isn't one.
 fn binding_elems(heap: &Heap, form: Value) -> Option<Vec<Value>> {
-    match form {
-        Value::Nil => Some(Vec::new()),
-        Value::Vector(vid) => Some(heap.vector(vid).to_vec()),
-        Value::Pair(_) => heap.list_to_vec(form).ok(),
+    match form.unpack() {
+        ValueRef::Nil => Some(Vec::new()),
+        ValueRef::Vector(vid) => Some(heap.vector(vid).to_vec()),
+        ValueRef::Pair(_) => heap.list_to_vec(form).ok(),
         _ => None,
     }
 }
@@ -796,7 +797,7 @@ fn binding_elems(heap: &Heap, form: Value) -> Option<Vec<Value>> {
 /// in `tail` position. Empty → `nil`. A single form returns that node directly.
 fn compile_body(heap: &Heap, forms: &[Value], scope: &mut Scope, tail: bool) -> Option<Node> {
     if forms.is_empty() {
-        return Some(const_node(heap, Value::Nil));
+        return Some(const_node(heap, Value::nil()));
     }
     let n = forms.len();
     let mut nodes = Vec::with_capacity(n);
@@ -836,8 +837,8 @@ fn compile_let(
             // reference any binder; then compile the rhs in order.
             let mut slots = Vec::with_capacity(elems.len() / 2);
             for pair in elems.chunks_exact(2) {
-                match pair[0] {
-                    Value::Sym(s) => slots.push(scope.bind(s)),
+                match pair[0].unpack() {
+                    ValueRef::Sym(s) => slots.push(scope.bind(s)),
                     _ => return None,
                 }
             }
@@ -864,8 +865,8 @@ fn compile_let(
         } else {
             // let/let*: sequential — a rhs sees only earlier binders.
             for pair in elems.chunks_exact(2) {
-                let name = match pair[0] {
-                    Value::Sym(s) => s,
+                let name = match pair[0].unpack() {
+                    ValueRef::Sym(s) => s,
                     _ => return None,
                 };
                 if is_fn_form(heap, pair[1]) {
@@ -910,9 +911,9 @@ fn compile_let(
 /// freshly-read or quasiquote-built `fn`) would dangle after a collection. Such a
 /// form simply defers to the tree-walker.
 fn fn_rest_is_stable(v: Value) -> bool {
-    match v {
-        Value::Pair(p) => p.region() != value::LOCAL,
-        Value::Nil => true, // `(fn)` — degenerate, but stable
+    match v.unpack() {
+        ValueRef::Pair(p) => p.region() != value::LOCAL,
+        ValueRef::Nil => true, // `(fn)` — degenerate, but stable
         _ => false,
     }
 }
@@ -952,21 +953,21 @@ fn const_node(heap: &Heap, v: Value) -> Node {
 /// branch, but the call must resolve), so gating this out breaks the release
 /// build. In release the optimizer drops the never-taken branch.
 fn value_is_immovable(v: Value) -> bool {
-    match v {
-        Value::Str(id) => id.region() != value::LOCAL,
-        Value::BigInt(id) => id.region() != value::LOCAL,
-        Value::Pair(id) => id.region() != value::LOCAL,
-        Value::Vector(id) => id.region() != value::LOCAL,
-        Value::Map(id) => id.region() != value::LOCAL,
-        Value::Rope(id) => id.region() != value::LOCAL,
-        Value::Fn(id) | Value::Macro(id) => id.region() != value::LOCAL,
+    match v.unpack() {
+        ValueRef::Str(id) => id.region() != value::LOCAL,
+        ValueRef::BigInt(id) => id.region() != value::LOCAL,
+        ValueRef::Pair(id) => id.region() != value::LOCAL,
+        ValueRef::Vector(id) => id.region() != value::LOCAL,
+        ValueRef::Map(id) => id.region() != value::LOCAL,
+        ValueRef::Rope(id) => id.region() != value::LOCAL,
+        ValueRef::Fn(id) | ValueRef::Macro(id) => id.region() != value::LOCAL,
         // A `Range` is a `VecId` and a `Transient` a `TransientId` — both movable when
         // LOCAL, so it must be checked too (else this tripwire would wrongly pass a
         // movable LOCAL `Range` baked into a Const).
-        Value::Range(id) => id.region() != value::LOCAL,
+        ValueRef::Range(id) => id.region() != value::LOCAL,
         // A `SeqView` is a `VecId` too — movable when LOCAL, so it must be checked
         // (else this tripwire would wrongly pass a movable LOCAL view in a Const).
-        Value::SeqView(id) => id.region() != value::LOCAL,
+        ValueRef::SeqView(id) => id.region() != value::LOCAL,
         // Inline scalars (Int/Float/Bool/Nil), interned Sym/Keyword, and the
         // remaining handle-free kinds carry nothing the GC relocates.
         _ => true,
@@ -1021,8 +1022,8 @@ fn compile_captures(scope: &Scope) -> Option<(Vec<(Symbol, Node)>, Option<Symbol
 /// gate the direct self-recursion path (only a fn-valued binder can be its own
 /// recursive callee).
 fn is_fn_form(heap: &Heap, form: Value) -> bool {
-    if let Value::Pair(p) = form {
-        if let Value::Sym(h) = heap.pair(p).0 {
+    if let ValueRef::Pair(p) = form.unpack() {
+        if let ValueRef::Sym(h) = heap.pair(p).0.unpack() {
             return value::symbol_is(h, kw::FN);
         }
     }
@@ -1039,8 +1040,8 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
     if crate::eval::macros::fn_needs_lowering(heap, form) {
         return None;
     }
-    let fn_rest = match form {
-        Value::Pair(p) => heap.pair(p).1,
+    let fn_rest = match form.unpack() {
+        ValueRef::Pair(p) => heap.pair(p).1,
         _ => return None,
     };
     // A LOCAL `fn_rest` is a `(fn …)` literal on the movable data heap — a top-level
@@ -1090,26 +1091,26 @@ fn resolve_prim(heap: &Heap, h: Symbol) -> Option<(PrimOp, [usize; 2])> {
     // disables (and the same epoch guard that protects every other inlined prim
     // re-validates here on a redefinition).
     if value::symbol_is(h, "nth") {
-        return match v {
-            Value::Fn(id) if id.region() == crate::core::value::PRELUDE => {
+        return match v.unpack() {
+            ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => {
                 Some((PrimOp::VectorRef, [0, 1]))
             }
             _ => None,
         };
     }
-    let (nid, map): (NativeId, [usize; 2]) = match v {
-        Value::Native(id) => (id, [0, 1]),
-        Value::Fn(id) => {
+    let (nid, map): (NativeId, [usize; 2]) = match v.unpack() {
+        ValueRef::Native(id) => (id, [0, 1]),
+        ValueRef::Fn(id) => {
             let (inner_head, m) = crate::eval::passthrough_arm(heap, id, 2)?;
             if m.len() != 2 {
                 return None;
             }
-            let inner = match inner_head {
-                Value::Sym(s) => heap.env_get(heap.global(), s)?,
-                other => other,
+            let inner = match inner_head.unpack() {
+                ValueRef::Sym(s) => heap.env_get(heap.global(), s)?,
+                _ => inner_head,
             };
-            match inner {
-                Value::Native(id) => (id, [m[0], m[1]]),
+            match inner.unpack() {
+                ValueRef::Native(id) => (id, [m[0], m[1]]),
                 _ => return None,
             }
         }
@@ -1127,19 +1128,19 @@ fn resolve_prim(heap: &Heap, h: Symbol) -> Option<(PrimOp, [usize; 2])> {
 /// `[0, 1]` so a swapped wrapper (`>` → `%lt`) can never be misread as a fold.
 /// Read against the live global env, so a redefined `+` simply doesn't match.
 pub fn reduce_prim_op(heap: &Heap, f: Value) -> Option<PrimOp> {
-    let nid = match f {
-        Value::Native(id) => id,
-        Value::Fn(id) => {
+    let nid = match f.unpack() {
+        ValueRef::Native(id) => id,
+        ValueRef::Fn(id) => {
             let (inner_head, m) = crate::eval::passthrough_arm(heap, id, 2)?;
             if m.len() != 2 || m[0] != 0 || m[1] != 1 {
                 return None;
             }
-            match inner_head {
-                Value::Sym(s) => match heap.env_get(heap.global(), s)? {
-                    Value::Native(id) => id,
+            match inner_head.unpack() {
+                ValueRef::Sym(s) => match heap.env_get(heap.global(), s)?.unpack() {
+                    ValueRef::Native(id) => id,
                     _ => return None,
                 },
-                Value::Native(id) => id,
+                ValueRef::Native(id) => id,
                 _ => return None,
             }
         }
@@ -1162,8 +1163,8 @@ pub fn prim_apply_step(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, 
 /// are bound directly to their natives. Read against the live global env, so a
 /// redefinition simply doesn't match.
 fn resolve_prim1(heap: &Heap, h: Symbol) -> Option<PrimOp1> {
-    match heap.env_get(heap.global(), h)? {
-        Value::Native(id) => PrimOp1::from_native_name(&heap.native(id).name),
+    match heap.env_get(heap.global(), h)?.unpack() {
+        ValueRef::Native(id) => PrimOp1::from_native_name(&heap.native(id).name),
         _ => None,
     }
 }
@@ -1173,22 +1174,22 @@ fn resolve_prim1(heap: &Heap, h: Symbol) -> Option<PrimOp1> {
 /// the form uses anything outside the VM's vocabulary (the caller then defers the
 /// whole closure to the tree-walker).
 fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Option<Node> {
-    match form {
+    match form.unpack() {
         // Self-evaluating literals. `const_node` freezes any embedded heap handle
         // into the immovable RUNTIME region — load-bearing for `Value::Str` (a LOCAL
         // string baked raw into the off-GC-graph AST is the use-after-GC class; see
         // `const_node`), a no-op for the inline/interned atoms.
-        Value::Int(_)
-        | Value::BigInt(_)
-        | Value::Float(_)
-        | Value::Bool(_)
-        | Value::Nil
-        | Value::Str(_)
-        | Value::Keyword(_) => Some(const_node(heap, form)),
+        ValueRef::Int(_)
+        | ValueRef::BigInt(_)
+        | ValueRef::Float(_)
+        | ValueRef::Bool(_)
+        | ValueRef::Nil
+        | ValueRef::Str(_)
+        | ValueRef::Keyword(_) => Some(const_node(heap, form)),
 
         // A name: a local frame slot if bound, else a global reference with a
         // read IC (ADR-096).
-        Value::Sym(s) => match scope.lookup(s) {
+        ValueRef::Sym(s) => match scope.lookup(s) {
             Some(slot) => Some(Node::Local(slot)),
             None => Some(Node::GlobalIc {
                 sym: s,
@@ -1197,10 +1198,10 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
         },
 
         // A combination — a special form we handle (`if`/`do`) or a function call.
-        Value::Pair(_) => {
+        ValueRef::Pair(_) => {
             let items = heap.list_to_vec(form).ok()?;
             let head = *items.first()?;
-            if let Value::Sym(h) = head {
+            if let ValueRef::Sym(h) = head.unpack() {
                 if value::symbol_is(h, kw::IF) {
                     // (if cond then) or (if cond then else)
                     if items.len() != 3 && items.len() != 4 {
@@ -1210,7 +1211,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                     let then = compile_node(heap, items[2], scope, tail)?;
                     let els = match items.get(3) {
                         Some(&e) => compile_node(heap, e, scope, tail)?,
-                        None => const_node(heap, Value::Nil),
+                        None => const_node(heap, Value::nil()),
                     };
                     return Some(Node::If(Box::new(cond), Box::new(then), Box::new(els)));
                 }
@@ -1361,7 +1362,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             // self-call, a shadowed name, or a mismatched arity falls through to the
             // regular env-resolved path below (still correct).
             if tail {
-                if let (Value::Sym(h), Some((name, arity))) = (head, scope.self_call) {
+                if let (ValueRef::Sym(h), Some((name, arity))) = (head.unpack(), scope.self_call) {
                     if h == name && scope.lookup(h).is_none() && items.len() - 1 == arity {
                         let mut args = Vec::with_capacity(arity);
                         for &a in &items[1..] {
@@ -1378,8 +1379,8 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             // A free-symbol head compiles to a plain `Node::Global` (not a
             // `GlobalIc`): the call's own site IC below caches the head's full
             // resolution, so a read IC there would be redundant (and waste a site).
-            let callee = match head {
-                Value::Sym(h) if scope.lookup(h).is_none() => Node::Global(h),
+            let callee = match head.unpack() {
+                ValueRef::Sym(h) if scope.lookup(h).is_none() => Node::Global(h),
                 _ => compile_node(heap, head, scope, false)?,
             };
             let mut args = Vec::with_capacity(items.len() - 1);
@@ -1406,7 +1407,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
         }
 
         // Vector literal — evaluate each element (value position), build fresh.
-        Value::Vector(id) => {
+        ValueRef::Vector(id) => {
             let items = heap.vector(id).to_vec();
             let mut nodes = Vec::with_capacity(items.len());
             for e in items {
@@ -1415,7 +1416,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             Some(Node::Vector(nodes.into_boxed_slice()))
         }
         // Map literal — evaluate each key and value (value position), build fresh.
-        Value::Map(id) => {
+        ValueRef::Map(id) => {
             let entries = heap.map_entries(id);
             let mut pairs = Vec::with_capacity(entries.len());
             for (k, v) in entries {
@@ -1488,7 +1489,7 @@ fn node_has_rt_handles(node: &Node) -> bool {
 fn is_elem_read(a: &Node, b: &Node, slot: usize, nelems: usize) -> Option<usize> {
     if let (Node::Local(k), Node::Const(cv)) = (a, b) {
         if *k == slot {
-            if let Value::Int(idx) = cv.load() {
+            if let ValueRef::Int(idx) = cv.load().unpack() {
                 if idx >= 0 && (idx as usize) < nelems {
                     return Some(idx as usize);
                 }
@@ -2109,9 +2110,9 @@ fn compile_arm(
     for (name, default) in optionals {
         // A nil default needs no eval (push_frame just leaves the slot nil); a real
         // default compiles in the current scope (required + earlier optionals bound).
-        let node = match default {
-            Value::Nil => None,
-            d => Some(compile_node(heap, *d, &mut scope, false)?),
+        let node = match default.unpack() {
+            ValueRef::Nil => None,
+            _ => Some(compile_node(heap, *default, &mut scope, false)?),
         };
         optional_defaults.push(node);
         scope.bind(*name);
@@ -2314,8 +2315,8 @@ fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
             // handle so the key is both stable and collision-free (immediates and
             // interned symbols are shared, so they'd alias unrelated closures).
             let first = heap.closure(id).arms.first()?.body.first().copied()?;
-            match first {
-                Value::Pair(p) if p.region() != value::LOCAL => Some(VmCacheKey::LocalBody(p.0)),
+            match first.unpack() {
+                ValueRef::Pair(p) if p.region() != value::LOCAL => Some(VmCacheKey::LocalBody(p.0)),
                 _ => None,
             }
         }
@@ -2371,14 +2372,14 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
 #[inline(always)]
 fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
     match op {
-        PrimOp::Add => a.checked_add(b).map(Value::Int),
-        PrimOp::Sub => a.checked_sub(b).map(Value::Int),
-        PrimOp::Mul => a.checked_mul(b).map(Value::Int),
-        PrimOp::Lt => Some(Value::Bool(a < b)),
-        PrimOp::Le => Some(Value::Bool(a <= b)),
-        PrimOp::Eq => Some(Value::Bool(a == b)),
-        PrimOp::Rem => a.checked_rem(b).map(Value::Int),
-        PrimOp::Quot => a.checked_div(b).map(Value::Int),
+        PrimOp::Add => a.checked_add(b).map(Value::int),
+        PrimOp::Sub => a.checked_sub(b).map(Value::int),
+        PrimOp::Mul => a.checked_mul(b).map(Value::int),
+        PrimOp::Lt => Some(Value::boolean(a < b)),
+        PrimOp::Le => Some(Value::boolean(a <= b)),
+        PrimOp::Eq => Some(Value::boolean(a == b)),
+        PrimOp::Rem => a.checked_rem(b).map(Value::int),
+        PrimOp::Quot => a.checked_div(b).map(Value::int),
         // Cons needs heap alloc; Div may return Float — both handled by prim_apply.
         // VectorRef needs the heap (slab index) and its operands aren't (Int, Int);
         // handled directly in prim2_inline_exec.
@@ -2394,8 +2395,8 @@ fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
 /// by promoting to a bignum (ADR bignums) rather than erroring. Needs no heap:
 /// the inline result is a scalar, so nothing is allocated and no GC can intervene.
 fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError> {
-    let (a, b) = match (x, y) {
-        (Value::Int(a), Value::Int(b)) => (a, b),
+    let (a, b) = match (x.unpack(), y.unpack()) {
+        (ValueRef::Int(a), ValueRef::Int(b)) => (a, b),
         _ => return Ok(prim_apply_float(op, x, y)),
     };
     let v = match op {
@@ -2403,36 +2404,36 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
         // the op in BigInt and demote, so a too-big result becomes a `BigInt`
         // instead of an `E0041`.
         PrimOp::Add => match a.checked_add(b) {
-            Some(r) => Value::Int(r),
+            Some(r) => Value::int(r),
             None => return Ok(None),
         },
         PrimOp::Sub => match a.checked_sub(b) {
-            Some(r) => Value::Int(r),
+            Some(r) => Value::int(r),
             None => return Ok(None),
         },
         PrimOp::Mul => match a.checked_mul(b) {
-            Some(r) => Value::Int(r),
+            Some(r) => Value::int(r),
             None => return Ok(None),
         },
-        PrimOp::Lt => Value::Bool(a < b),
-        PrimOp::Le => Value::Bool(a <= b),
-        PrimOp::Eq => Value::Bool(a == b),
+        PrimOp::Lt => Value::boolean(a < b),
+        PrimOp::Le => Value::boolean(a <= b),
+        PrimOp::Eq => Value::boolean(a == b),
         // Division family: handle the clean integer case inline, and **defer**
         // (`Ok(None)`) every edge — div-by-zero, the `i64::MIN / -1` overflow,
         // and (`%div` only) a non-exact quotient that the native returns as a
         // Float — so the native owns those exact results and error messages.
         PrimOp::Rem => match a.checked_rem(b) {
-            Some(r) => Value::Int(r),
+            Some(r) => Value::int(r),
             None => return Ok(None),
         },
         // `%div` returns an Int only when it divides evenly (matching `prim_div`);
         // a remainder means a Float result, which the native builds.
         PrimOp::Div => match (a.checked_rem(b), a.checked_div(b)) {
-            (Some(0), Some(q)) => Value::Int(q),
+            (Some(0), Some(q)) => Value::int(q),
             _ => return Ok(None),
         },
         PrimOp::Quot => match a.checked_div(b) {
-            Some(q) => Value::Int(q),
+            Some(q) => Value::int(q),
             None => return Ok(None),
         },
         // Handled in the exec arm (they need `&mut Heap` / the heap); never reach here.
@@ -2448,22 +2449,22 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
 /// numeric edges, division by zero) returns `None` so the real native owns the
 /// result and the error messages.
 fn prim_apply_float(op: PrimOp, x: Value, y: Value) -> Option<Value> {
-    let (a, b) = match (x, y) {
-        (Value::Float(a), Value::Float(b)) => (a, b),
-        (Value::Int(a), Value::Float(b)) => (a as f64, b),
-        (Value::Float(a), Value::Int(b)) => (a, b as f64),
+    let (a, b) = match (x.unpack(), y.unpack()) {
+        (ValueRef::Float(a), ValueRef::Float(b)) => (a, b),
+        (ValueRef::Int(a), ValueRef::Float(b)) => (a as f64, b),
+        (ValueRef::Float(a), ValueRef::Int(b)) => (a, b as f64),
         _ => return None,
     };
     Some(match op {
-        PrimOp::Add => Value::Float(a + b),
-        PrimOp::Sub => Value::Float(a - b),
-        PrimOp::Mul => Value::Float(a * b),
-        PrimOp::Lt => Value::Bool(a < b),
-        PrimOp::Le => Value::Bool(a <= b),
+        PrimOp::Add => Value::float(a + b),
+        PrimOp::Sub => Value::float(a - b),
+        PrimOp::Mul => Value::float(a * b),
+        PrimOp::Lt => Value::boolean(a < b),
+        PrimOp::Le => Value::boolean(a <= b),
         // `%div`: the native errors on a zero denominator — defer that edge
         // (a NaN/inf denominator is not zero, so it stays inline, matching the
         // native's plain `a / b`).
-        PrimOp::Div if b != 0.0 => Value::Float(a / b),
+        PrimOp::Div if b != 0.0 => Value::float(a / b),
         // `=` is structural (the native owns float equality), `rem`/`quot` take
         // the numeric-tower path, and zero-denominator `%div` errors — defer.
         _ => return None,
@@ -2515,7 +2516,7 @@ fn prim2_inline_exec(
     // (`VectorRef`/`Cons` never have `(Int, Int)` operands, so they skip this and
     // are handled on the cold path below — keeping this hot path branch-free of
     // them.)
-    if let (Value::Int(a), Value::Int(b)) = (x, y) {
+    if let (ValueRef::Int(a), ValueRef::Int(b)) = (x.unpack(), y.unpack()) {
         if let Some(v) = prim2_int_fast(op, a, b) {
             crate::perf_bump!(prim2_inline);
             return Ok(Some(v));
@@ -2537,7 +2538,7 @@ fn prim2_inline_exec(
         // `(Vector, Int)` case; non-vector / non-int / out-of-range defer
         // (`Ok(None)`) to the native, which owns the exact bounds + type errors.
         None if op == PrimOp::VectorRef => {
-            if let (Value::Vector(id), Value::Int(n)) = (x, y) {
+            if let (ValueRef::Vector(id), ValueRef::Int(n)) = (x.unpack(), y.unpack()) {
                 if n >= 0 && (n as usize) < heap.vector(id).len() {
                     crate::perf_bump!(prim2_inline);
                     return Ok(Some(heap.vector(id)[n as usize]));
@@ -2726,7 +2727,7 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
         }
         Node::Do(nodes) => {
             if nodes.is_empty() {
-                return Ok(Value::Nil);
+                return Ok(Value::nil());
             }
             let last = nodes.len() - 1;
             for n in &nodes[..last] {
@@ -2868,18 +2869,18 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
                 }
             };
             if inlinable {
-                match (op, sa) {
-                    (PrimOp1::First, Value::Pair(p)) => {
+                match (op, sa.unpack()) {
+                    (PrimOp1::First, ValueRef::Pair(p)) => {
                         crate::perf_bump!(prim1_inline);
                         return Ok(heap.pair(p).0);
                     }
-                    (PrimOp1::Rest, Value::Pair(p)) => {
+                    (PrimOp1::Rest, ValueRef::Pair(p)) => {
                         crate::perf_bump!(prim1_inline);
                         return Ok(heap.pair(p).1);
                     }
-                    (PrimOp1::First | PrimOp1::Rest, Value::Nil) => {
+                    (PrimOp1::First | PrimOp1::Rest, ValueRef::Nil) => {
                         crate::perf_bump!(prim1_inline);
-                        return Ok(Value::Nil);
+                        return Ok(Value::nil());
                     }
                     _ => {} // vectors/ranges/type errors → the native owns them
                 }
@@ -3070,13 +3071,13 @@ fn exec_call(
                         None => return Err(tag(crate::eval::unbound_error(heap, *sym))),
                     };
                     if !value::is_dynamic(*sym) {
-                        let arm = match v {
+                        let arm = match v.unpack() {
                             // Cache the VM fast path only for a callee
                             // `dispatch` would run on the VM directly: a
                             // non-passthrough closure with a compiled arm
                             // for this argc. Everything else caches just
                             // the value (still skips the lookup walk).
-                            Value::Fn(id)
+                            ValueRef::Fn(id)
                                 if crate::eval::passthrough_arm(heap, id, args.len()).is_none() =>
                             {
                                 compiled_arm_for(heap, id, args.len()).map(|arm| {
@@ -3206,8 +3207,8 @@ fn dispatch(
         // re-resolves the inner head each call (a symbol lookup — no GC, so `cur_argv`
         // stays valid). Looped for chained passthroughs.
         loop {
-            let id = match cur_callee {
-                Value::Fn(id) => id,
+            let id = match cur_callee.unpack() {
+                ValueRef::Fn(id) => id,
                 _ => break,
             };
             let Some((head, map)) = crate::eval::passthrough_arm(heap, id, cur_argv.len()) else {
@@ -3218,9 +3219,9 @@ fn dispatch(
             // `cur_argv` stays valid), else the head value itself. The shared
             // `passthrough_redirect_ok` then gates the redirect (callable inner only),
             // counts the reduction, and honours the deadline.
-            let inner = match head {
-                Value::Sym(s) => heap.env_get(cl_env, s),
-                other => Some(other),
+            let inner = match head.unpack() {
+                ValueRef::Sym(s) => heap.env_get(cl_env, s),
+                _ => Some(head),
             };
             let Some(inner) = inner else { break };
             // A redirect back to the *same* closure is direct self-recursion
@@ -3228,7 +3229,7 @@ fn dispatch(
             // un-preemptibly (this redirect path has no captureable safepoint). Break
             // so it dispatches as a normal call → its VM arm, whose loop-top reduction
             // check preempts it (ADR-100 §8.1).
-            if matches!(inner, Value::Fn(iid) if iid.0 == id.0) {
+            if matches!(inner.unpack(), ValueRef::Fn(iid) if iid.0 == id.0) {
                 break;
             }
             if !crate::eval::passthrough_redirect_ok(inner)? {
@@ -3245,7 +3246,7 @@ fn dispatch(
         // Mirrors the TW's inline unfolding (eval/mod.rs `while let Native … "apply"`).
         // After unfolding, `continue 'apply` re-runs passthrough on the real callee.
         // If the callee is not `apply`, or arity < 2, break and dispatch normally.
-        if let Value::Native(id) = cur_callee {
+        if let ValueRef::Native(id) = cur_callee.unpack() {
             if heap.native(id).name == "apply" && cur_argv.len() >= 2 {
                 let list = cur_argv
                     .pop()
@@ -3253,7 +3254,7 @@ fn dispatch(
                 let real = cur_argv.remove(0);
                 // A lazy seq-view as the spliced arg list must realise first —
                 // `seq_items` can't run its transducer.
-                let list = if matches!(list, Value::SeqView(_)) {
+                let list = if matches!(list.unpack(), ValueRef::SeqView(_)) {
                     crate::builtins::realize_seqview(heap, genv, list)?
                 } else {
                     list
@@ -3269,7 +3270,7 @@ fn dispatch(
     // call for the trampoline); a native or non-passthrough/ineligible callee goes
     // to the tree-walker via `eval::apply` (which is just `call_native` for a
     // native — cheap).
-    if let Value::Fn(id) = cur_callee {
+    if let ValueRef::Fn(id) = cur_callee.unpack() {
         // Resolve the arm cloning only the `Arc<CompiledArm>` (not the enclosing
         // `CompiledClosure`) — one fewer Arc clone per call on the hot path.
         if let Some(arm) = compiled_arm_for(heap, id, cur_argv.len()) {
@@ -3325,7 +3326,7 @@ fn push_frame(
     // default is evaluated: a default's eval can collect, which would strand the
     // still-live `args` slice (LOCAL handles) if it were read afterwards.
     for i in 0..arm.nrequired {
-        heap.set_root_at(base + i, args.get(i).copied().unwrap_or(Value::Nil));
+        heap.set_root_at(base + i, args.get(i).copied().unwrap_or(Value::nil()));
     }
     // Provided optionals are a left-to-right prefix of `args`; the remainder are
     // missing and take their defaults below.
@@ -3439,13 +3440,13 @@ pub(crate) fn run_process_body(
         // capture, so it runs tree-walked **on this worker thread** and its `receive`s
         // **block** the worker (the dirty-scheduler carve-out, §7.4); it returns Done/
         // Err and never suspends. Either way: no coroutine.
-        None => match body {
-            Value::Fn(id) if compiled_arm_for(heap, id, 0).is_some() => {
+        None => match body.unpack() {
+            ValueRef::Fn(id) if compiled_arm_for(heap, id, 0).is_some() => {
                 let arm = compiled_arm_for(heap, id, 0).expect("just checked is_some");
                 let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
                 vm_run_bc(heap, arm, &[], cenv, None, true)
             }
-            Value::Fn(_) => crate::eval::apply(heap, body, &[], EnvId::GLOBAL).map(VmOutcome::Done),
+            ValueRef::Fn(_) => crate::eval::apply(heap, body, &[], EnvId::GLOBAL).map(VmOutcome::Done),
             _ => Err(LispError::type_err("process body must be a function")),
         },
     }
@@ -3629,7 +3630,7 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
         }
         Node::Do(nodes) => {
             if nodes.is_empty() {
-                code.push(Inst::Const(ConstVal::Atom(Value::Nil)));
+                code.push(Inst::Const(ConstVal::Atom(Value::nil())));
             } else {
                 let last = nodes.len() - 1;
                 for n in &nodes[..last] {
@@ -3705,7 +3706,7 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                     true
                 }
                 (Node::Local(sa), Node::Const(cv)) => {
-                    if let Value::Int(n) = cv.load() {
+                    if let ValueRef::Int(n) = cv.load().unpack() {
                         code.push(Inst::Prim2SlotInt {
                             op: *op,
                             map: *map,
@@ -3722,7 +3723,7 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                     }
                 }
                 (Node::Const(cv), Node::Local(sb)) => {
-                    if let Value::Int(n) = cv.load() {
+                    if let ValueRef::Int(n) = cv.load().unpack() {
                         // Slot goes to src[0], const to src[1] — invert the map. `swapped`
                         // so the dispatch fallback restores the original `(op Const Local)`
                         // order when it calls the user `head` (the inline path uses `map`).
@@ -3968,25 +3969,25 @@ fn exec_chunk(
                     }
                 };
                 if inlinable {
-                    match (op, sa) {
-                        (PrimOp1::First, Value::Pair(p)) => {
+                    match (op, sa.unpack()) {
+                        (PrimOp1::First, ValueRef::Pair(p)) => {
                             crate::perf_bump!(prim1_inline);
                             let v = heap.pair(p).0;
                             heap.truncate_roots(n - 1);
                             heap.push_root(v);
                             continue;
                         }
-                        (PrimOp1::Rest, Value::Pair(p)) => {
+                        (PrimOp1::Rest, ValueRef::Pair(p)) => {
                             crate::perf_bump!(prim1_inline);
                             let v = heap.pair(p).1;
                             heap.truncate_roots(n - 1);
                             heap.push_root(v);
                             continue;
                         }
-                        (PrimOp1::First | PrimOp1::Rest, Value::Nil) => {
+                        (PrimOp1::First | PrimOp1::Rest, ValueRef::Nil) => {
                             crate::perf_bump!(prim1_inline);
                             heap.truncate_roots(n - 1);
-                            heap.push_root(Value::Nil);
+                            heap.push_root(Value::nil());
                             continue;
                         }
                         _ => {}
@@ -4067,7 +4068,7 @@ fn exec_chunk(
                 pos,
             } => {
                 let sa = heap.root_at(base + slot_a);
-                let sb = Value::Int(*int_b);
+                let sb = Value::int(*int_b);
                 let x = [sa, sb][map[0] as usize];
                 let y = [sa, sb][map[1] as usize];
                 let v = match prim2_inline_exec(heap, *op, *map, *swapped, *head, guard, x, y)? {
@@ -4135,8 +4136,8 @@ fn exec_chunk(
                             };
                             // Cache the resolved callee + (for a non-passthrough VM closure)
                             // its arm. A dynamic var is never cached (it can shadow per call).
-                            let arm = match v {
-                                Value::Fn(id)
+                            let arm = match v.unpack() {
+                                ValueRef::Fn(id)
                                     if crate::eval::passthrough_arm(heap, id, argc).is_none() =>
                                 {
                                     compiled_arm_for(heap, id, argc).map(|arm| {
@@ -4202,7 +4203,7 @@ fn exec_chunk(
                             crate::perf_bump!(self_tail);
                             heap.truncate_roots(base + arm.nslots);
                             for i in 0..arm.nslots {
-                                heap.set_root_at(base + i, Value::Nil);
+                                heap.set_root_at(base + i, Value::nil());
                             }
                             for i in 0..arm.nrequired {
                                 heap.set_root_at(base + i, argv[i]);
@@ -4319,7 +4320,7 @@ fn exec_chunk(
                 // Reset frame in place (same as the old outer-loop SelfTail handler).
                 heap.truncate_roots(base + arm.nslots);
                 for i in 0..arm.nslots {
-                    heap.set_root_at(base + i, Value::Nil);
+                    heap.set_root_at(base + i, Value::nil());
                 }
                 for i in 0..arm.nrequired {
                     heap.set_root_at(base + i, argv[i]);
@@ -4989,7 +4990,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             let genv = heap.root_env(env);
             let base = heap.roots_len();
             for _ in 0..scope.max {
-                heap.push_root(Value::Nil);
+                heap.push_root(Value::nil());
             }
             let r = exec_value(heap, &arm.body, base, genv);
             heap.truncate_roots(base);
@@ -5194,7 +5195,7 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // the same alloc path — is unaffected, so the bug is cons-specific.)
     };
     code.iter().all(|inst| match inst {
-        Inst::Const(cv) => matches!(cv.load(), Value::Int(_) | Value::Nil | Value::Float(_) | Value::Bool(_)),
+        Inst::Const(cv) => matches!(cv.load().unpack(), ValueRef::Int(_) | ValueRef::Nil | ValueRef::Float(_) | ValueRef::Bool(_)),
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)
@@ -6586,19 +6587,19 @@ fn jit_lower_arm_inner(
         let mut j = ip;
         loop {
             match &code[j] {
-                Inst::Const(cv) => match cv.load() {
-                    Value::Int(n) => stack.push(Op::Int(b.ins().iconst(types::I64, n))),
+                Inst::Const(cv) => match cv.load().unpack() {
+                    ValueRef::Int(n) => stack.push(Op::Int(b.ins().iconst(types::I64, n))),
                     // A float literal (`4.0`, `2.0` in mandelbrot's `esc`) → an unboxed f64.
-                    Value::Float(f) => stack.push(Op::Float(b.ins().f64const(f))),
+                    ValueRef::Float(f) => stack.push(Op::Float(b.ins().f64const(f))),
                     // `nil` (e.g. bintree `make`'s `(= d 0)` then-branch): a scalar atom,
                     // tag 0 / no payload — push it as a constant 3-word handle. A consumer
                     // that wants an int (`as_int`) tag-checks and deopts; a binder/return
                     // copies the words verbatim (`store_op`), which is all `make` does.
-                    Value::Nil => {
+                    ValueRef::Nil => {
                         let z = b.ins().iconst(types::I64, 0);
                         stack.push(Op::Handle(z, z, z));
                     }
-                    Value::Bool(bv) => {
+                    ValueRef::Bool(bv) => {
                         let v = b.ins().iconst(types::I64, if bv { 1 } else { 0 });
                         stack.push(Op::Bool(v));
                     }
@@ -7621,8 +7622,8 @@ pub(crate) fn jit_dispatch_call(
                     // Miss: resolve the callee global (the only `env_get` on the call path,
                     // and only while cold) and fill the IC.
                     let cenv = heap.read_root_env(heap.jit_call_env);
-                    match heap.env_get(cenv, head) {
-                        Some(Value::Fn(id)) => compiled_arm_for(heap, id, argc).map(|a| {
+                    match heap.env_get(cenv, head).map(|v| v.unpack()) {
+                        Some(ValueRef::Fn(id)) => compiled_arm_for(heap, id, argc).map(|a| {
                             let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
                             if !value::is_dynamic(head) {
                                 heap.vm_call_ic_put(
@@ -7631,7 +7632,7 @@ pub(crate) fn jit_dispatch_call(
                                         sym: head,
                                         argc: argc as u32,
                                         epoch,
-                                        callee: Value::Fn(id),
+                                        callee: Value::func(id),
                                         arm: Some((a.clone(), env)),
                                         fast: std::cell::Cell::new(None),
                                     },
@@ -7643,7 +7644,7 @@ pub(crate) fn jit_dispatch_call(
                     }
                 }
             }
-        } else if let Value::Fn(id) = heap.root_at(stage_base) {
+        } else if let ValueRef::Fn(id) = heap.root_at(stage_base).unpack() {
             compiled_arm_for(heap, id, argc)
                 .map(|a| (a, heap.closure(id).env.unwrap_or_else(|| heap.global())))
         } else {
@@ -8041,24 +8042,24 @@ mod tests {
     // Bump a movable handle's index by `by`; leave atoms alone. Stands in for the
     // `runtime_collect` flush that relocates a handle into the compacted region.
     fn bump(v: Value, by: usize) -> Value {
-        match v {
-            Value::Str(id) => Value::Str(StrId::runtime(id.index() + by)),
-            Value::Pair(id) => Value::Pair(PairId::runtime(id.index() + by)),
-            other => other,
+        match v.unpack() {
+            ValueRef::Str(id) => Value::str_(StrId::runtime(id.index() + by)),
+            ValueRef::Pair(id) => Value::pair(PairId::runtime(id.index() + by)),
+            _ => v,
         }
     }
 
     // `Value` has no `PartialEq` (Brood equality is a structural function), so compare
     // a handle const by kind + index.
     fn str_idx(v: Value) -> usize {
-        match v {
-            Value::Str(id) => id.index(),
+        match v.unpack() {
+            ValueRef::Str(id) => id.index(),
             other => panic!("expected a Str, got {:?}", std::mem::discriminant(&other)),
         }
     }
     fn pair_idx(v: Value) -> usize {
-        match v {
-            Value::Pair(id) => id.index(),
+        match v.unpack() {
+            ValueRef::Pair(id) => id.index(),
             other => panic!("expected a Pair, got {:?}", std::mem::discriminant(&other)),
         }
     }
@@ -8084,13 +8085,15 @@ mod tests {
             true,
             minus,
             &guard,
-            Value::Int(24),
-            Value::Int(5),
+            Value::int(24),
+            Value::int(5),
         )
         .expect("no arithmetic error");
         match out {
-            Some(Value::Int(n)) => assert_eq!(n, 19, "(- 24 5) must inline to 19"),
-            Some(other) => panic!("expected Int(19), got tag {:?}", value::tag(other)),
+            Some(v) => match v.unpack() {
+                ValueRef::Int(n) => assert_eq!(n, 19, "(- 24 5) must inline to 19"),
+                _ => panic!("expected Int(19), got tag {:?}", value::tag(v)),
+            },
             None => panic!("swapped Prim2SlotInt slow-pathed after an epoch bump (the bug)"),
         }
         // The guard was refreshed to the live epoch, so subsequent calls take the fast path.
@@ -8100,7 +8103,7 @@ mod tests {
     #[test]
     fn const_handle_round_trips() {
         // A heap-handle const decodes back to the same handle, and `rewrite` moves it.
-        let cv = ConstVal::new(Value::Str(StrId::runtime(5)));
+        let cv = ConstVal::new(Value::str_(StrId::runtime(5)));
         assert!(
             matches!(cv, ConstVal::Handle { .. }),
             "a Str must encode as a Handle"
@@ -8110,13 +8113,13 @@ mod tests {
         assert_eq!(str_idx(cv.load()), 105, "rewrite must relocate the handle");
 
         // An atom stays inline and is never touched by a rewrite.
-        let atom = ConstVal::new(Value::Int(42));
+        let atom = ConstVal::new(Value::int(42));
         assert!(
             matches!(atom, ConstVal::Atom(_)),
             "an Int must encode as an Atom"
         );
         atom.rewrite(&mut |_| panic!("an atom const must not be passed to the flush"));
-        assert!(matches!(atom.load(), Value::Int(42)));
+        assert!(matches!(atom.load().unpack(), ValueRef::Int(42)));
     }
 
     #[test]
@@ -8126,12 +8129,12 @@ mod tests {
         // `MakeClosure` `fn_rest`, an `&optional` default — through all the structural
         // node variants, while leaving atoms/symbols/indices alone.
         let body = Node::Do(Box::new([
-            Node::Const(ConstVal::new(Value::Str(StrId::runtime(1)))),
+            Node::Const(ConstVal::new(Value::str_(StrId::runtime(1)))),
             Node::If(
-                Box::new(Node::Const(ConstVal::new(Value::Int(7)))), // atom — untouched
-                Box::new(Node::Const(ConstVal::new(Value::Pair(PairId::runtime(2))))),
+                Box::new(Node::Const(ConstVal::new(Value::int(7)))), // atom — untouched
+                Box::new(Node::Const(ConstVal::new(Value::pair(PairId::runtime(2))))),
                 Box::new(Node::MakeClosure {
-                    fn_rest: ConstVal::new(Value::Pair(PairId::runtime(3))),
+                    fn_rest: ConstVal::new(Value::pair(PairId::runtime(3))),
                     captures: Box::new([]),
                     self_name: None,
                 }),
@@ -8140,7 +8143,7 @@ mod tests {
         let arm = CompiledArm {
             nrequired: 0,
             noptional: 1,
-            optional_defaults: Box::new([Some(Node::Const(ConstVal::new(Value::Str(
+            optional_defaults: Box::new([Some(Node::Const(ConstVal::new(Value::str_(
                 StrId::runtime(4),
             ))))]),
             rest_slot: None,
@@ -8179,7 +8182,7 @@ mod tests {
             panic!("if")
         };
         assert!(
-            matches!(load_const(cond), Value::Int(7)),
+            matches!(load_const(cond).unpack(), ValueRef::Int(7)),
             "atom const must be untouched"
         );
         assert_eq!(pair_idx(load_const(then)), 102);
@@ -8222,7 +8225,7 @@ mod tests {
         if n == 0 {
             Err(LispError::suspend(None))
         } else {
-            Ok(Value::Int(42))
+            Ok(Value::int(42))
         }
     }
 
@@ -8265,7 +8268,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 1,
-            body: Node::Const(ConstVal::new(Value::Nil)), // unused at runtime (chunk drives)
+            body: Node::Const(ConstVal::new(Value::nil())), // unused at runtime (chunk drives)
             chunk: Some(chunk),
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
@@ -8314,8 +8317,10 @@ mod tests {
         )
         .expect("resume errored");
         match resumed {
-            VmOutcome::Done(Value::Int(n)) => assert_eq!(n, 42, "resumed to the wrong value"),
-            VmOutcome::Done(other) => panic!("resumed to a non-int: {:?}", value::tag(other)),
+            VmOutcome::Done(v) => match v.unpack() {
+                ValueRef::Int(n) => assert_eq!(n, 42, "resumed to the wrong value"),
+                other => panic!("resumed to a non-int: {:?}", value::tag(other)),
+            },
             other => panic!(
                 "expected Done(42), got {}",
                 match other {
@@ -8346,7 +8351,7 @@ mod tests {
         let chunk = Chunk {
             code: vec![
                 Inst::Local(0),
-                Inst::Const(ConstVal::new(Value::Int(1))),
+                Inst::Const(ConstVal::new(Value::int(1))),
                 Inst::Prim2 {
                     op: PrimOp::Add,
                     map: [0, 1],
@@ -8362,7 +8367,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 1,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(chunk),
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
@@ -8391,11 +8396,11 @@ mod tests {
 
         // Frame: x = 41 at roots[base].
         let base = heap.roots_len();
-        heap.push_root(Value::Int(41));
+        heap.push_root(Value::int(41));
         let outcome = f(&mut heap as *mut Heap, base as i64);
         assert_eq!(outcome, 0, "Done (no deopt — arg is an Int)");
-        match heap.root_at(base) {
-            Value::Int(n) => assert_eq!(n, 42, "JIT-compiled (+ x 1) on x=41"),
+        match heap.root_at(base).unpack() {
+            ValueRef::Int(n) => assert_eq!(n, 42, "JIT-compiled (+ x 1) on x=41"),
             other => panic!("expected Int(42), got tag {:?}", value::tag(other)),
         }
     }
@@ -8417,10 +8422,10 @@ mod tests {
         let chunk = Chunk {
             code: vec![
                 Inst::Local(0),                            // 0: x
-                Inst::Const(ConstVal::new(Value::Int(0))), // 1: 0
+                Inst::Const(ConstVal::new(Value::int(0))), // 1: 0
                 prim2(PrimOp::Lt, "<"),                    // 2: x < 0
                 Inst::JumpIfFalse(8),                      // 3: false → else (ip 8)
-                Inst::Const(ConstVal::new(Value::Int(0))), // 4: then: 0
+                Inst::Const(ConstVal::new(Value::int(0))), // 4: then: 0
                 Inst::Local(0),                            // 5: x
                 prim2(PrimOp::Sub, "-"),                   // 6: 0 - x
                 Inst::Jump(9),                             // 7: → done (ip 9 = len)
@@ -8433,7 +8438,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 1,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(chunk),
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
@@ -8463,10 +8468,10 @@ mod tests {
         for (x, want) in [(-5i64, 5i64), (3, 3), (0, 0)] {
             let mut heap = Heap::new();
             let base = heap.roots_len();
-            heap.push_root(Value::Int(x));
+            heap.push_root(Value::int(x));
             assert_eq!(f(&mut heap as *mut Heap, base as i64), 0, "Done for x={x}");
-            match heap.root_at(base) {
-                Value::Int(n) => assert_eq!(n, want, "abs({x})"),
+            match heap.root_at(base).unpack() {
+                ValueRef::Int(n) => assert_eq!(n, want, "abs({x})"),
                 other => panic!(
                     "x={x}: expected Int({want}), got tag {:?}",
                     value::tag(other)
@@ -8494,13 +8499,13 @@ mod tests {
         let chunk = Chunk {
             code: vec![
                 Inst::Local(0),                            // 0: i
-                Inst::Const(ConstVal::new(Value::Int(1))), // 1: 1
+                Inst::Const(ConstVal::new(Value::int(1))), // 1: 1
                 prim2(PrimOp::Lt, "<"),                    // 2: i < 1
                 Inst::JumpIfFalse(6),                      // 3: false → else (ip 6)
                 Inst::Local(1),                            // 4: then: acc
                 Inst::Jump(13),                            // 5: → done (len)
                 Inst::Local(0),                            // 6: else: i
-                Inst::Const(ConstVal::new(Value::Int(1))), // 7: 1
+                Inst::Const(ConstVal::new(Value::int(1))), // 7: 1
                 prim2(PrimOp::Sub, "-"),                   // 8: (- i 1)  = arg0
                 Inst::Local(1),                            // 9: acc
                 Inst::Local(0),                            // 10: i
@@ -8514,7 +8519,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 2,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(chunk),
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
@@ -8548,11 +8553,11 @@ mod tests {
         for (n, want) in [(5i64, 15i64), (100, 5050), (1, 1), (0, 0)] {
             let mut heap = Heap::new();
             let base = heap.roots_len();
-            heap.push_root(Value::Int(n)); // i = slot 0
-            heap.push_root(Value::Int(0)); // acc = slot 1
+            heap.push_root(Value::int(n)); // i = slot 0
+            heap.push_root(Value::int(0)); // acc = slot 1
             assert_eq!(f(&mut heap as *mut Heap, base as i64), 0, "Done for n={n}");
-            match heap.root_at(base) {
-                Value::Int(r) => assert_eq!(r, want, "sumto({n}, 0)"),
+            match heap.root_at(base).unpack() {
+                ValueRef::Int(r) => assert_eq!(r, want, "sumto({n}, 0)"),
                 other => panic!(
                     "n={n}: expected Int({want}), got tag {:?}",
                     value::tag(other)
@@ -8568,8 +8573,8 @@ mod tests {
         crate::process::yield_now(); // budget = REDUCTION_BUDGET
         let mut heap = Heap::new();
         let base = heap.roots_len();
-        heap.push_root(Value::Int(1_000_000)); // far more iterations than the budget
-        heap.push_root(Value::Int(0));
+        heap.push_root(Value::int(1_000_000)); // far more iterations than the budget
+        heap.push_root(Value::int(0));
         let outcome = f(&mut heap as *mut Heap, base as i64);
         crate::process::set_capture_run(false); // restore (cargo test shares threads)
         assert_eq!(
@@ -8605,14 +8610,14 @@ mod tests {
         let chunk = Chunk {
             code: vec![
                 Inst::Local(0),                            // 0: n
-                Inst::Const(ConstVal::new(Value::Int(0))), // 1: 0
+                Inst::Const(ConstVal::new(Value::int(0))), // 1: 0
                 prim2(PrimOp::Eq, "="),                    // 2: n == 0    (work 1)
                 Inst::JumpIfFalse(6),                      // 3: false → else (ip 6)
                 Inst::Local(1),                            // 4: then: acc
                 Inst::Jump(16),                            // 5: → done (len)
                 Inst::Global(fb),                          // 6: else: callee `fb`
                 Inst::Local(0),                            // 7: n
-                Inst::Const(ConstVal::new(Value::Int(1))), // 8: 1
+                Inst::Const(ConstVal::new(Value::int(1))), // 8: 1
                 prim2(PrimOp::Sub, "-"),                   // 9: (- n 1) = arg0   (work 2)
                 Inst::Local(1),                            // 10: acc
                 Inst::Local(1),                            // 11: acc
@@ -8637,7 +8642,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 2,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(chunk),
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
@@ -8672,13 +8677,13 @@ mod tests {
         let elided = Chunk {
             code: vec![
                 Inst::Local(0),                            // 0: n
-                Inst::Const(ConstVal::new(Value::Int(0))), // 1: 0
+                Inst::Const(ConstVal::new(Value::int(0))), // 1: 0
                 prim2(PrimOp::Eq, "="),                    // 2: n == 0    (work 1)
                 Inst::JumpIfFalse(6),                      // 3: false → else (ip 6)
                 Inst::Local(1),                            // 4: then: acc
                 Inst::Jump(15),                            // 5: → done (len)
                 Inst::Local(0),                            // 6: else: n (no staged callee — elided)
-                Inst::Const(ConstVal::new(Value::Int(1))), // 7: 1
+                Inst::Const(ConstVal::new(Value::int(1))), // 7: 1
                 prim2(PrimOp::Sub, "-"),                   // 8: (- n 1) = arg0   (work 2)
                 Inst::Local(1),                            // 9: acc
                 Inst::Local(1),                            // 10: acc
@@ -8700,7 +8705,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 2,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(elided),
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
@@ -8732,14 +8737,14 @@ mod tests {
         let thin = Chunk {
             code: vec![
                 Inst::Local(0),
-                Inst::Const(ConstVal::new(Value::Int(0))),
+                Inst::Const(ConstVal::new(Value::int(0))),
                 prim2(PrimOp::Eq, "="),
                 Inst::JumpIfFalse(6),
                 Inst::Local(1),
                 Inst::Jump(10),
                 Inst::Global(fb),
                 Inst::Local(0),
-                Inst::Const(ConstVal::new(Value::Int(1))),
+                Inst::Const(ConstVal::new(Value::int(1))),
                 prim2(PrimOp::Sub, "-"),
                 Inst::Call {
                     argc: 1,
@@ -8756,7 +8761,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 2,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(thin),
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
@@ -8821,7 +8826,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(chunk),
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
@@ -8869,15 +8874,15 @@ mod tests {
         for (n, want) in [(5i64, 15i64), (100, 5050), (1, 1), (0, 0)] {
             let mut heap = Heap::new();
             let base = heap.roots_len();
-            heap.push_root(Value::Int(n));
-            heap.push_root(Value::Int(0));
+            heap.push_root(Value::int(n));
+            heap.push_root(Value::int(0));
             assert_eq!(
                 f(&mut heap as *mut Heap, base as i64),
                 0,
                 "Done for sumto({n})"
             );
-            match heap.root_at(base) {
-                Value::Int(r) => assert_eq!(r, want, "fused sumto({n}, 0)"),
+            match heap.root_at(base).unpack() {
+                ValueRef::Int(r) => assert_eq!(r, want, "fused sumto({n}, 0)"),
                 other => panic!("expected Int, got tag {:?}", value::tag(other)),
             }
         }
@@ -8890,9 +8895,9 @@ mod tests {
                 code: vec![
                     slot_int(PrimOp::Lt, [1, 0], 0, 5, ">"), // 0: (> x 5)  [swapped]
                     Inst::JumpIfFalse(4),                    // 1
-                    Inst::Const(ConstVal::new(Value::Int(100))), // 2: then
+                    Inst::Const(ConstVal::new(Value::int(100))), // 2: then
                     Inst::Jump(5),                           // 3
-                    Inst::Const(ConstVal::new(Value::Int(200))), // 4: else
+                    Inst::Const(ConstVal::new(Value::int(200))), // 4: else
                 ],
             },
             1,
@@ -8903,14 +8908,14 @@ mod tests {
         for (x, want) in [(10i64, 100i64), (3, 200)] {
             let mut heap = Heap::new();
             let base = heap.roots_len();
-            heap.push_root(Value::Int(x));
+            heap.push_root(Value::int(x));
             assert_eq!(
                 g(&mut heap as *mut Heap, base as i64),
                 0,
                 "Done for (> {x} 5)"
             );
-            match heap.root_at(base) {
-                Value::Int(r) => {
+            match heap.root_at(base).unpack() {
+                ValueRef::Int(r) => {
                     assert_eq!(r, want, "(if (> {x} 5) 100 200) — map must be applied")
                 }
                 other => panic!("expected Int, got tag {:?}", value::tag(other)),
@@ -8931,16 +8936,16 @@ mod tests {
             unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &sq, &[]).expect("(* x x) JITs")) };
         let mut heap = Heap::new();
         let base = heap.roots_len();
-        heap.push_root(Value::Int(3));
+        heap.push_root(Value::int(3));
         assert_eq!(
             s(&mut heap as *mut Heap, base as i64),
             0,
             "(* 3 3) is in range"
         );
-        assert!(matches!(heap.root_at(base), Value::Int(9)), "(* 3 3) = 9");
+        assert!(matches!(heap.root_at(base).unpack(), ValueRef::Int(9)), "(* 3 3) = 9");
         let mut heap = Heap::new();
         let base = heap.roots_len();
-        heap.push_root(Value::Int(4_000_000_000)); // 4e9 * 4e9 = 1.6e19 > i64::MAX
+        heap.push_root(Value::int(4_000_000_000)); // 4e9 * 4e9 = 1.6e19 > i64::MAX
         assert_eq!(
             s(&mut heap as *mut Heap, base as i64),
             1,
@@ -8969,7 +8974,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(chunk),
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
@@ -8995,13 +9000,13 @@ mod tests {
             Chunk {
                 code: vec![
                     Inst::Local(0),
-                    Inst::Const(ConstVal::new(Value::Int(1))),
+                    Inst::Const(ConstVal::new(Value::int(1))),
                     prim2(PrimOp::Lt, "<"),
                     Inst::JumpIfFalse(6),
                     Inst::Local(1),
                     Inst::Jump(13),
                     Inst::Local(0),
-                    Inst::Const(ConstVal::new(Value::Int(1))),
+                    Inst::Const(ConstVal::new(Value::int(1))),
                     prim2(PrimOp::Sub, "-"),
                     Inst::Local(1),
                     Inst::Local(0),
@@ -9026,8 +9031,8 @@ mod tests {
         for _ in 0..400 {
             crate::process::yield_now(); // keep the budget topped up across calls
             let base = interp.heap.roots_len();
-            interp.heap.push_root(Value::Int(5)); // i
-            interp.heap.push_root(Value::Int(0)); // acc
+            interp.heap.push_root(Value::int(5)); // i
+            interp.heap.push_root(Value::int(0)); // acc
             let outcome = jit_tier(
                 &sumto,
                 &mut interp.heap,
@@ -9041,8 +9046,8 @@ mod tests {
                 }
                 Some(0) => {
                     ran_native += 1;
-                    match interp.heap.root_at(base) {
-                        Value::Int(r) => assert_eq!(r, 15, "JIT'd sumto(5,0)"),
+                    match interp.heap.root_at(base).unpack() {
+                        ValueRef::Int(r) => assert_eq!(r, 15, "JIT'd sumto(5,0)"),
                         other => panic!("expected Int(15), got tag {:?}", value::tag(other)),
                     }
                     interp.heap.truncate_roots(base);
@@ -9068,7 +9073,7 @@ mod tests {
         ));
         for _ in 0..400 {
             let base = interp.heap.roots_len();
-            interp.heap.push_root(Value::Int(0));
+            interp.heap.push_root(Value::int(0));
             assert_eq!(
                 jit_tier(
                     &bailing,
@@ -9109,13 +9114,13 @@ mod tests {
         let chunk = Chunk {
             code: vec![
                 Inst::Local(0),
-                Inst::Const(ConstVal::new(Value::Int(1))),
+                Inst::Const(ConstVal::new(Value::int(1))),
                 prim2(PrimOp::Lt, "<"),
                 Inst::JumpIfFalse(6),
                 Inst::Local(1),
                 Inst::Jump(13),
                 Inst::Local(0),
-                Inst::Const(ConstVal::new(Value::Int(1))),
+                Inst::Const(ConstVal::new(Value::int(1))),
                 prim2(PrimOp::Sub, "-"),
                 Inst::Local(1),
                 Inst::Local(0),
@@ -9129,7 +9134,7 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 2,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(chunk),
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
@@ -9162,8 +9167,8 @@ mod tests {
         for _ in 0..400 {
             crate::process::yield_now();
             let base = interp.heap.roots_len();
-            interp.heap.push_root(Value::Int(5));
-            interp.heap.push_root(Value::Int(0));
+            interp.heap.push_root(Value::int(5));
+            interp.heap.push_root(Value::int(0));
             let _ = jit_tier(&arm, &mut interp.heap, base, EnvRoot::Stable(EnvId::GLOBAL));
             interp.heap.truncate_roots(base);
             let code = arm.jit_code.load(Acquire);
@@ -9180,15 +9185,17 @@ mod tests {
         let outcome = vm_run_bc(
             &mut interp.heap,
             arm,
-            &[Value::Int(5), Value::Int(0)],
+            &[Value::int(5), Value::int(0)],
             EnvId::GLOBAL,
             None,
             true,
         )
         .expect("vm_run_bc errored");
         match outcome {
-            VmOutcome::Done(Value::Int(n)) => assert_eq!(n, 15, "tiered sumto(5,0) via the hook"),
-            VmOutcome::Done(other) => panic!("Done non-int: tag {:?}", value::tag(other)),
+            VmOutcome::Done(v) => match v.unpack() {
+                ValueRef::Int(n) => assert_eq!(n, 15, "tiered sumto(5,0) via the hook"),
+                other => panic!("Done non-int: tag {:?}", value::tag(other)),
+            },
             _ => panic!("expected Done(15) from the JIT hook"),
         }
     }
@@ -9215,17 +9222,17 @@ mod tests {
             optional_defaults: Box::new([]),
             rest_slot: None,
             nslots: 2,
-            body: Node::Const(ConstVal::new(Value::Nil)),
+            body: Node::Const(ConstVal::new(Value::nil())),
             chunk: Some(Chunk {
                 code: vec![
                     Inst::Local(0),
-                    Inst::Const(ConstVal::new(Value::Int(1))),
+                    Inst::Const(ConstVal::new(Value::int(1))),
                     prim2(PrimOp::Lt, "<"),
                     Inst::JumpIfFalse(6),
                     Inst::Local(1),
                     Inst::Jump(13),
                     Inst::Local(0),
-                    Inst::Const(ConstVal::new(Value::Int(1))),
+                    Inst::Const(ConstVal::new(Value::int(1))),
                     prim2(PrimOp::Sub, "-"),
                     Inst::Local(1),
                     Inst::Local(0),
@@ -9263,14 +9270,17 @@ mod tests {
             match vm_run_bc(
                 h,
                 arm.clone(),
-                &[Value::Int(n), Value::Int(0)],
+                &[Value::int(n), Value::int(0)],
                 EnvId::GLOBAL,
                 None,
                 true,
             )
             .expect("run")
             {
-                VmOutcome::Done(Value::Int(r)) => r,
+                VmOutcome::Done(v) => match v.unpack() {
+                    ValueRef::Int(r) => r,
+                    _ => panic!("bad outcome"),
+                },
                 _ => panic!("bad outcome"),
             }
         };
@@ -9294,8 +9304,8 @@ mod tests {
         crate::process::yield_now();
         for _ in 0..1000 {
             let b = interp.heap.roots_len();
-            interp.heap.push_root(Value::Int(5));
-            interp.heap.push_root(Value::Int(0));
+            interp.heap.push_root(Value::int(5));
+            interp.heap.push_root(Value::int(0));
             let _ = jit_tier(
                 &jit_arm,
                 &mut interp.heap,
