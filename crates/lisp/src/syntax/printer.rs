@@ -4,7 +4,7 @@
 //! - [`display`] is *human* (strings raw) — what `print`/`str` use.
 
 use crate::core::heap::Heap;
-use crate::core::value::{symbol_name_ref, Value};
+use crate::core::value::{symbol_name_ref, Value, ValueRef};
 
 /// Maximum nesting the printer will descend into. Past this we emit `…`
 /// rather than recursing — a printed REPL value should never be the thing
@@ -30,21 +30,21 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
         out.push('…');
         return;
     }
-    match v {
-        Value::Nil => out.push_str("nil"),
-        Value::Bool(b) => out.push_str(if b { "true" } else { "false" }),
-        Value::Int(n) => out.push_str(&n.to_string()),
+    match v.unpack() {
+        ValueRef::Nil => out.push_str("nil"),
+        ValueRef::Bool(b) => out.push_str(if b { "true" } else { "false" }),
+        ValueRef::Int(n) => out.push_str(&n.to_string()),
         // A bignum prints as its decimal string, exactly like an `Int`.
-        Value::BigInt(id) => out.push_str(&heap.bigint(id).to_string()),
+        ValueRef::BigInt(id) => out.push_str(&heap.bigint(id).to_string()),
         // A bitset prints as an opaque handle — its bytes are raw, not text.
-        Value::Bitset(id) => out.push_str(&format!("#<bitset {} bytes>", heap.bitset(id).len())),
-        Value::Float(f) => out.push_str(&format_float(f)),
-        Value::Sym(s) => out.push_str(symbol_name_ref(s)),
-        Value::Keyword(s) => {
+        ValueRef::Bitset(id) => out.push_str(&format!("#<bitset {} bytes>", heap.bitset(id).len())),
+        ValueRef::Float(f) => out.push_str(&format_float(f)),
+        ValueRef::Sym(s) => out.push_str(symbol_name_ref(s)),
+        ValueRef::Keyword(s) => {
             out.push(':');
             out.push_str(symbol_name_ref(s));
         }
-        Value::Str(id) => {
+        ValueRef::Str(id) => {
             let s = heap.string(id);
             if readable {
                 out.push('"');
@@ -76,9 +76,9 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
                 out.push_str(s);
             }
         }
-        Value::Pair(_) => write_list(out, heap, v, readable, depth),
+        ValueRef::Pair(_) => write_list(out, heap, v, readable, depth),
         // A range prints as the list it stands in for: `(0 1 2 3 4)`.
-        Value::Range(id) => {
+        ValueRef::Range(id) => {
             out.push('(');
             let (lo, hi, step) = heap.range_parts(id);
             let mut i = lo;
@@ -88,7 +88,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
                     out.push(' ');
                 }
                 first = false;
-                write_value(out, heap, Value::Int(i), readable, depth + 1);
+                write_value(out, heap, Value::int(i), readable, depth + 1);
                 i += step;
             }
             out.push(')');
@@ -98,8 +98,8 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
         // in normal use this is unreachable; print an opaque marker as the
         // never-panic fallback for an escaped raw view (e.g. inside a kernel
         // error message).
-        Value::SeqView(_) => out.push_str("#<seq-view>"),
-        Value::Vector(id) => {
+        ValueRef::SeqView(_) => out.push_str("#<seq-view>"),
+        ValueRef::Vector(id) => {
             out.push('[');
             for (i, &item) in heap.vector(id).iter().enumerate() {
                 if i > 0 {
@@ -109,7 +109,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
             out.push(']');
         }
-        Value::Map(id) => {
+        ValueRef::Map(id) => {
             out.push('{');
             for (i, (k, v)) in heap.map_entries(id).iter().enumerate() {
                 if i > 0 {
@@ -121,7 +121,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
             out.push('}');
         }
-        Value::Fn(id) => {
+        ValueRef::Fn(id) => {
             out.push_str("#<fn");
             if let Some(name) = heap.closure(id).name {
                 out.push(' ');
@@ -129,7 +129,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
             out.push('>');
         }
-        Value::Macro(id) => {
+        ValueRef::Macro(id) => {
             out.push_str("#<macro");
             if let Some(name) = heap.closure(id).name {
                 out.push(' ');
@@ -137,24 +137,24 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
             out.push('>');
         }
-        Value::Native(id) => {
+        ValueRef::Native(id) => {
             out.push_str("#<native ");
             out.push_str(&heap.native(id).name);
             out.push('>');
         }
-        Value::Ref(n) => {
+        ValueRef::Ref(n) => {
             out.push_str("#<ref ");
             out.push_str(&n.to_string());
             out.push('>');
         }
-        Value::Pid { node, id } => {
+        ValueRef::Pid { node, id } => {
             out.push_str("#<pid ");
             out.push_str(symbol_name_ref(node));
             out.push('/');
             out.push_str(&id.to_string());
             out.push('>');
         }
-        Value::Rope(id) => {
+        ValueRef::Rope(id) => {
             // A buffer rope can hold a whole file; print a summary, not the
             // text (use `rope->string` to get the content). Same for both
             // readable and display forms — a rope has no re-readable literal.
@@ -165,19 +165,19 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str(&r.len_lines().to_string());
             out.push('>');
         }
-        Value::Socket(id) => {
+        ValueRef::Socket(id) => {
             // A socket is a live OS resource with no readable literal.
             out.push_str("#<socket ");
             out.push_str(&id.to_string());
             out.push('>');
         }
-        Value::Subprocess(id) => {
+        ValueRef::Subprocess(id) => {
             // A child process is a live OS resource with no readable literal.
             out.push_str("#<subprocess ");
             out.push_str(&id.to_string());
             out.push('>');
         }
-        Value::Table(id) => {
+        ValueRef::Table(id) => {
             // A shared in-memory table — no readable literal (identity handle).
             out.push_str("#<table ");
             out.push_str(&id.to_string());
@@ -193,8 +193,8 @@ fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u3
     // The list *spine* is iterated, not recursed (so a million-long proper
     // list doesn't overflow); only each `head` advances the depth counter.
     loop {
-        match cur {
-            Value::Pair(p) => {
+        match cur.unpack() {
+            ValueRef::Pair(p) => {
                 if !first {
                     out.push(' ');
                 }
@@ -203,7 +203,7 @@ fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u3
                 write_value(out, heap, head, readable, depth + 1);
                 cur = tail;
             }
-            Value::Nil => break,
+            ValueRef::Nil => break,
             other => {
                 out.push_str(" . ");
                 write_value(out, heap, other, readable, depth + 1);
@@ -250,8 +250,8 @@ mod tests {
         let printed = print(&heap, v);
         // Re-read the printed text and confirm we recover the same string.
         let back = reader::read_one(&mut heap, &printed).expect("re-reads");
-        match back {
-            Value::Str(id) => assert_eq!(heap.string(id), original),
+        match back.unpack() {
+            ValueRef::Str(id) => assert_eq!(heap.string(id), original),
             other => panic!("expected a string, got {other:?}"),
         }
     }

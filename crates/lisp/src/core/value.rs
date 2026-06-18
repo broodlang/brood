@@ -485,6 +485,210 @@ pub enum Value {
     Bitset(BsId),
 }
 
+/// The **unpacked** view of a [`Value`] — the form you `match` against.
+///
+/// Today this is a zero-cost alias for [`Value`] (which *is* the 24-byte enum),
+/// so `ValueRef::Int` *is* `Value::Int` and matching through it is identical and
+/// perf-flat (Stage 0, `docs/value-representation.md` §8). In a later stage
+/// `Value` becomes a tagged `struct Value(u64)` and `ValueRef` becomes a distinct
+/// enum — the *decoded* view — while every call site already matches through
+/// `value.unpack()`, so only [`Value::unpack`] (the decode point) changes.
+pub type ValueRef = Value;
+
+/// Stage-0 accessor layer (`docs/value-representation.md` §8). Every call site
+/// goes through these — `unpack()` for matching, the lowercase constructors to
+/// build, the `as_*` accessors for hot reads — so a later stage can swap the
+/// representation (24-byte enum → 8-byte tagged word) entirely behind this layer
+/// without touching the call sites. Today every method is a no-op / direct
+/// variant construct, so the abstraction compiles to the same code (perf-flat).
+impl Value {
+    /// Decode this `Value` into its [`ValueRef`] (unpacked) view for matching.
+    /// A no-op copy today (`Value` is `Copy` and `ValueRef` *is* `Value`); the
+    /// decode point a later stage hooks.
+    #[inline]
+    pub fn unpack(self) -> ValueRef {
+        self
+    }
+
+    // ----- constructors (one per variant; lowercase so they don't collide with
+    // the `Int`/`Float`/… variants) -----
+
+    #[inline]
+    pub fn nil() -> Value {
+        Value::Nil
+    }
+    #[inline]
+    pub fn boolean(b: bool) -> Value {
+        Value::Bool(b)
+    }
+    #[inline]
+    pub fn int(i: i64) -> Value {
+        Value::Int(i)
+    }
+    #[inline]
+    pub fn bigint(id: BigIntId) -> Value {
+        Value::BigInt(id)
+    }
+    #[inline]
+    pub fn float(f: f64) -> Value {
+        Value::Float(f)
+    }
+    #[inline]
+    pub fn symbol(s: Symbol) -> Value {
+        Value::Sym(s)
+    }
+    #[inline]
+    pub fn keyword(s: Symbol) -> Value {
+        Value::Keyword(s)
+    }
+    #[inline]
+    pub fn str_(id: StrId) -> Value {
+        Value::Str(id)
+    }
+    #[inline]
+    pub fn rope(id: RopeId) -> Value {
+        Value::Rope(id)
+    }
+    #[inline]
+    pub fn pair(id: PairId) -> Value {
+        Value::Pair(id)
+    }
+    #[inline]
+    pub fn vector(id: VecId) -> Value {
+        Value::Vector(id)
+    }
+    #[inline]
+    pub fn range(id: VecId) -> Value {
+        Value::Range(id)
+    }
+    #[inline]
+    pub fn seqview(id: VecId) -> Value {
+        Value::SeqView(id)
+    }
+    #[inline]
+    pub fn map(id: MapId) -> Value {
+        Value::Map(id)
+    }
+    #[inline]
+    pub fn func(id: ClosureId) -> Value {
+        Value::Fn(id)
+    }
+    #[inline]
+    pub fn macro_(id: ClosureId) -> Value {
+        Value::Macro(id)
+    }
+    #[inline]
+    pub fn native(id: NativeId) -> Value {
+        Value::Native(id)
+    }
+    #[inline]
+    pub fn ref_(id: u64) -> Value {
+        Value::Ref(id)
+    }
+    #[inline]
+    pub fn pid(node: Symbol, id: u64) -> Value {
+        Value::Pid { node, id }
+    }
+    #[inline]
+    pub fn socket(id: u64) -> Value {
+        Value::Socket(id)
+    }
+    #[inline]
+    pub fn subprocess(id: u64) -> Value {
+        Value::Subprocess(id)
+    }
+    #[inline]
+    pub fn table(id: u64) -> Value {
+        Value::Table(id)
+    }
+    #[inline]
+    pub fn bitset(id: BsId) -> Value {
+        Value::Bitset(id)
+    }
+
+    // ----- hot accessors (for the `if let Value::X(..) = v` shape) -----
+
+    /// This value's runtime [`Tag`] (its discriminant, with `BigInt`→`Int` and
+    /// `Range`/`SeqView`→`Pair` folded as the type system sees them).
+    #[inline]
+    pub fn tag(self) -> Tag {
+        tag(self)
+    }
+    /// The `i64` if this is a (machine-word) `Int`. A `BigInt` is deliberately
+    /// **not** returned here — it's out of `i64` range by the normalize invariant.
+    #[inline]
+    pub fn as_int(self) -> Option<i64> {
+        match self {
+            Value::Int(i) => Some(i),
+            _ => None,
+        }
+    }
+    /// The `f64` if this is a `Float`.
+    #[inline]
+    pub fn as_f64(self) -> Option<f64> {
+        match self {
+            Value::Float(f) => Some(f),
+            _ => None,
+        }
+    }
+    /// The `bool` if this is a `Bool`.
+    #[inline]
+    pub fn as_bool(self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(b),
+            _ => None,
+        }
+    }
+    /// The interned `Symbol` if this is a `Sym`.
+    #[inline]
+    pub fn as_sym(self) -> Option<Symbol> {
+        match self {
+            Value::Sym(s) => Some(s),
+            _ => None,
+        }
+    }
+    /// The interned `Symbol` if this is a `Keyword`.
+    #[inline]
+    pub fn as_keyword(self) -> Option<Symbol> {
+        match self {
+            Value::Keyword(s) => Some(s),
+            _ => None,
+        }
+    }
+    /// The [`PairId`] if this is a `Pair` (not a `Range`/`SeqView`).
+    #[inline]
+    pub fn as_pair(self) -> Option<PairId> {
+        match self {
+            Value::Pair(p) => Some(p),
+            _ => None,
+        }
+    }
+    /// The backing [`VecId`] if this is a `Vector`.
+    #[inline]
+    pub fn as_vector(self) -> Option<VecId> {
+        match self {
+            Value::Vector(v) => Some(v),
+            _ => None,
+        }
+    }
+    /// The [`StrId`] if this is a `Str`.
+    #[inline]
+    pub fn as_str_id(self) -> Option<StrId> {
+        match self {
+            Value::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+    /// The [`MapId`] if this is a `Map`.
+    #[inline]
+    pub fn as_map(self) -> Option<MapId> {
+        match self {
+            Value::Map(m) => Some(m),
+            _ => None,
+        }
+    }
+}
+
 /// The runtime type tags — the discriminant of [`Value`] made first-class, so it
 /// can be named (`type-of`), reported in self-identifying type errors, and used
 /// as the base of the (future, advisory) inference lattice. This *is* Brood's
