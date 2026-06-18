@@ -493,3 +493,55 @@ fn jit_result_matches_a_known_fib_style_accumulator() {
         "12586269025", // fib(50)
     );
 }
+
+#[test]
+fn warmed_recursive_fib_matches_vm() {
+    // The straight (non-inlined) recursive fib — the headline Track-B target. Both
+    // self-calls `(fib (- n 1))` / `(fib (- n 2))` are non-tail free-global calls, so under
+    // `BROOD_JIT_ICALL=1` they take the in-IR epoch-guarded fast-link path
+    // (`brood_rt_fast_frame`) instead of `brood_rt_call_slow`. `fib 30` makes ~2.7M such
+    // calls in one go, so `fib` tiers and the calls fast-link mid-run; the result must stay
+    // bit-identical to the VM (a dispatch desync would be a silent wrong answer). With the
+    // env unset this is the plain slow-dispatch path (the A/B baseline) — both must give
+    // 832040.
+    is(
+        "(defn fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+         (fib 30)",
+        "832040",
+    );
+}
+
+#[test]
+fn non_tail_mutual_recursion_fast_links_both_heads() {
+    // Two DISTINCT free-global callees calling each other in non-tail position (`(+ 1 (b …))`
+    // / `(+ 1 (a …))`) — two separate call sites with two different head symbols, so the
+    // flat fast-link table must serve each site its own `(code, env)` (a site→sym mix-up
+    // would cross-call). Warmed 100k× so both `a` and `b` tier and fast-link. `a 50`
+    // bottoms out at 0 after 50 alternating steps → 50; must match the VM under both
+    // `BROOD_JIT_ICALL` on and off.
+    is(
+        "(defn a (n) (if (< n 1) 0 (+ 1 (b (- n 1)))))
+         (defn b (n) (if (< n 1) 0 (+ 1 (a (- n 1)))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (a 50))))
+         (run 100000 0)",
+        "50",
+    );
+}
+
+#[test]
+fn redefining_a_fast_linked_callee_is_honored() {
+    // Late binding across the fast-link: warm `f` (a non-tail caller of `g`) so the call
+    // site fast-links to `g`'s native code, then `def` a new `g`. The epoch bump must
+    // invalidate the flat-table slot (stale epoch → IR miss → re-resolve), so the post-`def`
+    // call sees the NEW `g`. A fast-link that ignored the epoch would keep calling the old
+    // code — a silent wrong answer.
+    is(
+        "(defn g (x) (+ x 1))
+         (defn f (x) (+ 0 (g x)))
+         (defn warm (k last) (if (< k 1) last (warm (- k 1) (f 10))))
+         (warm 100000 0)
+         (def g (fn (x) (* x 100)))
+         (f 10)",
+        "1000", // new g: 10*100; (+ 0 1000)
+    );
+}

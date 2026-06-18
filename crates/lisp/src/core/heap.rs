@@ -1013,6 +1013,20 @@ pub struct Heap {
     /// site is allocated at compile time ([`Heap::vm_site_alloc`]), so ids are
     /// only as dense as the code this process actually compiled.
     vm_call_ics: RefCell<Vec<Option<CallIcEntry>>>,
+    /// **IR-readable mirror** of the fast-link memo (Track B / Technique A): a flat,
+    /// `#[repr(C)]` side table indexed by the same call-site id as [`Self::vm_call_ics`],
+    /// so JIT'd code can read a site's `(epoch, code, nslots, env)` with a raw load + an
+    /// epoch compare — no `RefCell` borrow, no `Vec<Option<…>>` niche, no `Cell` (none of
+    /// which are safe to touch from Cranelift IR). It is the same data as a
+    /// [`CallIcEntry::fast`] memo, written in lockstep by [`Self::vm_call_ic_fast_link`].
+    /// A slot is **valid** only when `epoch == global_epoch()`; a `def`/compaction bumps
+    /// the epoch (so a stale or recycled slot misses the IR guard and falls to the slow
+    /// path), and the table is cleared in lockstep with `vm_call_ics` on a
+    /// [`Self::runtime_collect`]. Grown by [`Self::vm_site_alloc`] so it stays the same
+    /// length as `vm_call_ics` (the IR bounds-checks `site < len` for a live arm whose
+    /// site ids outran a post-collect re-grow).
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    vm_fast_links: RefCell<Vec<FastLink>>,
     /// Global-read inline caches (ADR-096) — the value-position counterpart of
     /// [`Self::vm_call_ics`], indexed by a compiled `Node::GlobalIc`'s site id.
     /// Same lifecycle: allocated at compile time, validated by (sym, epoch),
@@ -1078,6 +1092,37 @@ pub struct CallIcEntry {
     /// [`Heap::vm_call_ic_put`], which clears this). Within an epoch an installed arm's
     /// code pointer is stable (a recompile bumps the epoch), so the cache can't go stale.
     pub fast: std::cell::Cell<Option<(usize, usize, EnvId)>>,
+}
+
+/// IR-readable mirror of one call site's fast-link, indexed by site id in
+/// [`Heap::vm_fast_links`]. `#[repr(C)]` with no niche so JIT'd code can load each
+/// field at a fixed offset (epoch at +0, code at +8, …). A `code` of 0 marks an
+/// empty/invalidated slot; a slot is only honoured when `epoch == global_epoch()`,
+/// which the IR checks before reading the rest. `code` is the native entry pointer as
+/// a `u64` (not a `*const u8`) — like [`CallIcEntry::fast`], so the table stays
+/// `Send`/`Sync` for a process that migrates worker threads; the IR loads it as a
+/// pointer. `env` is an [`EnvId`]'s raw word.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
+pub struct FastLink {
+    pub epoch: u64,
+    pub code: u64,
+    pub nslots: u32,
+    pub _pad: u32,
+    pub env: u64,
+}
+
+impl FastLink {
+    /// An empty slot: `code == 0` and an epoch (`u64::MAX`) no real `global_epoch`
+    /// reaches, so the IR's `epoch == global_epoch()` guard misses it either way.
+    const EMPTY: FastLink = FastLink {
+        epoch: u64::MAX,
+        code: 0,
+        nslots: 0,
+        _pad: 0,
+        env: 0,
+    };
 }
 
 impl Default for Heap {
@@ -1258,6 +1303,7 @@ impl Heap {
             vm_cache: RefCell::new(VmCacheMap::default()),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
+            vm_fast_links: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
@@ -1301,6 +1347,7 @@ impl Heap {
             vm_cache: RefCell::new(VmCacheMap::default()),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
+            vm_fast_links: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
@@ -4510,6 +4557,9 @@ impl Heap {
         self.vm_cache.borrow_mut().clear();
         self.global_ic.borrow_mut().clear();
         self.vm_call_ics.borrow_mut().clear();
+        // Clear the IR-readable mirror in lockstep (recycled sites get a fresh slot; a
+        // live arm's now-out-of-range site id is caught by the JIT's `site < len` guard).
+        self.vm_fast_links.borrow_mut().clear();
         self.vm_global_ics.borrow_mut().clear();
 
         debug_assert!(
@@ -4697,6 +4747,10 @@ impl Heap {
     pub fn vm_site_alloc(&self) -> u32 {
         let mut t = self.vm_call_ics.borrow_mut();
         t.push(None);
+        // Grow the IR-readable mirror in lockstep, so `vm_fast_links[site]` is always
+        // in range for any site `vm_call_ics` knows about (the JIT bounds-checks anyway,
+        // but this keeps the two tables the same length — see [`Self::vm_fast_links`]).
+        self.vm_fast_links.borrow_mut().push(FastLink::EMPTY);
         (t.len() - 1) as u32
     }
 
@@ -4807,7 +4861,34 @@ impl Heap {
         let active_ns = arm.active_nslots();
         // Fully validated + installed at this epoch — memoise for subsequent calls.
         e.fast.set(Some((code as usize, active_ns, *env)));
+        // Mirror into the IR-readable flat table so the next call reaches the native code
+        // straight from JIT'd code (epoch-guarded raw load) without re-entering this probe.
+        // Same data, written in lockstep — [`brood_rt_fast_frame`] debug-asserts they agree.
+        if let Some(slot) = self.vm_fast_links.borrow_mut().get_mut(site as usize) {
+            *slot = FastLink {
+                epoch,
+                code: code as u64,
+                nslots: active_ns as u32,
+                _pad: 0,
+                env: env.0,
+            };
+        }
         Some((code as *const u8, active_ns, *env))
+    }
+
+    /// Base pointer + length of the IR-readable [`FastLink`] mirror, for the JIT to read a
+    /// call site's fast-link with a raw load (no `RefCell` borrow on the hot path). Uses
+    /// [`RefCell::as_ptr`] so it never takes a borrow; valid until the table next grows
+    /// (`vm_site_alloc`, only during compilation — never mid-arm-call, like `roots_base`).
+    /// The JIT re-fetches it after each Brood→Brood call, exactly as it does the roots base.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub fn vm_fast_links_base(&self) -> (*const FastLink, usize) {
+        // SAFETY: single-threaded per process; nothing mutates the table between this read
+        // and the IR's use of the pointer (a `def`/compaction that would clear it can't run
+        // concurrently with this process executing an arm).
+        let v = unsafe { &*self.vm_fast_links.as_ptr() };
+        (v.as_ptr(), v.len())
     }
 
     /// Install (or overwrite) call-site `site`'s inline cache entry. An
@@ -4831,6 +4912,12 @@ impl Heap {
         let mut t = self.vm_call_ics.borrow_mut();
         if let Some(slot) = t.get_mut(site as usize) {
             *slot = Some(entry);
+            // The replacing entry's `fast` memo starts empty; clear the IR-readable mirror
+            // too so it never leads the IC. It is re-populated the next time
+            // [`Self::vm_call_ic_fast_link`] validates the (now installed) arm.
+            if let Some(fl) = self.vm_fast_links.borrow_mut().get_mut(site as usize) {
+                *fl = FastLink::EMPTY;
+            }
         }
     }
 

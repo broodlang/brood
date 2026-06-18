@@ -1961,6 +1961,17 @@ fn self_inline_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_INLINE").is_none())
 }
 
+/// Is the in-IR call-site fast-link (Track B / Technique A) enabled? **Opt-in** while it
+/// proves out — `BROOD_JIT_ICALL=1` turns it on. When on, a JIT'd arm's non-tail free-global
+/// call emits an epoch-guarded flat-table fast path (`brood_rt_fast_frame`) ahead of the
+/// `brood_rt_call_slow` miss path, removing the per-call IC probe + `RefCell` borrow. Off →
+/// every call goes straight through `brood_rt_call_slow` exactly as before (the A/B baseline).
+#[cfg(feature = "jit")]
+fn icall_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_JIT_ICALL").is_some())
+}
+
 /// **Non-mutating** probe: does `body` qualify for depth-1 self-inlining, and if so what
 /// is the inlined frame's slot high-water mark? Runs the inliner on a CLONE (discarded),
 /// so the original `body` is never touched — the VM keeps the small layout. `m` is the
@@ -5826,6 +5837,31 @@ fn jit_lower_arm_inner(
     let callslow_id = m
         .declare_function("brood_rt_call_slow", Linkage::Import, &callslow_sig)
         .ok()?;
+    // Track B / Technique A — the in-IR fast call path. brood_rt_fastlink_base(heap,
+    // out_len: *mut u64) -> *const FastLink: base + length of the IR-readable fast-link
+    // mirror. brood_rt_fast_frame(heap, out, site, head, argc, nslots, code, env) -> status:
+    // run the (already epoch-validated, flat-table-read) native fast-link. Status 0 = done,
+    // 1 = error parked, 2 = could-not-link (fall to brood_rt_call_slow).
+    let mut flbase_sig = m.make_signature();
+    flbase_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    flbase_sig.params.push(AbiParam::new(ptr_ty)); // out_len: *mut u64
+    flbase_sig.returns.push(AbiParam::new(ptr_ty)); // *const FastLink
+    let flbase_id = m
+        .declare_function("brood_rt_fastlink_base", Linkage::Import, &flbase_sig)
+        .ok()?;
+    let mut fastframe_sig = m.make_signature();
+    fastframe_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    fastframe_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
+    fastframe_sig.params.push(AbiParam::new(types::I32)); // site
+    fastframe_sig.params.push(AbiParam::new(types::I32)); // head sym
+    fastframe_sig.params.push(AbiParam::new(types::I32)); // argc
+    fastframe_sig.params.push(AbiParam::new(types::I32)); // nslots
+    fastframe_sig.params.push(AbiParam::new(types::I64)); // code (native entry ptr as u64)
+    fastframe_sig.params.push(AbiParam::new(types::I64)); // env (EnvId raw word)
+    fastframe_sig.returns.push(AbiParam::new(types::I64)); // status
+    let fastframe_id = m
+        .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)
+        .ok()?;
     // brood_rt_vector_ref(heap, out, vec 3 words, idx 3 words) -> status: bounds-checked
     // slab read into `*out` (0 = ok, 1 = deopt for non-vector / non-int / out-of-range).
     let mut vref_sig = m.make_signature();
@@ -5876,6 +5912,8 @@ fn jit_lower_arm_inner(
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
+    let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
+    let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     let gepoch_ref = m.declare_func_in_func(gepoch_id, b.func);
@@ -6764,25 +6802,100 @@ fn jit_lower_arm_inner(
                     let argc_v = b.ins().iconst(types::I32, argc as i64);
                     let site_v = b.ins().iconst(types::I32, call_site as i64);
                     let head_v = b.ins().iconst(types::I32, call_head as i64);
-                    let c = b
-                        .ins()
-                        .call(callslow_ref, &[heap, out_addr, argc_v, site_v, head_v]);
-                    let status = b.inst_results(c)[0];
-                    // The callee grew/relocated `roots`; re-fetch the base for later slots.
-                    let rbc = b.ins().call(rb_ref, &[heap]);
-                    let new_base = b.inst_results(rbc)[0];
-                    b.def_var(rb_var, new_base);
-                    let cont = b.create_block();
-                    b.ins().brif(status, error, &[], cont, &[]);
-                    b.switch_to_block(cont);
-                    let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-                    let w1 = b
-                        .ins()
-                        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                    let w2 = b
-                        .ins()
-                        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-                    stack.push(Op::Handle(w0, w1, w2));
+                    // Read the result `Value` (3 words) back out of `out_slot` and push it.
+                    let read_out = |b: &mut FunctionBuilder| {
+                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let w1 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        (w0, w1, w2)
+                    };
+                    // The shared slow-dispatch tail: call `brood_rt_call_slow`, re-fetch the
+                    // roots base (the callee may have relocated `roots`), and branch to `error`
+                    // on a nonzero status or `cont` on success. Used as the only path (icall
+                    // off / computed head) and as the miss path of the fast-link.
+                    let emit_call_slow = |b: &mut FunctionBuilder, cont: cranelift_codegen::ir::Block| {
+                        let c = b.ins().call(callslow_ref, &[heap, out_addr, argc_v, site_v, head_v]);
+                        let status = b.inst_results(c)[0];
+                        let rbc = b.ins().call(rb_ref, &[heap]);
+                        b.def_var(rb_var, b.inst_results(rbc)[0]);
+                        b.ins().brif(status, error, &[], cont, &[]);
+                    };
+
+                    if icall_enabled() && head.is_some() {
+                        // ---- Track B / Technique A: in-IR epoch-guarded fast link ----
+                        // Read the flat-table base + length (re-fetched here, like the roots
+                        // base, since a cold nested call may have grown + reallocated it).
+                        use crate::core::heap::FastLink;
+                        const FL_SIZE: i64 = std::mem::size_of::<FastLink>() as i64;
+                        let fl_epoch_off = std::mem::offset_of!(FastLink, epoch) as i32;
+                        let fl_code_off = std::mem::offset_of!(FastLink, code) as i32;
+                        let fl_nslots_off = std::mem::offset_of!(FastLink, nslots) as i32;
+                        let fl_env_off = std::mem::offset_of!(FastLink, env) as i32;
+                        let len_slot = b.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            8,
+                            3,
+                        ));
+                        let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
+                        let fbc = b.ins().call(flbase_ref, &[heap, len_addr]);
+                        let fl_base = b.inst_results(fbc)[0];
+                        let fl_len = b.ins().stack_load(types::I64, len_slot, 0);
+                        let site_idx = b.ins().iconst(types::I64, call_site as i64);
+                        // Bounds: `site < len` (a live arm whose site ids outran a post-collect
+                        // re-grow misses here and goes slow — the table read would be OOB).
+                        let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, site_idx, fl_len);
+                        let chk_epoch = b.create_block();
+                        let hit = b.create_block();
+                        let miss = b.create_block();
+                        let cont = b.create_block();
+                        b.ins().brif(in_bounds, chk_epoch, &[], miss, &[]);
+
+                        // chk_epoch: this slot's epoch must equal the current global epoch.
+                        b.switch_to_block(chk_epoch);
+                        let stride = b.ins().iconst(types::I64, FL_SIZE);
+                        let off = b.ins().imul(site_idx, stride);
+                        let slot_ptr = b.ins().iadd(fl_base, off);
+                        let ep = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_epoch_off);
+                        let gec = b.ins().call(gepoch_ref, &[heap]);
+                        let gep = b.inst_results(gec)[0];
+                        let ep_ok = b.ins().icmp(IntCC::Equal, ep, gep);
+                        b.ins().brif(ep_ok, hit, &[], miss, &[]);
+
+                        // hit: read (code, nslots, env) and run the fast frame.
+                        b.switch_to_block(hit);
+                        let code_v = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_code_off);
+                        let nslots_v = b.ins().load(types::I32, MemFlags::new(), slot_ptr, fl_nslots_off);
+                        let env_v = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_env_off);
+                        let ffc = b.ins().call(
+                            fastframe_ref,
+                            &[heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v],
+                        );
+                        let fst = b.inst_results(ffc)[0];
+                        // The callee may have relocated `roots`; re-fetch the base.
+                        let rbc = b.ins().call(rb_ref, &[heap]);
+                        b.def_var(rb_var, b.inst_results(rbc)[0]);
+                        // status: 1 = error → `error`; 2 = could-not-link → `miss`; 0 = `cont`.
+                        let is_err = b.ins().icmp_imm(IntCC::Equal, fst, 1);
+                        let not_err = b.create_block();
+                        b.ins().brif(is_err, error, &[], not_err, &[]);
+                        b.switch_to_block(not_err);
+                        let is_slow = b.ins().icmp_imm(IntCC::Equal, fst, 2);
+                        b.ins().brif(is_slow, miss, &[], cont, &[]);
+
+                        // miss: cold / redefined / over-cap / IC-moved → the slow dispatch.
+                        b.switch_to_block(miss);
+                        emit_call_slow(&mut b, cont);
+
+                        b.switch_to_block(cont);
+                        let (w0, w1, w2) = read_out(&mut b);
+                        stack.push(Op::Handle(w0, w1, w2));
+                    } else {
+                        let cont = b.create_block();
+                        emit_call_slow(&mut b, cont);
+                        b.switch_to_block(cont);
+                        let (w0, w1, w2) = read_out(&mut b);
+                        stack.push(Op::Handle(w0, w1, w2));
+                    }
                 }
                 Inst::Pop => {
                     // A non-final `do` form, evaluated for effect: drop its value.
@@ -7529,6 +7642,144 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
     }
 }
 
+/// Cap on native-to-native recursion (see [`Heap::jit_native_depth`]). Past this many
+/// native levels, drain the rest of the subtree on the VM (heap frames, bounded by
+/// [`MAX_BC_FRAMES`]) so deep non-tail recursion keeps working instead of overflowing the
+/// native stack. 1 500 levels (~a few MB of the 16 MB worker stack) dwarfs any real depth.
+#[cfg(feature = "jit")]
+pub(crate) const JIT_NATIVE_DEPTH_LIMIT: u32 = 1500;
+
+/// The result of running a validated native fast-link ([`jit_run_fast_link`]): the call
+/// completed (`Done`), raised an error parked for the arm to propagate (`Error`), or could
+/// not be fast-linked after all (`Fallthrough` — the IC moved under us; the args have been
+/// re-staged for the caller's slow path).
+#[cfg(feature = "jit")]
+pub(crate) enum FastLinkOutcome {
+    Done(Value),
+    Error,
+    Fallthrough,
+}
+
+/// The shared body of a validated native fast-link: set up the callee frame at `stage_base`,
+/// call its installed native `code`, and handle the outcome — `Done` (result boxed in
+/// `roots[stage_base]`), the parked-error exit, or a deopt/preempt/tail that re-runs the
+/// callee on the VM via the IC. Both [`jit_dispatch_call`] (after `vm_call_ic_fast_link`)
+/// and [`jit_dispatch_fast_frame`] (the in-IR epoch-guarded path, which reads `code/nslots/
+/// env` from the flat side table instead) funnel through here, so the two can never desync.
+/// `epoch`/`stage_base` are the caller's already-computed values; `code` is a finalized
+/// `extern "C" fn(*mut Heap, i64) -> i64`. On `Fallthrough` the `argc` args are re-staged at
+/// `[stage_base, stage_base+argc)` for the caller's slow path.
+#[cfg(feature = "jit")]
+#[allow(clippy::too_many_arguments)]
+fn jit_run_fast_link(
+    heap: &mut Heap,
+    argc: usize,
+    site: u32,
+    head: Symbol,
+    epoch: u64,
+    stage_base: usize,
+    code: usize,
+    nslots: usize,
+    callee_env: EnvId,
+) -> FastLinkOutcome {
+    heap.truncate_roots(stage_base + argc);
+    heap.extend_roots_to_nil(stage_base + nslots);
+    let base = stage_base;
+    // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from `jit_lower_arm`,
+    // kept for the process in `GLOBAL_JIT`; the frame is at `roots[base..]`. Validated
+    // current by the caller's epoch check (the IC fast-link, or the IR's flat-table guard).
+    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code as *mut u8) };
+    let depth = heap.jit_native_depth;
+    let saved = std::mem::replace(&mut heap.jit_call_env, EnvRoot::Stable(callee_env));
+    heap.jit_native_depth = depth + 1;
+    let outcome = f(heap as *mut Heap, base as i64);
+    heap.jit_native_depth = depth;
+    heap.jit_call_env = saved;
+    match outcome {
+        0 => {
+            crate::perf_bump!(jit_link_done);
+            let result = heap.root_at(base);
+            heap.truncate_roots(stage_base);
+            FastLinkOutcome::Done(result)
+        }
+        3 => {
+            heap.truncate_roots(stage_base);
+            FastLinkOutcome::Error
+        }
+        // deopt (1) / preempt (2) / tail (4): re-run on the VM. The args survive in the param
+        // slots `[base, base+argc)`. Re-probe for the arm (clones — but only on this rare
+        // path) and `vm_apply`.
+        _ => {
+            crate::perf_bump!(jit_link_rerun);
+            let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+            for k in 0..argc {
+                argv2.push(heap.root_at(base + k));
+            }
+            heap.truncate_roots(stage_base);
+            if let Some((_, Some((arm, cenv)))) =
+                heap.vm_call_ic_probe(site, head, argc as u32, epoch)
+            {
+                return match vm_apply(heap, arm, &argv2, cenv) {
+                    Ok(v) => FastLinkOutcome::Done(v),
+                    Err(e) => {
+                        heap.jit_pending_error = Some(e);
+                        FastLinkOutcome::Error
+                    }
+                };
+            }
+            // IC changed under us: restage the args so the elided slow path finds them.
+            for a in &argv2 {
+                heap.push_root(*a);
+            }
+            FastLinkOutcome::Fallthrough
+        }
+    }
+}
+
+/// The JIT's **in-IR** fast call path (Track B / Technique A). The arm's IR has already
+/// validated this elided call site's flat-table fast-link (`site < len` && `epoch ==
+/// global_epoch`) and read `(code, nslots, env)` out of [`Heap::vm_fast_links`] with raw
+/// loads — so this skips the IC probe + `RefCell` borrow that [`jit_dispatch_call`]'s fast
+/// path pays (the measured 40.9%-of-`fib` cost) and runs the same frame body via
+/// [`jit_run_fast_link`]. The `argc` args are the top operands on `roots`. Returns a
+/// [`FastLinkOutcome`] the caller maps to a status: `Done` (result), `Error` (parked), or
+/// `Fallthrough` — over the native-recursion cap, or the IC moved — which sends the IR to
+/// the `brood_rt_call_slow` miss path with the args left staged.
+#[cfg(feature = "jit")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn jit_dispatch_fast_frame(
+    heap: &mut Heap,
+    site: u32,
+    head: Symbol,
+    argc: usize,
+    nslots: usize,
+    code: usize,
+    env: u64,
+) -> FastLinkOutcome {
+    let n = heap.roots_len();
+    let epoch = heap.global_epoch();
+    // Elided (free-global) head: the args are the top `argc` operands; the frame starts there.
+    let stage_base = n - argc;
+    // Over the native-recursion cap → don't link (would overflow the native stack); the args
+    // stay staged at `[stage_base, n)` so the slow path drains the recursion on the VM.
+    if heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT {
+        return FastLinkOutcome::Fallthrough;
+    }
+    let callee_env = EnvId(env);
+    // Cross-check (debug only, fires in the gate): the flat-table values the IR handed us
+    // must equal what the authoritative IC fast-link resolves at this epoch — a mismatch is
+    // a mirror desync and a silent-wrong-answer risk.
+    #[cfg(debug_assertions)]
+    {
+        let auth = heap.vm_call_ic_fast_link(site, head, argc as u32, epoch);
+        debug_assert!(
+            matches!(auth, Some((c, ns, e)) if c as usize == code && ns == nslots && e == callee_env),
+            "fast-link mirror desynced from the call IC (site {site}, head {head})"
+        );
+    }
+    jit_run_fast_link(heap, argc, site, head, epoch, stage_base, code, nslots, callee_env)
+}
+
 /// Run a JIT'd arm's **non-tail** Brood→Brood call. The `argc` args are the top operands
 /// on `roots`. A **free-global** head (`site != NO_SITE`) is *not* staged — the callee is
 /// resolved here via the call-site IC (`head` + `site`), so the args occupy `[n-argc, n)`
@@ -7544,14 +7795,8 @@ pub(crate) fn jit_dispatch_call(
     head: Symbol,
 ) -> Option<Value> {
     use std::sync::atomic::Ordering::Acquire;
-    // Cap on native-to-native recursion (see [`Heap::jit_native_depth`]). Past this many
-    // native levels, drain the rest of the subtree on the VM (heap frames, bounded by
-    // [`MAX_BC_FRAMES`]) so deep non-tail recursion keeps working instead of overflowing the
-    // native stack. 1 500 levels (~a few MB of the 16 MB worker stack) dwarfs any real depth.
-    const NATIVE_DEPTH_LIMIT: u32 = 1500;
-
     let n = heap.roots_len();
-    let over_cap = heap.jit_native_depth >= NATIVE_DEPTH_LIMIT;
+    let over_cap = heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT;
     let epoch = heap.global_epoch();
     // A free-global head isn't staged (`elided`): the callee is resolved via the call IC.
     // `stage_base` is where the callee frame starts — directly at the args for an elided
@@ -7569,58 +7814,14 @@ pub(crate) fn jit_dispatch_call(
         if let Some((code, nslots, callee_env)) =
             heap.vm_call_ic_fast_link(site, head, argc as u32, epoch)
         {
-            heap.truncate_roots(stage_base + argc);
-            heap.extend_roots_to_nil(stage_base + nslots);
-            let base = stage_base;
-            // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
-            // `jit_lower_arm`, kept for the process in `GLOBAL_JIT`; the frame is at
-            // `roots[base..]`. Validated current by the fast-link epoch check above.
-            let f: extern "C" fn(*mut Heap, i64) -> i64 =
-                unsafe { std::mem::transmute(code as *mut u8) };
-            let depth = heap.jit_native_depth;
-            let saved = std::mem::replace(&mut heap.jit_call_env, EnvRoot::Stable(callee_env));
-            heap.jit_native_depth = depth + 1;
-            let outcome = f(heap as *mut Heap, base as i64);
-            heap.jit_native_depth = depth;
-            heap.jit_call_env = saved;
-            match outcome {
-                0 => {
-                    crate::perf_bump!(jit_link_done);
-                    let result = heap.root_at(base);
-                    heap.truncate_roots(stage_base);
-                    return Some(result);
-                }
-                3 => {
-                    heap.truncate_roots(stage_base);
-                    return None;
-                }
-                // deopt (1) / preempt (2) / tail (4): re-run on the VM. The args survive in
-                // the param slots `[base, base+argc)`. Re-probe for the arm (clones — but
-                // only on this rare path) and `vm_apply`, exactly like the cloning path.
-                _ => {
-                    crate::perf_bump!(jit_link_rerun);
-                    let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
-                    for k in 0..argc {
-                        argv2.push(heap.root_at(base + k));
-                    }
-                    heap.truncate_roots(stage_base);
-                    if let Some((_, Some((arm, cenv)))) =
-                        heap.vm_call_ic_probe(site, head, argc as u32, epoch)
-                    {
-                        return match vm_apply(heap, arm, &argv2, cenv) {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                heap.jit_pending_error = Some(e);
-                                None
-                            }
-                        };
-                    }
-                    // IC changed under us (astronomically rare in a hot loop): restage the
-                    // args so the elided slow path below finds them, and fall through.
-                    for a in &argv2 {
-                        heap.push_root(*a);
-                    }
-                }
+            match jit_run_fast_link(
+                heap, argc, site, head, epoch, stage_base, code as usize, nslots, callee_env,
+            ) {
+                FastLinkOutcome::Done(v) => return Some(v),
+                FastLinkOutcome::Error => return None,
+                // IC changed under us (astronomically rare): the args were re-staged at
+                // `[stage_base, ..)` — fall through to the slow path below.
+                FastLinkOutcome::Fallthrough => {}
             }
         }
     }
