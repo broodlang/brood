@@ -3823,17 +3823,36 @@ storage** (a `VecStore` = `SmallVec<[Packed;3]>` packed | `Vec<Value>` boxed), s
 `[l r]` node from a 24B header + a separately-malloc'd 48B buffer to 16B inline. Built correctly,
 GC-traced, gated green (gc 11/0 + nest 2161/2161 under `GC_STRESS+VERIFY`, both builds clean).
 
-**Result (VM-mode, median-of-5, vs 24B baseline): NO-GO.** bintree 1.059×; decomposed,
-`make`(alloc) 1.025× and `check`(read) 1.025×; nqueens 1.05×; matmul 1.10×. The decomposition is
-the decisive part: the read path is **not** slower, so there is no hidden alloc-side gain for the
-real 8B rep to recover — the heap-footprint lever is intrinsically ~2.5%. Per-node mallocs are
-already cheap (mimalloc) and GC-copy volume isn't the bottleneck; **per-call dispatch dominates**
-these recursion benchmarks (the same convergent finding as the inliner campaign), and the rep change
-doesn't touch dispatch. A full 8B rep (boxed floats, Pid-GC, handle repack, JIT 1-word rewrite)
-would be multi-week for a ~2.5–6% ceiling on the benchmarks it was meant to fix.
+**Result (VM-mode, median-of-5, vs the 24B baseline at Chunk A — both `--bin brood`, no-jit): NO-GO.**
+bintree(N=2000) **0.921×**, decomposed `make`(alloc) **0.947×** and `check`(read) **0.968×**;
+nqueens **1.000×**; matmul **0.853×**. The heap-boundary 8B prototype is a **net loss** — every
+vector access pays a `VecStore` enum branch (Packed vs Boxed) plus a per-element `unpack`/`pack`, and
+on the hot `nth`/alloc paths that costs more than the smaller cells save. matmul (float vectors → the
+`Boxed` fallback) regresses worst (−15%). Per-node mallocs are already cheap (mimalloc), GC-copy
+volume isn't the bottleneck, and **per-call dispatch dominates** these recursion benchmarks (the same
+convergent finding as the inliner campaign) — which the rep change doesn't touch. A full 8B rep
+(boxed floats, Pid-GC, handle repack, JIT 1-word rewrite) is multi-week, and the cheapest probe shows
+overhead, not headroom.
 
-**Decision.** Abandon the 8-byte rep. Branch retained as evidence, NOT merged. Stage 0's accessor
-layer stays on main (perf-neutral, cleaner construction surface) though the rep swap it prepared is
-cancelled. **Redirect to the dispatch lever** — the shipped self-inliner already gives ~1.8× on
+**Caveat (honest scope).** This prototype keeps `Value` 24B and packs only *heap vector storage*, so
+its losses come partly from artifacts a *real* 8B rep wouldn't have (the `VecStore` enum, the
+unpack-to-24B-Value tax). So it does not *prove* a full 8B `Value` would lose — but it is the cheapest
+probe of the dominant lever (heap-aggregate footprint), and it shows no win and real overhead, so the
+expensive full rewrite is not justified without a stronger signal.
+
+**Measurement-integrity correction (2026-06-18, same day).** An earlier version of this entry cited
+bintree **1.059×** (a *win*) and a "JIT dormant / Stage-0 regressed fib 8.3×" narrative. **Both were
+wrong — a stale-binary artifact.** `cargo build -p brood` builds the *lib* crate; the `brood`
+**binary** lives in `crates/cli`, so `-p brood` never relinks `target/release/brood`. Every A/B that
+session used a stale bin. Rebuilt with `--bin brood`: the JIT is fine (fib 0.30s, ≈8× over the
+tree-walker — there was never a regression), and the 8B prototype is the *net loss* above, not a win.
+Lesson, now in CLAUDE.md: **always build perf binaries with `--bin brood`, never `-p brood`.** Also
+note `BROOD_VM=0` is the *tree-walker* (legacy, ~10× slow), not the JIT; the bytecode VM is `BROOD_VM=1`
+/ default, and the JIT tiers within it.
+
+**Decision.** Abandon the 8-byte rep (conclusion unchanged from the original entry; the corrected
+numbers make it stronger, not weaker). Branch `stage1-8b-rep` retained as evidence, NOT merged.
+Stage 0's accessor layer stays on main (perf-neutral, cleaner construction surface) though the rep
+swap it prepared is cancelled. **Redirect to the dispatch lever** — the shipped self-inliner already gives ~1.8× on
 fib/pfib by removing calls; that (safe inlining of heap-touching recursion, call-site IC, tiering)
 is where Brood closes the gap to the BEAM. See `docs/value-representation.md` for the full verdict.
