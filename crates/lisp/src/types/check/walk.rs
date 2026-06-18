@@ -961,9 +961,9 @@ fn check_if(
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    let test = items.get(1).copied().unwrap_or(Value::Nil);
-    let then_form = items.get(2).copied().unwrap_or(Value::Nil);
-    let else_form = items.get(3).copied().unwrap_or(Value::Nil);
+    let test = items.get(1).copied().unwrap_or(Value::nil());
+    let then_form = items.get(2).copied().unwrap_or(Value::nil());
+    let else_form = items.get(3).copied().unwrap_or(Value::nil());
 
     // All three slots are evaluated value positions — a bare unbound symbol in
     // any (`(if typo …)`) is a reference error. then/else use the narrowed ctx,

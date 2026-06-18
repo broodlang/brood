@@ -958,10 +958,10 @@ mod tests {
     #[test]
     fn of_value_bridges_runtime_values() {
         // These Value variants are heap-free, so no Heap is needed.
-        assert_eq!(Ty::of_value(Value::Int(1)), Ty::of(Tag::Int));
-        assert_eq!(Ty::of_value(Value::Nil), Ty::of(Tag::Nil));
-        assert_eq!(Ty::of_value(Value::Bool(true)), Ty::of(Tag::Bool));
-        assert!(Ty::of_value(Value::Int(1)).is_subtype(&Ty::NUMBER));
+        assert_eq!(Ty::of_value(Value::int(1)), Ty::of(Tag::Int));
+        assert_eq!(Ty::of_value(Value::nil()), Ty::of(Tag::Nil));
+        assert_eq!(Ty::of_value(Value::boolean(true)), Ty::of(Tag::Bool));
+        assert!(Ty::of_value(Value::int(1)).is_subtype(&Ty::NUMBER));
     }
 
     #[test]
