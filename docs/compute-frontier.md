@@ -19,8 +19,8 @@
 >   compiles the frame work better than hand-emitted Cranelift IR. Reverted. The dispatch lever is
 >   mined out at increment 1.
 > - **Standings (full 7-language `brood-benchmarks` run, single-thread aggregate compute vs the
->   fastest):** .NET 1.0× · Node 2.7× · Elixir 2.8× · **Brood 7.0× (4th of 7)** · Ruby 11.8× ·
->   Clojure 18.7× · Python 27.8×. Brood wins `strings` + `http`; ~21 MB base RSS; ~29 ms startup.
+>   fastest):** .NET 1.0× · Node 2.6× · Elixir 3.7× · **Brood 6.1× (4th of 7)** · Ruby 11.6× ·
+>   Clojure 19.7× · Python 26.3×. Brood wins `strings` + `http`; ~21 MB base RSS; ~26 ms startup.
 > - **SHIPPED 2026-06-19 — `map-int-add` + JIT GC safepoint:** `wordcount` 810→**470 ms** (~42%).
 >   `(map-int-add m k delta)` fuses `(assoc m k (+ (get m k 0) delta))` into one CHAMP trie walk.
 >   Added GC safepoint in `jit_dispatch_call`'s slow-path `Ok(v)` arm — roots `v` before
@@ -30,13 +30,20 @@
 >   bintree 383→230 ms (−40%), nqueens 504→320 ms (−36%). These predicates were Brood closures;
 >   every call pushed a BcFrame (~100–150 ns). As native builtins `dispatch()` returns `Step::Done`
 >   inline — no BcFrame. `nil?`/`pair?` also compile to `Prim1::IsNil`/`IsPair` (single tag-check),
->   eliminating all dispatch overhead for compiled arms. `chunk_walks_structure` now only gates on
->   `First`/`Rest` (heap deref), not `IsNil`/`IsPair` (tag-only). **7.7× → 7.0×** overall.
-> - **NEXT lever:** the **heap gap** remains — structure-walkers (`check`/`safe?`) don't tier to
->   JIT (VectorRef gate); heap reads are per-op `brood_rt_*` FFI. Tier them + inline the reads
->   (`ptr+idx*STRIDE`, proven for invariant vectors). Then: tier-2 register-carry of loop-carried
->   Int vars (`loop`/`reduce`/`collatz` JIT'd but ~5-8× — operands round-trip through `roots`),
->   and Technique B (true inlining / bounded unroll).
+>   eliminating all dispatch overhead for compiled arms. `chunk_walks_structure` updated to only gate
+>   on `First`/`Rest` (heap deref), not `IsNil`/`IsPair` (tag-only). **7.7× → 7.0×** overall.
+> - **SHIPPED 2026-06-19 — lift `chunk_walks_structure` gate + fix Prim2SlotInt VectorRef:**
+>   bintree 241→**116 ms** (−52%, 2.3× speedup). The gate was correct pre-fast-link (JIT `check`'s
+>   recursive calls cost same as VM's BcFrame then), but now fast-link makes JIT→JIT calls ~35–40 ns
+>   vs ~150 ns BcFrame — so two-call structure-walking arms gain. Also fixed: `Prim2SlotInt { VectorRef }`
+>   (constant-index `nth`) was bailing with `return None`; now materialises the integer index as a
+>   Value word-triple and calls `vector_ref`. Deleted `chunk_walks_structure` (dead code). **7.0× → 6.1×**
+>   (sum aggregate). nqueens flat (safe? was already JIT-compiled, no VectorRef).
+> - **NEXT lever:** nqueens still 12.5× off .NET (safe? iterates a linked list via `first`/`rest`
+>   FFI per step — now in JIT native loop but each `empty?` call still goes through
+>   `brood_rt_call_slow`). Adding `PrimOp1::IsEmpty` (inline tag-check for Nil/Pair, deopt for
+>   Str/Vec/Map) would eliminate that FFI per safe? iteration. Then: tier-2 register-carry of
+>   loop-carried Int vars and Technique B (true inlining / bounded unroll).
 > - **Build/bench discipline:** perf bins via `cargo build --release --features jit --bin brood`
 >   (NEVER `-p brood` — stale-lib trap); `make install` before benchmarking (the harness runs the
 >   *installed* `brood`); GC-debug build = `RUSTFLAGS="-C debug-assertions=on"`.

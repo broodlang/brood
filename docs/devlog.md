@@ -4072,3 +4072,27 @@ Actually the ratios fluctuate with machine load. Absolute times:
 **Overall compute geomean: 7.7× → 7.0× vs .NET** (11 compute benchmarks, aggregate wall−startup).
 
 Gate: `make test` 616/616.
+
+---
+
+## 2026-06-19 — JIT: lift the chunk_walks_structure gate; fix Prim2SlotInt VectorRef: bintree −50%
+
+**Root cause recap.** The `chunk_walks_structure` gate blocked JIT lowering of any two-non-tail-call arm that touches `VectorRef` / `first` / `rest` — including bintree's `check` (`(+ 1 (check (nth n 0)) (check (nth n 1)))`). The original measurement (2026-06-18 kickoff entry) was correct at the time: JIT `check` with the old `brood_rt_call_slow` for recursive calls was neutral vs the VM, because the per-call cost was identical (~150 ns/call either way). But that measurement predates the fast-link (`brood_rt_fast_frame`, Technique A increment 1, 2026-06-18). With fast-link, JIT→JIT recursive calls cost ~35–40 ns vs ~150 ns for VM BcFrame — so a two-call structure-walking arm now **gains** from JIT.
+
+There was also a secondary bug: `Prim2SlotInt { op: VectorRef, .. }` (constant-index `(nth v 0)`) bailed the lowering with `return None` — meaning even if the gate were removed, check's `(nth node 0)` / `(nth node 1)` would still prevent lowering. Fixed by materialising the constant index as a `Value` word-triple and calling `vector_ref`.
+
+**Changes:**
+- Removed `chunk_walks_structure` gate from `jit_spill_reserve`: arms with ≥2 non-tail calls + structure access now get proper spill slots (needed by check to save `left_result` across the second call).
+- Removed the matching gate from `jit_lower_arm_inner`'s benefit check: all ≥2-non-tail-call arms that pass `chunk_in_jit_subset` now attempt lowering.
+- Deleted `chunk_walks_structure` (now dead code).
+- Fixed `Prim1` Handle-producer counting in `jit_spill_reserve`: `IsNil`/`IsPair` produce `Op::Int` (tag-only), not handles — only `First`/`Rest` count toward the spill reserve.
+- Fixed `Prim2SlotInt { op: VectorRef }` lowering: materialises the constant integer index as a Value word-triple and calls `vector_ref` (was `return None`).
+
+**Results (2026-06-19, full 7-language run):**
+- bintree: 241 ms → 116 ms (−52%), 14× → 6.8× behind .NET
+- nqueens: flat (safe? was already JIT-compiled; no structure change there)
+- Chart aggregate vs .NET: 7.0× → 6.1×
+
+**Why check wins.** At tree depth 12: 4 095 internal nodes × 200 iterations = 819 K check activations per run. Each internal node makes 2 recursive check calls: fast-link saves ~110 ns/call × 2 = ~220 ns/node vs VM BcFrame. Total: 819 K × 220 ns ≈ 180 ms. Measured saving: ~125 ms (the rest is GC / make / startup amortisation).
+
+Gate: `make test` 616/616.
