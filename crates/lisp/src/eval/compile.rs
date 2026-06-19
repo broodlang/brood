@@ -1961,15 +1961,17 @@ fn self_inline_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_INLINE").is_none())
 }
 
-/// Is the in-IR call-site fast-link (Track B / Technique A) enabled? **Opt-in** while it
-/// proves out — `BROOD_JIT_ICALL=1` turns it on. When on, a JIT'd arm's non-tail free-global
-/// call emits an epoch-guarded flat-table fast path (`brood_rt_fast_frame`) ahead of the
-/// `brood_rt_call_slow` miss path, removing the per-call IC probe + `RefCell` borrow. Off →
-/// every call goes straight through `brood_rt_call_slow` exactly as before (the A/B baseline).
+/// Is the in-IR call-site fast-link (Track B / Technique A increment 1) enabled? **Default ON**
+/// (shipped after the gate proved it — fib ~20% faster, JIT≡VM clean). When on, a JIT'd arm's
+/// non-tail free-global call emits an epoch-guarded flat-table fast path (`brood_rt_fast_frame`)
+/// ahead of the `brood_rt_call_slow` miss path, removing the per-call IC probe + `RefCell`
+/// borrow. `BROOD_NO_JIT_ICALL=1` opts out (every call goes straight through
+/// `brood_rt_call_slow`, the A/B baseline lever). Increment 2 (full in-IR frame setup) was
+/// measured slower and reverted — see `docs/devlog.md` 2026-06-19; this is the sweet spot.
 #[cfg(feature = "jit")]
 fn icall_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_JIT_ICALL").is_some())
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_JIT_ICALL").is_none())
 }
 
 /// **Non-mutating** probe: does `body` qualify for depth-1 self-inlining, and if so what
