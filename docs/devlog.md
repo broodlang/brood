@@ -3998,3 +3998,16 @@ raw loads; `brood_rt_global_epoch` is no longer called from JIT'd code (the Rust
 28/28 JIT≡VM under `-C debug-assertions=on` (the `redefining_*`/`unrelated_def_*` hot-reload tests —
 which exercise exactly this epoch guard — pass), `differential`, `nest test` 2161/2161, and
 hot-reload + a hoisted-global loop correct under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+**Follow-on (same day): skip the back-edge preemption poll in non-capture mode.** After the epoch
+fix, `brood_rt_tick` (the per-iteration preemption poll) was the next back-edge FFI (~20% of `loop`).
+It returns 0 on the root thread (`else { 0 }` — non-capture never preempts). Capture mode is constant
+for an arm's whole execution (set per process-run, unchanged across the arm + its nested calls), so
+read it **once at entry** (`brood_rt_in_capture`) and gate the poll: a **non-capture** (root) self-tail
+loop branches straight to the loop top — no FFI — while the **capture** path keeps polling every
+iteration (preemption fairness byte-identical). `loop` 0.11 → 0.09 s (with the epoch fix, **0.14 →
+0.09, ~36% total**); the profile shows both back-edge FFIs gone (`brood_jit_arm_0` 49% → 61%). Gate:
+`nest test` 2161/2161 (every test is a capture-mode green process), the
+`cpu_bound_process_does_not_starve_peers_on_one_worker` preemption-fairness test (a JIT'd `(defn hog
+() (hog))` must still yield to a peer), work-stealing, reductions, `jit.rs`/`differential`. Only the
+self-tail back-edge is affected; non-tail recursion (`fib`) uses the call fast-link, not this poll.
