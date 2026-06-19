@@ -1,6 +1,6 @@
 # Plan — the post-JIT single-threaded compute frontier
 
-> ## ⏯ RESUME HERE (2026-06-19) — current perf state + next lever
+> ## ⏯ RESUME HERE (2026-06-19) — current perf state + next lever (inline car/cdr/vector_ref)
 >
 > The newest work is the **JIT call-dispatch + loop-overhead** round (full play-by-play in
 > `docs/devlog.md`, entries 2026-06-18/19). Status:
@@ -19,8 +19,8 @@
 >   compiles the frame work better than hand-emitted Cranelift IR. Reverted. The dispatch lever is
 >   mined out at increment 1.
 > - **Standings (full 7-language `brood-benchmarks` run, single-thread aggregate compute vs the
->   fastest):** .NET 1.0× · Node 2.7× · Elixir 3.6× · **Brood 6.0× (4th of 7)** · Ruby 11.6× ·
->   Clojure 17.7× · Python 27.0×. Brood wins `strings` + `http`; ~21 MB base RSS; ~27 ms startup.
+>   fastest):** .NET 1.0× · Node 2.7× · Elixir 3.5× · **Brood 6.0× (4th of 7)** · Ruby 11.9× ·
+>   Clojure 18.2× · Python 27.3×. Brood wins `strings` + `http`; ~18 MB base RSS; ~26 ms startup.
 > - **SHIPPED 2026-06-19 — `map-int-add` + JIT GC safepoint:** `wordcount` 810→**470 ms** (~42%).
 >   `(map-int-add m k delta)` fuses `(assoc m k (+ (get m k 0) delta))` into one CHAMP trie walk.
 >   Added GC safepoint in `jit_dispatch_call`'s slow-path `Ok(v)` arm — roots `v` before
@@ -46,13 +46,22 @@
 >   `brif(is_nil|is_pair, cont, deopt)` — deopt for Vec/Str/Map (need heap length); push
 >   `Op::Int(is_nil)`. Also VM inline paths (single-eval + bytecode-compiled). **6.1× → 6.0×**
 >   aggregate (nqueens is 1 of 15 compute benchmarks; geomean barely moves).
-> - **NEXT lever:** register-carry of loop-carried Int vars (`loop`/`reduce`/`collatz` JIT'd but
->   ~5–8× — every loop-carried integer round-trips through `roots`). Then: inline `first`/`rest`/
->   `vector_ref` pointer arithmetic in the JIT (eliminates `brood_rt_car`/`cdr`/`vector_ref` FFI
->   for JIT-compiled structure walkers). Technique B (true inlining) is a longer horizon.
+> - **SHIPPED 2026-06-19 — register-carry for loop-carried Int params:** loop 60→**38 ms** (−37%),
+>   collatz 359→**320 ms** (−11%). Pure-arithmetic self-tail loops carried all loop state through
+>   `roots` slots — every read of a loop-carried integer emitted a tag-check + 2 memory loads.
+>   Fix: declare Cranelift `Variable`s for slots `0..carry_argc` (phi-node SSA), `def_var` once at
+>   entry and at each SelfCall back-edge, `use_var` in `load_slot_int`. Zero memory ops, zero
+>   branches per carry slot. Eligibility: `int_carry_eligible` (SelfCall, no non-tail Calls, no
+>   Cons/MakeVector/First/Rest) + all carry slots profiled as `TAG_INT` (critical — `!= TAG_FLOAT`
+>   was a latent bug that would deopt vector-param functions on every call). Aggregate: **6.0×
+>   (unchanged)** — dominated by wordcount/fib; per-benchmark improvements are real.
+> - **NEXT lever:** inline `first`/`rest`/`vector_ref` pointer arithmetic in the JIT (eliminates
+>   `brood_rt_car`/`cdr`/`vector_ref` FFI for JIT-compiled structure walkers). Technique B (true
+>   inlining) is a longer horizon.
 > - **Build/bench discipline:** perf bins via `cargo build --release --features jit --bin brood`
->   (NEVER `-p brood` — stale-lib trap); `make install` before benchmarking (the harness runs the
->   *installed* `brood`); GC-debug build = `RUSTFLAGS="-C debug-assertions=on"`.
+>   (NEVER `-p brood` — stale-lib trap); `make install` before benchmarking (`cp target/release/brood
+>   ~/.local/bin/brood` — the harness runs the *installed* `brood`, not `target/`); GC-debug build
+>   = `RUSTFLAGS="-C debug-assertions=on"`.
 >
 > ---
 >
