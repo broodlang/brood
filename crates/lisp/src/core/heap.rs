@@ -809,12 +809,9 @@ impl RuntimeCode {
 /// reallocates — keeping the base pointer + capacity stable across an in-IR frame.
 #[repr(C)]
 pub struct RootStack {
-    // `pub(crate)` so the JIT codegen can take `offset_of!` of each field (it reads `ptr`/`len`/
-    // `cap` and writes `len` by raw load/store at these offsets). Never mutate them directly
-    // outside `RootStack`'s own methods — the JIT's in-IR writes are the sole exception.
-    pub(crate) ptr: *mut Value,
-    pub(crate) len: usize,
-    pub(crate) cap: usize,
+    ptr: *mut Value,
+    len: usize,
+    cap: usize,
 }
 
 // SAFETY: `RootStack` exclusively owns its buffer (like the `Vec<Value>` it replaces) and
@@ -4372,37 +4369,6 @@ impl Heap {
     #[cfg(feature = "jit")]
     pub(crate) fn roots_base_ptr(&mut self) -> *mut Value {
         self.roots.as_mut_ptr()
-    }
-
-    /// Address of the [`RootStack`] header (Track B / Technique A increment 2), so JIT'd code
-    /// can read `ptr`/`len`/`cap` and **write** `len` at fixed offsets to set up a callee frame
-    /// without an FFI. The header itself is a stable `Heap` field (only its internal buffer
-    /// moves, on a Rust-side grow), so a JIT'd arm fetches this once at entry and re-loads the
-    /// fields per use. The arm only ever *writes* `len` within the current capacity (it
-    /// bounds-checks `len + nslots <= cap` first) — growth stays in Rust.
-    #[cfg(feature = "jit")]
-    pub(crate) fn rootstack_ptr(&mut self) -> *mut RootStack {
-        &mut self.roots
-    }
-
-    /// Address of the native-recursion depth counter, for JIT'd code to read (the over-cap
-    /// guard) and bump/restore it around an in-IR linked call. A stable `Heap` field → fetched
-    /// once at arm entry.
-    #[cfg(feature = "jit")]
-    pub(crate) fn native_depth_ptr(&mut self) -> *mut u32 {
-        &mut self.jit_native_depth
-    }
-
-    /// Is the executing arm's env the global scope? The JIT's in-IR fast call path skips all
-    /// `jit_call_env` management (the fragile part) and so is only valid when the callee's env
-    /// **and** the caller's current env are both `GLOBAL` (then `jit_call_env` stays `GLOBAL`
-    /// throughout and the callee resolves its free globals identically). `jit_call_env` is the
-    /// arm's env for the arm's whole duration (callbacks save/restore around nested calls), so
-    /// the arm reads this once at entry. The callee-side `== GLOBAL` is checked in IR from the
-    /// flat fast-link table.
-    #[cfg(feature = "jit")]
-    pub(crate) fn jit_env_is_global(&self) -> bool {
-        matches!(self.jit_call_env, EnvRoot::Stable(e) if e == EnvId::GLOBAL)
     }
 
     /// Current root-stack depth, for a balanced `truncate_roots(roots_len())`
