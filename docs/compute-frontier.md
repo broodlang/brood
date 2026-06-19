@@ -19,21 +19,24 @@
 >   compiles the frame work better than hand-emitted Cranelift IR. Reverted. The dispatch lever is
 >   mined out at increment 1.
 > - **Standings (full 7-language `brood-benchmarks` run, single-thread aggregate compute vs the
->   fastest):** .NET 1.0× · Node 2.6× · Elixir 3.4× · **Brood 7.7× (4th of 7)** · Ruby 11.5× ·
->   Clojure 17.8× · Python 26.2×. Brood wins `strings` + `http`; ~24 MB base RSS; ~36 ms startup.
->   (Clojure was added as a 7th language this round — the immutable-Lisp peer; its `wordcount`
->   immutable map *beats* Brood's CHAMP, proving Brood's map gap is constant factors, not immutability.)
+>   fastest):** .NET 1.0× · Node 2.7× · Elixir 2.8× · **Brood 7.0× (4th of 7)** · Ruby 11.8× ·
+>   Clojure 18.7× · Python 27.8×. Brood wins `strings` + `http`; ~21 MB base RSS; ~29 ms startup.
 > - **SHIPPED 2026-06-19 — `map-int-add` + JIT GC safepoint:** `wordcount` 810→**470 ms** (~42%).
 >   `(map-int-add m k delta)` fuses `(assoc m k (+ (get m k 0) delta))` into one CHAMP trie walk.
 >   Added GC safepoint in `jit_dispatch_call`'s slow-path `Ok(v)` arm — roots `v` before
 >   `heap.collect`, fixing the 1770 MB RSS regression that plagued the JIT path for native callees.
->   wordcount gap: ~31× → ~18× off the fastest (was wordcount ~18× in the doc below — now achieved).
-> - **NEXT lever (pick a DIFFERENT one — dispatch is done):** the **heap gap** is biggest —
->   `nqueens` ~29×, `bintree` ~20× off the fastest. Structure-walkers don't tier
->   and their heap reads are per-op `brood_rt_*` FFI; tier them + inline the reads (`ptr+idx*STRIDE`,
->   the LICM machinery below already proves it for invariant vectors). Then: tier-2 register-carry of
->   loop-carried Int vars (`loop`/`reduce`/`collatz` are JIT'd but still ~5-8× — operands
->   round-trip through `roots`), and Technique B (true inlining / bounded unroll).
+>   wordcount gap: ~31× → ~13× off the fastest.
+> - **SHIPPED 2026-06-19 — `nil?`/`pair?`/`empty?` as native builtins + PrimOp1::IsNil/IsPair:**
+>   bintree 383→230 ms (−40%), nqueens 504→320 ms (−36%). These predicates were Brood closures;
+>   every call pushed a BcFrame (~100–150 ns). As native builtins `dispatch()` returns `Step::Done`
+>   inline — no BcFrame. `nil?`/`pair?` also compile to `Prim1::IsNil`/`IsPair` (single tag-check),
+>   eliminating all dispatch overhead for compiled arms. `chunk_walks_structure` now only gates on
+>   `First`/`Rest` (heap deref), not `IsNil`/`IsPair` (tag-only). **7.7× → 7.0×** overall.
+> - **NEXT lever:** the **heap gap** remains — structure-walkers (`check`/`safe?`) don't tier to
+>   JIT (VectorRef gate); heap reads are per-op `brood_rt_*` FFI. Tier them + inline the reads
+>   (`ptr+idx*STRIDE`, proven for invariant vectors). Then: tier-2 register-carry of loop-carried
+>   Int vars (`loop`/`reduce`/`collatz` JIT'd but ~5-8× — operands round-trip through `roots`),
+>   and Technique B (true inlining / bounded unroll).
 > - **Build/bench discipline:** perf bins via `cargo build --release --features jit --bin brood`
 >   (NEVER `-p brood` — stale-lib trap); `make install` before benchmarking (the harness runs the
 >   *installed* `brood`); GC-debug build = `RUSTFLAGS="-C debug-assertions=on"`.

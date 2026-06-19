@@ -125,6 +125,8 @@ pub enum PrimOp {
 pub enum PrimOp1 {
     First,
     Rest,
+    IsNil,
+    IsPair,
 }
 
 impl PrimOp1 {
@@ -132,6 +134,8 @@ impl PrimOp1 {
         Some(match name {
             "first" => PrimOp1::First,
             "rest" => PrimOp1::Rest,
+            "nil?" => PrimOp1::IsNil,
+            "pair?" => PrimOp1::IsPair,
             _ => return None,
         })
     }
@@ -1998,8 +2002,10 @@ fn node_touches_heap(node: &Node) -> bool {
         Node::Vector(_) | Node::Map(_) => true,
         // `cons` and `nth`/`vector-ref`.
         Node::Prim2 { op: PrimOp::VectorRef | PrimOp::Cons, .. } => true,
-        // `first`/`rest` (car/cdr) — the only `PrimOp1`s, both heap reads.
+        // `first`/`rest` (car/cdr) dereference a pair handle — heap reads.
+        // `nil?`/`pair?` are tag-only checks — no heap dereference.
         Node::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. } => true,
+        Node::Prim1 { op: PrimOp1::IsNil | PrimOp1::IsPair, .. } => false,
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
         Node::If(a, b, c) => {
             node_touches_heap(a) || node_touches_heap(b) || node_touches_heap(c)
@@ -4021,6 +4027,23 @@ fn exec_chunk(
                             heap.push_root(Value::nil());
                             continue;
                         }
+                        (PrimOp1::IsNil, v) => {
+                            crate::perf_bump!(prim1_inline);
+                            let result = Value::boolean(matches!(v, ValueRef::Nil));
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(result);
+                            continue;
+                        }
+                        (PrimOp1::IsPair, v) => {
+                            crate::perf_bump!(prim1_inline);
+                            let result = Value::boolean(matches!(
+                                v,
+                                ValueRef::Pair(_) | ValueRef::Range(_) | ValueRef::SeqView(_)
+                            ));
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(result);
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -5220,7 +5243,9 @@ fn non_tail_call_count(code: &[Inst]) -> usize {
 #[cfg(feature = "jit")]
 fn chunk_walks_structure(code: &[Inst]) -> bool {
     code.iter().any(|i| {
-        matches!(i, Inst::Prim1 { .. })
+        // first/rest dereference a pair handle — a structure walk. IsNil/IsPair are
+        // tag-only checks (no heap dereference) so they don't trigger this gate.
+        matches!(i, Inst::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. })
             || matches!(
                 i,
                 Inst::Prim2 {
@@ -6996,23 +7021,44 @@ fn jit_lower_arm_inner(
                     store_op(&mut b, *i as i64, op);
                 }
                 Inst::Prim1 { op, .. } => {
-                    // `first`/`rest`: pop the list operand, tag-check it's a `Pair` (deopt to
-                    // the VM otherwise — which handles `first`/`rest` of nil / a non-list /
-                    // the type error), then read its car/cdr via the runtime op. The result
-                    // is an arbitrary `Value`, so it's a `Handle`.
                     let operand = stack.pop()?;
-                    let [w0, w1, w2] = read_words(&mut b, operand);
-                    let tagb = b.ins().band_imm(w0, 0xff);
-                    let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
-                    let cont = b.create_block();
-                    b.ins().brif(is_pair, cont, &[], deopt, &[]);
-                    b.switch_to_block(cont);
-                    let fref = match op {
-                        PrimOp1::First => car_ref,
-                        PrimOp1::Rest => cdr_ref,
-                    };
-                    let h = call_handle(&mut b, fref, &[w0, w1, w2]);
-                    stack.push(h);
+                    match op {
+                        PrimOp1::First | PrimOp1::Rest => {
+                            // Tag-check it's a Pair (deopt otherwise — the VM handles
+                            // first/rest of nil / non-list / type error). The result is
+                            // an arbitrary Value, so it's a Handle.
+                            let [w0, w1, w2] = read_words(&mut b, operand);
+                            let tagb = b.ins().band_imm(w0, 0xff);
+                            let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
+                            let cont = b.create_block();
+                            b.ins().brif(is_pair, cont, &[], deopt, &[]);
+                            b.switch_to_block(cont);
+                            let fref = match op {
+                                PrimOp1::First => car_ref,
+                                PrimOp1::Rest => cdr_ref,
+                                _ => unreachable!(),
+                            };
+                            let h = call_handle(&mut b, fref, &[w0, w1, w2]);
+                            stack.push(h);
+                        }
+                        PrimOp1::IsNil => {
+                            // Tag-only nil check: compare the tag byte to 0 (Tag::Nil).
+                            // Result is an i8 comparison value (truthy in JumpIfFalse).
+                            let [w0, _, _] = read_words(&mut b, operand);
+                            let tagb = b.ins().band_imm(w0, 0xff);
+                            let is_nil = b.ins().icmp_imm(IntCC::Equal, tagb, 0);
+                            stack.push(Op::Int(is_nil));
+                        }
+                        PrimOp1::IsPair => {
+                            // Tag-only pair check: compare the tag byte to TAG_PAIR.
+                            // Ranges and SeqViews also carry TAG_PAIR — matching nil?/pair?
+                            // semantics from builtins.rs.
+                            let [w0, _, _] = read_words(&mut b, operand);
+                            let tagb = b.ins().band_imm(w0, 0xff);
+                            let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
+                            stack.push(Op::Int(is_pair));
+                        }
+                    }
                 }
                 Inst::MakeVector(n) => {
                     // Only arity 2 reaches here (gated by `chunk_in_jit_subset`); bail

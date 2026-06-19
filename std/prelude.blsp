@@ -61,24 +61,7 @@
 ;; predicates / `cond`, which are defined further down. (Not a Rust primitive: the
 ;; empty list is `nil`, and every other collection's emptiness is a length the
 ;; kernel already exposes.)
-(defn empty? (x)
-  "True if `x` is an empty collection (`nil`, `()`, `[]`, `\"\"`, `{}`, or a seq-view that realises to nothing)."
-  ;; A lazy seq-view reports `type-of` `:pair` (it stands in for a list), but a
-  ;; `filter` may have dropped everything — so realise to find out. Guarded first,
-  ;; before the `:pair`-is-non-empty shortcut below would wrongly answer false.
-  (if (seqview? x)
-    (empty? (seq x))
-   (if (%eq (type-of x) :nil)
-    true
-    (if (%eq (type-of x) :pair)
-      false
-      (if (%eq (type-of x) :string)
-        (%eq (string-length x) 0)
-        (if (%eq (type-of x) :vector)
-          (%eq (vector-length x) 0)
-          (if (%eq (type-of x) :map)
-            (%eq (map-count x) 0)
-            (throw (str "empty?: not a collection: " (pr-str x))))))))))
+;; `empty?` is a native builtin (builtins.rs) for Prim1-level dispatch speed.
 
 ;; ---- universal list view ----
 ;; `seq` is what lets every list-shaped op (map/filter/fold/reduce/…) walk a
@@ -432,12 +415,10 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 
 ;; ---- type predicates --------------------------------------------------------
 ;; Each is a thin wrapper over `type-of`, the one reflective primitive (it
-;; returns the runtime tag as a keyword). These were Rust builtins; since they
-;; are expressible in the language they are policy, so they live here — only
-;; `type-of` itself is irreducible. (`%eq` not `=`: no dependency on the
+;; returns the runtime tag as a keyword). (`%eq` not `=`: no dependency on the
 ;; variadic comparison, and it can't be shadowed by a local `=`.)
-(defn nil? (x) "True if `x` is `nil`." (%eq (type-of x) :nil))
-(defn pair? (x) "True if `x` is a cons pair." (%eq (type-of x) :pair))
+;; `nil?` and `pair?` are native builtins (builtins.rs) — they compile to
+;; PrimOp1::IsNil / IsPair inline instructions, eliminating call overhead.
 (defn int? (x) "True if `x` is an integer." (%eq (type-of x) :int))
 (defn float? (x) "True if `x` is a float." (%eq (type-of x) :float))
 (defn bool? (x) "True if `x` is a boolean." (%eq (type-of x) :bool))
