@@ -3975,3 +3975,26 @@ heap-walking benchmarks (bintree 39×, nqueens 187× behind Elixir) where struct
 tier, and true inlining / bounded unroll (Technique B) which removes calls rather than cheapening
 them. Brood vs peers after increment 1 (fib38 compute): Brood 1.13s, Ruby 2.61s (~2.3× faster),
 Elixir 0.44s (~2.6× behind, down from ~3.3×).
+
+## 2026-06-19 — JIT: raw-load the global epoch instead of a per-iteration FFI (~21% on `loop`)
+
+Profiling `loop` (30 M iterations) showed ~30 % of it was *two FFI calls on the loop back-edge*:
+`brood_rt_global_epoch` (~20 %) — the hoisted-global guard re-reads the epoch every iteration to
+deopt if a global was rebound — and `brood_rt_tick` (~10 %, the preemption poll). The epoch one is a
+pure call to read one `AtomicU64`.
+
+Fix (same trick as the call fast-link's flat table): the epoch counter (`runtime.version`) lives at a
+**stable address** — `self.runtime` is constructed once and only mutated in place (`Arc::get_mut` in
+`runtime_collect`), never reassigned, and shared (not copied) to spawned processes. So
+`brood_rt_global_epoch_ptr(heap) -> *const u64` returns its address; a JIT'd arm fetches it **once at
+entry** (when it hoists a global or has an icall epoch check) and reads the epoch with a **raw load**
+each iteration/call instead of an FFI call. A plain load matches the `Relaxed` atomic (a `mov` on the
+host); the guard only needs to *eventually* observe a concurrent `def`'s bump, which it does. The
+three call sites (hoisted-global entry stamp, back-edge guard, icall hit-block check) all switched to
+raw loads; `brood_rt_global_epoch` is no longer called from JIT'd code (the Rust fn/symbol stays).
+
+**Result:** `loop` 0.14 → 0.11 s (~21 %); the re-profile confirms `brood_rt_global_epoch` is gone
+(the next back-edge FFI, `brood_rt_tick` ~20 %, is the obvious follow-up). Gate green: `tests/jit.rs`
+28/28 JIT≡VM under `-C debug-assertions=on` (the `redefining_*`/`unrelated_def_*` hot-reload tests —
+which exercise exactly this epoch guard — pass), `differential`, `nest test` 2161/2161, and
+hot-reload + a hoisted-global loop correct under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.

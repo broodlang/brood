@@ -92,6 +92,7 @@ impl Jit {
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
+        builder.symbol("brood_rt_global_epoch_ptr", brood_rt_global_epoch_ptr as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         Jit {
             module: JITModule::new(builder),
@@ -384,6 +385,17 @@ pub unsafe extern "C" fn brood_rt_vector_base(
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> i64 {
     (*heap).global_epoch() as i64
+}
+
+/// Address of the global-epoch counter, so JIT'd code reads the epoch with a raw load instead
+/// of calling [`brood_rt_global_epoch`] on every loop back-edge / linked call. Fetched once at
+/// arm entry; the address is stable for the process. See [`Heap::global_epoch_ptr`].
+///
+/// # Safety
+/// `heap` must be live; the returned pointer is valid for the process lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_global_epoch_ptr(heap: *mut Heap) -> *const u64 {
+    (*heap).global_epoch_ptr()
 }
 
 /// Base pointer of the operand-stack/`roots` buffer. JIT'd code calls this once at

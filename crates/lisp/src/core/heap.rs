@@ -4005,6 +4005,19 @@ impl Heap {
         self.runtime.version.load(Ordering::Relaxed)
     }
 
+    /// Address of the global-epoch counter (`runtime.version`), so JIT'd code can read the
+    /// epoch with a **raw load** instead of a `brood_rt_global_epoch` FFI *call* on every loop
+    /// back-edge / linked call (the call was ~20% of a hoisted-global loop like `loop`). The
+    /// counter is an `AtomicU64` living in the `Arc<RuntimeCode>` — a stable address for the
+    /// process (`runtime_collect` mutates `version` in place via `Arc::get_mut`, never replaces
+    /// the `Arc`), so a JIT'd arm fetches this once at entry and loads through it each iteration.
+    /// A plain `u64` load matches the `Relaxed` atomic load (a plain `mov` on the host); the
+    /// guard only needs to *eventually* observe a concurrent `def`'s bump, which it does.
+    #[cfg(feature = "jit")]
+    pub(crate) fn global_epoch_ptr(&self) -> *const u64 {
+        &self.runtime.version as *const AtomicU64 as *const u64
+    }
+
     /// Bump the global epoch and return the new value — the JIT two-stage tiering swap
     /// (devlog 2026-06-17) uses this to install a deferred *inlined* native arm in place
     /// of its small original. Bumping the epoch invalidates every per-process global +
