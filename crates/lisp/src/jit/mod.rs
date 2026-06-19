@@ -89,10 +89,6 @@ impl Jit {
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
         builder.symbol("brood_rt_fastlink_base", brood_rt_fastlink_base as *const u8);
         builder.symbol("brood_rt_fast_frame", brood_rt_fast_frame as *const u8);
-        builder.symbol("brood_rt_rootstack", brood_rt_rootstack as *const u8);
-        builder.symbol("brood_rt_native_depth", brood_rt_native_depth as *const u8);
-        builder.symbol("brood_rt_env_global", brood_rt_env_global as *const u8);
-        builder.symbol("brood_rt_fast_deopt", brood_rt_fast_deopt as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
@@ -551,58 +547,4 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         FastLinkOutcome::Error => 1,
         FastLinkOutcome::Fallthrough => 2,
     }
-}
-
-/// Address of the [`Heap::roots`] [`RootStack`] header — Track B / Technique A increment 2.
-/// Fetched once at arm entry; lets the IR read `ptr`/`len`/`cap` and write `len` directly to
-/// set up a callee frame with no FFI. See [`Heap::rootstack_ptr`].
-///
-/// # Safety
-/// `heap` must be live; the returned pointer is valid for the arm's duration.
-#[no_mangle]
-pub unsafe extern "C" fn brood_rt_rootstack(heap: *mut Heap) -> *mut FastLink {
-    // Returned as `*mut FastLink` only to reuse the pointer ABI; the IR reads it at the
-    // `RootStack` field offsets. (Kept opaque to avoid leaking `RootStack` into more sigs.)
-    (*heap).rootstack_ptr() as *mut FastLink
-}
-
-/// Address of the native-recursion depth counter, for the IR's over-cap guard + bump/restore
-/// around an in-IR linked call. Fetched once at arm entry.
-///
-/// # Safety
-/// `heap` must be live; the pointer is valid for the arm's duration.
-#[no_mangle]
-pub unsafe extern "C" fn brood_rt_native_depth(heap: *mut Heap) -> *mut u32 {
-    (*heap).native_depth_ptr()
-}
-
-/// Is the executing arm's env the global scope? Read once at arm entry; gates the in-IR fast
-/// path (which skips all `jit_call_env` management). See [`Heap::jit_env_is_global`].
-///
-/// # Safety
-/// `heap` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn brood_rt_env_global(heap: *mut Heap) -> u8 {
-    (*heap).jit_env_is_global() as u8
-}
-
-/// The deopt/preempt/tail tail of an in-IR linked call: the native callee returned a non-Done,
-/// non-error outcome, so re-run it on the VM (NOT re-link — the native already ran up to its
-/// bail point; re-linking would repeat side effects). Mirrors [`jit_run_fast_link`]'s deopt
-/// arm: read the args back from the callee's param slots `[base, base+argc)`, drop the frame,
-/// re-probe the IC, and `vm_apply`. Returns `0` = done (`*out` written), `1` = error (parked),
-/// `2` = IC moved (args restaged at `[base, ..)`, the IR falls to `brood_rt_call_slow`).
-///
-/// # Safety
-/// `heap`/`out` must be live; `base`/`argc` describe the callee frame still on `roots`.
-#[no_mangle]
-pub unsafe extern "C" fn brood_rt_fast_deopt(
-    heap: *mut Heap,
-    out: *mut crate::core::value::Value,
-    base: u64,
-    site: u32,
-    head: u32,
-    argc: u32,
-) -> i64 {
-    crate::eval::compile::jit_fast_deopt(&mut *heap, out, base as usize, site, head, argc as usize)
 }
