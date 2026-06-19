@@ -4116,3 +4116,31 @@ Gate: `make test` 616/616.
 **Why nqueens wins.** safe? iterates the placed-queens list checking empty? at each step. With n=10 there are up to 9 placed queens → up to 9 empty? calls per safe? invocation. Eliminating ~150 ns → ~2 ns per call × O(n²) calls dominates the inner solver loop. The geomean moves only 0.1× because nqueens is 1 of 15 compute benchmarks.
 
 Gate: `make test` 616/616.
+
+## 2026-06-19 — JIT: register-carry for loop-carried Int params — loop −37%, collatz −11%
+
+**Motivation.** Pure-arithmetic self-tail loops like `loop--acc` iterate with all params staying `Int` throughout. Each `load_slot_int(k)` in the JIT previously emitted: `iadd_imm(base, k)` + `imul_imm(idx, STRIDE)` + `iadd(rb, off)` + `load i8 [addr]` (tag byte) + `icmp_imm(tag, TAG_INT)` + `brif` + `load i64 [addr+8]` (payload). That's 4 address ops, 1 branch, and 2 memory loads per slot read — all just to re-verify something the JIT already knew was Int.
+
+**Fix: Cranelift Variables for carry slots.** For a qualifying arm, declare `carry_vars: Vec<Variable>` (Cranelift's phi-inserting SSA abstraction) for slots `0..carry_argc`. At entry, tag-check each slot once and `def_var` with the i64 payload. In `load_slot_int(k)`, if `k < carry_argc`, return `use_var(carry_var[k])` — no memory ops, no branch. At each SelfCall back-edge, `def_var` with the new i64 values (extracted from the ops just stored to roots). The roots stores are kept unchanged for deopt correctness.
+
+**Eligibility: `int_carry_eligible(code)`.** An arm qualifies iff:
+- Has at least one `SelfCall` (pure self-tail loop)
+- No `Call { tail: false, .. }` (non-tail calls to other functions would need spill)
+- No `Prim1::First | Prim1::Rest` (pair-derefs, not pure arithmetic)
+- No `MakeVector` or `Prim2::Cons` (allocation)
+
+Additionally, all carry slots `0..carry_argc` must be **profiled as `TAG_INT`** at JIT-compile time (checked via `slot_tags`). This is the critical guard: a vector-param function like `dot(rowa, j, k, acc)` is structurally eligible (SelfCall, no Cons/MakeVector) but `slot_tags[0] = TAG_VEC`. Without the `== TAG_INT` check (originally written as `!= TAG_FLOAT`), the entry tag-check would deopt on every call, turning `dot` from fast-JIT to VM-only and regressing matmul by 9×. The correct check is `== TAG_INT`, not `!= TAG_FLOAT`.
+
+**Benchmarks affected:**
+- `loop--acc`: both params (i, acc) carry as i64 → `Prim2SlotSlot { Add, 0, 1 }` is 2×`use_var` + 1 add vs 14 ops + 2 branches. loop: 60 ms → 38 ms (−37%).
+- `collatz/steps`: (n) carries as i64 → one `use_var` per `cond-zero?` + `%` reads. collatz: 359 ms → 320 ms (−11%).
+- Several other benchmarks (nqueens, errors, primes) improved 5–17% — consistent with carry applying to their tight inner loops.
+
+**Results (2026-06-19, full 7-language run):**
+- loop: 60 ms → 38 ms (−37%), 3rd of 7
+- collatz: 359 ms → 320 ms (−11%), 4th of 7
+- Chart aggregate vs .NET: 6.0× (unchanged — dominated by wordcount/fib)
+
+**Why aggregate didn't move.** The loop compute row is `sum(wall − startup)` over 11 benchmarks. Loop is only 38ms of Brood's 1824ms total, so a 22ms saving is 1.2% of the aggregate. Collatz saves 39ms (2.1%). The per-benchmark numbers are real; the aggregate is dominated by wordcount (423ms), collatz (320ms), fib (282ms), and mandelbrot (226ms).
+
+Gate: `make test` 616/616.

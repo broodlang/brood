@@ -5240,6 +5240,31 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
 }
 
+/// True if the arm is eligible for register-carry of loop-carried integer params.
+/// In a pure-arithmetic self-tail loop (no non-tail Calls, no handle-producing ops), every
+/// param slot at the `SelfCall` back-edge is always `Value::Int`. We can carry those i64s
+/// in Cranelift `Variable`s instead of boxing to `roots` every iteration: reads skip the
+/// per-access tag-check + address arithmetic + two memory ops. The `roots` stores at
+/// `SelfCall` are kept (for deopt correctness); only reads change.
+#[cfg(feature = "jit")]
+fn int_carry_eligible(code: &[Inst]) -> bool {
+    code.iter().any(|i| matches!(i, Inst::SelfCall { .. }))
+        && !code.iter().any(|i| {
+            matches!(
+                i,
+                Inst::Call { tail: false, .. }
+                    | Inst::Prim1 {
+                        op: PrimOp1::First | PrimOp1::Rest,
+                        ..
+                    }
+                    | Inst::MakeVector(_)
+                    | Inst::Prim2 { op: PrimOp::Cons, .. }
+                    | Inst::Prim2SlotSlot { op: PrimOp::Cons, .. }
+                    | Inst::Prim2SlotInt { op: PrimOp::Cons, .. }
+            )
+        })
+}
+
 /// Count of non-tail Brood→Brood calls in `code` — the shape that needs a handle spill
 /// (≥2) and drives the spill-reserve / lowering gates.
 #[cfg(feature = "jit")]
@@ -5512,7 +5537,7 @@ fn jit_lower_arm_inner(
         condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, StackSlotData,
         StackSlotKind,
     };
-    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
     use cranelift_module::{Linkage, Module};
     use std::sync::atomic::Ordering;
 
@@ -5954,6 +5979,35 @@ fn jit_lower_arm_inner(
     ctx.func.signature = sig;
     let mut fbctx = FunctionBuilderContext::new();
     let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+    // Register-carry: for pure-arithmetic self-tail loops, declare Cranelift Variables for
+    // param slots 0..carry_argc. Reads via `load_slot_int` use `use_var` (no tag-check, no
+    // address arithmetic) after `def_var` in the entry block (init) and at each SelfCall
+    // (update). The `roots` stores at SelfCall are kept for deopt; only reads change.
+    // Excluded: any arm whose carry slots (0..max_selfcall_argc) are not all profiled as Int.
+    // Checking == TAG_INT (not merely != Float) is critical: a vector-param function like
+    // `dot(rowa, j, k, acc)` is structurally eligible (SelfCall, no Cons/MakeVector) but
+    // slot_tags[0] = TAG_VEC — the entry tag-check would deopt every call if carry were enabled.
+    let profile_tag_int = crate::core::value::Tag::Int as u8;
+    let carry_argc: usize = {
+        let candidate = if int_carry_eligible(code) {
+            code.iter()
+                .filter_map(|i| if let Inst::SelfCall { argc } = i { Some(*argc) } else { None })
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if candidate > 0
+            && (0..candidate)
+                .all(|k| slot_tags.get(k).copied() == Some(profile_tag_int))
+        {
+            candidate
+        } else {
+            0
+        }
+    };
+    let carry_vars: Vec<Variable> =
+        (0..carry_argc).map(|_| b.declare_var(types::I64)).collect();
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
     let tick_ref = m.declare_func_in_func(tick_id, b.func);
     let incap_ref = m.declare_func_in_func(incap_id, b.func);
@@ -6176,6 +6230,22 @@ fn jit_lower_arm_inner(
             entry_epoch = Some(b.ins().load(types::I64, MemFlags::new(), ep_ptr, 0));
         }
     }
+    // Initialize register-carry variables from roots (first iteration). Each param slot k is
+    // tag-checked for Int (deopt on non-Int — same semantics as load_slot_int in the body,
+    // but done once at entry so subsequent iterations read `use_var(carry_vars[k])` directly).
+    for (k, &var) in carry_vars.iter().enumerate() {
+        let rb = b.use_var(rb_var);
+        let idx = b.ins().iadd_imm(base, k as i64);
+        let off = b.ins().imul_imm(idx, STRIDE);
+        let addr = b.ins().iadd(rb, off);
+        let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+        let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+        let cont = b.create_block();
+        b.ins().brif(is_int, cont, &[], deopt, &[]);
+        b.switch_to_block(cont);
+        let payload = b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+        b.def_var(var, payload);
+    }
     b.ins().jump(leader_block[0].unwrap(), &[]);
 
     // Box an `Op::Int`'s register value into a whole-`Value`'s `(tag_byte, payload_i64)`.
@@ -6199,7 +6269,14 @@ fn jit_lower_arm_inner(
     // operand branches to `deopt` (the VM then runs the arm, where the inline path
     // handles the real shape). Leaves `b` switched to the post-check block. Used by
     // `Local` and the fused `Prim2Slot*` operands alike.
+    // Fast path: register-carried param slots (0..carry_argc) skip the tag-check entirely —
+    // the entry block already verified Int and `def_var`'d the raw i64; each SelfCall
+    // re-`def_var`s on the back-edge. `use_var` gives the current iteration's value without
+    // any memory access or branch.
     let load_slot_int = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
+        if let Some(&var) = carry_vars.get(k as usize) {
+            return b.use_var(var);
+        }
         let roots_base = b.use_var(rb_var);
         let idx = b.ins().iadd_imm(base, k);
         let off = b.ins().imul_imm(idx, STRIDE);
@@ -7372,6 +7449,40 @@ fn jit_lower_arm_inner(
                         let addr = b.ins().iadd(roots_base, o);
                         for &(off, w) in words {
                             b.ins().store(MemFlags::new(), w, addr, off);
+                        }
+                    }
+                    // Register-carry update: keep carry_vars in sync with the new slot values.
+                    // The `roots` stores above are kept for deopt; this additionally def_var's
+                    // the unboxed i64 so subsequent `load_slot_int` calls skip the tag-check.
+                    // For Op::Int, use the raw value directly. For any other op (passthrough
+                    // Op::Slot, rare in carry-eligible arms), load the just-stored payload.
+                    if !carry_vars.is_empty() {
+                        let rb2 = b.use_var(rb_var);
+                        for (k, (&op, &var)) in ops.iter().zip(carry_vars.iter()).enumerate() {
+                            let raw = match op {
+                                Op::Int(v) => {
+                                    // Int result from arithmetic — the common case.
+                                    // box_scalar may have widened an i8 comparison to i64.
+                                    if b.func.dfg.value_type(v) == types::I64 {
+                                        v
+                                    } else {
+                                        b.ins().uextend(types::I64, v)
+                                    }
+                                }
+                                _ => {
+                                    // Passthrough or non-Int: load the payload we just stored.
+                                    let idx = b.ins().iadd_imm(base, k as i64);
+                                    let o = b.ins().imul_imm(idx, STRIDE);
+                                    let addr = b.ins().iadd(rb2, o);
+                                    b.ins().load(
+                                        types::I64,
+                                        MemFlags::new(),
+                                        addr,
+                                        PAYLOAD_OFFSET as i32,
+                                    )
+                                }
+                            };
+                            b.def_var(var, raw);
                         }
                     }
                     // GC safepoint (cons-allocating arms only): bound the nursery over loop
