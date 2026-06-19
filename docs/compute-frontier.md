@@ -19,8 +19,8 @@
 >   compiles the frame work better than hand-emitted Cranelift IR. Reverted. The dispatch lever is
 >   mined out at increment 1.
 > - **Standings (full 7-language `brood-benchmarks` run, single-thread aggregate compute vs the
->   fastest):** .NET 1.0× · Node 2.6× · Elixir 3.7× · **Brood 6.1× (4th of 7)** · Ruby 11.6× ·
->   Clojure 19.7× · Python 26.3×. Brood wins `strings` + `http`; ~21 MB base RSS; ~26 ms startup.
+>   fastest):** .NET 1.0× · Node 2.7× · Elixir 3.6× · **Brood 6.0× (4th of 7)** · Ruby 11.6× ·
+>   Clojure 17.7× · Python 27.0×. Brood wins `strings` + `http`; ~21 MB base RSS; ~27 ms startup.
 > - **SHIPPED 2026-06-19 — `map-int-add` + JIT GC safepoint:** `wordcount` 810→**470 ms** (~42%).
 >   `(map-int-add m k delta)` fuses `(assoc m k (+ (get m k 0) delta))` into one CHAMP trie walk.
 >   Added GC safepoint in `jit_dispatch_call`'s slow-path `Ok(v)` arm — roots `v` before
@@ -39,11 +39,17 @@
 >   (constant-index `nth`) was bailing with `return None`; now materialises the integer index as a
 >   Value word-triple and calls `vector_ref`. Deleted `chunk_walks_structure` (dead code). **7.0× → 6.1×**
 >   (sum aggregate). nqueens flat (safe? was already JIT-compiled, no VectorRef).
-> - **NEXT lever:** nqueens still 12.5× off .NET (safe? iterates a linked list via `first`/`rest`
->   FFI per step — now in JIT native loop but each `empty?` call still goes through
->   `brood_rt_call_slow`). Adding `PrimOp1::IsEmpty` (inline tag-check for Nil/Pair, deopt for
->   Str/Vec/Map) would eliminate that FFI per safe? iteration. Then: tier-2 register-carry of
->   loop-carried Int vars and Technique B (true inlining / bounded unroll).
+> - **SHIPPED 2026-06-19 — `PrimOp1::IsEmpty`:** nqueens 321→**166 ms** (−48%, 12.5× → 7.4× behind
+>   .NET). `empty?` was a native builtin (no BcFrame), but JIT arms still emitted `brood_rt_call_slow`
+>   (~150 ns/call). `safe?` calls `empty?` once per list iteration → O(n²) FFI calls in the inner
+>   loop. `IsEmpty` emits: read tag byte; `is_nil = (tag == 0)`; `is_pair = (tag == TAG_PAIR)`;
+>   `brif(is_nil|is_pair, cont, deopt)` — deopt for Vec/Str/Map (need heap length); push
+>   `Op::Int(is_nil)`. Also VM inline paths (single-eval + bytecode-compiled). **6.1× → 6.0×**
+>   aggregate (nqueens is 1 of 15 compute benchmarks; geomean barely moves).
+> - **NEXT lever:** register-carry of loop-carried Int vars (`loop`/`reduce`/`collatz` JIT'd but
+>   ~5–8× — every loop-carried integer round-trips through `roots`). Then: inline `first`/`rest`/
+>   `vector_ref` pointer arithmetic in the JIT (eliminates `brood_rt_car`/`cdr`/`vector_ref` FFI
+>   for JIT-compiled structure walkers). Technique B (true inlining) is a longer horizon.
 > - **Build/bench discipline:** perf bins via `cargo build --release --features jit --bin brood`
 >   (NEVER `-p brood` — stale-lib trap); `make install` before benchmarking (the harness runs the
 >   *installed* `brood`); GC-debug build = `RUSTFLAGS="-C debug-assertions=on"`.
