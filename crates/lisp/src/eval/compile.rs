@@ -5169,15 +5169,6 @@ fn jit_spill_reserve(code: &[Inst]) -> usize {
     if !chunk_in_jit_subset(code) {
         return 0;
     }
-    // Reserve **only** for the arms that actually lower (and benefit) — see the matching
-    // gate in `jit_lower_arm`. A two-call arm that walks a data structure (`VectorRef` /
-    // `first`/`rest`, like bintree's `check`) is *not* lowered (it regresses), so reserve
-    // nothing: the spill slots would be dead frame weight slowing the arm's *interpreted*
-    // execution too (e.g. 20 000 short `fib`s in `spawn`) — the cost that made an earlier
-    // flat reserve regress `spawn` ~1.8×.
-    if chunk_walks_structure(code) {
-        return 0;
-    }
     // How many spill slots `jit_lower_arm`'s monotonic `spill_next` can reach. A spill
     // fires when a non-tail call's safepoint finds a live `Op::Handle` *below* its
     // operands; the spill rewrites that handle to an `Op::Slot`, so **each handle is
@@ -5187,16 +5178,13 @@ fn jit_spill_reserve(code: &[Inst]) -> usize {
     // roots), giving the tight bound `producers − 1`.
     //
     // Handle producers in the lowering: a non-tail Brood→Brood `Call` (its `Value`
-    // result), a `MakeVector` (`[a b]`), a `Prim1` (`first`/`rest`), and a `Cons` prim.
-    // (`chunk_walks_structure` already returned for `Prim1`/`VectorRef` arms; `Cons` is
-    // now in `chunk_in_jit_subset` and counted here correctly.) For plain two-call
-    // recursion (`fib`) producers == 2 → reserve 1,
-    // **bit-identical to the prior hardcoded `1`** — so no arm that lowered before changes.
-    // A deeper-nested body — an inlined / bounded-unrolled `fib` arm
-    // (`docs/jit-optimizing-tier.md` §6b) — has more simultaneously-live call results, so
-    // it reserves one slot per producer beyond the last instead of bailing at translation.
-    // This only ever *raises* the reserve, and the gates above keep it off arms that don't
-    // lower (the dead-frame-weight that regressed `spawn` ~1.8× with a flat reserve).
+    // result), a `MakeVector` (`[a b]`), a `Prim1::First|Rest` (car/cdr deref → Handle),
+    // and a `Cons` prim. `Prim1::IsNil|IsPair` produce `Op::Int` (tag-only), not a
+    // Handle, so they are not counted. For plain two-call recursion (`fib`) producers == 2
+    // → reserve 1, **bit-identical to the prior hardcoded `1`** — so no arm that lowered
+    // before changes. A deeper-nested body — an inlined / bounded-unrolled `fib` arm or a
+    // structure-walking two-call arm like bintree's `check` — has more simultaneously-live
+    // call results, so it reserves one slot per producer beyond the last.
     let producers = code
         .iter()
         .filter(|i| {
@@ -5204,7 +5192,10 @@ fn jit_spill_reserve(code: &[Inst]) -> usize {
                 i,
                 Inst::Call { tail: false, .. }
                     | Inst::MakeVector(_)
-                    | Inst::Prim1 { .. }
+                    | Inst::Prim1 {
+                        op: PrimOp1::First | PrimOp1::Rest,
+                        ..
+                    }
                     | Inst::Prim2 {
                         op: PrimOp::Cons,
                         ..
@@ -5236,31 +5227,6 @@ fn non_tail_call_count(code: &[Inst]) -> usize {
         .count()
 }
 
-/// True if the arm walks a data structure — a `VectorRef` (`nth`) or `first`/`rest`. A
-/// two-call arm that does this (bintree's `check`) regresses if linked (the per-call
-/// frame/handle-copy cost outweighs the dispatch saving), so it stays on the VM. Shared
-/// by [`jit_spill_reserve`] and `jit_lower_arm`'s benefit gate so the two can't drift.
-#[cfg(feature = "jit")]
-fn chunk_walks_structure(code: &[Inst]) -> bool {
-    code.iter().any(|i| {
-        // first/rest dereference a pair handle — a structure walk. IsNil/IsPair are
-        // tag-only checks (no heap dereference) so they don't trigger this gate.
-        matches!(i, Inst::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. })
-            || matches!(
-                i,
-                Inst::Prim2 {
-                    op: PrimOp::VectorRef,
-                    ..
-                } | Inst::Prim2SlotSlot {
-                    op: PrimOp::VectorRef,
-                    ..
-                } | Inst::Prim2SlotInt {
-                    op: PrimOp::VectorRef,
-                    ..
-                }
-            )
-    })
-}
 
 /// True iff every opcode in `code` is in the integer JIT subset — i.e. `jit_lower_arm`
 /// could lower this arm (modulo the handle-spill, which is what the reserve enables).
@@ -5699,18 +5665,6 @@ fn jit_lower_arm_inner(
         if work < TAIL_CALL_MIN_WORK {
             return None;
         }
-    }
-
-    // ---- Benefit gate for two-call recursion (the handle-spill shape). ----
-    // Lowering an arm with ≥2 non-tail calls only pays off when the call/dispatch cost it
-    // removes (native-to-native linking, `jit_dispatch_call`) dominates the body — pure
-    // integer recursion like `fib`'s `(+ (fib …) (fib …))` (and so `pfib`). When the body
-    // also *walks a data structure* — a `VectorRef` (`nth`) or `first`/`rest`, as in
-    // bintree's `check` — the per-call linking cost (frame nil-init + the handle-arg copies
-    // + the helper calls) outweighs the saving and the arm *regresses* vs the VM's IC'd
-    // call path. Such arms stay on the VM (no spill lowering): measured neutral, not slower.
-    if non_tail_call_count(code) >= 2 && chunk_walks_structure(code) {
-        return None;
     }
 
     // ---- Block leaders: ip 0, every jump target, the inst after a jump, the `len`
@@ -7217,12 +7171,17 @@ fn jit_lower_arm_inner(
                     int_b,
                     ..
                 } => {
-                    // A const-index `vector-ref`/`nth` (`(nth v 0)`) fuses here; it's rare
-                    // (matmul-style loops use a variable index) — bail to the VM rather than
-                    // materialise the const operand as a `Value` word-triple.
                     if matches!(op, PrimOp::VectorRef) {
-                        return None;
-                    }
+                        // `(nth v 0)` / `(nth v 1)` — constant index fused into the slot:
+                        // materialise `int_b` as a Value word-triple and call vector_ref.
+                        // slot_a is always the vector (source 0 after map normalisation).
+                        let vec = read_words(&mut b, Op::Slot(*slot_a));
+                        let t = b.ins().iconst(types::I64, TAG_INT as i64);
+                        let v = b.ins().iconst(types::I64, *int_b);
+                        let z = b.ins().iconst(types::I64, 0);
+                        let h = vector_ref(&mut b, vec, [t, v, z]);
+                        stack.push(h);
+                    } else
                     // `(cons slot int_literal)` or `(cons int_literal slot)` (after map
                     // inversion for the swapped form). After fusion, slot_a is always source
                     // 0; map[0]=0 → slot is car, int is cdr; map[0]=1 → int is car, slot
