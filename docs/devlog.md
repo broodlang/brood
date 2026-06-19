@@ -4096,3 +4096,23 @@ There was also a secondary bug: `Prim2SlotInt { op: VectorRef, .. }` (constant-i
 **Why check wins.** At tree depth 12: 4 095 internal nodes × 200 iterations = 819 K check activations per run. Each internal node makes 2 recursive check calls: fast-link saves ~110 ns/call × 2 = ~220 ns/node vs VM BcFrame. Total: 819 K × 220 ns ≈ 180 ms. Measured saving: ~125 ms (the rest is GC / make / startup amortisation).
 
 Gate: `make test` 616/616.
+
+## 2026-06-19 — JIT: PrimOp1::IsEmpty — nqueens −48%
+
+**Root cause.** `empty?` was a native builtin (Step::Done inline, no BcFrame), but a JIT-compiled arm calling it still emitted `brood_rt_call_slow` (~150 ns/call) — because the compiler had no `Prim1` for `empty?`. nqueens `safe?` calls `empty?` once per placed-queen iteration, so this native-dispatch round-trip dominated the inner loop.
+
+**Changes (all in `compile.rs`):**
+- Added `PrimOp1::IsEmpty` variant and `"empty?" => PrimOp1::IsEmpty` to `from_native_name`.
+- VM single-eval inline path: `(IsEmpty, Nil)` → `true`, `(IsEmpty, Pair|Range)` → `false`, others fall through to native.
+- VM bytecode-compiled inline path: same three arms.
+- JIT lowering: read tag byte; `is_nil = tag == 0`; `is_pair = tag == TAG_PAIR`; `brif(is_nil | is_pair, cont, deopt)` — deopt for vectors/maps/strings (heap length needed, not needed for list iteration); push `Op::Int(is_nil)` in cont (1 for nil, 0 for pair).
+- `node_touches_heap`: `IsEmpty` added alongside `IsNil`/`IsPair` → false (tag-only on the fast path).
+
+**Results (2026-06-19, full 7-language run):**
+- nqueens: 321 ms → 166 ms (−48%), 12.5× → 7.4× behind .NET
+- bintree: flat (116 ms → 103 ms, measurement noise)
+- Chart aggregate vs .NET: 6.1× → 6.0×
+
+**Why nqueens wins.** safe? iterates the placed-queens list checking empty? at each step. With n=10 there are up to 9 placed queens → up to 9 empty? calls per safe? invocation. Eliminating ~150 ns → ~2 ns per call × O(n²) calls dominates the inner solver loop. The geomean moves only 0.1× because nqueens is 1 of 15 compute benchmarks.
+
+Gate: `make test` 616/616.

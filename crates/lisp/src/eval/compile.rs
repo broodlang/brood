@@ -127,6 +127,7 @@ pub enum PrimOp1 {
     Rest,
     IsNil,
     IsPair,
+    IsEmpty,
 }
 
 impl PrimOp1 {
@@ -136,6 +137,7 @@ impl PrimOp1 {
             "rest" => PrimOp1::Rest,
             "nil?" => PrimOp1::IsNil,
             "pair?" => PrimOp1::IsPair,
+            "empty?" => PrimOp1::IsEmpty,
             _ => return None,
         })
     }
@@ -2005,7 +2007,7 @@ fn node_touches_heap(node: &Node) -> bool {
         // `first`/`rest` (car/cdr) dereference a pair handle — heap reads.
         // `nil?`/`pair?` are tag-only checks — no heap dereference.
         Node::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. } => true,
-        Node::Prim1 { op: PrimOp1::IsNil | PrimOp1::IsPair, .. } => false,
+        Node::Prim1 { op: PrimOp1::IsNil | PrimOp1::IsPair | PrimOp1::IsEmpty, .. } => false,
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
         Node::If(a, b, c) => {
             node_touches_heap(a) || node_touches_heap(b) || node_touches_heap(c)
@@ -2918,6 +2920,14 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
                     (PrimOp1::First | PrimOp1::Rest, ValueRef::Nil) => {
                         crate::perf_bump!(prim1_inline);
                         return Ok(Value::nil());
+                    }
+                    (PrimOp1::IsEmpty, ValueRef::Nil) => {
+                        crate::perf_bump!(prim1_inline);
+                        return Ok(Value::boolean(true));
+                    }
+                    (PrimOp1::IsEmpty, ValueRef::Pair(_) | ValueRef::Range(_)) => {
+                        crate::perf_bump!(prim1_inline);
+                        return Ok(Value::boolean(false));
                     }
                     _ => {} // vectors/ranges/type errors → the native owns them
                 }
@@ -4042,6 +4052,18 @@ fn exec_chunk(
                             ));
                             heap.truncate_roots(n - 1);
                             heap.push_root(result);
+                            continue;
+                        }
+                        (PrimOp1::IsEmpty, ValueRef::Nil) => {
+                            crate::perf_bump!(prim1_inline);
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(Value::boolean(true));
+                            continue;
+                        }
+                        (PrimOp1::IsEmpty, ValueRef::Pair(_) | ValueRef::Range(_)) => {
+                            crate::perf_bump!(prim1_inline);
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(Value::boolean(false));
                             continue;
                         }
                         _ => {}
@@ -7011,6 +7033,22 @@ fn jit_lower_arm_inner(
                             let tagb = b.ins().band_imm(w0, 0xff);
                             let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
                             stack.push(Op::Int(is_pair));
+                        }
+                        PrimOp1::IsEmpty => {
+                            // nil → true, pair → false, everything else → deopt.
+                            // Vectors/maps/strings need a heap-length check — let the
+                            // native handle them. nqueens `safe?` only ever sees nil/pair.
+                            let [w0, _, _] = read_words(&mut b, operand);
+                            let tagb = b.ins().band_imm(w0, 0xff);
+                            let is_nil = b.ins().icmp_imm(IntCC::Equal, tagb, 0);
+                            let is_pair = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_PAIR as i64);
+                            let is_nil_or_pair = b.ins().bor(is_nil, is_pair);
+                            let cont = b.create_block();
+                            b.ins().brif(is_nil_or_pair, cont, &[], deopt, &[]);
+                            b.switch_to_block(cont);
+                            // After the guard: is_nil is 1 for nil, 0 for pair — exactly
+                            // the boolean result we want.
+                            stack.push(Op::Int(is_nil));
                         }
                     }
                 }
