@@ -5757,6 +5757,15 @@ fn jit_lower_arm_inner(
     let tick_id = m
         .declare_function("brood_rt_tick", Linkage::Import, &tick_sig)
         .ok()?;
+    // brood_rt_in_capture(heap) -> u8: is this a capture-mode (preemptible) process? Read once
+    // at entry to gate the per-back-edge `brood_rt_tick` poll — a non-capture (root) loop skips
+    // the FFI, which returns 0 there anyway.
+    let mut incap_sig = m.make_signature();
+    incap_sig.params.push(AbiParam::new(ptr_ty));
+    incap_sig.returns.push(AbiParam::new(types::I8));
+    let incap_id = m
+        .declare_function("brood_rt_in_capture", Linkage::Import, &incap_sig)
+        .ok()?;
     // The handle ops, by-value with an out-pointer (a `Value` is 24 bytes → no register-pair
     // return): brood_rt_cons(heap, out, car0,car1,car2, cdr0,cdr1,cdr2);
     // brood_rt_{car,cdr}(heap, out, w0,w1,w2). They write the result `Value` to `*out`.
@@ -5908,6 +5917,7 @@ fn jit_lower_arm_inner(
     let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
     let tick_ref = m.declare_func_in_func(tick_id, b.func);
+    let incap_ref = m.declare_func_in_func(incap_id, b.func);
     let car_ref = m.declare_func_in_func(car_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
@@ -6041,6 +6051,18 @@ fn jit_lower_arm_inner(
             None
         }
     };
+
+    // Capture-mode flag, read once at entry (when the arm has a self-tail back-edge): a
+    // non-capture (root-thread) loop skips the per-iteration `brood_rt_tick` poll, which returns
+    // 0 there anyway. Capture mode is constant for the arm's whole execution, so one read
+    // suffices; the capture path keeps polling every iteration (preemption fairness unchanged).
+    let capture_active: Option<cranelift_codegen::ir::Value> =
+        if code.iter().any(|i| matches!(i, Inst::SelfCall { .. })) {
+            let c = b.ins().call(incap_ref, &[heap]);
+            Some(b.inst_results(c)[0])
+        } else {
+            None
+        };
 
     if !hoist_slots.is_empty() || !hoist_globals.is_empty() || !hoist_scalar_globals.is_empty() {
         let len_slot = b.create_sized_stack_slot(StackSlotData::new(
@@ -7277,9 +7299,21 @@ fn jit_lower_arm_inner(
                     // Preemption (ADR-027): poll the reduction budget on the back-edge. On
                     // yield, deopt to `preempt` (return 2) — the frame slots already hold the
                     // next iteration's args (in `roots`), so the driver resumes on the VM.
-                    let tc = b.ins().call(tick_ref, &[heap]);
-                    let yld = b.inst_results(tc)[0];
-                    b.ins().brif(yld, preempt, &[], leader_block[0]?, &[]);
+                    // In **non-capture** mode (the root thread) the poll always returns 0, so gate
+                    // it on the entry-read capture flag and jump straight to the loop top — no FFI.
+                    let loop_top = leader_block[0]?;
+                    if let Some(cap) = capture_active {
+                        let poll = b.create_block();
+                        b.ins().brif(cap, poll, &[], loop_top, &[]);
+                        b.switch_to_block(poll);
+                        let tc = b.ins().call(tick_ref, &[heap]);
+                        let yld = b.inst_results(tc)[0];
+                        b.ins().brif(yld, preempt, &[], loop_top, &[]);
+                    } else {
+                        let tc = b.ins().call(tick_ref, &[heap]);
+                        let yld = b.inst_results(tc)[0];
+                        b.ins().brif(yld, preempt, &[], loop_top, &[]);
+                    }
                     break;
                 }
                 Inst::JumpIfFalse(t) => {

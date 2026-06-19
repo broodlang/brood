@@ -93,6 +93,7 @@ impl Jit {
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
         builder.symbol("brood_rt_global_epoch_ptr", brood_rt_global_epoch_ptr as *const u8);
+        builder.symbol("brood_rt_in_capture", brood_rt_in_capture as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         Jit {
             module: JITModule::new(builder),
@@ -180,6 +181,20 @@ pub extern "C" fn brood_rt_tick(_heap: *mut Heap) -> u8 {
     } else {
         0 // root / non-capture: never preempt (matches the VM)
     }
+}
+
+/// Is this thread running a **capture-mode** (preemptible green) process? JIT'd code reads it
+/// **once at arm entry** to gate the per-back-edge preemption poll: capture mode is constant for
+/// an arm's whole execution (set per process-run by the scheduler; unchanged across the arm and
+/// its nested calls), so a non-capture loop (the root thread — every single-threaded compute
+/// benchmark) skips the [`brood_rt_tick`] FFI entirely, which always returns 0 there anyway. The
+/// capture path is unchanged (still polls each iteration), so preemption fairness is untouched.
+///
+/// # Safety
+/// `heap` is unused (the state is a thread-local); the arg keeps the callback ABI uniform.
+#[no_mangle]
+pub extern "C" fn brood_rt_in_capture(_heap: *mut Heap) -> u8 {
+    crate::process::in_capture_run() as u8
 }
 
 /// GC safepoint check. JIT'd code calls this where the interpreter would collect (a
