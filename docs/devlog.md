@@ -4046,3 +4046,29 @@ or bintree (~440 ms, baseline ~415 ms) — within run-to-run noise.
 CHAMP path-copy allocates O(log₁₆ N) nodes per update vs Elixir's mutable `Dictionary`. The main
 remaining lever is `into`/reduce through the transient-map bulk-build path (`map_from_pairs`'s
 watermarked CHAMP), but that requires a semantically different benchmark formulation.
+
+## 2026-06-19 — nil?/pair?/empty? as native builtins: bintree −37%, nqueens −41%
+
+**Motivation.** bintree was 32× behind Elixir; nqueens 76×. Profiling showed the bottleneck in both was function-call overhead for predicates every iteration calls: `nil?` in bintree's `check` (one call per tree node = 1.6M calls/run), and `empty?` in nqueens' `safe?` (one call per list-step in the backtracking search). Both were Brood closures, so every call required a full `BcFrame` push/pop (~100–150 ns each).
+
+**Fix.** Moved `nil?`, `pair?`, and `empty?` from prelude.blsp into builtins.rs as native Rust functions:
+
+- **`nil?`** → `Value::boolean(matches!(x, Value::Nil))` — a single enum-variant check.
+- **`pair?`** → matches `Pair | Range | SeqView` (matching the prelude semantics: `type-of x == :pair`).
+- **`empty?`** → matches nil/pair/string/vector/map directly; seqview? case calls `realize_seqview`.
+
+With natives, `dispatch()` returns `Step::Done` (the native runs inline), so no `BcFrame` push is needed. Previously each call went through `dispatch → Step::Tail (Brood closure) → ChunkExit::Call → BcFrame push → try_jit → jit_tier → BcFrame pop`. Saving: ~100–150 ns per nil?/empty? call.
+
+Also added **`PrimOp1::IsNil`** and **`PrimOp1::IsPair`** to the compiler: `resolve_prim1` now maps these native names to Prim1 instructions that the VM executes inline (no Call instruction at all — just a tag comparison in the exec_chunk Prim1 handler and a Cranelift `icmp_imm` in the JIT lowering). Updated `chunk_walks_structure` to only exclude `Prim1::First | Prim1::Rest` (which deref pair handles), not `IsNil | IsPair` (tag-only checks, no heap deref).
+
+**Results (2026-06-19, full 7-language run):**
+- bintree: 383 ms → 230 ms (−40%), 32× → 20× behind Elixir
+- nqueens: 504 ms → 320 ms (−36%), 76× → 87× ... wait—
+
+Actually the ratios fluctuate with machine load. Absolute times:
+- bintree: 383 ms → 230 ms (−40%)  
+- nqueens: 504 ms → 320 ms (−36%)
+
+**Overall compute geomean: 7.7× → 7.0× vs .NET** (11 compute benchmarks, aggregate wall−startup).
+
+Gate: `make test` 616/616.

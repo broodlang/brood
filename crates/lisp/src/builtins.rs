@@ -258,6 +258,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![seq], list_ty),
         rest,
     );
+    def(
+        heap,
+        "nil?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        is_nil,
+    );
+    def(
+        heap,
+        "pair?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        is_pair,
+    );
+    def(
+        heap,
+        "empty?",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        is_empty,
+    );
     // Lazy reducible range (ADR: reducible range). `%range` constructs it (arg
     // parsing is in the Brood `range`); the fold-family fast paths in the prelude
     // call `range?` / `%range-reduce` / `%range-count`; everything else realises
@@ -2279,6 +2300,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
     ("first", &["coll"], "The head of a list or vector, or nil if empty."),
     ("rest", &["coll"], "All but the head of a list or vector."),
+    ("nil?", &["x"], "True if x is nil."),
+    ("pair?", &["x"], "True if x is a cons pair."),
+    ("empty?", &["coll"], "True if coll is empty (nil, an empty string/vector/map, or a seq-view that realises to nothing)."),
     ("range?", &["x"], "True if x is a lazy range (as produced by range). Ranges fold/reduce/sum/count without materialising; other ops treat them as the list they stand for."),
     ("vector", &["&", "items"], "A vector of the given items."),
     ("vector-ref", &["v", "i"], "The element at index i of vector v."),
@@ -3379,6 +3403,33 @@ fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         },
         Value::Nil => Ok(Value::nil()),
         _ => Err(LispError::wrong_type(heap, "rest", "list or vector", v)),
+    }
+}
+
+fn is_nil(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::boolean(matches!(arg(args, 0), Value::Nil)))
+}
+
+fn is_pair(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    Ok(Value::boolean(matches!(
+        arg(args, 0),
+        Value::Pair(_) | Value::Range(_) | Value::SeqView(_)
+    )))
+}
+
+fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let x = arg(args, 0);
+    match x {
+        Value::Nil => Ok(Value::boolean(true)),
+        Value::Pair(_) | Value::Range(_) => Ok(Value::boolean(false)),
+        Value::SeqView(_) => {
+            let realized = realize_seqview(heap, env, x)?;
+            Ok(Value::boolean(matches!(realized, Value::Nil)))
+        }
+        Value::Str(id) => Ok(Value::boolean(heap.string(id).is_empty())),
+        Value::Vector(id) => Ok(Value::boolean(heap.vector(id).is_empty())),
+        Value::Map(id) => Ok(Value::boolean(heap.map_size(id) == 0)),
+        _ => Err(LispError::wrong_type(heap, "empty?", "collection", x)),
     }
 }
 
