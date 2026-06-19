@@ -19,8 +19,8 @@
 >   compiles the frame work better than hand-emitted Cranelift IR. Reverted. The dispatch lever is
 >   mined out at increment 1.
 > - **Standings (full 7-language `brood-benchmarks` run, single-thread aggregate compute vs the
->   fastest):** .NET 1.0× · Node 2.5× · Elixir 3.0× · **Brood 8.3× (4th of 7)** · Ruby 10.4× ·
->   Clojure 15.4× · Python 24.1×. Brood wins `strings` + `http`; ~24 MB base RSS; ~36 ms startup.
+>   fastest):** .NET 1.0× · Node 2.6× · Elixir 3.4× · **Brood 7.7× (4th of 7)** · Ruby 11.5× ·
+>   Clojure 17.8× · Python 26.2×. Brood wins `strings` + `http`; ~24 MB base RSS; ~36 ms startup.
 >   (Clojure was added as a 7th language this round — the immutable-Lisp peer; its `wordcount`
 >   immutable map *beats* Brood's CHAMP, proving Brood's map gap is constant factors, not immutability.)
 > - **SHIPPED 2026-06-19 — `map-int-add` + JIT GC safepoint:** `wordcount` 810→**470 ms** (~42%).
@@ -159,12 +159,16 @@ structures (lists/vectors/maps) would cut both the copy cost and the peak RSS. S
 because the value can't be mutated out from under a sharer. Entry: `process/message.rs`
 (`to_message`/`StrShared`), `core/heap.rs` (the shared RUNTIME region + `promote`). See §6.
 
-### 3d. `wordcount` (~33×) — **persistent map build; likely accept**
+### 3d. `wordcount` (~13×) — **persistent map build; `map-int-add` shipped**
 
-`jit_native=0` (no JIT path), CHAMP-map build with structural sharing vs a mutable
-`Dictionary`. This is algorithmic (immutable by design, ADR-026). A transient-map build
-path exists (`5a7b8bb`); wiring `into`/`reduce`-into-a-map through it is the only realistic
-lever short of abandoning persistence. Lowest priority — most inherent to Brood's identity.
+**SHIPPED 2026-06-19:** `map-int-add` (single-pass CHAMP fused get+add+assoc) + JIT GC
+safepoint in `jit_dispatch_call`. wordcount 810 → **422 ms** compute; gap vs fastest
+(Node ~33ms) **~31× → ~13×**; gap vs Elixir **4.5× → 2.5×**.
+
+Residual gap is algorithmic: CHAMP path-copy allocates O(log₁₆ N) nodes per update vs a
+mutable `Dictionary`. A transient-map build path exists (`5a7b8bb`); wiring
+`into`/`reduce`-into-a-map through it is the only realistic remaining lever short of
+abandoning persistence. Lowest priority — most inherent to Brood's identity.
 
 ## 4. Recommendation & priority
 
@@ -189,7 +193,8 @@ Priority if/when this is picked up:
    deep-copying across processes; attacks the `strings` ~180 MB outlier and `spawn`/`pfib`
    message cost. Also opens **lazy combinators** as the eager-list fix.
 3. **`bintree` allocation** — GC/nursery tuning; diffuse.
-4. **`wordcount`** — accept, or transient-map `into`. Lowest.
+4. **`wordcount`** — **SHIPPED 2026-06-19** (`map-int-add` + JIT GC safepoint, 810→422ms,
+   gap ~31×→~13×). Residual: transient-map `into` for the final 13× → ~4× if wanted.
 
 NaN-boxing / `Value`-width is **not** on this list (§2).
 
