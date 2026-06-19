@@ -798,180 +798,6 @@ impl RuntimeCode {
     }
 }
 
-/// The operand-stack / GC-root buffer (ADR-061), with a `#[repr(C)]` `{ptr, len, cap}`
-/// header so JIT'd code (Track B / Technique A increment 2) can read **and write** `len` and
-/// index slots at fixed offsets (`ptr@0`, `len@8`, `cap@16`). It replaces the `Vec<Value>`
-/// the root stack used to be: `Vec`'s field order isn't guaranteed, so the JIT cannot touch
-/// its length; this gives a stable layout the IR loads/stores directly. `Value` is `Copy`
-/// with no `Drop`, so only the buffer is freed (no per-element teardown). **Growth happens
-/// only in Rust** (`push`/`reserve`/`resize_to_nil`); the JIT's in-IR frame setup bounds-checks
-/// `len + nslots <= cap` and falls to a reserving FFI on overflow, so native code never
-/// reallocates — keeping the base pointer + capacity stable across an in-IR frame.
-#[repr(C)]
-pub struct RootStack {
-    ptr: *mut Value,
-    len: usize,
-    cap: usize,
-}
-
-// SAFETY: `RootStack` exclusively owns its buffer (like the `Vec<Value>` it replaces) and
-// `Value: Send`, so it is sound to move a `Heap` (hence its root stack) between worker threads
-// — the established process-migration invariant. Not `Sync` (mutated through `&mut Heap`).
-unsafe impl Send for RootStack {}
-
-impl RootStack {
-    const fn new() -> Self {
-        RootStack {
-            ptr: std::ptr::NonNull::<Value>::dangling().as_ptr(),
-            len: 0,
-            cap: 0,
-        }
-    }
-
-    /// Grow the buffer to hold at least `min_cap` elements (amortised doubling). Rust-only;
-    /// reallocation moves the buffer, so callers outside the JIT re-read `as_mut_ptr` after.
-    #[cold]
-    fn grow_to(&mut self, min_cap: usize) {
-        let new_cap = min_cap.max(if self.cap == 0 { 4 } else { self.cap * 2 });
-        let new_layout = std::alloc::Layout::array::<Value>(new_cap).expect("roots layout");
-        let new_ptr = unsafe {
-            if self.cap == 0 {
-                std::alloc::alloc(new_layout)
-            } else {
-                let old_layout = std::alloc::Layout::array::<Value>(self.cap).expect("roots layout");
-                std::alloc::realloc(self.ptr as *mut u8, old_layout, new_layout.size())
-            }
-        } as *mut Value;
-        if new_ptr.is_null() {
-            std::alloc::handle_alloc_error(new_layout);
-        }
-        self.ptr = new_ptr;
-        self.cap = new_cap;
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    #[inline]
-    fn push(&mut self, v: Value) {
-        if self.len == self.cap {
-            self.grow_to(self.len + 1);
-        }
-        // SAFETY: `len < cap` after the grow; the slot is owned + uninitialised.
-        unsafe { self.ptr.add(self.len).write(v) };
-        self.len += 1;
-    }
-
-    #[inline]
-    fn pop(&mut self) -> Option<Value> {
-        if self.len == 0 {
-            None
-        } else {
-            self.len -= 1;
-            // SAFETY: `len` was in-bounds and the slot was initialised by a prior push/resize.
-            Some(unsafe { self.ptr.add(self.len).read() })
-        }
-    }
-
-    /// Shrink to `n` (no-op if already ≤ `n`). `Value` has no `Drop`, so this just lowers `len`.
-    #[inline]
-    fn truncate(&mut self, n: usize) {
-        if n < self.len {
-            self.len = n;
-        }
-    }
-
-    /// Grow `len` up to `new_len`, filling the new slots with `Nil` — a call frame's slot
-    /// pre-fill. `new_len` must be ≥ the current length.
-    #[inline]
-    fn resize_to_nil(&mut self, new_len: usize) {
-        debug_assert!(new_len >= self.len);
-        if new_len > self.cap {
-            self.grow_to(new_len);
-        }
-        // SAFETY: `[len, new_len) ⊆ [0, cap)` after the grow; each slot is owned.
-        unsafe {
-            let mut i = self.len;
-            while i < new_len {
-                self.ptr.add(i).write(Value::nil());
-                i += 1;
-            }
-        }
-        self.len = new_len;
-    }
-
-    /// Ensure room for `additional` more elements without reallocating (used by the JIT's
-    /// overflow fallback so a later in-IR frame setup stays within `cap`).
-    #[cfg(feature = "jit")]
-    #[inline]
-    #[allow(dead_code)] // wired in increment 2b (in-IR frame setup)
-    fn reserve(&mut self, additional: usize) {
-        let need = self.len + additional;
-        if need > self.cap {
-            self.grow_to(need);
-        }
-    }
-
-    #[cfg(feature = "jit")]
-    #[inline]
-    fn as_mut_ptr(&mut self) -> *mut Value {
-        self.ptr
-    }
-
-    #[inline]
-    fn as_slice(&self) -> &[Value] {
-        // SAFETY: `[0, len)` is initialised; the buffer lives as long as `self`.
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-    }
-
-    #[inline]
-    fn as_mut_slice(&mut self) -> &mut [Value] {
-        // SAFETY: as `as_slice`, with unique access via `&mut self`.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
-    }
-
-    #[inline]
-    fn iter(&self) -> std::slice::Iter<'_, Value> {
-        self.as_slice().iter()
-    }
-
-    #[inline]
-    fn iter_mut(&mut self) -> std::slice::IterMut<'_, Value> {
-        self.as_mut_slice().iter_mut()
-    }
-}
-
-impl Drop for RootStack {
-    fn drop(&mut self) {
-        if self.cap != 0 {
-            // SAFETY: allocated by `grow_to` with this exact `Value`-array layout.
-            unsafe {
-                std::alloc::dealloc(
-                    self.ptr as *mut u8,
-                    std::alloc::Layout::array::<Value>(self.cap).expect("roots layout"),
-                );
-            }
-        }
-    }
-}
-
-impl std::ops::Index<usize> for RootStack {
-    type Output = Value;
-    #[inline]
-    fn index(&self, i: usize) -> &Value {
-        &self.as_slice()[i]
-    }
-}
-
-impl std::ops::IndexMut<usize> for RootStack {
-    #[inline]
-    fn index_mut(&mut self, i: usize) -> &mut Value {
-        &mut self.as_mut_slice()[i]
-    }
-}
-
 pub struct Heap {
     /// The **nursery** (young generation): every `alloc_*` bumps into here, so it
     /// holds the freshly-allocated, mostly-short-lived objects. A *minor*
@@ -1065,9 +891,8 @@ pub struct Heap {
     /// relocates these in place). This is what lets the safepoint collect at
     /// **any** eval depth, not just the outermost — see `docs/memory-model.md`.
     /// Also used by `eval_str`/`eval_source` for the unevaluated forms vector.
-    /// Empty between top-level forms. A [`RootStack`] (repr(C)) rather than a `Vec` so
-    /// JIT'd code can manage the frame length directly (Track B / Technique A increment 2).
-    roots: RootStack,
+    /// Empty between top-level forms.
+    roots: Vec<Value>,
     /// The env half of the operand stack (ADR-061): LOCAL [`EnvId`]s an eval
     /// frame still needs across a nested `eval` (its `scope`/`env`). Relocated in
     /// place by [`arena_flip`](Self::arena_flip) alongside `roots`; re-read via
@@ -1462,7 +1287,7 @@ impl Heap {
             imports: HashMap::new(),
             dynamics: Vec::new(),
             global_ic: RefCell::new(SymbolMap::default()),
-            roots: RootStack::new(),
+            roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: usize::MAX,
             rt_gc_threshold: usize::MAX,
@@ -1506,7 +1331,7 @@ impl Heap {
             imports: HashMap::new(),
             dynamics: Vec::new(),
             global_ic: RefCell::new(SymbolMap::default()),
-            roots: RootStack::new(),
+            roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
             rt_gc_threshold: rt_gc_floor(),
@@ -4352,7 +4177,7 @@ impl Heap {
     /// (hot) call path. `len` must be ≥ the current length (frames only grow here).
     pub fn extend_roots_to_nil(&mut self, len: usize) {
         debug_assert!(len >= self.roots.len());
-        self.roots.resize_to_nil(len);
+        self.roots.resize(len, Value::nil());
     }
 
     /// Pop the most recently pushed root (the matching unwind of `push_root`).
@@ -5483,7 +5308,7 @@ impl Heap {
         for &e in extra_envs {
             work.push(W::E(e, 0));
         }
-        for &v in self.roots.iter() {
+        for &v in &self.roots {
             work.push(W::V(v, 0));
         }
         for &e in &self.env_roots {
