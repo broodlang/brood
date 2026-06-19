@@ -443,3 +443,87 @@ fn read_field(printed: &str, field: &str) -> i64 {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("no integer after {field} in {printed}"))
 }
+
+/// KI-4 regression: bitsets are a distinct `Value::Bitset` kind, not a non-UTF-8
+/// `Value::Str`. Before the fix, `promote_in` serialised the bitset via
+/// `heap.string(id).to_string()` → `from_utf8_unchecked` UB on the raw bytes →
+/// RUNTIME string slab corruption → `flush_oob` / SIGSEGV / SIGABRT downstream.
+///
+/// The fix: `alloc_bitset` / `promote_in` for `Value::Bitset` use the byte-clean
+/// slab and never touch the UTF-8 string path. This test exercises the exact
+/// crash path: a closure capturing a bitset is spawned (→ `promote_in` on the
+/// bitset), the spawned process verifies the byte content via `bitset-count`, and
+/// sends it back. Verified clean under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+#[test]
+fn ki4_bitset_survives_spawn_promote() {
+    let mut interp = Interp::new();
+    // Build a bitset with a known popcount (bits 0,1,3,7 set → 4 ones), spawn a
+    // process that captures it, and assert the byte content is intact in the child.
+    let prog = r#"
+        (def root (self))
+        (def bs
+          (reduce (fn (b i) (bitset-set b i))
+            (bitset 256)
+            [0 1 3 7]))
+        (def expected-count (bitset-count bs))
+        (def worker
+          (spawn
+            ;; The closure captures `bs` by value. On spawn, `promote_in` copies
+            ;; the bitset into the RUNTIME slab — the exact path KI-4 corrupted.
+            (do
+              (def child-count (bitset-count bs))
+              (send root [:result child-count]))))
+        (receive
+          ([:result n] n)
+          (after 10000 :timed-out))
+    "#;
+    let v = interp
+        .eval_str(prog)
+        .expect("bitset spawn-promote program errored");
+    assert_eq!(
+        interp.print(v),
+        "4",
+        "KI-4 regression: bitset byte content was corrupted across spawn/promote_in \
+         (bitset-count returned wrong value — expected 4, the four bits set before spawn)",
+    );
+}
+
+/// KI-4 GC-churn variant: the spawned process allocates heavily so minor and
+/// major collections fire while the promoted bitset is live, proving the bitset
+/// slab flush (`flush_bitset`) handles the Arc clone correctly and the GC
+/// verifier (`BROOD_GC_VERIFY=1`) doesn't trip.
+#[test]
+fn ki4_bitset_survives_gc_churn_in_spawned_process() {
+    let mut interp = Interp::new();
+    let prog = r#"
+        (def root (self))
+        ;; 64-bit bitset with alternating bits: 0,2,4,...,62 → 32 ones.
+        (def bs
+          (reduce (fn (b i) (bitset-set b (* i 2)))
+            (bitset 64)
+            (range 32)))
+        (def worker
+          (spawn
+            (do
+              ;; Heavy allocation to force GC while `bs` is live in this process.
+              (defn churn (n acc)
+                (if (= n 0)
+                  acc
+                  (churn (- n 1) (cons n acc))))
+              (churn 50000 nil)
+              ;; Verify the bitset survived the GC churn intact.
+              (send root [:count (bitset-count bs)]))))
+        (receive
+          ([:count n] n)
+          (after 60000 :timed-out))
+    "#;
+    let v = interp
+        .eval_str(prog)
+        .expect("bitset GC churn program errored");
+    assert_eq!(
+        interp.print(v),
+        "32",
+        "KI-4 regression: bitset was corrupted under GC churn in the spawned process \
+         (bitset-count returned wrong value after collection — expected 32)",
+    );
+}

@@ -4011,3 +4011,38 @@ iteration (preemption fairness byte-identical). `loop` 0.11 → 0.09 s (with the
 `cpu_bound_process_does_not_starve_peers_on_one_worker` preemption-fairness test (a JIT'd `(defn hog
 () (hog))` must still yield to a peer), work-stealing, reductions, `jit.rs`/`differential`. Only the
 self-tail back-edge is affected; non-tail recursion (`fib`) uses the call fast-link, not this poll.
+
+## 2026-06-19 — `map-int-add` + JIT GC safepoint: `wordcount` 810 → 470 ms
+
+Two independent fixes combined to cut `wordcount` by 42 %:
+
+**Fix 1: `map-int-add` — single-pass CHAMP update.** `wordcount`'s inner loop was
+`(assoc m key (+ (get m key 0) 1))`: two separate trie walks (one read, one copy-on-write
+path-copy). Added `heap.map_int_add(id, key, delta) → Value` in `heap.rs` and a
+`(map-int-add m k delta)` builtin in `builtins.rs`: a fused `champ_int_add` that traverses the trie
+once, reads the existing integer (or defaults to 0), adds delta, and path-copies on the way back
+up — identical allocations to `champ_assoc` alone, but the separate `champ_get` walk is gone.
+Updated `wordcount.blsp` to use `(map-int-add m key 1)`.
+
+**Fix 2: GC safepoint in `jit_dispatch_call` slow path.** When a JIT-compiled function makes a
+non-tail native call (e.g. `map-int-add` from JIT'd `gen`), the result goes through
+`brood_rt_call_slow → jit_dispatch_call`. Before this fix, the slow path returned the result
+directly with no GC check, so the nursery accumulated CHAMP nodes between the once-per-back-edge
+GC polls — giving 1770 MB peak RSS and ~0.5 s of sys time for `wordcount`. Fix: after
+`heap.truncate_roots(stage_base)` in the `Ok(v)` arm, push `v` to roots, call `heap.collect` if
+`gc_due()`, read back the (possibly relocated) value, and pop. GC checkpoints now match the
+BcFrame path's frequency (once per native call from JIT, not just once per self-tail back-edge).
+Result: RSS 1770 → 97 MB, sys time 0.5 → 0.03 s.
+
+The same safepoint pattern was added to `exec_chunk`'s `Step::Done` handler (the VM path analogue),
+though wordcount's hot path goes through the JIT.
+
+**Gate:** `make test` 616/616 (incl. `gc` 25/0, `jit` 11/0, full `nest test` 2161/2161 under GC
+stress). Correctness verified: `(map-int-add m k d)` equals `(assoc m k (+ (get m k 0) d))` for
+fresh keys, existing keys, and collision nodes. No regression on nqueens (~548 ms, baseline ~520 ms)
+or bintree (~440 ms, baseline ~415 ms) — within run-to-run noise.
+
+**Remaining gap:** Brood `wordcount` 470 ms vs Elixir 174 ms (~2.7×). The root cause is algorithmic:
+CHAMP path-copy allocates O(log₁₆ N) nodes per update vs Elixir's mutable `Dictionary`. The main
+remaining lever is `into`/reduce through the transient-map bulk-build path (`map_from_pairs`'s
+watermarked CHAMP), but that requires a semantically different benchmark formulation.
