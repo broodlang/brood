@@ -5862,6 +5862,42 @@ fn jit_lower_arm_inner(
     let fastframe_id = m
         .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)
         .ok()?;
+    // Increment 2 — the in-IR frame setup + call_indirect. brood_rt_rootstack(heap) -> *mut
+    // RootStack (ptr@0,len@8,cap@16), brood_rt_native_depth(heap) -> *mut u32, and
+    // brood_rt_env_global(heap) -> u8: the three entry-time reads. brood_rt_fast_deopt(heap,
+    // out, base, site, head, argc) -> status: the rare deopt/preempt/tail tail (re-run on VM).
+    let mut p2r_sig = m.make_signature(); // (heap) -> ptr  (rootstack + native_depth share this)
+    p2r_sig.params.push(AbiParam::new(ptr_ty));
+    p2r_sig.returns.push(AbiParam::new(ptr_ty));
+    let rootstack_id = m
+        .declare_function("brood_rt_rootstack", Linkage::Import, &p2r_sig)
+        .ok()?;
+    let ndepth_id = m
+        .declare_function("brood_rt_native_depth", Linkage::Import, &p2r_sig)
+        .ok()?;
+    let mut envg_sig = m.make_signature(); // (heap) -> u8
+    envg_sig.params.push(AbiParam::new(ptr_ty));
+    envg_sig.returns.push(AbiParam::new(types::I8));
+    let envg_id = m
+        .declare_function("brood_rt_env_global", Linkage::Import, &envg_sig)
+        .ok()?;
+    let mut deopt_sig = m.make_signature();
+    deopt_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    deopt_sig.params.push(AbiParam::new(ptr_ty)); // out
+    deopt_sig.params.push(AbiParam::new(types::I64)); // base
+    deopt_sig.params.push(AbiParam::new(types::I32)); // site
+    deopt_sig.params.push(AbiParam::new(types::I32)); // head
+    deopt_sig.params.push(AbiParam::new(types::I32)); // argc
+    deopt_sig.returns.push(AbiParam::new(types::I64)); // status
+    let deopt_id = m
+        .declare_function("brood_rt_fast_deopt", Linkage::Import, &deopt_sig)
+        .ok()?;
+    // The signature JIT'd arms are compiled with — `fn(heap, base) -> i64` — for the in-IR
+    // `call_indirect` to the callee's native entry. Same shape as this arm's own `sig`.
+    let mut armcall_sig = m.make_signature();
+    armcall_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    armcall_sig.params.push(AbiParam::new(types::I64)); // base
+    armcall_sig.returns.push(AbiParam::new(types::I64)); // outcome
     // brood_rt_vector_ref(heap, out, vec 3 words, idx 3 words) -> status: bounds-checked
     // slab read into `*out` (0 = ok, 1 = deopt for non-vector / non-int / out-of-range).
     let mut vref_sig = m.make_signature();
@@ -5914,6 +5950,11 @@ fn jit_lower_arm_inner(
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
     let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
+    let rootstack_ref = m.declare_func_in_func(rootstack_id, b.func);
+    let ndepth_ref = m.declare_func_in_func(ndepth_id, b.func);
+    let envg_ref = m.declare_func_in_func(envg_id, b.func);
+    let deopt_ref = m.declare_func_in_func(deopt_id, b.func);
+    let armcall_sigref = b.import_signature(armcall_sig);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     let gepoch_ref = m.declare_func_in_func(gepoch_id, b.func);
@@ -5986,6 +6027,30 @@ fn jit_lower_arm_inner(
         STRIDE as u32,
         3,
     ));
+
+    // Increment 2 entry reads (once per arm; the addresses are stable `Heap` fields, and
+    // `env_global` is constant for the arm — `jit_call_env` is restored to the arm's env around
+    // every nested call). Only when the in-IR fast call path could fire: icall on + the arm has
+    // a non-tail free-global call. `(rootstack_ptr, native_depth_ptr, env_global_i8)`.
+    let icall_entry: Option<(
+        cranelift_codegen::ir::Value,
+        cranelift_codegen::ir::Value,
+        cranelift_codegen::ir::Value,
+    )> = if icall_enabled()
+        && code
+            .iter()
+            .any(|i| matches!(i, Inst::Call { tail: false, head: Some(_), .. }))
+    {
+        let rs = b.ins().call(rootstack_ref, &[heap]);
+        let rs_ptr = b.inst_results(rs)[0];
+        let nd = b.ins().call(ndepth_ref, &[heap]);
+        let nd_ptr = b.inst_results(nd)[0];
+        let eg = b.ins().call(envg_ref, &[heap]);
+        let env_global = b.inst_results(eg)[0];
+        Some((rs_ptr, nd_ptr, env_global))
+    } else {
+        None
+    };
 
     // LICM hoist: resolve each invariant vector slot's element (ptr, len) once here in
     // the entry block (which dominates every loop block, so the values are usable in the
@@ -6861,28 +6926,154 @@ fn jit_lower_arm_inner(
                         let ep_ok = b.ins().icmp(IntCC::Equal, ep, gep);
                         b.ins().brif(ep_ok, hit, &[], miss, &[]);
 
-                        // hit: read (code, nslots, env) and run the fast frame.
+                        // hit: read (code, nslots, env) from the flat table.
                         b.switch_to_block(hit);
                         let code_v = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_code_off);
                         let nslots_v = b.ins().load(types::I32, MemFlags::new(), slot_ptr, fl_nslots_off);
                         let env_v = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_env_off);
-                        let ffc = b.ins().call(
-                            fastframe_ref,
-                            &[heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v],
-                        );
-                        let fst = b.inst_results(ffc)[0];
-                        // The callee may have relocated `roots`; re-fetch the base.
-                        let rbc = b.ins().call(rb_ref, &[heap]);
-                        b.def_var(rb_var, b.inst_results(rbc)[0]);
-                        // status: 1 = error → `error`; 2 = could-not-link → `miss`; 0 = `cont`.
-                        let is_err = b.ins().icmp_imm(IntCC::Equal, fst, 1);
-                        let not_err = b.create_block();
-                        b.ins().brif(is_err, error, &[], not_err, &[]);
-                        b.switch_to_block(not_err);
-                        let is_slow = b.ins().icmp_imm(IntCC::Equal, fst, 2);
-                        b.ins().brif(is_slow, miss, &[], cont, &[]);
 
-                        // miss: cold / redefined / over-cap / IC-moved → the slow dispatch.
+                        // The increment-1 FFI fast frame (`brood_rt_fast_frame`): the fallback
+                        // when the in-IR path isn't eligible (non-GLOBAL env, capacity growth,
+                        // over the native cap). Branches to `error` / `miss` / `cont`.
+                        let emit_fast_frame = |b: &mut FunctionBuilder| {
+                            let ffc = b.ins().call(
+                                fastframe_ref,
+                                &[heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v],
+                            );
+                            let fst = b.inst_results(ffc)[0];
+                            let rbc = b.ins().call(rb_ref, &[heap]);
+                            b.def_var(rb_var, b.inst_results(rbc)[0]);
+                            let is_err = b.ins().icmp_imm(IntCC::Equal, fst, 1);
+                            let not_err = b.create_block();
+                            b.ins().brif(is_err, error, &[], not_err, &[]);
+                            b.switch_to_block(not_err);
+                            let is_slow = b.ins().icmp_imm(IntCC::Equal, fst, 2);
+                            b.ins().brif(is_slow, miss, &[], cont, &[]);
+                        };
+
+                        if let Some((rs_ptr, nd_ptr, env_global)) = icall_entry {
+                            // ---- Increment 2: in-IR frame setup + call_indirect ----
+                            use crate::core::heap::RootStack;
+                            let rs_ptr_off = std::mem::offset_of!(RootStack, ptr) as i32;
+                            let rs_len_off = std::mem::offset_of!(RootStack, len) as i32;
+                            let rs_cap_off = std::mem::offset_of!(RootStack, cap) as i32;
+                            let argc_i64 = b.ins().iconst(types::I64, argc as i64);
+                            let nslots_64 = b.ins().uextend(types::I64, nslots_v);
+                            let cur_len = b.ins().load(types::I64, MemFlags::new(), rs_ptr, rs_len_off);
+                            let stage_base = b.ins().isub(cur_len, argc_i64);
+                            let frame_top = b.ins().iadd(stage_base, nslots_64);
+                            let cap = b.ins().load(types::I64, MemFlags::new(), rs_ptr, rs_cap_off);
+                            let depth = b.ins().load(types::I32, MemFlags::new(), nd_ptr, 0);
+                            // Eligible iff the arm's env is GLOBAL (so skipping `jit_call_env` is
+                            // sound), the callee's env is GLOBAL (`u64::MAX` == -1), the native
+                            // recursion cap isn't hit, and the frame fits the current capacity
+                            // (no realloc from native code). Any miss → the FFI fast frame.
+                            let c_env_arm = b.ins().icmp_imm(IntCC::NotEqual, env_global, 0);
+                            let c_env_callee = b.ins().icmp_imm(IntCC::Equal, env_v, -1);
+                            let c_depth = b.ins().icmp_imm(
+                                IntCC::UnsignedLessThan,
+                                depth,
+                                JIT_NATIVE_DEPTH_LIMIT as i64,
+                            );
+                            let c_cap = b.ins().icmp(IntCC::UnsignedLessThanOrEqual, frame_top, cap);
+                            let e0 = b.ins().band(c_env_arm, c_env_callee);
+                            let e1 = b.ins().band(c_depth, c_cap);
+                            let eligible = b.ins().band(e0, e1);
+                            let inir = b.create_block();
+                            let ff = b.create_block();
+                            b.ins().brif(eligible, inir, &[], ff, &[]);
+
+                            // in-IR: set up the callee frame and `call_indirect` its native entry.
+                            b.switch_to_block(inir);
+                            let buf = b.ins().load(ptr_ty, MemFlags::new(), rs_ptr, rs_ptr_off);
+                            let stride_v = b.ins().iconst(types::I64, STRIDE);
+                            // nil-fill the let/spill slots `[stage_base+argc, frame_top)` (the args
+                            // already occupy `[stage_base, stage_base+argc)`). GC-safety: the
+                            // collector scans `[0, len)`, so the new slots must be `Nil` before any
+                            // safepoint inside the callee.
+                            let arg_top = b.ins().iadd(stage_base, argc_i64);
+                            let nilhdr = b.create_block();
+                            b.append_block_param(nilhdr, types::I64);
+                            let nilbody = b.create_block();
+                            let filled = b.create_block();
+                            b.ins().jump(nilhdr, &[arg_top.into()]);
+                            b.switch_to_block(nilhdr);
+                            let i = b.block_params(nilhdr)[0];
+                            let more = b.ins().icmp(IntCC::UnsignedLessThan, i, frame_top);
+                            b.ins().brif(more, nilbody, &[], filled, &[]);
+                            b.switch_to_block(nilbody);
+                            let off_i = b.ins().imul(i, stride_v);
+                            let slot_a = b.ins().iadd(buf, off_i);
+                            let zero = b.ins().iconst(types::I64, 0);
+                            b.ins().store(MemFlags::new(), zero, slot_a, 0);
+                            b.ins().store(MemFlags::new(), zero, slot_a, PAYLOAD_OFFSET as i32);
+                            b.ins().store(MemFlags::new(), zero, slot_a, PAYLOAD_OFFSET as i32 + 8);
+                            let i1 = b.ins().iadd_imm(i, 1);
+                            b.ins().jump(nilhdr, &[i1.into()]);
+
+                            // filled: publish the frame length, bump depth, and link the call.
+                            b.switch_to_block(filled);
+                            b.ins().store(MemFlags::new(), frame_top, rs_ptr, rs_len_off);
+                            let depth1 = b.ins().iadd_imm(depth, 1);
+                            b.ins().store(MemFlags::new(), depth1, nd_ptr, 0);
+                            let ci = b.ins().call_indirect(armcall_sigref, code_v, &[heap, stage_base]);
+                            let outcome = b.inst_results(ci)[0];
+                            // Restore depth; re-fetch the roots base (the callee may have grown it).
+                            b.ins().store(MemFlags::new(), depth, nd_ptr, 0);
+                            let rbc = b.ins().call(rb_ref, &[heap]);
+                            b.def_var(rb_var, b.inst_results(rbc)[0]);
+                            let is_done = b.ins().icmp_imm(IntCC::Equal, outcome, 0);
+                            let doneb = b.create_block();
+                            let notdone = b.create_block();
+                            b.ins().brif(is_done, doneb, &[], notdone, &[]);
+
+                            // done: result is in `roots[stage_base]` — read it, drop the frame.
+                            b.switch_to_block(doneb);
+                            let buf2 = b.ins().load(ptr_ty, MemFlags::new(), rs_ptr, rs_ptr_off);
+                            let rb_off = b.ins().imul(stage_base, stride_v);
+                            let res_a = b.ins().iadd(buf2, rb_off);
+                            let r0 = b.ins().load(types::I64, MemFlags::new(), res_a, 0);
+                            let r1 = b.ins().load(types::I64, MemFlags::new(), res_a, PAYLOAD_OFFSET as i32);
+                            let r2 = b.ins().load(types::I64, MemFlags::new(), res_a, PAYLOAD_OFFSET as i32 + 8);
+                            b.ins().store(MemFlags::new(), stage_base, rs_ptr, rs_len_off);
+                            b.ins().stack_store(r0, out_slot, 0);
+                            b.ins().stack_store(r1, out_slot, PAYLOAD_OFFSET as i32);
+                            b.ins().stack_store(r2, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                            b.ins().jump(cont, &[]);
+
+                            // not done: error (3) propagates; deopt/preempt/tail (1/2/4) re-run on
+                            // the VM via `brood_rt_fast_deopt` (NOT a re-link — no repeated effects).
+                            b.switch_to_block(notdone);
+                            let is_err3 = b.ins().icmp_imm(IntCC::Equal, outcome, 3);
+                            let errb = b.create_block();
+                            let deoptb = b.create_block();
+                            b.ins().brif(is_err3, errb, &[], deoptb, &[]);
+                            b.switch_to_block(errb);
+                            b.ins().store(MemFlags::new(), stage_base, rs_ptr, rs_len_off);
+                            b.ins().jump(error, &[]);
+                            b.switch_to_block(deoptb);
+                            let dc = b.ins().call(
+                                deopt_ref,
+                                &[heap, out_addr, stage_base, site_v, head_v, argc_v],
+                            );
+                            let dst = b.inst_results(dc)[0];
+                            let rbc2 = b.ins().call(rb_ref, &[heap]);
+                            b.def_var(rb_var, b.inst_results(rbc2)[0]);
+                            let d_err = b.ins().icmp_imm(IntCC::Equal, dst, 1);
+                            let dn1 = b.create_block();
+                            b.ins().brif(d_err, error, &[], dn1, &[]);
+                            b.switch_to_block(dn1);
+                            let d_slow = b.ins().icmp_imm(IntCC::Equal, dst, 2);
+                            b.ins().brif(d_slow, miss, &[], cont, &[]);
+
+                            // ff: the increment-1 FFI fast frame (ineligible cases).
+                            b.switch_to_block(ff);
+                            emit_fast_frame(&mut b);
+                        } else {
+                            emit_fast_frame(&mut b);
+                        }
+
+                        // miss: cold / redefined / OOB site / IC-moved → the slow dispatch.
                         b.switch_to_block(miss);
                         emit_call_slow(&mut b, cont);
 
@@ -7778,6 +7969,53 @@ pub(crate) fn jit_dispatch_fast_frame(
         );
     }
     jit_run_fast_link(heap, argc, site, head, epoch, stage_base, code, nslots, callee_env)
+}
+
+/// The deopt/preempt/tail tail of an **in-IR** linked call (Track B / Technique A increment 2):
+/// the IR did the frame setup + `call_indirect` itself and the native callee returned a
+/// non-`Done`, non-error outcome. Re-run the callee on the VM — NOT re-link, which would repeat
+/// any side effects the native already committed before bailing. Mirrors [`jit_run_fast_link`]'s
+/// deopt arm exactly: read the args back from the preserved param slots `[base, base+argc)`,
+/// drop the frame, re-probe the IC, and `vm_apply`. The native depth has already been restored
+/// by the IR. Returns `0` = done (`*out` written), `1` = error (parked), `2` = IC moved (args
+/// restaged at `[base, ..)` for the IR's `brood_rt_call_slow` fallback).
+///
+/// # Safety
+/// `out` must be a live `*mut Value`; `base`/`argc` describe the callee frame still on `roots`.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_fast_deopt(
+    heap: &mut Heap,
+    out: *mut Value,
+    base: usize,
+    site: u32,
+    head: Symbol,
+    argc: usize,
+) -> i64 {
+    crate::perf_bump!(jit_link_rerun);
+    let epoch = heap.global_epoch();
+    let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+    for k in 0..argc {
+        argv2.push(heap.root_at(base + k));
+    }
+    heap.truncate_roots(base);
+    if let Some((_, Some((arm, cenv)))) = heap.vm_call_ic_probe(site, head, argc as u32, epoch) {
+        return match vm_apply(heap, arm, &argv2, cenv) {
+            Ok(v) => {
+                // SAFETY: `out` is the JIT arm's scratch result slot.
+                unsafe { *out = v };
+                0
+            }
+            Err(e) => {
+                heap.jit_pending_error = Some(e);
+                1
+            }
+        };
+    }
+    // IC moved under us: restage the args so the IR's slow path (`brood_rt_call_slow`) finds them.
+    for a in &argv2 {
+        heap.push_root(*a);
+    }
+    2
 }
 
 /// Run a JIT'd arm's **non-tail** Brood→Brood call. The `argc` args are the top operands
