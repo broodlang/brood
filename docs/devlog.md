@@ -3936,3 +3936,42 @@ JIT'd code instead of always trampolining out through `brood_rt_call_slow` + the
 
 **Next = increment 2:** move the frame setup + `call_indirect` fully into IR (pre-reserve `roots`
 capacity so the nil-fill is branchless, no realloc), removing the last FFI crossing on the hot path.
+
+## 2026-06-19 — Track B / Technique A increment 2: in-IR frame setup — implemented, REGRESSED, reverted (NO-GO)
+
+Built the full increment 2 and **measured it slower than increment 1**, so reverted it. The finding
+is the value: **the FFI boundary is not the bottleneck** — don't retry this lever.
+
+What was built (commits `5285723` 2a + `269b77a` 2b, both reverted by `f0dfd15`/`5312d01`):
+- **2a — repr(C) `RootStack`.** Replaced the root stack's `Vec<Value>` with a hand-rolled
+  `#[repr(C)] { ptr, len, cap }` so JIT'd code could read/**write** `len` and index slots at fixed
+  offsets (`Vec`'s field order isn't guaranteed). Sound (Value is Copy/no-Drop; `unsafe impl Send`;
+  growth stays in Rust). **Perf-neutral** (fib38 ICALL=0 1.47s vs the `Vec` baseline 1.49s).
+- **2b — in-IR frame setup + `call_indirect`.** For the GLOBAL-env fast path (gated at runtime on the
+  arm's env being GLOBAL + `callee_env == GLOBAL`, so `jit_call_env` needs no IR manipulation — the
+  fragile part avoided), emitted in IR: read `len`/`cap`/`depth` from the `RootStack`/depth pointers
+  (fetched once at entry via `brood_rt_rootstack`/`brood_rt_native_depth`/`brood_rt_env_global`),
+  bounds/eligibility checks, nil-fill loop, `len` store, depth bump, `call_indirect` to the callee's
+  native entry, then teardown. Ineligible → the increment-1 `brood_rt_fast_frame`; deopt/preempt/tail
+  → a new `brood_rt_fast_deopt` (VM re-run, **not** a re-link — no repeated effects).
+
+**Correctness was clean** (this is genuinely the riskiest runtime code and it held): `jit.rs` 28/28
+JIT≡VM with ICALL on under `-C debug-assertions=on`; `differential`; `nest test` 2161/2161;
+fib/mutual/redefine correct under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+**But it regressed.** fib(38), best-of-6, clean `--release`: in-IR **1.25s** vs increment-1 FFI
+`fast_frame` **1.19s** vs baseline 1.47s — the in-IR path is ~5% *slower* than the FFI it replaced.
+Why: `brood_rt_fast_frame`'s FFI call is cheap, and LLVM compiles the frame management (notably the
+`resize`/nil-fill) better than hand-emitted Cranelift IR, while the in-IR path *adds* per-call
+eligibility overhead (load `len`/`cap`/`depth` + 4 compares + bands) the FFI path never pays. This
+corroborates the earlier `#[inline(always)]`/no-op-truncate micro-opt experiment, which also
+regressed: **the cost in `jit_run_fast_link` is the irreducible frame work + the `call_indirect`
+dispatch, not the FFI/Rust-frame structure.** Increment 1 is the sweet spot for this lever.
+
+**Where the remaining fib gap actually is** (still ~36% `brood_jit_arm_1` compiled body + ~49%
+dispatch management, per the increment-1 profile): the dispatch share is the inherent per-call frame
+setup + indirect call, which neither IR nor Rust tweaks shrink. The bigger wins are elsewhere — the
+heap-walking benchmarks (bintree 39×, nqueens 187× behind Elixir) where structure-walkers don't even
+tier, and true inlining / bounded unroll (Technique B) which removes calls rather than cheapening
+them. Brood vs peers after increment 1 (fib38 compute): Brood 1.13s, Ruby 2.61s (~2.3× faster),
+Elixir 0.44s (~2.6× behind, down from ~3.3×).
