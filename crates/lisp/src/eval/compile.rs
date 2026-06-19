@@ -5892,11 +5892,14 @@ fn jit_lower_arm_inner(
     // brood_rt_global_epoch(heap) -> i64: the process global-rebind epoch, for the
     // back-edge guard that keeps a hoisted global vector bit-identical to the VM's late
     // binding (deopt if the global was rebound). Only declared/used when hoisting a global.
-    let mut gepoch_sig = m.make_signature();
-    gepoch_sig.params.push(AbiParam::new(ptr_ty));
-    gepoch_sig.returns.push(AbiParam::new(types::I64));
-    let gepoch_id = m
-        .declare_function("brood_rt_global_epoch", Linkage::Import, &gepoch_sig)
+    // brood_rt_global_epoch_ptr(heap) -> *const u64: the epoch counter's address, fetched once
+    // at entry so the per-iteration back-edge guard / per-call icall check reads it with a raw
+    // load instead of a `brood_rt_global_epoch` FFI call (~20% of a hoisted-global loop).
+    let mut gepochptr_sig = m.make_signature();
+    gepochptr_sig.params.push(AbiParam::new(ptr_ty));
+    gepochptr_sig.returns.push(AbiParam::new(ptr_ty));
+    let gepochptr_id = m
+        .declare_function("brood_rt_global_epoch_ptr", Linkage::Import, &gepochptr_sig)
         .ok()?;
 
     let mut ctx = m.make_context();
@@ -5918,7 +5921,7 @@ fn jit_lower_arm_inner(
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
-    let gepoch_ref = m.declare_func_in_func(gepoch_id, b.func);
+    let gepochptr_ref = m.declare_func_in_func(gepochptr_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
     let has_cons = code.iter().any(|i| {
@@ -6020,6 +6023,25 @@ fn jit_lower_arm_inner(
         ),
     > = std::collections::HashMap::new();
     let mut entry_epoch: Option<cranelift_codegen::ir::Value> = None;
+    // Fetch the global-epoch counter's address once here in the entry block (which dominates
+    // every loop/call block) when the arm reads the epoch on a hot path — a hoisted-global
+    // back-edge guard, or an icall epoch check per call. Those sites then do a raw load instead
+    // of a `brood_rt_global_epoch` FFI call each iteration/call (the call was ~20% of `loop`).
+    let epoch_ptr: Option<cranelift_codegen::ir::Value> = {
+        let needs = !hoist_globals.is_empty()
+            || !hoist_scalar_globals.is_empty()
+            || (icall_enabled()
+                && code
+                    .iter()
+                    .any(|i| matches!(i, Inst::Call { tail: false, head: Some(_), .. })));
+        if needs {
+            let c = b.ins().call(gepochptr_ref, &[heap]);
+            Some(b.inst_results(c)[0])
+        } else {
+            None
+        }
+    };
+
     if !hoist_slots.is_empty() || !hoist_globals.is_empty() || !hoist_scalar_globals.is_empty() {
         let len_slot = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -6089,8 +6111,8 @@ fn jit_lower_arm_inner(
             hoisted_scalar.insert(sym, (w0, w1, w2));
         }
         if !hoisted_global.is_empty() || !hoisted_scalar.is_empty() {
-            let c = b.ins().call(gepoch_ref, &[heap]);
-            entry_epoch = Some(b.inst_results(c)[0]);
+            let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when globals are hoisted");
+            entry_epoch = Some(b.ins().load(types::I64, MemFlags::new(), ep_ptr, 0));
         }
     }
     b.ins().jump(leader_block[0].unwrap(), &[]);
@@ -6858,8 +6880,8 @@ fn jit_lower_arm_inner(
                         let off = b.ins().imul(site_idx, stride);
                         let slot_ptr = b.ins().iadd(fl_base, off);
                         let ep = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_epoch_off);
-                        let gec = b.ins().call(gepoch_ref, &[heap]);
-                        let gep = b.inst_results(gec)[0];
+                        let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when icall is on");
+                        let gep = b.ins().load(types::I64, MemFlags::new(), ep_ptr, 0);
                         let ep_ok = b.ins().icmp(IntCC::Equal, ep, gep);
                         b.ins().brif(ep_ok, hit, &[], miss, &[]);
 
@@ -7242,8 +7264,11 @@ fn jit_lower_arm_inner(
                     // VM's per-iteration late binding. Frame slots already hold the next
                     // iteration's args, so the VM resumes there.
                     if let Some(entry_ep) = entry_epoch {
-                        let now = b.ins().call(gepoch_ref, &[heap]);
-                        let now_ep = b.inst_results(now)[0];
+                        // Raw load of the epoch counter (ptr fetched once at entry) — no FFI on
+                        // the back-edge. A plain load matches the `Relaxed` atomic; the guard only
+                        // needs to eventually observe a concurrent `def`'s bump.
+                        let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when a global is hoisted");
+                        let now_ep = b.ins().load(types::I64, MemFlags::new(), ep_ptr, 0);
                         let changed = b.ins().icmp(IntCC::NotEqual, now_ep, entry_ep);
                         let ck = b.create_block();
                         b.ins().brif(changed, deopt, &[], ck, &[]);
