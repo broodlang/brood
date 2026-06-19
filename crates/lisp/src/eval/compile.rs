@@ -3881,14 +3881,14 @@ fn exec_chunk(
     base: usize,
     genv: EnvRoot,
     capture: bool,
+    // Back-edge tiering counter (jit only): persisted across exec_chunk re-entries for
+    // the same frame so non-tail Brood calls (which exit and re-enter exec_chunk) don't
+    // reset the SelfCall iteration count. Each SelfCall increments this; every 256th
+    // iteration triggers a JIT tier check in the outer loop. Owned by vm_run_bc and
+    // stored in BcFrame so it survives frame save/restore.
+    #[cfg(feature = "jit")] back_edges: &mut u32,
 ) -> Result<ChunkExit, LispError> {
     let chunk = arm.chunk.as_ref().expect("exec_chunk: arm has no chunk");
-    // Back-edge tiering counter (jit only): counts `SelfCall` iterations so a hot
-    // self-tail loop can be handed to the driver to tier (it would otherwise be a single
-    // arm entry that never reaches the per-entry threshold). Checked every
-    // `BACKEDGE_TIER_INTERVAL` iterations to keep the inline loop tight.
-    #[cfg(feature = "jit")]
-    let mut back_edges: u32 = 0;
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
         *ip += 1;
@@ -4326,6 +4326,12 @@ fn exec_chunk(
                     Step::Done(v) => {
                         heap.truncate_roots(drop_base);
                         heap.push_root(v);
+                        // GC safepoint: mirror the frequency the BcFrame path gets
+                        // from vm_run_bc's outer loop. All live data is on heap.roots
+                        // here (frame + result just pushed), so collection is safe.
+                        if !crate::process::macro_block_active() && heap.gc_due() {
+                            heap.collect(&mut [], &mut []);
+                        }
                     }
                 }
             }
@@ -4384,8 +4390,9 @@ fn exec_chunk(
                 #[cfg(feature = "jit")]
                 {
                     const BACKEDGE_TIER_INTERVAL: u32 = 256;
-                    back_edges = back_edges.wrapping_add(1);
-                    if back_edges % BACKEDGE_TIER_INTERVAL == 0 {
+                    let edges = back_edges.wrapping_add(1);
+                    *back_edges = edges;
+                    if edges % BACKEDGE_TIER_INTERVAL == 0 {
                         let code = arm.jit_code.load(std::sync::atomic::Ordering::Acquire);
                         let installed = !code.is_null()
                             && code != crate::jit::BAILED
@@ -4459,6 +4466,9 @@ struct BcFrame {
     env: EnvRoot,
     env_base: usize,
     arm_slot: usize,
+    /// Persisted back-edge counter for this frame — see `exec_chunk`'s `back_edges` param.
+    #[cfg(feature = "jit")]
+    back_edges: u32,
 }
 
 /// A captured VM continuation — the reified call stack of a green process parked at a
@@ -4567,6 +4577,11 @@ fn vm_run_bc(
     let mut cur_base;
     let mut cur_arm_slot;
     let mut cur_ip;
+    // Persistent back-edge counter for the current frame. Passed as `&mut` into
+    // exec_chunk so SelfCall iterations accumulate across exec_chunk re-entries caused
+    // by non-tail Brood calls (which exit exec_chunk — a local counter would reset).
+    #[cfg(feature = "jit")]
+    let mut cur_back_edges: u32;
     // Fresh start (vs. resuming a parked continuation) — the JIT tiering hook fires only
     // on a fresh arm activation, never mid-receive resume.
     let fresh;
@@ -4586,6 +4601,10 @@ fn vm_run_bc(
             cur_env = cur.env;
             cur_env_base = cur.env_base;
             cur_arm_slot = cur.arm_slot;
+            #[cfg(feature = "jit")]
+            {
+                cur_back_edges = cur.back_edges;
+            }
             fresh = false;
         }
         // Fresh start: push `arm0`'s activation frame.
@@ -4610,6 +4629,10 @@ fn vm_run_bc(
                 return Err(e);
             }
             cur_ip = 0usize;
+            #[cfg(feature = "jit")]
+            {
+                cur_back_edges = 0;
+            }
             fresh = true;
         }
     }
@@ -4665,6 +4688,8 @@ fn vm_run_bc(
                     env: cur_env,
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
+                    #[cfg(feature = "jit")]
+                    back_edges: cur_back_edges,
                 };
                 return Ok(VmOutcome::Preempted(Suspended {
                     frames,
@@ -4772,10 +4797,12 @@ fn vm_run_bc(
                         Some(4) => jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env),
                         // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the
                         // arm on the VM with the frame intact (`cur_ip` is still 0).
-                        _ => exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture),
+                        _ => exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture,
+                            #[cfg(feature = "jit")] &mut cur_back_edges),
                     }
                 } else {
-                    exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture)
+                    exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture,
+                        #[cfg(feature = "jit")] &mut cur_back_edges)
                 }
             }
             #[cfg(not(feature = "jit"))]
@@ -4800,6 +4827,12 @@ fn vm_run_bc(
                         cur_env = caller.env;
                         cur_env_base = caller.env_base;
                         cur_arm_slot = caller.arm_slot;
+                        #[cfg(feature = "jit")]
+                        {
+                            // Restore the caller's back-edge counter so SelfCall
+                            // iterations accumulate correctly across non-tail calls.
+                            cur_back_edges = caller.back_edges;
+                        }
                         // The result lands where the caller pushed the callee — its
                         // operand stack continues seamlessly past the call site.
                         heap.push_root(v);
@@ -4822,6 +4855,8 @@ fn vm_run_bc(
                     env: cur_env,
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
+                    #[cfg(feature = "jit")]
+                    back_edges: cur_back_edges,
                 });
                 cur_env_base = heap.env_roots_len();
                 cur_env = heap.root_env(genv);
@@ -4843,6 +4878,7 @@ fn vm_run_bc(
                 #[cfg(feature = "jit")]
                 {
                     try_jit = true;
+                    cur_back_edges = 0; // fresh counter for the callee's frame
                 }
             }
             Ok(ChunkExit::Tail { arm, args, genv }) => {
@@ -4869,6 +4905,7 @@ fn vm_run_bc(
                 #[cfg(feature = "jit")]
                 {
                     try_jit = true;
+                    cur_back_edges = 0; // fresh arm, fresh counter
                 }
             }
             Ok(ChunkExit::SelfTail) => {
@@ -4898,6 +4935,8 @@ fn vm_run_bc(
                     env: cur_env,
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
+                    #[cfg(feature = "jit")]
+                    back_edges: cur_back_edges,
                 };
                 return Ok(VmOutcome::Preempted(Suspended {
                     frames,
@@ -4923,6 +4962,8 @@ fn vm_run_bc(
                     env: cur_env,
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
+                    #[cfg(feature = "jit")]
+                    back_edges: cur_back_edges,
                 };
                 return Ok(VmOutcome::Suspended(Suspended {
                     frames,
@@ -5124,9 +5165,9 @@ fn jit_spill_reserve(code: &[Inst]) -> usize {
     //
     // Handle producers in the lowering: a non-tail Brood→Brood `Call` (its `Value`
     // result), a `MakeVector` (`[a b]`), a `Prim1` (`first`/`rest`), and a `Cons` prim.
-    // (`chunk_walks_structure` already returned for `Prim1`/`VectorRef` arms, and `Cons`
-    // is out of `chunk_in_jit_subset` — but count them anyway so the bound stays sound if
-    // those gates move.) For plain two-call recursion (`fib`) producers == 2 → reserve 1,
+    // (`chunk_walks_structure` already returned for `Prim1`/`VectorRef` arms; `Cons` is
+    // now in `chunk_in_jit_subset` and counted here correctly.) For plain two-call
+    // recursion (`fib`) producers == 2 → reserve 1,
     // **bit-identical to the prior hardcoded `1`** — so no arm that lowered before changes.
     // A deeper-nested body — an inlined / bounded-unrolled `fib` arm
     // (`docs/jit-optimizing-tier.md` §6b) — has more simultaneously-live call results, so
@@ -5215,15 +5256,12 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
                 | PrimOp::Quot
                 | PrimOp::Div
                 | PrimOp::VectorRef
+                | PrimOp::Cons
         )
-        // NB: `Cons` is deliberately NOT here. The JIT'd `cons` path miscompiles —
-        // an arm that conses (e.g. the `reverse` accumulator behind `last`) returns a
-        // corrupted pair list once tiered, so reads off it (`first`/`last`) yield the
-        // wrong element (surfaced as a `nil` cursor-zone shape in the editor; repro in
-        // tests/jit_cons_test.blsp). Bailing cons-containing arms to the (correct)
-        // bytecode VM restores correctness at a bounded perf cost; re-admitting `Cons`
-        // needs the lowering fixed first. (Tracked as a follow-up; `make_vector2` —
-        // the same alloc path — is unaffected, so the bug is cons-specific.)
+        // `Cons` is admitted: the lowering calls `brood_rt_cons` (same bump-allocate
+        // path as `brood_rt_make_vector2`, which works) and reads all 3 result words
+        // back as a `Handle`. The earlier miscompile (surfaced in `jit_cons_test.blsp`)
+        // was fixed with the correct lowering; the old bail is no longer needed.
     };
     code.iter().all(|inst| match inst {
         Inst::Const(cv) => matches!(cv.load().unpack(), ValueRef::Int(_) | ValueRef::Nil | ValueRef::Float(_) | ValueRef::Bool(_)),
@@ -7139,6 +7177,28 @@ fn jit_lower_arm_inner(
                     if matches!(op, PrimOp::VectorRef) {
                         return None;
                     }
+                    // `(cons slot int_literal)` or `(cons int_literal slot)` (after map
+                    // inversion for the swapped form). After fusion, slot_a is always source
+                    // 0; map[0]=0 → slot is car, int is cdr; map[0]=1 → int is car, slot
+                    // is cdr (original was `(cons Const Local)`). Both map to brood_rt_cons.
+                    if matches!(op, PrimOp::Cons) {
+                        let slot_words = read_words(&mut b, Op::Slot(*slot_a));
+                        let int_tag = b.ins().iconst(types::I64, TAG_INT as i64);
+                        let int_val = b.ins().iconst(types::I64, *int_b);
+                        let z = b.ins().iconst(types::I64, 0);
+                        let int_words = [int_tag, int_val, z];
+                        let (car, cdr) = if map[0] == 0 {
+                            (slot_words, int_words)
+                        } else {
+                            (int_words, slot_words)
+                        };
+                        let h = call_handle(
+                            &mut b,
+                            cons_ref,
+                            &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
+                        );
+                        stack.push(h);
+                    } else
                     if op_is_float(Op::Slot(*slot_a)) {
                         // `(op floatslot int-literal)` — Brood coerces the int to f64
                         // (`(+ 1.5 1)` = 2.5). Promote the literal and do float arith.
@@ -8051,7 +8111,18 @@ pub(crate) fn jit_dispatch_call(
     match result {
         Ok(v) => {
             heap.truncate_roots(stage_base);
-            Some(v)
+            // GC safepoint: mirrors vm_run_bc's outer-loop check so native
+            // calls from the JIT get GC opportunities at the same cadence as
+            // the BcFrame path. Root `v` first so it survives relocation.
+            if !crate::process::macro_block_active() && heap.gc_due() {
+                heap.push_root(v);
+                heap.collect(&mut [], &mut []);
+                let relocated = heap.root_at(heap.roots_len() - 1);
+                heap.truncate_roots(heap.roots_len() - 1);
+                Some(relocated)
+            } else {
+                Some(v)
+            }
         }
         Err(e) => {
             heap.jit_pending_error = Some(e);

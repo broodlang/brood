@@ -426,6 +426,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "map-int-add",
+        Arity::exact(3),
+        Sig::new(vec![map_ty, any, int], map_ty),
+        map_int_add,
+    );
+    def(
+        heap,
         "map-dissoc",
         Arity::exact(2),
         Sig::new(vec![map_ty, any], map_ty),
@@ -2282,6 +2289,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("hash-map", &["&", "kvs"], "A map from alternating key/value arguments (last wins on duplicate keys)."),
     ("map-get", &["m", "k", "default"], "The value at key k in map m, or default (else nil)."),
     ("map-assoc", &["m", "k", "v"], "A fresh map like m with key k set to v."),
+    ("map-int-add", &["m", "k", "delta"], "A fresh map like m with key k's integer value incremented by delta (inserts delta when k is absent). Single trie traversal — equivalent to (assoc m k (+ (get m k 0) delta)) without the extra walk."),
     ("map-dissoc", &["m", "k"], "A fresh map like m with key k removed."),
     ("map-pairs", &["m"], "The entries of m as a list of [k v] vectors, in insertion order."),
     ("map-count", &["m"], "The number of entries in map m. O(1) — the CHAMP root tracks its size."),
@@ -3751,6 +3759,14 @@ fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 fn map_assoc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_map(heap, "map-assoc", arg(args, 0))?;
     Ok(heap.map_assoc(id, arg(args, 1), arg(args, 2)))
+}
+
+/// `(map-int-add m k delta)` — a fresh map with `k`'s integer value incremented
+/// by `delta` (inserts `delta` when `k` is absent). Single trie traversal.
+fn map_int_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_map(heap, "map-int-add", arg(args, 0))?;
+    let delta = expect_int(heap, "map-int-add", arg(args, 2))?;
+    Ok(heap.map_int_add(id, arg(args, 1), delta))
 }
 
 /// `(map-dissoc m k)` — a fresh map with `k` removed.
