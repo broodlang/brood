@@ -1,5 +1,41 @@
 # Plan — the post-JIT single-threaded compute frontier
 
+> ## ⏯ RESUME HERE (2026-06-19) — current perf state + next lever
+>
+> The newest work is the **JIT call-dispatch + loop-overhead** round (full play-by-play in
+> `docs/devlog.md`, entries 2026-06-18/19). Status:
+>
+> - **SHIPPED + default-on:** the **in-IR call fast-link** (Technique A increment 1 — a JIT'd
+>   non-tail free-global call epoch-guards a flat `#[repr(C)]` mirror of the call IC in IR and
+>   calls `brood_rt_fast_frame`, skipping the IC probe + `RefCell` borrow; **fib ~20%**), gated by
+>   `BROOD_JIT_ICALL` (now **default-on**, `BROOD_NO_JIT_ICALL=1` opts out). Plus two back-edge FFI
+>   eliminations on self-tail loops: raw-load the global epoch (`brood_rt_global_epoch_ptr`) and
+>   skip the `brood_rt_tick` preemption poll in non-capture mode (`brood_rt_in_capture`, read once at
+>   entry — capture-mode path unchanged). **`loop` 0.14→0.09 s (~36%).** All gated: jit.rs 28/28,
+>   differential, nest 2161, preemption/reductions/work-stealing, GC-stress+verify.
+> - **NO-GO — do NOT re-attempt:** Technique A **increment 2** (full in-IR frame setup —
+>   `#[repr(C)] RootStack` + in-IR `len`/nil-fill/depth/`call_indirect`). Implemented + correct but
+>   ~5% SLOWER than the `brood_rt_fast_frame` FFI. **The FFI boundary is not the bottleneck** — LLVM
+>   compiles the frame work better than hand-emitted Cranelift IR. Reverted. The dispatch lever is
+>   mined out at increment 1.
+> - **Standings (full 7-language `brood-benchmarks` run, single-thread aggregate compute vs the
+>   fastest):** .NET 1.0× · Node 2.5× · Elixir 3.0× · **Brood 8.3× (4th of 7)** · Ruby 10.4× ·
+>   Clojure 15.4× · Python 24.1×. Brood wins `strings` + `http`; ~24 MB base RSS; ~36 ms startup.
+>   (Clojure was added as a 7th language this round — the immutable-Lisp peer; its `wordcount`
+>   immutable map *beats* Brood's CHAMP, proving Brood's map gap is constant factors, not immutability.)
+> - **NEXT lever (pick a DIFFERENT one — dispatch is done):** the **heap gap** is biggest —
+>   `nqueens` ~29×, `bintree` ~20×, `wordcount` ~18× off the fastest. Structure-walkers don't tier
+>   and their heap reads are per-op `brood_rt_*` FFI; tier them + inline the reads (`ptr+idx*STRIDE`,
+>   the LICM machinery below already proves it for invariant vectors). Then: a single-pass
+>   `%map-update` primitive (`wordcount`), tier-2 register-carry of loop-carried Int vars
+>   (`loop`/`reduce`/`collatz` are JIT'd but still ~5-8× — operands round-trip through `roots`), and
+>   Technique B (true inlining / bounded unroll).
+> - **Build/bench discipline:** perf bins via `cargo build --release --features jit --bin brood`
+>   (NEVER `-p brood` — stale-lib trap); `make install` before benchmarking (the harness runs the
+>   *installed* `brood`); GC-debug build = `RUSTFLAGS="-C debug-assertions=on"`.
+>
+> ---
+>
 > **Status: in progress (2026-06-15). Lever 1 (matmul LICM) shipped — local AND global
 > hoist** — see the devlog entries "JIT matmul LICM" + "the global lever". Both invariant
 > `nth`s inlined (the local `rowa`; the global `b` via a back-edge `global_epoch` guard):
