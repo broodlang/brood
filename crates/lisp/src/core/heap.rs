@@ -4351,6 +4351,22 @@ impl Heap {
         self.roots.as_mut_ptr()
     }
 
+    /// Raw byte pointer to the LOCAL nursery pair slab (the flat `Vec<(Value, Value)>` backing
+    /// young LOCAL `Value::Pair` handles). Valid only while no `cons` can grow the slab. Used
+    /// by `brood_rt_pair_nursery_base` so the JIT can inline `first`/`rest` for LOCAL pairs
+    /// instead of calling `brood_rt_car`/`cdr` per element.
+    #[cfg(feature = "jit")]
+    pub(crate) fn local_pair_nursery_base(&self) -> *const u8 {
+        self.local.pairs.as_ptr() as *const u8
+    }
+
+    /// Raw byte pointer to the LOCAL old-generation pair slab (pairs that survived a minor
+    /// GC and were promoted). Companion to [`local_pair_nursery_base`].
+    #[cfg(feature = "jit")]
+    pub(crate) fn local_pair_old_base(&self) -> *const u8 {
+        self.old.pairs.as_ptr() as *const u8
+    }
+
     /// Current root-stack depth, for a balanced `truncate_roots(roots_len())`
     /// guard around a region that may push variable numbers of roots.
     pub fn roots_len(&self) -> usize {

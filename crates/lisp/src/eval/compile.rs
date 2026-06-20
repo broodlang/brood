@@ -5869,6 +5869,17 @@ fn jit_lower_arm_inner(
     let cdr_id = m
         .declare_function("brood_rt_cdr", Linkage::Import, &car_sig)
         .ok()?;
+    // Inline `first`/`rest` support: expose LOCAL pair-slab base pointers once per arm entry
+    // so the JIT can emit `ptr + idx*48 + {0,24}` loads instead of per-element FFI calls.
+    let mut pbase_sig = m.make_signature();
+    pbase_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    pbase_sig.returns.push(AbiParam::new(ptr_ty)); // *const u8
+    let pnbase_id = m
+        .declare_function("brood_rt_pair_nursery_base", Linkage::Import, &pbase_sig)
+        .ok()?;
+    let pobase_id = m
+        .declare_function("brood_rt_pair_old_base", Linkage::Import, &pbase_sig)
+        .ok()?;
     let mut cons_sig = m.make_signature();
     cons_sig.params.push(AbiParam::new(ptr_ty)); // heap
     cons_sig.params.push(AbiParam::new(ptr_ty)); // out
@@ -6044,6 +6055,8 @@ fn jit_lower_arm_inner(
     let incap_ref = m.declare_func_in_func(incap_id, b.func);
     let car_ref = m.declare_func_in_func(car_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
+    let pnbase_ref = m.declare_func_in_func(pnbase_id, b.func);
+    let pobase_ref = m.declare_func_in_func(pobase_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
     let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
@@ -6187,6 +6200,34 @@ fn jit_lower_arm_inner(
         } else {
             None
         };
+
+    // Inline `first`/`rest` pair reads: if the arm uses First/Rest but contains no Cons
+    // (which could grow the nursery slab and invalidate the stashed pointer), fetch the LOCAL
+    // nursery and old-gen pair-slab base pointers once here in the entry block. The inline
+    // lowering then computes `base + idx*48 + {0,24}` directly and deopts for non-LOCAL
+    // (PRELUDE/RUNTIME) pairs — those are rare on hot cons-list paths.
+    let pair_bases: Option<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> = {
+        let has_car_cdr = code.iter().any(|i| {
+            matches!(i, Inst::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. })
+        });
+        let has_cons = code.iter().any(|i| {
+            matches!(
+                i,
+                Inst::Prim2 { op: PrimOp::Cons, .. }
+                    | Inst::Prim2SlotSlot { op: PrimOp::Cons, .. }
+                    | Inst::Prim2SlotInt { op: PrimOp::Cons, .. }
+            )
+        });
+        if has_car_cdr && !has_cons {
+            let cn = b.ins().call(pnbase_ref, &[heap]);
+            let nursery = b.inst_results(cn)[0];
+            let co = b.ins().call(pobase_ref, &[heap]);
+            let old = b.inst_results(co)[0];
+            Some((nursery, old))
+        } else {
+            None
+        }
+    };
 
     if !hoist_slots.is_empty() || !hoist_globals.is_empty() || !hoist_scalar_globals.is_empty() {
         let len_slot = b.create_sized_stack_slot(StackSlotData::new(
@@ -7174,12 +7215,62 @@ fn jit_lower_arm_inner(
                             let cont = b.create_block();
                             b.ins().brif(is_pair, cont, &[], deopt, &[]);
                             b.switch_to_block(cont);
-                            let fref = match op {
-                                PrimOp1::First => car_ref,
-                                PrimOp1::Rest => cdr_ref,
-                                _ => unreachable!(),
+                            let h = if let Some((nursery_base, old_base)) = pair_bases {
+                                // Inline LOCAL pair read. PairId layout (w1):
+                                //   bits 0..31  = index into the slab
+                                //   bits 32..60 = gen epoch (ignored here)
+                                //   bit  61     = age  (0=nursery, 1=old)
+                                //   bits 62..63 = region (0=LOCAL, 1=PRELUDE, 2=RUNTIME)
+                                // Deopt for non-LOCAL (PRELUDE/RUNTIME) — uncommon on hot
+                                // cons-list paths; the VM handles those correctly.
+                                let high2 = b.ins().ushr_imm(w1, 62);
+                                let is_local =
+                                    b.ins().icmp_imm(IntCC::Equal, high2, 0i64);
+                                let local_cont = b.create_block();
+                                b.ins().brif(is_local, local_cont, &[], deopt, &[]);
+                                b.switch_to_block(local_cont);
+                                // Age bit 61: 0=nursery, 1=old. After the LOCAL check, bits
+                                // 62-63 are 0, so ushr by 61 gives exactly 0 or 1.
+                                let age_shifted = b.ins().ushr_imm(w1, 61);
+                                let is_old =
+                                    b.ins().icmp_imm(IntCC::NotEqual, age_shifted, 0i64);
+                                let base =
+                                    b.ins().select(is_old, old_base, nursery_base);
+                                // Index: lower 32 bits. stride = 48 (two 24-byte Values).
+                                let idx = b.ins().band_imm(w1, 0xFFFF_FFFFi64);
+                                let byte_off = b.ins().imul_imm(idx, 48i64);
+                                let pair_ptr = b.ins().iadd(base, byte_off);
+                                // Car at offset 0, cdr at offset 24 (one Value = 24 bytes).
+                                let field_off: i64 =
+                                    if matches!(op, PrimOp1::Rest) { 24 } else { 0 };
+                                let field_ptr = if field_off == 0 {
+                                    pair_ptr
+                                } else {
+                                    b.ins().iadd_imm(pair_ptr, field_off)
+                                };
+                                let rw0 =
+                                    b.ins().load(types::I64, MemFlags::new(), field_ptr, 0);
+                                let rw1 = b.ins().load(
+                                    types::I64,
+                                    MemFlags::new(),
+                                    field_ptr,
+                                    PAYLOAD_OFFSET as i32,
+                                );
+                                let rw2 = b.ins().load(
+                                    types::I64,
+                                    MemFlags::new(),
+                                    field_ptr,
+                                    PAYLOAD_OFFSET as i32 + 8,
+                                );
+                                Op::Handle(rw0, rw1, rw2)
+                            } else {
+                                let fref = match op {
+                                    PrimOp1::First => car_ref,
+                                    PrimOp1::Rest => cdr_ref,
+                                    _ => unreachable!(),
+                                };
+                                call_handle(&mut b, fref, &[w0, w1, w2])
                             };
-                            let h = call_handle(&mut b, fref, &[w0, w1, w2]);
                             stack.push(h);
                         }
                         PrimOp1::IsNil => {

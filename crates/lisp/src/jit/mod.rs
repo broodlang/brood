@@ -95,6 +95,11 @@ impl Jit {
         builder.symbol("brood_rt_global_epoch_ptr", brood_rt_global_epoch_ptr as *const u8);
         builder.symbol("brood_rt_in_capture", brood_rt_in_capture as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
+        builder.symbol(
+            "brood_rt_pair_nursery_base",
+            brood_rt_pair_nursery_base as *const u8,
+        );
+        builder.symbol("brood_rt_pair_old_base", brood_rt_pair_old_base as *const u8);
         Jit {
             module: JITModule::new(builder),
         }
@@ -291,6 +296,28 @@ pub unsafe extern "C" fn brood_rt_car(
         crate::core::value::Value::Pair(id) => h.pair(id).0,
         _ => crate::core::value::Value::Nil,
     };
+}
+
+/// Byte pointer to the LOCAL nursery pair slab (`Vec<(Value, Value)>`). Called once at JIT
+/// function entry so inline `first`/`rest` can compute `base + idx * 48 + {0,24}` directly
+/// instead of calling `brood_rt_car`/`cdr` per element. Valid only while no `cons` can grow
+/// the slab (arms that allocate must not use the stashed pointer — see `jit_lower_arm`).
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_pair_nursery_base(heap: *mut Heap) -> *const u8 {
+    (*heap).local_pair_nursery_base()
+}
+
+/// Byte pointer to the LOCAL old-generation pair slab. Companion to
+/// [`brood_rt_pair_nursery_base`] — for pairs promoted out of the nursery.
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_pair_old_base(heap: *mut Heap) -> *const u8 {
+    (*heap).local_pair_old_base()
 }
 
 /// `rest` counterpart of [`brood_rt_car`] — writes the pair's cdr to `*out`.

@@ -77,9 +77,13 @@
 >
 > **Work queue (5 items, see §3e–§3i for details):**
 >
-> 1. **car/cdr inline in JIT** (§3e) — expose LOCAL-nursery and LOCAL-old pair-slab base pointers via
->    `brood_rt_pair_bases`; inline `ptr + idx*48 + {0,24}` loads for `First`/`Rest` instead of
->    `brood_rt_car`/`cdr` FFI. Targets bintree (~127ms) and nqueens (~163ms). Estimated 20-30%.
+> 1. ~~**car/cdr inline in JIT** (§3e)~~ **SHIPPED 2026-06-20** — nqueens 163→**137 ms** (−16%).
+>    3-file change: `heap.rs` exposes `local_pair_nursery_base`/`local_pair_old_base`; `jit/mod.rs`
+>    exports them via `builder.symbol()` (critical: without this the JIT linker can't resolve the
+>    symbols even though they're `#[no_mangle]`); `compile.rs` hoists both pointers at arm entry
+>    (`pair_bases: Option<(nursery, old)>`) when the arm has First/Rest AND no Cons, then emits
+>    `ushr(w1,62)==0` region guard → `ushr(w1,61)!=0` age select → `base+idx*48+{0,24}` loads.
+>    bintree flat (uses vectors not pairs). sort: ~215ms now (pair reads were not the bottleneck).
 > 2. **range-fold JIT bypass** (§3f) — `%range-reduce` calls `+` via `eval_apply` on each of 5M
 >    elements; making it detect a PrimOp accumulator and use `prim_apply` inline cuts ~22ns/elem to
 >    ~4ns. reduce: ~109ms → ~20ms.

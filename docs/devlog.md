@@ -4216,3 +4216,41 @@ JIT-compiled collatz now sees `(max best ...)` as a single `PrimOp2(Max, ...)` n
 - alloc: 239,094 → ~0 (negligible nursery pressure)
 
 Gate: `make test` 616/616.
+
+## 2026-06-20 — JIT: inline `first`/`rest` slab reads; nqueens −16%
+
+**Root cause.** `brood_rt_car`/`brood_rt_cdr` are full FFI round-trips: marshal 5 i64 args
+(heap, out_ptr, w0, w1, w2), reconstruct `Value` inside the call, dispatch on region (LOCAL vs
+PRELUDE vs RUNTIME), index into the right slab, write 3 words back through the out_ptr — ~20–30 ns
+each. nqueens's `safe?`/`place-ok?` walk the queens list with `first`/`rest` per element,
+making the inner loop `O(n²)` in FFI calls.
+
+**Fix.** Three-file change:
+
+`crates/lisp/src/core/heap.rs`: added `local_pair_nursery_base()` and `local_pair_old_base()`
+returning raw `*const u8` pointers to the base of `local.pairs` (nursery) and `old.pairs` slabs.
+
+`crates/lisp/src/jit/mod.rs`: added `brood_rt_pair_nursery_base` and `brood_rt_pair_old_base`
+as `#[no_mangle] pub unsafe extern "C"` helpers. **Critical:** also added them to the `JITBuilder`
+via `builder.symbol("brood_rt_pair_nursery_base", ...)` — without this the JIT linker can't
+resolve the symbol even though `#[no_mangle]` is set, because the linker's dead-code elimination
+strips functions not reachable from the static call graph. `brood_rt_car` survived because it was
+already in this table; the new ones were not.
+
+`crates/lisp/src/eval/compile.rs`: at arm entry, compute `pair_bases: Option<(nursery, old)>`
+by calling both helpers once if the arm contains `First`/`Rest` AND no `Cons` (Cons can grow the
+`pairs` Vec, invalidating the stashed pointer). For each `First`/`Rest` lowering:
+1. Extract tag byte; deopt if not `TAG_PAIR`.
+2. `ushr(w1, 62)` → region; deopt if non-LOCAL (PRELUDE/RUNTIME pairs stay FFI).
+3. `ushr(w1, 61)` → age flag; `select(age!=0, old_base, nursery_base)` picks the right slab.
+4. `band(w1, 0xFFFF_FFFF)` → index; `imul(idx, 48)` → byte offset into the flat `(Value, Value)`
+   array; `load` 3 × i64 words at `base + offset + {0, 24}`. No out_ptr, no region dispatch.
+
+Arms without `pair_bases` (has Cons, or no First/Rest) fall back to `brood_rt_car`/`cdr` unchanged.
+
+**Results:**
+- nqueens: 163 ms → 137 ms (−16%)
+- bintree: flat (uses 2-element vectors, not cons pairs — `first`/`rest` never appear there)
+- sort: ~215 ms (pair reads not the bottleneck — dominated by `list_with_tail` allocs + GC)
+
+Gate: `make test` 616/616.
