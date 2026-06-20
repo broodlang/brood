@@ -109,6 +109,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "max",
+        Arity::at_least(1),
+        Sig::variadic(num, num),
+        prim_max,
+    );
+    def(
+        heap,
+        "min",
+        Arity::at_least(1),
+        Sig::variadic(num, num),
+        prim_min,
+    );
+    def(
+        heap,
         kw::EQ_PRIM,
         Arity::exact(2),
         Sig::new(vec![any, any], bool_ty),
@@ -2770,6 +2784,40 @@ fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         _ => num_to_f64(heap, "%le", a)? <= num_to_f64(heap, "%le", b)?,
     };
     Ok(Value::boolean(le))
+}
+
+fn prim_max(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut best = args[0]; // Arity::at_least(1) ensures non-empty
+    for &v in &args[1..] {
+        let replace = match (best, v) {
+            (Value::Int(a), Value::Int(b)) => b > a,
+            _ if is_integer(best) && is_integer(v) => {
+                heap.value_cmp(best, v) == std::cmp::Ordering::Less
+            }
+            _ => num_to_f64(heap, "max", v)? > num_to_f64(heap, "max", best)?,
+        };
+        if replace {
+            best = v;
+        }
+    }
+    Ok(best)
+}
+
+fn prim_min(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut best = args[0]; // Arity::at_least(1) ensures non-empty
+    for &v in &args[1..] {
+        let replace = match (best, v) {
+            (Value::Int(a), Value::Int(b)) => b < a,
+            _ if is_integer(best) && is_integer(v) => {
+                heap.value_cmp(best, v) == std::cmp::Ordering::Greater
+            }
+            _ => num_to_f64(heap, "min", v)? < num_to_f64(heap, "min", best)?,
+        };
+        if replace {
+            best = v;
+        }
+    }
+    Ok(best)
 }
 
 fn prim_eq(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {

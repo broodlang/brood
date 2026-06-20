@@ -686,14 +686,6 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 (defn positive? (n) "True if `n` is greater than zero." (> n 0))
 (defn negative? (n) "True if `n` is less than zero." (< n 0))
 (defn abs (n) "The absolute value of `n`." (if (< n 0) (- n) n))
-;; Variadic, fold over the first arg (so at least one is required); a strict `>`
-;; keeps the *first* of equal maxima, matching a left fold.
-(defn max (x & xs)
-  "The largest of the arguments (at least one required)."
-  (fold (fn (a b) (if (> b a) b a)) x xs))
-(defn min (x & xs)
-  "The smallest of the arguments (at least one required)."
-  (fold (fn (a b) (if (< b a) b a)) x xs))
 (defn sum (xs) "The sum of the numbers in `xs`." (fold %add 0 xs))
 (defn product (xs) "The product of the numbers in `xs`." (fold %mul 1 xs))
 (defn even? (n) "True if integer `n` is even." (= (rem n 2) 0))
