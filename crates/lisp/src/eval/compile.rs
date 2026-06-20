@@ -6217,10 +6217,12 @@ fn jit_lower_arm_inner(
         };
 
     // Inline `first`/`rest` pair reads: if the arm uses First/Rest but contains no Cons
-    // (which could grow the nursery slab and invalidate the stashed pointer), fetch the LOCAL
-    // nursery and old-gen pair-slab base pointers once here in the entry block. The inline
-    // lowering then computes `base + idx*48 + {0,24}` directly and deopts for non-LOCAL
-    // (PRELUDE/RUNTIME) pairs — those are rare on hot cons-list paths.
+    // (which could grow the nursery slab) and no non-tail Call (a GC safepoint that may
+    // trigger a minor collect, replacing the entire nursery slab with a fresh one and
+    // invalidating the stashed pointer), fetch the LOCAL nursery and old-gen pair-slab base
+    // pointers once here in the entry block. The inline lowering then computes
+    // `base + idx*48 + {0,24}` directly and deopts for non-LOCAL (PRELUDE/RUNTIME) pairs
+    // — those are rare on hot cons-list paths.
     let pair_bases: Option<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> = {
         let has_car_cdr = code.iter().any(|i| {
             matches!(i, Inst::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. })
@@ -6233,7 +6235,11 @@ fn jit_lower_arm_inner(
                     | Inst::Prim2SlotInt { op: PrimOp::Cons, .. }
             )
         });
-        if has_car_cdr && !has_cons {
+        // A non-tail Call is a GC safepoint: minor_collect replaces `self.local` entirely
+        // (std::mem::take), so any pointer to `local.pairs` cached before the call is
+        // invalid after it. Only inline when there are no such safepoints.
+        let has_call_safepoint = code.iter().any(|i| matches!(i, Inst::Call { tail: false, .. }));
+        if has_car_cdr && !has_cons && !has_call_safepoint {
             let cn = b.ins().call(pnbase_ref, &[heap]);
             let nursery = b.inst_results(cn)[0];
             let co = b.ins().call(pobase_ref, &[heap]);
