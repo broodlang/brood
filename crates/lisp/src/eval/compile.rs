@@ -1171,6 +1171,21 @@ pub fn prim_apply_step(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, 
     prim_apply(op, x, y)
 }
 
+/// Tighter variant of [`prim_apply_step`] for the range-reduce hot path: both
+/// operands are already `i64` (range element + integer accumulator), no Value
+/// boxing involved. Returns the next `i64` accumulator, or `None` on overflow
+/// (caller must fall back to the full `prim_apply_step` / `eval_apply` path).
+/// Only covers `Add` and `Mul` since those are the only ops [`reduce_prim_op`]
+/// admits.
+#[inline]
+pub fn prim_apply_int_step(op: PrimOp, a: i64, b: i64) -> Option<i64> {
+    match op {
+        PrimOp::Add => a.checked_add(b),
+        PrimOp::Mul => a.checked_mul(b),
+        _ => None,
+    }
+}
+
 /// Resolve a 1-arg call head `h` to a core inlinable [`PrimOp1`], or `None` if it
 /// isn't one. Unlike [`resolve_prim`] there's no passthrough hop: `first`/`rest`
 /// are bound directly to their natives. Read against the live global env, so a

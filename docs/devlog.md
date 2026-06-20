@@ -4254,3 +4254,31 @@ Arms without `pair_bases` (has Cons, or no First/Rest) fall back to `brood_rt_ca
 - sort: ~215 ms (pair reads not the bottleneck — dominated by `list_with_tail` allocs + GC)
 
 Gate: `make test` 616/616.
+
+## 2026-06-20 — %range-reduce tight i64 loop; reduce −80%
+
+**Root cause.** The existing fast path in `range_reduce` called
+`prim_apply_step(op, Value::int(acc), Value::int(i))` per element. `Value` is a 24-byte
+`#[repr(C, u8)]` struct — larger than 16 bytes — so SysV ABI passes it by pointer, not by
+register. That means 72 bytes of stack-frame traffic + a non-inlined call per iteration even
+though the actual work is one `checked_add`. Measured: ~24 ns/iter = ~120ms for 5M elements.
+
+**Fix.** Two-file change:
+
+`eval/compile.rs`: added `#[inline] pub fn prim_apply_int_step(op: PrimOp, a: i64, b: i64) -> Option<i64>`:
+takes and returns raw `i64` — no Value boxing — for `Add` and `Mul` (the only ops `reduce_prim_op`
+admits). The `#[inline]` forces the compiler to emit the operation directly at the call site.
+
+`builtins.rs`: restructured `range_reduce` into two functions:
+- `range_reduce`: if `prim = Some(op)` AND `init.as_int()` succeeds, runs a tight loop calling
+  `prim_apply_int_step(op, int_acc, i)` — pure i64 arithmetic, no Value boxing, no root machinery
+  (integers are inline values, never GC'd). Overflow (rare) falls through to `range_reduce_slow`.
+- `range_reduce_slow(f, init, lo, hi, step, ...)`: the old root_scope loop, now also handles
+  the non-prim path (float/BigInt reducers, custom closures, non-integer accumulators).
+
+**Results:**
+- reduce: 139 ms → 28 ms (−80%); 5M elements now take ~3 ms (~0.6 ns/iter, 2 CPU cycles)
+- startup (N=1): 25 ms — now dominates the benchmark
+- bit-identical: the overflow path falls through to eval_apply, so BigInt results are unchanged
+
+Gate: `make test` 616/616.
