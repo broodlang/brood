@@ -65,6 +65,20 @@
 >   `slot_float[k]` is NOT safe to skip tag-checks (single-pass, cross-branch contamination caused
 >   a real test failure); only the cache (populated on the actual store path) is safe.
 >   Aggregate: **6.0× (unchanged)** — mandelbrot is one of 15 compute rows.
+> - **SHIPPED 2026-06-20 — 2-level Brood-level self-recursive body inlining:** fib 532ms (no-inline)
+>   → **277 ms** (−48% vs baseline, best of 3). `inline_self_calls` is run twice in both
+>   `self_inline_probe` and `rederive_inlined_body` (probe and rederive must be identical). Level-1
+>   inlines the 2 non-tail self-calls from the original fib body; level-2 inlines the 4 external
+>   calls left over — each using the original body as template and a continuing `next_block` counter
+>   so slot ranges are disjoint. Guard: after level-1 `node_count(body) > SELF_INLINE_MAX_BODY`
+>   prevents level-2 for already-large bodies. `node_touches_heap` keeps bintree/sort-walk at
+>   level-1 (no regression). Debug: `BROOD_INLINE_DBG=1` → `new_max=7 inline_nslots=14` for fib(35).
+> - **SHIPPED 2026-06-20 — `bit-and`/`bit-or`/`bit-xor` as PrimOp2:** sort 238→**209 ms** (−12%).
+>   sort's `gen` function used `bit-and` in a self-tail loop; that emitted `brood_rt_call_slow`
+>   (~150 ns/call) AND blocked int register-carry for gen's loop variables. Making them PrimOps
+>   eliminates the Call, re-enables carry, and removes ~56 ms per sort run (N=375K). Same 7-location
+>   PrimOp pipeline: enum, `from_native_name`, `prim2_int_fast`, `prim_apply`, `prim_apply_float`
+>   (explicit float defer), `chunk_in_jit_subset`, `emit_arith` (CLIF `band`/`bor`/`bxor`).
 > - **SHIPPED 2026-06-20 — max/min as PrimOp2 native + cranelift `select`:** collatz 323→**111 ms**
 >   (−66%), 4th→4th of 7. Replaced the prelude's `(defn max (x & xs) (fold (fn …) x xs))` with a
 >   native builtin (`prim_max`/`prim_min`: Int fast-path → BigInt exact → float coerce,
@@ -93,11 +107,12 @@
 >    never-taken). When init is `Int` and prim resolves, the tight path runs; overflow or
 >    non-Int init falls through to `range_reduce_slow` (the old root_scope path). Result:
 >    5M iters in ~3ms (~0.6ns/iter, 2 CPU cycles), down from ~112ms. Startup dominates (25ms).
-> 3. **sort list-walk** (§3g) — sort already uses Rust `Vec::sort_by` (fast); the cost is
->    `seq_items` (O(n) pair reads) + `list_with_tail` (O(n) pair allocs) + `hash--acc` JIT walk.
->    Car/cdr inline (#1) directly fixes the read halves; the alloc half is structural.
-> 4. **fib call inlining** (§3h) — at ~15ns per `brood_rt_fast_frame` call × 18M calls = 270ms
->    floor. Only true CLIF inlining of the callee body breaks this; marked as long-horizon.
+> 3. ~~**sort list-walk** (§3g)~~ **PARTIALLY ADDRESSED 2026-06-20** — `bit-and` PrimOp removes
+>    ~12% overhead from gen's loop; residual cost is `list_with_tail` O(n) pair allocs (structural,
+>    needs mutable-sort or `sort-vec` variant). **209 ms** on N=375K.
+> 4. ~~**fib call inlining** (§3h)~~ **SHIPPED 2026-06-20** via Brood-level 2-level inline —
+>    **277 ms** (best of 3), down from 532ms no-inline / ~320ms level-1. True CLIF inlining would
+>    eliminate the remaining 8 `brood_rt_fast_frame` calls per arm activation; marked long-horizon.
 >
 > - **Build/bench discipline:** perf bins via `cargo build --release --features jit --bin brood`
 >   (NEVER `-p brood` — stale-lib trap); `make install` before benchmarking (`cp target/release/brood
