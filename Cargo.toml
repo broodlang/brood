@@ -5,7 +5,7 @@ members = ["crates/lisp", "crates/cli", "crates/nest", "crates/lsp"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 authors = ["Wilhelm Kirschbaum"]
 
 # The runtime `nest release` appends an app to (ADR-038). Inherits `release` and

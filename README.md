@@ -161,4 +161,15 @@ docs/          architecture, language reference, roadmap, decisions, dev log
 
 ## License
 
-MIT.
+Copyright © 2026 Wilhelm Kirschbaum.
+
+Brood — the interpreter, compiler, and standard library — is licensed under the
+**GNU Affero General Public License v3.0** (`AGPL-3.0-only`); see [`LICENSE`](LICENSE).
+
+**Programs you write in Brood are not covered by the AGPL.** Running a program
+through the interpreter, and any `.blsp` program you write, may be licensed on
+terms of your own choosing — see the additional permission in
+[`LICENSE-EXCEPTION.md`](LICENSE-EXCEPTION.md). The copyleft applies to
+modifications of the interpreter/standard library themselves.
+
+For a proprietary or otherwise AGPL-incompatible license, contact the author.
