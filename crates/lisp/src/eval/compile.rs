@@ -5653,6 +5653,15 @@ fn jit_lower_arm_inner(
     // looping forever on a condition that should exit.
     let slot_bool: std::cell::RefCell<Vec<bool>> =
         std::cell::RefCell::new(vec![false; nslots]);
+    // Per-slot F64 SSA value cache. When `store_op` writes `Op::Float(v)` to slot `dst`,
+    // we stash `v` here. A subsequent `as_f64(Op::Slot(k))` can return `v` directly —
+    // no tag-check, no memory load, just the SSA value already in a register. The cache
+    // is cleared on non-Float stores and propagated verbatim on slot-copies. Carry-var
+    // slots are served by `use_var` before we reach this cache; the cache covers let-bound
+    // floats (e.g. `nx`/`ny` in mandelbrot's `esc`) where the tag-checks for `nx*nx` and
+    // `ny*ny` would otherwise reload from memory and branch twice per read.
+    let slot_f64_cache: std::cell::RefCell<Vec<Option<cranelift_codegen::ir::Value>>> =
+        std::cell::RefCell::new(vec![None; nslots]);
     // Handle-spill scratch: `[spill_base, spill_base + reserve)` are the frame slots
     // reserved (above the compiler's slot ceiling) for spilling call-result handles
     // that must survive a later call's safepoint. `reserve` matches what arm
@@ -5979,16 +5988,16 @@ fn jit_lower_arm_inner(
     ctx.func.signature = sig;
     let mut fbctx = FunctionBuilderContext::new();
     let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
-    // Register-carry: for pure-arithmetic self-tail loops, declare Cranelift Variables for
-    // param slots 0..carry_argc. Reads via `load_slot_int` use `use_var` (no tag-check, no
-    // address arithmetic) after `def_var` in the entry block (init) and at each SelfCall
-    // (update). The `roots` stores at SelfCall are kept for deopt; only reads change.
-    // Excluded: any arm whose carry slots (0..max_selfcall_argc) are not all profiled as Int.
-    // Checking == TAG_INT (not merely != Float) is critical: a vector-param function like
-    // `dot(rowa, j, k, acc)` is structurally eligible (SelfCall, no Cons/MakeVector) but
-    // slot_tags[0] = TAG_VEC — the entry tag-check would deopt every call if carry were enabled.
+    // Register-carry: for pure-arithmetic self-tail loops, carry each param slot in a
+    // Cranelift Variable (SSA, phi-inserted at the loop header). Reads skip the per-access
+    // tag-check + address arithmetic + two memory ops entirely. The `roots` stores at each
+    // SelfCall are kept unchanged for deopt correctness; only reads change.
+    // carry_vars: Vec<(Variable, is_float)>. Int slots → I64 Variable; Float slots → F64
+    // Variable. Every slot in 0..max_selfcall_argc must be profiled as TAG_INT or TAG_FLOAT;
+    // anything else (vector, nil, handle) is excluded — TAG_VEC would deopt on every call.
     let profile_tag_int = crate::core::value::Tag::Int as u8;
-    let carry_argc: usize = {
+    let profile_tag_float_carry = crate::core::value::Tag::Float as u8;
+    let carry_vars: Vec<(Variable, bool)> = {
         let candidate = if int_carry_eligible(code) {
             code.iter()
                 .filter_map(|i| if let Inst::SelfCall { argc } = i { Some(*argc) } else { None })
@@ -5998,16 +6007,23 @@ fn jit_lower_arm_inner(
             0
         };
         if candidate > 0
-            && (0..candidate)
-                .all(|k| slot_tags.get(k).copied() == Some(profile_tag_int))
+            && (0..candidate).all(|k| {
+                let t = slot_tags.get(k).copied();
+                t == Some(profile_tag_int) || t == Some(profile_tag_float_carry)
+            })
         {
-            candidate
+            (0..candidate)
+                .map(|k| {
+                    let is_float =
+                        slot_tags.get(k).copied() == Some(profile_tag_float_carry);
+                    let ty = if is_float { types::F64 } else { types::I64 };
+                    (b.declare_var(ty), is_float)
+                })
+                .collect()
         } else {
-            0
+            vec![]
         }
     };
-    let carry_vars: Vec<Variable> =
-        (0..carry_argc).map(|_| b.declare_var(types::I64)).collect();
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
     let tick_ref = m.declare_func_in_func(tick_id, b.func);
     let incap_ref = m.declare_func_in_func(incap_id, b.func);
@@ -6231,20 +6247,30 @@ fn jit_lower_arm_inner(
         }
     }
     // Initialize register-carry variables from roots (first iteration). Each param slot k is
-    // tag-checked for Int (deopt on non-Int — same semantics as load_slot_int in the body,
-    // but done once at entry so subsequent iterations read `use_var(carry_vars[k])` directly).
-    for (k, &var) in carry_vars.iter().enumerate() {
+    // tag-checked (Int or Float, per is_float) once at entry; subsequent iterations read
+    // `use_var(carry_vars[k].0)` directly. Float slots are bitcast i64→f64.
+    for (k, &(var, is_float)) in carry_vars.iter().enumerate() {
         let rb = b.use_var(rb_var);
         let idx = b.ins().iadd_imm(base, k as i64);
         let off = b.ins().imul_imm(idx, STRIDE);
         let addr = b.ins().iadd(rb, off);
         let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
-        let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+        let expected_tag = if is_float {
+            TAG_FLOAT as i64
+        } else {
+            TAG_INT as i64
+        };
+        let ok = b.ins().icmp_imm(IntCC::Equal, tag, expected_tag);
         let cont = b.create_block();
-        b.ins().brif(is_int, cont, &[], deopt, &[]);
+        b.ins().brif(ok, cont, &[], deopt, &[]);
         b.switch_to_block(cont);
-        let payload = b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
-        b.def_var(var, payload);
+        let bits = b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+        if is_float {
+            let f = b.ins().bitcast(types::F64, MemFlags::new(), bits);
+            b.def_var(var, f);
+        } else {
+            b.def_var(var, bits);
+        }
     }
     b.ins().jump(leader_block[0].unwrap(), &[]);
 
@@ -6274,7 +6300,7 @@ fn jit_lower_arm_inner(
     // re-`def_var`s on the back-edge. `use_var` gives the current iteration's value without
     // any memory access or branch.
     let load_slot_int = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
-        if let Some(&var) = carry_vars.get(k as usize) {
+        if let Some(&(var, false)) = carry_vars.get(k as usize) {
             return b.use_var(var);
         }
         let roots_base = b.use_var(rb_var);
@@ -6587,14 +6613,34 @@ fn jit_lower_arm_inner(
             v
         }
     };
-    // Materialise an operand to an unboxed `f64`. A `Slot` is tag-checked `== Float` and
-    // its payload bit-cast to `f64` (the per-read check is what makes float specialization
-    // sound without separate entry guards: a slot whose runtime tag isn't Float deopts). An
-    // int/handle used as a float is a mixed op we don't lower → deopt.
+    // Materialise an operand to an unboxed `f64`. A `Slot` is normally tag-checked `==
+    // Float` and its payload bit-cast to `f64`. Two fast paths, applied in order:
+    //
+    // 1. Float-carry slots (0..carry_argc, profiled Int/Float): `use_var` — no tag-check,
+    //    no memory access, just the phi-propagated SSA value.
+    // 2. F64 SSA cache: `store_op(Float(v))` stashes `v` in `slot_f64_cache`; subsequent
+    //    reads in the same block return it directly. Eliminates the store→load→bitcast
+    //    round-trip for let-bound floats (e.g. `nx`/`ny` in mandelbrot's `esc` inner loop,
+    //    where `(* nx nx)` would otherwise reload and tag-check the just-written slot).
+    //    The cache is valid only for slots written via `store_op` (never via SelfCall/entry),
+    //    and parameter slots are always None — safe against cross-branch pollution.
+    // 3. Unknown: full tag-check + brif to deopt + load + bitcast. NOTE: we do NOT skip the
+    //    tag-check based on `slot_float[k]` alone: that flag is a single-pass approximation
+    //    that can be contaminated by stores in other branches (e.g. a then-branch `store_op`
+    //    setting slot_float[k]=true before an else-branch `as_f64` read — the slot is really
+    //    Int at that point). Skipping the brif deopt there produces wrong results.
     let as_f64 = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
         match op {
             Op::Float(v) => v,
             Op::Slot(k) => {
+                if let Some(&(var, true)) = carry_vars.get(k as usize) {
+                    return b.use_var(var);
+                }
+                if let Some(v) =
+                    slot_f64_cache.borrow().get(k as usize).copied().flatten()
+                {
+                    return v;
+                }
                 let roots_base = b.use_var(rb_var);
                 let i = b.ins().iadd_imm(base, k as i64);
                 let o = b.ins().imul_imm(i, STRIDE);
@@ -6669,6 +6715,9 @@ fn jit_lower_arm_inner(
             store_int(b, dst, v);
             set_slot_float(dst, false);
             set_slot_bool(dst, is_b);
+            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
+                *s = None;
+            }
         }
         Op::Float(v) => {
             let bits = b.ins().bitcast(types::I64, MemFlags::new(), v);
@@ -6677,6 +6726,9 @@ fn jit_lower_arm_inner(
             store_words(b, dst, [tag, bits, zero]);
             set_slot_float(dst, true);
             set_slot_bool(dst, false);
+            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
+                *s = Some(v);
+            }
         }
         Op::Bool(v) => {
             let tag = b.ins().iconst(types::I64, TAG_BOOL as i64);
@@ -6684,26 +6736,39 @@ fn jit_lower_arm_inner(
             store_words(b, dst, [tag, v, zero]);
             set_slot_float(dst, false);
             set_slot_bool(dst, true);
+            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
+                *s = None;
+            }
         }
         Op::Slot(k) => {
             copy_value(b, k as i64, dst);
-            // Read both source flags into locals *before* mutating (a held `borrow()` would
-            // double-borrow with `set_slot_*`'s `borrow_mut()`).
+            // Read both source flags and f64 cache into locals *before* mutating (a held
+            // `borrow()` would double-borrow with `set_slot_*`'s `borrow_mut()`).
             let f = slot_float.borrow().get(k).copied().unwrap_or(false);
             let bl = slot_bool.borrow().get(k).copied().unwrap_or(false);
+            let fv = slot_f64_cache.borrow().get(k).copied().flatten();
             set_slot_float(dst, f);
             set_slot_bool(dst, bl);
+            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
+                *s = fv;
+            }
         }
         Op::Handle(w0, w1, w2) => {
             store_words(b, dst, [w0, w1, w2]);
             set_slot_float(dst, false);
             set_slot_bool(dst, false);
+            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
+                *s = None;
+            }
         }
         Op::HoistedVec { w0, w1, w2, .. } => {
             // Stored as a whole `Value` (its entry-resolved words), like a `Handle`.
             store_words(b, dst, [w0, w1, w2]);
             set_slot_float(dst, false);
             set_slot_bool(dst, false);
+            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
+                *s = None;
+            }
         }
     };
     // Return-via-roots: place the single result in `roots[base]` and jump to the
@@ -7453,36 +7518,55 @@ fn jit_lower_arm_inner(
                     }
                     // Register-carry update: keep carry_vars in sync with the new slot values.
                     // The `roots` stores above are kept for deopt; this additionally def_var's
-                    // the unboxed i64 so subsequent `load_slot_int` calls skip the tag-check.
-                    // For Op::Int, use the raw value directly. For any other op (passthrough
-                    // Op::Slot, rare in carry-eligible arms), load the just-stored payload.
+                    // the unboxed i64/f64 so subsequent load_slot_int/as_f64 skip the tag-check.
+                    // For Op::Int/Float, use the raw value directly. For any other op (slot
+                    // passthrough), load from the just-stored roots payload — always correct and
+                    // avoids parallel-assignment issues with cross-slot references.
                     if !carry_vars.is_empty() {
                         let rb2 = b.use_var(rb_var);
-                        for (k, (&op, &var)) in ops.iter().zip(carry_vars.iter()).enumerate() {
-                            let raw = match op {
-                                Op::Int(v) => {
-                                    // Int result from arithmetic — the common case.
-                                    // box_scalar may have widened an i8 comparison to i64.
-                                    if b.func.dfg.value_type(v) == types::I64 {
-                                        v
-                                    } else {
-                                        b.ins().uextend(types::I64, v)
+                        for (k, (&op, &(var, is_float))) in
+                            ops.iter().zip(carry_vars.iter()).enumerate()
+                        {
+                            if is_float {
+                                let f = match op {
+                                    Op::Float(v) => v,
+                                    _ => {
+                                        let idx = b.ins().iadd_imm(base, k as i64);
+                                        let o = b.ins().imul_imm(idx, STRIDE);
+                                        let addr = b.ins().iadd(rb2, o);
+                                        let bits = b.ins().load(
+                                            types::I64,
+                                            MemFlags::new(),
+                                            addr,
+                                            PAYLOAD_OFFSET as i32,
+                                        );
+                                        b.ins().bitcast(types::F64, MemFlags::new(), bits)
                                     }
-                                }
-                                _ => {
-                                    // Passthrough or non-Int: load the payload we just stored.
-                                    let idx = b.ins().iadd_imm(base, k as i64);
-                                    let o = b.ins().imul_imm(idx, STRIDE);
-                                    let addr = b.ins().iadd(rb2, o);
-                                    b.ins().load(
-                                        types::I64,
-                                        MemFlags::new(),
-                                        addr,
-                                        PAYLOAD_OFFSET as i32,
-                                    )
-                                }
-                            };
-                            b.def_var(var, raw);
+                                };
+                                b.def_var(var, f);
+                            } else {
+                                let raw = match op {
+                                    Op::Int(v) => {
+                                        if b.func.dfg.value_type(v) == types::I64 {
+                                            v
+                                        } else {
+                                            b.ins().uextend(types::I64, v)
+                                        }
+                                    }
+                                    _ => {
+                                        let idx = b.ins().iadd_imm(base, k as i64);
+                                        let o = b.ins().imul_imm(idx, STRIDE);
+                                        let addr = b.ins().iadd(rb2, o);
+                                        b.ins().load(
+                                            types::I64,
+                                            MemFlags::new(),
+                                            addr,
+                                            PAYLOAD_OFFSET as i32,
+                                        )
+                                    }
+                                };
+                                b.def_var(var, raw);
+                            }
                         }
                     }
                     // GC safepoint (cons-allocating arms only): bound the nursery over loop
