@@ -1,6 +1,6 @@
 # Plan — the post-JIT single-threaded compute frontier
 
-> ## ⏯ RESUME HERE (2026-06-19) — current perf state + next lever (inline car/cdr/vector_ref)
+> ## ⏯ RESUME HERE (2026-06-20) — current perf state + next lever (inline car/cdr/vector_ref)
 >
 > The newest work is the **JIT call-dispatch + loop-overhead** round (full play-by-play in
 > `docs/devlog.md`, entries 2026-06-18/19). Status:
@@ -55,6 +55,16 @@
 >   Cons/MakeVector/First/Rest) + all carry slots profiled as `TAG_INT` (critical — `!= TAG_FLOAT`
 >   was a latent bug that would deopt vector-param functions on every call). Aggregate: **6.0×
 >   (unchanged)** — dominated by wordcount/fib; per-benchmark improvements are real.
+> - **SHIPPED 2026-06-20 — float register-carry + F64 SSA value cache:** mandelbrot 224→**204 ms**
+>   (−9%), 3rd of 7. Float carry extends `carry_vars` to `Vec<(Variable, is_float)>` — slots
+>   profiled TAG_FLOAT get an F64 Cranelift Variable (entry: tag-check + bitcast i64→f64; back-edge:
+>   `def_var` with new F64; reads: `use_var` — no memory ops). F64 SSA cache
+>   (`slot_f64_cache: RefCell<Vec<Option<Value>>>`) covers let-bound floats not in carry params:
+>   `store_op(Op::Float(v))` stashes `v`; `as_f64(Op::Slot(k))` returns it directly. Eliminated
+>   4 full tag-check+load+bitcast sequences per inner iteration for `nx²`/`ny²`. Key safety note:
+>   `slot_float[k]` is NOT safe to skip tag-checks (single-pass, cross-branch contamination caused
+>   a real test failure); only the cache (populated on the actual store path) is safe.
+>   Aggregate: **6.0× (unchanged)** — mandelbrot is one of 15 compute rows.
 > - **NEXT lever:** inline `first`/`rest`/`vector_ref` pointer arithmetic in the JIT (eliminates
 >   `brood_rt_car`/`cdr`/`vector_ref` FFI for JIT-compiled structure walkers). Technique B (true
 >   inlining) is a longer horizon.

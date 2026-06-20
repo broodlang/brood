@@ -4144,3 +4144,37 @@ Additionally, all carry slots `0..carry_argc` must be **profiled as `TAG_INT`** 
 **Why aggregate didn't move.** The loop compute row is `sum(wall − startup)` over 11 benchmarks. Loop is only 38ms of Brood's 1824ms total, so a 22ms saving is 1.2% of the aggregate. Collatz saves 39ms (2.1%). The per-benchmark numbers are real; the aggregate is dominated by wordcount (423ms), collatz (320ms), fib (282ms), and mandelbrot (226ms).
 
 Gate: `make test` 616/616.
+
+## 2026-06-20 — JIT: float register-carry + F64 SSA value cache; mandelbrot −9%
+
+**Root cause of mandelbrot stall.** Float carry was wired up on 2026-06-19, but mandelbrot's
+wall time barely moved. Investigation with `BROOD_JIT_DUMP_IR=1` showed the six carry params
+(x, y, xx, yy, x0, y0) were correctly served by `use_var` — but `(* nx nx)` and `(* ny ny)`
+in the inner loop were still emitting the full tag-check sequence: `iadd_imm + imul_imm + iadd
++ load.i8 + icmp + brif + load.i64 + bitcast.f64`. `nx` and `ny` are slots 7 and 8 —
+let-bound in the outer `esc` body, NOT carry params (0–5). Four such sequences per inner
+iteration (nx² and ny² each read twice).
+
+**Fix 1: extend carry_vars to Vec<(Variable, is_float)>.** Slots profiled TAG_FLOAT at
+JIT-compile time get an F64 Cranelift Variable. Entry block: tag-check once for TAG_FLOAT,
+bitcast i64→f64, `def_var`. SelfCall back-edge: `def_var` with the new F64 value. In
+`as_f64`: check `carry_vars[k].is_float` → `use_var(var)` (no memory, no branch). Handles
+the six float params.
+
+**Fix 2: F64 SSA value cache (slot_f64_cache).** `RefCell<Vec<Option<Value>>>`. When
+`store_op` writes `Op::Float(v)` to slot `k`, stash `v`. When `as_f64(Op::Slot(k))` is
+called: carry check first, then cache — if Some(v), return it directly. Cleared on
+non-Float stores; propagated on slot-copies. `(* nx nx)` compiles to a single `fmul v, v`.
+
+**Why slot_float alone is NOT safe.** Single-pass analysis — contaminated by stores in other
+branches. `(if cond (store-float-to-k) (read-k-as-float))`: the then-branch store sets
+`slot_float[k]=true`, and the else-branch's `as_f64` would skip the tag-check, interpreting
+int bits as float. Caused a real test failure (`deopt_on_non_int_operand_matches_vm`). Fixed
+by never skipping the tag-check on `slot_float` alone; only the cache (populated by actual
+`store_op` on the same execution path) is safe.
+
+**Results (2026-06-20, full 7-language run):**
+- mandelbrot: 224 ms → 204 ms (−9%), 3rd of 7
+- Chart aggregate vs .NET: 6.0× (unchanged — mandelbrot is one of 15 compute rows)
+
+Gate: `make test` 628/628.
