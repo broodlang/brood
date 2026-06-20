@@ -2085,6 +2085,12 @@ fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize)
     if inlined == 0 {
         return None;
     }
+    // Level-2: if the level-1 result is still compact, inline its external calls too.
+    // Uses the same `orig` template and a continuing `next_block`, so slot ranges stay
+    // disjoint. Must mirror rederive_inlined_body exactly.
+    if node_count(&clone) <= SELF_INLINE_MAX_BODY {
+        inline_self_calls(&mut clone, &orig, defn_name, nrequired, m, &mut next_block);
+    }
     let inline_max = m * next_block;
     // The inlined frame must also reserve the inlined chunk's call-result spill slots
     // (above `inline_max`) — exactly as `compile_arm` adds `jit_spill_reserve` to the
@@ -2121,6 +2127,10 @@ fn rederive_inlined_body(body: &Node, defn_name: Symbol, nrequired: usize, m: us
     let inlined = inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
     if inlined == 0 {
         return None;
+    }
+    // Level-2: must mirror self_inline_probe exactly.
+    if node_count(&spliced) <= SELF_INLINE_MAX_BODY {
+        inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
     }
     Some(spliced)
 }
