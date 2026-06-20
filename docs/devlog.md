@@ -4178,3 +4178,41 @@ by never skipping the tag-check on `slot_float` alone; only the cache (populated
 - Chart aggregate vs .NET: 6.0× (unchanged — mandelbrot is one of 15 compute rows)
 
 Gate: `make test` 628/628.
+
+## 2026-06-20 — max/min as PrimOp2 native + cranelift `select`; collatz −66%
+
+**Root cause.** Profiling collatz (N=250k) showed `alloc: 239,094` — roughly 1 heap object
+per iteration. The inner loop is `(max best (steps k 0))`. `max` was a Brood variadic closure:
+`(defn max (x & xs) (fold (fn (a b) (if (> b a) b a)) x xs))`. Each 2-arg call allocates:
+1 cons cell for the `xs` rest parameter and 1 fresh closure for the fold lambda. 250K iters ×
+2 allocs = ~500K nursery allocs per run, with proportional GC pressure.
+
+**Fix.** Three-file change:
+
+`std/prelude.blsp`: removed the Brood `max` and `min` definitions (8 lines).
+
+`crates/lisp/src/builtins.rs`: added `prim_max` and `prim_min` as native builtins. Each
+takes `Arity::at_least(1)` and folds over args: Int fast path (`b > a` / `b < a` directly),
+then BigInt exact (`heap.value_cmp`), then float coerce (`num_to_f64`). Registered under `"max"`
+and `"min"` (not `"%max"` — they replace the prelude functions, not shadow them).
+
+`crates/lisp/src/eval/compile.rs`: added `PrimOp::Max` and `PrimOp::Min` to the full
+PrimOp pipeline:
+- `PrimOp` enum: two new variants after `VectorRef`.
+- `from_native_name`: `"max" => Max`, `"min" => Min`.
+- `prim2_int_fast`: `Max => Some(Value::int(a.max(b)))`, `Min => Some(Value::int(a.min(b)))`.
+- `prim_apply`: `Max => Value::int(a.max(b))`, `Min => Value::int(a.min(b))` (no overflow guard
+  needed — max/min are branchless).
+- `prim_apply_float`: `Max => Value::float(a.max(b))`, `Min => Value::float(a.min(b))`.
+- `chunk_in_jit_subset`: added `| PrimOp::Max | PrimOp::Min`.
+- `emit_arith`: two new arms using cranelift `icmp(SGE/SLE)` + `select` — no overflow
+  branch, no deopt, just a branchless compare-and-select.
+
+JIT-compiled collatz now sees `(max best ...)` as a single `PrimOp2(Max, ...)` node — one
+`icmp` + one `select` in the emitted CLIF, zero FFI calls, zero heap allocs.
+
+**Results:**
+- collatz: 323 ms → 111 ms (−66%), 4th of 7
+- alloc: 239,094 → ~0 (negligible nursery pressure)
+
+Gate: `make test` 616/616.
