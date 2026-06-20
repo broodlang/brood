@@ -510,6 +510,27 @@ pub(crate) mod backend {
         N.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// HEADLESS mode (`BROOD_GUI_HEADLESS=1`): a gui-built runtime that opens NO real
+    /// OS window — `gui-open` hands back a fake window with a fixed cell grid, every
+    /// draw/window op is a silent no-op, and no key/mouse events ever arrive. A
+    /// windowed app's loop runs unchanged (paced by its own `(after)` timer), so it
+    /// can be tested / soak-run / CI'd with no popup. Read once at first use.
+    fn headless() -> bool {
+        static H: OnceLock<bool> = OnceLock::new();
+        *H.get_or_init(|| {
+            std::env::var("BROOD_GUI_HEADLESS")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(false)
+        })
+    }
+
+    /// The cell grid a headless window reports for a requested logical pixel `size`
+    /// (default 840×560 like a real `gui-open`), using a nominal 8×16 px cell.
+    fn headless_cells(size: Option<(f64, f64)>) -> (u16, u16) {
+        let (w, h) = size.unwrap_or((840.0, 560.0));
+        (((w / 8.0) as u16).max(1), ((h / 16.0) as u16).max(1))
+    }
+
     /// Spawn the GUI thread + build the (single) event loop; return a proxy to it.
     fn start_thread() -> Result<EventLoopProxy<UserEvent>, String> {
         let (ready_tx, ready_rx) = mpsc::channel::<Result<EventLoopProxy<UserEvent>, String>>();
@@ -530,6 +551,19 @@ pub(crate) mod backend {
         title: Option<String>,
         size: Option<(f64, f64)>,
     ) -> Result<u64, String> {
+        // Headless: register a fake window (fixed cell grid, no input) without ever
+        // starting winit, so nothing pops up.
+        if headless() {
+            let id = next_id();
+            windows().lock().unwrap().insert(
+                id,
+                WinHandle {
+                    size: Arc::new(Mutex::new(headless_cells(size))),
+                    held_key: Arc::new(Mutex::new(None)),
+                },
+            );
+            return Ok(id);
+        }
         let (reply_tx, reply_rx) = mpsc::channel();
         // Send under the proxy lock, then drop it before awaiting the reply so a
         // slow window build can't block other windows' sends.
@@ -556,6 +590,9 @@ pub(crate) mod backend {
     /// `(gui-close id)` — destroy window `id` (idempotent; unknown id is a no-op).
     pub fn close(id: u64) -> Result<(), String> {
         windows().lock().unwrap().remove(&id);
+        if headless() {
+            return Ok(());
+        }
         if let Ok(g) = gui() {
             let _ = g.lock().unwrap().send_event(UserEvent::Close { id });
         }
@@ -573,6 +610,9 @@ pub(crate) mod backend {
                 return Err("gui window not open".into());
             }
         }
+        if headless() {
+            return Ok(());
+        }
         gui()?
             .lock()
             .unwrap()
@@ -588,6 +628,9 @@ pub(crate) mod backend {
             if !w.contains_key(&id) {
                 return Err("gui window not open".into());
             }
+        }
+        if headless() {
+            return Ok(());
         }
         gui()?
             .lock()
@@ -605,6 +648,9 @@ pub(crate) mod backend {
                 return Err("gui window not open".into());
             }
         }
+        if headless() {
+            return Ok(());
+        }
         gui()?
             .lock()
             .unwrap()
@@ -620,6 +666,9 @@ pub(crate) mod backend {
             if !w.contains_key(&id) {
                 return Err("gui window not open".into());
             }
+        }
+        if headless() {
+            return Ok(());
         }
         gui()?
             .lock()
@@ -656,6 +705,9 @@ pub(crate) mod backend {
                 return Err("gui window not open".into());
             }
         }
+        if headless() {
+            return Ok(());
+        }
         gui()?
             .lock()
             .unwrap()
@@ -668,6 +720,9 @@ pub(crate) mod backend {
     /// Some(w)` targets just window `w`, leaving the global default untouched.
     /// No-op (silently) if the GUI thread never started.
     pub fn font(id: Option<u64>, family: Option<u32>, px: Option<f32>) -> Result<(), String> {
+        if headless() {
+            return Ok(());
+        }
         if let Ok(g) = gui() {
             let _ = g
                 .lock()
@@ -681,6 +736,9 @@ pub(crate) mod backend {
     /// global default for ones opened later. No-op (silently) if the GUI thread never
     /// started.
     pub fn inset(px: f32) -> Result<(), String> {
+        if headless() {
+            return Ok(());
+        }
         if let Ok(g) = gui() {
             let _ = g.lock().unwrap().send_event(UserEvent::Inset { px });
         }
@@ -691,6 +749,9 @@ pub(crate) mod backend {
     /// through the event-loop proxy like `font`; a no-op (silently) if the GUI thread
     /// never started or `id` isn't a live window.
     pub fn title(id: u64, title: String) -> Result<(), String> {
+        if headless() {
+            return Ok(());
+        }
         if let Ok(g) = gui() {
             let _ = g.lock().unwrap().send_event(UserEvent::Title { id, title });
         }
@@ -701,6 +762,9 @@ pub(crate) mod backend {
     /// RGBA pixels at runtime. Routed through the proxy like `title`; a silent no-op
     /// if the GUI thread never started or `id` isn't a live window.
     pub fn icon(id: u64, rgba: Vec<u8>, w: u32, h: u32) -> Result<(), String> {
+        if headless() {
+            return Ok(());
+        }
         if let Ok(g) = gui() {
             let _ = g
                 .lock()
@@ -720,6 +784,9 @@ pub(crate) mod backend {
         italic: Vec<u8>,
         bold_italic: Vec<u8>,
     ) -> Result<(), String> {
+        if headless() {
+            return Ok(());
+        }
         gui()?
             .lock()
             .unwrap()
