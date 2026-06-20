@@ -119,6 +119,13 @@ pub enum PrimOp {
     // per 2-arg call (one cons cell for `xs` + one closure for fold's lambda).
     Max,
     Min,
+    // `bit-and`/`bit-or`/`bit-xor` (perf): plain bitwise builtins; turning them
+    // into PrimOps removes the non-tail Call they emit in self-tail loops (e.g.
+    // sort's `gen`), which unblocks int register-carry for the loop variables.
+    // Int-only fast path; non-Int (BigInt) defers to the native builtin.
+    BitAnd,
+    BitOr,
+    BitXor,
 }
 
 /// A core 1-ary sequence primitive the compiler inlines (ADR-096) — the list
@@ -163,6 +170,9 @@ impl PrimOp {
             "vector-ref" => PrimOp::VectorRef,
             "max" => PrimOp::Max,
             "min" => PrimOp::Min,
+            "bit-and" => PrimOp::BitAnd,
+            "bit-or" => PrimOp::BitOr,
+            "bit-xor" => PrimOp::BitXor,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
             _ => return None,
         })
@@ -2425,6 +2435,9 @@ fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
         PrimOp::Quot => a.checked_div(b).map(Value::int),
         PrimOp::Max => Some(Value::int(a.max(b))),
         PrimOp::Min => Some(Value::int(a.min(b))),
+        PrimOp::BitAnd => Some(Value::int(a & b)),
+        PrimOp::BitOr => Some(Value::int(a | b)),
+        PrimOp::BitXor => Some(Value::int(a ^ b)),
         // Cons needs heap alloc; Div may return Float — both handled by prim_apply.
         // VectorRef needs the heap (slab index) and its operands aren't (Int, Int);
         // handled directly in prim2_inline_exec.
@@ -2483,6 +2496,9 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
         },
         PrimOp::Max => Value::int(a.max(b)),
         PrimOp::Min => Value::int(a.min(b)),
+        PrimOp::BitAnd => Value::int(a & b),
+        PrimOp::BitOr => Value::int(a | b),
+        PrimOp::BitXor => Value::int(a ^ b),
         // Handled in the exec arm (they need `&mut Heap` / the heap); never reach here.
         PrimOp::Cons | PrimOp::VectorRef => return Ok(None),
     };
@@ -2514,6 +2530,8 @@ fn prim_apply_float(op: PrimOp, x: Value, y: Value) -> Option<Value> {
         PrimOp::Div if b != 0.0 => Value::float(a / b),
         PrimOp::Max => Value::float(a.max(b)),
         PrimOp::Min => Value::float(a.min(b)),
+        // Bitwise ops are int-only; any float operand defers to the native (which errors).
+        PrimOp::BitAnd | PrimOp::BitOr | PrimOp::BitXor => return None,
         // `=` is structural (the native owns float equality), `rem`/`quot` take
         // the numeric-tower path, and zero-denominator `%div` errors — defer.
         _ => return None,
@@ -5325,6 +5343,9 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
                 | PrimOp::Cons
                 | PrimOp::Max
                 | PrimOp::Min
+                | PrimOp::BitAnd
+                | PrimOp::BitOr
+                | PrimOp::BitXor
         )
         // `Cons` is admitted: the lowering calls `brood_rt_cons` (same bump-allocate
         // path as `brood_rt_make_vector2`, which works) and reads all 3 result words
@@ -6474,6 +6495,9 @@ fn jit_lower_arm_inner(
                 let cond = b.ins().icmp(IntCC::SignedLessThanOrEqual, x, y);
                 b.ins().select(cond, x, y)
             }
+            PrimOp::BitAnd => b.ins().band(x, y),
+            PrimOp::BitOr => b.ins().bor(x, y),
+            PrimOp::BitXor => b.ins().bxor(x, y),
             PrimOp::Cons => return None, // allocates — never in the JIT subset
             PrimOp::VectorRef => return None, // heap slab read — not lowered; out of subset
         })
