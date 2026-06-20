@@ -3577,19 +3577,56 @@ fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         Value::Nil => return Ok(init), // empty range — acc unchanged
         v => return Err(LispError::wrong_type(heap, "%range-reduce", "range", v)),
     };
-    // Route the per-element callback through the VM when it's the active engine
-    // (`apply_value` → `dispatch`: a VM-eligible reducer runs compiled, ~the
-    // big win for a named/RUNTIME reducer; a native or ineligible closure still
-    // falls back to `eval::apply` inside `dispatch`). `BROOD_VM=0` keeps the pure
-    // tree-walker path, so the escape hatch / differential TW mode stay honest.
-    // Checked once, not per element.
+    // Route the per-element callback through the VM when it's the active engine.
     let use_vm = crate::eval::compile::vm_enabled();
     // Primitive-reducer fast path: when `f` is `+`/`*` (directly, or via the
     // prelude wrapper's passthrough arm), fold with the inlined scalar op and
-    // never call back into `apply` per element — that per-element dispatch is the
-    // dominant cost of `(reduce + 0 (range n))`. Resolved once against the live
-    // env; a per-element miss (i64 overflow → BigInt, or a Float/BigInt acc) falls
-    // back to the real reducer for that step, so the result stays bit-identical.
+    // never call back into `apply` per element.
+    let prim = crate::eval::compile::reduce_prim_op(heap, f);
+
+    // Tight i64 loop: when both prim resolves AND the accumulator is a plain i64,
+    // operate on raw integers with no Value boxing per iteration. This avoids the
+    // 24-byte-by-pointer passing overhead of `prim_apply_step` and the root
+    // machinery (integers are inline — no GC slot needed). On overflow (rare),
+    // fall through to the general path starting from the current position.
+    if let (Some(op), Some(mut int_acc)) = (prim, init.as_int()) {
+        let mut i = lo;
+        while if step > 0 { i < hi } else { i > hi } {
+            match crate::eval::compile::prim_apply_int_step(op, int_acc, i) {
+                Some(v) => int_acc = v,
+                None => {
+                    // Overflow or unsupported op — hand off the remainder to the
+                    // slow path starting from the current (i, acc) state.
+                    return range_reduce_slow(
+                        f,
+                        Value::int(int_acc),
+                        i,
+                        hi,
+                        step,
+                        use_vm,
+                        env,
+                        heap,
+                    );
+                }
+            }
+            i += step;
+        }
+        return Ok(Value::int(int_acc));
+    }
+
+    range_reduce_slow(f, init, lo, hi, step, use_vm, env, heap)
+}
+
+fn range_reduce_slow(
+    f: Value,
+    init: Value,
+    lo: i64,
+    hi: i64,
+    step: i64,
+    use_vm: bool,
+    env: EnvId,
+    heap: &mut Heap,
+) -> LispResult {
     let prim = crate::eval::compile::reduce_prim_op(heap, f);
     heap.root_scope(|heap| {
         let f_r = heap.root(f);

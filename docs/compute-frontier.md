@@ -84,9 +84,15 @@
 >    (`pair_bases: Option<(nursery, old)>`) when the arm has First/Rest AND no Cons, then emits
 >    `ushr(w1,62)==0` region guard → `ushr(w1,61)!=0` age select → `base+idx*48+{0,24}` loads.
 >    bintree flat (uses vectors not pairs). sort: ~215ms now (pair reads were not the bottleneck).
-> 2. **range-fold JIT bypass** (§3f) — `%range-reduce` calls `+` via `eval_apply` on each of 5M
->    elements; making it detect a PrimOp accumulator and use `prim_apply` inline cuts ~22ns/elem to
->    ~4ns. reduce: ~109ms → ~20ms.
+> 2. ~~**range-fold JIT bypass** (§3f)~~ **SHIPPED 2026-06-20** — reduce 139→**28 ms** (−80%).
+>    The previous fast path (already in place) used `prim_apply_step(op, Value::int(acc), Value::int(i))`
+>    per element — but `Value` is 24 bytes (> 16), so SysV ABI passes it by pointer: 72 bytes of
+>    stack traffic + a non-inlined call per iteration = ~24ns/elem despite the prim detection.
+>    Fix: `prim_apply_int_step(op: PrimOp, a: i64, b: i64) -> Option<i64>` takes/returns raw i64
+>    with `#[inline]`, so the compiler emits a tight 2-instruction loop (add + overflow branch
+>    never-taken). When init is `Int` and prim resolves, the tight path runs; overflow or
+>    non-Int init falls through to `range_reduce_slow` (the old root_scope path). Result:
+>    5M iters in ~3ms (~0.6ns/iter, 2 CPU cycles), down from ~112ms. Startup dominates (25ms).
 > 3. **sort list-walk** (§3g) — sort already uses Rust `Vec::sort_by` (fast); the cost is
 >    `seq_items` (O(n) pair reads) + `list_with_tail` (O(n) pair allocs) + `hash--acc` JIT walk.
 >    Car/cdr inline (#1) directly fixes the read halves; the alloc half is structural.
