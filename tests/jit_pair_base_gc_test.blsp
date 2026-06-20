@@ -1,0 +1,70 @@
+;; Regression test for a JIT use-after-GC bug in inline `first`/`rest` (ADR-101).
+;;
+;; The JIT stashed the LOCAL pair-slab base pointer once at arm entry, then used
+;; it for every `first`/`rest` in the arm body.  This worked for pure self-tail
+;; loops (no GC safepoints), but broke for arms that also contain a non-tail
+;; Call: the callee may trigger a minor GC flip, which replaces the entire
+;; nursery slab (std::mem::take(&mut self.local)) while leaving survivors in the
+;; new slab.  The cached base now points to freed memory; subsequent
+;; `first`/`rest` in the same arm use stale_base + new_pair_idx → garbage.
+;;
+;; The fix gates the optimization on !has_call_safepoint so arms with non-tail
+;; Calls fall back to brood_rt_car/cdr, which always read from the live heap.
+;;
+;; Shape that triggers the bug:
+;;   Prim1::First/Rest  ← stashed base used here (first read, still valid)
+;;   Call { tail:false } ← GC safepoint; flip may replace local slab
+;;   Prim1::First/Rest  ← stashed base used again (now stale → garbage)
+;;   SelfCall (tail)    ← keeps the arm in a loop past the JIT threshold
+;;
+;; The list `xs` is created inside the test body (not via a top-level `def`) so
+;; its pairs live in the LOCAL nursery, not the shared RUNTIME region.  After a
+;; GC flip the pair survives into the NEW nursery slab; the stashed old-slab
+;; pointer becomes dangling.  A test failure (false returned, or a panic) means
+;; the bug regressed; the tests must pass cleanly with the fix in place.
+
+(defmodule jit-pair-base-gc-test
+  (:use test))
+
+(defn alloc-pressure (n)
+  "Build a LOCAL cons-list of length n — pure allocation pressure, result dropped."
+  (if (= n 0) nil (cons n (alloc-pressure (- n 1)))))
+
+;; ---- arm under test: first ----
+;; Reads (first xs) twice with a non-tail allocating call between the two reads.
+;; xs is LOCAL; after the GC triggered by alloc-pressure the local slab changes;
+;; if pair_bases is stashed (old bug) the second read hits freed memory.
+(defn check-first-stable (xs iter)
+  "Return true if (first xs) agrees before and after alloc-pressure, for iter rounds."
+  (if (= iter 0)
+    true
+    (let (h1 (first xs)           ; LOCAL pair read — stashed base valid here
+          _  (alloc-pressure 32)  ; non-tail call → GC safepoint → may flip local slab
+          h2 (first xs))          ; stashed base dangling if flip occurred → garbage
+      (if (= h1 h2)
+        (check-first-stable xs (- iter 1))
+        false))))
+
+;; ---- arm under test: rest ----
+(defn check-rest-stable (xs iter)
+  "Return true if (rest xs) agrees before and after alloc-pressure, for iter rounds."
+  (if (= iter 0)
+    true
+    (let (t1 (rest xs)
+          _  (alloc-pressure 32)
+          t2 (rest xs))
+      (if (= (nil? t1) (nil? t2))
+        (check-rest-stable xs (- iter 1))
+        false))))
+
+(describe "JIT inline car/cdr: pair-slab pointer valid across GC safepoints" :serial
+  ;; Create the list INSIDE the test body so its pairs are LOCAL, not RUNTIME-promoted.
+  ;; Run 5000 iterations — past JIT tier threshold (8 × 256 = 2048) — so both
+  ;; check-first-stable and check-rest-stable compile and the stale-pointer path fires.
+  (test "first reads agree before and after a non-tail allocating call (regression)"
+    (let (xs (list 1 2 3 4 5))
+      (assert= (check-first-stable xs 5000) true)))
+
+  (test "rest reads agree before and after a non-tail allocating call (regression)"
+    (let (xs (list 1 2 3 4 5))
+      (assert= (check-rest-stable xs 5000) true))))
