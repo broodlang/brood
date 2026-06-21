@@ -23,6 +23,7 @@
 //! namespace-resolve), on the already-expanded, already-resolved form.
 
 use smallvec::SmallVec;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -449,6 +450,14 @@ pub enum Node {
         head: Symbol,
         guard: AtomicU64,
         pos: Option<Pos>,
+    },
+    /// `(%try body_fn handler_fn)` desugared inline: body is the thunk's
+    /// unwrapped body, bind_slot is the frame slot for the caught exception,
+    /// handler is the handler body. Both run via exec_value in the same frame.
+    TryCatch {
+        body: Box<Node>,
+        bind_slot: usize,
+        handler: Box<Node>,
     },
 }
 
@@ -1003,6 +1012,44 @@ fn value_is_immovable(v: Value) -> bool {
 /// to a `Node::Local` slot read; each name inherited from an *outer* closure maps
 /// to a `Node::Global` read through the current captured env. True globals are
 /// **not** captured — they resolve live (late-bound) through the new closure's
+/// Compile `(%try (fn () body…) (fn (e) handler…))` to a `Node::TryCatch` that runs
+/// body and handler inline in the current frame, without closure allocation.
+fn compile_try_catch(heap: &Heap, items: &[Value], scope: &mut Scope) -> Option<Node> {
+    if items.len() != 3 {
+        return None;
+    }
+    let thunk_items = heap.list_to_vec(items[1]).ok()?;
+    let handler_items = heap.list_to_vec(items[2]).ok()?;
+    if thunk_items.len() < 2 || handler_items.len() < 2 {
+        return None;
+    }
+    if !matches!(thunk_items[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::FN)) {
+        return None;
+    }
+    if !matches!(handler_items[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::FN)) {
+        return None;
+    }
+    let thunk_params = heap.list_to_vec(thunk_items[1]).ok()?;
+    let handler_params = heap.list_to_vec(handler_items[1]).ok()?;
+    if !thunk_params.is_empty() || handler_params.len() != 1 {
+        return None;
+    }
+    let evar = match handler_params[0].unpack() {
+        ValueRef::Sym(s) => s,
+        _ => return None,
+    };
+    let body = compile_body(heap, &thunk_items[2..], scope, false)?;
+    let saved = scope.mark();
+    let bind_slot = scope.bind(evar);
+    let handler = compile_body(heap, &handler_items[2..], scope, false);
+    scope.restore(saved);
+    Some(Node::TryCatch {
+        body: Box::new(body),
+        bind_slot,
+        handler: Box::new(handler?),
+    })
+}
+
 /// frame parent. Returns `None` (defer) if a capture would read a not-yet-finalized
 /// `letrec` slot, which a value snapshot can't express.
 fn compile_captures(scope: &Scope) -> Option<(Vec<(Symbol, Node)>, Option<Symbol>)> {
@@ -1284,6 +1331,14 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 if value::symbol_is(h, kw::FN) {
                     return compile_make_closure(heap, form, scope);
                 }
+                // `(%try (fn () body…) (fn (e) handler…))` — inline try/catch:
+                // run body and handler in the current frame without closure allocation.
+                if value::symbol_is(h, kw::TRY_PRIM) {
+                    if let Some(node) = compile_try_catch(heap, &items, scope) {
+                        return Some(node);
+                    }
+                    // Non-canonical shape: fall through to generic call (try_catch native handles it)
+                }
                 // Any *other* special form (`def`/`quasiquote`/`binding`) is outside
                 // the VM's vocabulary — defer the whole closure to the tree-walker.
                 // (`if`/`do`/`let`/`letrec`/`fn`/`quote` are handled above;
@@ -1517,6 +1572,9 @@ fn node_has_rt_handles(node: &Node) -> bool {
         }
         Node::Prim2 { a, b, .. } => node_has_rt_handles(a) || node_has_rt_handles(b),
         Node::Prim1 { a, .. } => node_has_rt_handles(a),
+        Node::TryCatch { body, handler, .. } => {
+            node_has_rt_handles(body) || node_has_rt_handles(handler)
+        }
         Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
     }
 }
@@ -1566,6 +1624,9 @@ fn local_escapes(node: &Node, slot: usize, nelems: usize) -> bool {
         Node::MakeClosure { captures, .. } => captures.iter().any(|(_, n)| local_escapes(n, slot, nelems)),
         Node::Prim2 { a, b, .. } => local_escapes(a, slot, nelems) || local_escapes(b, slot, nelems),
         Node::Prim1 { a, .. } => local_escapes(a, slot, nelems),
+        Node::TryCatch { body, handler, .. } => {
+            local_escapes(body, slot, nelems) || local_escapes(handler, slot, nelems)
+        }
     }
 }
 
@@ -1608,6 +1669,10 @@ fn rewrite_elem_reads(node: &mut Node, slot: usize, base: usize, nelems: usize) 
             rewrite_elem_reads(b, slot, base, nelems);
         }
         Node::Prim1 { a, .. } => rewrite_elem_reads(a, slot, base, nelems),
+        Node::TryCatch { body, handler, .. } => {
+            rewrite_elem_reads(body, slot, base, nelems);
+            rewrite_elem_reads(handler, slot, base, nelems);
+        }
     }
 }
 
@@ -1646,6 +1711,10 @@ fn ea_scalar_replace(node: &mut Node, next_slot: &mut usize) -> bool {
             changed |= ea_scalar_replace(b, next_slot);
         }
         Node::Prim1 { a, .. } => changed |= ea_scalar_replace(a, next_slot),
+        Node::TryCatch { body, handler, .. } => {
+            changed |= ea_scalar_replace(body, next_slot);
+            changed |= ea_scalar_replace(handler, next_slot);
+        }
         _ => {}
     }
     if let Node::LetBind { binds, body } = node {
@@ -1712,6 +1781,7 @@ fn node_count(node: &Node) -> usize {
         Node::MakeClosure { captures, .. } => captures.iter().map(|(_, n)| node_count(n)).sum(),
         Node::Prim2 { a, b, .. } => node_count(a) + node_count(b),
         Node::Prim1 { a, .. } => node_count(a),
+        Node::TryCatch { body, handler, .. } => node_count(body) + node_count(handler),
     }
 }
 
@@ -1733,6 +1803,9 @@ fn node_has_self_call(node: &Node) -> bool {
         Node::MakeClosure { captures, .. } => captures.iter().any(|(_, n)| node_has_self_call(n)),
         Node::Prim2 { a, b, .. } => node_has_self_call(a) || node_has_self_call(b),
         Node::Prim1 { a, .. } => node_has_self_call(a),
+        Node::TryCatch { body, handler, .. } => {
+            node_has_self_call(body) || node_has_self_call(handler)
+        }
     }
 }
 
@@ -1756,6 +1829,9 @@ fn node_has_make_closure(node: &Node) -> bool {
         }
         Node::Prim2 { a, b, .. } => node_has_make_closure(a) || node_has_make_closure(b),
         Node::Prim1 { a, .. } => node_has_make_closure(a),
+        Node::TryCatch { body, handler, .. } => {
+            node_has_make_closure(body) || node_has_make_closure(handler)
+        }
     }
 }
 
@@ -1891,6 +1967,11 @@ fn shift_slots(node: &Node, delta: usize) -> Node {
             guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
             pos: *pos,
         },
+        Node::TryCatch { body, bind_slot, handler } => Node::TryCatch {
+            body: Box::new(shift_slots(body, delta)),
+            bind_slot: bind_slot + delta,
+            handler: Box::new(shift_slots(handler, delta)),
+        },
     }
 }
 
@@ -1959,6 +2040,10 @@ fn inline_self_calls(
         }
         Node::Prim1 { a, .. } => {
             count += inline_self_calls(a, orig_body, defn_name, nrequired, m, next_block);
+        }
+        Node::TryCatch { body, handler, .. } => {
+            count += inline_self_calls(body, orig_body, defn_name, nrequired, m, next_block);
+            count += inline_self_calls(handler, orig_body, defn_name, nrequired, m, next_block);
         }
     }
     // Now consider *this* node (children already inlined). The args we move out keep
@@ -2056,6 +2141,9 @@ fn node_touches_heap(node: &Node) -> bool {
             captures.iter().any(|(_, n)| node_touches_heap(n))
         }
         Node::Prim2 { a, b, .. } => node_touches_heap(a) || node_touches_heap(b),
+        Node::TryCatch { body, handler, .. } => {
+            node_touches_heap(body) || node_touches_heap(handler)
+        }
     }
 }
 
@@ -2734,6 +2822,10 @@ fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
             rewrite_node(b, f);
         }
         Node::Prim1 { a, .. } => rewrite_node(a, f),
+        Node::TryCatch { body, handler, .. } => {
+            rewrite_node(body, f);
+            rewrite_node(handler, f);
+        }
     }
 }
 
@@ -3109,6 +3201,20 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
             let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
             heap.truncate_roots(save);
             result.map_err(tag)
+        }
+        Node::TryCatch { body, bind_slot, handler } => {
+            match exec_value(heap, body, frame_base, genv) {
+                Ok(v) => Ok(v),
+                Err(e) if e.is_control() => Err(e),
+                Err(e) => {
+                    let caught = match e.payload {
+                        Some(v) => v,
+                        None => e.to_value_map(heap),
+                    };
+                    heap.set_root_at(frame_base + bind_slot, caught);
+                    exec_value(heap, handler, frame_base, genv)
+                }
+            }
         }
     }
 }
@@ -3573,6 +3679,14 @@ pub(crate) fn run_process_body(
 // guarded by the differential test.
 
 /// One bytecode instruction. A **stack machine**: each instruction pushes/pops on
+/// Non-owning raw pointer into a `Node` tree owned by a `CompiledArm`.
+/// Used by `Inst::TryCatch` to avoid double-rewriting: `rewrite_node(arm.body)`
+/// rewrites the pointed-to nodes in place; `rewrite_chunk` skips `Inst::TryCatch`.
+struct NodePtr(NonNull<Node>);
+// SAFETY: Node is Send+Sync (all interior mutability is through AtomicU64).
+unsafe impl Send for NodePtr {}
+unsafe impl Sync for NodePtr {}
+
 /// the operand region of `Heap::roots` that sits just above the activation frame's
 /// slots (`base..base+nslots`). Frame slots are read/written by absolute index
 /// (`Local`/`SetLocal`); everything else is push/pop. The semantics of each arm
@@ -3684,6 +3798,14 @@ enum Inst {
         fn_rest: ConstVal,
         names: Box<[Symbol]>,
         self_name: Option<Symbol>,
+    },
+    /// Inline try/catch: run body via exec_value; on non-control error write
+    /// the caught value to bind_slot and run handler; push result. NodePtrs
+    /// point into arm.body — rewrite_chunk skips them; rewrite_node handles them.
+    TryCatch {
+        body: NodePtr,
+        bind_slot: usize,
+        handler: NodePtr,
     },
 }
 
@@ -3917,6 +4039,13 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 fn_rest: ConstVal::new(fn_rest.load()),
                 names,
                 self_name: *self_name,
+            });
+        }
+        Node::TryCatch { body, bind_slot, handler } => {
+            code.push(Inst::TryCatch {
+                body: NodePtr(NonNull::from(body.as_ref())),
+                bind_slot: *bind_slot,
+                handler: NodePtr(NonNull::from(handler.as_ref())),
             });
         }
     }
@@ -4537,6 +4666,27 @@ fn exec_chunk(
                     heap.env_define(env, *name, closure);
                 }
                 heap.push_root(closure);
+            }
+            Inst::TryCatch { body, bind_slot, handler } => {
+                // SAFETY: NodePtrs reference nodes owned by arm.body (same CompiledArm),
+                // which outlives exec_chunk via the Arc<CompiledArm> held by vm_run_bc.
+                let body_node = unsafe { body.0.as_ref() };
+                let handler_node = unsafe { handler.0.as_ref() };
+                match exec_value(heap, body_node, base, genv) {
+                    Ok(v) => heap.push_root(v),
+                    Err(e) if e.is_control() => return Err(e),
+                    Err(e) => {
+                        let caught = match e.payload {
+                            Some(v) => v,
+                            None => e.to_value_map(heap),
+                        };
+                        heap.set_root_at(base + bind_slot, caught);
+                        match exec_value(heap, handler_node, base, genv) {
+                            Ok(v) => heap.push_root(v),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
             }
         }
     }
@@ -5409,6 +5559,7 @@ fn inst_opcode_name(inst: &Inst) -> &'static str {
         Inst::Call { .. } => "Call",
         Inst::SelfCall { .. } => "SelfCall",
         Inst::MakeClosure { .. } => "MakeClosure",
+        Inst::TryCatch { .. } => "TryCatch",
     }
 }
 
@@ -5457,6 +5608,10 @@ fn collect_self_call_args<'a>(node: &'a Node, out: &mut Vec<&'a [Node]>) {
             collect_self_call_args(b, out);
         }
         Node::Prim1 { a, .. } => collect_self_call_args(a, out),
+        Node::TryCatch { body, handler, .. } => {
+            collect_self_call_args(body, out);
+            collect_self_call_args(handler, out);
+        }
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
     }
 }
@@ -5549,6 +5704,10 @@ fn invariant_global_vecs(node: &Node, out: &mut std::collections::HashSet<Symbol
             invariant_global_vecs(b, out);
         }
         Node::Prim1 { a, .. } => invariant_global_vecs(a, out),
+        Node::TryCatch { body, handler, .. } => {
+            invariant_global_vecs(body, out);
+            invariant_global_vecs(handler, out);
+        }
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
     }
 }
