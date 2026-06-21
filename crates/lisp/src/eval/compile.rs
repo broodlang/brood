@@ -5513,7 +5513,7 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // was fixed with the correct lowering; the old bail is no longer needed.
     };
     code.iter().all(|inst| match inst {
-        Inst::Const(cv) => matches!(cv.load().unpack(), ValueRef::Int(_) | ValueRef::Nil | ValueRef::Float(_) | ValueRef::Bool(_)),
+        Inst::Const(_) => true,
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)
@@ -6214,6 +6214,14 @@ fn jit_lower_arm_inner(
     let gepochptr_id = m
         .declare_function("brood_rt_global_epoch_ptr", Linkage::Import, &gepochptr_sig)
         .ok()?;
+    // brood_rt_const_load(cv: *const ConstVal, out: *mut Value): load the current Value
+    // from a GC-movable ConstVal::Handle, writing it to *out. No return value — never fails.
+    let mut const_load_sig = m.make_signature();
+    const_load_sig.params.push(AbiParam::new(ptr_ty)); // cv: *const ConstVal
+    const_load_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
+    let const_load_id = m
+        .declare_function("brood_rt_const_load", Linkage::Import, &const_load_sig)
+        .ok()?;
 
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
@@ -6274,6 +6282,7 @@ fn jit_lower_arm_inner(
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     let gepochptr_ref = m.declare_func_in_func(gepochptr_id, b.func);
+    let const_load_ref = m.declare_func_in_func(const_load_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
     let has_cons = code.iter().any(|i| {
@@ -7164,7 +7173,24 @@ fn jit_lower_arm_inner(
                         let v = b.ins().iconst(types::I64, if bv { 1 } else { 0 });
                         stack.push(Op::Bool(v));
                     }
-                    _ => return None,
+                    _ => {
+                        // GC-movable heap handle (Str, BigInt, Pair, Fn, …): call
+                        // `brood_rt_const_load(cv_ptr, out)` at the point of use to get
+                        // the live bits (updated by `runtime_collect` via `ConstVal::rewrite`).
+                        // The ConstVal lives in the arm's chunk behind an Arc<CompiledArm>,
+                        // so the address is stable for the JIT function's lifetime.
+                        let cv_ptr = b.ins().iconst(ptr_ty, cv as *const ConstVal as i64);
+                        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        b.ins().call(const_load_ref, &[cv_ptr, out_addr]);
+                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let w1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let w2 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        stack.push(Op::Handle(w0, w1, w2));
+                    }
                 },
                 // Lazy: push a reference to the frame slot. Consumers tag-check it to an int
                 // (arithmetic / a branch) or copy it whole (a binder / arg / return), so a
@@ -7238,15 +7264,6 @@ fn jit_lower_arm_inner(
                     // callee via the call IC. A **computed** head leaves the callee staged
                     // below the args (`argc + 1` operands).
                     let n_ops = if head.is_some() { argc } else { argc + 1 };
-                    // A free-global **tail** call is elided too (no staged callee), but the
-                    // tail path (`jit_dispatch_tail`, outcome 4) reads a staged callee — so
-                    // don't lower an arm ending in one; the VM runs it correctly. Computed
-                    // tail calls keep their staged callee and lower fine; non-tail elided
-                    // calls go via `jit_dispatch_call`. Rare (mutual recursion) — self-tail
-                    // loops use `SelfCall`, a different path.
-                    if *tail && head.is_some() {
-                        return None;
-                    }
                     // The call is a safepoint (the callee runs arbitrary Brood and may GC).
                     // A live `Handle` left on the operand stack BELOW the call's own operands
                     // would be a heap pointer in a register across the collection → stale.
@@ -7283,6 +7300,28 @@ fn jit_lower_arm_inner(
                         Vec::with_capacity(ops.len());
                     for &op in &ops {
                         worded.push(read_words(&mut b, op));
+                    }
+                    // For a free-global tail call, jit_dispatch_tail reads [callee, args…]
+                    // from roots — but the elided head is never staged. Resolve it via the
+                    // global IC and stage it now, before the args. Arg words are already in
+                    // `worded` (read above, before any push) so no slot reads follow.
+                    if *tail && head.is_some() {
+                        let sym_v2 = b.ins().iconst(types::I32, call_head as i64);
+                        let site_v2 = b.ins().iconst(types::I32, call_site as i64);
+                        let out_a = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        let cv = b.ins().call(globic_ref, &[heap, out_a, sym_v2, site_v2]);
+                        let cstatus = b.inst_results(cv)[0];
+                        let callee_ok = b.create_block();
+                        b.ins().brif(cstatus, error, &[], callee_ok, &[]);
+                        b.switch_to_block(callee_ok);
+                        let cw0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let cw1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let cw2 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        b.ins().call(push_ref, &[heap, cw0, cw1, cw2]);
                     }
                     // Stage `[callee, arg0 .. arg_{argc-1}]` (the VM's `Inst::Call` layout
                     // that `brood_rt_call_slow` / `jit_dispatch_tail` read back).

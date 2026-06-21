@@ -100,6 +100,7 @@ impl Jit {
             brood_rt_pair_nursery_base as *const u8,
         );
         builder.symbol("brood_rt_pair_old_base", brood_rt_pair_old_base as *const u8);
+        builder.symbol("brood_rt_const_load", brood_rt_const_load as *const u8);
         Jit {
             module: JITModule::new(builder),
         }
@@ -465,6 +466,22 @@ pub unsafe extern "C" fn brood_rt_roots_base(heap: *mut Heap) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_push(heap: *mut Heap, w0: i64, w1: i64, w2: i64) {
     (*heap).push_root(words_to_val(w0, w1, w2));
+}
+
+/// Load the current `Value` from a `ConstVal` (a compiled literal that may be a
+/// GC-movable heap handle). The ConstVal lives in the arm's `chunk.code` and is kept
+/// alive by the arm's `Arc<CompiledArm>` for the entire JIT code lifetime. Reading
+/// `cv.load()` at the point of use ensures we see the GC-updated bits after any
+/// `runtime_collect` that ran since the arm was compiled.
+///
+/// # Safety
+/// `cv` must point to a live [`crate::eval::compile::ConstVal`]; `out` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_const_load(
+    cv: *const crate::eval::compile::ConstVal,
+    out: *mut crate::core::value::Value,
+) {
+    *out = (*cv).load();
 }
 
 /// Resolve a free global `sym` (a JIT'd call's callee-loading `Inst::Global`/`GlobalIc`,
