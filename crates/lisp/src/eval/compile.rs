@@ -3496,6 +3496,64 @@ fn dispatch(
                     genv: callee_env,
                 });
             }
+            // JIT fast path: call jit_tier directly, bypassing vm_run_bc's per-call
+            // overhead (GcBlockGuard, TopLevelGuard thread-locals, BcFrame Vec alloc,
+            // loop-top safepoint checks). Gated on: JIT code installed, no runtime GC
+            // handles (which need live_arm_push registration), no installed inline
+            // upgrade (which needs the larger inline_nslots frame vm_run_bc sets up).
+            // The pre-check on `jit_code` avoids push_frame + vm_apply double-setup
+            // for arms that haven't tiered yet (those fall straight through to vm_apply).
+            #[cfg(feature = "jit")]
+            {
+                use std::sync::atomic::Ordering::Acquire;
+                let code = arm.jit_code.load(Acquire);
+                if !arm.has_runtime_handles
+                    && !arm.inline_installed.load(Acquire)
+                    && !code.is_null()
+                    && code != crate::jit::BAILED
+                    && code != crate::jit::QUEUED
+                {
+                    let env_base = heap.env_roots_len();
+                    let env_root = heap.root_env(callee_env);
+                    let base = heap.roots_len();
+                    if let Err(e) = push_frame(heap, &arm, &cur_argv, env_root) {
+                        heap.truncate_env_roots(env_base);
+                        return Err(e);
+                    }
+                    match jit_tier(&arm, heap, base, env_root) {
+                        Some(0) => {
+                            crate::perf_bump!(jit_apply_fast);
+                            let v = heap.root_at(base);
+                            heap.truncate_roots(base);
+                            heap.truncate_env_roots(env_base);
+                            return Ok(Step::Done(v));
+                        }
+                        Some(3) => {
+                            heap.truncate_roots(base);
+                            heap.truncate_env_roots(env_base);
+                            let e = heap
+                                .jit_pending_error
+                                .take()
+                                .expect("JIT outcome 3 with no parked error");
+                            return Err(e);
+                        }
+                        _ => {
+                            // Epoch reset (→ None), deopt (1), preempt (2), or tail
+                            // (4): fall back to vm_apply with the original args.
+                            // `!arm.has_runtime_handles` (the fast-path gate) ensures
+                            // no GC ran during the JIT call, so `cur_argv` is still
+                            // valid. Reading args back from roots[base+k] is wrong for
+                            // rest-param arms where cur_argv.len() > arm.nslots.
+                            let callee_env2 = heap.read_root_env(env_root);
+                            heap.truncate_roots(base);
+                            heap.truncate_env_roots(env_base);
+                            return Ok(Step::Done(
+                                vm_apply(heap, arm, &cur_argv, callee_env2)?,
+                            ));
+                        }
+                    }
+                }
+            }
             return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, callee_env)?));
         }
         // A closure with no VM-eligible arm for this argc — a true defer to the
@@ -9626,10 +9684,9 @@ mod tests {
             "an arm ending in a computed-callee tail call (past the body-weight gate) must lower"
         );
 
-        // The deliberate counter-case: the *same* 4-work-op arm whose tail call is a
-        // **free-global** head (`head: Some(fb)`, no staged callee — the elided shape the
-        // real compiler emits for `(fb …)` in tail position) *bails*. `jit_dispatch_tail`
-        // reads a staged callee an elided head never leaves, so the arm stays on the VM.
+        // The *same* 4-work-op arm whose tail call is a **free-global** head (`head:
+        // Some(fb)`, elided shape) now lowers successfully: the JIT stages the callee
+        // via `globic_ref` before the args (the free-global tail call fix, c99f539).
         let elided = Chunk {
             code: vec![
                 Inst::Local(0),                            // 0: n
@@ -9684,8 +9741,8 @@ mod tests {
                 inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(
-            jit_lower_arm(&mut jit, &elided_arm, &[]).is_none(),
-            "an elided free-global tail call must bail (the tail path needs a staged callee)"
+            jit_lower_arm(&mut jit, &elided_arm, &[]).is_some(),
+            "an elided free-global tail call must lower (callee staged via globic_ref, c99f539)"
         );
 
         // ...and a *thin* tail-call arm (2 work ops: `=`, `-`) is gated out — stays on the
