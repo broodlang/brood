@@ -95,6 +95,11 @@ mod imp {
         /// found them** — a dirty operand stack that corrupts the `exec_chunk` re-run.
         /// Nonzero ⇒ a real correctness hole.
         jit_deopt_dirty,
+        /// Rust-native → JIT fast path in `dispatch`: the callee was JIT-compiled and
+        /// returned Done (outcome 0) via `jit_tier` without going through `vm_run_bc`.
+        /// Saves the GcBlockGuard/TopLevelGuard thread-local ops and frame-vector setup
+        /// on each Rust-native callback call (e.g. a `reduce` lambda).
+        jit_apply_fast,
     );
 }
 
