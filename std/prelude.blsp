@@ -727,15 +727,13 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 (defn pow--acc (base exp acc) (if (= exp 0) acc (pow--acc base (- exp 1) (* acc base))))
 
 ;; (sqrt n) — Newton's method (Babylonian): guess' = (guess + n/guess)/2, iterated
-;; to the fixed point. Pure Brood, so it's *approximate* (a few ULPs, not the
-;; hardware sqrt) but needs no Rust; redefine it if you ever need bit-exactness.
+;; Delegates to `%f64-sqrt` (f64::sqrt) for IEEE 754 correctness on all inputs
+;; including subnormals (the old Newton's-method initial guess `(/ n 2.0)` would
+;; underflow to 0.0 for subnormal n, triggering a false division-by-zero).
 ;; Always returns a Float; a negative argument raises.
 (defn sqrt (n)
-  "The square root of `n` (Newton's method; always a float). Negative `n` raises."
-  (cond (< n 0) (error "sqrt: negative argument " n) (<= n 0) 0.0 else (sqrt--iter n (/ n 2.0) 100)))
-(defn sqrt--iter (n guess steps)
-  (let (next (/ (+ guess (/ n guess)) 2.0))
-    (if (or (= steps 0) (= next guess)) next (sqrt--iter n next (- steps 1)))))
+  "The square root of `n` (IEEE 754; always a float). Negative `n` raises."
+  (cond (< n 0) (error "sqrt: negative argument " n) (<= n 0) 0.0 else (%f64-sqrt n)))
 
 ;; Euclidean modulo: the result is always non-negative and lies in
 ;; [0, (abs b)). Brood over the `rem` primitive (truncated remainder), nudged
