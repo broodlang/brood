@@ -1,5 +1,10 @@
 # Brood
 
+> ⚠️ **Experimental — pre-1.0.** Brood is under active development and nothing is
+> stable yet. The language, standard library, tooling, and on-disk formats can
+> change dramatically (and break) without notice or migration path. Explore and
+> experiment freely, but don't build anything you depend on against it yet.
+
 **Brood** is a small, dynamic **Lisp implemented in Rust**, built for one
 purpose: to be the language a modern, Emacs-like text editor is *written in* —
 so that a running editor can redefine its own behaviour on the fly.
