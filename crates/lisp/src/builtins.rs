@@ -1020,8 +1020,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "audio-beep",
-        Arity::exact(2),
-        Sig::new(vec![num, num], nil_ty),
+        Arity::range(2, 3),
+        Sig::with_rest(vec![num, num], num, nil_ty),
         audio_beep,
     );
     def(
@@ -2522,7 +2522,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gui-fullscreen!", &["id", "on"], "Make window id borderless-fullscreen while `on` is truthy (covering the whole monitor it's on, NO title bar / decorations — distraction-free), or restore it to a normal window otherwise. For a big-but-normal window that keeps its title bar, use gui-maximize! instead. The fullscreen/restore triggers a resize, so the consumer gets the usual [:resize cols rows] message and re-renders at the new size. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-maximize!", &["id", "on"], "Maximise window id while `on` is truthy (fill the screen's work area, KEEPING the title bar / decorations), or restore it to its previous size otherwise — e.g. an editor's init file opening big without going true-fullscreen. The maximise/restore triggers a resize, so the consumer gets the usual [:resize cols rows] message and re-renders at the new size. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
-    ("audio-beep", &["freq-hz", "ms"], "Play a short tone of freq-hz for ms milliseconds. Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. Synthesised on a dedicated audio thread (needs --features audio, which `gui` pulls in). A graceful no-op without the feature, when there's no audio device, or when muted via BROOD_AUDIO=0 or BROOD_GUI_HEADLESS. Returns nil."),
+    ("audio-beep", &["freq-hz", "ms", "vol"], "Play a short tone of freq-hz for ms milliseconds, optionally at peak amplitude vol (0..1, default ~0.18 — pass a small vol for quiet/ambient sounds). Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. Synthesised on a dedicated audio thread (needs --features audio). A graceful no-op without the feature, when there's no audio device, or when muted via BROOD_AUDIO=0 or BROOD_GUI_HEADLESS. Returns nil."),
     ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
     ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."),
     ("gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
@@ -6967,14 +6967,22 @@ fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::int(id as i64))
 }
 
-/// `(audio-beep freq-hz ms)` — play a short tone of `freq-hz` for `ms`
-/// milliseconds. Fire-and-forget (never blocks); overlapping beeps mix. A no-op
-/// without `--features audio`, when there's no audio device, or when muted
-/// (`BROOD_AUDIO=0` / `BROOD_GUI_HEADLESS`). Returns nil.
+/// `(audio-beep freq-hz ms [vol])` — play a short tone of `freq-hz` for `ms`
+/// milliseconds at peak amplitude `vol` (0..1, default ~0.18). Fire-and-forget
+/// (never blocks); overlapping beeps mix. A no-op without `--features audio`,
+/// when there's no audio device, or when muted (`BROOD_AUDIO=0` /
+/// `BROOD_GUI_HEADLESS`). Returns nil.
 fn audio_beep(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let freq = expect_number(heap, "audio-beep", arg(args, 0))?;
     let ms = expect_number(heap, "audio-beep", arg(args, 1))?;
-    crate::audio::beep(freq as f32, ms.max(0.0) as u64);
+    // Optional 3rd arg is peak amplitude; 0.0 (also the default) means "use the
+    // backend's default volume".
+    let vol = if args.len() >= 3 {
+        expect_number(heap, "audio-beep", arg(args, 2))? as f32
+    } else {
+        0.0
+    };
+    crate::audio::beep(freq as f32, ms.max(0.0) as u64, vol);
     Ok(Value::Nil)
 }
 
