@@ -159,6 +159,49 @@ brood> (greet "world")
 "hello, world"
 ```
 
+### Project commands (`nest`)
+
+`nest` is the project driver (the `cargo` to `brood`'s `rustc`). Run any of these
+from a project directory (`nest new <name>` scaffolds one):
+
+| Command | What it does |
+|---------|--------------|
+| `nest new <name>` | Scaffold a project (`project.blsp`, `src/`, `tests/`, `.mcp.json`, a starter doc). |
+| `nest run [file]` | Run the project entry point, or a given `.blsp` file (`--watch` reloads on change). |
+| `nest test [files]` | Run the test suite (or specific `tests/**/*_test.blsp` files). |
+| `nest check [files]` | Advisory set-theoretic type-check. |
+| `nest format` | Reformat every `.blsp` under `src/` and `tests/` in place. |
+| `nest doc [module]` | Emit Markdown docs for the project, or one module. |
+| `nest repl` | A REPL with every project module pre-loaded. |
+| `nest add`/`remove`/`fetch`/`update`/`tree` | Dependency management (ADR-037). |
+| `nest grammar [target]` | Generate an editor syntax grammar (see below). |
+| `nest mcp` | Serve the project over MCP on stdio (see below). |
+| `nest observe` | A full-screen TUI process observer. |
+| `nest attach` | Attach this terminal to a `ui-run` app served by a running daemon. |
+| `nest release` | Bundle the project into a single self-contained executable (ADR-038). |
+
+### Editor & agent integration
+
+**Language server.** `make install` already builds and installs **`brood-lsp`**
+(Tiers 0–2: diagnostics, completion, hover, signature help, goto-definition,
+references, rename, semantic tokens, formatting). Point your editor's LSP client
+at the `brood-lsp` binary for `.blsp` files — see [`docs/lsp.md`](docs/lsp.md).
+
+**Syntax highlighting** is *generated* from the language's own `(special-forms)`,
+so the keyword list never drifts. `nest grammar [target]` prints to stdout —
+redirect it into your editor's grammar file:
+
+```bash
+nest grammar                 > brood.tmLanguage.json   # VS Code TextMate (default target)
+nest grammar emacs           > brood-mode-keywords.el   # Emacs font-lock (brood-mode)
+nest grammar tree-sitter     > highlights.scm           # tree-sitter highlight queries
+```
+
+**MCP server.** `nest mcp` serves the current project over the Model Context
+Protocol on stdio, so an agent (Claude Code, etc.) can eval, look up docs, format,
+macroexpand, and run tests against the project's live image. `nest new` scaffolds
+a `.mcp.json` wired to it — see [`docs/mcp.md`](docs/mcp.md).
+
 ## What works today
 
 Lexically-scoped closures, proper tail calls, `def`/`defn`/`let`/`fn`,
