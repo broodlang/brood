@@ -10,13 +10,14 @@
 //! silent). Beeps are synthesised sine tones mixed concurrently, so overlapping
 //! sounds (a hit during a score jingle) just stack.
 
-/// `(audio-beep freq-hz ms)` — play a short tone. No-op without `--features audio`.
+/// `(audio-beep freq-hz ms [vol])` — play a short tone at peak amplitude `vol`
+/// (0..1). No-op without `--features audio`.
 #[cfg(not(feature = "audio"))]
-pub fn beep(_freq: f32, _ms: u64) {}
+pub fn beep(_freq: f32, _ms: u64, _vol: f32) {}
 
 #[cfg(feature = "audio")]
-pub fn beep(freq: f32, ms: u64) {
-    backend::beep(freq, ms);
+pub fn beep(freq: f32, ms: u64, vol: f32) {
+    backend::beep(freq, ms, vol);
 }
 
 #[cfg(feature = "audio")]
@@ -27,12 +28,13 @@ mod backend {
     use std::sync::OnceLock;
     use std::time::Duration;
 
-    /// Peak amplitude of a beep (0..1) — modest so stacked tones don't clip.
+    /// Default peak amplitude (0..1) — modest so stacked tones don't clip.
     const VOLUME: f32 = 0.18;
 
     struct Beep {
         freq: f32,
         ms: u64,
+        vol: f32,
     }
 
     fn muted() -> bool {
@@ -65,7 +67,7 @@ mod backend {
                     while let Ok(b) = rx.recv() {
                         let tone = SineWave::new(b.freq)
                             .take_duration(Duration::from_millis(b.ms))
-                            .amplify(VOLUME);
+                            .amplify(b.vol);
                         let _ = handle.play_raw(tone.convert_samples());
                     }
                 });
@@ -77,9 +79,15 @@ mod backend {
         .as_ref()
     }
 
-    pub fn beep(freq: f32, ms: u64) {
+    pub fn beep(freq: f32, ms: u64, vol: f32) {
+        // Clamp to a sane amplitude; non-finite or <=0 falls back to the default.
+        let vol = if vol.is_finite() && vol > 0.0 {
+            vol.min(1.0)
+        } else {
+            VOLUME
+        };
         if let Some(tx) = sender() {
-            let _ = tx.send(Beep { freq, ms });
+            let _ = tx.send(Beep { freq, ms, vol });
         }
     }
 }
