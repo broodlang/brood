@@ -95,6 +95,12 @@ impl Jit {
         builder.symbol("brood_rt_global_epoch_ptr", brood_rt_global_epoch_ptr as *const u8);
         builder.symbol("brood_rt_in_capture", brood_rt_in_capture as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
+        builder.symbol(
+            "brood_rt_pair_nursery_base",
+            brood_rt_pair_nursery_base as *const u8,
+        );
+        builder.symbol("brood_rt_pair_old_base", brood_rt_pair_old_base as *const u8);
+        builder.symbol("brood_rt_const_load", brood_rt_const_load as *const u8);
         Jit {
             module: JITModule::new(builder),
         }
@@ -293,6 +299,28 @@ pub unsafe extern "C" fn brood_rt_car(
     };
 }
 
+/// Byte pointer to the LOCAL nursery pair slab (`Vec<(Value, Value)>`). Called once at JIT
+/// function entry so inline `first`/`rest` can compute `base + idx * 48 + {0,24}` directly
+/// instead of calling `brood_rt_car`/`cdr` per element. Valid only while no `cons` can grow
+/// the slab (arms that allocate must not use the stashed pointer — see `jit_lower_arm`).
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_pair_nursery_base(heap: *mut Heap) -> *const u8 {
+    (*heap).local_pair_nursery_base()
+}
+
+/// Byte pointer to the LOCAL old-generation pair slab. Companion to
+/// [`brood_rt_pair_nursery_base`] — for pairs promoted out of the nursery.
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_pair_old_base(heap: *mut Heap) -> *const u8 {
+    (*heap).local_pair_old_base()
+}
+
 /// `rest` counterpart of [`brood_rt_car`] — writes the pair's cdr to `*out`.
 ///
 /// # Safety
@@ -438,6 +466,22 @@ pub unsafe extern "C" fn brood_rt_roots_base(heap: *mut Heap) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_push(heap: *mut Heap, w0: i64, w1: i64, w2: i64) {
     (*heap).push_root(words_to_val(w0, w1, w2));
+}
+
+/// Load the current `Value` from a `ConstVal` (a compiled literal that may be a
+/// GC-movable heap handle). The ConstVal lives in the arm's `chunk.code` and is kept
+/// alive by the arm's `Arc<CompiledArm>` for the entire JIT code lifetime. Reading
+/// `cv.load()` at the point of use ensures we see the GC-updated bits after any
+/// `runtime_collect` that ran since the arm was compiled.
+///
+/// # Safety
+/// `cv` must point to a live [`crate::eval::compile::ConstVal`]; `out` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_const_load(
+    cv: *const crate::eval::compile::ConstVal,
+    out: *mut crate::core::value::Value,
+) {
+    *out = (*cv).load();
 }
 
 /// Resolve a free global `sym` (a JIT'd call's callee-loading `Inst::Global`/`GlobalIc`,

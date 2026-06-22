@@ -1,6 +1,6 @@
 # Plan — the post-JIT single-threaded compute frontier
 
-> ## ⏯ RESUME HERE (2026-06-20) — current perf state + next lever (inline car/cdr/vector_ref)
+> ## ⏯ RESUME HERE (2026-06-20) — current perf state + 5-item work queue
 >
 > The newest work is the **JIT call-dispatch + loop-overhead** round (full play-by-play in
 > `docs/devlog.md`, entries 2026-06-18/19). Status:
@@ -65,9 +65,55 @@
 >   `slot_float[k]` is NOT safe to skip tag-checks (single-pass, cross-branch contamination caused
 >   a real test failure); only the cache (populated on the actual store path) is safe.
 >   Aggregate: **6.0× (unchanged)** — mandelbrot is one of 15 compute rows.
-> - **NEXT lever:** inline `first`/`rest`/`vector_ref` pointer arithmetic in the JIT (eliminates
->   `brood_rt_car`/`cdr`/`vector_ref` FFI for JIT-compiled structure walkers). Technique B (true
->   inlining) is a longer horizon.
+> - **SHIPPED 2026-06-20 — 2-level Brood-level self-recursive body inlining:** fib 532ms (no-inline)
+>   → **277 ms** (−48% vs baseline, best of 3). `inline_self_calls` is run twice in both
+>   `self_inline_probe` and `rederive_inlined_body` (probe and rederive must be identical). Level-1
+>   inlines the 2 non-tail self-calls from the original fib body; level-2 inlines the 4 external
+>   calls left over — each using the original body as template and a continuing `next_block` counter
+>   so slot ranges are disjoint. Guard: after level-1 `node_count(body) > SELF_INLINE_MAX_BODY`
+>   prevents level-2 for already-large bodies. `node_touches_heap` keeps bintree/sort-walk at
+>   level-1 (no regression). Debug: `BROOD_INLINE_DBG=1` → `new_max=7 inline_nslots=14` for fib(35).
+> - **SHIPPED 2026-06-20 — `bit-and`/`bit-or`/`bit-xor` as PrimOp2:** sort 238→**209 ms** (−12%).
+>   sort's `gen` function used `bit-and` in a self-tail loop; that emitted `brood_rt_call_slow`
+>   (~150 ns/call) AND blocked int register-carry for gen's loop variables. Making them PrimOps
+>   eliminates the Call, re-enables carry, and removes ~56 ms per sort run (N=375K). Same 7-location
+>   PrimOp pipeline: enum, `from_native_name`, `prim2_int_fast`, `prim_apply`, `prim_apply_float`
+>   (explicit float defer), `chunk_in_jit_subset`, `emit_arith` (CLIF `band`/`bor`/`bxor`).
+> - **SHIPPED 2026-06-20 — max/min as PrimOp2 native + cranelift `select`:** collatz 323→**111 ms**
+>   (−66%), 4th→4th of 7. Replaced the prelude's `(defn max (x & xs) (fold (fn …) x xs))` with a
+>   native builtin (`prim_max`/`prim_min`: Int fast-path → BigInt exact → float coerce,
+>   `Arity::at_least(1)`) and a JIT-inlined `icmp(SGE/SLE)` + `select` pair. The old definition
+>   allocated ~2 heap cells per 2-arg call (one cons for the `xs` rest arg, one closure for the
+>   fold lambda); collatz's inner `(max best (steps k 0))` ran 250K times = ~500K allocs/run.
+>   `PrimOp::Max`/`Min` added to the full PrimOp pipeline: `from_native_name`, `prim2_int_fast`,
+>   `prim_apply`, `prim_apply_float`, `chunk_in_jit_subset`, `emit_arith`. No overflow guard needed
+>   (max/min are branchless). Aggregate: **5.9× → ~5.8×** (collatz now comparable to Node's 182ms).
+>
+> **Work queue (5 items, see §3e–§3i for details):**
+>
+> 1. ~~**car/cdr inline in JIT** (§3e)~~ **SHIPPED 2026-06-20** — nqueens 163→**137 ms** (−16%).
+>    3-file change: `heap.rs` exposes `local_pair_nursery_base`/`local_pair_old_base`; `jit/mod.rs`
+>    exports them via `builder.symbol()` (critical: without this the JIT linker can't resolve the
+>    symbols even though they're `#[no_mangle]`); `compile.rs` hoists both pointers at arm entry
+>    (`pair_bases: Option<(nursery, old)>`) when the arm has First/Rest AND no Cons, then emits
+>    `ushr(w1,62)==0` region guard → `ushr(w1,61)!=0` age select → `base+idx*48+{0,24}` loads.
+>    bintree flat (uses vectors not pairs). sort: ~215ms now (pair reads were not the bottleneck).
+> 2. ~~**range-fold JIT bypass** (§3f)~~ **SHIPPED 2026-06-20** — reduce 139→**28 ms** (−80%).
+>    The previous fast path (already in place) used `prim_apply_step(op, Value::int(acc), Value::int(i))`
+>    per element — but `Value` is 24 bytes (> 16), so SysV ABI passes it by pointer: 72 bytes of
+>    stack traffic + a non-inlined call per iteration = ~24ns/elem despite the prim detection.
+>    Fix: `prim_apply_int_step(op: PrimOp, a: i64, b: i64) -> Option<i64>` takes/returns raw i64
+>    with `#[inline]`, so the compiler emits a tight 2-instruction loop (add + overflow branch
+>    never-taken). When init is `Int` and prim resolves, the tight path runs; overflow or
+>    non-Int init falls through to `range_reduce_slow` (the old root_scope path). Result:
+>    5M iters in ~3ms (~0.6ns/iter, 2 CPU cycles), down from ~112ms. Startup dominates (25ms).
+> 3. ~~**sort list-walk** (§3g)~~ **PARTIALLY ADDRESSED 2026-06-20** — `bit-and` PrimOp removes
+>    ~12% overhead from gen's loop; residual cost is `list_with_tail` O(n) pair allocs (structural,
+>    needs mutable-sort or `sort-vec` variant). **209 ms** on N=375K.
+> 4. ~~**fib call inlining** (§3h)~~ **SHIPPED 2026-06-20** via Brood-level 2-level inline —
+>    **277 ms** (best of 3), down from 532ms no-inline / ~320ms level-1. True CLIF inlining would
+>    eliminate the remaining 8 `brood_rt_fast_frame` calls per arm activation; marked long-horizon.
+>
 > - **Build/bench discipline:** perf bins via `cargo build --release --features jit --bin brood`
 >   (NEVER `-p brood` — stale-lib trap); `make install` before benchmarking (`cp target/release/brood
 >   ~/.local/bin/brood` — the harness runs the *installed* `brood`, not `target/`); GC-debug build
@@ -148,14 +194,13 @@ Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_I
   `jit/mod.rs::brood_rt_vector_ref` (the runtime helper); `core/heap.rs` `vector()` + the
   `CodeSlabs.vectors` boxcar (the storage to flatten).
 
-### 3b. `bintree` (~27×) — **allocation / GC for short-lived pairs**
+### 3b. `bintree` (~?×) — **car/cdr FFI per tree step (§3e is the lever)**
 
-`jit_native=85` (barely tiers), `prim2_fallback=655 280` (first/rest/cons on pairs),
-`alloc=366 825`. It builds and walks many small trees — allocation-bound. The lever is the
-GC/allocator (cheaper short-lived pair allocation: a bump nursery already exists — tune it,
-or a JIT cons fast path — but note `Cons` is deliberately out of the JIT subset after a
-miscompile; see the `chunk_in_jit_subset` comment). Entry: `core/heap.rs` (allocation,
-`gc_floor`, nursery), `jit-stage1.md`.
+After `chunk_walks_structure` removal (2026-06-19), bintree ~116→~127ms (local noise). It now
+JIT-compiles `check` correctly but every `first`/`rest` call still emits a `brood_rt_car`/`cdr`
+FFI (marshal 3 words in, write 3 words to an out-ptr stack slot, region-dispatch inside). The
+`check` walk touches every node twice per tree — 200 trees × 8190 nodes × 2 = ~3.3M FFI calls
+per run. See §3e for the inline approach.
 
 ### 3c. `strings` / `pipeline` — **lazy sequence combinators** — *shipped (pipeline)*
 
@@ -205,6 +250,131 @@ mutable `Dictionary`. A transient-map build path exists (`5a7b8bb`); wiring
 `into`/`reduce`-into-a-map through it is the only realistic remaining lever short of
 abandoning persistence. Lowest priority — most inherent to Brood's identity.
 
+### 3e. `bintree`/`nqueens`/`sort` — **inline `first`/`rest` slab reads in the JIT**
+
+**Root cause.** `PrimOp1::First` and `PrimOp1::Rest` in the JIT currently tag-check for
+`Pair` (deopt otherwise), then call `brood_rt_car`/`brood_rt_cdr`. Each call marshals 5 args
+(heap ptr, out ptr, w0/w1/w2) and inside: reconstructs the `Value` from 3 words, matches on
+`Pair(id)`, dispatches on `id.region()`, indexes into the right slab, and writes 3 words to
+`*out`. Cost: ~20–30 ns per `first`/`rest`. bintree has ~3.3M such calls/run; nqueens has
+similar list-walk density; `sort`'s `seq_items` and `hash--acc` also pay it.
+
+**Layout facts (load-bearing for the inline).** A `Value::Pair(PairId)` under `#[repr(C, u8)]`
+is exactly 3 i64 words:
+- `w0` — tag byte (low 8 bits = `TAG_PAIR = 9`), upper bits 0
+- `w1` — `PairId` u64: bits 0..31 = index; bits 32..60 = gen epoch; bit 61 = age
+  (0=nursery, 1=old); bits 62..63 = region (LOCAL=0, PRELUDE=1, RUNTIME=2)
+- `w2` — 0 (padding)
+
+The pair slab entry is `(Value, Value)` = 48 bytes. Car at offset 0, cdr at offset 24. For
+LOCAL pairs (region=0), the slabs are plain `Vec<(Value, Value)>` — flat arrays, so
+`base_ptr + index * 48 + {0,24}` is a valid inline load. PRELUDE pairs never move (stable
+pointer for the process lifetime). RUNTIME pairs are `boxcar::Vec` (segmented) — complex to
+inline; fall back to FFI.
+
+**Proposed approach.**
+1. Add `brood_rt_pair_bases(heap, out_nursery: *mut *const u8, out_old: *mut *const u8)` to
+   `jit/mod.rs` — writes the nursery `pairs.as_ptr()` and old-gen `pairs.as_ptr()` as raw
+   byte pointers. Call once at JIT function entry (like `brood_rt_roots_base`).
+2. In `jit_lower_arm`'s `Inst::Prim1 { First | Rest }` arm: after the existing `TAG_PAIR`
+   tag-check, extract `region = (w1 >> 62) & 3` and `age = (w1 >> 61) & 1` and `idx = w1 &
+   0xFFFF_FFFF`. Emit a branch: LOCAL (region==0) → use nursery or old base (via age bit) +
+   `idx * 48 + {0,24}`; non-LOCAL → fall back to `call_handle(car_ref/cdr_ref, [w0,w1,w2])`.
+3. Safety: LOCAL pair slabs can grow only via `cons` (nursery push). For arms that don't
+   call `cons` (`bintree`/`nqueens` structure-walks, `sort`'s `seq_items`/`hash--acc`), the
+   base pointer is stable for the arm's duration. Arms that DO call `cons` must use the FFI
+   path (can gate: if the arm contains `Cons`, skip the inline). The epoch guard covers GC
+   relocations. PRELUDE is immutable; can add `brood_rt_prelude_pair_base` later for that
+   region.
+4. `chunk_in_jit_subset` already admits `First`/`Rest`; no gate change needed.
+
+**Expected gain.** Eliminating the FFI boundary + 3-word marshal + out-ptr copy per
+`first`/`rest`: ~20–30 ns → ~2–3 ns (3 loads + arithmetic). bintree: ~127ms → ~90ms;
+nqueens: ~163ms → ~120ms. `sort`'s `hash--acc` walk gains proportionally.
+
+**Entry points:** `jit/mod.rs` (add `brood_rt_pair_bases`), `eval/compile.rs`
+`jit_lower_arm` (`Inst::Prim1` arm at ~line 7164), `jit_lower_arm` function entry (add the
+one-shot `brood_rt_pair_bases` call + store base SSA values for later use by First/Rest arms).
+
+---
+
+### 3f. `reduce` — **range-fold JIT bypass**
+
+**Root cause.** `(reduce + 0 (range n))` routes through the prelude's `fold`, which detects a
+range and calls `%range-reduce` (the Rust native at `builtins.rs`). Inside `%range-reduce`, the
+accumulator function `f` is called per element via `heap.eval_apply(f, &[acc, elem])` — the
+full function-dispatch path: IC probe, `RefCell` borrow, dispatch match. Even though `+` is a
+native (`prim_add`), `eval_apply` still goes through `dispatch()`. Cost: ~22 ns/element × 5M
+elements = ~109ms. The JIT never sees this loop — `%range-reduce` is Rust.
+
+**Proposed approach.** In `%range-reduce` (or a fast-path variant), detect whether `f` resolves
+to a single PrimOp-eligible function at call time:
+1. Resolve `f`'s native name via the interpreter's IC cache (or check `f.native_fn()`).
+2. If it matches a PrimOp (`+`/`-`/`max`/`min`/etc.), run a tight Rust loop:
+   ```rust
+   let mut acc = init;
+   for elem in range_iter {
+       acc = prim_apply(op, acc, elem)?.unwrap_or_else(|| eval_apply(f, acc, elem));
+   }
+   ```
+   where `prim_apply` is the same inline function already used in `prim2_inline_exec` —
+   `(Int, Int)` case returns directly, overflow/float defers to `eval_apply`.
+3. A global-epoch guard around the loop deopts to the fallback if `+` gets rebound.
+
+This keeps `%range-reduce` Rust-native (no JIT compile of the loop), but replaces the per-step
+`eval_apply` (~22 ns) with `prim_apply` (~2–3 ns) for the common `(reduce + 0 (range n))` shape.
+
+**Expected gain.** reduce: 109ms → ~20ms (matching `loop`'s profile at ~44ms for 30M iters, or
+~1.4× worse due to the `prim_apply` overhead vs pure SSA arithmetic).
+
+**Entry points:** `builtins.rs` (`range_reduce` function), `eval/compile.rs` (`prim_apply`
+export or inline copy), `core/value.rs` (`PrimOp` — may need to be accessible from builtins).
+
+---
+
+### 3g. `sort` — **list-walk and rebuild cost**
+
+**Root cause.** `(sort lst)` (N=375k integers) has three phases:
+1. `seq_items` — O(n) cons-spine walk to collect into `Vec<Value>`: each step calls `h.pair(id)`
+   (a region-dispatch slab read). ~375K pair reads = ~7.5ms at 20 ns each.
+2. `Vec::sort_by` — pure Rust timsort with no function dispatch; fast (~10ms for 375K ints).
+3. `list_with_tail` — O(n) `alloc_pair` calls to rebuild the list: ~375K nursery allocations.
+   Each `alloc_pair` bumps the nursery; this also triggers periodic minor GCs.
+4. `hash--acc` — O(n) JIT-compiled list walk via `first`/`rest` FFI calls: ~375K car/cdr pairs.
+
+Phase 2 is already fast. Phases 1 and 4 are directly fixed by §3e (car/cdr inline). Phase 3
+(alloc_pair) is structural: rebuilding an immutable sorted list requires allocating n new pairs.
+
+**Residual after §3e.** seq_items drops ~7ms; hash--acc drops ~7ms; the alloc cost (phase 3)
+remains. Estimate: ~172ms → ~130ms after §3e; further narrowing requires either a mutable sort
+(in-place pair update — unsafe, only valid for nursery pairs not aliased elsewhere) or returning
+a sorted vector instead of a list (`sort-vec` variant).
+
+**Entry points:** `builtins.rs` (`sort_asc`, `seq_items`, `list_with_tail`). Phase 3 is in
+`core/heap.rs` (`alloc_pair`/`list_with_tail`). The `hash--acc` gain is from §3e.
+
+---
+
+### 3h. `fib` — **function call inlining (long horizon)**
+
+**Root cause.** `fib(35)` makes ~18M recursive calls. With fast-link (`brood_rt_fast_frame`),
+each non-tail JIT→JIT call costs ~15 ns. 18M × 15 ns = 270ms — matches the observed ~280ms.
+This is the floor of the fast-link approach. The call overhead IS the benchmark.
+
+**What would help.** True CLIF inlining: detect that the callee's body is small and pure,
+emit it at the call site, eliminating the frame entirely. For `fib`, the two recursive calls
+become inline additions — no frame setup, no `brood_rt_fast_frame`, no result ABI. Estimated
+gain: 280ms → ~80ms (pure arithmetic loop over the call tree).
+
+**Why it's deferred.** Requires: (a) detecting that `(fib (- m 1))` and `(fib (- m 2))` are
+calls to the same function being compiled, (b) emitting the callee body inline (two levels deep
+for fib), (c) handling the base case (`if (< m 2) m`) as a CLIF conditional inside the inlined
+body. Cranelift supports this — it's a normal CLIF subgraph — but the compiler machinery to
+detect, bound, and emit self-recursive inlines doesn't exist yet. Likely a 2–3 day change.
+
+**Entry points:** `eval/compile.rs` `jit_lower_arm` — would detect `Node::Call` to the
+function being compiled and recurse into `emit_body` with a depth limit.
+
 ## 4. Recommendation & priority
 
 These are **foundational, multi-session bets with capped payoff** (Brood's boxed/immutable/
@@ -230,6 +400,11 @@ Priority if/when this is picked up:
 3. **`bintree` allocation** — GC/nursery tuning; diffuse.
 4. **`wordcount`** — **SHIPPED 2026-06-19** (`map-int-add` + JIT GC safepoint, 810→422ms,
    gap ~31×→~13×). Residual: transient-map `into` for the final 13× → ~4× if wanted.
+5. **inline `first`/`rest`** (§3e) — `brood_rt_pair_bases` + CLIF inline loads for LOCAL
+   pairs; bintree/nqueens/sort-walk. Medium effort, 20–30% on affected benchmarks.
+6. **range-fold JIT bypass** (§3f) — `%range-reduce` PrimOp fast-path; reduce 109ms → ~20ms.
+   Medium effort; requires `prim_apply` accessible from builtins.
+7. **fib call inlining** (§3h) — long horizon; requires self-recursive CLIF inlining.
 
 NaN-boxing / `Value`-width is **not** on this list (§2).
 

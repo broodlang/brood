@@ -23,6 +23,7 @@
 //! namespace-resolve), on the already-expanded, already-resolved form.
 
 use smallvec::SmallVec;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -119,6 +120,13 @@ pub enum PrimOp {
     // per 2-arg call (one cons cell for `xs` + one closure for fold's lambda).
     Max,
     Min,
+    // `bit-and`/`bit-or`/`bit-xor` (perf): plain bitwise builtins; turning them
+    // into PrimOps removes the non-tail Call they emit in self-tail loops (e.g.
+    // sort's `gen`), which unblocks int register-carry for the loop variables.
+    // Int-only fast path; non-Int (BigInt) defers to the native builtin.
+    BitAnd,
+    BitOr,
+    BitXor,
 }
 
 /// A core 1-ary sequence primitive the compiler inlines (ADR-096) — the list
@@ -163,6 +171,9 @@ impl PrimOp {
             "vector-ref" => PrimOp::VectorRef,
             "max" => PrimOp::Max,
             "min" => PrimOp::Min,
+            "bit-and" => PrimOp::BitAnd,
+            "bit-or" => PrimOp::BitOr,
+            "bit-xor" => PrimOp::BitXor,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
             _ => return None,
         })
@@ -439,6 +450,14 @@ pub enum Node {
         head: Symbol,
         guard: AtomicU64,
         pos: Option<Pos>,
+    },
+    /// `(%try body_fn handler_fn)` desugared inline: body is the thunk's
+    /// unwrapped body, bind_slot is the frame slot for the caught exception,
+    /// handler is the handler body. Both run via exec_value in the same frame.
+    TryCatch {
+        body: Box<Node>,
+        bind_slot: usize,
+        handler: Box<Node>,
     },
 }
 
@@ -993,6 +1012,44 @@ fn value_is_immovable(v: Value) -> bool {
 /// to a `Node::Local` slot read; each name inherited from an *outer* closure maps
 /// to a `Node::Global` read through the current captured env. True globals are
 /// **not** captured — they resolve live (late-bound) through the new closure's
+/// Compile `(%try (fn () body…) (fn (e) handler…))` to a `Node::TryCatch` that runs
+/// body and handler inline in the current frame, without closure allocation.
+fn compile_try_catch(heap: &Heap, items: &[Value], scope: &mut Scope) -> Option<Node> {
+    if items.len() != 3 {
+        return None;
+    }
+    let thunk_items = heap.list_to_vec(items[1]).ok()?;
+    let handler_items = heap.list_to_vec(items[2]).ok()?;
+    if thunk_items.len() < 2 || handler_items.len() < 2 {
+        return None;
+    }
+    if !matches!(thunk_items[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::FN)) {
+        return None;
+    }
+    if !matches!(handler_items[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::FN)) {
+        return None;
+    }
+    let thunk_params = heap.list_to_vec(thunk_items[1]).ok()?;
+    let handler_params = heap.list_to_vec(handler_items[1]).ok()?;
+    if !thunk_params.is_empty() || handler_params.len() != 1 {
+        return None;
+    }
+    let evar = match handler_params[0].unpack() {
+        ValueRef::Sym(s) => s,
+        _ => return None,
+    };
+    let body = compile_body(heap, &thunk_items[2..], scope, false)?;
+    let saved = scope.mark();
+    let bind_slot = scope.bind(evar);
+    let handler = compile_body(heap, &handler_items[2..], scope, false);
+    scope.restore(saved);
+    Some(Node::TryCatch {
+        body: Box::new(body),
+        bind_slot,
+        handler: Box::new(handler?),
+    })
+}
+
 /// frame parent. Returns `None` (defer) if a capture would read a not-yet-finalized
 /// `letrec` slot, which a value snapshot can't express.
 fn compile_captures(scope: &Scope) -> Option<(Vec<(Symbol, Node)>, Option<Symbol>)> {
@@ -1171,6 +1228,21 @@ pub fn prim_apply_step(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, 
     prim_apply(op, x, y)
 }
 
+/// Tighter variant of [`prim_apply_step`] for the range-reduce hot path: both
+/// operands are already `i64` (range element + integer accumulator), no Value
+/// boxing involved. Returns the next `i64` accumulator, or `None` on overflow
+/// (caller must fall back to the full `prim_apply_step` / `eval_apply` path).
+/// Only covers `Add` and `Mul` since those are the only ops [`reduce_prim_op`]
+/// admits.
+#[inline]
+pub fn prim_apply_int_step(op: PrimOp, a: i64, b: i64) -> Option<i64> {
+    match op {
+        PrimOp::Add => a.checked_add(b),
+        PrimOp::Mul => a.checked_mul(b),
+        _ => None,
+    }
+}
+
 /// Resolve a 1-arg call head `h` to a core inlinable [`PrimOp1`], or `None` if it
 /// isn't one. Unlike [`resolve_prim`] there's no passthrough hop: `first`/`rest`
 /// are bound directly to their natives. Read against the live global env, so a
@@ -1258,6 +1330,14 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 // capturing a flat snapshot of the enclosing lexicals.
                 if value::symbol_is(h, kw::FN) {
                     return compile_make_closure(heap, form, scope);
+                }
+                // `(%try (fn () body…) (fn (e) handler…))` — inline try/catch:
+                // run body and handler in the current frame without closure allocation.
+                if value::symbol_is(h, kw::TRY_PRIM) {
+                    if let Some(node) = compile_try_catch(heap, &items, scope) {
+                        return Some(node);
+                    }
+                    // Non-canonical shape: fall through to generic call (try_catch native handles it)
                 }
                 // Any *other* special form (`def`/`quasiquote`/`binding`) is outside
                 // the VM's vocabulary — defer the whole closure to the tree-walker.
@@ -1492,6 +1572,9 @@ fn node_has_rt_handles(node: &Node) -> bool {
         }
         Node::Prim2 { a, b, .. } => node_has_rt_handles(a) || node_has_rt_handles(b),
         Node::Prim1 { a, .. } => node_has_rt_handles(a),
+        Node::TryCatch { body, handler, .. } => {
+            node_has_rt_handles(body) || node_has_rt_handles(handler)
+        }
         Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
     }
 }
@@ -1541,6 +1624,9 @@ fn local_escapes(node: &Node, slot: usize, nelems: usize) -> bool {
         Node::MakeClosure { captures, .. } => captures.iter().any(|(_, n)| local_escapes(n, slot, nelems)),
         Node::Prim2 { a, b, .. } => local_escapes(a, slot, nelems) || local_escapes(b, slot, nelems),
         Node::Prim1 { a, .. } => local_escapes(a, slot, nelems),
+        Node::TryCatch { body, handler, .. } => {
+            local_escapes(body, slot, nelems) || local_escapes(handler, slot, nelems)
+        }
     }
 }
 
@@ -1583,6 +1669,10 @@ fn rewrite_elem_reads(node: &mut Node, slot: usize, base: usize, nelems: usize) 
             rewrite_elem_reads(b, slot, base, nelems);
         }
         Node::Prim1 { a, .. } => rewrite_elem_reads(a, slot, base, nelems),
+        Node::TryCatch { body, handler, .. } => {
+            rewrite_elem_reads(body, slot, base, nelems);
+            rewrite_elem_reads(handler, slot, base, nelems);
+        }
     }
 }
 
@@ -1621,6 +1711,10 @@ fn ea_scalar_replace(node: &mut Node, next_slot: &mut usize) -> bool {
             changed |= ea_scalar_replace(b, next_slot);
         }
         Node::Prim1 { a, .. } => changed |= ea_scalar_replace(a, next_slot),
+        Node::TryCatch { body, handler, .. } => {
+            changed |= ea_scalar_replace(body, next_slot);
+            changed |= ea_scalar_replace(handler, next_slot);
+        }
         _ => {}
     }
     if let Node::LetBind { binds, body } = node {
@@ -1687,6 +1781,7 @@ fn node_count(node: &Node) -> usize {
         Node::MakeClosure { captures, .. } => captures.iter().map(|(_, n)| node_count(n)).sum(),
         Node::Prim2 { a, b, .. } => node_count(a) + node_count(b),
         Node::Prim1 { a, .. } => node_count(a),
+        Node::TryCatch { body, handler, .. } => node_count(body) + node_count(handler),
     }
 }
 
@@ -1708,6 +1803,9 @@ fn node_has_self_call(node: &Node) -> bool {
         Node::MakeClosure { captures, .. } => captures.iter().any(|(_, n)| node_has_self_call(n)),
         Node::Prim2 { a, b, .. } => node_has_self_call(a) || node_has_self_call(b),
         Node::Prim1 { a, .. } => node_has_self_call(a),
+        Node::TryCatch { body, handler, .. } => {
+            node_has_self_call(body) || node_has_self_call(handler)
+        }
     }
 }
 
@@ -1731,6 +1829,9 @@ fn node_has_make_closure(node: &Node) -> bool {
         }
         Node::Prim2 { a, b, .. } => node_has_make_closure(a) || node_has_make_closure(b),
         Node::Prim1 { a, .. } => node_has_make_closure(a),
+        Node::TryCatch { body, handler, .. } => {
+            node_has_make_closure(body) || node_has_make_closure(handler)
+        }
     }
 }
 
@@ -1866,6 +1967,11 @@ fn shift_slots(node: &Node, delta: usize) -> Node {
             guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
             pos: *pos,
         },
+        Node::TryCatch { body, bind_slot, handler } => Node::TryCatch {
+            body: Box::new(shift_slots(body, delta)),
+            bind_slot: bind_slot + delta,
+            handler: Box::new(shift_slots(handler, delta)),
+        },
     }
 }
 
@@ -1934,6 +2040,10 @@ fn inline_self_calls(
         }
         Node::Prim1 { a, .. } => {
             count += inline_self_calls(a, orig_body, defn_name, nrequired, m, next_block);
+        }
+        Node::TryCatch { body, handler, .. } => {
+            count += inline_self_calls(body, orig_body, defn_name, nrequired, m, next_block);
+            count += inline_self_calls(handler, orig_body, defn_name, nrequired, m, next_block);
         }
     }
     // Now consider *this* node (children already inlined). The args we move out keep
@@ -2031,6 +2141,9 @@ fn node_touches_heap(node: &Node) -> bool {
             captures.iter().any(|(_, n)| node_touches_heap(n))
         }
         Node::Prim2 { a, b, .. } => node_touches_heap(a) || node_touches_heap(b),
+        Node::TryCatch { body, handler, .. } => {
+            node_touches_heap(body) || node_touches_heap(handler)
+        }
     }
 }
 
@@ -2059,6 +2172,12 @@ fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize)
     let inlined = inline_self_calls(&mut clone, &orig, defn_name, nrequired, m, &mut next_block);
     if inlined == 0 {
         return None;
+    }
+    // Level-2: if the level-1 result is still compact, inline its external calls too.
+    // Uses the same `orig` template and a continuing `next_block`, so slot ranges stay
+    // disjoint. Must mirror rederive_inlined_body exactly.
+    if node_count(&clone) <= SELF_INLINE_MAX_BODY {
+        inline_self_calls(&mut clone, &orig, defn_name, nrequired, m, &mut next_block);
     }
     let inline_max = m * next_block;
     // The inlined frame must also reserve the inlined chunk's call-result spill slots
@@ -2096,6 +2215,10 @@ fn rederive_inlined_body(body: &Node, defn_name: Symbol, nrequired: usize, m: us
     let inlined = inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
     if inlined == 0 {
         return None;
+    }
+    // Level-2: must mirror self_inline_probe exactly.
+    if node_count(&spliced) <= SELF_INLINE_MAX_BODY {
+        inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
     }
     Some(spliced)
 }
@@ -2410,6 +2533,9 @@ fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
         PrimOp::Quot => a.checked_div(b).map(Value::int),
         PrimOp::Max => Some(Value::int(a.max(b))),
         PrimOp::Min => Some(Value::int(a.min(b))),
+        PrimOp::BitAnd => Some(Value::int(a & b)),
+        PrimOp::BitOr => Some(Value::int(a | b)),
+        PrimOp::BitXor => Some(Value::int(a ^ b)),
         // Cons needs heap alloc; Div may return Float — both handled by prim_apply.
         // VectorRef needs the heap (slab index) and its operands aren't (Int, Int);
         // handled directly in prim2_inline_exec.
@@ -2468,6 +2594,9 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
         },
         PrimOp::Max => Value::int(a.max(b)),
         PrimOp::Min => Value::int(a.min(b)),
+        PrimOp::BitAnd => Value::int(a & b),
+        PrimOp::BitOr => Value::int(a | b),
+        PrimOp::BitXor => Value::int(a ^ b),
         // Handled in the exec arm (they need `&mut Heap` / the heap); never reach here.
         PrimOp::Cons | PrimOp::VectorRef => return Ok(None),
     };
@@ -2499,6 +2628,8 @@ fn prim_apply_float(op: PrimOp, x: Value, y: Value) -> Option<Value> {
         PrimOp::Div if b != 0.0 => Value::float(a / b),
         PrimOp::Max => Value::float(a.max(b)),
         PrimOp::Min => Value::float(a.min(b)),
+        // Bitwise ops are int-only; any float operand defers to the native (which errors).
+        PrimOp::BitAnd | PrimOp::BitOr | PrimOp::BitXor => return None,
         // `=` is structural (the native owns float equality), `rem`/`quot` take
         // the numeric-tower path, and zero-denominator `%div` errors — defer.
         _ => return None,
@@ -2691,6 +2822,10 @@ fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
             rewrite_node(b, f);
         }
         Node::Prim1 { a, .. } => rewrite_node(a, f),
+        Node::TryCatch { body, handler, .. } => {
+            rewrite_node(body, f);
+            rewrite_node(handler, f);
+        }
     }
 }
 
@@ -3067,6 +3202,20 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
             heap.truncate_roots(save);
             result.map_err(tag)
         }
+        Node::TryCatch { body, bind_slot, handler } => {
+            match exec_value(heap, body, frame_base, genv) {
+                Ok(v) => Ok(v),
+                Err(e) if e.is_control() => Err(e),
+                Err(e) => {
+                    let caught = match e.payload {
+                        Some(v) => v,
+                        None => e.to_value_map(heap),
+                    };
+                    heap.set_root_at(frame_base + bind_slot, caught);
+                    exec_value(heap, handler, frame_base, genv)
+                }
+            }
+        }
     }
 }
 
@@ -3347,6 +3496,64 @@ fn dispatch(
                     genv: callee_env,
                 });
             }
+            // JIT fast path: call jit_tier directly, bypassing vm_run_bc's per-call
+            // overhead (GcBlockGuard, TopLevelGuard thread-locals, BcFrame Vec alloc,
+            // loop-top safepoint checks). Gated on: JIT code installed, no runtime GC
+            // handles (which need live_arm_push registration), no installed inline
+            // upgrade (which needs the larger inline_nslots frame vm_run_bc sets up).
+            // The pre-check on `jit_code` avoids push_frame + vm_apply double-setup
+            // for arms that haven't tiered yet (those fall straight through to vm_apply).
+            #[cfg(feature = "jit")]
+            {
+                use std::sync::atomic::Ordering::Acquire;
+                let code = arm.jit_code.load(Acquire);
+                if !arm.has_runtime_handles
+                    && !arm.inline_installed.load(Acquire)
+                    && !code.is_null()
+                    && code != crate::jit::BAILED
+                    && code != crate::jit::QUEUED
+                {
+                    let env_base = heap.env_roots_len();
+                    let env_root = heap.root_env(callee_env);
+                    let base = heap.roots_len();
+                    if let Err(e) = push_frame(heap, &arm, &cur_argv, env_root) {
+                        heap.truncate_env_roots(env_base);
+                        return Err(e);
+                    }
+                    match jit_tier(&arm, heap, base, env_root) {
+                        Some(0) => {
+                            crate::perf_bump!(jit_apply_fast);
+                            let v = heap.root_at(base);
+                            heap.truncate_roots(base);
+                            heap.truncate_env_roots(env_base);
+                            return Ok(Step::Done(v));
+                        }
+                        Some(3) => {
+                            heap.truncate_roots(base);
+                            heap.truncate_env_roots(env_base);
+                            let e = heap
+                                .jit_pending_error
+                                .take()
+                                .expect("JIT outcome 3 with no parked error");
+                            return Err(e);
+                        }
+                        _ => {
+                            // Epoch reset (→ None), deopt (1), preempt (2), or tail
+                            // (4): fall back to vm_apply with the original args.
+                            // `!arm.has_runtime_handles` (the fast-path gate) ensures
+                            // no GC ran during the JIT call, so `cur_argv` is still
+                            // valid. Reading args back from roots[base+k] is wrong for
+                            // rest-param arms where cur_argv.len() > arm.nslots.
+                            let callee_env2 = heap.read_root_env(env_root);
+                            heap.truncate_roots(base);
+                            heap.truncate_env_roots(env_base);
+                            return Ok(Step::Done(
+                                vm_apply(heap, arm, &cur_argv, callee_env2)?,
+                            ));
+                        }
+                    }
+                }
+            }
             return Ok(Step::Done(vm_apply(heap, arm, &cur_argv, callee_env)?));
         }
         // A closure with no VM-eligible arm for this argc — a true defer to the
@@ -3530,6 +3737,14 @@ pub(crate) fn run_process_body(
 // guarded by the differential test.
 
 /// One bytecode instruction. A **stack machine**: each instruction pushes/pops on
+/// Non-owning raw pointer into a `Node` tree owned by a `CompiledArm`.
+/// Used by `Inst::TryCatch` to avoid double-rewriting: `rewrite_node(arm.body)`
+/// rewrites the pointed-to nodes in place; `rewrite_chunk` skips `Inst::TryCatch`.
+struct NodePtr(NonNull<Node>);
+// SAFETY: Node is Send+Sync (all interior mutability is through AtomicU64).
+unsafe impl Send for NodePtr {}
+unsafe impl Sync for NodePtr {}
+
 /// the operand region of `Heap::roots` that sits just above the activation frame's
 /// slots (`base..base+nslots`). Frame slots are read/written by absolute index
 /// (`Local`/`SetLocal`); everything else is push/pop. The semantics of each arm
@@ -3641,6 +3856,14 @@ enum Inst {
         fn_rest: ConstVal,
         names: Box<[Symbol]>,
         self_name: Option<Symbol>,
+    },
+    /// Inline try/catch: run body via exec_value; on non-control error write
+    /// the caught value to bind_slot and run handler; push result. NodePtrs
+    /// point into arm.body — rewrite_chunk skips them; rewrite_node handles them.
+    TryCatch {
+        body: NodePtr,
+        bind_slot: usize,
+        handler: NodePtr,
     },
 }
 
@@ -3874,6 +4097,13 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 fn_rest: ConstVal::new(fn_rest.load()),
                 names,
                 self_name: *self_name,
+            });
+        }
+        Node::TryCatch { body, bind_slot, handler } => {
+            code.push(Inst::TryCatch {
+                body: NodePtr(NonNull::from(body.as_ref())),
+                bind_slot: *bind_slot,
+                handler: NodePtr(NonNull::from(handler.as_ref())),
             });
         }
     }
@@ -4494,6 +4724,27 @@ fn exec_chunk(
                     heap.env_define(env, *name, closure);
                 }
                 heap.push_root(closure);
+            }
+            Inst::TryCatch { body, bind_slot, handler } => {
+                // SAFETY: NodePtrs reference nodes owned by arm.body (same CompiledArm),
+                // which outlives exec_chunk via the Arc<CompiledArm> held by vm_run_bc.
+                let body_node = unsafe { body.0.as_ref() };
+                let handler_node = unsafe { handler.0.as_ref() };
+                match exec_value(heap, body_node, base, genv) {
+                    Ok(v) => heap.push_root(v),
+                    Err(e) if e.is_control() => return Err(e),
+                    Err(e) => {
+                        let caught = match e.payload {
+                            Some(v) => v,
+                            None => e.to_value_map(heap),
+                        };
+                        heap.set_root_at(base + bind_slot, caught);
+                        match exec_value(heap, handler_node, base, genv) {
+                            Ok(v) => heap.push_root(v),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
             }
         }
     }
@@ -5310,6 +5561,9 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
                 | PrimOp::Cons
                 | PrimOp::Max
                 | PrimOp::Min
+                | PrimOp::BitAnd
+                | PrimOp::BitOr
+                | PrimOp::BitXor
         )
         // `Cons` is admitted: the lowering calls `brood_rt_cons` (same bump-allocate
         // path as `brood_rt_make_vector2`, which works) and reads all 3 result words
@@ -5317,7 +5571,7 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         // was fixed with the correct lowering; the old bail is no longer needed.
     };
     code.iter().all(|inst| match inst {
-        Inst::Const(cv) => matches!(cv.load().unpack(), ValueRef::Int(_) | ValueRef::Nil | ValueRef::Float(_) | ValueRef::Bool(_)),
+        Inst::Const(_) => true,
         Inst::Local(_)
         | Inst::Jump(_)
         | Inst::JumpIfFalse(_)
@@ -5363,6 +5617,7 @@ fn inst_opcode_name(inst: &Inst) -> &'static str {
         Inst::Call { .. } => "Call",
         Inst::SelfCall { .. } => "SelfCall",
         Inst::MakeClosure { .. } => "MakeClosure",
+        Inst::TryCatch { .. } => "TryCatch",
     }
 }
 
@@ -5411,6 +5666,10 @@ fn collect_self_call_args<'a>(node: &'a Node, out: &mut Vec<&'a [Node]>) {
             collect_self_call_args(b, out);
         }
         Node::Prim1 { a, .. } => collect_self_call_args(a, out),
+        Node::TryCatch { body, handler, .. } => {
+            collect_self_call_args(body, out);
+            collect_self_call_args(handler, out);
+        }
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
     }
 }
@@ -5503,6 +5762,10 @@ fn invariant_global_vecs(node: &Node, out: &mut std::collections::HashSet<Symbol
             invariant_global_vecs(b, out);
         }
         Node::Prim1 { a, .. } => invariant_global_vecs(a, out),
+        Node::TryCatch { body, handler, .. } => {
+            invariant_global_vecs(body, out);
+            invariant_global_vecs(handler, out);
+        }
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
     }
 }
@@ -5869,6 +6132,17 @@ fn jit_lower_arm_inner(
     let cdr_id = m
         .declare_function("brood_rt_cdr", Linkage::Import, &car_sig)
         .ok()?;
+    // Inline `first`/`rest` support: expose LOCAL pair-slab base pointers once per arm entry
+    // so the JIT can emit `ptr + idx*48 + {0,24}` loads instead of per-element FFI calls.
+    let mut pbase_sig = m.make_signature();
+    pbase_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    pbase_sig.returns.push(AbiParam::new(ptr_ty)); // *const u8
+    let pnbase_id = m
+        .declare_function("brood_rt_pair_nursery_base", Linkage::Import, &pbase_sig)
+        .ok()?;
+    let pobase_id = m
+        .declare_function("brood_rt_pair_old_base", Linkage::Import, &pbase_sig)
+        .ok()?;
     let mut cons_sig = m.make_signature();
     cons_sig.params.push(AbiParam::new(ptr_ty)); // heap
     cons_sig.params.push(AbiParam::new(ptr_ty)); // out
@@ -5998,6 +6272,14 @@ fn jit_lower_arm_inner(
     let gepochptr_id = m
         .declare_function("brood_rt_global_epoch_ptr", Linkage::Import, &gepochptr_sig)
         .ok()?;
+    // brood_rt_const_load(cv: *const ConstVal, out: *mut Value): load the current Value
+    // from a GC-movable ConstVal::Handle, writing it to *out. No return value — never fails.
+    let mut const_load_sig = m.make_signature();
+    const_load_sig.params.push(AbiParam::new(ptr_ty)); // cv: *const ConstVal
+    const_load_sig.params.push(AbiParam::new(ptr_ty)); // out: *mut Value
+    let const_load_id = m
+        .declare_function("brood_rt_const_load", Linkage::Import, &const_load_sig)
+        .ok()?;
 
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
@@ -6044,6 +6326,8 @@ fn jit_lower_arm_inner(
     let incap_ref = m.declare_func_in_func(incap_id, b.func);
     let car_ref = m.declare_func_in_func(car_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
+    let pnbase_ref = m.declare_func_in_func(pnbase_id, b.func);
+    let pobase_ref = m.declare_func_in_func(pobase_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
     let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
@@ -6056,6 +6340,7 @@ fn jit_lower_arm_inner(
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     let gepochptr_ref = m.declare_func_in_func(gepochptr_id, b.func);
+    let const_load_ref = m.declare_func_in_func(const_load_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
     let has_cons = code.iter().any(|i| {
@@ -6187,6 +6472,40 @@ fn jit_lower_arm_inner(
         } else {
             None
         };
+
+    // Inline `first`/`rest` pair reads: if the arm uses First/Rest but contains no Cons
+    // (which could grow the nursery slab) and no non-tail Call (a GC safepoint that may
+    // trigger a minor collect, replacing the entire nursery slab with a fresh one and
+    // invalidating the stashed pointer), fetch the LOCAL nursery and old-gen pair-slab base
+    // pointers once here in the entry block. The inline lowering then computes
+    // `base + idx*48 + {0,24}` directly and deopts for non-LOCAL (PRELUDE/RUNTIME) pairs
+    // — those are rare on hot cons-list paths.
+    let pair_bases: Option<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> = {
+        let has_car_cdr = code.iter().any(|i| {
+            matches!(i, Inst::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. })
+        });
+        let has_cons = code.iter().any(|i| {
+            matches!(
+                i,
+                Inst::Prim2 { op: PrimOp::Cons, .. }
+                    | Inst::Prim2SlotSlot { op: PrimOp::Cons, .. }
+                    | Inst::Prim2SlotInt { op: PrimOp::Cons, .. }
+            )
+        });
+        // A non-tail Call is a GC safepoint: minor_collect replaces `self.local` entirely
+        // (std::mem::take), so any pointer to `local.pairs` cached before the call is
+        // invalid after it. Only inline when there are no such safepoints.
+        let has_call_safepoint = code.iter().any(|i| matches!(i, Inst::Call { tail: false, .. }));
+        if has_car_cdr && !has_cons && !has_call_safepoint {
+            let cn = b.ins().call(pnbase_ref, &[heap]);
+            let nursery = b.inst_results(cn)[0];
+            let co = b.ins().call(pobase_ref, &[heap]);
+            let old = b.inst_results(co)[0];
+            Some((nursery, old))
+        } else {
+            None
+        }
+    };
 
     if !hoist_slots.is_empty() || !hoist_globals.is_empty() || !hoist_scalar_globals.is_empty() {
         let len_slot = b.create_sized_stack_slot(StackSlotData::new(
@@ -6412,6 +6731,9 @@ fn jit_lower_arm_inner(
                 let cond = b.ins().icmp(IntCC::SignedLessThanOrEqual, x, y);
                 b.ins().select(cond, x, y)
             }
+            PrimOp::BitAnd => b.ins().band(x, y),
+            PrimOp::BitOr => b.ins().bor(x, y),
+            PrimOp::BitXor => b.ins().bxor(x, y),
             PrimOp::Cons => return None, // allocates — never in the JIT subset
             PrimOp::VectorRef => return None, // heap slab read — not lowered; out of subset
         })
@@ -6909,7 +7231,24 @@ fn jit_lower_arm_inner(
                         let v = b.ins().iconst(types::I64, if bv { 1 } else { 0 });
                         stack.push(Op::Bool(v));
                     }
-                    _ => return None,
+                    _ => {
+                        // GC-movable heap handle (Str, BigInt, Pair, Fn, …): call
+                        // `brood_rt_const_load(cv_ptr, out)` at the point of use to get
+                        // the live bits (updated by `runtime_collect` via `ConstVal::rewrite`).
+                        // The ConstVal lives in the arm's chunk behind an Arc<CompiledArm>,
+                        // so the address is stable for the JIT function's lifetime.
+                        let cv_ptr = b.ins().iconst(ptr_ty, cv as *const ConstVal as i64);
+                        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        b.ins().call(const_load_ref, &[cv_ptr, out_addr]);
+                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let w1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let w2 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        stack.push(Op::Handle(w0, w1, w2));
+                    }
                 },
                 // Lazy: push a reference to the frame slot. Consumers tag-check it to an int
                 // (arithmetic / a branch) or copy it whole (a binder / arg / return), so a
@@ -6983,15 +7322,6 @@ fn jit_lower_arm_inner(
                     // callee via the call IC. A **computed** head leaves the callee staged
                     // below the args (`argc + 1` operands).
                     let n_ops = if head.is_some() { argc } else { argc + 1 };
-                    // A free-global **tail** call is elided too (no staged callee), but the
-                    // tail path (`jit_dispatch_tail`, outcome 4) reads a staged callee — so
-                    // don't lower an arm ending in one; the VM runs it correctly. Computed
-                    // tail calls keep their staged callee and lower fine; non-tail elided
-                    // calls go via `jit_dispatch_call`. Rare (mutual recursion) — self-tail
-                    // loops use `SelfCall`, a different path.
-                    if *tail && head.is_some() {
-                        return None;
-                    }
                     // The call is a safepoint (the callee runs arbitrary Brood and may GC).
                     // A live `Handle` left on the operand stack BELOW the call's own operands
                     // would be a heap pointer in a register across the collection → stale.
@@ -7028,6 +7358,28 @@ fn jit_lower_arm_inner(
                         Vec::with_capacity(ops.len());
                     for &op in &ops {
                         worded.push(read_words(&mut b, op));
+                    }
+                    // For a free-global tail call, jit_dispatch_tail reads [callee, args…]
+                    // from roots — but the elided head is never staged. Resolve it via the
+                    // global IC and stage it now, before the args. Arg words are already in
+                    // `worded` (read above, before any push) so no slot reads follow.
+                    if *tail && head.is_some() {
+                        let sym_v2 = b.ins().iconst(types::I32, call_head as i64);
+                        let site_v2 = b.ins().iconst(types::I32, call_site as i64);
+                        let out_a = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        let cv = b.ins().call(globic_ref, &[heap, out_a, sym_v2, site_v2]);
+                        let cstatus = b.inst_results(cv)[0];
+                        let callee_ok = b.create_block();
+                        b.ins().brif(cstatus, error, &[], callee_ok, &[]);
+                        b.switch_to_block(callee_ok);
+                        let cw0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let cw1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let cw2 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        b.ins().call(push_ref, &[heap, cw0, cw1, cw2]);
                     }
                     // Stage `[callee, arg0 .. arg_{argc-1}]` (the VM's `Inst::Call` layout
                     // that `brood_rt_call_slow` / `jit_dispatch_tail` read back).
@@ -7174,12 +7526,62 @@ fn jit_lower_arm_inner(
                             let cont = b.create_block();
                             b.ins().brif(is_pair, cont, &[], deopt, &[]);
                             b.switch_to_block(cont);
-                            let fref = match op {
-                                PrimOp1::First => car_ref,
-                                PrimOp1::Rest => cdr_ref,
-                                _ => unreachable!(),
+                            let h = if let Some((nursery_base, old_base)) = pair_bases {
+                                // Inline LOCAL pair read. PairId layout (w1):
+                                //   bits 0..31  = index into the slab
+                                //   bits 32..60 = gen epoch (ignored here)
+                                //   bit  61     = age  (0=nursery, 1=old)
+                                //   bits 62..63 = region (0=LOCAL, 1=PRELUDE, 2=RUNTIME)
+                                // Deopt for non-LOCAL (PRELUDE/RUNTIME) — uncommon on hot
+                                // cons-list paths; the VM handles those correctly.
+                                let high2 = b.ins().ushr_imm(w1, 62);
+                                let is_local =
+                                    b.ins().icmp_imm(IntCC::Equal, high2, 0i64);
+                                let local_cont = b.create_block();
+                                b.ins().brif(is_local, local_cont, &[], deopt, &[]);
+                                b.switch_to_block(local_cont);
+                                // Age bit 61: 0=nursery, 1=old. After the LOCAL check, bits
+                                // 62-63 are 0, so ushr by 61 gives exactly 0 or 1.
+                                let age_shifted = b.ins().ushr_imm(w1, 61);
+                                let is_old =
+                                    b.ins().icmp_imm(IntCC::NotEqual, age_shifted, 0i64);
+                                let base =
+                                    b.ins().select(is_old, old_base, nursery_base);
+                                // Index: lower 32 bits. stride = 48 (two 24-byte Values).
+                                let idx = b.ins().band_imm(w1, 0xFFFF_FFFFi64);
+                                let byte_off = b.ins().imul_imm(idx, 48i64);
+                                let pair_ptr = b.ins().iadd(base, byte_off);
+                                // Car at offset 0, cdr at offset 24 (one Value = 24 bytes).
+                                let field_off: i64 =
+                                    if matches!(op, PrimOp1::Rest) { 24 } else { 0 };
+                                let field_ptr = if field_off == 0 {
+                                    pair_ptr
+                                } else {
+                                    b.ins().iadd_imm(pair_ptr, field_off)
+                                };
+                                let rw0 =
+                                    b.ins().load(types::I64, MemFlags::new(), field_ptr, 0);
+                                let rw1 = b.ins().load(
+                                    types::I64,
+                                    MemFlags::new(),
+                                    field_ptr,
+                                    PAYLOAD_OFFSET as i32,
+                                );
+                                let rw2 = b.ins().load(
+                                    types::I64,
+                                    MemFlags::new(),
+                                    field_ptr,
+                                    PAYLOAD_OFFSET as i32 + 8,
+                                );
+                                Op::Handle(rw0, rw1, rw2)
+                            } else {
+                                let fref = match op {
+                                    PrimOp1::First => car_ref,
+                                    PrimOp1::Rest => cdr_ref,
+                                    _ => unreachable!(),
+                                };
+                                call_handle(&mut b, fref, &[w0, w1, w2])
                             };
-                            let h = call_handle(&mut b, fref, &[w0, w1, w2]);
                             stack.push(h);
                         }
                         PrimOp1::IsNil => {
@@ -9282,10 +9684,9 @@ mod tests {
             "an arm ending in a computed-callee tail call (past the body-weight gate) must lower"
         );
 
-        // The deliberate counter-case: the *same* 4-work-op arm whose tail call is a
-        // **free-global** head (`head: Some(fb)`, no staged callee — the elided shape the
-        // real compiler emits for `(fb …)` in tail position) *bails*. `jit_dispatch_tail`
-        // reads a staged callee an elided head never leaves, so the arm stays on the VM.
+        // The *same* 4-work-op arm whose tail call is a **free-global** head (`head:
+        // Some(fb)`, elided shape) now lowers successfully: the JIT stages the callee
+        // via `globic_ref` before the args (the free-global tail call fix, c99f539).
         let elided = Chunk {
             code: vec![
                 Inst::Local(0),                            // 0: n
@@ -9340,8 +9741,8 @@ mod tests {
                 inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(
-            jit_lower_arm(&mut jit, &elided_arm, &[]).is_none(),
-            "an elided free-global tail call must bail (the tail path needs a staged callee)"
+            jit_lower_arm(&mut jit, &elided_arm, &[]).is_some(),
+            "an elided free-global tail call must lower (callee staged via globic_ref, c99f539)"
         );
 
         // ...and a *thin* tail-call arm (2 work ops: `=`, `-`) is gated out — stays on the

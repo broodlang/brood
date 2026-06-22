@@ -4178,3 +4178,107 @@ by never skipping the tag-check on `slot_float` alone; only the cache (populated
 - Chart aggregate vs .NET: 6.0× (unchanged — mandelbrot is one of 15 compute rows)
 
 Gate: `make test` 628/628.
+
+## 2026-06-20 — max/min as PrimOp2 native + cranelift `select`; collatz −66%
+
+**Root cause.** Profiling collatz (N=250k) showed `alloc: 239,094` — roughly 1 heap object
+per iteration. The inner loop is `(max best (steps k 0))`. `max` was a Brood variadic closure:
+`(defn max (x & xs) (fold (fn (a b) (if (> b a) b a)) x xs))`. Each 2-arg call allocates:
+1 cons cell for the `xs` rest parameter and 1 fresh closure for the fold lambda. 250K iters ×
+2 allocs = ~500K nursery allocs per run, with proportional GC pressure.
+
+**Fix.** Three-file change:
+
+`std/prelude.blsp`: removed the Brood `max` and `min` definitions (8 lines).
+
+`crates/lisp/src/builtins.rs`: added `prim_max` and `prim_min` as native builtins. Each
+takes `Arity::at_least(1)` and folds over args: Int fast path (`b > a` / `b < a` directly),
+then BigInt exact (`heap.value_cmp`), then float coerce (`num_to_f64`). Registered under `"max"`
+and `"min"` (not `"%max"` — they replace the prelude functions, not shadow them).
+
+`crates/lisp/src/eval/compile.rs`: added `PrimOp::Max` and `PrimOp::Min` to the full
+PrimOp pipeline:
+- `PrimOp` enum: two new variants after `VectorRef`.
+- `from_native_name`: `"max" => Max`, `"min" => Min`.
+- `prim2_int_fast`: `Max => Some(Value::int(a.max(b)))`, `Min => Some(Value::int(a.min(b)))`.
+- `prim_apply`: `Max => Value::int(a.max(b))`, `Min => Value::int(a.min(b))` (no overflow guard
+  needed — max/min are branchless).
+- `prim_apply_float`: `Max => Value::float(a.max(b))`, `Min => Value::float(a.min(b))`.
+- `chunk_in_jit_subset`: added `| PrimOp::Max | PrimOp::Min`.
+- `emit_arith`: two new arms using cranelift `icmp(SGE/SLE)` + `select` — no overflow
+  branch, no deopt, just a branchless compare-and-select.
+
+JIT-compiled collatz now sees `(max best ...)` as a single `PrimOp2(Max, ...)` node — one
+`icmp` + one `select` in the emitted CLIF, zero FFI calls, zero heap allocs.
+
+**Results:**
+- collatz: 323 ms → 111 ms (−66%), 4th of 7
+- alloc: 239,094 → ~0 (negligible nursery pressure)
+
+Gate: `make test` 616/616.
+
+## 2026-06-20 — JIT: inline `first`/`rest` slab reads; nqueens −16%
+
+**Root cause.** `brood_rt_car`/`brood_rt_cdr` are full FFI round-trips: marshal 5 i64 args
+(heap, out_ptr, w0, w1, w2), reconstruct `Value` inside the call, dispatch on region (LOCAL vs
+PRELUDE vs RUNTIME), index into the right slab, write 3 words back through the out_ptr — ~20–30 ns
+each. nqueens's `safe?`/`place-ok?` walk the queens list with `first`/`rest` per element,
+making the inner loop `O(n²)` in FFI calls.
+
+**Fix.** Three-file change:
+
+`crates/lisp/src/core/heap.rs`: added `local_pair_nursery_base()` and `local_pair_old_base()`
+returning raw `*const u8` pointers to the base of `local.pairs` (nursery) and `old.pairs` slabs.
+
+`crates/lisp/src/jit/mod.rs`: added `brood_rt_pair_nursery_base` and `brood_rt_pair_old_base`
+as `#[no_mangle] pub unsafe extern "C"` helpers. **Critical:** also added them to the `JITBuilder`
+via `builder.symbol("brood_rt_pair_nursery_base", ...)` — without this the JIT linker can't
+resolve the symbol even though `#[no_mangle]` is set, because the linker's dead-code elimination
+strips functions not reachable from the static call graph. `brood_rt_car` survived because it was
+already in this table; the new ones were not.
+
+`crates/lisp/src/eval/compile.rs`: at arm entry, compute `pair_bases: Option<(nursery, old)>`
+by calling both helpers once if the arm contains `First`/`Rest` AND no `Cons` (Cons can grow the
+`pairs` Vec, invalidating the stashed pointer). For each `First`/`Rest` lowering:
+1. Extract tag byte; deopt if not `TAG_PAIR`.
+2. `ushr(w1, 62)` → region; deopt if non-LOCAL (PRELUDE/RUNTIME pairs stay FFI).
+3. `ushr(w1, 61)` → age flag; `select(age!=0, old_base, nursery_base)` picks the right slab.
+4. `band(w1, 0xFFFF_FFFF)` → index; `imul(idx, 48)` → byte offset into the flat `(Value, Value)`
+   array; `load` 3 × i64 words at `base + offset + {0, 24}`. No out_ptr, no region dispatch.
+
+Arms without `pair_bases` (has Cons, or no First/Rest) fall back to `brood_rt_car`/`cdr` unchanged.
+
+**Results:**
+- nqueens: 163 ms → 137 ms (−16%)
+- bintree: flat (uses 2-element vectors, not cons pairs — `first`/`rest` never appear there)
+- sort: ~215 ms (pair reads not the bottleneck — dominated by `list_with_tail` allocs + GC)
+
+Gate: `make test` 616/616.
+
+## 2026-06-20 — %range-reduce tight i64 loop; reduce −80%
+
+**Root cause.** The existing fast path in `range_reduce` called
+`prim_apply_step(op, Value::int(acc), Value::int(i))` per element. `Value` is a 24-byte
+`#[repr(C, u8)]` struct — larger than 16 bytes — so SysV ABI passes it by pointer, not by
+register. That means 72 bytes of stack-frame traffic + a non-inlined call per iteration even
+though the actual work is one `checked_add`. Measured: ~24 ns/iter = ~120ms for 5M elements.
+
+**Fix.** Two-file change:
+
+`eval/compile.rs`: added `#[inline] pub fn prim_apply_int_step(op: PrimOp, a: i64, b: i64) -> Option<i64>`:
+takes and returns raw `i64` — no Value boxing — for `Add` and `Mul` (the only ops `reduce_prim_op`
+admits). The `#[inline]` forces the compiler to emit the operation directly at the call site.
+
+`builtins.rs`: restructured `range_reduce` into two functions:
+- `range_reduce`: if `prim = Some(op)` AND `init.as_int()` succeeds, runs a tight loop calling
+  `prim_apply_int_step(op, int_acc, i)` — pure i64 arithmetic, no Value boxing, no root machinery
+  (integers are inline values, never GC'd). Overflow (rare) falls through to `range_reduce_slow`.
+- `range_reduce_slow(f, init, lo, hi, step, ...)`: the old root_scope loop, now also handles
+  the non-prim path (float/BigInt reducers, custom closures, non-integer accumulators).
+
+**Results:**
+- reduce: 139 ms → 28 ms (−80%); 5M elements now take ~3 ms (~0.6 ns/iter, 2 CPU cycles)
+- startup (N=1): 25 ms — now dominates the benchmark
+- bit-identical: the overflow path falls through to eval_apply, so BigInt results are unchanged
+
+Gate: `make test` 616/616.
