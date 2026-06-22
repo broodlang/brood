@@ -5970,19 +5970,32 @@ fn jit_lower_arm_inner(
     // ---- Body-weight gate for arms ending in a tail call (jit-tier2.md §6.2). ----
     // A **tail** call returns to the driver (outcome 4) to dispatch the callee and reuse
     // the frame — a per-hop native↔driver round-trip the self-recursive `SelfCall` loop
-    // avoids (it loops inside native). That round-trip only pays off once the arm does
-    // enough work to outweigh it. Benchmarking mutual recursion puts the crossover at
-    // ~3 "work" ops: a 2-op `(if (= n 0) … (g (- n 1)))` ping/pong loop *regresses* ~7%
-    // (the native body is too small to amortize the round-trip), a 3-op body is ~neutral,
-    // a 5-op body gains ~12%. So an arm containing a tail call must have **≥ 4 work
-    // instructions** (arithmetic/list prims + nested non-tail calls) to lower; a thinner
-    // one stays on the VM — same speed, no regression. Arms with no tail call are
-    // unaffected (no round-trip): a tiny `SelfCall` int loop still tiers (~27× win).
+    // avoids (it loops inside native). There are two costs that must be amortised:
+    //
+    // 1. The native→driver round-trip overhead per activation. Benchmarking mutual
+    //    recursion puts the crossover at ~3 "work" ops: a 2-op `(if (= n 0) … (g (- n 1)))`
+    //    ping/pong loop *regresses* ~7% (the native body is too small to amortise the
+    //    round-trip), a 3-op body is ~neutral, a 5-op body gains ~12%.
+    //
+    // 2. `jit_dispatch_call` (non-tail native→native linking) does not yet follow an
+    //    outcome-4 tail staged by the callee — it re-runs the callee via `vm_apply` instead,
+    //    paying both JIT and VM overhead. Until that is fixed, a JIT-compiled thin delegator
+    //    (e.g. `prime?` tail-calling `divides-none?`) called from JIT code in non-tail
+    //    position regresses because every call hits the re-run path.
+    //
+    // So an arm containing a tail call must have **≥ 4 work instructions** (arithmetic/list
+    // prims + nested non-tail calls) to lower; a thinner one stays on the VM — same speed,
+    // no regression. Arms with no tail call are unaffected (no round-trip): a tiny `SelfCall`
+    // int loop still tiers (~27× win).
     const TAIL_CALL_MIN_WORK: usize = 4;
-    if code
-        .iter()
-        .any(|i| matches!(i, Inst::Call { tail: true, .. }))
-    {
+    let has_tail_call = code.iter().any(|i| matches!(i, Inst::Call { tail: true, .. }));
+    let has_self_call = code.iter().any(|i| matches!(i, Inst::SelfCall { .. }));
+    // The gate only applies when the arm is self-recursive (SelfCall present). A non-self-
+    // recursive arm with a tail call is a pure delegator: it calls out exactly once and never
+    // returns to a self-loop, so the tail-call overhead is amortised over all the callee's
+    // work. With outcome-4 follow-through in `jit_dispatch_call` / `jit_run_fast_link`, such
+    // arms are now safe to compile without regression.
+    if has_tail_call && has_self_call {
         let work = code
             .iter()
             .filter(|i| {
@@ -6064,8 +6077,13 @@ fn jit_lower_arm_inner(
                 // through would propagate a bogus depth into whatever instruction follows
                 // (dead code, or a sibling leader), corrupting that block's param count.
                 Inst::Call { tail: true, .. } => break,
-                // A non-tail call pops the callee + `argc` args and pushes one result: net `-argc`.
-                Inst::Call { argc, .. } => cur -= *argc as i32,
+                // A non-tail call pushes one result and pops its operands.
+                // For a free-global head (head=Some) the callee is resolved via the call IC
+                // and is NOT staged on the operand stack — only the `argc` args are: net `1-argc`.
+                // For a computed head (head=None) the callee IS staged below the args: net `-argc`.
+                Inst::Call { argc, head, .. } => {
+                    cur += if head.is_some() { 1 - *argc as i32 } else { -(*argc as i32) };
+                }
                 // Fused prims read their operands from frame slots / a literal, not the
                 // operand stack: net push of 1 (unlike the generic `Prim2`'s pop-2-push-1).
                 Inst::Prim2SlotSlot { .. } | Inst::Prim2SlotInt { .. } => cur += 1,
@@ -8490,7 +8508,34 @@ fn jit_run_fast_link(
             heap.truncate_roots(stage_base);
             FastLinkOutcome::Error
         }
-        // deopt (1) / preempt (2) / tail (4): re-run on the VM. The args survive in the param
+        // Tail call (outcome 4): the callee JIT'd a tail call — [callee, arg0..argN] are staged
+        // in roots above the callee's frame at `[base+nslots, roots_len)`. Rather than discarding
+        // the staged call and re-running the callee via `vm_apply` (which would pay both JIT and
+        // VM overhead for every tail-calling callee), follow the chain: dispatch the staged call
+        // as if the callee had returned that value. This makes JIT-compiled thin delegators
+        // (e.g. `prime?` tail-calling `divides-none?`) called in non-tail position efficient.
+        4 => {
+            let staged_start = base + nslots;
+            let staged_end = heap.roots_len();
+            if staged_end > staged_start {
+                let staged_callee = heap.root_at(staged_start);
+                let staged_argc = staged_end - staged_start - 1;
+                let staged_args: SmallVec<[Value; 4]> =
+                    (1..=staged_argc).map(|k| heap.root_at(staged_start + k)).collect();
+                heap.truncate_roots(stage_base);
+                return match apply_value(heap, staged_callee, &staged_args, heap.global()) {
+                    Ok(v) => FastLinkOutcome::Done(v),
+                    Err(e) => {
+                        heap.jit_pending_error = Some(e);
+                        FastLinkOutcome::Error
+                    }
+                };
+            }
+            // No staged call staged (shouldn't happen): fall back.
+            heap.truncate_roots(stage_base);
+            FastLinkOutcome::Error
+        }
+        // deopt (1) / preempt (2): re-run on the VM. The args survive in the param
         // slots `[base, base+argc)`. Re-probe for the arm (clones — but only on this rare
         // path) and `vm_apply`.
         _ => {
@@ -8709,7 +8754,31 @@ pub(crate) fn jit_dispatch_call(
                         heap.truncate_roots(stage_base);
                         return None;
                     }
-                    // deopt (1) / preempt (2) / tail (4): re-run the callee on the VM. The args
+                    // Tail call (4): the callee JIT'd a tail — [callee, arg0..argN] staged above
+                    // its frame at `[base+nslots, roots_len)`. Follow the chain rather than
+                    // re-running the callee via `vm_apply` (which would pay both JIT and VM cost).
+                    4 => {
+                        let nslots = arm.active_nslots();
+                        let staged_start = base + nslots;
+                        let staged_end = heap.roots_len();
+                        if staged_end > staged_start {
+                            let staged_callee = heap.root_at(staged_start);
+                            let staged_argc = staged_end - staged_start - 1;
+                            let staged_args: SmallVec<[Value; 4]> =
+                                (1..=staged_argc).map(|k| heap.root_at(staged_start + k)).collect();
+                            heap.truncate_roots(stage_base);
+                            return match apply_value(heap, staged_callee, &staged_args, heap.global()) {
+                                Ok(v) => Some(v),
+                                Err(e) => {
+                                    heap.jit_pending_error = Some(e);
+                                    None
+                                }
+                            };
+                        }
+                        heap.truncate_roots(stage_base);
+                        return None;
+                    }
+                    // deopt (1) / preempt (2): re-run the callee on the VM. The args
                     // survive in the frame's param slots `[base, base+argc)` (params aren't
                     // overwritten by the arm body), so re-read, drop the frame, and `vm_apply`.
                     _ => {
