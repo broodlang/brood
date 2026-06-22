@@ -40,8 +40,13 @@ JIT_FEATURES := $(if $(filter-out 0,$(WITH_JIT)),--features brood/jit,)
 # GUI_FEATURES). Unlike the windowing stack it is NOT gated on configure.
 TS_FEATURES := --features brood/treesit
 
+# Local (gitignored — `target/` is in .gitignore) output dir for the optimized
+# binaries. `make release` builds into here; `make install` copies them out to
+# $(PREFIX)/bin. So building and installing are separate steps.
+RELEASE_DIR := target/release-lean
+
 .DEFAULT_GOAL := help
-.PHONY: help build test test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
+.PHONY: help build release test test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
@@ -133,27 +138,36 @@ configure: ## Show current build options (./configure --with-gui to enable the G
 	@echo "WITH_AUDIO = $(WITH_AUDIO)$(if $(AUDIO_FEATURES), (audio-beep on),)"
 	@echo "Run ./configure --with-gui to enable the native window; ./configure --help for more."
 
-install: ## Install `brood`, `nest` and `brood-lsp` into $(PREFIX)/bin (./configure --with-gui first for the window)
+release: ## Build optimized `brood`, `nest` and `brood-lsp` into $(RELEASE_DIR) (gitignored; does NOT install — ./configure --with-gui first for the window)
+	# Build the optimized binaries into the local, gitignored $(RELEASE_DIR); the
+	# separate `install` target copies them out to $(PREFIX)/bin.
+	#
 	# Force a clean *performance* build: append `-C debug-assertions=off
 	# -C overflow-checks=off` to any ambient RUSTFLAGS. rustc takes the LAST
 	# `-C <key>=` for a key, so this wins even if the GC-debug build mode
 	# (`RUSTFLAGS="-C debug-assertions=on"`, see CLAUDE.md) is exported in the
 	# shell — so the installed binary is never accidentally debug-armed (which
 	# would carry the GC tripwire/verifier overhead and skew benchmarks).
-	# Build the single lean (+gui if `./configure --with-gui`) runtime that `nest`
-	# embeds, so `nest release` ships a self-contained app with NO Rust at release
-	# time (ADR-038, docs/release.md). `--no-default-features` strips the dev/debug
-	# surface; `$(GUI_FEATURES)` adds `--features brood/gui` when GUI is configured.
+	# `--no-default-features` strips the dev/debug surface; `$(GUI_FEATURES)` adds
+	# `--features brood/gui` when GUI is configured.
 	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean --no-default-features -p cli $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/cli  --force --root $(PREFIX) $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
-	# Bake the runtime built above into `nest` (crates/nest/build.rs reads BROOD_EMBED_RUNTIME).
-	BROOD_EMBED_RUNTIME=$(CURDIR)/target/release-lean/brood RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/lsp  --force --root $(PREFIX)
+	# Bake the `brood` runtime built above into `nest` (crates/nest/build.rs reads
+	# BROOD_EMBED_RUNTIME), so `nest release` ships a self-contained app with NO
+	# Rust at release time (ADR-038, docs/release.md).
+	BROOD_EMBED_RUNTIME=$(CURDIR)/$(RELEASE_DIR)/brood RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean --no-default-features -p nest $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean -p brood-lsp
 
-uninstall: ## Remove the installed `brood`, `nest` and `brood-lsp` binaries from $(PREFIX)/bin
-	cargo uninstall cli --root $(PREFIX)
-	cargo uninstall nest --root $(PREFIX)
-	cargo uninstall brood-lsp --root $(PREFIX)
+install: release ## Install the binaries built by `release` into $(PREFIX)/bin
+	# Just place the binaries built by `release` — no rebuild, no cargo install.
+	@mkdir -p $(PREFIX)/bin
+	install -m755 $(RELEASE_DIR)/brood     $(PREFIX)/bin/brood
+	install -m755 $(RELEASE_DIR)/nest      $(PREFIX)/bin/nest
+	install -m755 $(RELEASE_DIR)/brood-lsp $(PREFIX)/bin/brood-lsp
+
+uninstall: ## Remove the installed binaries from $(PREFIX)/bin (leaves the local $(RELEASE_DIR) build intact)
+	# Removes only what `install` placed on the system — the local release build
+	# in $(RELEASE_DIR) is left alone (use `make clean` to remove that).
+	rm -f $(PREFIX)/bin/brood $(PREFIX)/bin/nest $(PREFIX)/bin/brood-lsp
 
 fmt: ## Format all Rust code
 	cargo fmt
@@ -167,5 +181,8 @@ clippy: ## Lint with clippy (all targets + all features; warnings reported, not 
 
 check: clippy test ## Lint + test (the pre-commit gate). Run `make fmt` separately — it rewrites files.
 
-clean: ## Remove build artifacts
+clean: ## Remove all build artifacts (incl. the local $(RELEASE_DIR) build); does NOT touch installed binaries in $(PREFIX)/bin
+	# Wipes the whole target/ tree — every build artifact, including the local
+	# release build in $(RELEASE_DIR). Installed binaries in $(PREFIX)/bin are
+	# untouched (use `make uninstall` to remove those).
 	cargo clean
