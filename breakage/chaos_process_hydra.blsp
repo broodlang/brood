@@ -1,0 +1,148 @@
+;;; chaos_process_hydra.blsp — process scheduler & message-passing stress
+;;;
+;;; Launches a binary tree of processes (depth 14 = 16383 leaves + internal nodes),
+;;; each doing independent computation, then fans results back up the tree via
+;;; send/receive. Tests the green-process scheduler under load, message deep-copy
+;;; across per-process heaps, and mailbox ordering.
+;;;
+;;; Targets:
+;;;   - `spawn` / `send` / `receive` under thousands of concurrent processes
+;;;   - Deep-copy of compound messages (lists, maps, closures) across heaps
+;;;   - Named-spawn idempotency under concurrent registration
+;;;   - `monitor` / `[:down …]` under hundreds of process deaths
+;;;   - Timeout `receive … (after 5000 :timeout)` — should never fire here
+
+(println "--- fan-out/fan-in tree (depth 13, 8191 leaf processes) ---")
+
+;; Leaf: compute sum of squares [start, end) and reply to parent
+(defn tree-leaf (parent start end)
+  (let (sum (fold (fn (acc i) (+ acc (* i i))) 0 (range start end)))
+    (send parent [:leaf-result sum])))
+
+;; Internal node: spawn two children, collect their results, sum, send up
+(defn tree-node (parent start end depth)
+  (if (= depth 0)
+    (tree-leaf parent start end)
+    (let (mid (+ start (quot (- end start) 2))
+          me  (self)
+          c1  (spawn (tree-node me start mid (- depth 1)))
+          c2  (spawn (tree-node me mid   end (- depth 1)))
+          r1  (receive ([:leaf-result v] v))
+          r2  (receive ([:leaf-result v] v)))
+      (send parent [:leaf-result (+ r1 r2)]))))
+
+;; Root: spawn the tree and collect the final answer
+(let (me     (self)
+      n      8192          ; number of items total (evenly distributable)
+      depth  13)           ; 2^13 = 8192 leaves
+  (spawn (tree-node me 0 n depth))
+  (let (result (receive ([:leaf-result v] v)))
+    ;; sum of i^2 for i in [0, 8192) = (8191 * 8192 * 16383) / 6
+    (def expected (quot (* (* 8191 8192) 16383) 6))
+    (println "tree result:" result)
+    (println "expected:"    expected)
+    (println "tree correct?" (= result expected))))
+
+(println "--- 1000 worker fan-out with compound messages ---")
+
+;; Each worker receives a config map, does work, sends back a map with results
+(defn heavy-worker (parent id config)
+  (let (n     (get config :n)
+        seed  (get config :seed)
+        ;; compute a pseudo-random sum (poor man's hash chain)
+        total (fold (fn (acc i) (rem (+ (* acc 1103515245) i seed) 2147483647))
+                    1 (range n)))
+    (send parent {:id id :result total :config config})))
+
+(let (me      (self)
+     n-workers 1000
+     config    {:n 200 :seed 42 :label "stress"})
+  ;; Fan out
+  (dotimes (i n-workers)
+    (spawn (heavy-worker me i config)))
+  ;; Fan in — collect all results into a map keyed by id
+  (defn collect-workers (acc remaining)
+    (if (= remaining 0)
+      acc
+      (collect-workers
+        (receive (msg (assoc acc (get msg :id) (get msg :result))))
+        (- remaining 1))))
+  (let (results (collect-workers {} n-workers))
+    (println "workers returned:" (count results))
+    ;; Every worker had the same config, so all results must be equal
+    (let (vals (vals results)
+          all-same (= (count (into {} (map (fn (v) [v true]) vals))) 1))
+      (println "all workers got same result?" all-same)
+      (println "sample result[0]:" (get results 0)))))
+
+(println "--- monitor stress: 500 processes die, check all [:down ...] received ---")
+
+(let (me   (self)
+     n     500
+     refs  (map (fn (i)
+                  (let (pid (spawn (if (= (rem i 3) 0)
+                                    (error "intentional crash")
+                                    :normal-exit)))
+                    (monitor pid)))
+                (range n)))
+  ;; Collect all :down messages
+  (defn collect-downs (remaining acc)
+    (if (= remaining 0)
+      acc
+      (collect-downs (- remaining 1)
+        (receive ([:down _ _ reason] (cons reason acc))
+                 (after 3000 (cons :timeout acc))))))
+  (let (downs (collect-downs n nil))
+    (println "down messages:" (count downs))
+    (let (crashes (count (filter (fn (r) (string? (error-message r))) downs)))
+      (println "crashed processes (approx):" crashes))))
+
+(println "--- named-spawn idempotency: same name spawned from many processes ---")
+
+;; 50 processes all try to spawn :shared-counter — only the first wins,
+;; the rest get back the existing pid. We verify they all got the same pid.
+(defn shared-counter-proc (n)
+  (receive
+    ([:get caller] (do (send caller n) (shared-counter-proc n)))
+    ([:add x]      (shared-counter-proc (+ n x)))))
+
+(let (me (self)
+     n   50)
+  (dotimes (_ n)
+    (spawn
+      (let (pid (spawn :shared-counter (shared-counter-proc 0)))
+        (send me pid))))
+  ;; collect all returned pids
+  (defn collect-pids (remaining acc)
+    (if (= remaining 0)
+      acc
+      (collect-pids (- remaining 1) (receive (p (cons p acc))))))
+  (let (pids  (collect-pids n nil)
+        uniq  (into {} (map (fn (p) [p true]) pids)))
+    (println "unique pids registered for :shared-counter:" (count uniq))
+    (println "all same pid?" (= (count uniq) 1))))
+
+(println "--- closure shipping: send a function across process heaps ---")
+
+;; Parent sends a closure to a worker; worker calls it with its own argument
+(let (me  (self)
+     f    (fn (x) (* x x x))   ; cube — a real closure
+     n    200)
+  (dotimes (i n)
+    (spawn
+      (let (result (f (+ i 1)))
+        (send me [:cube (+ i 1) result]))))
+  (defn collect-cubes (remaining acc)
+    (if (= remaining 0)
+      acc
+      (collect-cubes (- remaining 1)
+        (receive ([:cube i v] (assoc acc i v))))))
+  (let (cubes (collect-cubes n {}))
+    (println "cube results received:" (count cubes))
+    ;; verify a few
+    (println "cube(1):"   (get cubes 1))
+    (println "cube(10):"  (get cubes 10))
+    (println "cube(200):" (get cubes 200))
+    (println "all correct?" (= (count (filter (fn (kv) (= (first (rest kv)) (* (first kv) (* (first kv) (first kv))))) cubes)) n))))
+
+(println "--- DONE ---")

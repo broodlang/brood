@@ -1,0 +1,165 @@
+;;; chaos_float_pathology.blsp — IEEE 754 edge cases and int/float boundary stress
+;;;
+;;; Hammers the evaluator / JIT with float operations that cross tag boundaries,
+;;; approach infinity, underflow to subnormals, alternate int/float in accumulators,
+;;; and probe the int→float exactness boundary.
+;;;
+;;; Targets:
+;;;   - Tag-checking when the same slot holds int then float then int
+;;;   - Float overflow to infinity (Brood should not panic)
+;;;   - Float underflow to subnormal / zero
+;;;   - `to-fixed` / `format` on extreme values
+;;;   - Arithmetic chains where intermediate values are float then int
+;;;   - `round` / `floor` / `ceil` / `abs` on edge-case values
+;;;   - Division that crosses the exact/inexact boundary mid-stream
+
+(println "--- basic IEEE 754 extremes ---")
+
+(def f-max  1.7976931348623157e308)
+(def f-min  5.0e-324)              ; smallest positive subnormal (DBL_TRUE_MIN)
+
+;; Brood raises on float /0 instead of giving IEEE infinity — so we catch and probe
+(def div-by-zero-result (try (/ 1.0 0.0) (catch e (str "raises: " (error-message e)))))
+(println "1.0/0.0 behaviour:" div-by-zero-result)
+(def fdiv-zero-result (try (/ 0.0 0.0) (catch e (str "raises: " (error-message e)))))
+(println "0.0/0.0 behaviour:" fdiv-zero-result)
+
+;; Generate inf/nan via other means — sqrt(-1) might give NaN, or large pow
+(def f-inf  (try (pow 1.0e308 2.0)     (catch _ nil)))   ; overflow → +inf or raises?
+(def f-nan  (try (sqrt -1.0)           (catch _ nil)))   ; complex result → NaN or raises?
+(def f-ninf (try (* f-max -2.0)        (catch _ nil)))   ; overflow negative?
+
+(println "--- basic IEEE 754 extremes ---")
+(println "f-max:"       f-max)
+(println "f-min:"       f-min)
+(println "pow(1e308,2):" f-inf)    ; may be nil (raised) or +inf
+(println "sqrt(-1.0):"  f-nan)    ; may be nil (raised) or NaN
+(println "f-max * -2:"  f-ninf)   ; may be nil or -inf
+(println "f-min > 0:"   (> f-min 0.0))
+
+;; Overflow: multiply f-max by 2 → what happens?
+(println "f-max * 2.0:" (try (* f-max 2.0) (catch e (str "raises: " (error-message e)))))
+(println "f-max + f-max:" (try (+ f-max f-max) (catch e (str "raises: " (error-message e)))))
+;; Underflow: f-min / 2 → subnormal or 0?
+(println "f-min / 2.0:" (try (/ f-min 2.0) (catch e (str "raises: " (error-message e)))))
+(println "f-min / 3.0:" (try (/ f-min 3.0) (catch e (str "raises: " (error-message e)))))
+
+(println "--- arithmetic on overflow values (if we got them) ---")
+(when f-inf
+  (println "f-inf + 1.0:"   (try (+ f-inf 1.0)  (catch e (str "raises: " (error-message e)))))
+  (println "f-inf - f-inf:" (try (- f-inf f-inf) (catch e (str "raises: " (error-message e)))))
+  (println "f-inf * 0.0:"   (try (* f-inf 0.0)  (catch e (str "raises: " (error-message e)))))
+  (println "f-inf * -1.0:"  (try (* f-inf -1.0) (catch e (str "raises: " (error-message e)))))
+  (println "1.0 / f-inf:"   (try (/ 1.0 f-inf)  (catch e (str "raises: " (error-message e))))))
+
+(println "--- int/float alternating accumulator (JIT deopt storm) ---")
+
+;; Accumulate: each step adds an int, then a float, then an int …
+;; The tag flips every step, stressing the JIT's type specialisation.
+(defn alt-acc (n acc is-float)
+  (if (= n 0) acc
+    (if is-float
+      (alt-acc (- n 1) (+ acc 0.5) false)
+      (alt-acc (- n 1) (+ acc 1)   true))))
+
+(def alt-result (alt-acc 1000000 0 false))
+(println "alt-acc(1M) result:" alt-result)
+;; 500000 int steps of +1 = 500000; 500000 float steps of +0.5 = 250000.0 → 750000.0
+(println "expected 750000.0:" (= 750000.0 alt-result))
+
+(println "--- exact/inexact division alternation ---")
+
+;; / returns an int when exact (no remainder), else float
+;; Alternate: some inputs give int results, some float → repeated tag change
+(defn div-stress (n acc)
+  (if (= n 0) acc
+    (let (v (/ n 2))                 ; even n → int, odd n → float
+      (div-stress (- n 1) (+ acc v)))))
+
+(def div-result (div-stress 100000 0))
+(println "div-stress(100k) result:" div-result)
+;; sum of n/2 for n=1..100000; odd n gives (n-0.5), even n gives n/2 = int
+;; sum = Σ n/2 = 100000*100001/4 = 2500025000 (half of 5000050000)
+;; Actually sum of floor is different; let's just print it
+(println "type of result:" (type-of div-result))
+
+(println "--- huge integer that is EXACTLY representable as float ---")
+
+;; 2^53 = 9007199254740992 is exactly representable in f64 (53-bit mantissa)
+(def two53 9007199254740992)
+(def two53f (+ two53 0.0))          ; coerce to float
+(println "2^53 as int:"   two53)
+(println "2^53 as float:"  two53f)
+(println "equal?" (= two53 two53f))  ; true — structural equality
+
+;; 2^53 + 1 is NOT exactly representable — adding 0.0 should lose the last bit
+(def two53p1 (+ two53 1))
+(def two53p1f (+ two53p1 0.0))
+(println "2^53+1 as int:"  two53p1)
+(println "2^53+1 as float:" two53p1f)
+(println "equal?" (= two53p1 two53p1f))  ; false: float rounds back to 2^53
+
+(println "--- round / floor / ceil on edge values ---")
+(println "round(0.5):"     (round 0.5))    ; ties-to-even: 0 or 1
+(println "round(-0.5):"    (round -0.5))   ; ties-to-even: 0 or -1
+(println "round(1.5):"     (round 1.5))    ; 2
+(println "round(-1.5):"    (round -1.5))   ; -2
+(println "floor(-0.0):"    (floor -0.0))   ; 0 (or -0)
+(println "ceil(-0.0):"     (ceil -0.0))    ; 0
+(when f-inf
+  (println "floor(f-inf):" (floor f-inf))
+  (println "abs(f-ninf):"  (when f-ninf (abs f-ninf))))
+(when f-nan
+  (println "floor(f-nan):" (try (floor f-nan) (catch e (str "raises: " (error-message e)))))
+  (println "abs(f-nan):"   (try (abs f-nan)   (catch e (str "raises: " (error-message e))))))
+
+(println "--- to-fixed / format on extreme values ---")
+(println "to-fixed(1.23456789e15, 2):" (to-fixed 1.23456789e15 2))
+(println "to-fixed(f-min, 400):"       (to-fixed f-min 400))
+(when f-inf
+  (println "format %.2f of f-inf:"  (try (format "%.2f" f-inf) (catch e (str "raises: " (error-message e))))))
+(when f-nan
+  (println "format %.2f of f-nan:"  (try (format "%.2f" f-nan) (catch e (str "raises: " (error-message e))))))
+(println "format %d of 2^53+1:"        (format "%d" two53p1))
+
+(println "--- cascading float loss ---")
+;; Repeatedly add a tiny delta to a large number — eventually the delta is lost
+(defn float-cascade (big delta n acc)
+  (if (= n 0) acc
+    (let (next (+ big delta))
+      (float-cascade big delta (- n 1) (+ acc (- next big))))))
+
+(def big-base  1.0e15)
+(def tiny-delta 1.0)       ; 1.0 added to 1e15: fine
+(def tiny-delta2 0.00001)  ; 0.00001 added to 1e15: lost (below ULP)
+
+(println "cascade with delta=1.0 (should accumulate):"     (float-cascade big-base tiny-delta 1000 0.0))
+(println "cascade with delta=0.00001 (should be ~0):"      (float-cascade big-base tiny-delta2 1000 0.0))
+
+(println "--- min / max with extreme values ---")
+(when f-nan
+  (println "min(1.0, f-nan):"  (try (min 1.0 f-nan) (catch e (str "raises: " (error-message e)))))
+  (println "max(1.0, f-nan):"  (try (max 1.0 f-nan) (catch e (str "raises: " (error-message e))))))
+(when f-inf
+  (println "min(f-inf, 1e300):"  (min f-inf 1.0e300))
+  (println "max(f-ninf, -1e300):" (when f-ninf (max f-ninf -1.0e300))))
+
+(println "--- pow edge cases (int exponent only in Brood) ---")
+(println "pow(0.0, 0):"    (try (pow 0.0 0)    (catch e (str "raises: " (error-message e)))))  ; 1 or raises?
+(println "pow(-1.0, 3):"   (try (pow -1.0 3)   (catch e (str "raises: " (error-message e)))))  ; -1.0
+(println "pow(2.0, 1000):" (try (pow 2.0 1000)  (catch e (str "raises: " (error-message e)))))  ; huge or inf
+(println "pow(2.0, 1100):" (try (pow 2.0 1100)  (catch e (str "raises: " (error-message e)))))  ; overflow?
+(println "pow(0.0, -1):"   (try (pow 0.0 -1)   (catch e (str "raises: " (error-message e)))))  ; inf or raise?
+(println "pow(2.0, 0):"    (try (pow 2.0 0)    (catch e (str "raises: " (error-message e)))))  ; 1.0
+(println "pow(0.5, 2):"    (try (pow 0.5 2)    (catch e (str "raises: " (error-message e)))))  ; 0.25
+;; Float as exponent — explicitly non-integer — should raise
+(println "pow(2.0, 1.5):"  (try (pow 2.0 1.5)  (catch e (str "raises: " (error-message e)))))
+
+(println "--- sqrt edge cases ---")
+(println "sqrt(0.0):"    (sqrt 0.0))
+(println "sqrt(-1.0):"   (try (sqrt -1.0)  (catch e (str "raises: " (error-message e)))))
+;; BUG: sqrt(f-min) raises "division by zero" even though f-min > 0!
+;; Smallest positive subnormal (5e-324) is not zero — this is a Brood bug.
+(println "sqrt(f-min) [BUG?]:" (try (sqrt f-min) (catch e (str "raises: " (error-message e)))))
+
+(println "--- DONE ---")

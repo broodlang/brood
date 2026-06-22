@@ -1,0 +1,178 @@
+;;; chaos_type_blender.blsp — heterogeneous type chaos
+;;;
+;;; Throws every Brood value type into shared pipelines: map, filter, reduce,
+;;; sort, fold, pattern match, `=`, `pr-str`, `type-of`. Mixes ints, floats,
+;;; BigInts, strings, keywords, symbols, booleans, nil, pairs, vectors, maps,
+;;; functions, and pids into single collections. Tests that every operation
+;;; degrades gracefully or produces a well-typed error rather than a panic.
+;;;
+;;; Targets:
+;;;   - Structural equality across heterogeneous types
+;;;   - `sort` on mixed-type lists (structural ordering)
+;;;   - `pr-str` on every value type, including closures and pids
+;;;   - Pattern matching on values of unknown runtime type
+;;;   - `fold` / `reduce` with a type-polymorphic accumulator function
+;;;   - `apply` with ill-typed arguments (should raise, not panic)
+;;;   - `eval` of value types that are not self-evaluating
+
+(println "--- the soup: every value type in one list ---")
+
+(def pid-example (spawn :chaos-pid-holder (receive (_ :done))))
+
+(def soup
+  (list
+    42                                ; int
+    -9223372036854775807              ; near i64::MIN (triggers BigInt check)
+    3.14                              ; float
+    1.7976931348623157e308            ; f64::MAX
+    ;; NaN/inf: Brood raises on float /0, produce via overflow instead
+    (* 1.7976931348623157e308 2.0)   ; +inf (via overflow)
+    (* 1.7976931348623157e308 -2.0)  ; -inf
+    "hello world"                    ; string
+    ""                               ; empty string
+    :keyword                         ; keyword
+    'symbol                          ; symbol
+    true                             ; bool
+    false
+    nil                              ; nil
+    (list 1 2 3)                     ; pair list
+    nil                              ; nil (the empty list)
+    [1 2 3]                          ; vector
+    []                               ; empty vector
+    {:a 1 :b 2}                      ; map
+    {}                               ; empty map
+    (fn (x) (* x x))                 ; closure (function value)
+    pid-example                      ; pid
+    ;; BigInts
+    9223372036854775808              ; i64::MAX + 1 → BigInt
+    -9223372036854775809             ; i64::MIN - 1 → BigInt
+    (* 99999999999 99999999999)      ; large BigInt
+  ))
+
+(println "soup count:" (count soup))
+
+(println "--- pr-str every element ---")
+(doseq (v soup)
+  (println "  type:" (type-of v) " pr-str:" (pr-str v)))
+
+(println "--- structural equality: every element equals itself ---")
+(let (all-self-equal (= (count (filter (fn (v)
+                                         (if (= (type-of v) :float)
+                                           ;; NaN != NaN — expected; count float as "special"
+                                           (or (= v v) (string-contains? (pr-str v) "NaN"))
+                                           (= v v)))
+                                       soup))
+                        (count soup)))
+  (println "all self-equal (NaN excepted):" all-self-equal))
+
+(println "--- filter: keep only truthy values ---")
+(def truthy-vals (filter (fn (v) v) soup))
+(println "truthy count (nil and false removed):" (count truthy-vals))
+
+(println "--- map: pr-str every value (exercises the printer on all types) ---")
+(def strs (map pr-str soup))
+(println "stringified count:" (count strs))
+(println "all strings?" (= (count (filter string? strs)) (count strs)))
+
+(println "--- type-of frequencies ---")
+(def type-freq (frequencies (map type-of soup)))
+(println "type frequencies:" (pr-str type-freq))
+
+(println "--- sort the soup (structural order) ---")
+;; sort handles heterogeneous types by structural comparison
+;; It should either produce a deterministic order or raise on incompatible types
+(let (sorted (try (sort soup) (catch e (str "sort-error: " (error-message e)))))
+  (if (string? sorted)
+    (println "sort raised:" sorted)
+    (do (println "sort succeeded, count:" (count sorted))
+        (println "sorted first:" (pr-str (first sorted)))
+        (println "sorted last:"  (pr-str (first (reverse sorted)))))))
+
+(println "--- pattern match on each soup element ---")
+(defn classify-value (v)
+  (match v
+    (0              "zero-int")
+    (0.0            "zero-float")
+    (true           "true")
+    (false          "false")
+    (nil            "nil")
+    (""             "empty-string")
+    ([]             "empty-vector")
+    ({}             "empty-map")
+    (:keyword       "keyword-kw")
+    ('symbol        "symbol-sym")
+    ((x & _)        (str "pair-head=" (pr-str x)))
+    ;; [x & _] is NOT valid — vectors are fixed-length in patterns
+    ([x]            (str "vector-len1=" (pr-str x)))
+    ([x y]          (str "vector-len2=" (pr-str x) "+" (pr-str y)))
+    ([x y z]        (str "vector-len3=" (pr-str x) "+" (pr-str y) "+" (pr-str z)))
+    (x              (str "other:" (type-of x) "=" (pr-str x)))))
+
+(doseq (v soup)
+  (println "  classify:" (classify-value v)))
+
+(println "--- reduce with polymorphic accumulator: stringify-chain ---")
+;; Concatenate pr-str of every element
+(def big-repr (reduce (fn (acc v) (str acc "|" (pr-str v))) "" soup))
+(println "big-repr length:" (string-length big-repr))
+(println "big-repr first 80:" (substring big-repr 0 (min 80 (string-length big-repr))))
+
+(println "--- apply with wrong type args (should raise cleanly) ---")
+(let (result (try (apply + (list "not" "a" "number"))
+               (catch e (str "error: " (error-message e)))))
+  (println "apply + on strings:" result))
+
+(let (result (try (+ "a" 1)
+               (catch e (str "error: " (error-message e)))))
+  (println "+ string int:" result))
+
+(let (result (try (first 42)
+               (catch e (str "error: " (error-message e)))))
+  (println "first of int:" result))
+
+(let (result (try (get 42 :k)
+               (catch e (str "error: " (error-message e)))))
+  (println "get of int:" result))
+
+(let (result (try (count (fn (x) x))
+               (catch e (str "error: " (error-message e)))))
+  (println "count of fn:" result))
+
+(println "--- deeply nested heterogeneous structure (GC traversal) ---")
+;; Build a structure: map of vectors of lists of maps of lists …, 6 levels deep
+(defn nest-value (v depth)
+  (if (= depth 0) v
+    (nest-value
+      {:kind :level
+       :depth depth
+       :data [v (str "level-" depth) depth]
+       :children (list (nest-value 42 (- depth 1))
+                       (nest-value "leaf" (- depth 1))
+                       (nest-value [1 2 3] (- depth 1)))}
+      (- depth 1))))
+
+;; This will loop! `nest-value` passes v through unchanged when depth > 0,
+;; but the recursive calls go to (- depth 1), so it terminates.
+;; Actually let me fix this - the outer call should grow, not pass v through:
+(defn make-nested (depth)
+  (if (= depth 0)
+    {:leaf true :v 42}
+    {:kind :node
+     :depth depth
+     :children [(make-nested (- depth 1))
+                (make-nested (- depth 1))]
+     :payload (string-repeat "x" (* depth 100))}))
+
+(def deep-tree (make-nested 12))  ; 2^12 = 4096 leaves, payload strings up to 1200 chars
+(println "deep-tree built, kind:" (get deep-tree :kind))
+(println "deep-tree depth:" (get deep-tree :depth))
+
+;; pr-str the whole thing — exercises the printer on a deep, wide structure
+(def tree-str (pr-str deep-tree))
+(println "pr-str of deep-tree length:" (string-length tree-str))
+
+;; Round-trip: read it back and check equality
+(def reparsed-tree (read-string tree-str))
+(println "round-trip equal?" (= deep-tree reparsed-tree))
+
+(println "--- DONE ---")
