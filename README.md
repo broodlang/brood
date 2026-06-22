@@ -130,10 +130,20 @@ example, a desktop build with sound:
 Make sure `~/.local/bin` (or your chosen `PREFIX/bin`) is on your `PATH`.
 Run `./configure --help` for the full list.
 
+Building and installing are separate steps. `make release` compiles the
+optimized `brood`, `nest`, and `brood-lsp` binaries into `target/release-lean/`
+(gitignored); `make install` then just copies those three into `$(PREFIX)/bin`.
+Running `make install` on its own builds first (it depends on `release`), so the
+one-liner above still works — but you can also `make release` to produce the
+binaries without touching the system, and `make install` later to place them.
+(`make build` is unrelated: a plain *debug* build of the whole workspace for
+hacking on the Rust, which never installs.)
+
 Other handy targets:
 
 ```bash
-make build     # debug build of the whole workspace
+make release   # build the optimized binaries into target/release-lean (no install)
+make build     # debug build of the whole workspace (for development; does not install)
 make test      # Rust tests + the in-language suite (via cargo-nextest)
 make repl      # start the REPL without installing
 make benchmark # run the divan benches, archived to docs/benchmarks/
