@@ -28,6 +28,14 @@ dev-tools = []
 # The display *protocol* is unchanged Brood data (render ops); these just paint it
 # to a window instead of a terminal. See src/gui.rs and std/observer.blsp's `(observe)`.
 gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "clipboard"]
+# Audio output (the `audio-beep` builtin), via `rodio`. OPT-IN and independent of
+# `gui` on purpose: rodio→cpal links `libasound.so.2` as a hard runtime dependency
+# on Linux, so a `gui` build that pulled it in would refuse to start on a box
+# without ALSA. Kept separate, the default/`gui` release stays portable (no audio
+# stack linked), and `--features audio` (./configure --with-audio) adds sound for
+# builds that want it. Without it `audio-beep` is a graceful no-op. A dedicated
+# audio thread owns the device (rodio's stream is !Send), fed over a channel.
+audio = ["dep:rodio"]
 # GPU rendering for the GUI window (OpenGL via glutin + glow), behind its OWN feature
 # so the default `gui` build stays on the CPU softbuffer path, byte-for-byte unchanged.
 # When on, it REPLACES softbuffer: instanced GPU quads for the cell/rect ops + an
@@ -173,6 +181,9 @@ rcgen = "0.13"
 # `make clippy` lints `--all-features`, so a mismatch is caught at the gate.
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
+# Audio output for the `audio-beep` builtin (feature `audio`, pulled in by `gui`).
+# default-features off so we link only synthesis + output, no format decoders.
+rodio = { version = "0.20", optional = true, default-features = false }
 # Optional GPU backend (the `gui-gpu` feature). glutin creates a GL context on the
 # existing winit window via raw-window-handle 0.6 (the same rwh line winit 0.30 speaks),
 # glutin-winit bridges the two, and glow is the thin GL function loader. No vsync coupling:

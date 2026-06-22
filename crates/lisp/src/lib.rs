@@ -28,6 +28,7 @@ pub mod bundle; // single-binary app release: append-to-binary bundling (ADR-038
 pub mod cli_support; // tiny mechanism the `brood` and `nest` binaries share
 pub mod dist; // distributed nodes: connect two runtimes over TCP, route messages
 pub mod error; // errors + source positions (cross-cutting)
+pub mod audio; // optional audio output backend (feature "audio", pulled in by "gui")
 pub mod gui; // optional windowed display backend (feature "gui") — ADR-046 frontend #2
 #[cfg(feature = "gui-gpu")]
 pub mod gui_gpu; // optional GPU (OpenGL) render backend for `gui` — feature "gui-gpu"

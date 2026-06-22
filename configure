@@ -10,6 +10,7 @@ set -eu
 prefix="$HOME/.local"
 with_gui=0
 with_gui_gpu=0
+with_audio=0
 with_jit=1
 
 usage() {
@@ -24,6 +25,11 @@ Options:
                     CPU softbuffer one (implies --with-gui). Instanced quads + an
                     immediate swapchain; text is not yet drawn on the GPU. Off by default.
   --without-gui-gpu Use the CPU softbuffer backend (the default).
+  --with-audio      Build the audio backend (the `audio-beep` builtin, via rodio).
+                    OFF by default and independent of --with-gui: on Linux it links
+                    libasound.so.2 as a hard runtime dep, so a default/gui build
+                    stays portable. Needs libasound2-dev + pkg-config to compile.
+  --without-audio   Disable the audio backend (the default).
   --with-jit        Build the tier-1 JIT (ADR-101) into `brood`/`nest`. On by default;
                     hot compute loops run as native code. Needs a Cranelift-supported
                     host (x86_64 / aarch64).
@@ -44,6 +50,8 @@ for arg in "$@"; do
 	--without-gui) with_gui=0 ;;
 	--with-gui-gpu) with_gui_gpu=1; with_gui=1 ;;
 	--without-gui-gpu) with_gui_gpu=0 ;;
+	--with-audio) with_audio=1 ;;
+	--without-audio) with_audio=0 ;;
 	--with-jit) with_jit=1 ;;
 	--without-jit) with_jit=0 ;;
 	--prefix=*) prefix=${arg#--prefix=} ;;
@@ -64,6 +72,7 @@ cat >config.mk <<EOF
 PREFIX   := $prefix
 WITH_GUI := $with_gui
 WITH_GUI_GPU := $with_gui_gpu
+WITH_AUDIO := $with_audio
 WITH_JIT := $with_jit
 EOF
 
@@ -71,6 +80,7 @@ echo "configure: wrote config.mk"
 echo "  prefix      = $prefix"
 echo "  with-gui    = $with_gui"
 echo "  with-gui-gpu = $with_gui_gpu"
+echo "  with-audio  = $with_audio"
 echo "  with-jit    = $with_jit"
 echo
 echo "Next: make install"

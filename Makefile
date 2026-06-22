@@ -20,6 +20,12 @@ GUI_FEATURES := $(if $(filter-out 0,$(WITH_GUI)),--features brood/gui,)
 # `--features`, so this composes with GUI_FEATURES above.
 WITH_GUI_GPU ?= 0
 GUI_GPU_FEATURES := $(if $(filter-out 0,$(WITH_GUI_GPU)),--features brood/gui-gpu,)
+# `./configure --with-audio` (WITH_AUDIO) compiles the audio backend (the
+# `audio-beep` builtin, via rodio). OFF by default and INDEPENDENT of gui: on Linux
+# it links libasound.so.2 as a hard runtime dep, so a default/gui release stays
+# portable (no audio) and only an opt-in build carries the ALSA dependency.
+WITH_AUDIO ?= 0
+AUDIO_FEATURES := $(if $(filter-out 0,$(WITH_AUDIO)),--features brood/audio,)
 # JIT (ADR-101): the tier-1 template JIT, ON by default — hot compute loops run as
 # native code, and it's compiled out (zero cost) only when disabled. `make install`
 # defaults it on even without ./configure; `./configure --without-jit` (WITH_JIT=0)
@@ -124,6 +130,7 @@ repl: ## Start the REPL
 configure: ## Show current build options (./configure --with-gui to enable the GUI)
 	@echo "PREFIX   = $(PREFIX)"
 	@echo "WITH_GUI = $(WITH_GUI)$(if $(GUI_FEATURES), (GUI backend on),)"
+	@echo "WITH_AUDIO = $(WITH_AUDIO)$(if $(AUDIO_FEATURES), (audio-beep on),)"
 	@echo "Run ./configure --with-gui to enable the native window; ./configure --help for more."
 
 install: ## Install `brood`, `nest` and `brood-lsp` into $(PREFIX)/bin (./configure --with-gui first for the window)
@@ -137,10 +144,10 @@ install: ## Install `brood`, `nest` and `brood-lsp` into $(PREFIX)/bin (./config
 	# embeds, so `nest release` ships a self-contained app with NO Rust at release
 	# time (ADR-038, docs/release.md). `--no-default-features` strips the dev/debug
 	# surface; `$(GUI_FEATURES)` adds `--features brood/gui` when GUI is configured.
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean --no-default-features -p cli $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/cli  --force --root $(PREFIX) $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean --no-default-features -p cli $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/cli  --force --root $(PREFIX) $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
 	# Bake the runtime built above into `nest` (crates/nest/build.rs reads BROOD_EMBED_RUNTIME).
-	BROOD_EMBED_RUNTIME=$(CURDIR)/target/release-lean/brood RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
+	BROOD_EMBED_RUNTIME=$(CURDIR)/target/release-lean/brood RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/nest --force --root $(PREFIX) $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
 	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo install --path crates/lsp  --force --root $(PREFIX)
 
 uninstall: ## Remove the installed `brood`, `nest` and `brood-lsp` binaries from $(PREFIX)/bin
