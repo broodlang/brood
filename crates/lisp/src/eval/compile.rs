@@ -6492,29 +6492,35 @@ fn jit_lower_arm_inner(
         };
 
     // Inline `first`/`rest` pair reads: if the arm uses First/Rest but contains no Cons
-    // (which could grow the nursery slab) and no non-tail Call (a GC safepoint that may
-    // trigger a minor collect, replacing the entire nursery slab with a fresh one and
-    // invalidating the stashed pointer), fetch the LOCAL nursery and old-gen pair-slab base
-    // pointers once here in the entry block. The inline lowering then computes
-    // `base + idx*48 + {0,24}` directly and deopts for non-LOCAL (PRELUDE/RUNTIME) pairs
-    // — those are rare on hot cons-list paths.
+    // or MakeVector (which trigger the back-edge GC safepoint — `minor_collect` replaces
+    // `self.local` via `std::mem::take`, freeing the old nursery buffer and invalidating
+    // the stashed pointer) and no non-tail Call (also a GC safepoint), fetch the LOCAL
+    // nursery and old-gen pair-slab base pointers once here in the entry block. The inline
+    // lowering then computes `base + idx*48 + {0,24}` directly and deopts for non-LOCAL
+    // (PRELUDE/RUNTIME) pairs — those are rare on hot cons-list paths.
+    //
+    // The `has_cons` check here must mirror the one that gates `sp_ref` (the back-edge
+    // safepoint call) at line ~8020, which includes MakeVector. If MakeVector is present,
+    // the safepoint fires on the back-edge, `minor_collect` replaces `self.local`, and the
+    // hoisted nursery base pointer becomes a dangling pointer into the freed slab.
     let pair_bases: Option<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> = {
         let has_car_cdr = code.iter().any(|i| {
             matches!(i, Inst::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. })
         });
-        let has_cons = code.iter().any(|i| {
+        let has_alloc_safepoint = code.iter().any(|i| {
             matches!(
                 i,
                 Inst::Prim2 { op: PrimOp::Cons, .. }
                     | Inst::Prim2SlotSlot { op: PrimOp::Cons, .. }
                     | Inst::Prim2SlotInt { op: PrimOp::Cons, .. }
+                    | Inst::MakeVector(_)
             )
         });
         // A non-tail Call is a GC safepoint: minor_collect replaces `self.local` entirely
         // (std::mem::take), so any pointer to `local.pairs` cached before the call is
         // invalid after it. Only inline when there are no such safepoints.
         let has_call_safepoint = code.iter().any(|i| matches!(i, Inst::Call { tail: false, .. }));
-        if has_car_cdr && !has_cons && !has_call_safepoint {
+        if has_car_cdr && !has_alloc_safepoint && !has_call_safepoint {
             let cn = b.ins().call(pnbase_ref, &[heap]);
             let nursery = b.inst_results(cn)[0];
             let co = b.ins().call(pobase_ref, &[heap]);
@@ -8726,9 +8732,11 @@ pub(crate) fn jit_dispatch_call(
                 }
                 heap.truncate_roots(stage_base + argc);
                 // Two-stage tiering: size the callee frame to its *installed* native version
-                // (inlined upgrade → `inline_nslots`; small → `nslots`). The epoch guard above
-                // matched, so the installed code and its active size are consistent.
-                heap.extend_roots_to_nil(stage_base + arm.active_nslots());
+                // (inlined upgrade → `inline_nslots`; small → `nslots`). Capture once and reuse
+                // for both frame extension and the outcome-4 staged_start calculation — the two
+                // must agree on the same frame boundary.
+                let frame_nslots = arm.active_nslots();
+                heap.extend_roots_to_nil(stage_base + frame_nslots);
                 let base = stage_base;
                 // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from
                 // `jit_lower_arm`, living for the process in `GLOBAL_JIT`; the frame is set
@@ -8755,11 +8763,10 @@ pub(crate) fn jit_dispatch_call(
                         return None;
                     }
                     // Tail call (4): the callee JIT'd a tail — [callee, arg0..argN] staged above
-                    // its frame at `[base+nslots, roots_len)`. Follow the chain rather than
+                    // its frame at `[base+frame_nslots, roots_len)`. Follow the chain rather than
                     // re-running the callee via `vm_apply` (which would pay both JIT and VM cost).
                     4 => {
-                        let nslots = arm.active_nslots();
-                        let staged_start = base + nslots;
+                        let staged_start = base + frame_nslots;
                         let staged_end = heap.roots_len();
                         if staged_end > staged_start {
                             let staged_callee = heap.root_at(staged_start);
@@ -9072,14 +9079,19 @@ pub(crate) fn jit_tier(
                 }
             } else if ic != crate::jit::BAILED && ic != crate::jit::QUEUED {
                 // The inlined upgrade is ready — swap it in. Bump the epoch FIRST, then stamp
-                // `compile_epoch` to the new value and publish the inlined pointer, so a
-                // concurrent fast-link sees a consistent (new-epoch, inlined-code) pair or
-                // misses (re-validates). `inline_installed` last: it gates `active_nslots`,
-                // and must only read true once the bigger code is genuinely in `jit_code`.
+                // `compile_epoch` to the new value. Store `inline_installed` BEFORE `jit_code`
+                // so that any reader which Acquire-loads `jit_code = inline_code` is guaranteed
+                // (by the Release-Acquire chain) to also see `inline_installed = true` and
+                // therefore call `active_nslots()` → `inline_nslots`. The reversed order
+                // (jit_code before inline_installed) created a race: a reader could observe the
+                // inline code pointer but still see `inline_installed = false`, sizing the callee
+                // frame to the small `nslots` — the inline code would then raw-read beyond the
+                // frame, picking up stale Vec-capacity data as slot values and passing garbage
+                // through the outcome-4 tail-call staging path.
                 let new_epoch = heap.bump_global_epoch();
                 arm.compile_epoch.store(new_epoch, Release);
+                arm.inline_installed.store(true, Release); // BEFORE jit_code — see comment above
                 arm.jit_code.store(ic, Release);
-                arm.inline_installed.store(true, Release);
                 // Run the VM this activation; the next entry sizes the frame to inline_nslots
                 // (the call site reads `active_nslots()`) and runs the inlined native.
                 return None;
