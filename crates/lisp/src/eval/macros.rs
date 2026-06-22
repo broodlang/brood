@@ -838,14 +838,14 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
     // while that holds. Expansion is bounded per form, so memory grows briefly
     // (reclaimed at the next runtime safepoint). The `GcBlockGuard` is kept too,
     // purely for the stack-depth accounting it feeds. See `docs/memory-model.md`.
-    let _gc_block = crate::process::GcBlockGuard::enter();
-    let _macro_block = crate::process::MacroBlockGuard::enter();
     if depth >= MAX_DEPTH {
         return Err(LispError::runtime(format!(
             "macro expansion nested too deeply (max {} levels)",
             MAX_DEPTH
         )));
     }
+    let _gc_block = crate::process::GcBlockGuard::enter();
+    let _macro_block = crate::process::MacroBlockGuard::enter();
     let original = form;
     let form = macroexpand(heap, form, env)?;
     match form.unpack() {

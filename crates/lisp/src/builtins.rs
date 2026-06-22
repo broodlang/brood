@@ -700,6 +700,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![num], float),
         math_log10,
     );
+    def(
+        heap,
+        "%f64-sqrt",
+        Arity::exact(1),
+        Sig::new(vec![num], float),
+        math_f64_sqrt,
+    );
 
     // rope — the editor buffer's text storage (ADR-045). The irreducible text
     // mechanism: a `ropey::Rope` gives O(log n) edits + char/line indexing that
@@ -2363,6 +2370,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("ln",    &["x"], "The natural logarithm of x. x must be positive; raises otherwise."),
     ("log2",  &["x"], "The base-2 logarithm of x. x must be positive; raises otherwise."),
     ("log10", &["x"], "The base-10 logarithm of x. x must be positive; raises otherwise."),
+    ("%f64-sqrt", &["x"], "The IEEE 754 square root of x (f64::sqrt). x must be non-negative; raises otherwise. Handles subnormals and ±0 correctly."),
     ("string->rope", &["s"], "A rope (editor buffer text) holding the characters of string s."),
     ("rope->string", &["r"], "The full text of rope r as a string."),
     ("rope-length", &["r"], "The number of characters in rope r."),
@@ -5906,6 +5914,17 @@ math1_bounded!(math_acos, "acos", acos);
 math1_positive!(math_ln, "ln", ln);
 math1_positive!(math_log2, "log2", log2);
 math1_positive!(math_log10, "log10", log10);
+
+fn math_f64_sqrt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let x = expect_number(heap, "%f64-sqrt", arg(args, 0))?;
+    if x < 0.0 {
+        return Err(LispError::runtime(format!(
+            "%f64-sqrt: argument {} must be non-negative",
+            x
+        )));
+    }
+    Ok(Value::float(x.sqrt()))
+}
 
 fn math_atan2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let y = expect_number(heap, "atan2", arg(args, 0))?;
