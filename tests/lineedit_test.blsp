@@ -117,7 +117,16 @@
   (test "dispatch resolves the command late (by symbol), so redefining hot-swaps"
     ;; the bound symbol is resolved via the global, not captured — proven by the
     ;; structure above + that handle and the command agree.
-    (is (fn? (eval (get *lineedit-keymap* :ctrl-e))))))
+    (is (fn? (eval (get *lineedit-keymap* :ctrl-e)))))
+  (test "C-j accepts the line like Enter (raw-mode typed-ahead newline — crossterm #371)"
+    ;; A line typed before the REPL enters raw mode has its Enter (\r) mapped to \n
+    ;; by the tty; crossterm then reports that \n as Ctrl-J, not Enter. Both keys
+    ;; must submit, or the pre-typed form sits unsubmitted until a second Enter.
+    (assert= (get *lineedit-keymap* :ctrl-j) 'editor/lineedit/lineedit-submit)
+    (assert= (get *lineedit-keymap* :enter) 'editor/lineedit/lineedit-submit)
+    (let (s (le--keys (le--fresh) (list "(" "+" " " "1" " " "1" ")")))
+      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-j) :done) :submit)
+      (assert= (get (editor/lineedit/lineedit--handle s :enter) :done) :submit))))
 
 (defn rs--init ()
   (editor/lineedit/lineedit--init "x> " "" (list "(map f xs)" "(reduce + 0 ys)" "(filter p zs)")))

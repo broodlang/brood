@@ -4282,3 +4282,30 @@ admits). The `#[inline]` forces the compiler to emit the operation directly at t
 - bit-identical: the overflow path falls through to eval_apply, so BigInt results are unchanged
 
 Gate: `make test` 616/616.
+
+## 2026-06-22 — REPL: C-j accepts the line (typed-ahead `\n` at startup didn't submit)
+
+**Symptom.** A form typed at the `brood>` prompt *while the REPL was still
+starting* (the common case — a debug `cargo run` build is slow to load the image)
+appeared on the line but did nothing on Enter; you had to press Enter a second
+time before the result printed.
+
+**Root cause — crossterm issue #371.** The lineedit editor (`std/editor/lineedit.blsp`)
+reads keys in raw mode and only bound `:enter` (a `\r` / `KeyCode::Enter`) to
+submit. When you type ahead *before* the REPL enters raw mode, the tty's line
+discipline (ICRNL) has already mapped your Enter (`\r`, 0x0D) to `\n` (0x0A) and
+buffered it. crossterm then, *in raw mode*, deliberately does **not** decode a
+bare `\n` as Enter (it disables the tty's `\r`→`\n` translation, so `\n` is
+ambiguous) — it reports 0x0A as **Ctrl-J**. `:ctrl-j` was unbound, so the
+pre-typed form sat unsubmitted until a fresh `\r` arrived. Reproduced with a pty
+driver: feeding `(+ 1 1)\n` accumulated text but never evaluated; `(+ 1 1)\r`
+printed `2` correctly.
+
+**Fix.** Bind `:ctrl-j` to `lineedit-submit` alongside `:enter` in
+`*lineedit-keymap*` — exactly readline's `C-j` = *accept-line*. Pure Brood
+(policy), one line. After the fix the pty repro submits on `\n`:
+`brood> (+ 1 1)\r\n2\r\nbrood> `.
+
+Test: `tests/lineedit_test.blsp` — the keymap `describe` now asserts both
+`:ctrl-j` and `:enter` map to submit and that dispatching either marks the state
+`:done :submit` (38/38 pass).
