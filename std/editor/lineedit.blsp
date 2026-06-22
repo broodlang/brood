@@ -427,6 +427,12 @@ globals by default; a project can rebind it to complete its own vocabulary)."
 ;; takes no docstring — keep this as a comment, not a string before the map.)
 (def *lineedit-keymap*
   {:enter 'editor/lineedit/lineedit-submit
+   ;; C-j (line feed, 0x0A) also accepts the line — readline's accept-line. In raw
+   ;; mode crossterm reports a bare \n as Ctrl-J, not Enter (its issue #371): when a
+   ;; line is *typed ahead* before the REPL enters raw mode, the tty has already
+   ;; mapped Enter (\r) to \n, so that submit arrives here as :ctrl-j. Without this
+   ;; the pre-typed form just sits unsubmitted until you press Enter again.
+   :ctrl-j 'editor/lineedit/lineedit-submit
    :ctrl-c 'editor/lineedit/lineedit-cancel
    :ctrl-d 'editor/lineedit/lineedit-eof-or-delete
    :backspace 'editor/lineedit/lineedit-delete-backward
