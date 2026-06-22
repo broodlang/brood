@@ -1,0 +1,138 @@
+;;; chaos_eval_wormhole.blsp — dynamic eval, quasiquote, and read-string stress
+;;;
+;;; Generates programs as data structures (s-expressions), builds them with
+;;; quasiquote, reads them from strings, and evals them — then uses the results
+;;; to build more programs. Cycles eval→build→eval up to bizarre depths.
+;;;
+;;; Targets:
+;;;   - `eval` / `eval-string` on dynamically generated programs
+;;;   - `read-string` on large, deeply nested source strings
+;;;   - Quasiquote splicing of large lists
+;;;   - The compile pass (macro expansion + pattern lowering) on generated code
+;;;   - Recursive `eval` inside an `eval`'d expression
+;;;   - Symtable growth from thousands of dynamically `def`'d globals
+
+(println "--- eval-string: fibonacci program as a string ---")
+
+;; A full Brood fib function constructed as a string and evaluated
+(def fib-src
+  "(defn chaos-fib (n a b) (if (< n 1) a (chaos-fib (- n 1) b (+ a b))))")
+
+(eval-string fib-src)
+(println "chaos-fib(0):"  (chaos-fib 0 0 1))
+(println "chaos-fib(10):" (chaos-fib 10 0 1))
+(println "chaos-fib(50):" (chaos-fib 50 0 1))  ; 12586269025
+
+(println "--- quasiquote: build a fold-summing program for n terms ---")
+
+;; Generate `(+ 1 (+ 2 (+ 3 ... (+ n 0) ...)))` as a data structure via quasiquote
+(defn build-nested-add (terms)
+  (fold (fn (expr n) `(+ ~n ~expr)) 0 (reverse terms)))
+
+(def terms-100 (range 1 101))
+(def nested-add-100 (build-nested-add terms-100))
+;; The generated AST is `(+ 100 (+ 99 ... (+ 1 0) ...))`
+(println "nested-add-100 result:" (eval nested-add-100))
+(println "expected 5050:" (= 5050 (eval nested-add-100)))
+
+;; CRASH FOUND: 10000-term nested-add overflows the Rust eval stack (SIGABRT).
+;; The evaluator is recursive (each `(+ a b)` recurses into b before returning).
+;; No depth limit → host stack overflow. 1000 terms are safe; 10k are not.
+;; (def nested-add-10k (build-nested-add (range 1 10001)))   ← DO NOT EVAL
+;; (println "nested-add-10k result:" (eval nested-add-10k))  ← stack overflow!
+(println "SKIP: 10k nested-add crashes eval (Rust stack overflow, no depth limit)")
+
+(println "--- quasiquote splicing: generate a (list 1 2 3 ... 10000) call ---")
+
+(def big-list-expr `(list ~@(range 1 10001)))
+(def big-list (eval big-list-expr))
+(println "big-list count:" (count big-list))
+(println "big-list sum:" (reduce + 0 big-list))
+
+(println "--- generate and eval 1000 defns, then call them all ---")
+
+;; Generate: (defn chaos-fn-N (x) (+ x N))  for N in [0, 1000)
+;; Then sum all chaos-fn-N(N) = sum of N+N = 2 * sum(0..999) = 999000
+
+(dotimes (i 1000)
+  (eval `(defn ~(symbol (str "chaos-fn-" i)) (x) (+ x ~i))))
+
+(def fn-sum
+  (fold (fn (acc i)
+          (let (fn-name (symbol (str "chaos-fn-" i)))
+            (+ acc ((eval fn-name) i))))
+        0
+        (range 1000)))
+
+(println "sum of chaos-fn-N(N):" fn-sum)
+(println "expected 999000:" (= 999000 fn-sum))
+
+(println "--- read-string round-trip on a large generated program ---")
+
+;; Build a source string for a long `do` block with 500 `def` forms
+(defn make-def-src (n)
+  (str "(do "
+       (join " " (map (fn (i) (str "(def chaos-var-" i " " (* i i) ")")) (range n)))
+       ")"))
+
+(def big-do-src (make-def-src 500))
+(println "big-do-src length:" (string-length big-do-src))
+
+;; Read it back as a value (s-expression)
+(def big-do-form (read-string big-do-src))
+(println "form is a pair?" (pair? big-do-form))
+(println "first of form:" (first big-do-form))
+
+;; Eval the form — defines 500 globals
+(eval big-do-form)
+(println "chaos-var-0:"   chaos-var-0)
+(println "chaos-var-499:" chaos-var-499)
+
+(println "--- recursive eval: an eval'd program that itself calls eval ---")
+
+;; A self-referential program: it reads a Brood expression, evals it, and returns
+;; the result — all inside an eval'd string.
+(def meta-src
+  "(eval-string \"(+ 1 (eval-string \\\"(* 6 7)\\\"))\")")
+(println "meta-eval result:" (eval-string meta-src))  ; should be 43
+
+;; Go three levels deep
+(def deep-meta-src
+  "(eval-string \"(+ 1 (eval-string \\\"(+ 10 (eval-string \\\\\\\"(* 2 3)\\\\\\\"))\\\"))\")")
+(println "3-level meta-eval result:" (eval-string deep-meta-src))  ; 1 + (10 + 6) = 17
+
+(println "--- quasiquote: build a match expression with 500 clauses ---")
+
+;; Generate: (match x (0 "zero") (1 "one") ... (_ "unknown"))
+;; CRASH FOUND: 500 clauses overwhelm the recursive pattern compiler
+;; (green-thread stack budget exhausted compiling the clause tree).
+;; 100 clauses are safe; 500 are not.
+;; (def big-match-fn (eval (build-big-match 500)))  ← stack overflow in eval
+(println "SKIP: 500-clause match crashes eval (recursion too deep in pattern compiler)")
+
+(defn build-big-match (n)
+  (let (clauses (map (fn (i) `(~i ~(str "val-" i))) (range n)))
+    `(fn (x) (match x ~@clauses (_ "unknown")))))
+
+;; Safe with 100 clauses
+(def big-match-fn (eval (build-big-match 100)))
+(println "big-match(0):"   (big-match-fn 0))
+(println "big-match(50):"  (big-match-fn 50))
+(println "big-match(99):"  (big-match-fn 99))
+(println "big-match(100):" (big-match-fn 100))
+
+(println "--- apply with a huge argument list ---")
+
+;; `apply` a variadic + with 10000 arguments
+(def huge-args (range 1 10001))
+(println "apply + over 10k args:" (apply + huge-args))
+(println "expected 50005000:" (= 50005000 (apply + huge-args)))
+
+(println "--- gensym storm: generate 10000 unique symbols ---")
+(def syms (map (fn (_) (gensym)) (range 10000)))
+(println "gensym count:" (count syms))
+;; All must be unique
+(def unique-syms (into {} (map (fn (s) [s true]) syms)))
+(println "all unique?" (= (count unique-syms) 10000))
+
+(println "--- DONE ---")

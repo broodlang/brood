@@ -1,0 +1,102 @@
+;;; chaos_map_volcano.blsp — CHAMP trie map operations at scale
+;;;
+;;; Builds maps with millions of entries, then merges, diffs, filters, and folds
+;;; them in ways that stress the trie's structural sharing and GC pressure.
+;;;
+;;; Targets:
+;;;   - CHAMP trie `assoc` / `dissoc` / `get` at 1M-entry depth
+;;;   - `into` (bulk insert) vs. incremental `assoc` — same result?
+;;;   - `filter` / `map` over a map → produces intermediate lists of [k v] pairs
+;;;   - `fold` / `reduce` over a huge map (1M iterations in the trie walker)
+;;;   - `merge` (assoc all of b into a) of two large maps — deep trie restructure
+;;;   - `frequencies` on a list of 1M things with 10 distinct values
+;;;   - Map with non-keyword, non-string keys: ints, vectors, lists, nested maps
+
+(println "--- building 1M-entry map (fold over range) ---")
+
+;; Each key is the integer, value is its square
+(defn build-map (n)
+  (fold (fn (m i) (assoc m i (* i i))) {} (range n)))
+
+(def big-map (build-map 1000000))
+(println "big-map count:" (count big-map))
+(println "get 999999:" (get big-map 999999))
+(println "get 0:" (get big-map 0))
+(println "get 500000:" (get big-map 500000))
+(println "get missing (nil):" (get big-map 1000001))
+
+(println "--- dissoc 100k entries ---")
+(defn dissoc-range (m start end)
+  (if (>= start end) m (dissoc-range (dissoc m start) (+ start 1) end)))
+
+(def shrunk (dissoc-range big-map 0 100000))
+(println "after dissoc 100k, count:" (count shrunk))
+(println "get 0 after dissoc (nil?):" (nil? (get shrunk 0)))
+(println "get 100000 still there?:" (= 10000000000 (get shrunk 100000)))
+
+(println "--- filter: keep entries where value mod 7 == 0 ---")
+;; `filter` on a map walks [k v] pairs
+(def mod7-map (into {} (filter (fn (kv) (= (rem (first (rest kv)) 7) 0)) big-map)))
+(println "entries divisible by 7:" (count mod7-map))
+
+(println "--- map values: increment every value in a 100k-entry slice ---")
+(defn map-values (m f)
+  (fold (fn (acc kv) (assoc acc (first kv) (f (first (rest kv))))) {} m))
+
+(def small-slice (build-map 100000))
+(def incremented (map-values small-slice inc))
+(println "incremented count:" (count incremented))
+(println "incremented[0]:" (get incremented 0))   ; was 0, now 1
+(println "incremented[99999]:" (get incremented 99999)) ; was 9999800001, now +1
+
+(println "--- merge two large maps (union, right-wins) ---")
+;; Build a second map with keys [500000, 1500000) and negative values
+(defn build-neg-map (n start)
+  (fold (fn (m i) (assoc m (+ i start) (- (* i i)))) {} (range n)))
+
+(def right-map (build-neg-map 1000000 500000))
+(println "right-map count:" (count right-map))
+
+;; merge: keys [0,500000) from big-map only; [500000, 1000000) right-wins (neg); [1000000,1500000) right only
+(def merged (into big-map right-map))
+(println "merged count:" (count merged))
+(println "key 499999 (positive from left):" (get merged 499999))
+(println "key 500000 (negative, right wins):" (get merged 500000))
+(println "key 1000000 (right only):" (get merged 1000000))
+
+(println "--- fold: sum all values in big-map ---")
+;; Sum of i^2 for i in [0, 1M) = (n-1)*n*(2n-1)/6 = 999999*1000000*1999999/6
+(def expected-sum (quot (* (* 999999 1000000) 1999999) 6))
+(def actual-sum (fold (fn (acc kv) (+ acc (first (rest kv)))) 0 big-map))
+(println "expected sum:" expected-sum)
+(println "actual sum:"   actual-sum)
+(println "sums match?" (= expected-sum actual-sum))
+
+(println "--- frequencies: 1M items with 10 distinct values ---")
+;; range(1M) → mod 10 → list of 0..9 each 100k times
+(def freq-input (map (fn (i) (rem i 10)) (range 1000000)))
+(def freqs (frequencies freq-input))
+(println "distinct values:" (count freqs))
+(println "freq of 0:" (get freqs 0))
+(println "freq of 9:" (get freqs 9))
+
+(println "--- map with vector keys (structural hashing stress) ---")
+;; Keys are 2-vectors [i, i mod 100] — tests hash of non-primitive types
+(defn build-vec-key-map (n)
+  (fold (fn (m i) (assoc m [i (rem i 100)] (* i 2))) {} (range n)))
+
+(def vk-map (build-vec-key-map 100000))
+(println "vec-key-map count:" (count vk-map))
+(println "get [99999 99]:" (get vk-map [99999 99]))
+(println "get [0 0]:" (get vk-map [0 0]))
+
+(println "--- map with nested-map keys (pathological hashing) ---")
+;; Keys are single-entry maps {:v i}
+(defn build-nested-key-map (n)
+  (fold (fn (m i) (assoc m {:v i} i)) {} (range n)))
+
+(def nk-map (build-nested-key-map 10000))
+(println "nested-key-map count:" (count nk-map))
+(println "get {:v 9999}:" (get nk-map {:v 9999}))
+
+(println "--- DONE ---")

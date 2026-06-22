@@ -1,0 +1,73 @@
+;;; chaos_bignum.blsp — BigInt promotion & arithmetic stress
+;;;
+;;; Grows an integer by repeated squaring until it has hundreds of thousands
+;;; of decimal digits, then hammers it with arithmetic, modular reduction,
+;;; string conversion, and digit manipulation.
+;;;
+;;; Targets:
+;;;   - The i64 → BigInt deopt path in eval/JIT
+;;;   - BigInt limb arithmetic (Karatsuba / long-mul) under allocation pressure
+;;;   - `number->string` on a several-hundred-KB number
+;;;   - `string->number` round-trip on the result
+;;;   - `rem` / `quot` of a huge BigInt vs a small prime
+
+;; 2^(2^20) ≈ 10^315000 — about 315 000 decimal digits, 16384 u64 limbs.
+;; Each squaring doubles limbs; 20 squarings from 2 → wall-clock seconds, not hours.
+(defn repeated-square (n times)
+  (if (= times 0) n (repeated-square (* n n) (- times 1))))
+
+(println "--- growing the monster ---")
+(def monster (repeated-square 2 20))
+(def monster-str (number->string monster))
+(println "digit count:" (string-length monster-str))
+
+;; the string should start with 1 and end with 6 (2^any is always even, but
+;; 2^(large even) mod 10 … let's just print first and last chars)
+(println "first digit:" (char-at monster-str 0))
+(println "last  digit:" (char-at monster-str (- (string-length monster-str) 1)))
+
+(println "--- arithmetic on the monster ---")
+;; Add: result has same number of digits or one more
+(def monster+1 (+ monster 1))
+(println "monster+1 last digit:" (char-at (number->string monster+1) (- (string-length (number->string monster+1)) 1)))
+
+;; Multiply by a large prime: 2^(2^20) × 999_999_937
+(def mega-prime 999999937)
+(def big-product (* monster mega-prime))
+(println "big-product digit count:" (string-length (number->string big-product)))
+
+;; Modular reduction: monster mod a small prime should be fast (single division)
+(def small-prime 999999893)
+(println "monster mod small-prime:" (rem monster small-prime))
+(println "big-product mod small-prime:" (rem big-product small-prime))
+
+;; Quotient: divide the monster by a medium integer
+(def divisor 123456789012345678)
+(def q (quot monster divisor))
+(def r (rem monster divisor))
+(println "quot digit count:" (string-length (number->string q)))
+(println "remainder:" r)
+;; Verify: q*divisor + r == monster
+(println "reconstruction ok?" (= (* q divisor) (- monster r)))
+
+(println "--- round-trip string conversion ---")
+;; Convert to string, parse back, check equality — exercises `string->number` on a huge input
+(def reparsed (string->number monster-str))
+(println "round-trip equal?" (= reparsed monster))
+;; Substring of the digit string, parsed as a number
+(def chunk (substring monster-str 0 18))
+(println "first 18 digits as int:" (string->number chunk))
+
+(println "--- GCD stress: gcd(monster, monster+1) must be 1 ---")
+;; Euclidean algorithm in Brood — deeply tests BigInt subtraction / mod at huge sizes
+(defn gcd (a b) (if (= b 0) a (gcd b (rem a b))))
+(println "gcd(monster, monster+1):" (gcd monster monster+1))
+
+(println "--- factorial of 1000 for good measure ---")
+;; fac(1000) has ~2568 digits; stresses a different allocation pattern (many small muls)
+(defn fac (n acc) (if (= n 0) acc (fac (- n 1) (* acc n))))
+(def fac1000 (fac 1000 1))
+(println "1000! digit count:" (string-length (number->string fac1000)))
+(println "1000! mod 1000000007:" (rem fac1000 1000000007))
+
+(println "--- DONE ---")

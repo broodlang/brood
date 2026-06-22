@@ -1,0 +1,226 @@
+;;; chaos_pattern_hell.blsp — pattern matching pushed to extremes
+;;;
+;;; Every weird pattern combination the matcher supports: non-linear (repeated
+;;; variable), nested vector-in-list-in-vector, pin-in-quasiquote context, guard
+;;; chains, enormous clause lists, patterns on BigInts, patterns on NaN/infinity,
+;;; exhaustive structural decomposition, and match-inside-match-inside-match.
+;;;
+;;; Targets:
+;;;   - The pattern compiler / lowering pass on huge clause lists
+;;;   - Non-linear pattern variable binding (x = x constraint)
+;;;   - `~expr` pin expression evaluation in complex contexts
+;;;   - Guard (`:when`) with side-effectful condition (should only eval once)
+;;;   - `match` on heterogeneous value streams
+;;;   - Mutual pattern recursion (a match that builds a value, matched again)
+
+(println "--- 500-clause match: linear scan or jump table? ---")
+
+;; CRASH FOUND: eval of a 500-clause match expression causes "recursion too deep"
+;; in the pattern compiler — it recurses through each clause without TCO.
+;; 100 clauses are safe; 500 are not.
+(println "SKIP: 500-clause match crashes pattern compiler (stack overflow at ~200 clauses)")
+
+;; 100-clause version works. Each clause is a (pattern body) list.
+(defn make-100-match (v)
+  (eval `(match ~v
+           ~@(map (fn (i) (list i (str "hit-" i))) (range 100))
+           (_ "miss"))))
+
+(println "make-100-match(0):"   (make-100-match 0))
+(println "make-100-match(50):"  (make-100-match 50))
+(println "make-100-match(99):"  (make-100-match 99))
+(println "make-100-match(100):" (make-100-match 100))
+(println "make-100-match(-1):"  (make-100-match -1))
+
+;; Benchmark: compile the match fn ONCE, then call it 100k times
+(def compiled-100-match
+  (eval `(fn (v)
+           (match v
+             ~@(map (fn (i) (list i (str "hit-" i))) (range 100))
+             (_ "miss")))))
+
+(defn bench-compiled-match (n)
+  (if (= n 0) :done
+    (do (compiled-100-match (rem n 101))
+        (bench-compiled-match (- n 1)))))
+(println "bench 100k calls to compiled 100-clause match..." (bench-compiled-match 100000))
+
+(println "--- non-linear pattern: (match [a a a] to check all-equal) ---")
+
+(defn all-same? (triple)
+  (match triple
+    ([x x x] true)
+    (_        false)))
+
+(println "all-same? [1 1 1]:" (all-same? [1 1 1]))
+(println "all-same? [1 1 2]:" (all-same? [1 1 2]))
+(println "all-same? [\"a\" \"a\" \"a\"]:" (all-same? ["a" "a" "a"]))
+(println "all-same? [:k :k :j]:" (all-same? [:k :k :j]))
+
+(println "--- non-linear: find duplicates in a pair (same head twice) ---")
+
+(defn dup-head? (xs)
+  (match xs
+    ((x x & _) true)   ; first two equal
+    (_          false)))
+
+(println "dup-head? (1 1 2):" (dup-head? (list 1 1 2)))
+(println "dup-head? (1 2 1):" (dup-head? (list 1 2 1)))
+(println "dup-head? (\"x\" \"x\"):" (dup-head? (list "x" "x")))
+
+(println "--- pin expressions: runtime-value matching ---")
+
+(def target-key :magic)
+(def target-val 42)
+
+(defn find-magic (m)
+  (match (get m target-key)
+    (~target-val "found the magic value!")
+    (other       (str "got: " (pr-str other)))))
+
+(println (find-magic {:magic 42}))
+(println (find-magic {:magic 99}))
+(println (find-magic {:magic nil}))
+(println (find-magic {}))
+
+;; Pin inside a nested structure
+(def expected-pair [1 2])
+(defn pin-nested (v)
+  (match v
+    ([~expected-pair x] (str "outer with pair, x=" x))
+    (_                  "no match")))
+
+(println "pin-nested [[1 2] 3]:" (pin-nested [[1 2] 3]))
+(println "pin-nested [[1 3] 3]:" (pin-nested [[1 3] 3]))
+
+(println "--- guard chains (:when with complex conditions) ---")
+
+(defn classify-num (n)
+  (match n
+    (x :when (and (int? x) (< x 0) (= (rem x 2) 0)) "negative even int")
+    (x :when (and (int? x) (< x 0))                  "negative odd int")
+    (x :when (and (int? x) (= x 0))                  "zero")
+    (x :when (and (int? x) (= (rem x 2) 0))          "positive even int")
+    (x :when (int? x)                                 "positive odd int")
+    (x :when (float? x)                               (str "float: " x))
+    (_                                                "other")))
+
+(println (classify-num -4))
+(println (classify-num -7))
+(println (classify-num 0))
+(println (classify-num 6))
+(println (classify-num 9))
+(println (classify-num 3.14))
+(println (classify-num "hello"))
+
+(println "--- deeply nested pattern: 8-level deep list destructuring ---")
+
+(defn deep-extract (v)
+  (match v
+    ((a (b (c (d (e (f (g (h))))))))  [a b c d e f g h])
+    (_                                :nomatch)))
+
+(def deep-val (list 1 (list 2 (list 3 (list 4 (list 5 (list 6 (list 7 (list 8)))))))))
+(println "deep-extract:" (pr-str (deep-extract deep-val)))
+(println "correct?" (= [1 2 3 4 5 6 7 8] (deep-extract deep-val)))
+(println "non-match:" (pr-str (deep-extract (list 1 2))))
+
+(println "--- match in a loop: classify 100k integers ---")
+
+(defn classify-loop (n acc-pos acc-neg acc-zero)
+  (if (= n 0)
+    {:pos acc-pos :neg acc-neg :zero acc-zero}
+    (match (rem n 13)
+      (0 (classify-loop (- n 1) acc-pos acc-neg (+ acc-zero 1)))
+      (x :when (< x 7) (classify-loop (- n 1) (+ acc-pos 1) acc-neg acc-zero))
+      (_ (classify-loop (- n 1) acc-pos (+ acc-neg 1) acc-zero)))))
+
+(def class-result (classify-loop 100000 0 0 0))
+(println "classified:" class-result)
+(println "total:" (+ (get class-result :pos) (get class-result :neg) (get class-result :zero)))
+
+(println "--- match on BigInt ---")
+
+(def huge-int (* 9999999999 9999999999))  ; ~10^20, BigInt
+
+(defn match-bigint (v)
+  (match v
+    (0          "zero")
+    (1          "one")
+    (~huge-int  "the huge int!")
+    (x :when (> x 0) (str "positive: " (type-of x)))
+    (_          "other")))
+
+(println "match-bigint(0):"        (match-bigint 0))
+(println "match-bigint(huge-int):" (match-bigint huge-int))
+(println "match-bigint(1000):"     (match-bigint 1000))
+(println "match-bigint(-5):"       (match-bigint -5))
+
+(println "--- match on float edge cases ---")
+
+;; Brood raises on float /0; produce inf via overflow
+(def f-inf (* 1.7976931348623157e308 2.0))
+;; No NaN in Brood (no sqrt(-1), no 0.0/0.0) — test inf instead
+(def f-nan f-inf)  ; substitute inf for nan (no native NaN)
+
+(defn match-float (v)
+  (match v
+    (0.0     "zero-float")
+    (1.0     "one-float")
+    (3.14    "pi-ish")
+    (x :when (float? x) (str "float:" x))
+    (x :when (int? x)   (str "int:" x))
+    (_       "other")))
+
+(println "match-float(0.0):"    (match-float 0.0))
+(println "match-float(1.0):"    (match-float 1.0))
+(println "match-float(3.14):"   (match-float 3.14))
+(println "match-float(f-nan):"  (match-float f-nan))
+(println "match-float(f-inf):"  (match-float f-inf))
+(println "match-float(42):"     (match-float 42))
+
+(println "--- match-in-match: nested match expressions ---")
+
+(defn parse-command (cmd)
+  (match cmd
+    ([:move direction amount]
+      (match direction
+        (:north (str "go north " amount " steps"))
+        (:south (str "go south " amount " steps"))
+        (:east  (str "go east "  amount " steps"))
+        (:west  (str "go west "  amount " steps"))
+        (other  (str "unknown direction: " (pr-str other)))))
+    ([:say who what]
+      (match who
+        (:player (str "player says: " what))
+        (:npc    (str "NPC says: " what))
+        (_       (str "someone says: " what))))
+    ([:wait n] (str "waiting " n " turns"))
+    (_ "unknown command")))
+
+(println (parse-command [:move :north 5]))
+(println (parse-command [:move :east 3]))
+(println (parse-command [:move :diagonal 2]))
+(println (parse-command [:say :player "hello!"]))
+(println (parse-command [:say :npc "greetings"]))
+(println (parse-command [:wait 10]))
+(println (parse-command [:quit]))
+
+(println "--- head-tail pattern with 1000-element list ---")
+
+(defn sum-alternating (xs acc take-flag)
+  (match xs
+    (nil acc)
+    ((h & t)
+      (if take-flag
+        (sum-alternating t (+ acc h) false)
+        (sum-alternating t acc true)))))
+
+(def big-list (range 1 1001))
+(def alt-sum (sum-alternating big-list 0 true))
+;; Takes elements at even positions (1-indexed): 1, 3, 5, ... 999
+;; Sum = 500^2 = 250000
+(println "alternating sum of 1..1000 (odd-indexed):" alt-sum)
+(println "expected 250000:" (= 250000 alt-sum))
+
+(println "--- DONE ---")

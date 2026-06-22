@@ -1,0 +1,93 @@
+;;; chaos_string_cancer.blsp — string operations at absurd scale
+;;;
+;;; Doubles a seed string 25 times → 33 554 432-character string (~32 MB).
+;;; Then hammers it with: index-of, contains?, substring, char-at, split, join,
+;;; upper/lower, replace, pad-*, string-repeat, and string->list on a slice.
+;;;
+;;; Targets:
+;;;   - String allocation and copy (immutable model means every op is a fresh value)
+;;;   - `index-of` on a 33 MB string (should be O(n) in the worst case)
+;;;   - `string-split` producing millions of fragments
+;;;   - `join` re-assembling a million fragments
+;;;   - `string->list` → `list->string` round-trip on a large slice
+
+(println "--- building the 32 MB string ---")
+
+;; "ab" doubled 25× → 2^25 = 33 554 432 chars
+(defn double-str (s n)
+  (if (= n 0) s (double-str (str s s) (- n 1))))
+
+(def leviathan (double-str "ab" 25))
+(println "length:" (string-length leviathan))
+(println "first 8 chars:" (substring leviathan 0 8))
+(println "char at 16777216:" (char-at leviathan 16777216))
+
+(println "--- searching ---")
+;; The string is all 'a' and 'b' alternating, so "ba" always exists at odd positions
+(println "contains? 'ab':" (string-contains? leviathan "ab"))
+(println "contains? 'ba':" (string-contains? leviathan "ba"))
+;; A pattern that can't exist: three consecutive 'a's
+(println "contains? 'aaa':" (string-contains? leviathan "aaa"))
+;; index-of near the end — should walk the whole string
+(def needle (str (substring leviathan (- (string-length leviathan) 10) (string-length leviathan))))
+(println "index-of last-10-chars:" (index-of leviathan needle))
+
+(println "--- substring & slicing ---")
+(def mid-slice (substring leviathan 1000000 1001000))
+(println "mid-slice length:" (string-length mid-slice))
+(println "mid-slice first:" (char-at mid-slice 0))
+
+(println "--- case conversion (allocates a full copy) ---")
+(def up-slice (upper (substring leviathan 0 1000000)))
+(println "upper 1M-char slice length:" (string-length up-slice))
+(println "first char of upper:" (char-at up-slice 0))
+(def down-slice (lower up-slice))
+(println "lower round-trip matches original?" (= down-slice (substring leviathan 0 1000000)))
+
+(println "--- replace on a 1M-char slice ---")
+;; Replace every "ab" with "XY" — should produce same-length output (2-char → 2-char)
+(def replaced (replace (substring leviathan 0 1000000) "ab" "XY"))
+(println "replaced length:" (string-length replaced))
+(println "replaced first 8:" (substring replaced 0 8))
+;; Replace back
+(def restored (replace replaced "XY" "ab"))
+(println "restored matches original?" (= restored (substring leviathan 0 1000000)))
+
+(println "--- split & join ---")
+;; Split on "ab" — a 32M string of alternating 'a','b' has no "ab" runs; split gives many ""-parts
+;; Actually "ab" appears every 2 chars, so splitting the 1M-char slice on "ab" gives 500001 pieces
+(def parts (string-split (substring leviathan 0 1000000) "ab"))
+(println "parts count:" (count parts))
+(println "first part:" (pr-str (first parts)))
+;; Rejoin with a different separator
+(def rejoined (join "||" parts))
+(println "rejoined length:" (string-length rejoined))
+
+(println "--- string->list -> list->string on a 10k-char slice ---")
+(def slice-10k (substring leviathan 0 10000))
+(def chars (string->list slice-10k))
+(println "char count:" (count chars))
+;; Reverse the chars and rejoin
+(def reversed-str (list->string (reverse chars)))
+(println "reversed first 8:" (substring reversed-str 0 8))
+;; reversed "ab"×5000 should be "ba"×5000, so first char 'b'
+(println "reversed first char is b?" (= "b" (char-at reversed-str 0)))
+
+(println "--- pad ---")
+;; pad-left takes (string width) — spaces are the fill char (no 3rd arg)
+(def padded (pad-left "hello" 100))
+(println "pad-left length:" (string-length padded))
+(println "pad-left first char:" (pr-str (char-at padded 0)))
+(println "pad-left last 5:" (substring padded (- (string-length padded) 5) (string-length padded)))
+;; Pad right: pad to 100 chars
+(def rpadded (pad-right "hello" 100))
+(println "pad-right length:" (string-length rpadded))
+(println "pad-right last char:" (pr-str (char-at rpadded 99)))
+
+(println "--- string-repeat of a long string ---")
+;; Repeat the 1k slice 1000 times → 1M chars
+(def repeated (string-repeat (substring leviathan 0 1000) 1000))
+(println "repeated length:" (string-length repeated))
+(println "repeated == 1M-char original?" (= repeated (substring leviathan 0 1000000)))
+
+(println "--- DONE ---")
