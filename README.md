@@ -9,14 +9,14 @@ local mutation (no `set!`, no `while`), so loops are recursion. The single
 exception is `def`, which rebinds a global — that *is* live redefinition, the
 whole point of an editor that can rewrite itself while running.
 
-Under the Lisp sits Erlang/OTP-style concurrency: a *brood* of cheap, supervised
-processes that share nothing and talk by message passing. That swarm is where
+Under the Lisp sits share-nothing, message-passing concurrency: a *brood* of
+cheap, supervised processes that share nothing and talk by messages. That swarm is where
 the name comes from. Immutability is what makes that share-nothing model safe:
 no aliasing across processes, messages copied cleanly, no shared mutable state to
 race on.
 
 > **Name & tooling.** This project was formerly `mylisp`; it is now **Brood**.
-> The command line splits the way `rustc`/`cargo` (and `elixir`/`mix`) do
+> The command line splits the way `rustc`/`cargo` do
 > (ADR-028): **`brood`** runs the *language* — a file, the REPL, or a single
 > test file (`brood --test`) — and **`nest`** is the *project tool* —
 > `nest new`, `nest test`, `nest run`, `nest doc`, and dependency management
@@ -34,7 +34,7 @@ exists; it consumes this language and the `std/editor/*` framework. This
 repository is the **language core and runtime** — a reader, a closure-compiling
 **bytecode VM** with proper tail calls and lexical closures (with a tier-1
 **JIT** that compiles hot loops to native code), a Brood-written standard
-library, and a self-hosted REPL — plus the Erlang-style **concurrency** and
+library, and a self-hosted REPL — plus the **concurrency** and
 **distributed-node** runtime, and the editor framework (a rope/buffer data model
 and a display protocol) those vertical slices grew into.
 
@@ -54,12 +54,12 @@ and a display protocol) those vertical slices grew into.
 (sum-to 100000 0)                ;=> 5000050000
 ```
 
-### Processes & message passing (the Erlang/Elixir half)
+### Processes & message passing
 
-Under the Lisp is an Erlang-style runtime: cheap, share-nothing **green
-processes** that talk only by message passing. `spawn`/`send`/`receive`/`self`
-are the whole API; `receive` selects on **patterns**, just like Elixir's
-`receive do`.
+Under the Lisp is a runtime of cheap, share-nothing **green processes** that talk
+only by message passing — the actor model Erlang popularised.
+`spawn`/`send`/`receive`/`self` are the whole API, and `receive` selects on
+**patterns**.
 
 ```lisp
 ;; A worker process: receive a number, reply to `parent` with its square.
@@ -68,11 +68,11 @@ are the whole API; `receive` selects on **patterns**, just like Elixir's
     (send parent (* n n))))
 
 (def me (self))
-(def w (spawn (square-worker me)))   ; spawn returns a pid, like Elixir's spawn/1
+(def w (spawn (square-worker me)))   ; spawn returns a pid
 (send w 6)
 (receive)                            ;=> 36
 
-;; Selective receive — match on the shape of the message (Elixir's `receive do`):
+;; Selective receive — match on the shape of the message:
 (defn account (balance)
   (receive
     ([:deposit  amt from] (send from :ok) (account (+ balance amt)))
@@ -80,13 +80,13 @@ are the whole API; `receive` selects on **patterns**, just like Elixir's
                             (do (send from :ok)    (account (- balance amt)))
                             (do (send from :insufficient) (account balance))))
     ([:balance      from] (send from balance) (account balance))))
-;; A process loop carries its state as an argument and tail-calls itself —
-;; the GenServer pattern, no mutable variable in sight.
+;; A process loop carries its state in its argument and tail-calls itself —
+;; no mutable variable in sight.
 ```
 
 Distribution is the same model stretched over TCP: two runtimes connect and
 `send` works location-transparently across nodes, with remote monitors and
-closure-shipping (Erlang's `:rpc`, in a Lisp).
+closure-shipping.
 
 ## Install
 
@@ -100,19 +100,30 @@ autotools-style `./configure` records build options.
 ./configure
 make install
 
-# pick a different prefix, or opt into the optional backends:
-./configure --prefix=/usr/local   # install root (binaries go in PREFIX/bin)
-./configure --with-gui            # native window backend (for the display layer)
-./configure --with-audio          # the `audio-beep` builtin (links libasound on Linux)
-./configure --without-jit         # bytecode-VM only, no native JIT (unsupported hosts)
-make install
-
-make uninstall                    # remove the installed binaries
+make uninstall   # remove the installed binaries
 ```
 
-`make install` defaults to no GUI/audio, the tier-1 JIT **on**, and
-`PREFIX=~/.local` — so a bare `make install` works without running `./configure`
-first. Make sure `~/.local/bin` is on your `PATH`.
+`./configure` records build options into `config.mk`; re-run it any time to
+change them. Each `--with-X` has a `--without-X` opposite, and a bare
+`make install` uses the defaults below (so `./configure` is optional):
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `--prefix=DIR`    | `~/.local`  | Install root — binaries go in `DIR/bin`. |
+| `--with-jit`      | **on**      | Tier-1 native JIT for hot loops. `--without-jit` falls back to the bytecode VM (for unsupported hosts / minimal builds). |
+| `--with-gui`      | off         | Native window backend (winit/softbuffer/fontdue) for the display layer. |
+| `--with-gui-gpu`  | off         | Experimental OpenGL render backend (implies `--with-gui`). |
+| `--with-audio`    | off         | The `audio-beep` builtin (via rodio); links `libasound.so.2` on Linux, so it's off by default to keep the build portable. |
+
+So the defaults are: **JIT on; GUI, GPU, and audio off; prefix `~/.local`.** For
+example, a desktop build with sound:
+
+```bash
+./configure --with-gui --with-audio && make install
+```
+
+Make sure `~/.local/bin` (or your chosen `PREFIX/bin`) is on your `PATH`.
+Run `./configure --help` for the full list.
 
 Other handy targets:
 
@@ -155,7 +166,7 @@ Lexically-scoped closures, proper tail calls, `def`/`defn`/`let`/`fn`,
 Clojure-style `` ` ``/`~`/`~@` quasiquote, `macroexpand`, `gensym`), integers &
 floats with overflow-checked arithmetic, strings, symbols, keywords, cons-cell
 lists, `[ ]` vectors, immutable `{ }` maps (`get`/`assoc`/`dissoc`/`keys`/`vals`/
-`contains?`), Erlang-style **pattern matching** (`match` + destructuring in
+`contains?`), **pattern matching** (`match` + destructuring in
 `let`/`fn`), higher-order functions (`map`/`filter`/`reduce`/`apply`),
 and the self-hosting trio `eval`/`read-string`/`load`. Parameter lists are
 written as lists (`(x y)` — code is lists; vectors are data) and support
@@ -170,9 +181,8 @@ small Rust kernel.
 Code runs on a closure-compiling **bytecode VM** (the default engine), and a
 tier-1 **JIT** compiles hot compute loops to native code via Cranelift. The one
 mutable structure in the whole language is `Table` — a shared, identity-mutable
-key→value store (Erlang's ETS) for when you genuinely need mutable state; every
-other value is immutable, and per-process state lives in a process loop's
-arguments instead.
+key→value store for when you genuinely need mutable state; every other value is
+immutable, and per-process state lives in a process loop's arguments instead.
 
 See [`docs/language.md`](docs/language.md) for the full reference.
 
@@ -180,24 +190,24 @@ See [`docs/language.md`](docs/language.md) for the full reference.
 
 The surface borrows a few good ideas from Clojure — immutable data, `{ }` map
 and `[ ]` vector literals, `:keywords`, `->`/`->>` threading, and `~`/`~@`
-quasiquote — so a Clojure reader will recognise the shapes. **The semantics are
-Erlang/Elixir, not Clojure**, and the differences are deliberate:
+quasiquote — so a Clojure reader will recognise the shapes. But the semantics
+diverge, and the differences are deliberate:
 
 - **Concurrency is share-nothing processes + message passing**, not shared memory.
   There are **no atoms, refs, agents, STM, or transients** — no mutable reference
-  cell of any kind. State lives in a process (Erlang), or in a `Table` (ETS).
+  cell of any kind. State lives in a process, or in a shared `Table`.
 - **The loop is recursion with proper tail calls** (Scheme-style). There is no
   `loop`/`recur`, no `while`, and no `set!`.
 - **Code is lists, data is vectors.** Parameter lists are written `(x y)`, not
   `[x y]` — the opposite emphasis from Clojure.
-- **`def` is late-binding global rebinding** — that *is* Erlang-style hot reload
+- **`def` is late-binding global rebinding** — that *is* live hot reload
   (a running process picks up a redefinition on its next call), not a Clojure var.
-- **Pattern matching and selective `receive` are first-class** (Erlang), and it
-  runs on its own small Rust runtime, not the JVM.
+- **Pattern matching and selective `receive` are first-class**, and it runs on
+  its own small Rust runtime, not the JVM.
 
 ## What's next
 
-Concurrency is well underway: Erlang-style **processes** (`spawn`/`send`/`receive`/`self`)
+Concurrency is well underway: **processes** (`spawn`/`send`/`receive`/`self`)
 run share-nothing as lightweight **green threads** on an M:N worker pool (≈`nproc`),
 with reduction-counted preemption, selective `receive` + timeouts, and process
 monitors (see [`examples/processes.blsp`](examples/processes.blsp)). **Distributed
@@ -218,8 +228,7 @@ The editor milestones are well underway as vertical slices: a `ropey`-backed
 **rope kernel** + an immutable **buffer framework** (`std/editor/buffer.blsp`); a
 serialisable **display protocol** (`std/editor/display.blsp`) with a terminal
 frontend (and an optional native GUI window), demoed end-to-end by `nest observe`
-(an Erlang-observer-style process viewer) and `nest attach` (an `emacsclient`-style
-thin frontend for a daemon). The **editor app itself is a separate project**,
+(a live process viewer) and `nest attach` (a thin client frontend for a daemon). The **editor app itself is a separate project**,
 `brood-edit`, which already exists and consumes this language and the
 `std/editor/*` framework. Still ahead here: full server/daemon serving and a **web
 frontend**.
