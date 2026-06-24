@@ -165,19 +165,22 @@ docs/testing.md for the full guide.")
 
 (defmacro describe (group & forms)
   "Register a group of tests: `(describe \"name\" [:serial | :isolated] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals."
-  (let (mode (cond
-               (= (first forms) :isolated) :isolated
-               (= (first forms) :serial) :serial
-               else :parallel)
-        body (if (= mode :parallel) forms (rest forms)))
-    `(do
-       (def *collecting* true)
-       (def *collected* nil)
-       (do ~@body)
-       ; the (test ...) forms collect themselves
-       (def *collecting* false)
-       (emit-describe! ~mode ~group (reverse *collected*))
-       nil)))
+  (if (keyword? group)
+    (error "describe: group name must be a string, not keyword " (pr-str group)
+           " — did you mean (describe \"" (pr-str group) "\" ...) or did you accidentally omit the group name?")
+    (let (mode (cond
+                 (= (first forms) :isolated) :isolated
+                 (= (first forms) :serial) :serial
+                 else :parallel)
+          body (if (= mode :parallel) forms (rest forms)))
+      `(do
+         (def *collecting* true)
+         (def *collected* nil)
+         (do ~@body)
+         ; the (test ...) forms collect themselves
+         (def *collecting* false)
+         (emit-describe! ~mode ~group (reverse *collected*))
+         nil))))
 
 ;; (test "name" [:isolated] body...) — register one test. Each top-level body form
 ;; becomes its own thunk; `test--run` runs them in order, each in its own `try`,

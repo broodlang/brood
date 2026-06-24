@@ -1,0 +1,323 @@
+;; Comprehensive tests for `try`/`catch`/`throw`/`error`.
+;;
+;; Coverage:
+;;   - Basic catch and no-catch expansion
+;;   - Every kernel error kind (type, arity, runtime, unbound, parse)
+;;   - throw with all value shapes (string, keyword, int, vector, map, nil)
+;;   - Error map structure and the error-message / error-of accessors
+;;   - Multiple body forms, nested try, rethrowing
+;;   - Tail-position catching (no stack growth)
+;;   - Wrong-syntax guard: (try … (fn …)) → clear compile-time error
+;;   - JIT / VM deopt → recoverable error (the crash-repro scenario)
+;;   - GC stress: catch after GC moved the nursery
+
+(defmodule try-catch-test (:use test))
+
+;; ── helpers ──────────────────────────────────────────────────────────────────
+
+(defn raises? (f)
+  "Returns true if calling the zero-arg fn `f` raises any error."
+  (try (f) false (catch _ true)))
+
+(defn caught-msg (f)
+  "Returns the error-message string of whatever `f` raises, or nil."
+  (try (f) nil (catch e (error-message e))))
+
+;; ── 1. Basic syntax ──────────────────────────────────────────────────────────
+
+(describe "try / catch — basic syntax"
+  (test "catch clause receives the thrown value"
+    (assert= (try (throw :boom) (catch e e)) :boom))
+
+  (test "body value returned when no error"
+    (assert= (try (+ 1 2) (catch e :nope)) 3))
+
+  (test "catch is not entered when body succeeds"
+    ;; If catch were entered, result would be :nope; body value proves it wasn't.
+    (assert= (try (+ 1 1) (catch _ :nope)) 2))
+
+  (test "no catch clause — try expands to do, evaluates body"
+    (assert= (try 1 2 3) 3))
+
+  (test "single body form with no catch returns that form's value"
+    (assert= (try 42) 42))
+
+  (test "multiple body forms: error in an earlier form is caught"
+    (assert= (try (throw :stop) (+ 2 2) (catch e e)) :stop))
+
+  (test "multiple body forms: last form is the result when no error"
+    (assert= (try (+ 1 1) (* 3 3) (catch _ :err)) 9))
+
+  (test "catch body may have multiple forms; last is the result"
+    (assert= (try (throw :x) (catch _ (+ 1 1) :result)) :result))
+
+  (test "catch binding shadows outer binding of same name"
+    (let (e :outer)
+      (assert= (try (throw :inner) (catch e e)) :inner)
+      (assert= e :outer))))
+
+;; ── 2. throw value shapes ────────────────────────────────────────────────────
+
+(describe "try / catch — throw value shapes"
+  (test "throw a string"
+    (assert= (try (throw "oops") (catch e e)) "oops"))
+
+  (test "throw a keyword"
+    (assert= (try (throw :abort) (catch e e)) :abort))
+
+  (test "throw an integer"
+    (assert= (try (throw 42) (catch e e)) 42))
+
+  (test "throw nil"
+    (assert= (try (throw nil) (catch e e)) nil))
+
+  (test "throw a vector"
+    (assert= (try (throw [:tag 1 2]) (catch e e)) [:tag 1 2]))
+
+  (test "throw a map"
+    (let (m {:a 1 :b 2})
+      (assert= (try (throw m) (catch e e)) m)))
+
+  (test "throw a list"
+    (assert= (try (throw '(a b c)) (catch e e)) '(a b c)))
+
+  (test "error function raises a string message"
+    (assert= (try (error "bad " "input") (catch e e)) "bad input")))
+
+;; ── 3. Kernel error kinds ────────────────────────────────────────────────────
+
+(describe "try / catch — kernel error kinds"
+  (test "type error is catchable"
+    (is (try (+ 1 "x") false (catch _ true))))
+
+  (test "arity error is catchable"
+    (is (try ((fn (x) x) 1 2) false (catch _ true))))
+
+  (test "runtime error (div by zero) is catchable"
+    (is (try (/ 1 0) false (catch _ true))))
+
+  (test "unbound symbol error is catchable"
+    (is (try (eval 'no-such-symbol-xyz) false (catch _ true))))
+
+  (test "parse error from read-string is catchable"
+    (is (try (read-string "(1 2") false (catch _ true))))
+
+  (test "index out of bounds is catchable"
+    (is (try (vector-ref [1 2 3] 99) false (catch _ true)))))
+
+;; ── 4. Error map structure ───────────────────────────────────────────────────
+
+(describe "try / catch — error map structure"
+  (test "kernel error arrives as a map with :kind and :message"
+    (let (e (try (/ 1 0) (catch e e)))
+      (is (map? e))
+      (is (keyword? (get e :kind)))
+      (is (string? (get e :message)))))
+
+  (test ":kind is a keyword naming the error family"
+    (assert= (get (try (/ 1 0) (catch e e)) :kind) :runtime)
+    (assert= (get (try (+ 1 "x") (catch e e)) :kind) :type)
+    (assert= (get (try ((fn (x) x) 1 2) (catch e e)) :kind) :arity))
+
+  (test ":message is a human-readable string"
+    (assert= (get (try (/ 1 0) (catch e e)) :message) "division by zero"))
+
+  (test "throw passes the value through unchanged (not wrapped in a map)"
+    (assert= (try (throw :raw) (catch e e)) :raw)
+    (assert= (try (throw "msg") (catch e e)) "msg")
+    (refute (map? (try (throw :x) (catch e e))))))
+
+;; ── 5. error-message and error-of ───────────────────────────────────────────
+
+(describe "error-message"
+  (test "kernel error map → :message field"
+    (assert= (try (/ 1 0) (catch e (error-message e))) "division by zero")
+    (assert= (try (+ 1 "x") (catch e (error-message e)))
+      "%add: expected number, got string (\"x\")"))
+
+  (test "a raised string is returned as-is"
+    (assert= (try (error "plain") (catch e (error-message e))) "plain"))
+
+  (test "a raised keyword is pr-str'd"
+    (assert= (try (throw :boom) (catch e (error-message e))) ":boom"))
+
+  (test "a raised vector is pr-str'd"
+    (assert= (try (throw [:tag 1]) (catch e (error-message e))) "[:tag 1]"))
+
+  (test "nil thrown → pr-str of nil"
+    (assert= (try (throw nil) (catch e (error-message e))) "nil")))
+
+(describe "error-of"
+  (test "returns nil when no error"
+    (assert= (error-of (+ 1 2)) nil))
+
+  (test "returns rendered error string on failure"
+    (assert= (error-of (/ 1 0)) "runtime error: division by zero"))
+
+  (test "type error names the op, the expected type, and the value"
+    (assert= (error-of (+ 1 "x")) "type error: %add: expected number, got string (\"x\")")
+    (assert= (error-of (first 5))
+      "type error: first: expected list or vector, got int (5)"))
+
+  (test "throw value is returned verbatim"
+    (assert= (error-of (throw :boom)) :boom)
+    (assert= (error-of (throw 99)) 99)))
+
+;; ── 6. Nested try and rethrowing ─────────────────────────────────────────────
+
+(describe "try / catch — nested and rethrow"
+  (test "inner catch handles its own error; outer sees nothing"
+    ;; If outer catch fired, result would be :outer; inner handling gives :handled.
+    (assert= (try
+               (try (throw :inner) (catch _ :handled))
+               (catch _ :outer))
+      :handled))
+
+  (test "outer catch handles error that escapes inner"
+    (assert= (try
+               (try (throw :escapes) (catch e (throw e)))
+               (catch e e))
+      :escapes))
+
+  (test "rethrowing inside catch propagates to the next handler"
+    (assert= (try
+               (try (throw :original) (catch e (throw :rethrown)))
+               (catch e e))
+      :rethrown))
+
+  (test "try can be nested three levels deep"
+    (assert= (try
+               (try
+                 (try (throw :deep) (catch e (throw :level2)))
+                 (catch e (throw :level3)))
+               (catch e e))
+      :level3))
+
+  (test "a catch handler that itself throws is caught by the next outer try"
+    (assert= (try
+               (try (/ 1 0) (catch _ (error "handler-boom")))
+               (catch e (error-message e)))
+      "handler-boom")))
+
+;; ── 7. try in various positions ──────────────────────────────────────────────
+
+(describe "try / catch — usage positions"
+  (test "try as a let binding"
+    (let (v (try (throw :x) (catch e e)))
+      (assert= v :x)))
+
+  (test "try as the condition of if"
+    (assert= (if (try (throw :x) false (catch _ true)) :yes :no) :yes))
+
+  (test "try as function argument"
+    (assert= (str (try (throw :x) (catch e e))) ":x"))
+
+  (test "try in tail position of a function"
+    ;; try bodies compile non-tail (each level is a new frame); keep depth modest.
+    (defn t-tail (n)
+      (try (if (= n 0) (throw :done) (t-tail (- n 1)))
+           (catch e e)))
+    (assert= (t-tail 50) :done))
+
+  (test "try wrapping a deep TAIL-recursive function does not overflow"
+    ;; t-loop itself is tail-recursive; the try wrapper adds only one frame.
+    (defn t-loop (n)
+      (if (= n 0) :ok (t-loop (- n 1))))
+    (assert= (try (t-loop 50000) (catch _ :error)) :ok)))
+
+;; ── 8. Wrong-syntax guard ────────────────────────────────────────────────────
+
+(describe "try / catch — wrong syntax gives a clear error"
+  (test "(try body (fn (e) handler)) raises a clear compile error"
+    ;; Using eval + a quoted form forces macro expansion at runtime, so
+    ;; error-of can intercept the compile-time error.
+    (let (msg (error-of (eval '(try (+ 1 2) (fn (e) :caught)))))
+      (is (string? msg))
+      (is (string-contains? msg "try:"))
+      (is (string-contains? msg "(catch"))))
+
+  (test "error message names the fn form that was passed"
+    (let (msg (error-of (eval '(try (+ 1 2) (fn (x) (* x 2))))))
+      (is (string-contains? msg "(fn"))))
+
+  (test "error message suggests the right param name from the fn"
+    (let (msg (error-of (eval '(try (throw :x) (fn (err) err)))))
+      (is (string-contains? msg "err"))))
+
+  (test "correct syntax (catch e ...) does NOT trigger the guard"
+    (assert= (try (throw :ok) (catch e e)) :ok))
+
+  (test "(try body) with no catch still works — no guard fires"
+    (assert= (try (+ 1 2)) 3)))
+
+;; ── 9. JIT / VM deopt → recoverable error ────────────────────────────────────
+;;
+;; Regression: before the fix in e000652 the stale-LOCAL-handle bug caused these
+;; to CRASH (panicked at heap.rs) instead of raising a catchable Brood error.
+;; Now they must raise a clean type error that try/catch intercepts.
+
+(describe "try / catch — JIT / VM deopt recovery" :serial
+  ;; Helper: a function compiled by the VM/JIT for integer operands.
+  ;; When called with a non-integer the JIT deopts — previously crashed.
+  (defn deopt-adder (x)
+    (+ x 1))
+
+  ;; Heat the function so the JIT/VM compiles it for integers.
+  (defn deopt-heat (n)
+    (when (> n 0)
+      (deopt-adder n)
+      (deopt-heat (- n 1))))
+
+  (test "type error from a compiled function is catchable"
+    (deopt-heat 5000)
+    (assert= (try (deopt-adder "not-a-number") (catch _ :caught)) :caught))
+
+  (test "type error from compiled function carries the right message"
+    (deopt-heat 5000)
+    (let (msg (caught-msg (fn () (deopt-adder "x"))))
+      (is (string? msg))
+      (is (string-contains? msg "expected number"))))
+
+  (test "try/catch works across repeated deopt calls"
+    (deopt-heat 5000)
+    (let (results (map (fn (v) (try (deopt-adder v) (catch _ :caught)))
+                    '("a" "b" "c" 1 "d" 2)))
+      (assert= results '(:caught :caught :caught 2 :caught 3))))
+
+  ;; Stale-handle scenario: allocate many short-lived pairs (stress the
+  ;; nursery) and confirm errors are still catchable after GC moves things.
+  (defn make-pairs (n acc)
+    (if (= n 0) acc (make-pairs (- n 1) (cons n acc))))
+
+  (test "error catchable even when GC ran before the deopt"
+    (deopt-heat 5000)
+    (make-pairs 500 nil) ; stress the nursery
+    (assert= (try (deopt-adder :keyword) (catch _ :ok)) :ok))
+
+  ;; Multi-arg variant: more slots means more stale-handle exposure.
+  (defn deopt-mul (x y)
+    (* x y))
+
+  (defn deopt-heat-mul (n)
+    (when (> n 0)
+      (deopt-mul n n)
+      (deopt-heat-mul (- n 1))))
+
+  (test "two-arg compiled function deopt is catchable"
+    (deopt-heat-mul 5000)
+    (assert= (try (deopt-mul nil 2) (catch _ :caught)) :caught)
+    (assert= (try (deopt-mul 2 "x") (catch _ :caught)) :caught)))
+
+;; ── 10. assert-error macro ───────────────────────────────────────────────────
+
+(describe "assert-error"
+  (test "passes when the body raises"
+    (assert-error (/ 1 0))
+    (assert-error (throw :boom))
+    (assert-error (+ 1 "x"))
+    (assert-error (vector-ref [] 0)))
+
+  (test "multiple assert-error in one test"
+    (assert-error (first 5))
+    (assert-error (eval 'undefined-xyz-99))
+    (assert-error (read-string "(("))))

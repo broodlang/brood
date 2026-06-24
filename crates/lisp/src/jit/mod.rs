@@ -29,6 +29,14 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::default_libcall_names;
 use std::sync::{LazyLock, Mutex};
 
+#[cfg(debug_assertions)]
+fn jit_cb_trace_enabled() -> bool {
+    static CB_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CB_TRACE.get_or_init(|| {
+        std::env::var("BROOD_JIT_CB_TRACE").map_or(false, |v| v != "0" && !v.is_empty())
+    })
+}
+
 /// The process-wide JIT module (tiering, 1b). It owns every compiled arm's executable
 /// code, which must outlive all installed fn-pointers — hence a single process-lifetime
 /// instance. Compilation mutates it (`declare`/`define`/`finalize`), so it's behind a
@@ -182,6 +190,8 @@ mod smoke {
 /// so the JIT could never actually run the loop.
 #[no_mangle]
 pub extern "C" fn brood_rt_tick(_heap: *mut Heap) -> u8 {
+    #[cfg(debug_assertions)]
+    if jit_cb_trace_enabled() { eprintln!("[jit-cb] brood_rt_tick()"); }
     if crate::process::in_capture_run() {
         crate::process::tick_capture() as u8
     } else {
@@ -212,6 +222,8 @@ pub extern "C" fn brood_rt_in_capture(_heap: *mut Heap) -> u8 {
 /// live `Value`s outside `Heap::roots` (the no-stack-map invariant, ADR-101 §6.2).
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_gc_safepoint(heap: *mut Heap) {
+    #[cfg(debug_assertions)]
+    if jit_cb_trace_enabled() { eprintln!("[jit-cb] brood_rt_gc_safepoint()"); }
     let h = &mut *heap;
     if !crate::process::macro_block_active() && h.gc_due() {
         h.collect(&mut [], &mut []);
@@ -498,6 +510,10 @@ pub unsafe extern "C" fn brood_rt_global(
     out: *mut crate::core::value::Value,
     sym: u32,
 ) -> i64 {
+    #[cfg(debug_assertions)]
+    if jit_cb_trace_enabled() {
+        eprintln!("[jit-cb] brood_rt_global(sym={})", crate::core::value::symbol_name(sym));
+    }
     match crate::eval::compile::jit_resolve_global(&mut *heap, sym) {
         Some(v) => {
             *out = v;
@@ -525,6 +541,10 @@ pub unsafe extern "C" fn brood_rt_global_ic(
     sym: u32,
     site: u32,
 ) -> i64 {
+    #[cfg(debug_assertions)]
+    if jit_cb_trace_enabled() {
+        eprintln!("[jit-cb] brood_rt_global_ic(sym={}, site={})", crate::core::value::symbol_name(sym), site);
+    }
     match crate::eval::compile::jit_resolve_global_ic(&mut *heap, sym, site) {
         Some(v) => {
             *out = v;
@@ -554,6 +574,8 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     site: u32,
     head: u32,
 ) -> i64 {
+    #[cfg(debug_assertions)]
+    if jit_cb_trace_enabled() { eprintln!("[jit-cb] brood_rt_call_slow(argc={})", argc); }
     match crate::eval::compile::jit_dispatch_call(&mut *heap, argc as usize, site, head) {
         Some(v) => {
             *out = v;
