@@ -86,17 +86,32 @@ paths — but until then, prefer learning over shortcuts.
 ```
 crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity),
-               heap.rs (per-process heap + shared regions + env chain), alloc.rs,
+               heap.rs (per-process heap + shared regions + env chain; major sections:
+               construction/construction, source-positions, definition-sites, alloc,
+               accessors, equality/hashing, env-chain, globals, gc-roots, gc-stats,
+               vm-cache, collection/compaction), alloc.rs,
                blob.rs (cross-process zero-copy blob heap), map_champ.rs (CHAMP
                map trie), sync.rs
   syntax/      reader.rs (text -> Value), scanner.rs, printer.rs, and the tooling
                CST (atom.rs / cst.rs / scope.rs)
   eval/        mod.rs (evaluator — a `'tail: loop` for tail calls + special forms),
-               compile.rs (the closure-compiling VM — the default engine, ADR-076),
+               compile.rs (the closure-compiling VM — the default engine, ADR-076).
+                 Major sections of compile.rs (10K lines):
+                 - IR types: PrimOp/PrimOp1, ConstVal, Node, CompiledArm/Closure, Chunk/Inst
+                 - Compiler front-end: compile_arm, compile_node, emit_node (AST → IR → bytecode)
+                 - exec_chunk: the bytecode interpreter inner loop (Stage 1, call-free arms)
+                 - dispatch: the VM arm dispatcher (handles Call/SelfCall, IC, JIT fast path)
+                 - vm_run_bc: the outer VM trampoline (tail-call loop, frame save/restore)
+                 - jit_lower_arm / jit_lower_arm_inner: Cranelift JIT lowering (feature = "jit")
                macros.rs (quasiquote, macroexpand, the compile pass + pattern lowering)
   types/       mod.rs (Ty/GradualTy set-theoretic lattice), check.rs + check/
                (advisory checker)
-  builtins.rs  functions implemented in Rust (the primitive kernel)
+  builtins/    functions implemented in Rust (the primitive kernel); split into:
+               mod.rs (Reg struct, pub fn register, PRIMITIVE_DOCS, shared helpers),
+               numeric.rs (numeric/bitwise/bitset/math), sequences.rs (pair/list/range/
+               seqview/vector/map/string/rope), io.rs (TCP/table/print/time/fs/hashing/
+               git/crypto), terminal.rs (terminal + GUI, feature-gated), system.rs
+               (eval/load/macros/introspection/errors/processes/dist/dynamic/namespaces)
   introspect.rs  doc/arglist/global-names/bound? and friends (ADR-025)
   cli_support.rs file-runner / --test plumbing shared by the binaries
   process.rs + process/   green-process scheduler (mailbox, message, monitor,
@@ -191,6 +206,10 @@ contention races).
 | `BROOD_PERF_STATS=1` | Dump the VM work-attribution counters (`(vm-stats)`) to stderr after a file/`--test` run — closure activations, IC hit/miss, prim inline/fallback, env-chain hops, allocs, defers. **Needs `--features perf-stats`** (else prints a hint; counters compile to nothing by default). Counting tool, not timing — see `docs/benchmarking.md`. |
 | `BROOD_JIT_DUMP_IR=1` | Dump each fully-lowered JIT arm's **bytecode opcode fingerprint + Cranelift CLIF** to stderr (`[jit-ir]` lines), for diagnosing a JIT miscompile — read the IR, diff against the intended semantics. **Needs `--features jit`**; only fires for arms that lower (a bailed arm never reaches the dump). Run a *targeted* program to limit which arms compile. |
 | `BROOD_NO_INLINE=1` | **Opt-OUT** of the JIT recursive self-inliner (Phase B, `docs/jit-optimizing-tier.md` §6b) — now **default ON** via two-stage tiering (devlog 2026-06-17: dual-body + per-engine frame sizing + a deferred lower-priority inlined upgrade, so the VM keeps the small body and short-lived workloads stay on the small native — fib ~1.7×, spawn/bintree/nqueens flat). Set it to fall back to the small-native-only baseline (the A/B lever). **Needs `--features jit`**; `BROOD_INLINE_DBG=1` traces which arms qualify to inline. |
+| `BROOD_VM_TRACE=1` | Trace each bytecode instruction to stderr as it executes (`[vm-trace ip=N] InstName(...)`). Debug builds only. For debugging VM/JIT correctness divergences. |
+| `BROOD_GC_TRACE=1` | Log each minor GC collection's nursery/old-gen stats to stderr (`[gc-trace] collect: ...`). Debug builds only. |
+| `BROOD_EVAL_TRACE=1` | Trace each form entering the tree-walking evaluator to stderr (`[eval-trace] <form>`). Debug builds only. Use to see which forms the VM defers to the tree-walker. |
+| `BROOD_JIT_CB_TRACE=1` | Trace JIT runtime-callback invocations to stderr (`[jit-cb] brood_rt_<name>(...)`). Debug builds only. Useful for diagnosing JIT-compiled code calling back into Rust (global lookup, slow calls, GC). |
 | `RUST_BACKTRACE` | `brood`/`nest` **default it to `1`** (set in each `main`); `RUST_BACKTRACE=0` opts out, `full` for verbose. |
 
 **Two layers of use-after-GC detection** (a moving collector relocates LOCAL

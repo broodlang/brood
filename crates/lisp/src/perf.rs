@@ -100,6 +100,10 @@ mod imp {
         /// Saves the GcBlockGuard/TopLevelGuard thread-local ops and frame-vector setup
         /// on each Rust-native callback call (e.g. a `reduce` lambda).
         jit_apply_fast,
+        /// JIT fast-path deopt (outcome 1/2/None): fell back to vm_apply with fresh_argv.
+        jit_fast_deopt,
+        /// JIT fast-path outcome 4 (staged tail): dispatched the staged call.
+        jit_fast_tail4,
     );
 }
 

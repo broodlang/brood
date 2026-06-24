@@ -1265,6 +1265,8 @@ impl std::hash::Hash for VmCacheKey {
     }
 }
 
+// ===== Construction and shared-region management ================================
+
 impl Heap {
     /// A bare heap with empty shared regions — used to *build* the prelude
     /// before freezing it. Real runtimes use [`Heap::with_regions`]. GC is
@@ -1460,6 +1462,8 @@ impl Heap {
         (SharedCode { slabs, def_sites }, bindings)
     }
 
+    // ===== Process global scope =================================================
+
     /// Record this process's global scope (call once, after creating it).
     pub fn set_global(&mut self, env: EnvId) {
         self.global = env;
@@ -1536,7 +1540,7 @@ impl Heap {
         // that we let the next `gc_due` check recompute against the smaller heap.
     }
 
-    // ----- source-position metadata (editor tooling; see docs/tooling.md) -----
+    // ===== Source positions and compilation context =============================
 
     /// Record the source position of a LOCAL list form (no-op for atoms and
     /// forms in the shared regions). Called by the reader as it builds lists.
@@ -1632,7 +1636,7 @@ impl Heap {
         self.imports.iter().map(|(&b, &q)| (b, q)).collect()
     }
 
-    // ----- definition sites (cross-file xref; ADR-031, docs/lsp.md) -----
+    // ===== Definition sites (cross-file xref; ADR-031) =========================
 
     /// If `form` is a top-level `def`/`defn`/`defmacro`, record its name's source
     /// location (the [`current_file`] + `pos`). Called by the file loaders on each
@@ -1698,7 +1702,7 @@ impl Heap {
             .or_else(|| self.prelude.def_sites.get(&name).cloned())
     }
 
-    // ----- allocation (always into the local heap) -----
+    // ===== Allocation — LOCAL slab =============================================
     //
     // Every allocator bump-appends to its LOCAL slab (the [`alloc_slot!`]
     // macro is that shape in one place; `alloc_string` / `new_env` stay
@@ -3294,6 +3298,8 @@ impl Heap {
         );
     }
 
+    // ===== Accessors — read LOCAL/PRELUDE/RUNTIME values =======================
+
     pub fn pair(&self, id: PairId) -> (Value, Value) {
         match id.region() {
             LOCAL if id.is_old() => {
@@ -3416,6 +3422,8 @@ impl Heap {
             _ => Err(LispError::type_err("expected a list or vector")),
         }
     }
+
+    // ===== Value equality, comparison, and hashing =============================
 
     /// A `u64` hash of `v` consistent with [`Heap::equal`]: two values that
     /// `equal` agrees on must hash to the same number. Used by the CHAMP map
@@ -3890,7 +3898,7 @@ impl Heap {
         }
     }
 
-    // ----- environments -----
+    // ===== Environment chain ====================================================
     //
     // Real env frames are always LOCAL. The global scope is the sentinel
     // [`EnvId::GLOBAL`], which routes to the shared `runtime.globals` table; a
@@ -4137,6 +4145,8 @@ impl Heap {
         val
     }
 
+    // ===== Global bindings (RUNTIME) ============================================
+
     /// The current global-binding **epoch** — bumped on every `def`/`defmacro`
     /// (and hot-reload) via `runtime.version`. The compiling VM stamps it into a
     /// `Node::Prim2`'s inline-op guard at compile time and re-validates against it
@@ -4312,7 +4322,7 @@ impl Heap {
         }
     }
 
-    // ----- GC root stack -------------------------------------------------------
+    // ===== GC roots and root stack ==============================================
     //
     // A small explicit root stack for the few sites (today: `eval_str` /
     // `eval_source`) that hold a `Vec<Value>` of LOCAL forms across a depth-0
@@ -4521,7 +4531,7 @@ impl Heap {
         result
     }
 
-    // ----- GC trigger / introspection -----------------------------------------
+    // ===== GC trigger, RUNTIME compaction, and statistics =======================
 
     /// Is GC armed on this heap? `false` for the prelude *builder* (we don't
     /// collect during the one-shot build/freeze) and `true` for every real
@@ -4872,7 +4882,7 @@ impl Heap {
         self.gc_trace = on;
     }
 
-    // ----- compiling-VM body cache (ADR-076; see `eval::compile`) -----
+    // ===== Compiling-VM body cache and inline caches (ADR-076/096) =============
 
     /// The cached compile result for closure key `k` (see [`VmCacheKey`]):
     /// `None` = not cached yet; `Some(None)` = cached as ineligible; `Some(Some(a))`
@@ -5136,6 +5146,8 @@ impl Heap {
     // into (they hold no LOCAL refs, by the promotion invariant), so the walk
     // stays bounded by *this* process's working set.
 
+    // ===== Collection — minor (LOCAL nursery → old) =============================
+
     /// **Stage B — automatic copying collection at the eval safepoint** (ADR-054;
     /// `docs/memory-review.md`). Fired by `eval::eval` when `gc_due()` *and* we are
     /// the outermost eval (`gc_block_depth() == 1`), so the only live LOCAL handles
@@ -5154,6 +5166,25 @@ impl Heap {
     /// disabled (the builder heap during prelude construction). Shares all of its
     /// machinery — and the no-slot-reuse safety — with the [`flush`](Self::flush) helper.
     pub fn collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
+        // GC trace (BROOD_GC_TRACE=1): log each minor collection's working set.
+        #[cfg(debug_assertions)]
+        {
+            static GC_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *GC_TRACE.get_or_init(|| {
+                std::env::var("BROOD_GC_TRACE").map_or(false, |v| v != "0" && !v.is_empty())
+            }) {
+                eprintln!(
+                    "[gc-trace] collect: nursery pairs={} vecs={} strs={} envs={} closures={} | old pairs={} vecs={}",
+                    self.local.pairs.len(),
+                    self.local.vectors.len(),
+                    self.local.strings.len(),
+                    self.local.envs.len(),
+                    self.local.closures.len(),
+                    self.old.pairs.len(),
+                    self.old.vectors.len(),
+                );
+            }
+        }
         if !self.gc_enabled {
             return;
         }

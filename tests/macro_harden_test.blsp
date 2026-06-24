@@ -1,0 +1,234 @@
+;; Tests for macro hardening: each tested macro now raises a clear compile-time
+;; error on wrong syntax instead of silently doing the wrong thing.
+;;
+;; Coverage:
+;;   cond    — odd clause count → named error
+;;   defseq  — non-string docstring → named error
+;;   dotimes — malformed bind → named error
+;;   dolist  — malformed bind → named error
+;;   for     — unpaired binding / bare :when → named error
+;;   receive — (after …) in non-last position → named error
+;;   describe — keyword group name → named error
+
+(defmodule macro-harden-test (:use test))
+
+;; ── helpers ──────────────────────────────────────────────────────────────────
+
+(defn expand-error (form)
+  "Expand `form` at runtime and return the error string, or nil on success."
+  (error-of (eval form)))
+
+(defn expand-ok? (form)
+  "True when `form` expands and evaluates without error."
+  (nil? (error-of (eval form))))
+
+;; ── 1. cond — odd clause count ────────────────────────────────────────────────
+
+(describe "cond — wrong syntax"
+  (test "even clause count works normally"
+    (assert= (cond true :yes false :no) :yes)
+    (assert= (cond false :no else :yes) :yes))
+
+  (test "empty cond returns nil"
+    (assert= (cond) nil))
+
+  (test "cond with else clause works"
+    (assert= (cond false :never else :default) :default))
+
+  (test "odd clause count raises a clear error"
+    (let (msg (expand-error '(cond true)))
+      (is (string? msg))
+      (is (string-contains? msg "cond"))))
+
+  (test "error names the orphan test form"
+    (let (msg (expand-error '(cond false :no :orphan-test)))
+      (is (string-contains? msg ":orphan-test"))))
+
+  (test "three-clause (two pairs + one orphan) raises"
+    (let (msg (expand-error '(cond a :x b :y c)))
+      (is (string-contains? msg "cond"))
+      (is (string-contains? msg "c"))))
+
+  (test "correct 4-clause cond does NOT raise"
+    (assert= (cond false :a false :b else :c) :c))
+
+  (test "else as sole clause does not raise (returns nil)"
+    ;; (cond else) is degenerate but tolerated — else/true has no expression
+    ;; and expands to nil. Not worth erroring; the oddness guard exempts else.
+    (assert= (eval '(cond else)) nil))
+
+  (test ":else as sole clause does not raise"
+    (assert= (eval '(cond :else)) nil)))
+
+;; ── 2. defseq — non-string docstring ─────────────────────────────────────────
+
+;; Define the toy sequence op at module level so the compiler sees it.
+(defseq my-double () "Double each element." (cons (* 2 item) acc))
+
+(describe "defseq — wrong syntax"
+  (test "valid defseq works"
+    (assert= (my-double '(1 2 3)) '(2 4 6)))
+
+  (test "non-string docstring raises a clear error"
+    (let (msg (expand-error '(defseq bad-seq () :not-a-string (cons item acc))))
+      (is (string? msg))
+      (is (string-contains? msg "defseq"))
+      (is (string-contains? msg "docstring"))))
+
+  (test "error shows the bad value"
+    (let (msg (expand-error '(defseq bad-seq () :not-a-string (cons item acc))))
+      (is (string-contains? msg ":not-a-string"))))
+
+  (test "integer docstring raises"
+    (let (msg (expand-error '(defseq bad-seq () 42 (cons item acc))))
+      (is (string-contains? msg "defseq"))))
+
+  (test "symbol docstring raises"
+    (let (msg (expand-error '(defseq bad-seq () some-sym (cons item acc))))
+      (is (string-contains? msg "defseq")))))
+
+;; ── 3. dotimes — malformed bind ───────────────────────────────────────────────
+
+(describe "dotimes — wrong syntax"
+  (test "correct dotimes works"
+    (let (acc (ref))
+      (dotimes (i 3) i)  ; side-effect-only, just check no error
+      :ok))
+
+  (test "bare symbol bind raises a clear error"
+    (let (msg (expand-error '(dotimes n (+ n 1))))
+      (is (string? msg))
+      (is (string-contains? msg "dotimes"))
+      (is (string-contains? msg "(i n)"))))
+
+  (test "single-element list bind raises"
+    (let (msg (expand-error '(dotimes (i) (+ i 1))))
+      (is (string-contains? msg "dotimes"))))
+
+  (test "empty list bind raises"
+    (let (msg (expand-error '(dotimes () nil)))
+      (is (string-contains? msg "dotimes"))))
+
+  (test "correct (i n) bind does NOT raise"
+    (let (result (ref))
+      (dotimes (i 3) i)
+      :ok)))
+
+;; ── 4. dolist — malformed bind ────────────────────────────────────────────────
+
+(describe "dolist — wrong syntax"
+  (test "correct dolist works"
+    (dolist (x '(1 2 3)) x)  ; side-effect-only
+    :ok)
+
+  (test "bare symbol bind raises a clear error"
+    (let (msg (expand-error '(dolist xs (println xs))))
+      (is (string? msg))
+      (is (string-contains? msg "dolist"))
+      (is (string-contains? msg "(x xs)"))))
+
+  (test "single-element list bind raises"
+    (let (msg (expand-error '(dolist (x) (println x))))
+      (is (string-contains? msg "dolist"))))
+
+  (test "empty list bind raises"
+    (let (msg (expand-error '(dolist () nil)))
+      (is (string-contains? msg "dolist"))))
+
+  (test "correct (x xs) bind does NOT raise"
+    (dolist (x '(a b c)) x)
+    :ok))
+
+;; ── 5. for — unpaired binding or lone :when ───────────────────────────────────
+
+(describe "for — wrong syntax"
+  (test "correct (for (x xs) expr) works"
+    (assert= (for (x '(1 2 3)) (* x 2)) '(2 4 6)))
+
+  (test "multi-binding (for (x xs y ys) ...) works"
+    (assert= (for (x '(1 2) y '(a b)) [x y])
+      '([1 a] [1 b] [2 a] [2 b])))
+
+  (test ":when filter works"
+    (assert= (for (x '(1 2 3 4) :when (even? x)) x) '(2 4)))
+
+  (test "unpaired variable raises a clear error"
+    (let (msg (expand-error '(for (x) x)))
+      (is (string? msg))
+      (is (string-contains? msg "for"))
+      (is (string-contains? msg "x"))))
+
+  (test "three-element bind (missing second coll) raises"
+    (let (msg (expand-error '(for (x xs y) [x y])))
+      (is (string-contains? msg "for"))
+      (is (string-contains? msg "y"))))
+
+  (test ":when at end of bindings (no guard) raises"
+    (let (msg (expand-error '(for (x '(1 2 3) :when) x)))
+      (is (string-contains? msg "for"))
+      (is (string-contains? msg ":when"))))
+
+  (test "correct binding pairs do NOT raise"
+    (assert= (for (x '(a b) y '(1 2)) [x y])
+      '([a 1] [a 2] [b 1] [b 2])))
+
+  (test ":when with guard does NOT raise"
+    (assert= (for (x '(1 2 3 4 5) :when (> x 3)) x) '(4 5))))
+
+;; ── 6. receive — (after …) in non-last position ───────────────────────────────
+
+(describe "receive — wrong syntax" :serial
+  (test "correct receive with after works"
+    ;; A process that sends itself a message, then receives with a short timeout.
+    (let (me (self))
+      (spawn (send me :ping))
+      (assert= (receive (:ping :got-ping) (after 200 :timeout)) :got-ping)))
+
+  (test "receive without after works"
+    (let (me (self))
+      (spawn (send me :msg))
+      (assert= (receive (:msg :ok)) :ok)))
+
+  (test "after in first position (before other clauses) raises"
+    (let (msg (expand-error '(receive (after 100 :timeout) (:msg :ok))))
+      (is (string? msg))
+      (is (string-contains? msg "receive"))
+      (is (string-contains? msg "after"))))
+
+  (test "after in middle position raises"
+    (let (msg (expand-error '(receive (:a :a) (after 100 :timeout) (:b :b))))
+      (is (string-contains? msg "receive"))
+      (is (string-contains? msg "after"))))
+
+  (test "after in last position does NOT raise"
+    (let (me (self))
+      (spawn (send me :x))
+      ;; Just check expansion — after in last position is valid syntax.
+      (assert= (receive (:x :ok) (after 200 :timed-out)) :ok))))
+
+;; ── 7. describe — keyword group name ─────────────────────────────────────────
+;; `describe` is defined in the `test` module. When testing via `eval`, we must
+;; use the qualified name `test/describe` because `eval` resolves bare symbols
+;; from the global (root) namespace, not from the current module's imports.
+
+(describe "describe — wrong syntax"
+  (test "string group name works normally"
+    ;; This describe block is itself the proof: a string name works.
+    :ok)
+
+  (test "keyword group name raises a clear error"
+    (let (msg (error-of (eval '(test/describe :my-group (test/test "t" :ok)))))
+      (is (string? msg))
+      (is (string-contains? msg "describe"))
+      (is (string-contains? msg "keyword"))))
+
+  (test "error shows the bad keyword"
+    (let (msg (error-of (eval '(test/describe :serial (test/test "t" :ok)))))
+      (is (string-contains? msg ":serial"))))
+
+  (test "common mistake: :isolated as group name raises"
+    (let (msg (error-of (eval '(test/describe :isolated (test/test "t" :ok)))))
+      (is (string-contains? msg "describe"))))
+
+  (test "correct string name does NOT raise"
+    (is (nil? (error-of (eval '(test/describe "valid group" (test/test "t" :ok))))))  ))

@@ -380,15 +380,28 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
       (let (g (gensym "or")) `(let (~g ~(first xs)) (if ~g ~g (or ~@(rest xs))))))))
 
 ;; cond: flat test/expr pairs (ADR-004); `else` or `:else` is the catch-all.
+;; Bootstrap helper for cond's guard: walks clauses two at a time, returning
+;; the orphan last element when count is odd, nil when even. Uses only
+;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
+;; during prelude loading before `odd?`/`count`/`last` are defined.
+(defn cond--orphan (clauses)
+  (if (empty? clauses) nil
+    (if (empty? (rest clauses)) (first clauses)
+      (cond--orphan (rest (rest clauses))))))
+
 (defmacro cond (& clauses)
   "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` (or `:else`) test always matches; `nil` if none do."
-  (if (empty? clauses)
-    nil
-    (let (test (first clauses) expr (first (rest clauses)) more (rest (rest clauses)))
-      ;; compare with the `%eq` primitive, not the variadic `=` — `=` builds a
-      ;; lambda, and doing that *at expansion time* during the prelude's own
-      ;; compile pass would strand a local-env closure (breaks the freeze).
-      (if (or (%eq test 'else) (%eq test :else)) expr `(if ~test ~expr (cond ~@more))))))
+  (let (orphan (cond--orphan clauses))
+    (if (and (not (nil? orphan)) (not (%eq orphan 'else)) (not (%eq orphan :else)))
+      (error "cond: odd number of clauses — expected test/expression pairs. "
+             "Did you forget an expression for '" (pr-str orphan) "'?")
+      (if (empty? clauses)
+        nil
+        (let (test (first clauses) expr (first (rest clauses)) more (rest (rest clauses)))
+          ;; compare with the `%eq` primitive, not the variadic `=` — `=` builds a
+          ;; lambda, and doing that *at expansion time* during the prelude's own
+          ;; compile pass would strand a local-env closure (breaks the freeze).
+          (if (or (%eq test 'else) (%eq test :else)) expr `(if ~test ~expr (cond ~@more))))))))
 
 ;; ---- macro expansion --------------------------------------------------------
 ;; Fully expand `form`'s head macro by iterating the single-step `macroexpand-1`
@@ -463,13 +476,17 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   "Define an eager sequence op that reverse-accumulates over `coll`.
 `params` are the extra arguments before `coll`; inside `step`, `item` is the
 current element and `acc` is the current accumulator."
-  `(defn ~sym (~@params coll)
-     ~docstring
-     (letrec (--loop (fn (coll acc)
-                       (if (empty? coll) acc
-                         (let (item (first coll))
-                           (--loop (rest coll) ~step)))))
-       (reverse (--loop (seq coll) nil)))))
+  (if (not (string? docstring))
+    (error "defseq: third argument must be a docstring string, got "
+           (pr-str docstring)
+           ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
+    `(defn ~sym (~@params coll)
+       ~docstring
+       (letrec (--loop (fn (coll acc)
+                         (if (empty? coll) acc
+                           (let (item (first coll))
+                             (--loop (rest coll) ~step)))))
+         (reverse (--loop (seq coll) nil))))))
 
 (defseq map (f)
   "A list of `(f x)` for each `x` in `coll`."
@@ -830,7 +847,17 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
     (if (and (pair? clause) (= (first clause) 'catch))
       (let (init (but-last body) evar (second clause) handler (rest (rest clause)))
         `(%try (fn () ~@init) (fn (~evar) ~@handler)))
-      `(do ~@body))))
+      (if (and (pair? clause) (= (first clause) 'fn))
+        ;; Common mistake: (try body (fn (e) handler)) instead of (try body (catch e handler)).
+        ;; Fail loud at macro-expansion time so the bug is caught before it silently becomes
+        ;; (do body (fn (e) ...)) — a handler that is never installed.
+        (error "try: last form is `" (pr-str clause) "` — did you mean `(catch "
+               (let (params (second clause))
+                 (if (and (pair? params) (not (nil? params)))
+                   (str (first params))
+                   "e"))
+               " ...)`? Syntax: (try body... (catch e handler...))")
+        `(do ~@body)))))
 
 ;; A thrown value has no single shape: `(throw x)` hands `catch` the value `x`
 ;; verbatim (a bare string from `error`, a keyword, a `[:tag …]` vector, …),
@@ -1396,6 +1423,17 @@ runtime isn't a node yet."
       `(~pat :when ~(second more) (fn () ~@(rest (rest more))))
       `(~pat (fn () ~@more)))))
 
+;; Walk the clause list and error if an `(after ...)` clause appears before the last
+;; position — a non-last `after` would silently become a pattern clause matching the
+;; symbol `after`, which is almost certainly a mistake.
+(defn receive--check-after (clauses)
+  (if (or (empty? clauses) (empty? (rest clauses)))
+    nil
+    (if (and (pair? (first clauses)) (%eq (first (first clauses)) 'after))
+      (error "receive: (after ...) must be the last clause, but it appears before "
+             (count (rest clauses)) " more clause(s)")
+      (receive--check-after (rest clauses)))))
+
 ;; Split clauses into [real-clauses ms-or-nil timeout-thunk-or-nil], peeling an
 ;; optional trailing (after ms body...). `after` as a final clause head is reserved.
 (defn receive--split (clauses)
@@ -1408,18 +1446,20 @@ runtime isn't a node yet."
 
 (defmacro receive (& clauses)
   "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message."
-  (let (parts (receive--split clauses)
-        real (nth parts 0)
-        ms (nth parts 1)
-        on-time (nth parts 2)
-        msg (gensym "msg")
-        matcher (if (empty? real)
-                  `(fn (~msg) (fn () ~msg))
-                  ; no clauses: take the next message as-is
-                  `(fn (~msg) ~(match-build-from (map receive--thunk-clause real) msg nil))))
-    ;; `%receive` returns the matched (or timeout) body *thunk*; applying it here —
-    ;; in tail position — is what keeps a receive loop O(1) stack (eval TCO).
-    `((%receive ~matcher ~ms ~on-time))))
+  (do
+    (receive--check-after clauses)
+    (let (parts (receive--split clauses)
+          real (nth parts 0)
+          ms (nth parts 1)
+          on-time (nth parts 2)
+          msg (gensym "msg")
+          matcher (if (empty? real)
+                    `(fn (~msg) (fn () ~msg))
+                    ; no clauses: take the next message as-is
+                    `(fn (~msg) ~(match-build-from (map receive--thunk-clause real) msg nil))))
+      ;; `%receive` returns the matched (or timeout) body *thunk*; applying it here —
+      ;; in tail position — is what keeps a receive loop O(1) stack (eval TCO).
+      `((%receive ~matcher ~ms ~on-time)))))
 
 ;; ---- a general membership test ----------------------------------------------
 (defn member? (x xs)
@@ -1945,10 +1985,27 @@ directly. With no transducers it is just a view of the collection."
             ~acc
             ~(second binds))))
 
+;; Validate that binding pairs are complete — each variable has a collection, and each
+;; :when has a guard expression. An odd-count suffix silently produces an empty result
+;; (the missing coll becomes nil), which is almost always a mistake.
+(defn for--check-binds (binds)
+  (cond
+    (empty? binds) nil
+    (%eq (first binds) :when)
+      (if (empty? (rest binds))
+        (error "for: :when at end of bindings has no guard expression")
+        (for--check-binds (rest (rest binds))))
+    (empty? (rest binds))
+      (error "for: binding '" (pr-str (first binds))
+             "' has no collection — bindings must be paired as (var coll ...)")
+    else (for--check-binds (rest (rest binds)))))
+
 (defmacro for (binds body)
   "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure."
-  (let (acc (gensym "acc"))
-    `(reverse (let (~acc nil) ~(for--fold acc (map identity binds) body)))))
+  (do
+    (for--check-binds binds)
+    (let (acc (gensym "acc"))
+      `(reverse (let (~acc nil) ~(for--fold acc (map identity binds) body))))))
 
 ;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
 ;; returning nil. Just `for` run for effect (the result list is discarded). The
@@ -1963,7 +2020,10 @@ directly. With no transducers it is just a view of the collection."
 (defn dotimes--loop (n f i) (when (< i n) (f i) (dotimes--loop n f (+ i 1))))
 (defmacro dotimes (bind & body)
   "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`."
-  `(do (dotimes--loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil))
+  (if (not (and (pair? bind) (pair? (rest bind))))
+    (error "dotimes: bind must be (var n), got " (pr-str bind)
+           ". Syntax: (dotimes (i n) body...)")
+    `(do (dotimes--loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil)))
 
 ;; (dolist (x xs) body...) — run `body` for each element of `xs`; returns nil.
 ;; The list-only counterpart to `dotimes`: lean and tail-recursive, no discard
@@ -1972,7 +2032,10 @@ directly. With no transducers it is just a view of the collection."
 (defn dolist--loop (xs f) (when (not (nil? xs)) (f (first xs)) (dolist--loop (rest xs) f)))
 (defmacro dolist (bind & body)
   "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`."
-  `(do (dolist--loop ~(second bind) (fn (~(first bind)) ~@body)) nil))
+  (if (not (and (pair? bind) (pair? (rest bind))))
+    (error "dolist: bind must be (var coll), got " (pr-str bind)
+           ". Syntax: (dolist (x xs) body...)")
+    `(do (dolist--loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
 
 ;; (bench label expr) — wall-clock timing, in milliseconds (the resolution of
 ;; `now`). The gensyms keep `label`/`expr` from capturing `t0`/`r` if the caller
