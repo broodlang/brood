@@ -4533,8 +4533,8 @@ pub fn apply_engine(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId)
 #[cfg(feature = "jit")]
 mod jit_lower;
 #[cfg(feature = "jit")]
-pub(crate) use jit_lower::{jit_lower_arm, jit_lower_inlined_arm};
-// The `jit_spill_reserve` stub (cfg not jit) is also in jit_lower.
+pub(crate) use jit_lower::{jit_lower_arm, jit_lower_inlined_arm, jit_spill_reserve};
+// When JIT is disabled, provide a zero stub so callers don't need cfg guards.
 #[cfg(not(feature = "jit"))]
 fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
