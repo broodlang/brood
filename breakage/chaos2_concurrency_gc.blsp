@@ -1,0 +1,171 @@
+;;; chaos2_concurrency_gc.blsp — GC stress under multi-process concurrency
+;;;
+;;; The GC is per-process (each process has a LOCAL heap). But the SHARED regions
+;;; (RUNTIME code, shared globals, the shared closure/env region) are accessed
+;;; concurrently. These tests hammer the boundary between local and shared regions
+;;; under allocation pressure.
+;;;
+;;; Targets:
+;;;   P68 — 200 processes all compacting simultaneously (shared region pressure)
+;;;   P69 — process that allocates heavily while receiving cross-process messages
+;;;   P70 — closures promoted to RUNTIME region while being called by many processes
+;;;   P71 — def rebind while 100 processes are reading the old binding
+;;;   P72 — process that triggers minor_collect in every receive iteration
+;;;   P73 — cross-process send of a value that requires nursery promotion
+
+;;; ---- P68: 200 processes all GC-ing simultaneously ----
+(println "=== P68: 200 concurrent heavy-allocating processes ===")
+(let (me (self)
+      n 200)
+  (dotimes (_ n)
+    (spawn
+      (do
+        ;; Each process: build and discard 10k-element lists repeatedly
+        (defn alloc-loop (iterations)
+          (when (> iterations 0)
+            (let (_ (into [] (range 1000)))  ; force allocation
+              (alloc-loop (- iterations 1)))))
+        (alloc-loop 100)
+        (send me :done))))
+  ;; Wait for all to finish
+  (defn wait-all (remaining)
+    (when (> remaining 0)
+      (receive (:done (wait-all (- remaining 1)))
+               (after 60000 (println "P68: timeout waiting for processes")))))
+  (wait-all n)
+  (println "P68: all 200 processes finished without crash"))
+
+;;; ---- P69: heavy allocation while receiving large messages ----
+(println "=== P69: alloc during large-message receive ===")
+(let (me (self))
+  (let (worker (spawn
+                 (defn recv-and-alloc (n)
+                   (if (= n 0)
+                     (send me :p69-done)
+                     (let (msg (receive (v v) (after 10000 :timeout)))
+                       ;; Allocate a bunch after receiving
+                       (let (_ (range 500))
+                         (recv-and-alloc (- n 1))))))
+                 (recv-and-alloc 100)))
+    ;; Send 100 moderately large messages
+    (doseq (i (range 100))
+      (send worker (into [] (range (rem (* i 17) 200)))))
+    (let (r (receive (:p69-done :ok) (after 30000 :timeout)))
+      (println "P69: completed:" (= :ok r)))))
+
+;;; ---- P70: promoted closure called by many concurrent processes ----
+(println "=== P70: promoted closure called concurrently by 100 processes ===")
+
+;; `def` promotes code to the RUNTIME region
+(defn p70-compute (x n)
+  (if (= n 0) x (p70-compute (+ x 1) (- n 1))))
+
+;; Warm it up to promote to RUNTIME
+(p70-compute 0 100)
+
+(let (me (self)
+      n 100)
+  (dotimes (i n)
+    (spawn
+      (let (r (p70-compute i 10000))
+        (send me [:p70 i r]))))
+  (defn collect-p70 (remaining wrong)
+    (if (= remaining 0)
+      wrong
+      (let (r (receive ([:p70 i v] [i v]) (after 30000 :timeout)))
+        (let (expected (+ (get r 0) 10000))
+          (collect-p70 (- remaining 1)
+                       (if (= expected (get r 1)) wrong (+ wrong 1)))))))
+  (def p70-wrong (collect-p70 n 0))
+  (println "P70: wrong results:" p70-wrong)
+  (println "P70-correct:" (= 0 p70-wrong)))
+
+;;; ---- P71: def rebind while 100 readers are running ----
+(println "=== P71: def rebind under concurrent read (late binding) ===")
+
+(def p71-global-val 0)
+
+(defn p71-reader (n acc)
+  (if (= n 0) acc
+    (p71-reader (- n 1) (+ acc p71-global-val))))
+
+;; Warm the reader
+(p71-reader 10 0)
+
+(let (me (self)
+      n-readers 100)
+  ;; Spawn readers: each does 10k reads of the global
+  (dotimes (_ n-readers)
+    (spawn
+      (let (result (p71-reader 10000 0))
+        (send me [:p71 result]))))
+  ;; Concurrently rebind the global several times
+  (spawn
+    (doseq (v [1 2 3 4 5 0])
+      (def p71-global-val v)
+      ;; Small sleep equivalent: spin for a bit
+      (fold (fn (a _) (+ a 1)) 0 (range 10000))))
+  ;; Collect results — each reader should get a consistent sum (all one value)
+  ;; We can't predict the exact value (depends on when reads vs rebind happen)
+  ;; but each individual read should return a valid integer (not corrupted)
+  (defn collect-p71 (n all-valid)
+    (if (= n 0) all-valid
+      (let (r (receive ([:p71 v] v) (after 30000 :timeout)))
+        (collect-p71 (- n 1) (and all-valid (int? r))))))
+  (def p71-ok (collect-p71 n-readers true))
+  (println "P71: all reads produced valid ints:" p71-ok))
+
+;;; ---- P72: minor_collect on every receive (GC safepoint stress) ----
+(println "=== P72: process triggering GC on every receive ===")
+;; By allocating heavily before each receive, we ensure the nursery fills up
+;; and minor_collect fires at the next safepoint (inside receive).
+(let (me (self)
+      n 500)
+  (let (worker (spawn
+                 (do
+                   (defn gc-heavy-recv (remaining)
+                     (when (> remaining 0)
+                       ;; Fill the nursery
+                       (let (_ (into [] (range 1000)))
+                         (let (msg (receive (v v) (after 5000 :timeout)))
+                           (gc-heavy-recv (- remaining 1))))))
+                   (gc-heavy-recv n)
+                   (send me :p72-done))))
+    ;; Feed it n messages
+    (doseq (i (range n))
+      (send worker i))
+    (let (r (receive (:p72-done :ok) (after 60000 :timeout)))
+      (println "P72: done without crash:" (= :ok r)))))
+
+;;; ---- P73: cross-process send of nursery-young value (forces promotion) ----
+(println "=== P73: nursery-young value sent cross-process (forces to_message promotion) ===")
+(let (me (self))
+  ;; Allocate a fresh value (young nursery generation) and immediately send it
+  ;; to_message must deep-copy it; it may trigger a partial GC on the sender side
+  (defn p73-make-and-send (worker n)
+    (when (> n 0)
+      ;; Make a fresh young pair list, send immediately
+      (let (young-val (cons n (cons (* n n) nil)))
+        (send worker [:check young-val])
+        (p73-make-and-send worker (- n 1)))))
+  (let (worker (spawn
+                 (defn check-loop (expected)
+                   (if (= expected 0)
+                     (send me :p73-done)
+                     (let (r (receive ([:check v] v) (after 10000 :timeout)))
+                       (let (n (first r)
+                               n2 (first (rest r)))
+                         (when (not (= (* n n) n2))
+                           (send me [:p73-error n n2]))
+                         (check-loop (- expected 1))))))
+                 (check-loop 5000)))
+    (p73-make-and-send worker 5000)
+    (let (r (receive
+              (:p73-done :ok)
+              ([:p73-error n n2]
+                (str "corrupt: " n " -> " n2 " expected " (* n n)))
+              (after 30000 :timeout)))
+      (println "P73: result:" r)
+      (println "P73-correct:" (= :ok r)))))
+
+(println "=== chaos2_concurrency_gc DONE ===")

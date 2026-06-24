@@ -1,0 +1,150 @@
+;;; chaos2_dynamic_vars.blsp — dynamic variable deep-dive
+;;;
+;;; `defdyn` + `binding` is the mechanism for process-scoped overridable config.
+;;; Targets:
+;;;   P49 — nested binding: 100 levels deep, innermost shadows outermost correctly
+;;;   P50 — binding in a recursive fn: each frame sees correct binding level
+;;;   P51 — defdyn across a process boundary: child sees default, not parent's binding
+;;;   P52 — binding + error: var restored even after nested errors (RAII semantics)
+;;;   P53 — many distinct dynvars in one process: no cross-contamination
+;;;   P54 — binding inside a spawned closure: closure captures the binding context
+;;;   P55 — dynamic? predicate: dynamic vs non-dynamic symbols
+
+;;; ---- P49: 100-deep nested binding ----
+(println "=== P49: 100-deep nested binding ===")
+
+(defdyn *p49-depth* 0)
+
+(defn p49-nest (n)
+  (if (= n 0)
+    *p49-depth*
+    (binding (*p49-depth* n)
+      (let (inner-val *p49-depth*)
+        ;; While inside, current value must be n
+        (when (not (= inner-val n))
+          (println "P49: WRONG at depth" n "got" inner-val))
+        (p49-nest (- n 1))))))
+
+(def p49-innermost (p49-nest 100))
+(println "P49: innermost (should be 1):" p49-innermost)
+(println "P49: restored (should be 0):" *p49-depth*)
+(println "P49-correct:" (and (= 1 p49-innermost) (= 0 *p49-depth*)))
+
+;;; ---- P50: binding in recursive fn (each frame independent) ----
+(println "=== P50: binding in recursive fn ===")
+
+(defdyn *p50-acc* 0)
+
+(defn p50-sum (n)
+  (if (= n 0)
+    *p50-acc*
+    (binding (*p50-acc* (+ *p50-acc* n))
+      (p50-sum (- n 1)))))
+
+;; This is NOT tail-recursive (each binding frame must be restored)
+;; Use small n to avoid stack overflow
+(def p50-result (p50-sum 50))
+;; binding(*p50-acc* n) → inside, *p50-acc* = prev + n
+;; This accumulates: 0 + 50 + 49 + ... + 1 = 0+50+49+...+1 = 50*51/2 = 1275
+(println "P50: result:" p50-result)
+(println "P50: restored to 0:" (= 0 *p50-acc*))
+(println "P50-correct (1275):" (= 1275 p50-result))
+
+;;; ---- P51: child process sees default, not parent's binding ----
+(println "=== P51: child process sees defdyn default, not parent binding ===")
+
+(defdyn *p51-config* :parent-default)
+
+(let (me (self))
+  (binding (*p51-config* :parent-override)
+    (println "P51: parent sees:" *p51-config*)
+    ;; Spawn a child — it should see the declared DEFAULT, not parent's binding
+    (spawn
+      (send me [:p51 *p51-config*]))
+    (let (child-val (receive ([:p51 v] v) (after 3000 :timeout)))
+      (println "P51: child sees:" child-val)
+      (println "P51-correct (child gets default):"
+               (= :parent-default child-val)))))
+
+;;; ---- P52: binding + nested errors restore correctly ----
+(println "=== P52: binding + nested errors (RAII restore) ===")
+
+(defdyn *p52-x* 0)
+
+(defn p52-work (n)
+  (binding (*p52-x* n)
+    (if (= n 5)
+      (error "p52: deliberate crash at 5")
+      (if (= n 0) :done (p52-work (- n 1))))))
+
+(try
+  (p52-work 10)
+  (catch e
+    (println "P52: caught:" (error-message e))
+    (println "P52: *p52-x* after catch:" *p52-x*)
+    (println "P52-correct (restored to 0):" (= 0 *p52-x*))))
+
+;;; ---- P53: many distinct dynvars, no cross-contamination ----
+(println "=== P53: 20 distinct dynamic vars, concurrent bindings ===")
+
+(defdyn *dv-0*  :d0)  (defdyn *dv-1*  :d1)  (defdyn *dv-2*  :d2)  (defdyn *dv-3*  :d3)
+(defdyn *dv-4*  :d4)  (defdyn *dv-5*  :d5)  (defdyn *dv-6*  :d6)  (defdyn *dv-7*  :d7)
+(defdyn *dv-8*  :d8)  (defdyn *dv-9*  :d9)  (defdyn *dv-10* :d10) (defdyn *dv-11* :d11)
+(defdyn *dv-12* :d12) (defdyn *dv-13* :d13) (defdyn *dv-14* :d14) (defdyn *dv-15* :d15)
+(defdyn *dv-16* :d16) (defdyn *dv-17* :d17) (defdyn *dv-18* :d18) (defdyn *dv-19* :d19)
+
+;; Bind all 20 at once, verify each sees the right value and doesn't bleed into others
+(binding (*dv-0* :b0) (*dv-1* :b1) (*dv-2* :b2) (*dv-3* :b3) (*dv-4* :b4)
+         (*dv-5* :b5) (*dv-6* :b6) (*dv-7* :b7) (*dv-8* :b8) (*dv-9* :b9)
+         (*dv-10* :b10) (*dv-11* :b11) (*dv-12* :b12) (*dv-13* :b13) (*dv-14* :b14)
+         (*dv-15* :b15) (*dv-16* :b16) (*dv-17* :b17) (*dv-18* :b18) (*dv-19* :b19))
+
+  (def p53-checks
+    (and (= :b0 *dv-0*)   (= :b1 *dv-1*)   (= :b2 *dv-2*)   (= :b3 *dv-3*)
+         (= :b4 *dv-4*)   (= :b5 *dv-5*)   (= :b6 *dv-6*)   (= :b7 *dv-7*)
+         (= :b8 *dv-8*)   (= :b9 *dv-9*)   (= :b10 *dv-10*) (= :b11 *dv-11*)
+         (= :b12 *dv-12*) (= :b13 *dv-13*) (= :b14 *dv-14*) (= :b15 *dv-15*)
+         (= :b16 *dv-16*) (= :b17 *dv-17*) (= :b18 *dv-18*) (= :b19 *dv-19*)))
+  (println "P53: all bound correctly:" p53-checks))
+
+;; After binding exits, all should be restored to defaults
+(def p53-restored
+  (and (= :d0 *dv-0*)   (= :d1 *dv-1*)   (= :d2 *dv-2*)   (= :d3 *dv-3*)
+       (= :d4 *dv-4*)   (= :d5 *dv-5*)   (= :d6 *dv-6*)   (= :d7 *dv-7*)
+       (= :d8 *dv-8*)   (= :d9 *dv-9*)   (= :d10 *dv-10*) (= :d11 *dv-11*)
+       (= :d12 *dv-12*) (= :d13 *dv-13*) (= :d14 *dv-14*) (= :d15 *dv-15*)
+       (= :d16 *dv-16*) (= :d17 *dv-17*) (= :d18 *dv-18*) (= :d19 *dv-19*)))
+(println "P53: all restored to defaults:" p53-restored)
+
+;;; ---- P54: binding inside a spawned closure ----
+(println "=== P54: binding inside spawned closure sees parent's binding at capture time ===")
+
+;; Note: dynamic vars are NOT lexically captured — children see the DEFAULT.
+;; This test confirms that a closure spawned INSIDE a binding sees the DEFAULT,
+;; not the parent's dynamic binding (process boundary resets dynamics).
+(defdyn *p54-mode* :default)
+
+(let (me (self))
+  (binding (*p54-mode* :overridden)
+    ;; Closure captures nothing dynamic — child will see :default
+    (spawn
+      (send me [:p54 *p54-mode*])))
+  (let (r (receive ([:p54 v] v) (after 3000 :timeout)))
+    (println "P54: child saw:" r)
+    (println "P54-correct (default, not overridden):" (= :default r))))
+
+;;; ---- P55: dynamic? predicate ----
+(println "=== P55: dynamic? predicate ===")
+
+(defdyn *p55-declared* :yes)
+(def    p55-not-dynamic 42)
+
+(println "P55: dynamic? *p55-declared*:" (dynamic? '*p55-declared*))
+(println "P55: dynamic? p55-not-dynamic:" (dynamic? 'p55-not-dynamic))
+(println "P55: dynamic? unbound-sym:" (dynamic? 'totally-unbound-xyz))
+(println "P55-correct:"
+         (and (= true  (dynamic? '*p55-declared*))
+              (= false (dynamic? 'p55-not-dynamic))
+              (= false (dynamic? 'totally-unbound-xyz))))
+
+(println "=== chaos2_dynamic_vars DONE ===")

@@ -1,0 +1,204 @@
+;;; chaos2_tcp_stress.blsp — TCP socket stress and edge cases
+;;;
+;;; All tests use loopback (127.0.0.1) with OS-assigned ports (port 0).
+;;; The model: tcp-listen and tcp-connect both deliver to the calling process's
+;;; mailbox. tcp-controlling-process transfers ownership of an accepted socket.
+;;;
+;;; Targets:
+;;;   P36 — multi-client echo server: 50 concurrent clients, each sends/receives
+;;;   P37 — rapid connect-disconnect: 200 connections opened and closed without data
+;;;   P38 — binary mode: send and receive raw bytes (0x00–0xFF)
+;;;   P39 — half-close: client closes its side; server gets :tcp-closed; sends last chunk
+;;;   P40 — large payload: 512KB transfer, verify length and content integrity
+;;;   P41 — listener closed mid-accept: any in-flight accepts complete or get :tcp-closed
+;;;   P42 — tcp-local-port returns valid port; connecting to a dead port raises cleanly
+
+;;; ---- P36: multi-client echo server ----
+(println "=== P36: 50-client concurrent echo ===")
+
+(let (me (self)
+      n-clients 50
+      ls (tcp-listen "127.0.0.1" 0)
+      port (tcp-local-port ls))
+
+  ;; Server process: accepts and echoes for each client
+  (defn echo-server-loop (remaining)
+    (if (= remaining 0)
+      (tcp-close ls)
+      (let (client (receive ([:tcp-accept _ cs] cs) (after 10000 :timeout)))
+        (if (= :timeout client)
+          (do (println "P36: server accept timeout") (tcp-close ls))
+          (do
+            (tcp-controlling-process client (self))
+            (let (data (receive ([:tcp _ d] d) (after 5000 :timeout)))
+              (when data (tcp-send client data))
+              (tcp-close client)
+              (echo-server-loop (- remaining 1))))))))
+
+  (spawn (echo-server-loop n-clients))
+
+  ;; Spawn n-clients clients, each sends a unique message and waits for echo
+  (dotimes (i n-clients)
+    (spawn
+      (let (msg (str "client-" i "-hello")
+            c   (tcp-connect "127.0.0.1" port))
+        (tcp-send c msg)
+        (let (echo (receive ([:tcp _ d] d)    (after 5000 :timeout)))
+          (tcp-close c)
+          (send me [:p36-result i (= msg echo)])))))
+
+  ;; Collect all results
+  (defn collect-p36 (n ok bad)
+    (if (= n 0)
+      [ok bad]
+      (let (r (receive ([:p36-result _ success] success) (after 30000 :timeout)))
+        (collect-p36 (- n 1) (if r (+ ok 1) ok) (if r bad (+ bad 1))))))
+  (def [ok bad] (collect-p36 n-clients 0 0))
+  (println "P36: ok=" ok "bad=" bad)
+  (println "P36-correct:" (and (= n-clients ok) (= 0 bad))))
+
+;;; ---- P37: rapid connect-disconnect (no data) ----
+(println "=== P37: 200 rapid connect-disconnect ===")
+
+(let (me (self)
+      n 200
+      ls (tcp-listen "127.0.0.1" 0)
+      port (tcp-local-port ls))
+
+  ;; Server: accept and immediately close
+  (spawn
+    (defn quick-close-loop (remaining)
+      (if (= remaining 0)
+        (do (tcp-close ls) (send me :server-done))
+        (let (client (receive ([:tcp-accept _ cs] cs) (after 10000 :timeout)))
+          (if (= :timeout client)
+            (send me :server-timeout)
+            (do (tcp-close client)
+                (quick-close-loop (- remaining 1)))))))
+    (quick-close-loop n))
+
+  ;; Clients: connect and immediately close
+  (dotimes (_ n)
+    (let (c (tcp-connect "127.0.0.1" port))
+      ;; Connection may be closed by server before we even close our side
+      (tcp-close c)))
+
+  (let (r (receive (:server-done :ok) (:server-timeout :timeout) (after 30000 :timeout)))
+    (println "P37: server result:" r)
+    (println "P37-correct:" (= :ok r))))
+
+;;; ---- P38: binary mode (raw bytes 0x00–0xFF) ----
+(println "=== P38: binary mode round-trip ===")
+
+(let (me (self)
+      ls (tcp-listen "127.0.0.1" 0)
+      port (tcp-local-port ls))
+
+  ;; Build a string with all byte values 0–255 (Latin-1 codepoints)
+  (def binary-payload
+    (apply str (map (fn (i) (string (char i))) (range 256))))
+
+  ;; Server: accept, switch to binary mode, receive and echo
+  (spawn
+    (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
+      (tcp-controlling-process client (self))
+      (tcp-set-binary client true)
+      (let (data (receive ([:tcp _ d] d) (after 5000 :timeout)))
+        (tcp-send client data)
+        (tcp-close client)
+        (tcp-close ls))))
+
+  ;; Client: connect, binary mode, send all bytes, receive them back
+  (let (c (tcp-connect "127.0.0.1" port))
+    (tcp-set-binary c true)
+    (tcp-send c binary-payload)
+    (let (echo (receive ([:tcp _ d] d) (after 5000 :timeout)))
+      (tcp-close c)
+      (println "P38: payload length:" (string-length binary-payload))
+      (println "P38: echo length:" (string-length echo))
+      (println "P38-correct:" (= binary-payload echo)))))
+
+;;; ---- P39: half-close: client closes, server reads EOF then sends ----
+(println "=== P39: half-close (client closes write side) ===")
+;; Note: TCP half-close (shutdown(SHUT_WR)) is not directly exposed.
+;; We simulate by closing the client and verifying the server gets :tcp-closed.
+(let (me (self)
+      ls (tcp-listen "127.0.0.1" 0)
+      port (tcp-local-port ls))
+
+  (spawn
+    (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
+      (tcp-controlling-process client (self))
+      ;; Wait for client data OR close
+      (let (event (receive
+                    ([:tcp _ d] [:data d])
+                    ([:tcp-closed _] :closed)
+                    (after 5000 :timeout)))
+        (send me [:p39-server-saw event])
+        (tcp-close client)
+        (tcp-close ls))))
+
+  (let (c (tcp-connect "127.0.0.1" port))
+    (tcp-send c "hello-before-close")
+    (tcp-close c))
+
+  (let (r (receive ([:p39-server-saw v] v) (after 5000 :timeout)))
+    (println "P39: server saw:" (pr-str r))
+    (println "P39-correct (data or closed):"
+             (or (= r :closed) (and (vector? r) (= (get r 0) :data))))))
+
+;;; ---- P40: 512 KB payload, integrity check ----
+(println "=== P40: 512KB payload integrity ===")
+
+(let (me (self)
+      ls (tcp-listen "127.0.0.1" 0)
+      port (tcp-local-port ls)
+      big (string-repeat "BROOD" (quot 524288 5)))  ; ~512KB
+
+  ;; Server: receive all chunks, concatenate, report length
+  (spawn
+    (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
+      (tcp-controlling-process client (self))
+      (defn drain-tcp (sock acc)
+        (let (event (receive
+                      ([:tcp _ d]   [:data d])
+                      ([:tcp-closed _] :done)
+                      (after 10000 :timeout)))
+          (if (= :done event)
+            (send me [:p40-received acc])
+            (drain-tcp sock (str acc (second event))))))
+      (drain-tcp client "")
+      (tcp-close client)
+      (tcp-close ls)))
+
+  (let (c (tcp-connect "127.0.0.1" port))
+    (tcp-send c big)
+    (tcp-close c)
+    (let (r (receive ([:p40-received s] s) (after 15000 :timeout)))
+      (println "P40: sent:" (string-length big) "received:" (string-length r))
+      (println "P40-correct:" (= big r)))))
+
+;;; ---- P41: tcp-local-port after close returns nil ----
+(println "=== P41: tcp-local-port after close ===")
+(let (ls (tcp-listen "127.0.0.1" 0))
+  (def p41-port (tcp-local-port ls))
+  (println "P41: port before close:" p41-port)
+  (tcp-close ls)
+  (def p41-after (try (tcp-local-port ls) (catch e :error)))
+  (println "P41: port after close:" p41-after)
+  (println "P41-correct (valid port then nil/error):"
+           (and (> p41-port 0) (or (= nil p41-after) (= :error p41-after)))))
+
+;;; ---- P42: connect to dead port raises cleanly ----
+(println "=== P42: connect to dead port → clean error ===")
+;; Find a port that's not listening. Bind one, grab the port, close it.
+(let (ls (tcp-listen "127.0.0.1" 0)
+      port (tcp-local-port ls))
+  (tcp-close ls)
+  ;; Now try to connect — should raise, not panic
+  (let (r (try (tcp-connect "127.0.0.1" port)
+             (catch e (str "error: " (error-message e)))))
+    (println "P42: result:" r)
+    (println "P42-correct (error string):" (string? r))))
+
+(println "=== chaos2_tcp_stress DONE ===")

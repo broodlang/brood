@@ -1,0 +1,178 @@
+;;; chaos2_process_ring.blsp — process ring, mailbox flood, selective receive
+;;;
+;;; Targets:
+;;;   P23 — 500-process ring: token circulates N full rounds; counts must be exact
+;;;   P24 — self-send flood: 100k messages to self, all drained correctly
+;;;   P25 — selective receive: non-matching messages queue; only the right one fires
+;;;   P26 — large message (1 MB string) round-trip without corruption
+;;;   P27 — process spawning tree: depth-8 binary tree of processes (256 leaves)
+;;;   P28 — many monitors on one pid: 200 watchers, all get :down
+
+;;; ---- P23: token ring ----
+(println "=== P23: 500-process token ring ===")
+
+(defn ring-node (next-pid rounds-left done-pid)
+  (let (tok (receive (tok tok) (after 10000 :timeout)))
+    (if (= tok nil)
+      (send done-pid :error-nil-token)
+      (if (= rounds-left 0)
+        (send done-pid [:done tok])
+        (do (send next-pid (+ tok 1))
+            (ring-node next-pid (- rounds-left 1) done-pid))))))
+
+(let (me (self)
+      n 500
+      rounds 3)
+  ;; Build ring: each process receives its next-pid after spawning
+  ;; We do this iteratively: spawn processes in a chain
+  ;; Process 0 → process 1 → … → process 499 → process 0 (us starts the token)
+  ;; Simpler: build the ring as a list of pids, then wire them up via a message
+  ;; Actually use the simpler 1-message-per-node approach: each spawned process
+  ;; waits for its next-pid in a setup message, then enters the ring loop.
+
+  (defn spawn-node (me rounds)
+    (spawn
+      (let (setup (receive (setup setup) (after 5000 :timeout)))
+        (let (next-pid  (get setup :next)
+              done-pid  (get setup :done)
+              rounds-l  (get setup :rounds))
+          (ring-node next-pid rounds-l done-pid)))))
+
+  (def ring-pids
+    (into [] (map (fn (_) (spawn-node me rounds)) (range n))))
+
+  ;; Wire each node to the next (ring topology)
+  (doseq (i (range n))
+    (let (next-i (rem (+ i 1) n))
+      (send (get ring-pids i)
+            {:next   (get ring-pids next-i)
+             :done   me
+             :rounds (if (= i 0) rounds 0)})))
+
+  ;; Start the token: send to node 0 (it has rounds set)
+  ;; Actually node 0 starts the token itself since it has rounds-left > 0
+  ;; Wait — each node has rounds-left = 0 except node 0. The token goes around
+  ;; the ring, and each pass through node 0 decrements rounds-left.
+  ;; Let's simplify: just send the initial token to node 0.
+  (send (get ring-pids 0) 1)
+
+  (let (result (receive
+                 ([:done v] v)
+                 (after 30000 :timeout)))
+    ;; Token incremented by 1 at each step, n nodes × rounds rounds
+    ;; Starting at 1, after n*rounds hops = 1 + n*rounds
+    (def expected (+ 1 (* n rounds)))
+    (println "P23: token value:" result)
+    (println "P23: expected:" expected)
+    (println "P23-correct:" (= result expected))))
+
+;;; ---- P24: self-send flood ----
+(println "=== P24: 100k self-send flood ===")
+(let (me (self)
+      n 100000)
+  ;; Flood our own mailbox
+  (dotimes (i n) (send me i))
+  ;; Drain: sum all messages in order
+  (defn drain-loop (remaining acc)
+    (if (= remaining 0)
+      acc
+      (let (v (receive (v v) (after 5000 :timeout)))
+        (drain-loop (- remaining 1) (+ acc v)))))
+  (def p24-sum (drain-loop n 0))
+  ;; Expected: 0+1+2+...+(n-1) = n*(n-1)/2
+  (def p24-expected (* n (- n 1) (/ 1 2)))
+  (println "P24: sum:" p24-sum)
+  (println "P24: expected:" (quot (* n (- n 1)) 2))
+  (println "P24-correct:" (= p24-sum (quot (* n (- n 1)) 2))))
+
+;;; ---- P25: selective receive queues non-matching messages ----
+(println "=== P25: selective receive ordering ===")
+(let (me (self))
+  ;; Send several different-shaped messages out of order
+  (send me [:b 2])
+  (send me [:a 1])
+  (send me [:c 3])
+  (send me [:b 20])
+
+  ;; Receive :a first (it's in the queue, not at head — must scan)
+  (let (a (receive ([:a v] v) (after 2000 :timeout)))
+    ;; Receive :c next
+    (let (c (receive ([:c v] v) (after 2000 :timeout)))
+      ;; Now drain :b messages in order
+      (let (b1 (receive ([:b v] v) (after 2000 :timeout))
+            b2 (receive ([:b v] v) (after 2000 :timeout)))
+        (println "P25: a=" a "c=" c "b1=" b1 "b2=" b2)
+        (println "P25-correct:"
+                 (and (= 1 a) (= 3 c) (= 2 b1) (= 20 b2)))))))
+
+;;; ---- P26: 1MB message round-trip ----
+(println "=== P26: 1MB string round-trip across process heaps ===")
+(let (me (self)
+      big-string (string-repeat "X" 1048576))  ; 1 MB
+  (spawn
+    (receive ([:echo s] (send me [:reply s]))
+             (after 10000 :timeout)))
+  (send (whereis nil) :skip)  ; dummy — just get the last spawned pid
+  ;; Actually capture the pid properly:
+  )
+
+;; Simpler: spawn returns the pid
+(let (me (self)
+      big-string (string-repeat "A" 1048576))
+  (let (worker (spawn
+                 (receive
+                   ([:echo s] (send me [:reply (string-length s) (char-at s 0) (char-at s (- (string-length s) 1))]))
+                   (after 10000 :timeout))))
+    (send worker [:echo big-string])
+    (let (r (receive ([:reply len first-ch last-ch] [len first-ch last-ch]) (after 10000 :timeout)))
+      (println "P26: length=" (get r 0) "first=" (get r 1) "last=" (get r 2))
+      (println "P26-correct:"
+               (and (= 1048576 (get r 0))
+                    (= "A" (get r 1))
+                    (= "A" (get r 2)))))))
+
+;;; ---- P27: process spawning tree (depth 8 = 256 leaf processes) ----
+(println "=== P27: 256-leaf process tree ===")
+(defn spawn-tree (depth done-pid)
+  (if (= depth 0)
+    (send done-pid 1)  ; leaf contributes 1
+    (let (me (self))
+      (spawn (spawn-tree (- depth 1) me))
+      (spawn (spawn-tree (- depth 1) me))
+      ;; Collect two counts from children
+      (let (l (receive (v v) (after 10000 0))
+            r (receive (v v) (after 10000 0)))
+        (send done-pid (+ l r))))))
+
+(let (me (self))
+  (spawn (spawn-tree 8 me))
+  (let (total (receive (v v) (after 30000 :timeout)))
+    (println "P27: leaf count:" total)
+    (println "P27-correct (256):" (= 256 total))))
+
+;;; ---- P28: 200 monitors on one pid, all get :down ----
+(println "=== P28: 200 monitors on one pid ===")
+(let (me (self)
+      victim (spawn (do (receive (:go :ok) (after 5000 :ok)) :done)))
+  ;; Spawn 200 watchers, each monitors victim and reports :down to us
+  (def watcher-count 200)
+  (dotimes (_ watcher-count)
+    (spawn
+      (let (ref (monitor victim))
+        (let (r (receive ([:down ~ref _ reason] reason) (after 10000 :timeout)))
+          (send me [:watcher-result r])))))
+  ;; Give watchers time to set up monitors
+  (receive (_ :ok) (after 100 :timeout))
+  ;; Kill the victim
+  (send victim :go)
+  ;; Collect results from all watchers
+  (defn collect-watchers (n acc)
+    (if (= n 0) acc
+      (let (r (receive ([:watcher-result v] v) (after 10000 :timeout)))
+        (collect-watchers (- n 1) (cons r acc)))))
+  (def results (collect-watchers watcher-count nil))
+  (def all-normal (= (count (filter (fn (r) (= :normal r)) results)) watcher-count))
+  (println "P28: watchers that got :down:" (count results))
+  (println "P28-correct (all normal):" all-normal))
+
+(println "=== chaos2_process_ring DONE ===")

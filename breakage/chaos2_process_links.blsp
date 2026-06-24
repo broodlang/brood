@@ -1,0 +1,153 @@
+;;; chaos2_process_links.blsp — process links, monitors, exit propagation
+;;;
+;;; Targets:
+;;;   P15 — link chain: A→B→C→D, D exits :normal, only D dies (normal doesn't propagate)
+;;;   P16 — link chain: D exits with error, cascade kill reaches A (unless trap-exit)
+;;;   P17 — trap-exit converts link-death to a message, doesn't kill
+;;;   P18 — monitor: dead-process monitor fires :down immediately on monitor call
+;;;   P19 — demonitor before the process dies: no :down message delivered
+;;;   P20 — double-link (link twice): one unlink should drop it entirely
+;;;   P21 — exit :kill is untrappable even with trap-exit true
+;;;   P22 — monitor + link to same pid: both fire on death
+
+;;; ---- P15: :normal exit does NOT propagate through links ----
+(println "=== P15: :normal exit does not cascade ===")
+(let (me (self))
+  (let (d (spawn
+            ;; D does its work and exits normally
+            (send me [:d-done (self)])
+            :normal))
+    ;; A links to D
+    (link d)
+    ;; Wait for D to announce itself then finish
+    (receive ([:d-done _] :ok) (after 2000 :timeout))
+    ;; D exits :normal — A should NOT die; we're still here
+    (println "P15: still alive after linked :normal exit — correct")))
+
+;;; ---- P16: error exit cascades through link chain ----
+(println "=== P16: error exit cascades (trap-exit to catch it) ===")
+(let (me (self))
+  ;; We trap exits so we can observe the cascade without dying ourselves
+  (trap-exit true)
+  (let (child (spawn
+                ;; child exits with :badness
+                (exit (self) :badness)))
+    (link child)
+    (let (msg (receive
+                ([:EXIT _ reason] reason)
+                (after 3000 :timeout)))
+      (println "P16: got exit reason:" msg)
+      (println "P16-correct:" (= :badness msg)))
+  (trap-exit false)))
+
+;;; ---- P17: trap-exit converts link-death to message ----
+(println "=== P17: trap-exit shields from link cascade ===")
+(let (me (self))
+  (trap-exit true)
+  (let (crasher (spawn (error "i crash now")))
+    (link crasher)
+    ;; Should receive [:EXIT crasher <reason>] not die
+    (let (r (receive
+              ([:EXIT pid _] (str "caught exit from " (pr-str pid)))
+              (after 3000 :timeout)))
+      (println "P17: received:" r)
+      (println "P17-correct:" (string? r))))
+  (trap-exit false))
+
+;;; ---- P18: monitoring an already-dead process fires :down immediately ----
+(println "=== P18: monitor dead process → immediate :down ===")
+(let (me (self))
+  ;; Spawn and wait for it to die
+  (let (dead (spawn (send me :spawned)))
+    (receive (:spawned :ok) (after 2000 :timeout))
+    ;; Give it time to exit
+    (receive (_ :ok) (after 100 :timeout))
+    ;; Now monitor the (likely dead) pid
+    (let (ref (monitor dead)
+          msg (receive
+                ([:down ~ref _ reason] reason)
+                (after 2000 :timeout)))
+      (println "P18: down reason:" msg)
+      (println "P18-correct (noproc or normal):"
+               (or (= :noproc msg) (= :normal msg))))))
+
+;;; ---- P19: demonitor before death → no :down message ----
+(println "=== P19: demonitor before death = no :down ===")
+(let (me (self))
+  (let (long-lived (spawn (do (receive (:go :ok) (after 5000 :ok)) (send me :bye))))
+    (let (ref (monitor long-lived))
+      (demonitor ref)
+      ;; Tell the process to exit
+      (send long-lived :go)
+      ;; We should NOT receive a :down (we demonitored)
+      (let (msg (receive
+                  ([:down _ _ _] :got-down)
+                  (:bye :got-bye)
+                  (after 2000 :timeout)))
+        (println "P19: got:" msg)
+        (println "P19-correct (bye, not down):" (= :got-bye msg))))))
+
+;;; ---- P20: double-link, one unlink drops it ----
+(println "=== P20: double link + single unlink ===")
+(let (me (self))
+  (trap-exit true)
+  (let (child (spawn (do (receive (:go :ok)) (send me :bye))))
+    (link child)
+    (link child)  ; linking twice
+    (unlink child) ; one unlink should remove the link entirely
+    (send child :go)
+    ;; Should get :bye message (process exits normally after :go), NOT [:EXIT ...]
+    (let (msg (receive
+                ([:EXIT _ _] :got-exit)
+                (:bye       :got-bye)
+                (after 2000 :timeout)))
+      (println "P20: got:" msg)
+      (println "P20-correct (bye):" (= :got-bye msg))))
+  (trap-exit false))
+
+;;; ---- P21: exit :kill is untrappable ----
+(println "=== P21: exit :kill cannot be trapped ===")
+(let (me (self))
+  (trap-exit true)
+  (let (victim (spawn
+                 (do (trap-exit true)
+                     (send me :ready)
+                     ;; Victim has trap-exit on but :kill still kills it
+                     (receive (_ :got-something) (after 5000 :timeout))
+                     (send me :survived-wrongly))))
+    (receive (:ready :ok) (after 2000 :timeout))
+    (let (ref (monitor victim))
+      (exit victim :kill)
+      (let (r (receive
+                ([:down ~ref _ reason] reason)
+                (after 2000 :timeout)))
+        (println "P21: victim died with reason:" r)
+        (println "P21-correct (killed):" (= :killed r)))))
+  (trap-exit false))
+
+;;; ---- P22: monitor + link to same pid: both fire ----
+(println "=== P22: monitor + link to same pid ===")
+(let (me (self))
+  (trap-exit true)
+  (let (victim (spawn (do (send me :ready) (error "combined-death"))))
+    (receive (:ready :ok) (after 2000 :timeout))
+    (let (ref (monitor victim))
+      (link victim)
+      ;; wait a tiny bit for victim to crash
+      (let (r1 (receive
+                 ([:EXIT _ reason] [:link reason])
+                 ([:down _ _ reason] [:monitor reason])
+                 (after 3000 :timeout))
+            r2 (receive
+                 ([:EXIT _ reason] [:link reason])
+                 ([:down _ _ reason] [:monitor reason])
+                 (after 3000 :timeout)))
+        (println "P22: r1=" (pr-str r1) "r2=" (pr-str r2))
+        (println "P22-correct (both fired):"
+                 (and r1 r2
+                      (not (= r1 r2))
+                      (or (= (first r1) :link) (= (first r1) :monitor))
+                      (or (= (first r2) :link) (= (first r2) :monitor)))))))
+  (trap-exit false))
+
+(println "=== chaos2_process_links DONE ===")

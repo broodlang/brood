@@ -3537,18 +3537,72 @@ fn dispatch(
                                 .expect("JIT outcome 3 with no parked error");
                             return Err(e);
                         }
-                        _ => {
-                            // Epoch reset (→ None), deopt (1), preempt (2), or tail
-                            // (4): fall back to vm_apply with the original args.
-                            // `!arm.has_runtime_handles` (the fast-path gate) ensures
-                            // no GC ran during the JIT call, so `cur_argv` is still
-                            // valid. Reading args back from roots[base+k] is wrong for
-                            // rest-param arms where cur_argv.len() > arm.nslots.
+                        Some(4) => {
+                            // Tail call staged by the JIT: [callee, arg0..argN] sit
+                            // above the frame at roots[base+active_nslots..].  These
+                            // were pushed *after* any GC that fired inside
+                            // jit_dispatch_call's safepoint (line ~8890), so they hold
+                            // current-epoch handles — unlike cur_argv which was captured
+                            // before jit_tier ran and may be stale.  Follow the staged
+                            // call directly instead of re-running this arm on the VM.
+                            let frame_top = base + arm.active_nslots();
+                            let n = heap.roots_len();
                             let callee_env2 = heap.read_root_env(env_root);
+                            if n > frame_top {
+                                let staged_callee = heap.root_at(frame_top);
+                                let staged_argc = n - frame_top - 1;
+                                let staged_argv: SmallVec<[Value; 4]> = (0..staged_argc)
+                                    .map(|k| heap.root_at(frame_top + 1 + k))
+                                    .collect();
+                                heap.truncate_roots(base);
+                                heap.truncate_env_roots(env_base);
+                                return Ok(Step::Done(apply_value(
+                                    heap,
+                                    staged_callee,
+                                    &staged_argv,
+                                    callee_env2,
+                                )?));
+                            }
+                            // Staged area is empty (shouldn't happen for outcome 4,
+                            // but fall back gracefully).  GC may have run, so read
+                            // fresh args from the frame rather than stale cur_argv.
+                            let argc = cur_argv.len();
+                            let fresh_argv: SmallVec<[Value; 4]> =
+                                if arm.rest_slot.is_none() {
+                                    (0..argc).map(|k| heap.root_at(base + k)).collect()
+                                } else {
+                                    cur_argv
+                                };
                             heap.truncate_roots(base);
                             heap.truncate_env_roots(env_base);
                             return Ok(Step::Done(
-                                vm_apply(heap, arm, &cur_argv, callee_env2)?,
+                                vm_apply(heap, arm, &fresh_argv, callee_env2)?,
+                            ));
+                        }
+                        _ => {
+                            // Epoch reset (→ None), deopt (1), or preempt (2): re-run
+                            // on the VM.  GC can fire during any jit_dispatch_call
+                            // safepoint (line ~8903) triggered by a sub-call inside
+                            // jit_tier — even for deopt (the sub-call returns a
+                            // non-int, GC fires in its safepoint, then the JIT deopts
+                            // on the non-int result).  After that GC, cur_argv holds
+                            // stale LOCAL handles.  The frame at roots[base..base+nslots]
+                            // is updated in place by every GC, so read fresh args from
+                            // there.  Arms with a rest slot collect the rest elements
+                            // into a list; they're unreachable in the JIT int-subset
+                            // and fall through to cur_argv as an inert dead-code path.
+                            let callee_env2 = heap.read_root_env(env_root);
+                            let argc = cur_argv.len();
+                            let fresh_argv: SmallVec<[Value; 4]> =
+                                if arm.rest_slot.is_none() {
+                                    (0..argc).map(|k| heap.root_at(base + k)).collect()
+                                } else {
+                                    cur_argv
+                                };
+                            heap.truncate_roots(base);
+                            heap.truncate_env_roots(env_base);
+                            return Ok(Step::Done(
+                                vm_apply(heap, arm, &fresh_argv, callee_env2)?,
                             ));
                         }
                     }
@@ -4730,6 +4784,13 @@ fn exec_chunk(
                 // which outlives exec_chunk via the Arc<CompiledArm> held by vm_run_bc.
                 let body_node = unsafe { body.0.as_ref() };
                 let handler_node = unsafe { handler.0.as_ref() };
+                // `exec_value` runs the body through the tree-walker, which can't be
+                // captured across the native frame boundary. Gate off `capture_top_level`
+                // so a `receive` inside the body or handler blocks the worker (the §7.4
+                // dirty-scheduler carve-out) rather than attempting a state-capture that
+                // can't cross native frames — the same guard `dispatch` applies when it
+                // defers a closure to the tree-walker.
+                let _guard = CaptureTopGuard(crate::process::set_capture_top_level(false));
                 match exec_value(heap, body_node, base, genv) {
                     Ok(v) => heap.push_root(v),
                     Err(e) if e.is_control() => return Err(e),
@@ -8498,11 +8559,15 @@ fn jit_run_fast_link(
     // current by the caller's epoch check (the IC fast-link, or the IR's flat-table guard).
     let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code as *mut u8) };
     let depth = heap.jit_native_depth;
-    let saved = std::mem::replace(&mut heap.jit_call_env, EnvRoot::Stable(callee_env));
+    // Root callee_env via env_roots so GC tenure inside the callee forwards it.
+    let env_base = heap.env_roots_len();
+    let env_root = heap.root_env(callee_env);
+    let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
     heap.jit_native_depth = depth + 1;
     let outcome = f(heap as *mut Heap, base as i64);
     heap.jit_native_depth = depth;
     heap.jit_call_env = saved;
+    heap.truncate_env_roots(env_base);
     match outcome {
         0 => {
             crate::perf_bump!(jit_link_done);
@@ -8742,12 +8807,15 @@ pub(crate) fn jit_dispatch_call(
                 // `jit_lower_arm`, living for the process in `GLOBAL_JIT`; the frame is set
                 // up at `roots[base..]`.
                 let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code) };
-                let env_root = EnvRoot::Stable(callee_env);
+                // Root callee_env via env_roots so GC tenure inside the callee forwards it.
+                let env_base = heap.env_roots_len();
+                let env_root = heap.root_env(callee_env);
                 let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
                 heap.jit_native_depth = depth + 1;
                 let outcome = f(heap as *mut Heap, base as i64);
                 heap.jit_native_depth = depth;
                 heap.jit_call_env = saved;
+                heap.truncate_env_roots(env_base);
                 match outcome {
                     // Done: result boxed in `roots[base]`. Take it, drop the frame.
                     0 => {
