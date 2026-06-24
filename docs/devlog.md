@@ -293,6 +293,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-08** — corosensei removal §8.4 step 3 (cont'd): **kill/monitor-of-parked-processes-at-scale deadlock fixed.** Root cause: a worker parked in a dirty native-nested block (blocked inside `run_one`, never returning to its run loop) still looked schedulable to `assign_worker` (empty queue + busy = low load), so processes (e.g. 1000 monitored workers being killed, or children spawned during the parent's `mfan`) got routed onto it and stranded → all-threads-asleep deadlock. Fix (§7.4 dirty-scheduler): a worker marks itself **dirty** for the block (`dirty_block`, keyed by a new `CURRENT_WORKER` thread-local set at `worker_loop` entry); `assign_worker` excludes a dirty worker (load `MAX`), and entering the block **drains the stranded backlog** off it — only *non-fresh capture* procs (the unstealable ones) are re-routed; *fresh* stay (an idle worker steals them) and pinned *coroutines* stay (KI-1b). The mass-kill / 1000-monitored / `observer` process-info tests now pass flag-on (were 120s timeouts); `adversarial` 22/22, `concurrency` 33/33, `exit` 5/5. §6 plain-release KI-1 bar holds **flag on and off** (10/10 + `BROOD_GC_STRESS`). Also fixed a status leak: the yielder-less block left `ST_WAITING` set (it returns inline, with no `run_one` to flip it back), so a `process-info` after a native-nested receive read `:waiting` while running — now reset to `ST_RUNNING` after the wait. **Last flag-on flake before the flip:** `gen_test`'s linked-spawn describe (~25%: `%isolate` reap `:kill`s a still-alive *linked* server → `:kill` back-propagates to the isolate-runner; an async-`stop`-vs-reap race capture-mode timing exposes — Brood-side to resolve). `stream_test` is WIP. Flag stays **off**.
 - **2026-06-08** — corosensei removal §8.4 step 3: gen flake **fixed** + capture mode proven **correctness-equivalent**. The `%isolate` reap now `unlink_self(child)` before `(exit child :kill)`, so cleaning up a leftover `spawn-link`ed server can't back-propagate `:killed` and kill the isolate runner (the async-`stop`-vs-reap race is moot) — gen 8/8 flag-on. Full suite both modes (good binary): **1882/1902**, the **same 20 failures in both** — all environmental (≈15 tree-sitter, needs native grammars [WIP]; ≈5 package-`:git`, needs git/network, 120s timeouts) — so **capture mode adds zero failures**. Timing 218 s (off) vs 265 s (on) ≈ **+22%** (the 6× was the now-fixed deadlock/timeouts). So every capture-specific issue (the §8.1 native-nested footgun, the kill/monitor deadlock, the gen flake) is resolved; what's left for step 3 is the **flip-the-default decision** — correctness is proven, the open question is whether to eat the ~22% now (it lands before step 4's corosensei-deletion payoff) or optimise the capture hot path first. §6 plain-release bar holds flag on+off. Flag still **off**.
 - **2026-06-08** — corosensei removal §8.4 **steps 3-flip + 4 done: corosensei is gone.** Flipped the default and **deleted corosensei** in one move — the `BROOD_STATE_CAPTURE` flag, the `Run::{Coro|Capture}` split, the `corosensei` dep, all the coroutine plumbing (`Suspend`/`Yielder0`/`build_coro`/`resume_coro`/`handle_coro_outcome`), and `unsafe impl Send for Process` are removed. State capture is the **sole** scheduler engine; `Process` is now plain `Send` data and `run_one` always drives `vm_run_bc` (a body with no compiled 0-arg arm tree-walks on the worker thread, its `receive`s block — the §7.4 dirty carve-out). **Stealing generalised:** every process is heap-captured with no native stack, so `try_steal` takes **any** queued process (`pop_back`), `STEALABLE` counts all queued, and the now-vestigial `fresh` flag is dropped; `CORO_STACK_BYTES` → `WORKER_STACK_BYTES`. **Regression caught + fixed in validation:** a self-recursive pass-through `(defn hog () (hog))` spun **un-preemptibly** — ADR-069's pass-through opt flagged it as a thin wrapper redirecting `hog → hog`, and the redirect loop (`compile::dispatch` + `eval::eval`) relied on `tick()`→`preempt()` to yield, which is now a no-op (only the VM driver's loop-top `tick_capture` suspends). Both redirect loops now **break a self-cycle** (redirect resolving to the same closure by identity) and fall through to the normal call path, so it runs as a VM `SelfTail`/`Call` and preempts at the loop top (the closure's own name isn't known at `compute_passthrough` — a `defn` fn is anonymous). Validation: §6 plain-release KI-1 bar 10/10 + 5/5 `BROOD_GC_STRESS`; lib + differential (engines agree) + work-stealing + live-migration + preemption all green via nextest; full suite 553/555, the 2 failures pre-existing environmental (parser deep-nest stack flake — passes with `RUST_MIN_STACK=32M`; `dist` reconnect — fails on HEAD too, so not from this work). Suite runtime back to ~25 s (the +22% capture overhead is moot now that corosensei + its 16 MiB coroutine stacks are gone).
+- **2026-06-24** — JIT fast path: stale LOCAL handle (`StrId`) after GC in `dispatch`'s `_ =>` arm — deopt (outcome 1) fires after a sub-call returns a non-int, but GC already ran in `jit_dispatch_call`'s safepoint; `cur_argv` is stale; fix reads `roots[base..argc]` instead
 
 ---
 
@@ -4309,3 +4310,86 @@ printed `2` correctly.
 Test: `tests/lineedit_test.blsp` — the keymap `describe` now asserts both
 `:ctrl-j` and `:enter` map to submit and that dispatching either marks the state
 `:done :submit` (38/38 pass).
+
+## 2026-06-24 — JIT fast path: stale LOCAL handle after GC in `dispatch`'s `_ =>` arm
+
+**Symptom.** hatch-demo crashed intermittently with a panic at `heap.rs:3339` —
+`index out of bounds: the len is 37 but the index is 4293`. Same file, same
+accessor (`string()`, LOCAL nursery branch), different magnitudes: prior to this
+the crash read `len 21, index 2325`. Both are stale string-slab indices — a
+LOCAL-region `StrId` pointing into a nursery that has since been collected and
+restarted from 0.
+
+**Root cause — two related sites in `dispatch`'s JIT fast path.**
+
+When `dispatch` detects a JIT-compiled callee with no runtime handles and no
+inline installation, it calls `jit_tier` directly (the fast path). It first
+captures the arguments into `cur_argv: SmallVec<[Value; 4]>` on the Rust stack,
+then calls into the JIT. `jit_tier` can in turn make sub-calls via
+`brood_rt_call_slow` → `jit_dispatch_call`. After every sub-call returns,
+`jit_dispatch_call` checks `heap.gc_due()` and runs a GC safepoint if set. That
+GC updates `heap.roots` in place but leaves `cur_argv` — a plain Rust SmallVec
+— holding handles from the pre-GC epoch.
+
+The outcome integer `jit_tier` returns determines which arm runs:
+- `Some(0)` — Done (fast return, no deopt).
+- `Some(4)` — Staged tail call; when the staging area is empty this falls back
+  to `vm_apply` with `cur_argv`. **Fixed earlier** (the vector-handle crash).
+- `_ =>` — Outcomes 1 (deopt: sub-call returned a non-int), 2 (preempt: self-call
+  budget), or `None`. The arm's stale comment claimed "no GC ran during the JIT
+  call." Wrong: deopt fires *after* a sub-call returns a non-int, but GC already
+  ran in that sub-call's `jit_dispatch_call` safepoint. `cur_argv` then holds
+  a stale LOCAL string handle. The arm passed `cur_argv` to `vm_apply`, which
+  called `heap.string()` on the stale id → slab OOB panic in release builds
+  (where the debug epoch-tripwire is stripped).
+
+**Triggering sequence** (the string-deopt scenario):
+
+1. `hot-adder(x)` is JIT-compiled by heating with integers.
+2. Caller passes a fresh string `x`. JIT fast path grabs `cur_argv = [x]`.
+3. Inside the JIT, `my-str-id(x)` is dispatched via `brood_rt_call_slow` →
+   GC fires in `jit_dispatch_call`'s safepoint → nursery flips → `cur_argv[0]`
+   (the raw `StrId`) is now stale.
+4. JIT tries `(+ result 1)` where `result` is a string → non-int → deopt
+   (outcome 1).
+5. `_ =>` arm: `vm_apply(heap, arm, &cur_argv, env)` → `heap.string(stale_id)`
+   → index-out-of-bounds panic.
+
+**Fix** (`crates/lisp/src/eval/compile.rs`, `dispatch` JIT fast path).
+
+The frame `heap.roots[base..base+nslots]` is updated in place by every GC, so
+`roots[base..base+argc]` always holds current-epoch values. For arms with no
+rest slot, build `fresh_argv` by reading from roots instead of `cur_argv`:
+
+```rust
+let argc = cur_argv.len();
+let fresh_argv: SmallVec<[Value; 4]> =
+    if arm.rest_slot.is_none() {
+        (0..argc).map(|k| heap.root_at(base + k)).collect()
+    } else {
+        cur_argv   // rest arms collect rest elements into a list; they're
+                   // unreachable in the JIT int-subset — inert dead-code path
+    };
+```
+
+Applied to both the `_ =>` arm and the `Some(4)` fallback (the latter had been
+patched for the VecId crash but needed the same treatment for strings).
+
+**Why `roots[base..]` is safe.** `push_frame` stores all args into
+`roots[base..base+nslots]` before `jit_tier` runs; every GC updates roots in
+place. The rest-slot guard is needed because an arm with a rest slot collects
+the variadic tail into a heap list at `roots[base+rest_slot]` — reading raw
+`roots[base..base+argc]` would overshoot into capture/let slots. Such arms are
+unreachable in the JIT int-subset anyway, so the `cur_argv` fallback is dead
+code.
+
+**Verification.** `pong/src/crash_repro.blsp` test 2 (string-deopt test):
+heats `hot-adder` with 5000 integers (triggers JIT), allocates 300 short-lived
+strings to stress the nursery, then calls `hot-adder` with a string in
+non-tail position. Under `BROOD_GC_STRESS=1` (GC after every allocation) this
+reliably triggered the slab panic before the fix. After the fix: a Brood type
+error (`%add: expected number, got string`) — not a crash. hatch-demo confirmed
+working after installing the fixed `nest` binary.
+
+**Commits.** brood `e000652`; pong reproducer `61af798`; hatch-demo
+`.gitignore` + lockfile `6424e6a`.
