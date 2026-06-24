@@ -24,7 +24,7 @@ static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// spills); if the predicate ever under-counts, the lowering bails safely rather than
 /// corrupting. `0` under `--without-jit`, so that build's frames are unchanged.
 #[cfg(feature = "jit")]
-fn jit_spill_reserve(code: &[Inst]) -> usize {
+pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
     if non_tail_call_count(code) < 2 {
         return 0;
     }
