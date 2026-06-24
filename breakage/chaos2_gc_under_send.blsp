@@ -1,0 +1,136 @@
+;;; chaos2_gc_under_send.blsp — GC races during message send/receive
+;;;
+;;; Every `send` deep-copies the value across the process heap boundary via
+;;; `to_message` / `from_message`. If a GC fires during send (or between the copy
+;;; and the mailbox enqueue), we could read stale handles. Similarly, `receive`
+;;; calls `from_message` which allocates into the LOCAL heap — if that allocation
+;;; triggers a GC mid-deserialization, handles to partly-deserialized values
+;;; could go stale.
+;;;
+;;; Targets:
+;;;   P56 — send a live BigInt that gets promoted during copy (stress to_message)
+;;;   P57 — send a deep list (10k pairs) → verify structure after cross-process copy
+;;;   P58 — send a map of 1k closures (each closes over a BigInt)
+;;;   P59 — GC_STRESS equivalent: rapid-allocate while sending, verify no corruption
+;;;   P60 — concurrent sends: 50 processes simultaneously sending to one mailbox
+
+;;; ---- P56: BigInt round-trip via send ----
+(println "=== P56: BigInt round-trip across process boundary ===")
+(let (me (self)
+      bignum (* 999999999999999999 999999999999999999))  ; ~10^36, large BigInt
+  (spawn
+    (receive
+      ([:big n] (send me [:result (* n 2)]))
+      (after 5000 :timeout)))
+  ;; Capture the spawned pid — use a reference via the next spawn trick
+  )
+
+;; Cleaner: capture pid from spawn's return value
+(let (me (self)
+      bignum (* 999999999999999999 999999999999999999))
+  (let (worker (spawn
+                 (receive
+                   ([:big n] (send me [:result (* n 2)]))
+                   (after 5000 :timeout))))
+    (send worker [:big bignum])
+    (let (r (receive ([:result v] v) (after 5000 :timeout)))
+      (println "P56: sent:" bignum)
+      (println "P56: received back (* 2):" r)
+      (println "P56-correct:" (= (* bignum 2) r)))))
+
+;;; ---- P57: deep list (10k pairs) cross-process ----
+(println "=== P57: 10k-element list round-trip ===")
+(let (me (self)
+      deep-list (range 1 10001))
+  (let (worker (spawn
+                 (receive
+                   ([:list xs]
+                     (let (s (fold (fn (a v) (+ a v)) 0 xs))
+                       (send me [:sum s (count xs)])))
+                   (after 10000 :timeout))))
+    (send worker [:list deep-list])
+    (let (r (receive ([:sum s c] [s c]) (after 10000 :timeout)))
+      (println "P57: sum=" (get r 0) "count=" (get r 1))
+      (println "P57-correct:"
+               (and (= 50005000 (get r 0))  ; 1+2+...+10000 = 10000*10001/2
+                    (= 10000 (get r 1)))))))
+
+;;; ---- P58: map of closures shipped cross-process ----
+(println "=== P58: map of 500 closures with captured BigInt ===")
+(let (me (self)
+      big-base (* 12345678901234 56789012345678))
+  (def closure-map-58
+    (fold (fn (m i) (assoc m i (fn () (+ big-base i)))) {} (range 500)))
+  (let (worker (spawn
+                 (receive
+                   ([:cmap m]
+                     ;; Call a few closures to verify they captured correctly
+                     (let (r0 ((get m 0))
+                           r250 ((get m 250))
+                           r499 ((get m 499)))
+                       (send me [:p58 r0 r250 r499])))
+                   (after 10000 :timeout))))
+    (send worker [:cmap closure-map-58])
+    (let (r (receive ([:p58 r0 r250 r499] [r0 r250 r499]) (after 10000 :timeout)))
+      (println "P58: [0]=" (get r 0) "expected:" (+ big-base 0))
+      (println "P58: [250]=" (get r 1) "expected:" (+ big-base 250))
+      (println "P58: [499]=" (get r 2) "expected:" (+ big-base 499))
+      (println "P58-correct:"
+               (and (= (+ big-base 0)   (get r 0))
+                    (= (+ big-base 250) (get r 1))
+                    (= (+ big-base 499) (get r 2)))))))
+
+;;; ---- P59: allocation storm while sending ----
+(println "=== P59: alloc storm during concurrent sends ===")
+;; Have one process continuously allocating while another sends it messages.
+;; Any stale-pointer bug in the allocating process would corrupt the received value.
+(let (me (self))
+  (let (receiver (spawn
+                   ;; Continuously allocate (build and discard lists)
+                   ;; while also receiving messages
+                   (defn recv-loop (n acc)
+                     (if (= n 0)
+                       (send me [:p59 acc])
+                       ;; Interleave allocation with receive
+                       (let (_ (range (rem n 100)))  ; allocate a small list
+                         (let (msg (receive
+                                     ([:val v] v)
+                                     (after 0 nil)))
+                           (recv-loop (- n 1) (if msg (+ acc msg) acc))))))
+                   (recv-loop 10000 0)))
+    ;; Send 10k numbered messages as fast as possible
+    (doseq (i (range 10000))
+      (send receiver [:val i]))
+    (let (r (receive ([:p59 v] v) (after 30000 :timeout)))
+      (println "P59: accumulated sum:" r)
+      ;; We can't know exactly which messages the receive captured (since it uses
+      ;; (after 0 nil)) — just verify it's a reasonable number and not a crash
+      (println "P59: non-negative sum:" (>= r 0)))))
+
+;;; ---- P60: 50 senders → 1 receiver, order and count check ----
+(println "=== P60: 50 concurrent senders to one mailbox ===")
+(let (me (self)
+      n-senders 50
+      msgs-each 100)
+  (let (receiver (spawn
+                   (defn drain-60 (expected acc)
+                     (if (= expected 0)
+                       (send me [:p60 acc])
+                       (let (v (receive (v v) (after 10000 :timeout)))
+                         (drain-60 (- expected 1) (+ acc (if (int? v) v 0))))))
+                   (drain-60 (* n-senders msgs-each) 0)))
+    ;; Spawn senders
+    (dotimes (i n-senders)
+      (spawn
+        ;; Each sender sends msgs-each copies of the value (i+1)
+        (dotimes (_ msgs-each)
+          (send receiver (+ i 1)))))
+    (let (r (receive ([:p60 v] v) (after 30000 :timeout)))
+      (println "P60: total sum:" r)
+      ;; Each sender i sends (i+1) msgs-each times; sum = msgs-each * Σ(i+1) for i in [0,n-senders)
+      ;;   = msgs-each * (1+2+...+n-senders) = msgs-each * n-senders*(n-senders+1)/2
+      (def expected-sum (* msgs-each (quot (* n-senders (+ n-senders 1)) 2)))
+      (println "P60: expected:" expected-sum)
+      (println "P60-correct:" (= r expected-sum)))))
+
+(println "=== chaos2_gc_under_send DONE ===")

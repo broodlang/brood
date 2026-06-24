@@ -1,0 +1,98 @@
+;;; chaos2_bigint_edge.blsp — BigInt boundary and edge-case arithmetic
+;;;
+;;; Targets:
+;;;   - i64::MIN / -1 (would be i64 overflow → must produce BigInt)
+;;;   - i64::MIN rem -1 (same overflow risk)
+;;;   - BigInt negative rem/quot signs (Brood uses truncated division)
+;;;   - BigInt -> float conversion precision (exact for small BigInts)
+;;;   - BigInt equality vs float equality at boundary values
+;;;   - Mixed BigInt + float arithmetic chain
+;;;   - Near-zero BigInt rem (rem of huge number by 1 = 0)
+;;;   - BigInt bitwise ops (if supported)
+
+(def i64-max  9223372036854775807)   ; 2^63 - 1
+(def i64-min -9223372036854775808)   ; -2^63 (still an i64 in Brood)
+(def bigint-min-plus1 -9223372036854775807)  ; i64, but -i64-min = BigInt
+
+;;; ---- PROGRAM 8: i64::MIN / -1 must produce BigInt, not crash ----
+(println "=== P8: i64::MIN / -1 overflow → BigInt ===")
+;; -(-2^63) = 2^63, which exceeds i64::MAX and must become a BigInt
+(def p8-result (try (/ i64-min -1)
+                 (catch e (str "error: " (error-message e)))))
+(println "i64-min / -1 =" p8-result)
+(println "is-bigint?" (> p8-result i64-max))
+(println "correct value?" (= p8-result (+ i64-max 1)))
+
+;;; ---- PROGRAM 9: i64::MIN rem -1 (same overflow path) ----
+(println "=== P9: i64::MIN rem -1 ===")
+(def p9-result (try (rem i64-min -1)
+                 (catch e (str "error: " (error-message e)))))
+;; Truncated remainder: i64::MIN / -1 = 2^63, remainder = 0
+(println "i64-min rem -1 =" p9-result)
+(println "expected 0:" (= 0 p9-result))
+
+;;; ---- PROGRAM 10: BigInt rem sign (truncated toward zero) ----
+(println "=== P10: BigInt rem signs ===")
+(def big-pos (* 999999999999999999 7))
+(def big-neg (- 0 big-pos))
+;; Brood uses truncated rem: sign follows dividend
+(def r1 (rem big-pos  3))
+(def r2 (rem big-neg  3))
+(def r3 (rem big-pos -3))
+(def r4 (rem big-neg -3))
+(println "rem(+big, +3) sign >= 0:" (>= r1 0))
+(println "rem(-big, +3) sign <= 0:" (<= r2 0))
+(println "rem(+big, -3) sign >= 0:" (>= r3 0))
+(println "rem(-big, -3) sign <= 0:" (<= r4 0))
+(println "abs consistency:" (= (abs r1) (abs r2) (abs r3) (abs r4)))
+
+;;; ---- PROGRAM 11: BigInt → float precision ----
+(println "=== P11: BigInt -> float conversion ===")
+;; 2^53 = 9007199254740992 fits exactly in f64 (53-bit mantissa)
+(def exact-int 9007199254740992)   ; 2^53, an i64
+(def exact-bigint (* exact-int 1)) ; same value
+;; 2^53 as float must be exact
+(def exact-float (* 1.0 exact-int))
+(println "2^53 as float:" exact-float)
+(println "exact?" (= exact-float 9007199254740992.0))
+
+;; 2^53 + 1 cannot be represented exactly in f64
+(def inexact-int (+ exact-int 1))
+(def inexact-float (* 1.0 inexact-int))
+;; The float may equal the previous float (rounding)
+(println "2^53+1 as float == 2^53 float?:" (= exact-float inexact-float))
+
+;;; ---- PROGRAM 12: Near-zero BigInt rem ----
+(println "=== P12: huge BigInt rem 1 = 0 ===")
+(def huge (* 123456789012345678 987654321098765432))
+(def p12-result (rem huge 1))
+(println "huge rem 1 =" p12-result)
+(println "expected 0:" (= 0 p12-result))
+
+;;; ---- PROGRAM 13: Repeated multiplication near i64 boundary ----
+;;; Exercises the i64 → BigInt promotion path in tight repetition
+(println "=== P13: repeated multiplication crossing i64→BigInt boundary ===")
+(defn p13-grow (n steps)
+  (if (= steps 0) n (p13-grow (* n 3) (- steps 1))))
+
+;; 3^40 ≈ 1.2e19, crosses i64::MAX (9.2e18) around step 38
+(def p13-result (p13-grow 1 40))
+(println "3^40 ==" p13-result)
+(println "bigger than i64-max:" (> p13-result i64-max))
+;; Verify: 3^40 = 12157665459056928801
+(println "exact:" (= p13-result 12157665459056928801))
+
+;;; ---- PROGRAM 14: BigInt GCD via subtraction (stress modular arithmetic) ----
+(println "=== P14: BigInt GCD via Euclidean algorithm ===")
+(defn bigint-gcd (a b)
+  (if (= b 0) a (bigint-gcd b (rem a b))))
+
+(def a14 (* 123456789 987654321 9999999937))  ; large product
+(def b14 (* 987654321 111111111 9999999937))  ; shares factor
+;; GCD should be (* 987654321 9999999937) = 9876543197530864977
+(def p14-gcd (bigint-gcd a14 b14))
+(println "gcd result:" p14-gcd)
+(println "divides a:" (= 0 (rem a14 p14-gcd)))
+(println "divides b:" (= 0 (rem b14 p14-gcd)))
+
+(println "=== chaos2_bigint_edge DONE ===")

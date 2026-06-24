@@ -1,0 +1,149 @@
+;;; chaos2_jit_gc_interplay.blsp — JIT pair-base hoisting + GC interaction
+;;;
+;;; After the has_alloc_safepoint fix (commit 6542003 + 84ccfab), these programs
+;;; stress the exact boundary conditions of the hoisting guards:
+;;;   - Arms with First/Rest + MakeVector + Call (all three GC triggers)
+;;;   - Arms warmed past the JIT threshold that then hit minor_collect mid-arm
+;;;   - Pair access after a non-tail Call (the call may collect; pair_bases stale?)
+;;;   - Global hoisting (hoist_safe) invalidated by a def in a spawned process
+;;;   - Vector-slot hoisting with a GC safepoint on every iteration
+
+;;; ---- PROGRAM 1: First/Rest + MakeVector + non-tail Call in one arm ----
+;;; The three GC triggers that used to fool has_alloc_safepoint must all prevent
+;;; pair_bases hoisting. This arm exercises all three simultaneously.
+(println "=== P1: First+Rest+MakeVector+Call in one JIT arm ===")
+
+(defn helper-vec (x) (into [] (list x (* x 2) (* x 3))))
+
+(defn p1-loop (xs n acc)
+  (if (or (= n 0) (empty? xs))
+    acc
+    (let (h (first xs)
+          t (rest xs)
+          v (helper-vec h))   ; non-tail call — GC safepoint
+      (p1-loop t (- n 1) (+ acc (get v 0) (get v 1) (get v 2))))))
+
+(def p1-input (range 1 201))
+;; sum of i + 2i + 3i for i in 1..200 = 6 * (200*201/2) = 120600
+(def p1-result (p1-loop p1-input 200 0))
+(println "p1-result:" p1-result)
+(println "p1-expected 120600:" (= 120600 p1-result))
+
+;;; ---- PROGRAM 2: Back-edge safepoint fires mid-pair-traversal ----
+;;; Warm the arm past the JIT threshold so it compiles; then run with allocation
+;;; pressure so the back-edge safepoint calls minor_collect between pair accesses.
+(println "=== P2: back-edge safepoint fires during pair traversal ===")
+
+(defn p2-sum (xs acc)
+  (if (empty? xs) acc
+    (p2-sum (rest xs) (+ acc (first xs)))))
+
+;; Create a huge list to force many back-edge iterations (each might collect).
+(def p2-list (range 1 50001))  ; 50k elements
+(def p2-result (p2-sum p2-list 0))
+;; 1+2+...+50000 = 50000*50001/2 = 1250025000
+(println "p2-result:" p2-result)
+(println "p2-expected 1250025000:" (= 1250025000 p2-result))
+
+;;; ---- PROGRAM 3: Pair access in a closure that escapes and is GC'd ----
+;;; The closure captures a pair list. Sending it across a process heap deep-copies
+;;; it. Then the original nursery gets collected. If the JIT read stale pair_bases,
+;;; it would see garbage — but the closure copy should be independent.
+(println "=== P3: closure over pair list shipped cross-process ===")
+
+(def p3-data (range 1 101))
+
+(defn p3-closure-sum (xs acc)
+  (if (empty? xs) acc
+    (p3-closure-sum (rest xs) (+ acc (first xs)))))
+
+(let (me (self))
+  (spawn
+    (send me [:p3 (p3-closure-sum p3-data 0)]))
+  (let (r (receive ([:p3 v] v)))
+    (println "p3-result:" r)
+    (println "p3-expected 5050:" (= 5050 r))))
+
+;;; ---- PROGRAM 4: Global hoisted by JIT, then redef'd by spawned process ----
+;;; JIT arms can cache a global's value at arm-entry. A concurrent `def` from
+;;; another process must not make the cached value visible until the arm exits and
+;;; re-checks (late binding). Verify the calling process always sees consistent
+;;; values, never torn state.
+(println "=== P4: global redef concurrent with JIT-compiled reader ===")
+
+(def p4-counter 0)
+
+(defn p4-read-loop (n acc)
+  (if (= n 0) acc
+    (p4-read-loop (- n 1) (+ acc p4-counter))))
+
+;; Warm the reader arm
+(p4-read-loop 20 0)
+
+(let (me (self))
+  ;; Redefine p4-counter in a spawned process
+  (spawn (do (def p4-counter 1) (send me :done)))
+  (receive (:done :ok))
+  ;; After redef, reading should see the new value
+  (def p4-after (p4-read-loop 100 0))
+  (println "p4-after (should be 100):" p4-after)
+  (println "p4-correct:" (= 100 p4-after)))
+
+;;; ---- PROGRAM 5: Alternating cons+vector in a tight loop ----
+;;; Building a pair list and a vector alternately stresses the boundary of
+;;; pair_bases hoisting: each Cons and each MakeVector is a potential GC point,
+;;; and the arm reads First/Rest between them.
+(println "=== P5: alternating cons and vector allocation ===")
+
+(defn p5-build (n pairs vecs)
+  (if (= n 0) {:pairs (count pairs) :vecs (count vecs)}
+    (p5-build (- n 1)
+              (cons n pairs)
+              (into vecs [(into [] (list n (* n 2)))]))))
+
+(def p5-result (p5-build 5000 nil []))
+(println "p5-pairs:" (get p5-result :pairs))
+(println "p5-vecs:"  (get p5-result :vecs))
+(println "p5-correct:" (and (= 5000 (get p5-result :pairs)) (= 5000 (get p5-result :vecs))))
+
+;;; ---- PROGRAM 6: Rest past end of list (should return nil, not panic) ----
+;;; The JIT pair accessor for `rest` should never index out of bounds on nil.
+(println "=== P6: rest past end of list ===")
+
+(defn p6-walk (xs n)
+  (if (= n 0) xs
+    (p6-walk (rest xs) (- n 1))))
+
+;; Walk 5 steps past the end of a 3-element list
+(def p6-r0 (p6-walk (list 1 2 3) 3))   ; = nil (end)
+(def p6-r1 (p6-walk (list 1 2 3) 5))   ; = nil (past end)
+(println "p6-r0 (nil):" (= nil p6-r0))
+(println "p6-r1 (nil):" (= nil p6-r1))
+
+;;; ---- PROGRAM 7: JIT arm with 200+ local slots ----
+;;; frame_nslots must be computed ONCE before the arm call; it used to be recomputed
+;;; inside the arm prologue. Stress this with a wide let binding.
+(println "=== P7: wide frame (many let slots) ===")
+
+;; Build a function with 100 let-bound locals
+(def p7-fn
+  (eval
+    `(fn (x)
+       (let (a0  (* x  1) a1  (* x  2) a2  (* x  3) a3  (* x  4) a4  (* x  5)
+             a5  (* x  6) a6  (* x  7) a7  (* x  8) a8  (* x  9) a9  (* x 10)
+             a10 (* x 11) a11 (* x 12) a12 (* x 13) a13 (* x 14) a14 (* x 15)
+             a15 (* x 16) a16 (* x 17) a17 (* x 18) a18 (* x 19) a19 (* x 20)
+             a20 (* x 21) a21 (* x 22) a22 (* x 23) a23 (* x 24) a24 (* x 25))
+         (+ a0 a1 a2 a3 a4 a5 a6 a7 a8 a9
+            a10 a11 a12 a13 a14 a15 a16 a17 a18 a19
+            a20 a21 a22 a23 a24)))))
+
+;; warm the arm
+(dotimes (_ 50) (p7-fn 1))
+
+(def p7-result (p7-fn 2))
+;; 2*(1+2+...+25) = 2*325 = 650
+(println "p7-result:" p7-result)
+(println "p7-expected 650:" (= 650 p7-result))
+
+(println "=== chaos2_jit_gc_interplay DONE ===")

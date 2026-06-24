@@ -1,0 +1,169 @@
+;;; chaos2_process_crash_propagation.blsp — crash propagation, exit signals, cascades
+;;;
+;;; Targets:
+;;;   P61 — multi-hop link cascade: A→B→C all die when C errors (no trap-exit)
+;;;   P62 — mixed link+trap: B traps, C doesn't — C dies, B gets [:EXIT C reason]
+;;;   P63 — exit :normal to linked process: does NOT propagate
+;;;   P64 — process crash with huge error value (BigInt in reason): round-trips OK
+;;;   P65 — process dies while holding monitors: monitor refs are cleaned up (no ghost :down)
+;;;   P66 — 100-process linked chain: one crash cascades through all
+;;;   P67 — spawn inside try/catch: inner crash is caught, outer process stays alive
+
+;;; ---- P61: 3-hop link cascade ----
+(println "=== P61: A→B→C link cascade, C errors ===")
+(let (me (self))
+  (trap-exit true)
+  (let (c-pid (spawn (do (receive (:crash :ok) (after 5000 :ok)) (error "cascade-error")))
+        b-pid (spawn (do (link c-pid) (receive (:quit :ok) (after 10000 :ok))))
+        a-pid (spawn (do (link b-pid) (receive (:quit :ok) (after 10000 :ok)))))
+    (link a-pid)
+    ;; Crash C
+    (send c-pid :crash)
+    ;; We should get an EXIT from A (the tail of the cascade reaching us)
+    (let (r (receive
+              ([:EXIT _ reason] reason)
+              (after 5000 :timeout)))
+      (println "P61: cascade reached us, reason:" r)
+      ;; reason propagated as the original error
+      (println "P61-correct (got exit, not timeout):" (not (= :timeout r)))))
+  (trap-exit false))
+
+;;; ---- P62: mixed trap-exit in chain ----
+(println "=== P62: B traps, C doesn't — C dies, B gets [:EXIT] message ===")
+(let (me (self))
+  (let (c-pid (spawn (do (receive (:crash :ok) (after 5000 :ok)) (error "partial-cascade")))
+        b-pid (spawn
+                (do (trap-exit true)
+                    (link c-pid)
+                    (send me :b-ready)
+                    (let (msg (receive
+                                ([:EXIT from reason] [:got-exit from reason])
+                                (after 5000 :timeout)))
+                      (send me [:b-saw msg])))))
+    (receive (:b-ready :ok) (after 3000 :timeout))
+    (send c-pid :crash)
+    (let (r (receive ([:b-saw v] v) (after 5000 :timeout)))
+      (println "P62: B saw:" (pr-str r))
+      (println "P62-correct (B got [:EXIT C reason]):"
+               (and (vector? r) (= :got-exit (get r 0)))))))
+
+;;; ---- P63: exit :normal to linked process does not kill it ----
+(println "=== P63: exit :normal to linked process ===")
+(let (me (self))
+  (trap-exit true)
+  (let (child (spawn (receive (:quit :ok) (after 10000 :ok))))
+    (link child)
+    ;; Send :normal exit — should not kill the child or propagate to us
+    (exit child :normal)
+    ;; Child receives :normal as a trappable [:EXIT] message (not a kill)
+    ;; Or — if child has trap-exit false — :normal exit signal is just ignored
+    ;; For us (trap-exit true): if we get a [:EXIT child :normal], it means
+    ;; the child died normally. That is expected behavior.
+    (let (r (receive
+              ([:EXIT _ :normal] :got-normal)
+              (after 500 :timeout)))
+      (println "P63: got:" r)
+      ;; :normal may or may not fire [:EXIT] depending on whether child was already exiting
+      ;; The key invariant: we must NOT have died ourselves
+      (println "P63-correct (we're alive):" true))
+    ;; Cleanup
+    (send child :quit))
+  (trap-exit false))
+
+;;; ---- P64: huge error reason (BigInt) in :down message ----
+(println "=== P64: BigInt in exit reason round-trips via monitor ===")
+(let (me (self)
+      big-reason (* 999999999 999999999 999999999))
+  (let (victim (spawn (do (receive (:go :ok) (after 5000 :ok)) (exit (self) big-reason))))
+    (let (ref (monitor victim))
+      (send victim :go)
+      (let (r (receive
+                ([:down ~ref _ reason] reason)
+                (after 5000 :timeout)))
+        (println "P64: reason == big-reason:" (= big-reason r))
+        (println "P64-correct:" (= big-reason r))))))
+
+;;; ---- P65: dead process's monitor refs cleaned up ----
+(println "=== P65: process holding monitors dies → refs cleaned up ===")
+;; A process monitors B, then A dies. B should NOT later receive a stale [:down] from A.
+;; We verify by letting B live and checking it doesn't receive unexpected messages.
+(let (me (self))
+  (let (b-pid (spawn
+                (do (send me :b-ready)
+                    ;; Wait for signal to check mailbox
+                    (receive (:check :ok) (after 10000 :timeout))
+                    ;; Check if we got any unexpected [:down ...] messages
+                    (let (unexpected (receive
+                                       ([:down _ _ _] :got-stale-down)
+                                       (after 100 :timeout)))
+                      (send me [:b-check unexpected])))))
+    (receive (:b-ready :ok) (after 3000 :timeout))
+    ;; A: monitor B, then immediately exit
+    (spawn
+      (let (_ (monitor b-pid))
+        ;; A exits without demonitoring — should not send stale :down to B later
+        :done))
+    ;; Let A die and GC settle
+    (receive (_ :ok) (after 200 :ok))
+    ;; Tell B to check its mailbox
+    (send b-pid :check)
+    (let (r (receive ([:b-check v] v) (after 3000 :timeout)))
+      (println "P65: B saw:" r)
+      (println "P65-correct (timeout, no stale down):" (= :timeout r)))))
+
+;;; ---- P66: 100-process linked chain crash cascade ----
+(println "=== P66: 100-process linked chain crash ===")
+(let (me (self))
+  (trap-exit true)
+  ;; Build a linked chain: process 0 links to process 1, ..., process 99
+  ;; Crash process 99 — the exit signal should propagate back to us
+  (defn build-chain (n parent-pid me)
+    (if (= n 0)
+      ;; End of chain: this is the tail, send its pid up and wait for :crash
+      (do (send me [:tail (self)])
+          (receive (:crash :ok) (after 10000 :timeout))
+          (error "chain-end-crash"))
+      ;; Intermediate: spawn next, link to it, wait
+      (let (child (spawn (build-chain (- n 1) (self) me)))
+        (link child)
+        (send me [:node (self)])
+        (receive (:quit :ok) (after 15000 :timeout)))))
+  (spawn (build-chain 99 nil me))
+  ;; Wait for the tail to announce itself
+  (let (tail (receive ([:tail p] p) (after 10000 :timeout)))
+    ;; Drain the other node announcements
+    (doseq (_ (range 99))
+      (receive ([:node _] :ok) (after 10000 :timeout)))
+    ;; Link to the first node in the chain (which is the spawned process from build-chain 99)
+    ;; Actually we'll just crash the tail and wait for the signal to reach us
+    (send tail :crash)
+    ;; The cascade should reach us as an EXIT signal (since we trap-exit)
+    (let (r (receive
+              ([:EXIT _ reason] reason)
+              (after 30000 :timeout)))
+      (println "P66: cascade reason reached us:" r)
+      (println "P66-correct:" (not (= :timeout r)))))
+  (trap-exit false))
+
+;;; ---- P67: spawn inside try/catch — inner crash is caught ----
+(println "=== P67: spawn + crash, outer try/catch is unaffected ===")
+(let (me (self))
+  ;; Without trap-exit, a crash in a linked child kills us too.
+  ;; But if we don't link, the child's crash is fully contained.
+  (def p67-outer-survived true)  ; we'll overwrite if we crash
+  (try
+    (let (child (spawn (error "inner-crash")))
+      ;; Monitor to detect the crash without linking
+      (let (ref (monitor child))
+        (let (r (receive
+                  ([:down ~ref _ reason] reason)
+                  (after 3000 :timeout)))
+          (println "P67: inner crash reason:" r)
+          ;; Outer process is still alive
+          (println "P67-outer-alive:" true))))
+    (catch e
+      (println "P67: UNEXPECTED outer catch:" (error-message e))
+      (def p67-outer-survived false)))
+  (println "P67-correct (outer survived):" p67-outer-survived))
+
+(println "=== chaos2_process_crash_propagation DONE ===")

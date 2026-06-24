@@ -1,0 +1,218 @@
+;;; chaos2_process_genserver.blsp — gen-server patterns and process state machines
+;;;
+;;; These mimic Erlang OTP gen_server patterns: a process holds state in its
+;;; receive loop and responds to typed messages. Tests concurrent access,
+;;; state corruption, crash-and-restart, and timeout handling.
+;;;
+;;; Targets:
+;;;   P43 — stateful counter server: concurrent increments from 100 clients
+;;;   P44 — request-reply with timeout: server sleeps; client times out and retries
+;;;   P45 — crash-and-restart: supervisor sees :down, restarts the worker
+;;;   P46 — process register + whereis: named lookup, dead name → nil
+;;;   P47 — gen-server with large state: map of 10k entries, many concurrent readers
+;;;   P48 — process info: mailbox count, status, memory introspection
+
+;;; ---- P43: concurrent counter server ----
+(println "=== P43: concurrent counter from 100 clients ===")
+
+(defn counter-server (count)
+  (receive
+    ([:incr n reply-to]
+      (send reply-to [:ok (+ count n)])
+      (counter-server (+ count n)))
+    ([:get reply-to]
+      (send reply-to [:count count])
+      (counter-server count))
+    (:stop :done)))
+
+(let (me (self)
+      server (spawn (counter-server 0))
+      n-clients 100)
+  ;; Each client sends 10 increments of 1, waits for each ack
+  (dotimes (i n-clients)
+    (spawn
+      (defn do-increments (server me remaining)
+        (if (= remaining 0)
+          (send me [:client-done i])
+          (do
+            (send server [:incr 1 (self)])
+            (receive ([:ok _] :ok) (after 5000 :timeout))
+            (do-increments server me (- remaining 1)))))
+      (do-increments server me 10)))
+
+  ;; Wait for all clients to finish
+  (defn wait-clients (n)
+    (when (> n 0)
+      (receive ([:client-done _] (wait-clients (- n 1)))
+               (after 30000 (println "P43: client timeout!")))))
+  (wait-clients n-clients)
+
+  ;; Check final count
+  (send server [:get (self)])
+  (let (final (receive ([:count c] c) (after 5000 :timeout)))
+    (send server :stop)
+    (println "P43: final count:" final)
+    (println "P43-correct (1000):" (= 1000 final))))
+
+;;; ---- P44: request-reply with timeout and retry ----
+(println "=== P44: timeout + retry pattern ===")
+
+(defn slow-server ()
+  (receive
+    ([:request reply-to payload]
+      ;; Simulate delay: 200ms
+      (receive (_ :ok) (after 200 :ok))
+      (send reply-to [:response payload])
+      (slow-server))
+    (:stop :done)))
+
+(defn call-with-retry (server payload max-retries timeout-ms)
+  (if (= max-retries 0)
+    :give-up
+    (do
+      (send server [:request (self) payload])
+      (let (r (receive
+                ([:response v] [:ok v])
+                (after timeout-ms [:timeout max-retries])))
+        (if (vector? r)
+          (let (tag (get r 0))
+            (if (= :ok tag)
+              (get r 1)
+              ;; timed out — retry
+              (call-with-retry server payload (- max-retries 1) timeout-ms)))
+          r)))))
+
+(let (server (spawn (slow-server)))
+  ;; Short timeout: will retry a few times
+  (def p44-result (call-with-retry server :ping 5 50))
+  (println "P44: result (may be :ping after retries):" p44-result)
+  ;; Long timeout: always succeeds
+  (def p44-result2 (call-with-retry server :pong 3 1000))
+  (println "P44: result2 (always pong):" p44-result2)
+  (send server :stop)
+  (println "P44-correct:" (= :pong p44-result2)))
+
+;;; ---- P45: crash-and-restart supervision ----
+(println "=== P45: crash-and-restart (one-for-one supervisor) ===")
+
+(defn crashable-worker (me)
+  (receive
+    (:crash (error "worker-crash"))
+    ([:echo v reply-to]
+      (send reply-to [:echo v])
+      (crashable-worker me))
+    (:stop :done)))
+
+(defn supervisor (worker-fn me restarts-left)
+  (let (worker (spawn (worker-fn me)))
+    (let (ref (monitor worker))
+      (send me [:worker-pid worker])
+      (let (event (receive
+                    ([:down ~ref _ reason] [:crashed reason])
+                    (:stop [:stopped])
+                    (after 10000 :timeout)))
+        (when (and (vector? event) (= :crashed (get event 0)))
+          (if (> restarts-left 0)
+            (do (send me [:restarted (get event 1)])
+                (supervisor worker-fn me (- restarts-left 1)))
+            (send me [:max-restarts])))))))
+
+(let (me (self))
+  (spawn (supervisor (fn (me) (crashable-worker me)) me 3))
+  (let (worker-pid (receive ([:worker-pid p] p) (after 5000 :timeout)))
+    ;; Crash the worker 3 times
+    (send worker-pid :crash)
+    (receive ([:restarted reason]
+      (println "P45: restart 1, reason:" reason))
+      (after 3000 (println "P45: no restart 1")))
+    (let (worker2 (receive ([:worker-pid p] p) (after 3000 :timeout)))
+      (send worker2 :crash)
+      (receive ([:restarted _] (println "P45: restart 2")) (after 3000 (println "P45: no restart 2")))
+      (let (worker3 (receive ([:worker-pid p] p) (after 3000 :timeout)))
+        (send worker3 :crash)
+        (receive ([:restarted _] (println "P45: restart 3")) (after 3000 (println "P45: no restart 3")))
+        ;; After max-restarts, supervisor should report max-restarts
+        (let (final (receive ([:max-restarts] :hit-max)
+                             ([:worker-pid _] :got-another-pid)
+                             (after 3000 :timeout)))
+          (println "P45: final:" final)
+          (println "P45-correct (hit-max or restarted all):" (not (= :timeout final))))))))
+
+;;; ---- P46: register + whereis + death deregisters ----
+(println "=== P46: register/whereis and auto-deregister on death ===")
+
+(let (me (self))
+  (let (worker (spawn :p46-test-worker
+                  (do (receive (:die :ok) (after 10000 :ok)) (send me :dead))))
+    (let (found (whereis :p46-test-worker))
+      (println "P46: found registered:" (pid? found))
+      (println "P46: same pid:" (= worker found)))
+    (send worker :die)
+    (receive (:dead :ok) (after 3000 :timeout))
+    ;; Give scheduler time to reap the name
+    (receive (_ :ok) (after 100 :ok))
+    (let (gone (whereis :p46-test-worker))
+      (println "P46: after death, whereis:" gone)
+      (println "P46-correct (nil after death):" (= nil gone)))))
+
+;;; ---- P47: large state map, concurrent readers ----
+(println "=== P47: gen-server with 10k-entry map state, 50 readers ===")
+
+(defn map-server (m)
+  (receive
+    ([:get k reply-to]
+      (send reply-to [:val (get m k)])
+      (map-server m))
+    ([:put k v reply-to]
+      (let (m2 (assoc m k v))
+        (send reply-to :ok)
+        (map-server m2)))
+    (:stop :done)))
+
+(let (me (self)
+      server (spawn (map-server {})))
+  ;; Populate: 10k entries
+  (doseq (i (range 10000))
+    (send server [:put i (* i i) (self)])
+    (receive (:ok :ok) (after 1000 :timeout)))
+
+  ;; 50 concurrent readers
+  (dotimes (i 50)
+    (spawn
+      (let (key (rem (* i 197) 10000))
+        (send server [:get key (self)])
+        (let (r (receive ([:val v] v) (after 5000 :timeout)))
+          (send me [:p47 i key r])))))
+
+  ;; Collect results
+  (defn collect-p47 (n wrong)
+    (if (= n 0) wrong
+      (let (r (receive ([:p47 _ key val] [key val]) (after 10000 :timeout)))
+        (let (expected (* (get r 0) (get r 0)))
+          (collect-p47 (- n 1)
+                       (if (= expected (get r 1)) wrong (+ wrong 1)))))))
+  (def p47-wrong (collect-p47 50 0))
+  (send server :stop)
+  (println "P47: wrong reads:" p47-wrong)
+  (println "P47-correct:" (= 0 p47-wrong)))
+
+;;; ---- P48: process-info introspection ----
+(println "=== P48: process-info gives valid snapshot ===")
+
+(let (me (self))
+  ;; Flood our mailbox so mailbox count is visible
+  (dotimes (_ 10) (send me :dummy))
+  (let (info (process-info me))
+    (println "P48: process-info keys:" (into [] (keys info)))
+    (println "P48: status:" (get info :status))
+    (println "P48: mailbox >= 10:" (>= (get info :mailbox) 10))
+    (println "P48: memory > 0:" (> (get info :memory) 0))
+    (println "P48-correct:"
+             (and info
+                  (or (= :running (get info :status))
+                      (= :waiting (get info :status)))
+                  (>= (get info :mailbox) 10))))
+  ;; Drain dummies
+  (dotimes (_ 10) (receive (:dummy :ok) (after 100 :ok))))
+
+(println "=== chaos2_process_genserver DONE ===")

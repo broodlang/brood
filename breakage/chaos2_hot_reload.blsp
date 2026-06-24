@@ -1,0 +1,186 @@
+;;; chaos2_hot_reload.blsp — hot-reload, def rebind, and live-code-update races
+;;;
+;;; Brood's hot-reload model: `def` rebinds a global in the shared RUNTIME table;
+;;; processes look up globals at *call time* (late binding), so a running process
+;;; sees new code on its next call — without restarting.
+;;;
+;;; Targets:
+;;;   P29 — def rebind visible to spawned processes on next call (late binding)
+;;;   P30 — defonce: second eval leaves the first binding (idempotent)
+;;;   P31 — reload-defs on a tempfile: def'd fn updated, side-effecting println NOT re-run
+;;;   P32 — hot-swap a recursive fn while it runs: in-flight calls use old code,
+;;;          next top-level entry uses new code (late binding at the *call site*, not def site)
+;;;   P33 — defdyn + binding: per-process dynamic variables don't leak across processes
+;;;   P34 — binding restores on error: dynamic var reverts even when body raises
+;;;   P35 — concurrent binding: two processes binding the same dyn var independently
+
+;;; ---- P29: def rebind visible via late binding ----
+(println "=== P29: late binding — def rebind visible on next call ===")
+
+(def p29-version 1)
+
+(defn p29-get-version () p29-version)
+
+;; Warm the arm
+(dotimes (_ 10) (p29-get-version))
+(println "P29: before redef:" (p29-get-version))
+
+;; Redefine p29-version
+(def p29-version 2)
+
+;; Next call should see the new value (late binding — global lookup at call time)
+(println "P29: after redef:" (p29-get-version))
+(println "P29-correct:" (= 2 (p29-get-version)))
+
+;;; ---- P30: defonce is idempotent ----
+(println "=== P30: defonce idempotency ===")
+
+(defonce p30-state {:initialized true :value 42})
+;; Re-evaluate defonce — must NOT overwrite
+(defonce p30-state {:initialized false :value 0})
+
+(println "P30: state:" (pr-str p30-state))
+(println "P30-correct (first wins):"
+         (and (= true (get p30-state :initialized))
+              (= 42   (get p30-state :value))))
+
+;;; ---- P31: reload-defs skips side-effecting top-level calls ----
+(println "=== P31: reload-defs only re-evaluates defs ===")
+
+;; Write a temp file with a def and a side-effecting println
+(def p31-tmpfile "/tmp/brood_chaos_reload_test.blsp")
+(write-file p31-tmpfile
+  "(def p31-reloaded-val 100)\n(println \"SIDE-EFFECT-FROM-RELOAD\")\n")
+
+;; First: plain load runs everything
+(println "P31: loading fresh (should print SIDE-EFFECT)...")
+(def p31-printed false)
+;; We can't easily capture stdout mid-test, so we verify via the def value
+(load p31-tmpfile)
+(println "P31: after load, val:" p31-reloaded-val)
+(println "P31: correct val:" (= 100 p31-reloaded-val))
+
+;; Now change the def value and use reload-defs — side effect should NOT re-run
+(write-file p31-tmpfile
+  "(def p31-reloaded-val 200)\n(println \"SIDE-EFFECT-SHOULD-NOT-APPEAR\")\n")
+(println "P31: reload-defs (should NOT print SIDE-EFFECT-SHOULD-NOT-APPEAR)...")
+(reload-defs p31-tmpfile)
+(println "P31: after reload-defs, val:" p31-reloaded-val)
+(println "P31-correct (200):" (= 200 p31-reloaded-val))
+
+;;; ---- P32: hot-swap fn while it runs ----
+(println "=== P32: hot-swap recursive fn via def ===")
+
+;; Define a recursive fn that counts down, but checks a global flag mid-loop
+(def p32-use-new-impl false)
+
+(defn p32-compute (n acc)
+  (if (= n 0)
+    [:old acc]
+    (p32-compute (- n 1) (+ acc n))))
+
+;; New implementation returns a tagged result
+(defn p32-compute-new (n acc)
+  (if (= n 0)
+    [:new acc]
+    (p32-compute-new (- n 1) (+ acc n))))
+
+;; Start with old impl
+(def p32-old-result (p32-compute 1000 0))
+(println "P32: old impl:" (first p32-old-result))
+
+;; Hot-swap: rebind p32-compute to the new version
+;; (In a running system this would happen from a file reload or REPL)
+(def p32-compute p32-compute-new)
+
+;; Next top-level call sees new impl (late binding at the call site)
+(def p32-new-result (p32-compute 1000 0))
+(println "P32: new impl after hot-swap:" (first p32-new-result))
+(println "P32-correct (both 500500):"
+         (and (= 500500 (second p32-old-result))
+              (= 500500 (second p32-new-result))
+              (= :new (first p32-new-result))))
+
+;;; ---- P33: defdyn per-process isolation ----
+(println "=== P33: defdyn per-process isolation ===")
+
+(defdyn *p33-request-id* :none)
+
+(let (me (self))
+  ;; Each spawned process binds *p33-request-id* independently
+  (spawn
+    (binding (*p33-request-id* :req-1)
+      (receive (:go :ok) (after 3000 :timeout))
+      (send me [:p33 *p33-request-id*])))
+  (spawn
+    (binding (*p33-request-id* :req-2)
+      (receive (:go :ok) (after 3000 :timeout))
+      (send me [:p33 *p33-request-id*])))
+  ;; Both processes are now waiting with their respective bindings
+  ;; Send :go to all processes registered as p33 workers (they aren't registered,
+  ;; so we rely on the spawn order: let's broadcast via a third spawn)
+  ;; Actually just wait a bit and send :go to both — we captured their pids above
+  ;; Let's redo this properly with captured pids:
+  )
+
+;; Redo with proper pid capture
+(let (me (self))
+  (let (w1 (spawn
+              (binding (*p33-request-id* :req-1)
+                (receive (:go :ok) (after 3000 :timeout))
+                (send me [:p33 1 *p33-request-id*])))
+        w2 (spawn
+              (binding (*p33-request-id* :req-2)
+                (receive (:go :ok) (after 3000 :timeout))
+                (send me [:p33 2 *p33-request-id*]))))
+    (send w1 :go)
+    (send w2 :go)
+    (let (r1 (receive ([:p33 1 v] v) (after 3000 :timeout))
+          r2 (receive ([:p33 2 v] v) (after 3000 :timeout)))
+      (println "P33: proc1 binding:" r1 "proc2 binding:" r2)
+      (println "P33-isolated:" (and (= :req-1 r1) (= :req-2 r2)))
+      ;; Main process binding is unaffected
+      (println "P33-main-unaffected:" (= :none *p33-request-id*)))))
+
+;;; ---- P34: binding restores on error ----
+(println "=== P34: binding restores dynamic var on error ===")
+
+(defdyn *p34-level* 0)
+
+(println "P34: before:" *p34-level*)
+(try
+  (binding (*p34-level* 99)
+    (println "P34: inside binding:" *p34-level*)
+    (error "deliberate error inside binding"))
+  (catch e
+    (println "P34: caught error, level now:" *p34-level*)
+    (println "P34-restored:" (= 0 *p34-level*))))
+
+;;; ---- P35: concurrent binding — 100 processes each with their own binding ----
+(println "=== P35: 100 concurrent processes with independent defdyn bindings ===")
+
+(defdyn *p35-worker-id* :unset)
+
+(let (me (self)
+      n 100)
+  (dotimes (i n)
+    (spawn
+      (binding (*p35-worker-id* i)
+        ;; Do some work to let other processes interleave
+        (def _ (fold (fn (a x) (+ a x)) 0 (range 1000)))
+        ;; Check that our binding is still intact
+        (send me [:p35 i *p35-worker-id*]))))
+  ;; Collect results — each worker must see its own i
+  (defn collect-p35 (remaining wrong)
+    (if (= remaining 0)
+      wrong
+      (let (r (receive ([:p35 expected actual] [expected actual]) (after 10000 :timeout)))
+        (collect-p35 (- remaining 1)
+                     (if (= (get r 0) (get r 1))
+                       wrong
+                       (+ wrong 1))))))
+  (def p35-wrong (collect-p35 n 0))
+  (println "P35: wrong bindings:" p35-wrong)
+  (println "P35-correct (0 wrong):" (= 0 p35-wrong)))
+
+(println "=== chaos2_hot_reload DONE ===")
