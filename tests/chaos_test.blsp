@@ -1,0 +1,277 @@
+;; Chaos tests: gibberish spawns, gibberish closures, pathological match forms,
+;; throw with weird values, type errors in builtins, arity explosions.
+;; Each case documents the ACTUAL behavior so regressions are visible.
+;;
+;; Philosophy: every case either:
+;;   (a) Works cleanly with a documented result — the runtime absorbed the abuse.
+;;   (b) Raises a structured error — the runtime caught it safely.
+;; "Silently crash" or "hang" are both failures.
+
+(defmodule chaos-test (:use test))
+
+(defn expand-error (form)
+  (error-of (eval form)))
+
+;; ── 1. Spawn with non-function values ────────────────────────────────────────
+;;
+;; `spawn` takes an EXPRESSION, not a callable — `(spawn nil)` spawns a process
+;; that evaluates `nil`, returns it, and exits normally.  Not an error.
+
+(describe "spawn with non-function values"
+  (test "spawning nil returns a pid — process evaluates nil and exits normally"
+    (let (w (spawn nil))
+      (is (pid? w))))
+
+  (test "spawning an integer returns a pid"
+    (let (w (spawn 42))
+      (is (pid? w))))
+
+  (test "spawning a keyword returns a pid"
+    (let (w (spawn :not-a-fn))
+      (is (pid? w))))
+
+  (test "a spawned-nil process exits with :normal"
+    (let (w (spawn nil) ref (monitor w))
+      (assert= :normal (receive ([:down _ _ reason] reason) (after 500 :timeout)))))
+
+  (test "a spawned-integer process exits with :normal"
+    (let (w (spawn 42) ref (monitor w))
+      (assert= :normal (receive ([:down _ _ reason] reason) (after 500 :timeout)))))
+
+  (test "a crashing spawned process exits with :normal (error does not propagate as reason)"
+    (let (w (spawn (fn () (/ 1 0))) ref (monitor w))
+      (assert= :normal (receive ([:down _ _ reason] reason) (after 500 :timeout)))))
+
+  (test "parent process is unaffected when a child crashes without a monitor"
+    (let (w (spawn (fn () (/ 1 0))))
+      (assert= :survived (receive (after 100 :survived))))))
+
+;; ── 2. send and monitor type errors ──────────────────────────────────────────
+
+(describe "send and monitor with wrong types"
+  (test "(send nil msg) raises type error"
+    (assert-error (send nil :hello)))
+
+  (test "(send integer msg) raises type error"
+    (assert-error (send 42 :hello)))
+
+  (test "(monitor nil) raises type error"
+    (assert-error (monitor nil)))
+
+  (test "(monitor integer) raises type error"
+    (assert-error (monitor 42))))
+
+;; ── 3. throw with non-standard values ────────────────────────────────────────
+;;
+;; `(throw v)` re-raises any value; `catch` sees it as-is.
+;; `error-of` renders maps as "kind: message" and passes other values through.
+
+(describe "throw and catch with weird values"
+  (test "throw a keyword — catch receives it"
+    (assert= :boom (try (throw :boom) (catch e e))))
+
+  (test "throw an integer — catch receives it"
+    (assert= 99 (try (throw 99) (catch e e))))
+
+  (test "throw a vector — catch receives it"
+    (assert= [1 2 3] (try (throw [1 2 3]) (catch e e))))
+
+  (test "throw nil — catch receives nil"
+    (assert= nil (try (throw nil) (catch e e))))
+
+  (test "rethrow inside nested try is caught by outer try"
+    (let (caught
+          (try
+            (try (/ 1 0) (catch e (throw e)))
+            (catch outer-e outer-e)))
+      (is (map? caught))
+      (is (string-contains? (str (get caught :message)) "zero"))))
+
+  (test "try with no error returns its body value"
+    (assert= :ok (try :ok (catch e :error))))
+
+  (test "try with a throw skips the body result"
+    (assert= :caught (try (do (throw :x) :not-reached) (catch _ :caught)))))
+
+;; ── 4. Function arity errors ──────────────────────────────────────────────────
+
+(describe "function arity errors"
+  (test "too few arguments raises arity error"
+    (let (msg (error-of ((fn (a b c) a) 1 2)))
+      (is (string? msg))
+      (is (string-contains? msg "3"))))
+
+  (test "too many arguments raises arity error"
+    (let (msg (error-of ((fn (a b) a) 1 2 3)))
+      (is (string? msg))
+      (is (string-contains? msg "2"))))
+
+  (test "variadic (& rest) accepts any number of args including zero"
+    (assert= '()      ((fn (& xs) xs)))
+    (assert= '(1)     ((fn (& xs) xs) 1))
+    (assert= '(1 2 3) ((fn (& xs) xs) 1 2 3)))
+
+  (test "required + rest accepts any count >= required"
+    (assert= '(1 ())     ((fn (a & rest) (list a rest)) 1))
+    (assert= '(1 (2 3)) ((fn (a & rest) (list a rest)) 1 2 3))))
+
+;; ── 5. Closures: gibberish and chaos ─────────────────────────────────────────
+
+(describe "closure chaos"
+  (test "closure factory — fn returning fn"
+    (let (adder (fn (n) (fn (x) (+ n x))))
+      (assert= 15 ((adder 5) 10))
+      (assert= 0  ((adder -3) 3))))
+
+  (test "three closures sharing the same captured binding"
+    (let (x 42
+          f1 (fn () x)
+          f2 (fn () (+ (f1) x))
+          f3 (fn () (+ (f2) x)))
+      (assert= 126 (f3))))
+
+  (test "fn chain — fn returning fn returning fn"
+    (let (outer (fn () (fn () (fn () 42))))
+      (assert= 42 (((outer))))))
+
+  (test "closure over a mutable-looking (but immutable) let binding"
+    (let (counter
+          (let (n 0)
+            (fn () n))
+          )
+      (assert= 0 (counter))
+      (assert= 0 (counter))))
+
+  (test "closure passed as argument and called inside another fn"
+    (let (apply-f (fn (f x) (f x))
+          double  (fn (n) (* n 2)))
+      (assert= 10 (apply-f double 5))))
+
+  (test "doubly-wrapped closure application (wrap returns fn, calling it returns val)"
+    (let (wrap (fn (v) (fn () v)))
+      (assert= 99 ((wrap 99)))))
+
+  (test "map over a list using a closure that closes over outer state"
+    (let (offset 10)
+      (assert= '(11 12 13) (map (fn (x) (+ x offset)) '(1 2 3)))))
+
+  (test "closure that calls itself via argument (no let-rec bug)"
+    (let (f (fn (recurse n)
+              (if (= n 0) 0 (recurse recurse (- n 1)))))
+      (assert= 0 (f f 10000)))))
+
+;; ── 6. match chaos ────────────────────────────────────────────────────────────
+
+(describe "match — chaotic patterns"
+  (test "match nil literal"
+    (assert= :got-nil (match nil (nil :got-nil) (_ :other))))
+
+  (test "match true and false literals"
+    (assert= :yes (match true  (true :yes) (false :no) (_ :other)))
+    (assert= :no  (match false (true :yes) (false :no) (_ :other))))
+
+  (test "match empty list"
+    (assert= :empty (match '() (() :empty) (_ :other))))
+
+  (test "match with no clauses raises"
+    (is (not (nil? (expand-error '(match 42))))))
+
+  (test "match with no matching clause raises"
+    (is (not (nil? (expand-error '(match 42 (99 :nope) (100 :nope)))))))
+
+  (test "match with guard — passes when guard is true"
+    (assert= :even (match 8 (n :when (even? n) :even) (n :odd))))
+
+  (test "match with guard — falls through when guard is false"
+    (assert= :odd (match 7 (n :when (even? n) :even) (n :odd))))
+
+  (test "match nested vector destructure"
+    (assert= 6 (match [1 [2 3]] ([a [b c]] (+ a b c)))))
+
+  (test "match map — bind to variable and extract with get"
+    (assert= 42 (match {:x 42 :y 0} (m (get m :x)))))
+
+  (test "match wildcard always matches"
+    (assert= :yes (match :anything (_ :yes))))
+
+  (test "match a keyword as a pattern literal"
+    (assert= :matched (match :foo (:foo :matched) (_ :other)))))
+
+;; ── 7. Concurrent chaos — 100 processes spawned and drained ──────────────────
+
+(defn chaos-fan-out (n me)
+  (if (= n 0) nil
+    (do (spawn (send me n))
+        (chaos-fan-out (- n 1) me))))
+
+(defn chaos-fan-in (got total acc)
+  (if (= got total) acc
+    (chaos-fan-in (+ got 1) total (receive (x (+ acc x))))))
+
+(defn chaos-drain (n)
+  (if (= n 0) :ok
+    (receive (:done (chaos-drain (- n 1))) (after 500 :timeout))))
+
+(describe "concurrent spawn/send chaos"
+  :isolated
+
+  (test "100 spawned processes each send a number; drain all of them"
+    (chaos-fan-out 100 (self))
+    (assert= 5050 (chaos-fan-in 0 100 0)))
+
+  (test "spawning 50 processes that each crash does not affect parent"
+    (let (me (self))
+      (dotimes (i 50)
+        (spawn (fn () (/ 1 0))))
+      (assert= :alive (receive (after 200 :alive)))))
+
+  ;; `(self)` inside a `(spawn expr)` resolves in the SPAWNED process, so
+  ;; `(spawn (send (self) :done))` would send to the spawned process itself.
+  ;; Capture the parent PID with `me=(self)` first.
+  (test "20 spawned senders deliver :done to parent — all received without timeout"
+    (let (me (self))
+      (dotimes (i 20)
+        (spawn (send me :done))))
+    (assert= :ok (chaos-drain 20))))
+
+;; ── 8. nil args to builtins ───────────────────────────────────────────────────
+
+(describe "nil arguments to builtins"
+  (test "(not nil) returns true"
+    (is (not nil)))
+
+  (test "(count nil) returns 0"
+    (assert= 0 (count nil)))
+
+  (test "(str nil) returns \"nil\""
+    (assert= "nil" (str nil)))
+
+  (test "(string-length nil) raises type error"
+    (assert-error (string-length nil)))
+
+  (test "(string-contains? nil ...) returns false — nil is treated as empty string"
+    (assert= false (string-contains? nil "x")))
+
+  (test "(append nil list) returns list"
+    (assert= '(1 2 3) (append nil '(1 2 3))))
+
+  (test "(append list nil) returns list"
+    (assert= '(1 2 3) (append '(1 2 3) nil))))
+
+;; ── 9. Higher-order gibberish ─────────────────────────────────────────────────
+
+(describe "higher-order function chaos"
+  (test "map/filter/fold on a vector return a list"
+    (assert= '(2 4 6)  (map (fn (x) (* x 2)) [1 2 3]))
+    (assert= '(1 3)    (filter odd? [1 2 3 4]))
+    (assert= 15        (fold + 0 [1 2 3 4 5])))
+
+  (test "apply with leading args: (apply + 1 2 '(3 4)) = 10"
+    (assert= 10 (apply + 1 2 '(3 4))))
+
+  (test "map returning closures — each closure closes over its own captured value"
+    (let (fns (map (fn (n) (fn () n)) '(1 2 3)))
+      (assert= '(1 2 3) (map (fn (f) (f)) fns))))
+
+  (test "fold building a list in reverse (classic fold pattern)"
+    (assert= '(5 4 3 2 1) (fold (fn (acc x) (cons x acc)) '() '(1 2 3 4 5)))))
