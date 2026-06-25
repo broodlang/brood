@@ -289,6 +289,7 @@ pub enum Node {
         args: Box<[Node]>,
         tail: bool,
         pos: Option<Pos>,
+        file: Option<std::sync::Arc<str>>,
         site: u32,
     },
     /// A **direct `letrec` self-recursive tail call** (the self-call optimization).

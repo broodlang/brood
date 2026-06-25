@@ -162,7 +162,7 @@ pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     num_bin(
         heap,
         args,
-        "%add",
+        "+",
         i64::checked_add,
         |a, b| a + b,
         |a, b| a + b,
@@ -172,7 +172,7 @@ pub(super) fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     num_bin(
         heap,
         args,
-        "%sub",
+        "-",
         i64::checked_sub,
         |a, b| a - b,
         |a, b| a - b,
@@ -182,7 +182,7 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     num_bin(
         heap,
         args,
-        "%mul",
+        "*",
         i64::checked_mul,
         |a, b| a * b,
         |a, b| a * b,
@@ -190,8 +190,8 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 }
 
 pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = two(args, "%div")?;
-    let bf = num_to_f64(heap, "%div", b)?;
+    let (a, b) = two(args, "/")?;
+    let bf = num_to_f64(heap, "/", b)?;
     if bf == 0.0 {
         return Err(LispError::runtime("division by zero")
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
@@ -216,15 +216,15 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
             if num_traits::Zero::is_zero(&r) {
                 Ok(heap.int_from_bigint(q))
             } else {
-                Ok(Value::Float(num_to_f64(heap, "%div", a)? / bf))
+                Ok(Value::Float(num_to_f64(heap, "/", a)? / bf))
             }
         }
-        _ => Ok(Value::Float(num_to_f64(heap, "%div", a)? / bf)),
+        _ => Ok(Value::Float(num_to_f64(heap, "/", a)? / bf)),
     }
 }
 
 pub(super) fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = two(args, "%lt")?;
+    let (a, b) = two(args, "<")?;
     // Compare two integers directly; coercing to f64 first loses precision past
     // 2^53 (e.g. `(< 9007199254740992 9007199254740993)` would wrongly be false).
     // `value_cmp` already handles Int/BigInt exactly and the mixed int/float and
@@ -232,7 +232,7 @@ pub(super) fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let lt = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x < y,
         _ if is_integer(a) && is_integer(b) => heap.value_cmp(a, b) == std::cmp::Ordering::Less,
-        _ => num_to_f64(heap, "%lt", a)? < num_to_f64(heap, "%lt", b)?,
+        _ => num_to_f64(heap, "<", a)? < num_to_f64(heap, "<", b)?,
     };
     Ok(Value::boolean(lt))
 }
@@ -242,11 +242,11 @@ pub(super) fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// reach (the old `(not (%lt …))` bodies were a nested call it couldn't). Same
 /// int-exact / float-coerce care as `%lt`.
 pub(super) fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = two(args, "%le")?;
+    let (a, b) = two(args, "<=")?;
     let le = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x <= y,
         _ if is_integer(a) && is_integer(b) => heap.value_cmp(a, b) != std::cmp::Ordering::Greater,
-        _ => num_to_f64(heap, "%le", a)? <= num_to_f64(heap, "%le", b)?,
+        _ => num_to_f64(heap, "<=", a)? <= num_to_f64(heap, "<=", b)?,
     };
     Ok(Value::boolean(le))
 }
@@ -361,7 +361,7 @@ pub(super) fn remainder(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// `(/ (- a (rem a b)) b)` integer result) and guards both `b == 0` and the lone
 /// `i64::MIN / -1` overflow; that overflow promotes to BigInt.
 pub(super) fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let (a, b) = two(args, "%quot")?;
+    let (a, b) = two(args, "quot")?;
     if let (Value::Int(x), Value::Int(y)) = (a, b) {
         match x.checked_div(y) {
             Some(q) => return Ok(Value::int(q)),
@@ -373,7 +373,7 @@ pub(super) fn prim_quot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             None => {} // i64::MIN / -1 — promote and fall through
         }
     }
-    let (x, y) = bigint_pair(heap, args, "%quot")?;
+    let (x, y) = bigint_pair(heap, args, "quot")?;
     if num_traits::Zero::is_zero(&y) {
         return Err(LispError::runtime("quot: division by zero")
             .with_code(crate::error::error_codes::DIV_BY_ZERO)

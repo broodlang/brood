@@ -432,7 +432,7 @@ fn type_errors_are_self_identifying() {
     };
     assert_eq!(
         err("(+ 1 \"x\")"),
-        "type error: %add: expected number, got string (\"x\")"
+        "type error: +: expected number, got string (\"x\")"
     );
     assert_eq!(
         err("(first 5)"),

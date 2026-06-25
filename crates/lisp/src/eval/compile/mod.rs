@@ -861,14 +861,16 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 Node::Global(_) => heap.vm_site_alloc(),
                 _ => NO_SITE,
             };
+            let (pos, file) = match heap.form_pos(form) {
+                Some((p, f)) => (Some(p), f),
+                None => (None, None),
+            };
             Some(Node::Call {
                 callee: Box::new(callee),
                 args: args.into_boxed_slice(),
                 tail,
-                // Capture the combination's source position now, while its
-                // reader-recorded `form_pos` entry is live (a later collection moves
-                // the LOCAL form, but `Pos` is plain data and stays valid).
-                pos: heap.form_pos_only(form),
+                pos,
+                file,
                 site,
             })
         }
@@ -1184,6 +1186,7 @@ fn shift_slots(node: &Node, delta: usize) -> Node {
             args,
             tail: _,
             pos,
+            file,
             site,
         } => Node::Call {
             callee: Box::new(shift_slots(callee, delta)),
@@ -1200,6 +1203,7 @@ fn shift_slots(node: &Node, delta: usize) -> Node {
             // only to splice into non-tail position, so the demotion is always correct.)
             tail: false,
             pos: *pos,
+            file: file.clone(),
             site: *site,
         },
         Node::SelfCall { args, pos } => Node::SelfCall {
@@ -2216,9 +2220,10 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
             args,
             tail,
             pos,
+            file,
             site,
         } => {
-            let step = exec_call(heap, callee, args, *tail, *pos, *site, frame_base, genv)?;
+            let step = exec_call(heap, callee, args, *tail, *pos, file.as_deref(), *site, frame_base, genv)?;
             force(heap, step)
         }
         Node::Prim1 {
@@ -2425,16 +2430,20 @@ fn exec_call(
     args: &[Node],
     tail: bool,
     pos: Option<Pos>,
+    file: Option<&str>,
     site: u32,
     frame_base: usize,
     genv: EnvRoot,
 ) -> Result<Step, LispError> {
-    // Tag an error with this combination's source position if it doesn't
-    // already carry one — so the *innermost* failing call wins (mirrors the
-    // tree-walker's `or_form_pos`); a sub-call that already tagged itself is
-    // left untouched. `None` (a promoted RUNTIME body) is a no-op.
+    // Tag an error with this combination's source position (and file when known)
+    // if it doesn't already carry one — so the *innermost* failing call wins
+    // (mirrors the tree-walker's `or_form_pos`); a sub-call that already tagged
+    // itself is left untouched.
     let tag = |e: LispError| match pos {
-        Some(p) => e.or_pos(p),
+        Some(p) => match file {
+            Some(f) => e.or_pos(p).or_file(f),
+            None => e.or_pos(p),
+        },
         None => e,
     };
     // Resolve the callee — through this site's inline cache when it has one
@@ -3149,6 +3158,7 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             args,
             tail,
             pos,
+            file: _,
             site,
         } => {
             // Callee first, then each arg (the order `exec_call` evaluates them). When
