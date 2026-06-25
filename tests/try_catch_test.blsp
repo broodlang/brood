@@ -133,7 +133,7 @@
   (test "kernel error map → :message field"
     (assert= (try (/ 1 0) (catch e (error-message e))) "division by zero")
     (assert= (try (+ 1 "x") (catch e (error-message e)))
-      "%add: expected number, got string (\"x\")"))
+      "+: expected number, got string (\"x\")"))
 
   (test "a raised string is returned as-is"
     (assert= (try (error "plain") (catch e (error-message e))) "plain"))
@@ -155,7 +155,7 @@
     (assert= (error-of (/ 1 0)) "runtime error: division by zero"))
 
   (test "type error names the op, the expected type, and the value"
-    (assert= (error-of (+ 1 "x")) "type error: %add: expected number, got string (\"x\")")
+    (assert= (error-of (+ 1 "x")) "type error: +: expected number, got string (\"x\")")
     (assert= (error-of (first 5))
       "type error: first: expected list or vector, got int (5)"))
 

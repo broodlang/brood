@@ -200,7 +200,7 @@
   (test "unbound symbol echoes the name"
     (assert= (error-of undefined-name) "unbound error: unbound symbol: undefined-name"))
   (test "type errors name the op, the wanted type, and what arrived"
-    (assert= (error-of (+ 1 "x")) "type error: %add: expected number, got string (\"x\")")
+    (assert= (error-of (+ 1 "x")) "type error: +: expected number, got string (\"x\")")
     (assert= (error-of (first 5)) "type error: first: expected list or vector, got int (5)")
     (assert= (error-of (string-length :k))
       "type error: string-length: expected string, got keyword (:k)")
