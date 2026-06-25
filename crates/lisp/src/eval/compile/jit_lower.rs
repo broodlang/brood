@@ -2041,6 +2041,8 @@ fn jit_lower_arm_inner(
                         let fl_code_off = std::mem::offset_of!(FastLink, code) as i32;
                         let fl_nslots_off = std::mem::offset_of!(FastLink, nslots) as i32;
                         let fl_env_off = std::mem::offset_of!(FastLink, env) as i32;
+                        let fl_sym_off = std::mem::offset_of!(FastLink, sym) as i32;
+                        let fl_argc_off = std::mem::offset_of!(FastLink, argc) as i32;
                         let len_slot = b.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             8,
@@ -2055,6 +2057,7 @@ fn jit_lower_arm_inner(
                         // re-grow misses here and goes slow — the table read would be OOB).
                         let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, site_idx, fl_len);
                         let chk_epoch = b.create_block();
+                        let chk_ident = b.create_block();
                         let hit = b.create_block();
                         let miss = b.create_block();
                         let cont = b.create_block();
@@ -2069,7 +2072,23 @@ fn jit_lower_arm_inner(
                         let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when icall is on");
                         let gep = b.ins().load(types::I64, MemFlags::new(), ep_ptr, 0);
                         let ep_ok = b.ins().icmp(IntCC::Equal, ep, gep);
-                        b.ins().brif(ep_ok, hit, &[], miss, &[]);
+                        b.ins().brif(ep_ok, chk_ident, &[], miss, &[]);
+
+                        // chk_ident: the slot must link the *same* callee this site calls. A
+                        // call-site id reused across a `runtime_collect` table clear (ADR-096)
+                        // can leave a slot populated by a different arm for a different callee;
+                        // the epoch guard alone wouldn't catch it (same epoch). Match the slot's
+                        // resolved `sym`/`argc` against this site's baked `head`/`argc` — exactly
+                        // the validation the IC probe paths do — or fall to the slow path, which
+                        // re-resolves correctly. Without this the fast path would jump into the
+                        // wrong native code with the wrong arity (a SIGSEGV in release).
+                        b.switch_to_block(chk_ident);
+                        let slot_sym = b.ins().load(types::I32, MemFlags::new(), slot_ptr, fl_sym_off);
+                        let sym_ok = b.ins().icmp(IntCC::Equal, slot_sym, head_v);
+                        let slot_argc = b.ins().load(types::I32, MemFlags::new(), slot_ptr, fl_argc_off);
+                        let argc_ok = b.ins().icmp(IntCC::Equal, slot_argc, argc_v);
+                        let ident_ok = b.ins().band(sym_ok, argc_ok);
+                        b.ins().brif(ident_ok, hit, &[], miss, &[]);
 
                         // hit: read (code, nslots, env) and run the fast frame.
                         b.switch_to_block(hit);
