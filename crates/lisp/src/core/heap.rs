@@ -5378,9 +5378,10 @@ impl Heap {
     }
 
     /// A **major collection**: compact the old generation (a semi-space copy of
-    /// `old` into fresh `old` slabs, dropping dead tenured objects). Assumes a
-    /// minor has just run, so the nursery is empty and everything live is in old
-    /// and reachable from the roots. Bumps the old epoch.
+    /// `old` into fresh `old` slabs, dropping dead tenured objects). The preceding
+    /// minor may have been a flip (not a tenure), so the nursery may be non-empty;
+    /// `flush_nursery_old_refs` handles the resulting nursery→old edges. Bumps the
+    /// old epoch.
     fn major_collect(&mut self, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
         let before_old = self.old_live_count();
         self.old_epoch = self.old_epoch.wrapping_add(1);
@@ -5391,6 +5392,14 @@ impl Heap {
         fwd.src_old = true; // copy old-gen objects
         fwd.dest_old = true; // into the fresh old space
         self.flush_roots(&old_src, &mut dest, &mut fwd, value_roots, env_roots);
+        // If the preceding minor was a flip (not a tenure) the nursery is
+        // non-empty.  `flush_roots` updated handles in `self.roots` and
+        // `self.env_roots`, but OLD handles *inside* nursery objects were
+        // silently skipped by `flush_value`/`flush_env` (they gate on
+        // `fwd.copies`, which is false for nursery objects during a major).
+        // Rewrite those stale OLD handles in-place now, while `old_src` is
+        // still live.
+        flush_nursery_old_refs(&mut self.local, &old_src, &mut dest, &mut fwd);
         // Write barrier across a major. After a *tenure* minor `remembered` is
         // empty (the minor cleared it). But `collect()` can run a major right
         // after a *flip* minor, and a flip RETAINS `remembered` — old EnvIds for
@@ -6245,6 +6254,99 @@ fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -
         .collect();
     new.envs[new_idx] = EnvFrame { vars, parent };
     fwd.mint_env(new_idx)
+}
+
+/// During a **major collect**, rewrite the OLD handles that live *inside* nursery
+/// objects.  `flush_roots` already updated every handle stored directly in
+/// `Heap::roots` / `Heap::env_roots`, but any handle that was *inside* a nursery
+/// object was silently skipped — `flush_value` and `flush_env` gate on
+/// `fwd.copies(region, is_old)` and a nursery object doesn't qualify.
+///
+/// When the minor that preceded the major was a *flip* (not a tenure) the nursery
+/// is non-empty, so those skipped handles are real: a nursery closure's `env`
+/// field, a nursery env-frame's vars, a nursery map's data entries or child
+/// sub-nodes can all point into the pre-compaction old slab, which is now gone.
+///
+/// This pass walks every nursery slab slot in-place and rewrites OLD handles
+/// through `fwd`.  If an OLD handle wasn't reached by `flush_roots` (it was only
+/// referenced from a dead nursery object) it is copied to `dest` here —
+/// conservative but correct: the minor that follows will discard the dead nursery
+/// referrer, and the next major will then reclaim the briefly-retained old object.
+fn flush_nursery_old_refs(
+    nursery: &mut Slabs,
+    old_src: &Slabs,
+    dest: &mut Slabs,
+    fwd: &mut FlushForward,
+) {
+    // EnvFrames: vars and parent chain.
+    for i in 0..nursery.envs.len() {
+        let n = nursery.envs[i].vars.len();
+        for j in 0..n {
+            let v = nursery.envs[i].vars[j].1;
+            nursery.envs[i].vars[j].1 = flush_value(old_src, dest, fwd, v);
+        }
+        if let Some(parent) = nursery.envs[i].parent {
+            if fwd.copies(parent.region(), parent.is_old()) {
+                nursery.envs[i].parent = Some(flush_env(old_src, dest, fwd, parent));
+            }
+        }
+    }
+    // Closures: captured env, per-arm optional defaults, per-arm body literals.
+    for i in 0..nursery.closures.len() {
+        if let Some(env) = nursery.closures[i].env {
+            if fwd.copies(env.region(), env.is_old()) {
+                nursery.closures[i].env = Some(flush_env(old_src, dest, fwd, env));
+            }
+        }
+        for arm_idx in 0..nursery.closures[i].arms.len() {
+            let n_opt = nursery.closures[i].arms[arm_idx].optionals.len();
+            for k in 0..n_opt {
+                let v = nursery.closures[i].arms[arm_idx].optionals[k].1;
+                nursery.closures[i].arms[arm_idx].optionals[k].1 =
+                    flush_value(old_src, dest, fwd, v);
+            }
+            let n_body = nursery.closures[i].arms[arm_idx].body.len();
+            for k in 0..n_body {
+                let v = nursery.closures[i].arms[arm_idx].body[k];
+                nursery.closures[i].arms[arm_idx].body[k] =
+                    flush_value(old_src, dest, fwd, v);
+            }
+        }
+    }
+    // MapNodes: inline key/value data entries and child sub-node handles.
+    for i in 0..nursery.maps.len() {
+        let n = nursery.maps[i].data.len();
+        for j in 0..n {
+            let (k, v) = nursery.maps[i].data[j];
+            nursery.maps[i].data[j] = (
+                flush_value(old_src, dest, fwd, k),
+                flush_value(old_src, dest, fwd, v),
+            );
+        }
+        let m = nursery.maps[i].children.len();
+        for j in 0..m {
+            let c = nursery.maps[i].children[j];
+            if fwd.copies(c.region(), c.is_old()) {
+                nursery.maps[i].children[j] = flush_map(old_src, dest, fwd, c);
+            }
+        }
+    }
+    // Cons pairs.
+    for i in 0..nursery.pairs.len() {
+        let (car, cdr) = nursery.pairs[i];
+        nursery.pairs[i] = (
+            flush_value(old_src, dest, fwd, car),
+            flush_value(old_src, dest, fwd, cdr),
+        );
+    }
+    // Vectors (also backing store for `Value::Range` and `Value::SeqView`).
+    for i in 0..nursery.vectors.len() {
+        let n = nursery.vectors[i].len();
+        for j in 0..n {
+            let v = nursery.vectors[i][j];
+            nursery.vectors[i][j] = flush_value(old_src, dest, fwd, v);
+        }
+    }
 }
 
 // ===================== RUNTIME-region compaction (ADR-076 follow-up) =====================
