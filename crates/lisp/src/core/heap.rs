@@ -1108,9 +1108,19 @@ pub struct CallIcEntry {
 pub struct FastLink {
     pub epoch: u64,
     pub code: u64,
-    pub nslots: u32,
-    pub _pad: u32,
     pub env: u64,
+    pub nslots: u32,
+    /// The IC entry's callee symbol and arity this slot was resolved for. The IR's
+    /// fast path checks them against the call site's *baked* `head`/`argc` (alongside
+    /// the epoch guard) before honouring the slot — without this, a call-site id reused
+    /// across a [`Self::runtime_collect`] table clear (ADR-096) lets one arm read a
+    /// fast-link another arm populated for a *different* callee, then jump into the wrong
+    /// native code with the wrong arity (a SIGSEGV in release). The IC probe paths already
+    /// validate sym+argc+epoch; mirroring them here closes the same hole on the raw-load
+    /// fast path. `u32::MAX` head/`0` argc in an [`Self::EMPTY`] slot match nothing real.
+    pub sym: u32,
+    pub argc: u32,
+    pub _pad: u32,
 }
 
 impl FastLink {
@@ -1119,9 +1129,11 @@ impl FastLink {
     const EMPTY: FastLink = FastLink {
         epoch: u64::MAX,
         code: 0,
-        nslots: 0,
-        _pad: 0,
         env: 0,
+        nslots: 0,
+        sym: u32::MAX,
+        argc: 0,
+        _pad: 0,
     };
 }
 
@@ -5060,9 +5072,15 @@ impl Heap {
             *slot = FastLink {
                 epoch,
                 code: code as u64,
-                nslots: active_ns as u32,
-                _pad: 0,
                 env: env.0,
+                nslots: active_ns as u32,
+                // `sym`/`argc` matched `e.sym`/`e.argc` at the top of this fn (the early
+                // `return None`), so they identify exactly the callee this slot links to —
+                // the IR re-checks them against its baked head/argc so a reused site id
+                // (ADR-096) can never read another arm's link. See [`FastLink`].
+                sym,
+                argc,
+                _pad: 0,
             };
         }
         Some((code as *const u8, active_ns, *env))

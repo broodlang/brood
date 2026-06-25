@@ -4920,7 +4920,9 @@ fn jit_run_fast_link(
 
 /// The JIT's **in-IR** fast call path (Track B / Technique A). The arm's IR has already
 /// validated this elided call site's flat-table fast-link (`site < len` && `epoch ==
-/// global_epoch`) and read `(code, nslots, env)` out of [`Heap::vm_fast_links`] with raw
+/// global_epoch` && the slot's `sym`/`argc` match this site's baked head/arity — the last
+/// guards against a call-site id reused across a `runtime_collect` clear, ADR-096) and read
+/// `(code, nslots, env)` out of [`Heap::vm_fast_links`] with raw
 /// loads — so this skips the IC probe + `RefCell` borrow that [`jit_dispatch_call`]'s fast
 /// path pays (the measured 40.9%-of-`fib` cost) and runs the same frame body via
 /// [`jit_run_fast_link`]. The `argc` args are the top operands on `roots`. Returns a
@@ -4956,7 +4958,10 @@ pub(crate) fn jit_dispatch_fast_frame(
         let auth = heap.vm_call_ic_fast_link(site, head, argc as u32, epoch);
         debug_assert!(
             matches!(auth, Some((c, ns, e)) if c as usize == code && ns == nslots && e == callee_env),
-            "fast-link mirror desynced from the call IC (site {site}, head {head})"
+            "fast-link mirror desynced from the call IC (site {site}, head {head}): \
+             mirror=(code={code:#x}, nslots={nslots}, env={:#x}) auth={auth:?} — the IR's \
+             epoch+sym+argc guard should make this unreachable (see FastLink)",
+            callee_env.0
         );
     }
     jit_run_fast_link(heap, argc, site, head, epoch, stage_base, code, nslots, callee_env)
