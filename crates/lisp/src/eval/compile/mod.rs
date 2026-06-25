@@ -2492,6 +2492,15 @@ fn exec_call(
                             _ => None,
                         };
                         fast = arm.clone();
+                        // Mirror vm_call_ic_put's LOCAL-env guard: arg eval below can
+                        // trigger a LOCAL minor collect that moves the env without
+                        // bumping the global epoch, so the epoch check at the fast-path
+                        // use site wouldn't catch a stale LOCAL cenv.  Clear fast now.
+                        if let Some((_, cenv)) = &fast {
+                            if *cenv != EnvId::GLOBAL && cenv.region() == value::LOCAL {
+                                fast = None;
+                            }
+                        }
                         heap.vm_call_ic_put(
                             site,
                             crate::core::heap::CallIcEntry {
