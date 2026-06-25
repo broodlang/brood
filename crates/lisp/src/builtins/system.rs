@@ -1055,7 +1055,7 @@ pub(super) fn check_string_structured(args: &[Value], _env: EnvId, heap: &mut He
 /// `nil`. Recorded by the reader for list forms; used by the test macros to
 /// capture a test's source line *before* the form expands.
 pub(super) fn form_pos(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
-    match heap.form_pos(arg(args, 0)) {
+    match heap.form_pos_only(arg(args, 0)) {
         Some(p) => Ok(heap.alloc_vector(vec![Value::int(p.line as i64), Value::int(p.col as i64)])),
         None => Ok(Value::nil()),
     }

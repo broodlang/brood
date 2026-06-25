@@ -755,7 +755,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                             a: Box::new(a),
                             head: h,
                             guard: AtomicU64::new(heap.global_epoch()),
-                            pos: heap.form_pos(form),
+                            pos: heap.form_pos_only(form),
                         });
                     }
                 }
@@ -779,7 +779,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                             map: [map[0] as u8, map[1] as u8],
                             head: h,
                             guard: AtomicU64::new(heap.global_epoch()),
-                            pos: heap.form_pos(form),
+                            pos: heap.form_pos_only(form),
                             broot,
                         });
                     }
@@ -813,7 +813,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                                     map: [0, 1],
                                     head: h,
                                     guard: AtomicU64::new(heap.global_epoch()),
-                                    pos: heap.form_pos(form),
+                                    pos: heap.form_pos_only(form),
                                     broot,
                                 };
                             }
@@ -837,7 +837,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                         }
                         return Some(Node::SelfCall {
                             args: args.into_boxed_slice(),
-                            pos: heap.form_pos(form),
+                            pos: heap.form_pos_only(form),
                         });
                     }
                 }
@@ -868,7 +868,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 // Capture the combination's source position now, while its
                 // reader-recorded `form_pos` entry is live (a later collection moves
                 // the LOCAL form, but `Pos` is plain data and stays valid).
-                pos: heap.form_pos(form),
+                pos: heap.form_pos_only(form),
                 site,
             })
         }

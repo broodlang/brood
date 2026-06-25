@@ -5,8 +5,24 @@
 //! human-readable message.
 
 use std::fmt;
+use std::path::Path;
 
 use crate::core::value::Value;
+
+/// Return the shortest useful path for display: relative when the file lives
+/// under the cwd, absolute otherwise. Best-effort — falls back to `path` as-is
+/// if the cwd or canonicalization is unavailable.
+fn display_path(path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(rel) = p.strip_prefix(&cwd) {
+                return rel.to_string_lossy().into_owned();
+            }
+        }
+    }
+    path.to_string()
+}
 
 /// A 1-based source position (line and column), used for editor-parseable
 /// error reporting (see `docs/tooling.md`). Columns count characters.
@@ -252,18 +268,25 @@ impl LispError {
         self
     }
 
-    /// Attach the recorded source position of `form` (if any) only when none is
-    /// set yet — the [`or_pos`](Self::or_pos) shape, but driven by
-    /// [`Heap::form_pos`](crate::core::heap::Heap::form_pos). The eval loop
-    /// uses this on every error-propagation path, so an error bubbles up tagged
-    /// with the *innermost* form whose position was recorded by the reader.
-    /// The lookup happens only on the error path, so the hot path pays nothing.
+    /// Attach the recorded source position (and originating file, if known) of
+    /// `form` only when none is set yet — the [`or_pos`](Self::or_pos) shape,
+    /// but driven by [`Heap::form_pos`](crate::core::heap::Heap::form_pos). The
+    /// eval loop uses this on every error-propagation path, so an error bubbles
+    /// up tagged with the *innermost* form whose position was recorded by the
+    /// reader. The lookup happens only on the error path, so the hot path pays
+    /// nothing.
     pub fn or_form_pos(self, heap: &crate::core::heap::Heap, form: Value) -> Self {
         if self.pos.is_some() {
             return self;
         }
         match heap.form_pos(form) {
-            Some(p) => self.with_pos(p),
+            Some((p, file)) => {
+                let e = self.with_pos(p);
+                match file {
+                    Some(f) => e.or_file(f.as_ref()),
+                    None => e,
+                }
+            }
             None => self,
         }
     }
@@ -278,11 +301,13 @@ impl LispError {
 
     /// A one-line GNU diagnostic: `[FILE:][LINE:COL: ]kind error: message`, the
     /// form editors parse (see `docs/tooling.md`). Falls back gracefully when
-    /// the file or position is unknown (e.g. at the REPL).
+    /// the file or position is unknown (e.g. at the REPL). The file is shown as
+    /// a relative path when it lives under the cwd, and as an absolute path
+    /// otherwise.
     pub fn located(&self) -> String {
         let prefix = match (&self.file, self.pos) {
-            (Some(f), Some(p)) => format!("{}:{}:{}: ", f, p.line, p.col),
-            (Some(f), None) => format!("{}: ", f),
+            (Some(f), Some(p)) => format!("{}:{}:{}: ", display_path(f), p.line, p.col),
+            (Some(f), None) => format!("{}: ", display_path(f)),
             (None, Some(p)) => format!("{}:{}: ", p.line, p.col),
             (None, None) => String::new(),
         };

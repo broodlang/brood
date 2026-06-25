@@ -156,7 +156,7 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
         // flag it. Either way the arguments are evaluated in non-tail position.
         if head == name && !tail {
             out.push((
-                heap.form_pos(form),
+                heap.form_pos_only(form),
                 format!(
                     "{}: recursive call in non-tail position — deep recursion overflows the \
                      stack; restructure so the self-call is the last thing evaluated \

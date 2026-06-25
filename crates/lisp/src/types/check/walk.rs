@@ -252,7 +252,7 @@ fn check_value_leaf(
     }
     if let Value::Sym(s) = form {
         if is_unbound(heap, ctx, s) {
-            out.push((heap.form_pos(parent), unbound_msg(&name_of(s))));
+            out.push((heap.form_pos_only(parent), unbound_msg(&name_of(s))));
         }
     }
 }
@@ -531,7 +531,7 @@ pub(super) fn check_into(
         // spelling — but only when every other short-circuit has failed.
         // Compute it lazily.
         if is_unbound(heap, ctx, s) {
-            out.push((heap.form_pos(form), unbound_msg(&name_of(s))));
+            out.push((heap.form_pos_only(form), unbound_msg(&name_of(s))));
             // Still recurse into args below — they may carry their own issues.
         }
 
@@ -553,7 +553,7 @@ pub(super) fn check_into(
             let argc = items.len() - 1;
             if !a.accepts(argc) {
                 out.push((
-                    heap.form_pos(form),
+                    heap.form_pos_only(form),
                     format!(
                         "{}: wrong number of arguments — expected {}, got {}",
                         name_of(s),
@@ -583,7 +583,7 @@ pub(super) fn check_into(
                     {
                         let n = name_of(a);
                         out.push((
-                            heap.form_pos(form),
+                            heap.form_pos_only(form),
                             format!(
                                 "{n}: function used as a value — did you mean ({n})? \
                                  the bare zero-arg function stringifies as #<fn {n}>, not its result"
@@ -622,7 +622,7 @@ pub(super) fn check_into(
                             crate::syntax::printer::print(heap, arg),
                         );
                         // Locate to the call form (a Pair the reader positioned).
-                        out.push((heap.form_pos(form), msg));
+                        out.push((heap.form_pos_only(form), msg));
                     }
                 }
 
@@ -649,7 +649,7 @@ pub(super) fn check_into(
                                     callback_desc(arg),
                                     arity_str(cb),
                                 );
-                                out.push((heap.form_pos(form), msg));
+                                out.push((heap.form_pos_only(form), msg));
                             }
                         }
                     }
@@ -757,7 +757,7 @@ fn check_fn_seeded(
             if !g.consistent_with(s.ret.clone()) {
                 let who = name.map(|n| format!("{}: ", name_of(n))).unwrap_or_default();
                 out.push((
-                    heap.form_pos(ret_form),
+                    heap.form_pos_only(ret_form),
                     format!(
                         "{}declared return type {} but the body yields {}",
                         who, s.ret, g.bound
@@ -862,7 +862,7 @@ fn check_def(
             let g = gradual_of(heap, value_form, ctx);
             if !g.consistent_with(t.clone()) {
                 out.push((
-                    heap.form_pos(form),
+                    heap.form_pos_only(form),
                     format!(
                         "{}: value of type {} is not assignable to declared type {}",
                         name_of(name),
@@ -982,7 +982,7 @@ fn check_if(
             // compiler-generated guard never involves one, so no false positives.
             if let Some((p, known)) = then_ctx.newly_dead_sig_param(ctx) {
                 out.push((
-                    heap.form_pos(form),
+                    heap.form_pos_only(form),
                     format!(
                         "unreachable clause: {} is {}, which can never be {} \
                          — this branch is dead code",
