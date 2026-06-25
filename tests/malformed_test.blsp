@@ -1,0 +1,286 @@
+;; Tests for badly-formed Brood: expressions that should either work cleanly
+;; (with a documented result), raise a type/arity error, or raise a runtime
+;; error — never silently corrupt state or crash the host.
+;;
+;; Coverage:
+;;   non-callables   — nil/bool/int/float/string/keyword/vector/map are not fns
+;;   arithmetic      — zero-arg identity, unary negation, overflow, div-by-zero
+;;   strings         — count, str, split, substring OOB
+;;   truthiness      — Brood falsy: only nil, false, and empty list; 0/"" are truthy
+;;   collection ops  — nil as empty, get/assoc on wrong types
+;;   degenerate forms — (do), (if), (quote), (->), empty let, fn with no body
+;;   malformed forms  — let odd-binding, let non-symbol name, quote arity
+;;   dup fn params   — last binding wins, no error
+;;   read-string     — 1.2.3 as symbol, #q as symbol, unknown escape stripped
+;;   apply / map     — zero-arg and non-fn errors
+
+(defmodule malformed-test (:use test))
+
+(defn expand-error (form)
+  "Return the error string when `form` raises via eval, or nil if it succeeds."
+  (error-of (eval form)))
+
+;; ── 1. Calling non-functions ──────────────────────────────────────────────────
+
+(describe "calling non-functions"
+  (test "nil is not callable"
+    (assert-error (nil 1 2)))
+
+  (test "boolean is not callable"
+    (assert-error (true 1 2))
+    (assert-error (false 1 2)))
+
+  (test "integer is not callable"
+    (assert-error (42 1 2)))
+
+  (test "float is not callable"
+    (assert-error (3.14 0)))
+
+  (test "string is not callable"
+    (assert-error ("hello" 0)))
+
+  (test "keyword is not callable — unlike Clojure, keywords are not lookup fns"
+    (assert-error (:key 1 2)))
+
+  (test "vector is not callable — unlike Clojure, vectors are not fns of their index"
+    (assert-error ([1 2] 0)))
+
+  (test "map is not callable — unlike Clojure, maps are not fns of their key"
+    (assert-error ({:a 1} :a))))
+
+;; ── 2. Arithmetic zero-arg, unary, and overflow ──────────────────────────────
+
+(describe "arithmetic zero-arg, unary, and overflow"
+  (test "(+) returns additive identity 0"
+    (assert= 0 (+)))
+
+  (test "(*) returns multiplicative identity 1"
+    (assert= 1 (*)))
+
+  (test "(- n) is unary negation"
+    (assert= -5 (- 5))
+    (assert= 5  (- -5)))
+
+  (test "(max n) and (min n) work with a single argument"
+    (assert= 99 (max 99))
+    (assert= 99 (min 99)))
+
+  (test "(max) with no args raises arity error"
+    (assert-error (max)))
+
+  (test "(min) with no args raises arity error"
+    (assert-error (min)))
+
+  (test "integer arithmetic auto-promotes to bigint on overflow — no wrapping"
+    (assert= 9223372036854775808 (+ 9223372036854775807 1)))
+
+  (test "-0 equals 0"
+    (is (= 0 -0))))
+
+;; ── 3. Arithmetic type and value errors ──────────────────────────────────────
+
+(describe "arithmetic errors"
+  (test "integer division by zero raises"
+    (assert-error (/ 1 0)))
+
+  (test "float division by zero raises"
+    (assert-error (/ 1.0 0.0)))
+
+  (test "mod by zero raises"
+    (assert-error (mod 7 0)))
+
+  (test "sqrt of negative number raises"
+    (assert-error (sqrt -1.0)))
+
+  (test "comparing number to string raises type error"
+    (assert-error (< 1 "a"))))
+
+;; ── 4. String operations ──────────────────────────────────────────────────────
+
+(describe "string operations"
+  (test "(count string) returns character count"
+    (assert= 5 (count "hello"))
+    (assert= 0 (count "")))
+
+  (test "(str) with no args returns empty string"
+    (assert= "" (str)))
+
+  (test "(str nil) converts nil to the string \"nil\""
+    (assert= "nil" (str nil)))
+
+  (test "(str ...) converts mixed types without error"
+    (assert= "a1:btruenil" (str "a" 1 :b true nil)))
+
+  (test "string-split on empty delimiter splits into individual characters"
+    (assert= '("a" "b" "c") (string-split "abc" "")))
+
+  (test "string-split with no match returns the full string as a single element"
+    (assert= '("abc") (string-split "abc" "x")))
+
+  (test "substring out of bounds raises"
+    (assert-error (substring "hello" 10 20)))
+
+  (test "substring with negative start raises"
+    (assert-error (substring "hello" -1 3)))
+
+  (test "substring with reversed range raises"
+    (assert-error (substring "hello" 3 1))))
+
+;; ── 5. Truthiness — Brood vs Clojure/Python/JS ───────────────────────────────
+
+(describe "truthiness — Brood-specific rules"
+  (test "only nil and false are falsy"
+    (assert= :no (if nil   :yes :no))
+    (assert= :no (if false :yes :no)))
+
+  (test "empty list is falsy — unlike Clojure where '() is truthy"
+    (assert= :no (if '()    :yes :no))
+    (assert= :no (if (list) :yes :no))
+    (is (not '())))
+
+  (test "non-empty list is truthy"
+    (assert= :yes (if '(1) :yes :no)))
+
+  (test "0 is truthy — unlike Python and JS"
+    (assert= :yes (if 0 :yes :no))
+    (is (not (not 0))))
+
+  (test "empty string is truthy"
+    (assert= :yes (if "" :yes :no)))
+
+  (test "empty map and empty vector are truthy"
+    (assert= :yes (if {} :yes :no))
+    (assert= :yes (if [] :yes :no)))
+
+  (test "(and) with no args returns true"
+    (assert= true (and)))
+
+  (test "(or) with no args returns nil"
+    (assert= nil (or))))
+
+;; ── 6. Collection operations on nil and wrong types ──────────────────────────
+
+(describe "collection ops on nil and wrong types"
+  (test "(count nil) returns 0"
+    (assert= 0 (count nil)))
+
+  (test "(first nil) and (rest nil) return nil"
+    (assert= nil (first nil))
+    (assert= nil (rest nil)))
+
+  (test "(get nil key) returns nil"
+    (assert= nil (get nil :k)))
+
+  (test "(get string key) returns nil — strings are traversable but not key-value maps"
+    (assert= nil (get "hello" :k)))
+
+  (test "(get integer key) raises type error"
+    (assert-error (get 42 :k)))
+
+  (test "(get boolean key) raises type error"
+    (assert-error (get true :k)))
+
+  (test "(assoc nil key val) raises — nil is not a map"
+    (assert-error (assoc nil :k 1)))
+
+  (test "(assoc integer key val) raises type error"
+    (assert-error (assoc 42 :k 1)))
+
+  (test "map/filter/fold accept nil as an empty sequence"
+    (assert= nil (map    (fn (x) (* x 2)) nil))
+    (assert= nil (filter odd? nil))
+    (assert= 0   (fold   + 0 nil)))
+
+  (test "(reduce f '()) with no init value returns nil"
+    (assert= nil (reduce + '())))
+
+  (test "(reduce f init '()) returns init unchanged"
+    (assert= 0 (reduce + 0 '()))))
+
+;; ── 7. Degenerate special forms that silently return nil or the input ─────────
+
+(describe "degenerate special forms"
+  (test "(do) with no body returns nil"
+    (assert= nil (do)))
+
+  (test "(if) with no args returns nil"
+    (assert= nil (eval '(if))))
+
+  (test "(if cond) with no branches: false cond → nil, true cond with no then → nil"
+    (assert= nil  (eval '(if nil)))
+    (assert= :yes (if true :yes))
+    (assert= nil  (if nil  :yes)))
+
+  (test "(quote) with no args returns nil"
+    (assert= nil (eval '(quote))))
+
+  (test "(-> x) with no threading steps returns x"
+    (assert= 42 (-> 42)))
+
+  (test "(->> x) with no threading steps returns x"
+    (assert= 42 (->> 42)))
+
+  (test "(let () body) with empty binding list evaluates body normally"
+    (assert= 42 (let () 42)))
+
+  (test "((fn ())) with no body returns nil"
+    (assert= nil ((fn ()))))
+
+  (test "((fn (x)) 5) with no body and a matched argument returns nil"
+    (assert= nil ((fn (x)) 5))))
+
+;; ── 8. Malformed special forms that raise errors ─────────────────────────────
+
+(describe "malformed special forms"
+  (test "let with odd binding count raises"
+    (is (string? (expand-error '(let (x) x)))))
+
+  (test "let with integer as binding name raises match error"
+    (assert-error (eval '(let (1 :val) 1))))
+
+  (test "quote with multiple args raises arity error"
+    (is (string? (expand-error '(quote a b)))))
+
+  (test "threading a nil step raises type error"
+    (is (string? (expand-error '(-> 1 nil))))))
+
+;; ── 9. Duplicate function parameters ─────────────────────────────────────────
+
+(describe "duplicate function parameters"
+  (test "duplicate params are allowed: last binding wins"
+    (assert= 2 ((fn (a a) a) 1 2)))
+
+  (test "duplicate params: all references to the name see the last bound value"
+    (assert= [2 2] ((fn (a a) [a a]) 1 2))))
+
+;; ── 10. read-string edge cases ────────────────────────────────────────────────
+
+(describe "read-string edge cases"
+  (test "\"1.2.3\" is not a float — it parses as a symbol"
+    (let (v (read-string "1.2.3"))
+      (is (symbol? v))
+      (assert= "1.2.3" (str v))))
+
+  (test "\"#q\" reads as a symbol, not an error"
+    (is (symbol? (read-string "#q"))))
+
+  (test "unknown backslash escape in a string literal silently drops the backslash"
+    (assert= "q" (read-string "\"\\q\""))))
+
+;; ── 11. apply and map/filter arity ───────────────────────────────────────────
+
+(describe "apply and map/filter arity"
+  (test "(apply + '()) passes empty args — identical to (+)"
+    (assert= 0 (apply + '())))
+
+  (test "(apply non-fn args) raises type error"
+    (assert-error (apply 42 '(1 2))))
+
+  (test "(map fn coll) works normally"
+    (assert= '(2 4 6) (map (fn (x) (* x 2)) '(1 2 3))))
+
+  (test "(map) with no args raises arity error"
+    (assert-error (map)))
+
+  (test "(map fn-only) with one arg raises arity error"
+    (assert-error (map identity))))
