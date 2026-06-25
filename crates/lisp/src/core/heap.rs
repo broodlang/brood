@@ -700,7 +700,7 @@ pub struct RuntimeCode {
     /// for VM-compilation), so `(form-pos …)` still resolves and a position survives a
     /// cross-node send (`Message::List`). Append-only in practice (a RUNTIME pair never
     /// moves), so entries stay valid; shared across the runtime's processes via `Arc`.
-    positions: RwLock<HashMap<usize, crate::error::Pos>>,
+    positions: RwLock<HashMap<usize, (crate::error::Pos, Option<Arc<str>>)>>,
     /// Shared JIT native-code cache (ADR-101, the spawn lever): maps a simple
     /// fixed-arity RUNTIME/PRELUDE closure arm's `(closure_id, argc)` key (see
     /// `CompiledArm::share_key`) to its compiled native code as
@@ -777,20 +777,20 @@ impl RuntimeCode {
     fn def_sites_read(&self) -> RwLockReadGuard<'_, HashMap<Symbol, SourceLoc>> {
         self.def_sites.read().unwrap_or_else(|e| e.into_inner())
     }
-    /// RUNTIME-form source position by slab index, or `None`. See [`Self::positions`].
-    fn position_of(&self, idx: usize) -> Option<crate::error::Pos> {
+    /// RUNTIME-form source position + file by slab index, or `None`. See [`Self::positions`].
+    fn position_of(&self, idx: usize) -> Option<(crate::error::Pos, Option<Arc<str>>)> {
         self.positions
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(&idx)
-            .copied()
+            .cloned()
     }
-    /// Record a RUNTIME-form source position (called by `promote`). See [`Self::positions`].
-    fn set_position(&self, idx: usize, pos: crate::error::Pos) {
+    /// Record a RUNTIME-form source position + file (called by `promote`). See [`Self::positions`].
+    fn set_position(&self, idx: usize, pos: crate::error::Pos, file: Option<Arc<str>>) {
         self.positions
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(idx, pos);
+            .insert(idx, (pos, file));
     }
 
     fn def_sites_write(&self) -> RwLockWriteGuard<'_, HashMap<Symbol, SourceLoc>> {
@@ -837,7 +837,7 @@ pub struct Heap {
     /// Keyed by [`form_pos_key`] — the pair's slab index packed with its
     /// generation age bit, so a nursery pair and an old pair at the same slab
     /// index don't collide (the two LOCAL spaces share an index range).
-    form_pos: HashMap<u64, crate::error::Pos>,
+    form_pos: HashMap<u64, (crate::error::Pos, Option<Arc<str>>)>,
     /// The file currently being `load`ed, exposed via `(current-file)`. Saved and
     /// restored around each load so nested loads don't clobber the outer file.
     current_file: Option<String>,
@@ -1547,24 +1547,35 @@ impl Heap {
     pub fn set_form_pos(&mut self, v: Value, pos: crate::error::Pos) {
         if let Some(id) = v.as_pair() {
             if id.region() == crate::core::value::LOCAL {
-                self.form_pos.insert(form_pos_key(id), pos);
+                let file: Option<Arc<str>> =
+                    self.current_file.as_deref().map(Arc::from);
+                self.form_pos.insert(form_pos_key(id), (pos, file));
             }
         }
     }
 
-    /// The recorded source position of a list form, if any. LOCAL pairs read the
-    /// per-heap reader-stamped table; RUNTIME pairs read the shared table `promote`
-    /// carried the position into (so `form-pos` works on a frozen `defn`/lambda body
-    /// and a position survives a cross-node send). PRELUDE forms carry none.
-    pub fn form_pos(&self, v: Value) -> Option<crate::error::Pos> {
+    /// The recorded source position (and originating file, if known) of a list form.
+    /// LOCAL pairs read the per-heap reader-stamped table; RUNTIME pairs read the
+    /// shared table `promote` carried the position into (so `form-pos` works on a
+    /// frozen `defn`/lambda body and a position survives a cross-node send). PRELUDE
+    /// forms carry none.
+    ///
+    /// Use [`form_pos_only`](Self::form_pos_only) when only the line/col is needed.
+    pub fn form_pos(&self, v: Value) -> Option<(crate::error::Pos, Option<Arc<str>>)> {
         if let Some(id) = v.as_pair() {
             match id.region() {
-                crate::core::value::LOCAL => return self.form_pos.get(&form_pos_key(id)).copied(),
+                crate::core::value::LOCAL => return self.form_pos.get(&form_pos_key(id)).cloned(),
                 crate::core::value::RUNTIME => return self.runtime.position_of(id.index()),
                 _ => {}
             }
         }
         None
+    }
+
+    /// Convenience: just the `Pos` part of [`form_pos`](Self::form_pos), for
+    /// callers that don't need the file.
+    pub fn form_pos_only(&self, v: Value) -> Option<crate::error::Pos> {
+        self.form_pos(v).map(|(p, _)| p)
     }
 
     /// Set the file currently being loaded, returning the previous value so the
@@ -3003,8 +3014,8 @@ impl Heap {
         let mut acc = tail;
         for (src, head) in nodes.into_iter().rev() {
             let idx = self.runtime.code.pairs.push((head, acc));
-            if let Some(pos) = self.form_pos.get(&form_pos_key(src)).copied() {
-                self.runtime.set_position(idx, pos);
+            if let Some((pos, file)) = self.form_pos.get(&form_pos_key(src)).cloned() {
+                self.runtime.set_position(idx, pos, file);
             }
             acc = Value::pair(PairId::runtime(idx));
         }

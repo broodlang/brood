@@ -37,6 +37,7 @@ pub fn install_crash_dump() {
         let thread = std::thread::current();
         let mut body = String::new();
         body.push_str("\n=== brood crash dump ===\n");
+        body.push_str(&format!("version: {} ({})\n", env!("CARGO_PKG_VERSION"), env!("BROOD_GIT_SHA")));
         body.push_str(&format!("when:    {when} ms since epoch\n"));
         body.push_str(&format!(
             "thread:  {}\n",
@@ -115,6 +116,7 @@ pub fn report_error(e: &LispError) {
     if let Some(hint) = &e.hint {
         eprintln!("    hint: {hint}");
     }
+    eprintln!("    brood {} ({})", env!("CARGO_PKG_VERSION"), env!("BROOD_GIT_SHA"));
 }
 
 /// Split CLI args into file paths and an optional concurrency cap. Accepts

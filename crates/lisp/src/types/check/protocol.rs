@@ -89,7 +89,7 @@ pub(super) fn check_impls(
         let Some(proto) = protos.get(&pname) else {
             continue;
         };
-        let pos = heap.form_pos(form);
+        let pos = heap.form_pos_only(form);
         // `(defimpl Proto key method…)` — the methods are items[3..].
         let provided: HashMap<String, usize> = items
             .get(3..)
@@ -226,7 +226,7 @@ fn implements_claims(heap: &Heap, forms: &[Value]) -> Vec<(String, Option<Pos>)>
         if !head_is(&items, "defmodule") {
             continue;
         }
-        let pos = heap.form_pos(form);
+        let pos = heap.form_pos_only(form);
         for &clause in items.get(2..).unwrap_or(&[]) {
             let Some(citems) = list_items(heap, clause) else {
                 continue;

@@ -945,7 +945,7 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
 /// enclosing top-level form's start. No-op for non-LOCAL originals (see
 /// [`Heap::form_pos`](crate::core::heap::Heap::form_pos)).
 fn rebuild_list(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
-    let pos = heap.form_pos(original);
+    let pos = heap.form_pos_only(original);
     let new_list = heap.list(items);
     if let Some(p) = pos {
         heap.set_form_pos(new_list, p);

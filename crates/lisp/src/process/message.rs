@@ -182,7 +182,7 @@ fn to_message_rec(
             None => Message::Str(heap.string(id).to_string()),
         },
         Value::Pair(_) => {
-            let pos = heap.form_pos(v);
+            let pos = heap.form_pos_only(v);
             let items = heap.list_to_vec(v)?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
@@ -201,7 +201,7 @@ fn to_message_rec(
         // A range crosses as the list it stands in for (its elements are plain
         // ints; rare across a message boundary, so realising it is fine).
         Value::Range(id) => {
-            let pos = heap.form_pos(v);
+            let pos = heap.form_pos_only(v);
             let items = heap.range_to_vec(id);
             let mut out = Vec::with_capacity(items.len());
             for item in items {
