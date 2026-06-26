@@ -103,6 +103,13 @@ pub fn symbol_name_ref(sym: Symbol) -> &'static str {
         .as_str()
 }
 
+/// Non-panicking spelling of `sym`: `None` if `sym` isn't a valid interned id (e.g. a
+/// sentinel / a non-symbolic call head). For diagnostics that run over *every* call,
+/// where the head may not be a real symbol — never panic the program to print a label.
+pub fn symbol_name_opt(sym: Symbol) -> Option<&'static str> {
+    NAMES.get(sym as usize).map(|s| s.as_str())
+}
+
 /// Look up an existing interned symbol without inserting one. Returns `None` if
 /// the name has never been interned in this process. For cold-path checks (e.g.
 /// `dist::connect`'s pre-dial de-dup) that don't want to grow the interner with

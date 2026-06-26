@@ -1448,8 +1448,10 @@ fn jit_describe_value(v: Value) -> &'static str {
 /// `argc` describe the call being staged.
 #[cfg(feature = "jit")]
 fn jit_verify_staged(heap: &Heap, lo: usize, hi: usize, head: Symbol, site: u32, argc: usize) {
-    let head_name = crate::core::value::symbol_name(head);
-    let log_args = jit_verify_fn() == Some(head_name.as_str());
+    // Non-panicking: a computed-head call passes a `head` that isn't a real interned
+    // symbol, so never `expect` it (that aborts the whole run from inside a diagnostic).
+    let head_name = crate::core::value::symbol_name_opt(head).unwrap_or("<computed>");
+    let log_args = jit_verify_fn() == Some(head_name);
     for k in lo..hi {
         let v = heap.root_at(k);
         if jit_verify_enabled() {
