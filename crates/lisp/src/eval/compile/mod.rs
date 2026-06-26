@@ -1394,6 +1394,35 @@ fn no_jit_enabled() -> bool {
     *OFF.get_or_init(|| std::env::var_os("BROOD_NO_JIT").is_some())
 }
 
+/// Runtime JIT self-verification (`BROOD_JIT_VERIFY=1`). Runs the staged-stale-handle scan
+/// on every Brood→Brood call's staged args in **any** build (not just debug-assertions) —
+/// so a JIT+GC use-after-GC (bug #2) can be caught at the staging site (naming the callee +
+/// the stale handle kind) in a normal `--release` binary, without a debug-armed rebuild.
+/// Off by default; one cached bool check + (when on) a short scan per call.
+#[cfg(feature = "jit")]
+fn jit_verify_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_JIT_VERIFY").is_some())
+}
+
+/// Scan `roots[lo..hi]` for a stale LOCAL handle and report each to stderr (the runtime
+/// `BROOD_JIT_VERIFY` staged-args check). `head`/`site`/`argc` describe the call being staged.
+#[cfg(feature = "jit")]
+fn jit_verify_staged(heap: &Heap, lo: usize, hi: usize, head: Symbol, site: u32, argc: usize) {
+    for k in lo..hi {
+        let v = heap.root_at(k);
+        if let Some((kind, g, e)) = heap.dbg_value_stale(v) {
+            let raw = unsafe { std::mem::transmute::<Value, [i64; 3]>(v) };
+            eprintln!(
+                "[jit-verify] STALE {kind} (gen {g} != live {e}) staged at roots[{k}] for call \
+                 to '{}' (site={site}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
+                crate::core::value::symbol_name(head),
+                raw[0], raw[1], raw[2],
+            );
+        }
+    }
+}
+
 /// Is the in-IR call-site fast-link (Track B / Technique A increment 1) enabled? **Default ON**
 /// (shipped after the gate proved it — fib ~20% faster, JIT≡VM clean). When on, a JIT'd arm's
 /// non-tail free-global call emits an epoch-guarded flat-table fast path (`brood_rt_fast_frame`)
@@ -4878,6 +4907,11 @@ fn jit_run_fast_link(
         let args: Vec<Value> = (0..argc).map(|k| heap.root_at(stage_base + k)).collect();
         dbg_check_args(&args, &format!("jit_run_fast_link site={site} loc={}", heap.dbg_site_loc(site)));
     }
+    // Runtime BROOD_JIT_VERIFY: the fast-link path bypasses jit_dispatch_call's scan, so
+    // scan the staged args here too (works in a plain --release build).
+    if jit_verify_enabled() {
+        jit_verify_staged(heap, stage_base, stage_base + argc, head, site, argc);
+    }
     heap.extend_roots_to_nil(stage_base + nslots);
     let base = stage_base;
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from `jit_lower_arm`,
@@ -5050,6 +5084,10 @@ pub(crate) fn jit_dispatch_call(
                 );
             }
         }
+    }
+    // Runtime BROOD_JIT_VERIFY: same scan in a plain --release build.
+    if jit_verify_enabled() {
+        jit_verify_staged(heap, stage_base, n, head, site, argc);
     }
 
     // ---- Fast native link (no per-call Arc clone) ----
