@@ -485,6 +485,11 @@ pub struct CompiledArm {
     /// (the common case).
     #[cfg(feature = "jit")]
     pub inline_name: Option<Symbol>,
+    /// Diagnostic only: this arm's defining-`defn` name (independent of `inline_name`,
+    /// which is set only for inlinable recursive defns). Lets `jit_tier` label the arm in
+    /// the staged-stale report so a use-after-GC names the arm holding the stale handle.
+    #[cfg(feature = "jit")]
+    pub dbg_name: Option<Symbol>,
     /// The per-block slot stride for inlining (`m` = the original arm's slot
     /// high-water mark `scope.max`); each inlined call site occupies a disjoint
     /// shifted range `[m*i .. m*(i+1))`. Only meaningful when `inline_name.is_some()`.

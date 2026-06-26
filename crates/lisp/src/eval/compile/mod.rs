@@ -1740,6 +1740,8 @@ fn compile_arm(
         #[cfg(feature = "jit")]
         inline_name,
         #[cfg(feature = "jit")]
+        dbg_name: defn_name,
+        #[cfg(feature = "jit")]
         inline_stride,
         #[cfg(feature = "jit")]
         inline_nslots,
@@ -4604,6 +4606,8 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 #[cfg(feature = "jit")]
                 inline_name: None,
                 #[cfg(feature = "jit")]
+                dbg_name: None,
+                #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
                 inline_nslots: 0,
@@ -5658,7 +5662,7 @@ pub(crate) fn jit_tier(
     let saved_env = std::mem::replace(&mut heap.jit_call_env, env);
     // Best-effort arm name for the staged-stale diagnostic (recursive defns carry
     // `inline_name`; others reset to MAX so the value is never misleadingly stale).
-    let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, arm.inline_name.unwrap_or(u32::MAX));
+    let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, arm.dbg_name.unwrap_or(u32::MAX));
     let outcome = f(heap as *mut Heap, base as i64);
     heap.jit_call_env = saved_env;
     heap.jit_dbg_fn = saved_fn;
@@ -5790,6 +5794,8 @@ mod tests {
                 #[cfg(feature = "jit")]
                 inline_name: None,
                 #[cfg(feature = "jit")]
+                dbg_name: None,
+                #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
                 inline_nslots: 0,
@@ -5910,6 +5916,8 @@ mod tests {
                 #[cfg(feature = "jit")]
                 inline_name: None,
                 #[cfg(feature = "jit")]
+                dbg_name: None,
+                #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
                 inline_nslots: 0,
@@ -6009,6 +6017,8 @@ mod tests {
                 #[cfg(feature = "jit")]
                 inline_name: None,
                 #[cfg(feature = "jit")]
+                dbg_name: None,
+                #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
                 inline_nslots: 0,
@@ -6079,6 +6089,8 @@ mod tests {
             capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
+                #[cfg(feature = "jit")]
+                dbg_name: None,
                 #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
@@ -6160,6 +6172,8 @@ mod tests {
             capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
+                #[cfg(feature = "jit")]
+                dbg_name: None,
                 #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
@@ -6284,6 +6298,8 @@ mod tests {
                 #[cfg(feature = "jit")]
                 inline_name: None,
                 #[cfg(feature = "jit")]
+                dbg_name: None,
+                #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
                 inline_nslots: 0,
@@ -6346,6 +6362,8 @@ mod tests {
                 #[cfg(feature = "jit")]
                 inline_name: None,
                 #[cfg(feature = "jit")]
+                dbg_name: None,
+                #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
                 inline_nslots: 0,
@@ -6401,6 +6419,8 @@ mod tests {
             capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
+                #[cfg(feature = "jit")]
+                dbg_name: None,
                 #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
@@ -6466,6 +6486,8 @@ mod tests {
             capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
+                #[cfg(feature = "jit")]
+                dbg_name: None,
                 #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
@@ -6614,6 +6636,8 @@ mod tests {
             capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
+                #[cfg(feature = "jit")]
+                dbg_name: None,
                 #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
@@ -6775,6 +6799,8 @@ mod tests {
                 #[cfg(feature = "jit")]
                 inline_name: None,
                 #[cfg(feature = "jit")]
+                dbg_name: None,
+                #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
                 inline_nslots: 0,
@@ -6878,6 +6904,8 @@ mod tests {
             capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
+                #[cfg(feature = "jit")]
+                dbg_name: None,
                 #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
