@@ -49,7 +49,7 @@
 
 ;; Write a temp file with a def and a side-effecting println
 (def p31-tmpfile "/tmp/brood_chaos_reload_test.blsp")
-(write-file p31-tmpfile
+(spit p31-tmpfile
   "(def p31-reloaded-val 100)\n(println \"SIDE-EFFECT-FROM-RELOAD\")\n")
 
 ;; First: plain load runs everything
@@ -61,7 +61,7 @@
 (println "P31: correct val:" (= 100 p31-reloaded-val))
 
 ;; Now change the def value and use reload-defs — side effect should NOT re-run
-(write-file p31-tmpfile
+(spit p31-tmpfile
   "(def p31-reloaded-val 200)\n(println \"SIDE-EFFECT-SHOULD-NOT-APPEAR\")\n")
 (println "P31: reload-defs (should NOT print SIDE-EFFECT-SHOULD-NOT-APPEAR)...")
 (reload-defs p31-tmpfile)

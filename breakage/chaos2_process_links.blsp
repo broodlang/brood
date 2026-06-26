@@ -15,8 +15,8 @@
 (let (me (self))
   (let (d (spawn
             ;; D does its work and exits normally
-            (send me [:d-done (self)])
-            :normal))
+            (do (send me [:d-done (self)])
+                :normal)))
     ;; A links to D
     (link d)
     ;; Wait for D to announce itself then finish
