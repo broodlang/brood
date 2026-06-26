@@ -169,6 +169,23 @@ uninstall: ## Remove the installed binaries from $(PREFIX)/bin (leaves the local
 	# in $(RELEASE_DIR) is left alone (use `make clean` to remove that).
 	rm -f $(PREFIX)/bin/brood $(PREFIX)/bin/nest $(PREFIX)/bin/brood-lsp
 
+gui-debug: ## Build + install JIT+GUI brood/nest with GC debug-assertions ARMED, for debugging the JIT+GC bug (bug #2). Then `nest run` in your project.
+	# The diagnostic build for chasing the JIT+GC use-after-GC (bug #2): JIT ON (so
+	# it still reproduces), GUI ON (so the app renders), and `-C debug-assertions=on`
+	# so the per-deref GC tripwire + the `[jit-staged-stale]` staging check fire AT
+	# the corruption site instead of surfacing as a distant OOB / `*: got nil`.
+	# Installs over $(PREFIX)/bin so a plain `nest run` picks it up. Restore the fast
+	# build afterwards with `make install` (or `make release && make install`).
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=on" cargo build --release -p cli  --features "brood/jit brood/gui"
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=on" cargo build --release -p nest --features "brood/jit brood/gui"
+	@mkdir -p $(PREFIX)/bin
+	install -m755 target/release/brood $(PREFIX)/bin/brood
+	install -m755 target/release/nest  $(PREFIX)/bin/nest
+	@echo ">>> debug-armed (JIT+GUI, debug-assertions) brood+nest installed to $(PREFIX)/bin"
+	@echo ">>> now reproduce with diagnostics:  BROOD_GC_VERIFY=1 nest run"
+	@echo ">>> capture the '[jit-staged-stale]' / 'use-after-GC' line + .brood_crash_dump"
+	@echo ">>> (run 'make install' later to restore the fast, non-armed build)"
+
 fmt: ## Format all Rust code
 	cargo fmt
 
