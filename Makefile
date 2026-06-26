@@ -97,7 +97,7 @@ breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwi
 	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=on" cargo build --release -p cli --features jit
 	@bin=target/release/brood; fail=0; \
 	echo ">>> running breakage suite with $$bin"; \
-	for f in breakage/*_test.blsp; do \
+	for f in breakage/*.blsp; do \
 		echo ""; echo "===== $$f ====="; \
 		$$bin --test "$$f"; \
 		rc=$$?; \
