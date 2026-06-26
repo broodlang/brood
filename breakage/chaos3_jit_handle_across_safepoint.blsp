@@ -1,0 +1,80 @@
+;;; chaos3_jit_handle_across_safepoint.blsp — bug #2 regression stress: a JIT'd arm
+;;; that keeps movable LOCAL handles live across non-tail call safepoints.
+;;;
+;;; Bug #2 (tripwire signature: "use-after-GC: vector handle … held across a
+;;; collection without being re-rooted"): with no GC stack map (ADR-101 §6.2), the
+;;; Cranelift tier-1 JIT may park heap-handle operands in callee-saved registers
+;;; across an allocating sub-call. When the GC relocates those LOCAL handles the
+;;; saved registers are NOT updated, so the post-call use sees a STALE handle →
+;;; garbage Value / use-after-GC. Surfaces in the hatch render path (escape-html /
+;;; diff--at) which runs in per-request task processes.
+;;;
+;;; The bug only manifests in the scheduler/preemption context — a top-level run
+;;; does NOT reproduce it. So the work runs in SPAWNED green processes via the test
+;;; framework (each `test` is its own process; `:isolated` + explicit fan-out put
+;;; many handle-heavy JIT'd activations on the worker pool at once). Run under
+;;; `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 make breakagetests` to drive a collection
+;;; at every safepoint and arm the heap verifier (much slower, far likelier to
+;;; catch the stale handle at the bad deref).
+;;;
+;;; NOTE: this is a probabilistic stress repro (like the other chaos files), not a
+;;; deterministic trigger — the bug needs Cranelift register pressure + a GC at the
+;;; exact safepoint. The reliable manual repro remains the hatch-demo web app under
+;;; load. This file exercises the precise shape so the always-armed GC tripwire
+;;; catches a regression when it fires.
+(defmodule chaos3-test (:use test))
+
+;; ---- handle-heavy helpers (the JIT targets). All tail-recursive: a `test` body
+;;      runs in a green process whose coroutine stack is small. ----
+(defn mk (n) (str "handle-" n "-payload"))            ; fresh movable string per call
+(defn combine6 (a b c d e f) (str a "|" b "|" c "|" d "|" e "|" f))
+
+;; SIX movable handle results live simultaneously across the allocating sub-calls
+;; (mk …) and the combine6 call — maximises handle pressure so they land in
+;; callee-saved registers across a safepoint.
+(defn pressure (n acc)
+  (if (= n 0)
+    acc
+    (let (r (combine6 (mk n) (mk (+ n 1)) (mk (+ n 2))
+                      (mk (+ n 3)) (mk (+ n 4)) (mk (+ n 5))))
+      (pressure (- n 1) (str acc (substring r 0 1))))))
+
+;; diff--at shape: vector/map handle operands held across nth/assoc sub-calls.
+(defn vdiff (old new i n acc)
+  (if (>= i n)
+    acc
+    (vdiff old new (+ i 1) n
+      (if (= (nth old i) (nth new i))
+        acc
+        (assoc acc i (nth new i))))))
+
+;; A worker: run both handle-heavy shapes hot (warms + exercises the JIT under the
+;; garbage it allocates), send a checksum back to the parent.
+(defn c3-worker (parent k)
+  (let (s (pressure 150 "")
+        v (into [] (range 12))
+        d (vdiff v v 0 1200 {}))
+    (send parent [:done (+ (string-length s) (count d))])))
+
+(defn c3-spawn (parent n)
+  (when (> n 0) (spawn (c3-worker parent n)) (c3-spawn parent (- n 1))))
+
+(defn c3-collect (got total acc)
+  (if (= got total)
+    acc
+    (c3-collect (+ got 1) total (receive ([:done v] (+ acc v))))))
+
+(describe "JIT handles held across safepoints in spawned processes (bug #2 regression)"
+  :isolated
+
+  (test "fan-out: many workers run handle-heavy JIT'd code concurrently under GC"
+    ;; 24 worker processes each push the pressure/vdiff arms past the JIT tiering
+    ;; threshold and run them JIT'd while allocating heavily (frequent GC). Each
+    ;; pressure run builds a 150-char string ⇒ checksum 150; vdiff on equal vectors
+    ;; never assocs ⇒ count 0. Σ over 24 workers = 24*150 = 3600.
+    (c3-spawn (self) 24)
+    (assert= (c3-collect 0 24 0) 3600))
+
+  (test "single worker: render-shape tail call with handles across sub-calls"
+    (let (me (self) w (spawn (c3-worker me 7)))
+      (assert= (receive ([:done v] v)) 150))))
