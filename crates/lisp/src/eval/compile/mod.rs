@@ -5401,6 +5401,17 @@ fn jit_dispatch_tail(
     let n = heap.roots_len();
     let argc = n - top - 1;
     let callee = heap.root_at(top);
+    // Verify the staged tail-call args too (BROOD_JIT_VERIFY / _FN) — the tail path is
+    // separate from jit_dispatch_call, and a tail-called callee (e.g. pong's lambda
+    // tail-calling `badge-ops`) stages its args here. The callee is a Value, so resolve
+    // its closure name for the `_FN` match (u32::MAX = anonymous → "<computed>").
+    if jit_verify_active() {
+        let head = match callee.unpack() {
+            crate::core::value::ValueRef::Fn(id) => heap.closure(id).name.unwrap_or(u32::MAX),
+            _ => u32::MAX,
+        };
+        jit_verify_staged(heap, top + 1, n, head, NO_SITE, argc);
+    }
     let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
     for k in 0..argc {
         argv.push(heap.root_at(top + 1 + k));
