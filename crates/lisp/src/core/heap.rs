@@ -5289,7 +5289,6 @@ impl Heap {
         // value was written into a heap cell) right here — with the root→…→cell
         // path — instead of letting it surface far away as an OOB index or a
         // `promote` stack overflow. See `verify_local_graph`.
-        #[cfg(debug_assertions)]
         if Self::gc_verify_enabled() {
             self.verify_local_graph(extra_roots, extra_envs);
         }
@@ -5545,8 +5544,10 @@ impl Heap {
         // `old_src` drops here, releasing the pre-compaction old slabs.
     }
 
-    /// Is the `BROOD_GC_VERIFY` heap-verifier armed? Read once. Debug only.
-    #[cfg(debug_assertions)]
+    /// Is the `BROOD_GC_VERIFY` heap-verifier armed? Read once. Available in release too
+    /// (gated by the env flag) so a stored-stale-handle (bug #2 class) can be caught in a
+    /// normal `--release` binary without a debug-assertions rebuild — O(live) per collection
+    /// only when the flag is set.
     fn gc_verify_enabled() -> bool {
         use std::sync::OnceLock;
         static ON: OnceLock<bool> = OnceLock::new();
@@ -5563,8 +5564,8 @@ impl Heap {
     /// live graph** — the use-after-GC class the per-deref tripwire misses because
     /// the bad handle is written, not dereferenced. Panics with the
     /// root→…→containing-cell path so the offending structure (hence the missed
-    /// rooting site) is obvious. O(live); only runs under the env flag.
-    #[cfg(debug_assertions)]
+    /// rooting site) is obvious. O(live); only runs under the env flag. Available in
+    /// release (gated by `gc_verify_enabled`) — see its note.
     fn verify_local_graph(&self, extra_roots: &[Value], extra_envs: &[EnvId]) {
         // Allocation-light: the worklist carries only Copy handles plus the raw
         // handle of the containing cell (`parent`, `0` = a root). No per-node

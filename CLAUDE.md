@@ -198,7 +198,7 @@ contention races).
 | Env flag | Effect |
 |----------|--------|
 | `BROOD_GC_STRESS=1` | Collect at **every** eval safepoint (not just when the threshold is crossed). Turns rare GC races into deterministic ones. |
-| `BROOD_GC_VERIFY=1` | **Heap verifier** (debug only): before each collection, walk the whole reachable LOCAL graph and assert every handle is in-bounds + current-epoch. Catches a *stored* stale handle and prints the `root→…→cell` path. See below. |
+| `BROOD_GC_VERIFY=1` | **Heap verifier** (now works in plain `--release` too, gated by the flag): before each collection, walk the whole reachable LOCAL graph and assert every handle is in-bounds + current-epoch. Catches a *stored* stale handle (the use-after-GC class the per-deref tripwire misses — a bad handle written into a heap cell, e.g. into game state) and prints the `root→…→cell` path at the store site's next collection. O(live) per collection only when set. See below. |
 | `BROOD_TRACE_GCBLOCK=1` | Trace GC-block depth (debug). |
 | `BROOD_MEM_LIMIT=<bytes>` | Arm the ADR-043 soft/hard memory cap for a run. |
 | `BROOD_STACK_BUDGET=<bytes>` | Raise/lower the non-tail-recursion stack guard. |
