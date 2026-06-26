@@ -53,9 +53,9 @@
       [ok bad]
       (let (r (receive ([:p36-result _ success] success) (after 30000 :timeout)))
         (collect-p36 (- n 1) (if r (+ ok 1) ok) (if r bad (+ bad 1))))))
-  (def [ok bad] (collect-p36 n-clients 0 0))
-  (println "P36: ok=" ok "bad=" bad)
-  (println "P36-correct:" (and (= n-clients ok) (= 0 bad))))
+  (let ([ok bad] (collect-p36 n-clients 0 0))
+    (println "P36: ok=" ok "bad=" bad)
+    (println "P36-correct:" (and (= n-clients ok) (= 0 bad)))))
 
 ;;; ---- P37: rapid connect-disconnect (no data) ----
 (println "=== P37: 200 rapid connect-disconnect ===")
@@ -96,17 +96,20 @@
 
   ;; Build a string with all byte values 0–255 (Latin-1 codepoints)
   (def binary-payload
-    (apply str (map (fn (i) (string (char i))) (range 256))))
+    (apply str (map (fn (i) (int->char i)) (range 256))))
 
   ;; Server: accept, switch to binary mode, receive and echo
   (spawn
     (let (client (receive ([:tcp-accept _ cs] cs) (after 5000 :timeout)))
-      (tcp-controlling-process client (self))
-      (tcp-set-binary client true)
-      (let (data (receive ([:tcp _ d] d) (after 5000 :timeout)))
-        (tcp-send client data)
-        (tcp-close client)
-        (tcp-close ls))))
+      (if (= :timeout client)
+        (tcp-close ls)
+        (do
+          (tcp-controlling-process client (self))
+          (tcp-set-binary client true)
+          (let (data (receive ([:tcp _ d] d) (after 5000 :timeout)))
+            (when (not (= :timeout data)) (tcp-send client data))
+            (tcp-close client)
+            (tcp-close ls))))))
 
   ;; Client: connect, binary mode, send all bytes, receive them back
   (let (c (tcp-connect "127.0.0.1" port))
@@ -115,7 +118,7 @@
     (let (echo (receive ([:tcp _ d] d) (after 5000 :timeout)))
       (tcp-close c)
       (println "P38: payload length:" (string-length binary-payload))
-      (println "P38: echo length:" (string-length echo))
+      (println "P38: echo length:" (if (= :timeout echo) :timeout (string-length echo)))
       (println "P38-correct:" (= binary-payload echo)))))
 
 ;;; ---- P39: half-close: client closes, server reads EOF then sends ----

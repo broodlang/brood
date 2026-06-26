@@ -94,10 +94,10 @@
 (defdyn *dv-16* :d16) (defdyn *dv-17* :d17) (defdyn *dv-18* :d18) (defdyn *dv-19* :d19)
 
 ;; Bind all 20 at once, verify each sees the right value and doesn't bleed into others
-(binding (*dv-0* :b0) (*dv-1* :b1) (*dv-2* :b2) (*dv-3* :b3) (*dv-4* :b4)
-         (*dv-5* :b5) (*dv-6* :b6) (*dv-7* :b7) (*dv-8* :b8) (*dv-9* :b9)
-         (*dv-10* :b10) (*dv-11* :b11) (*dv-12* :b12) (*dv-13* :b13) (*dv-14* :b14)
-         (*dv-15* :b15) (*dv-16* :b16) (*dv-17* :b17) (*dv-18* :b18) (*dv-19* :b19))
+(binding (*dv-0* :b0 *dv-1* :b1 *dv-2* :b2 *dv-3* :b3 *dv-4* :b4
+          *dv-5* :b5 *dv-6* :b6 *dv-7* :b7 *dv-8* :b8 *dv-9* :b9
+          *dv-10* :b10 *dv-11* :b11 *dv-12* :b12 *dv-13* :b13 *dv-14* :b14
+          *dv-15* :b15 *dv-16* :b16 *dv-17* :b17 *dv-18* :b18 *dv-19* :b19)
 
   (def p53-checks
     (and (= :b0 *dv-0*)   (= :b1 *dv-1*)   (= :b2 *dv-2*)   (= :b3 *dv-3*)

@@ -107,16 +107,7 @@
 
 ;;; ---- P26: 1MB message round-trip ----
 (println "=== P26: 1MB string round-trip across process heaps ===")
-(let (me (self)
-      big-string (string-repeat "X" 1048576))  ; 1 MB
-  (spawn
-    (receive ([:echo s] (send me [:reply s]))
-             (after 10000 :timeout)))
-  (send (whereis nil) :skip)  ; dummy — just get the last spawned pid
-  ;; Actually capture the pid properly:
-  )
-
-;; Simpler: spawn returns the pid
+;; spawn returns the pid; capture it and round-trip a 1 MB string through it.
 (let (me (self)
       big-string (string-repeat "A" 1048576))
   (let (worker (spawn
