@@ -1405,18 +1405,69 @@ fn jit_verify_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_JIT_VERIFY").is_some())
 }
 
-/// Scan `roots[lo..hi]` for a stale LOCAL handle and report each to stderr (the runtime
-/// `BROOD_JIT_VERIFY` staged-args check). `head`/`site`/`argc` describe the call being staged.
+/// `BROOD_JIT_VERIFY_FN=<fn>`: log every JIT'd Brood→Brood call to `<fn>` with each staged
+/// arg's *type* — the targeted, low-noise way to see a value-level corruption (e.g. a `nil`
+/// staged where a number belongs: pong's `badge-ops` getting `throb=nil`). Identifies whether
+/// a bad value is staged *from JIT'd code* and which arg position, without a debug rebuild.
+#[cfg(feature = "jit")]
+fn jit_verify_fn() -> Option<&'static str> {
+    static F: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    F.get_or_init(|| std::env::var("BROOD_JIT_VERIFY_FN").ok())
+        .as_deref()
+}
+
+/// Either verification mode is on (the stale-handle scan, or the targeted per-fn arg log).
+#[cfg(feature = "jit")]
+fn jit_verify_active() -> bool {
+    jit_verify_enabled() || jit_verify_fn().is_some()
+}
+
+/// A one-word type tag for a `Value`, for the `BROOD_JIT_VERIFY_FN` arg log.
+#[cfg(feature = "jit")]
+fn jit_describe_value(v: Value) -> &'static str {
+    match v {
+        Value::Nil => "NIL",
+        Value::Bool(_) => "bool",
+        Value::Int(_) => "int",
+        Value::BigInt(_) => "bigint",
+        Value::Float(_) => "float",
+        Value::Sym(_) => "sym",
+        Value::Keyword(_) => "keyword",
+        Value::Str(_) => "str",
+        Value::Rope(_) => "rope",
+        Value::Pair(_) => "pair",
+        Value::Vector(_) => "vector",
+        Value::Range(_) => "range",
+        Value::Map(_) => "map",
+        _ => "other",
+    }
+}
+
+/// Scan `roots[lo..hi]` for a stale LOCAL handle (`BROOD_JIT_VERIFY`) and, when
+/// `BROOD_JIT_VERIFY_FN` names this call's callee, log every staged arg's type. `head`/`site`/
+/// `argc` describe the call being staged.
 #[cfg(feature = "jit")]
 fn jit_verify_staged(heap: &Heap, lo: usize, hi: usize, head: Symbol, site: u32, argc: usize) {
+    let head_name = crate::core::value::symbol_name(head);
+    let log_args = jit_verify_fn() == Some(head_name.as_str());
     for k in lo..hi {
         let v = heap.root_at(k);
-        if let Some((kind, g, e)) = heap.dbg_value_stale(v) {
+        if jit_verify_enabled() {
+            if let Some((kind, g, e)) = heap.dbg_value_stale(v) {
+                let raw = unsafe { std::mem::transmute::<Value, [i64; 3]>(v) };
+                eprintln!(
+                    "[jit-verify] STALE {kind} (gen {g} != live {e}) staged at roots[{k}] for call \
+                     to '{head_name}' (site={site}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
+                    raw[0], raw[1], raw[2],
+                );
+            }
+        }
+        if log_args {
             let raw = unsafe { std::mem::transmute::<Value, [i64; 3]>(v) };
             eprintln!(
-                "[jit-verify] STALE {kind} (gen {g} != live {e}) staged at roots[{k}] for call \
-                 to '{}' (site={site}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
-                crate::core::value::symbol_name(head),
+                "[jit-verify-fn] call to '{head_name}' (site={site}) arg[{}] = {} raw=[{:#x},{:#x},{:#x}]",
+                k - lo,
+                jit_describe_value(v),
                 raw[0], raw[1], raw[2],
             );
         }
@@ -4909,7 +4960,7 @@ fn jit_run_fast_link(
     }
     // Runtime BROOD_JIT_VERIFY: the fast-link path bypasses jit_dispatch_call's scan, so
     // scan the staged args here too (works in a plain --release build).
-    if jit_verify_enabled() {
+    if jit_verify_active() {
         jit_verify_staged(heap, stage_base, stage_base + argc, head, site, argc);
     }
     heap.extend_roots_to_nil(stage_base + nslots);
@@ -5086,7 +5137,7 @@ pub(crate) fn jit_dispatch_call(
         }
     }
     // Runtime BROOD_JIT_VERIFY: same scan in a plain --release build.
-    if jit_verify_enabled() {
+    if jit_verify_active() {
         jit_verify_staged(heap, stage_base, n, head, site, argc);
     }
 
