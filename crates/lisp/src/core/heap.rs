@@ -3296,7 +3296,9 @@ impl Heap {
     /// tripwire must not be the thing that cries wolf). The one definition
     /// shared by [`check_epoch_aged`](Self::check_epoch_aged) and the
     /// `BROOD_GC_VERIFY` walker, so the two detectors can't drift.
-    #[cfg(debug_assertions)]
+    // Available in release too: `dbg_value_stale` (used by the runtime BROOD_JIT_VERIFY
+    // staged-stale scan) calls it. Pure arithmetic — zero cost unless called.
+    #[allow(dead_code)]
     fn epoch_in_gen_width(epoch: u32) -> u32 {
         epoch & (crate::core::value::GEN_MASK as u32)
     }
@@ -3332,10 +3334,11 @@ impl Heap {
         );
     }
 
-    /// DEBUG ONLY: is `v` a LOCAL handle whose generation epoch no longer matches the live
-    /// epoch (stale across a collection)? Non-panicking sibling of the per-deref tripwire,
-    /// for scanning staged call args. Returns `Some((kind, handle_gen, live_gen))` if stale.
-    #[cfg(debug_assertions)]
+    /// Is `v` a LOCAL handle whose generation epoch no longer matches the live epoch
+    /// (stale across a collection)? Non-panicking sibling of the per-deref tripwire, for
+    /// scanning staged call args. Returns `Some((kind, handle_gen, live_gen))` if stale.
+    /// Available in release (gated only by the caller) so the runtime `BROOD_JIT_VERIFY`
+    /// scan can run without a debug-assertions build.
     pub fn dbg_value_stale(&self, v: Value) -> Option<(&'static str, u32, u32)> {
         let (name, region, is_old, gen) = match v {
             Value::Pair(id) => ("pair", id.region(), id.is_old(), id.generation()),
