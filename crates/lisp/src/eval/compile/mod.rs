@@ -1458,8 +1458,9 @@ fn jit_verify_staged(heap: &Heap, lo: usize, hi: usize, head: Symbol, site: u32,
             if let Some((kind, g, e)) = heap.dbg_value_stale(v) {
                 let raw = unsafe { std::mem::transmute::<Value, [i64; 3]>(v) };
                 eprintln!(
-                    "[jit-verify] STALE {kind} (gen {g} != live {e}) staged at roots[{k}] for call \
-                     to '{head_name}' (site={site}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
+                    "[jit-verify] STALE {kind} (gen {g} != live {e}) staged at roots[{k}] BY arm \
+                     '{}' for call to '{head_name}' (site={site}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
+                    crate::core::value::symbol_name_opt(heap.jit_dbg_fn).unwrap_or("<unknown>"),
                     raw[0], raw[1], raw[2],
                 );
             }
@@ -4976,10 +4977,12 @@ fn jit_run_fast_link(
     let env_base = heap.env_roots_len();
     let env_root = heap.root_env(callee_env);
     let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
+    let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, head);
     heap.jit_native_depth = depth + 1;
     let outcome = f(heap as *mut Heap, base as i64);
     heap.jit_native_depth = depth;
     heap.jit_call_env = saved;
+    heap.jit_dbg_fn = saved_fn;
     heap.truncate_env_roots(env_base);
     match outcome {
         0 => {
@@ -5130,9 +5133,10 @@ pub(crate) fn jit_dispatch_call(
                 let raw = unsafe { std::mem::transmute::<Value, [i64; 3]>(v) };
                 eprintln!(
                     "[jit-staged-stale] STALE {kind} (gen {g} != live {e}) staged at roots[{k}] \
-                     for call at {} (site={site}, head={}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
-                    heap.dbg_site_loc(site),
+                     BY arm '{}' for call to '{}' at {} (site={site}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
+                    crate::core::value::symbol_name_opt(heap.jit_dbg_fn).unwrap_or("<unknown>"),
                     crate::core::value::symbol_name_opt(head).unwrap_or("<computed>"),
+                    heap.dbg_site_loc(site),
                     raw[0], raw[1], raw[2],
                 );
             }
@@ -5250,10 +5254,12 @@ pub(crate) fn jit_dispatch_call(
                 let env_base = heap.env_roots_len();
                 let env_root = heap.root_env(callee_env);
                 let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
+                let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, head);
                 heap.jit_native_depth = depth + 1;
                 let outcome = f(heap as *mut Heap, base as i64);
                 heap.jit_native_depth = depth;
                 heap.jit_call_env = saved;
+                heap.jit_dbg_fn = saved_fn;
                 heap.truncate_env_roots(env_base);
                 match outcome {
                     // Done: result boxed in `roots[base]`. Take it, drop the frame.
@@ -5650,8 +5656,12 @@ pub(crate) fn jit_tier(
     // Publish this arm's env for the call/global callbacks, save/restoring the previous
     // value so a JIT'd callee that re-enters another JIT'd arm nests correctly.
     let saved_env = std::mem::replace(&mut heap.jit_call_env, env);
+    // Best-effort arm name for the staged-stale diagnostic (recursive defns carry
+    // `inline_name`; others reset to MAX so the value is never misleadingly stale).
+    let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, arm.inline_name.unwrap_or(u32::MAX));
     let outcome = f(heap as *mut Heap, base as i64);
     heap.jit_call_env = saved_env;
+    heap.jit_dbg_fn = saved_fn;
     Some(outcome)
 }
 

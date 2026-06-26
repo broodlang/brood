@@ -1062,6 +1062,12 @@ pub struct Heap {
     /// loop).
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_force_vm: bool,
+    /// Diagnostic only (`BROOD_JIT_VERIFY`/staged-stale): the symbol name of the JIT'd arm
+    /// currently executing native code (`u32::MAX` = none/unknown). Set on each native entry
+    /// and restored after, so when that arm stages a stale handle for a sub-call the report
+    /// can name the *caller* arm (the one holding the stale handle), not just the callee.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) jit_dbg_fn: u32,
     /// An error parked by a JIT runtime callback (the C ABI can't return a `Value` *and* an
     /// error); the arm returns the error outcome and [`vm_run_bc`] takes this to propagate.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
@@ -1331,6 +1337,7 @@ impl Heap {
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
             jit_force_vm: false,
+            jit_dbg_fn: u32::MAX,
             jit_pending_error: None,
         }
     }
@@ -1377,6 +1384,7 @@ impl Heap {
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
             jit_force_vm: false,
+            jit_dbg_fn: u32::MAX,
             jit_pending_error: None,
         }
     }
