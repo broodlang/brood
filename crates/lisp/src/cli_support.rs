@@ -23,6 +23,29 @@ use std::path::Path;
 /// **Caveat:** this catches Rust *panics*, not `SIGSEGV` (e.g. a coroutine
 /// stack overflow) — a signal handler writing from an async-signal context is a
 /// separate, much hairier mechanism, deliberately not done here.
+/// Format a Unix-epoch milliseconds value as a human-readable UTC timestamp
+/// (`YYYY-MM-DD HH:MM:SS UTC`) so a crash-dump entry tells you *when* the run
+/// was at a glance — `.brood_crash_dump` is append-only, so several runs pile up
+/// and the raw epoch-ms is hard to tell apart. Pure std (Hinnant's
+/// civil-from-days), no `chrono`.
+fn fmt_utc_ms(ms: u128) -> String {
+    let secs = (ms / 1000) as i64;
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    // civil_from_days: days since 1970-01-01 → (year, month, day), UTC.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02} UTC")
+}
+
 pub fn install_crash_dump() {
     let prior = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -38,7 +61,7 @@ pub fn install_crash_dump() {
         let mut body = String::new();
         body.push_str("\n=== brood crash dump ===\n");
         body.push_str(&format!("version: {} ({})\n", env!("CARGO_PKG_VERSION"), env!("BROOD_GIT_SHA")));
-        body.push_str(&format!("when:    {when} ms since epoch\n"));
+        body.push_str(&format!("when:    {} ({when} ms since epoch)\n", fmt_utc_ms(when)));
         body.push_str(&format!(
             "thread:  {}\n",
             thread.name().unwrap_or("<unnamed>")
