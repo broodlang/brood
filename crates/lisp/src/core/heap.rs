@@ -1027,6 +1027,13 @@ pub struct Heap {
     /// site ids outran a post-collect re-grow).
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     vm_fast_links: RefCell<Vec<FastLink>>,
+    /// DEBUG ONLY: per-call-site source position, recorded at compile time and indexed
+    /// by the same site id as [`Self::vm_call_ics`]. Lets a crash map a runtime call site
+    /// back to its `.blsp` file:line (call-site ids are positional + reset on
+    /// `runtime_collect`, so this is grown/cleared in lockstep). For diagnosing the JIT
+    /// stale-operand bug — see `dbg_site_pos` / `dbg_set_site_pos`.
+    #[cfg(debug_assertions)]
+    dbg_site_pos: RefCell<Vec<Option<(crate::error::Pos, Option<Arc<str>>)>>>,
     /// Global-read inline caches (ADR-096) — the value-position counterpart of
     /// [`Self::vm_call_ics`], indexed by a compiled `Node::GlobalIc`'s site id.
     /// Same lifecycle: allocated at compile time, validated by (sym, epoch),
@@ -1318,6 +1325,8 @@ impl Heap {
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
+            #[cfg(debug_assertions)]
+            dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
@@ -1362,6 +1371,8 @@ impl Heap {
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
+            #[cfg(debug_assertions)]
+            dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
@@ -3321,6 +3332,31 @@ impl Heap {
         );
     }
 
+    /// DEBUG ONLY: is `v` a LOCAL handle whose generation epoch no longer matches the live
+    /// epoch (stale across a collection)? Non-panicking sibling of the per-deref tripwire,
+    /// for scanning staged call args. Returns `Some((kind, handle_gen, live_gen))` if stale.
+    #[cfg(debug_assertions)]
+    pub fn dbg_value_stale(&self, v: Value) -> Option<(&'static str, u32, u32)> {
+        let (name, region, is_old, gen) = match v {
+            Value::Pair(id) => ("pair", id.region(), id.is_old(), id.generation()),
+            Value::Vector(id) => ("vector", id.region(), id.is_old(), id.generation()),
+            Value::Map(id) => ("map", id.region(), id.is_old(), id.generation()),
+            Value::Str(id) => ("string", id.region(), id.is_old(), id.generation()),
+            Value::Rope(id) => ("rope", id.region(), id.is_old(), id.generation()),
+            _ => return None,
+        };
+        if region != LOCAL {
+            return None;
+        }
+        let expected =
+            Self::epoch_in_gen_width(if is_old { self.old_epoch } else { self.local_epoch });
+        if gen != expected {
+            Some((name, gen, expected))
+        } else {
+            None
+        }
+    }
+
     // ===== Accessors — read LOCAL/PRELUDE/RUNTIME values =======================
 
     pub fn pair(&self, id: PairId) -> (Value, Value) {
@@ -4764,6 +4800,8 @@ impl Heap {
         // Clear the IR-readable mirror in lockstep (recycled sites get a fresh slot; a
         // live arm's now-out-of-range site id is caught by the JIT's `site < len` guard).
         self.vm_fast_links.borrow_mut().clear();
+        #[cfg(debug_assertions)]
+        self.dbg_site_pos.borrow_mut().clear();
         self.vm_global_ics.borrow_mut().clear();
 
         debug_assert!(
@@ -4955,7 +4993,32 @@ impl Heap {
         // in range for any site `vm_call_ics` knows about (the JIT bounds-checks anyway,
         // but this keeps the two tables the same length — see [`Self::vm_fast_links`]).
         self.vm_fast_links.borrow_mut().push(FastLink::EMPTY);
+        #[cfg(debug_assertions)]
+        self.dbg_site_pos.borrow_mut().push(None);
         (t.len() - 1) as u32
+    }
+
+    /// DEBUG ONLY: record call site `site`'s source position (compile time). See
+    /// [`Self::dbg_site_pos`].
+    #[cfg(debug_assertions)]
+    pub fn dbg_set_site_pos(&self, site: u32, pos: Option<crate::error::Pos>, file: Option<Arc<str>>) {
+        if let (Some(p), Some(slot)) = (pos, self.dbg_site_pos.borrow_mut().get_mut(site as usize)) {
+            *slot = Some((p, file));
+        }
+    }
+
+    /// DEBUG ONLY: look up a call site's recorded source position as `file:line:col`.
+    #[cfg(debug_assertions)]
+    pub fn dbg_site_loc(&self, site: u32) -> String {
+        match self.dbg_site_pos.borrow().get(site as usize).and_then(|o| o.clone()) {
+            Some((p, file)) => format!(
+                "{}:{}:{}",
+                file.as_deref().unwrap_or("?"),
+                p.line,
+                p.col
+            ),
+            None => format!("<site {site}: no recorded pos>"),
+        }
     }
 
     /// Allocate a fresh global-read site id for a compiled `Node::GlobalIc`.
