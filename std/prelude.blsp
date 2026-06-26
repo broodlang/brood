@@ -577,8 +577,15 @@ Maps look up by key; vectors, lists, and strings index by integer position
       :else (nth coll k (first default)))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
-(defn assoc--pairs (set m kvs)
-  (if (empty? kvs) m (assoc--pairs set (set m (first kvs) (second kvs)) (rest (rest kvs)))))
+;; Multi-pair builders, split by collection kind so the kernel op (`map-assoc` /
+;; `vector-assoc`) is a **direct free-global call**, not a computed-head call through a
+;; passed-in `set` function value. The computed-head form `(set m k v)` mis-compiles under
+;; the JIT — a map accumulator held across the loop's safepoints goes stale (use-after-GC);
+;; the direct call avoids that path (and is faster: no per-step function-value dispatch).
+(defn assoc--map-pairs (m kvs)
+  (if (empty? kvs) m (assoc--map-pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
+(defn assoc--vec-pairs (v kvs)
+  (if (empty? kvs) v (assoc--vec-pairs (vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
 (defn assoc
   "A fresh collection like `coll` with each `key value` pair added or updated.
 For a map, keys are added or replaced; for a vector, integer indices in
@@ -586,9 +593,9 @@ For a map, keys are added or replaced; for a vector, integer indices in
 `conj`, not `assoc`)."
   ;; The single-pair `(assoc coll k v)` arm is the hot case (it's what `update`,
   ;; tallies, and most call sites use): exact arity → VM-eligible, and it skips the
-  ;; `& kvs` rest-list + the `assoc--pairs` loop, going straight to the kernel op.
+  ;; `& kvs` rest-list + the multi-pair loop, going straight to the kernel op.
   ((coll k v) (if (vector? coll) (vector-assoc coll k v) (map-assoc coll k v)))
-  ((coll & kvs) (assoc--pairs (if (vector? coll) vector-assoc map-assoc) coll kvs)))
+  ((coll & kvs) (if (vector? coll) (assoc--vec-pairs coll kvs) (assoc--map-pairs coll kvs))))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
