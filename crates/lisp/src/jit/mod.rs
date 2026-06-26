@@ -101,6 +101,10 @@ impl Jit {
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
         builder.symbol("brood_rt_global_epoch_ptr", brood_rt_global_epoch_ptr as *const u8);
+        #[cfg(debug_assertions)]
+        builder.symbol("brood_rt_dbg_set_staging", brood_rt_dbg_set_staging as *const u8);
+        #[cfg(debug_assertions)]
+        builder.symbol("brood_rt_dbg_check_slot", brood_rt_dbg_check_slot as *const u8);
         builder.symbol("brood_rt_in_capture", brood_rt_in_capture as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         builder.symbol(
@@ -475,8 +479,52 @@ pub unsafe extern "C" fn brood_rt_roots_base(heap: *mut Heap) -> *mut u8 {
 /// # Safety
 /// `heap` must be the live context pointer; the word triple is bytes the JIT read out
 /// of a real `Value` (a slot, an `Int` box, or a handle result).
+// DEBUG ONLY: the call site currently staging its args (set by `brood_rt_dbg_set_staging`
+// at the start of each call's staging, read by `brood_rt_push` on garbage). Thread-local
+// because set→push run synchronously on one worker with no yield between.
+#[cfg(debug_assertions)]
+thread_local! {
+    static DBG_STAGING: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
+    // Push index within the current staging (0 = first arg pushed), so a garbage push
+    // reveals *which* operand (callee/arg0/arg1/…) is bad.
+    static DBG_PUSH_IDX: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// DEBUG ONLY: record the call site about to stage its args.
+#[cfg(debug_assertions)]
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_dbg_set_staging(_heap: *mut Heap, site: u32) {
+    DBG_STAGING.with(|s| s.set(site));
+    DBG_PUSH_IDX.with(|s| s.set(0));
+}
+
+/// DEBUG ONLY: validate a frame-slot read at its SOURCE — `abs_idx` is the absolute roots
+/// index the JIT read (`base + slot`), `w0` its tag word. A garbage tag here is the
+/// earliest point the corruption is observable; report the slot index vs. roots_len so we
+/// can tell an out-of-frame read (`nslots` undercount) from an in-frame corrupted slot.
+#[cfg(debug_assertions)]
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_dbg_check_slot(heap: *mut Heap, w0: i64, abs_idx: i64) {
+    let tag = (w0 as u64 & 0xff) as u8;
+    if tag > 24 {
+        let h = &*heap;
+        let site = DBG_STAGING.with(|s| s.get());
+        eprintln!(
+            "[slot-read] GARBAGE read at roots[{abs_idx}] tag={tag:#x} w0={w0:#x}; \
+             roots_len={} (in_frame={}) jit_native_depth={} last_staging_site={site} loc={}",
+            h.roots_len(),
+            (abs_idx as usize) < h.roots_len(),
+            h.jit_native_depth,
+            h.dbg_site_loc(site),
+        );
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_push(heap: *mut Heap, w0: i64, w1: i64, w2: i64) {
+    // NOTE: kept bare (no eprintln) so a bad-tag transmute panics *immediately* with a
+    // minimal instruction path — the btrace reverse-walk from the panic then reaches the
+    // JIT arm that produced the garbage without wading through stderr-formatting machinery.
     (*heap).push_root(words_to_val(w0, w1, w2));
 }
 

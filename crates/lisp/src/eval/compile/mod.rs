@@ -865,6 +865,10 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 Some((p, f)) => (Some(p), f),
                 None => (None, None),
             };
+            #[cfg(debug_assertions)]
+            if site != NO_SITE {
+                heap.dbg_set_site_pos(site, pos, file.clone());
+            }
             Some(Node::Call {
                 callee: Box::new(callee),
                 args: args.into_boxed_slice(),
@@ -1376,6 +1380,18 @@ fn inline_self_calls(
 fn self_inline_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_INLINE").is_none())
+}
+
+/// Runtime JIT off-switch. **Default OFF** (the JIT runs). `BROOD_NO_JIT=1` makes
+/// [`jit_tier`] never compile or run native code — every arm interprets on the VM,
+/// which is the correct reference engine. Today disabling the JIT otherwise needs a
+/// no-`jit`-feature *build*; this is the runtime A/B lever that lets a suspected
+/// JIT-only miscompile (e.g. a use-after-GC in a render arm) be ruled in/out and
+/// worked around without a rebuild. Cached once, like the other JIT levers.
+#[cfg(feature = "jit")]
+fn no_jit_enabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("BROOD_NO_JIT").is_some())
 }
 
 /// Is the in-IR call-site fast-link (Track B / Technique A increment 1) enabled? **Default ON**
@@ -2845,12 +2861,33 @@ fn dispatch(
 /// binders — `nslots` values total. Selection guarantees `args.len() >= nrequired`.
 /// No eval runs here (the rest is a plain `list_from_slice`), so no collection can
 /// happen between reading `args` and rooting the slots.
+/// DEBUG ONLY: assert every value in `args` has a valid `Value` discriminant. A value
+/// with an out-of-range tag byte is non-`Value` memory — a JIT frame-slot corruption
+/// (the bug #2 family). Aborting here, at the earliest frame entry that sees it, makes
+/// the backtrace point at the call chain that produced the garbage.
+#[cfg(debug_assertions)]
+fn dbg_check_args(args: &[Value], label: &str) {
+    for (i, a) in args.iter().enumerate() {
+        let tag = (unsafe { std::mem::transmute::<Value, [i64; 3]>(*a) }[0] as u64 & 0xff) as u8;
+        // Value has ~22 variants (max discriminant ~21); well above that is garbage.
+        if tag > 24 {
+            panic!("[arg-origin] {label}: arg[{i}] has invalid Value tag {tag:#x} — corrupt (non-Value) memory passed into a frame");
+        }
+    }
+}
+
 fn push_frame(
     heap: &mut Heap,
     arm: &CompiledArm,
     args: &[Value],
     genv: EnvRoot,
 ) -> Result<(), LispError> {
+    // DEBUG ONLY: catch a corrupt argument at the EARLIEST frame entry — the first call
+    // that receives an invalid-tag `Value` is closest to the origin of the JIT GC bug.
+    // Abort so the backtrace shows the call chain that produced it.
+    #[cfg(debug_assertions)]
+    dbg_check_args(args, "push_frame");
+
     let base = heap.roots_len();
     // Pre-allocate the whole frame as nil: every slot (params, optionals, rest, and
     // the body's `let`/`letrec` binders) must exist before anything writes it via
@@ -4834,6 +4871,13 @@ fn jit_run_fast_link(
     callee_env: EnvId,
 ) -> FastLinkOutcome {
     heap.truncate_roots(stage_base + argc);
+    // DEBUG ONLY: the JIT fast path bypasses `push_frame`, so validate the staged args
+    // here too — catch a corrupt arg at the earliest native frame entry (bug #2).
+    #[cfg(debug_assertions)]
+    {
+        let args: Vec<Value> = (0..argc).map(|k| heap.root_at(stage_base + k)).collect();
+        dbg_check_args(&args, &format!("jit_run_fast_link site={site} loc={}", heap.dbg_site_loc(site)));
+    }
     heap.extend_roots_to_nil(stage_base + nslots);
     let base = stage_base;
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from `jit_lower_arm`,
@@ -4990,6 +5034,23 @@ pub(crate) fn jit_dispatch_call(
     // head, one slot lower (over the staged callee) for a computed one.
     let elided = site != NO_SITE;
     let stage_base = if elided { n - argc } else { n - argc - 1 };
+
+    #[cfg(debug_assertions)]
+    {
+        for k in stage_base..n {
+            let v = heap.root_at(k);
+            if let Some((kind, g, e)) = heap.dbg_value_stale(v) {
+                let raw = unsafe { std::mem::transmute::<Value, [i64; 3]>(v) };
+                eprintln!(
+                    "[jit-staged-stale] STALE {kind} (gen {g} != live {e}) staged at roots[{k}] \
+                     for call at {} (site={site}, head={}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
+                    heap.dbg_site_loc(site),
+                    crate::core::value::symbol_name(head),
+                    raw[0], raw[1], raw[2],
+                );
+            }
+        }
+    }
 
     // ---- Fast native link (no per-call Arc clone) ----
     // The hot recursive case (`fib`, a free-global head). `vm_call_ic_fast_link` validates
@@ -5311,6 +5372,13 @@ pub(crate) fn jit_tier(
     // Draining an over-deep native-recursion subtree on the VM (see [`JIT_FORCE_VM`]):
     // interpret this arm so its recursion stays in the bounded heap-frame loop.
     if heap.jit_force_vm {
+        return None;
+    }
+    // Runtime JIT off-switch (BROOD_NO_JIT): never compile or run native — interpret
+    // on the (correct) VM. Returns before the hotness count + the background-compile
+    // enqueue CAS, so no arm is ever handed to the compiler and no native pointer is
+    // installed, so the fast-link / dispatch paths have nothing to call either.
+    if no_jit_enabled() {
         return None;
     }
     let mut code = arm.jit_code.load(Acquire);

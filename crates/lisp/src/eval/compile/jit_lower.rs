@@ -771,6 +771,25 @@ fn jit_lower_arm_inner(
     let sp_id = m
         .declare_function("brood_rt_gc_safepoint", Linkage::Import, &sp_sig)
         .ok()?;
+    // DEBUG ONLY: brood_rt_dbg_set_staging(heap, site) — record the staging call site.
+    #[cfg(debug_assertions)]
+    let dbg_staging_id = {
+        let mut s = m.make_signature();
+        s.params.push(AbiParam::new(ptr_ty));
+        s.params.push(AbiParam::new(types::I32));
+        m.declare_function("brood_rt_dbg_set_staging", Linkage::Import, &s)
+            .ok()?
+    };
+    // DEBUG ONLY: brood_rt_dbg_check_slot(heap, w0, abs_idx) — validate a slot read.
+    #[cfg(debug_assertions)]
+    let dbg_check_slot_id = {
+        let mut s = m.make_signature();
+        s.params.push(AbiParam::new(ptr_ty));
+        s.params.push(AbiParam::new(types::I64));
+        s.params.push(AbiParam::new(types::I64));
+        m.declare_function("brood_rt_dbg_check_slot", Linkage::Import, &s)
+            .ok()?
+    };
     // The Brood→Brood call ABI. brood_rt_push(heap, w0,w1,w2): stage one operand `Value`
     // onto `roots`. brood_rt_global(heap, out, sym) -> status: resolve a free global into
     // `*out`. brood_rt_call_slow(heap, out, argc) -> status: dispatch the staged call into
@@ -933,6 +952,10 @@ fn jit_lower_arm_inner(
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
     let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
+    #[cfg(debug_assertions)]
+    let dbg_staging_ref = m.declare_func_in_func(dbg_staging_id, b.func);
+    #[cfg(debug_assertions)]
+    let dbg_check_slot_ref = m.declare_func_in_func(dbg_check_slot_id, b.func);
     let push_ref = m.declare_func_in_func(push_id, b.func);
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
@@ -1404,6 +1427,7 @@ fn jit_lower_arm_inner(
     // Store an unboxed scalar `Op::Int` value into frame slot `k`, boxing it as `Int` or
     // (for a comparison `i8`) `Bool` via `box_scalar`.
     let store_int = |b: &mut FunctionBuilder, k: i64, v: cranelift_codegen::ir::Value| {
+        debug_assert!((k as usize) < nslots, "[jit-slot] store_int slot {k} >= nslots {nslots}");
         let (tag_byte, payload) = box_scalar(b, v);
         let roots_base = b.use_var(rb_var);
         let idx = b.ins().iadd_imm(base, k);
@@ -1420,6 +1444,7 @@ fn jit_lower_arm_inner(
     // (and any future 2-word-payload variant) carries `id` in the third word at offset 16,
     // which a tag+payload-only copy would drop and corrupt.
     let copy_value = |b: &mut FunctionBuilder, src: i64, dst: i64| {
+        debug_assert!((src as usize) < nslots && (dst as usize) < nslots, "[jit-slot] copy_value src {src} dst {dst} vs nslots {nslots}");
         let roots_base = b.use_var(rb_var);
         let saddr = {
             let i = b.ins().iadd_imm(base, src);
@@ -1453,6 +1478,12 @@ fn jit_lower_arm_inner(
                 [tag, payload, zero]
             }
             Op::Slot(k) => {
+                // DEBUG: a real/spill slot must be inside the frame [0, nslots). A k >= nslots
+                // reads past the frame into staging/stale memory — the bug #2 slot-count gap.
+                debug_assert!(
+                    k < nslots,
+                    "[jit-slot] read_words Op::Slot({k}) >= nslots {nslots} (spill_base {spill_base}, reserve {reserve}) — slot count undercounted",
+                );
                 let roots_base = b.use_var(rb_var);
                 let i = b.ins().iadd_imm(base, k as i64);
                 let o = b.ins().imul_imm(i, STRIDE);
@@ -1464,6 +1495,10 @@ fn jit_lower_arm_inner(
                 let w2 = b
                     .ins()
                     .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8);
+                // DEBUG ONLY: validate this slot read at its source (bug #2 origin hunt).
+                // `i` is the absolute roots index. Reports a garbage tag with in_frame info.
+                #[cfg(debug_assertions)]
+                b.ins().call(dbg_check_slot_ref, &[heap, w0, i]);
                 [w0, w1, w2]
             }
             Op::Float(v) => {
@@ -1487,6 +1522,7 @@ fn jit_lower_arm_inner(
     };
     // Store the three words of a `Value` into frame slot `dst`.
     let store_words = |b: &mut FunctionBuilder, dst: i64, w: [cranelift_codegen::ir::Value; 3]| {
+        debug_assert!((dst as usize) < nslots, "[jit-slot] store_words slot {dst} >= nslots {nslots}");
         let roots_base = b.use_var(rb_var);
         let i = b.ins().iadd_imm(base, dst);
         let o = b.ins().imul_imm(i, STRIDE);
@@ -1930,6 +1966,11 @@ fn jit_lower_arm_inner(
                     // callee via the call IC. A **computed** head leaves the callee staged
                     // below the args (`argc + 1` operands).
                     let n_ops = if head.is_some() { argc } else { argc + 1 };
+                    #[cfg(debug_assertions)]
+                    {
+                        let sv = b.ins().iconst(types::I32, call_site as i64);
+                        b.ins().call(dbg_staging_ref, &[heap, sv]);
+                    }
                     // The call is a safepoint (the callee runs arbitrary Brood and may GC).
                     // A live `Handle` left on the operand stack BELOW the call's own operands
                     // would be a heap pointer in a register across the collection → stale.
@@ -2810,6 +2851,16 @@ fn jit_lower_arm_inner(
                 code.len(),
                 ops.join(" ")
             );
+            // Per-Call (site, head) so the CLIF can be correlated to a source arm.
+            for i in code.iter() {
+                if let Inst::Call { site, head, argc, tail, .. } = i {
+                    let hn = match head {
+                        Some(h) => crate::core::value::symbol_name(*h),
+                        None => "<computed>".to_string(),
+                    };
+                    eprintln!("[jit-ir]   Call site={site} head={hn} argc={argc} tail={tail}");
+                }
+            }
             eprintln!("{}", ctx.func.display());
         }
     }
