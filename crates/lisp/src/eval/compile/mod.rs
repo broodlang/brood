@@ -5132,7 +5132,7 @@ pub(crate) fn jit_dispatch_call(
                     "[jit-staged-stale] STALE {kind} (gen {g} != live {e}) staged at roots[{k}] \
                      for call at {} (site={site}, head={}, argc={argc}); raw=[{:#x},{:#x},{:#x}]",
                     heap.dbg_site_loc(site),
-                    crate::core::value::symbol_name(head),
+                    crate::core::value::symbol_name_opt(head).unwrap_or("<computed>"),
                     raw[0], raw[1], raw[2],
                 );
             }
