@@ -92,7 +92,6 @@ impl Jit {
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
-        builder.symbol("brood_rt_load_slot", brood_rt_load_slot as *const u8);
         builder.symbol("brood_rt_global", brood_rt_global as *const u8);
         builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
@@ -114,6 +113,33 @@ impl Jit {
         );
         builder.symbol("brood_rt_pair_old_base", brood_rt_pair_old_base as *const u8);
         builder.symbol("brood_rt_const_load", brood_rt_const_load as *const u8);
+        // DEBUG (bug #2): print the callback addresses once, so an offline disasm of a
+        // BROOD_DUMP_CODE'd arm can resolve each `movabs/call` target to a name.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("BROOD_DUMP_CODE").is_some() {
+            for (n, a) in [
+                ("roots_base", brood_rt_roots_base as usize),
+                ("call_slow", brood_rt_call_slow as usize),
+                ("fast_frame", brood_rt_fast_frame as usize),
+                ("fastlink_base", brood_rt_fastlink_base as usize),
+                ("push", brood_rt_push as usize),
+                ("car", brood_rt_car as usize),
+                ("cdr", brood_rt_cdr as usize),
+                ("cons", brood_rt_cons as usize),
+                ("global", brood_rt_global as usize),
+                ("global_ic", brood_rt_global_ic as usize),
+                ("const_load", brood_rt_const_load as usize),
+                ("vector_ref", brood_rt_vector_ref as usize),
+                ("vector_base", brood_rt_vector_base as usize),
+                ("tick", brood_rt_tick as usize),
+                ("gc_safepoint", brood_rt_gc_safepoint as usize),
+                ("make_vector2", brood_rt_make_vector2 as usize),
+                ("global_epoch_ptr", brood_rt_global_epoch_ptr as usize),
+                ("dbg_set_staging", brood_rt_dbg_set_staging as usize),
+            ] {
+                eprintln!("[rt-addr] {n} = {a:#x}");
+            }
+        }
         Jit {
             module: JITModule::new(builder),
         }
@@ -521,22 +547,6 @@ pub unsafe extern "C" fn brood_rt_dbg_check_slot(heap: *mut Heap, w0: i64, w1: i
     }
 }
 
-/// EXPERIMENT (bug #2): opaque whole-Value read of `roots[abs_idx]` (3 words → `*out`).
-/// Cranelift can't store-to-load-forward a spill store across this call, so a frame-slot
-/// read after a safepoint genuinely reloads the GC-updated value. Paired with eager-spill
-/// (`BROOD_SPILL_ALL_HANDLES`) to test whether handles-only-in-roots fixes bug #2.
-///
-/// # Safety
-/// `heap`/`out` live; `abs_idx` is an in-bounds `roots` index.
-#[no_mangle]
-pub unsafe extern "C" fn brood_rt_load_slot(
-    heap: *mut Heap,
-    abs_idx: i64,
-    out: *mut crate::core::value::Value,
-) {
-    *out = (*heap).root_at(abs_idx as usize);
-}
-
 /// Push a `Value` (by word-triple) onto the operand stack (`roots`). The JIT stages a
 /// Brood→Brood call's callee + args here, in the VM's `Inst::Call` layout, before
 /// [`brood_rt_call_slow`]. Goes through `push_root` so the `roots` length/capacity are
@@ -586,7 +596,38 @@ pub unsafe extern "C" fn brood_rt_const_load(
     cv: *const crate::eval::compile::ConstVal,
     out: *mut crate::core::value::Value,
 ) {
-    *out = (*cv).load();
+    let v = (*cv).load();
+    // DEBUG (bug #2): a ConstVal must hold a RUNTIME/PRELUDE handle or an atom — NEVER a
+    // LOCAL handle, and never an invalid tag. A LOCAL/garbage value here means the baked
+    // `cv` points at a freed/relocated chunk (use-after-free of a recompiled CompiledArm),
+    // which would feed garbage into the arm (e.g. a garbage map_get key).
+    #[cfg(debug_assertions)]
+    if std::env::var_os("BROOD_DBG_CONST").is_some() {
+        use crate::core::value::ValueRef;
+        let bad = match v.unpack() {
+            ValueRef::Pair(id) => Some(("pair", id.region())),
+            ValueRef::Vector(id) | ValueRef::Range(id) | ValueRef::SeqView(id) => {
+                Some(("vector", id.region()))
+            }
+            ValueRef::Map(id) => Some(("map", id.region())),
+            ValueRef::Str(id) => Some(("string", id.region())),
+            ValueRef::BigInt(id) => Some(("bigint", id.region())),
+            ValueRef::Rope(id) => Some(("rope", id.region())),
+            ValueRef::Fn(id) | ValueRef::Macro(id) => Some(("fn", id.region())),
+            _ => None,
+        };
+        if let Some((kind, region)) = bad {
+            if region == crate::core::value::LOCAL {
+                let raw = std::mem::transmute::<crate::core::value::Value, [i64; 3]>(v);
+                eprintln!(
+                    "[const-garbage] const_load returned a LOCAL {kind} handle (cv={:p}) raw=[{:#x},{:#x},{:#x}] — \
+                     a const must be RUNTIME/PRELUDE; likely a freed/stale ConstVal chunk",
+                    cv, raw[0], raw[1], raw[2],
+                );
+            }
+        }
+    }
+    *out = v;
 }
 
 /// Resolve a free global `sym` (a JIT'd call's callee-loading `Inst::Global`/`GlobalIc`,
