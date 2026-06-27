@@ -470,15 +470,6 @@ pub unsafe extern "C" fn brood_rt_roots_base(heap: *mut Heap) -> *mut u8 {
     (*heap).roots_base_ptr() as *mut u8
 }
 
-/// Push a `Value` (by word-triple) onto the operand stack (`roots`). The JIT stages a
-/// Brood→Brood call's callee + args here, in the VM's `Inst::Call` layout, before
-/// [`brood_rt_call_slow`]. Goes through `push_root` so the `roots` length/capacity are
-/// maintained; a growth may reallocate the buffer, so the JIT re-fetches
-/// [`brood_rt_roots_base`] after the call.
-///
-/// # Safety
-/// `heap` must be the live context pointer; the word triple is bytes the JIT read out
-/// of a real `Value` (a slot, an `Int` box, or a handle result).
 // DEBUG ONLY: the call site currently staging its args (set by `brood_rt_dbg_set_staging`
 // at the start of each call's staging, read by `brood_rt_push` on garbage). Thread-local
 // because set→push run synchronously on one worker with no yield between.
@@ -504,14 +495,23 @@ pub unsafe extern "C" fn brood_rt_dbg_set_staging(_heap: *mut Heap, site: u32) {
 /// can tell an out-of-frame read (`nslots` undercount) from an in-frame corrupted slot.
 #[cfg(debug_assertions)]
 #[no_mangle]
-pub unsafe extern "C" fn brood_rt_dbg_check_slot(heap: *mut Heap, w0: i64, abs_idx: i64) {
+pub unsafe extern "C" fn brood_rt_dbg_check_slot(heap: *mut Heap, w0: i64, w1: i64, w2: i64, abs_idx: i64) {
+    let h = &*heap;
     let tag = (w0 as u64 & 0xff) as u8;
-    if tag > 24 {
-        let h = &*heap;
+    // Invalid tag byte → definitely garbage.
+    let bad_tag = tag > 24;
+    // Reconstruct the full Value and check for a stale/garbage LOCAL handle (a handle
+    // whose generation epoch doesn't match the live epoch, or whose slab index is OOB —
+    // i.e. read from a freed/wrong location). This catches the bug-#2 garbage that the
+    // tag-only check misses (a valid tag byte over a garbage payload).
+    let v = words_to_val(w0, w1, w2);
+    let stale = h.dbg_value_stale(v);
+    let oob = h.dbg_value_oob(v);
+    if bad_tag || stale.is_some() || oob.is_some() {
         let site = DBG_STAGING.with(|s| s.get());
         eprintln!(
-            "[slot-read] GARBAGE read at roots[{abs_idx}] tag={tag:#x} w0={w0:#x}; \
-             roots_len={} (in_frame={}) jit_native_depth={} last_staging_site={site} loc={}",
+            "[slot-read] GARBAGE/STALE read at roots[{abs_idx}] tag={tag:#x} w0={w0:#x} w1={w1:#x} w2={w2:#x} \
+             stale={stale:?} oob={oob:?}; roots_len={} (in_frame={}) jit_native_depth={} last_staging_site={site} loc={}",
             h.roots_len(),
             (abs_idx as usize) < h.roots_len(),
             h.jit_native_depth,
@@ -520,12 +520,40 @@ pub unsafe extern "C" fn brood_rt_dbg_check_slot(heap: *mut Heap, w0: i64, abs_i
     }
 }
 
+/// Push a `Value` (by word-triple) onto the operand stack (`roots`). The JIT stages a
+/// Brood→Brood call's callee + args here, in the VM's `Inst::Call` layout, before
+/// [`brood_rt_call_slow`]. Goes through `push_root` so the `roots` length/capacity are
+/// maintained; a growth may reallocate the buffer, so the JIT re-fetches
+/// [`brood_rt_roots_base`] after the call.
+///
+/// # Safety
+/// `heap` must be the live context pointer; the word triple is bytes the JIT read out
+/// of a real `Value` (a slot, an `Int` box, or a handle result).
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_push(heap: *mut Heap, w0: i64, w1: i64, w2: i64) {
-    // NOTE: kept bare (no eprintln) so a bad-tag transmute panics *immediately* with a
-    // minimal instruction path — the btrace reverse-walk from the panic then reaches the
-    // JIT arm that produced the garbage without wading through stderr-formatting machinery.
-    (*heap).push_root(words_to_val(w0, w1, w2));
+    let v = words_to_val(w0, w1, w2);
+    // DEBUG: catch a stale/OOB heap handle being STAGED as a call arg — the definitive
+    // bug-#2 catch point (independent of how the value was produced: read_words, a call
+    // result, car/cdr, …). Prints the staging site (→ the JIT arm) before the value goes
+    // into roots and out to the callee.
+    #[cfg(debug_assertions)]
+    {
+        let h = &*heap;
+        let stale = h.dbg_value_stale(v);
+        let oob = h.dbg_value_oob(v);
+        if stale.is_some() || oob.is_some() {
+            let site = DBG_STAGING.with(|s| s.get());
+            eprintln!(
+                "[push-stage] STAGING GARBAGE arg w0={w0:#x} w1={w1:#x} w2={w2:#x} \
+                 stale={stale:?} oob={oob:?}; roots_len={} jit_native_depth={} site={site} arm='{}' loc={}",
+                h.roots_len(),
+                h.jit_native_depth,
+                crate::core::value::symbol_name_opt(h.jit_dbg_fn).unwrap_or("<none/computed>"),
+                h.dbg_site_loc(site),
+            );
+        }
+    }
+    (*heap).push_root(v);
 }
 
 /// Load the current `Value` from a `ConstVal` (a compiled literal that may be a

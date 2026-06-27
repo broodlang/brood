@@ -784,9 +784,11 @@ fn jit_lower_arm_inner(
     #[cfg(debug_assertions)]
     let dbg_check_slot_id = {
         let mut s = m.make_signature();
-        s.params.push(AbiParam::new(ptr_ty));
-        s.params.push(AbiParam::new(types::I64));
-        s.params.push(AbiParam::new(types::I64));
+        s.params.push(AbiParam::new(ptr_ty)); // heap
+        s.params.push(AbiParam::new(types::I64)); // w0
+        s.params.push(AbiParam::new(types::I64)); // w1
+        s.params.push(AbiParam::new(types::I64)); // w2
+        s.params.push(AbiParam::new(types::I64)); // abs_idx
         m.declare_function("brood_rt_dbg_check_slot", Linkage::Import, &s)
             .ok()?
     };
@@ -954,8 +956,10 @@ fn jit_lower_arm_inner(
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     #[cfg(debug_assertions)]
     let dbg_staging_ref = m.declare_func_in_func(dbg_staging_id, b.func);
+    // Declared for ad-hoc slot-read validation during bug hunts (calls removed from
+    // read_words — they perturbed codegen and masked the bug they were chasing).
     #[cfg(debug_assertions)]
-    let dbg_check_slot_ref = m.declare_func_in_func(dbg_check_slot_id, b.func);
+    let _dbg_check_slot_ref = m.declare_func_in_func(dbg_check_slot_id, b.func);
     let push_ref = m.declare_func_in_func(push_id, b.func);
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
@@ -1495,10 +1499,11 @@ fn jit_lower_arm_inner(
                 let w2 = b
                     .ins()
                     .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8);
-                // DEBUG ONLY: validate this slot read at its source (bug #2 origin hunt).
-                // `i` is the absolute roots index. Reports a garbage tag with in_frame info.
-                #[cfg(debug_assertions)]
-                b.ins().call(dbg_check_slot_ref, &[heap, w0, i]);
+                // NOTE: an in-IR validation call here (dbg_check_slot_ref) PERTURBS codegen —
+                // it forces register spills around the call that mask the very register-liveness
+                // bug we're hunting (#2). Validation now lives in the Rust-side `brood_rt_push`
+                // (non-perturbing). `i`/dbg_check_slot_ref kept declared for ad-hoc use.
+                let _ = i;
                 [w0, w1, w2]
             }
             Op::Float(v) => {
@@ -1514,7 +1519,11 @@ fn jit_lower_arm_inner(
                 let zero = b.ins().iconst(types::I64, 0);
                 [tag, v, zero]
             }
-            Op::Handle(w0, w1, w2) => [w0, w1, w2],
+            Op::Handle(w0, w1, w2) => {
+                // NOTE: no in-IR validation call here — it would perturb codegen and mask the
+                // bug (see Op::Slot above). Register handles flow to brood_rt_push for checking.
+                [w0, w1, w2]
+            }
             // A hoisted global vector used as a whole `Value` (any non-`VectorRef`
             // consumer): its entry-resolved words move verbatim, exactly like a `Handle`.
             Op::HoistedVec { w0, w1, w2, .. } => [w0, w1, w2],
