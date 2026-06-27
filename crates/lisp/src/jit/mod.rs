@@ -92,6 +92,7 @@ impl Jit {
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
+        builder.symbol("brood_rt_load_slot", brood_rt_load_slot as *const u8);
         builder.symbol("brood_rt_global", brood_rt_global as *const u8);
         builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
@@ -518,6 +519,22 @@ pub unsafe extern "C" fn brood_rt_dbg_check_slot(heap: *mut Heap, w0: i64, w1: i
             h.dbg_site_loc(site),
         );
     }
+}
+
+/// EXPERIMENT (bug #2): opaque whole-Value read of `roots[abs_idx]` (3 words → `*out`).
+/// Cranelift can't store-to-load-forward a spill store across this call, so a frame-slot
+/// read after a safepoint genuinely reloads the GC-updated value. Paired with eager-spill
+/// (`BROOD_SPILL_ALL_HANDLES`) to test whether handles-only-in-roots fixes bug #2.
+///
+/// # Safety
+/// `heap`/`out` live; `abs_idx` is an in-bounds `roots` index.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_load_slot(
+    heap: *mut Heap,
+    abs_idx: i64,
+    out: *mut crate::core::value::Value,
+) {
+    *out = (*heap).root_at(abs_idx as usize);
 }
 
 /// Push a `Value` (by word-triple) onto the operand stack (`roots`). The JIT stages a

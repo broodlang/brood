@@ -5335,6 +5335,24 @@ impl Heap {
         if !self.gc_enabled {
             return;
         }
+        // DEBUG (bug #2): scan every roots slot for an OOB/garbage handle at each collection —
+        // catches WHICH slot holds garbage and WHEN (the collection right after it's written),
+        // independent of where it's later deref'd. Gated by BROOD_GC_VERIFY.
+        #[cfg(debug_assertions)]
+        if Self::gc_verify_enabled() {
+            let n = self.roots.len();
+            for i in 0..n {
+                let v = self.roots[i];
+                if let Some((kind, idx, len)) = self.dbg_value_oob(v) {
+                    eprintln!(
+                        "[roots-garbage] roots[{i}] = OOB {kind} idx={idx} slab_len={len} \
+                         (roots_len={n}) jit_native_depth={} arm='{}'",
+                        self.jit_native_depth,
+                        crate::core::value::symbol_name_opt(self.jit_dbg_fn).unwrap_or("<none>"),
+                    );
+                }
+            }
+        }
         // `BROOD_GC_VERIFY=1` (debug only): before flipping, walk the whole
         // reachable LOCAL graph and assert every handle is in-bounds and
         // current-epoch. Catches a *stored* stale handle (a missed root whose
