@@ -1394,6 +1394,16 @@ fn no_jit_enabled() -> bool {
     *OFF.get_or_init(|| std::env::var_os("BROOD_NO_JIT").is_some())
 }
 
+/// Debug bisect: `BROOD_NO_JIT_COMPUTED=1` bails (runs on the VM) any arm whose chunk
+/// contains a **computed-head** non-tail call `(f …)` — the shape fold--loop / assoc--pairs
+/// share, suspected in the JIT+GC value→nil/stale bug. If the repro goes clean with this set,
+/// the computed-head call lowering is the culprit.
+#[cfg(feature = "jit")]
+fn no_jit_computed() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("BROOD_NO_JIT_COMPUTED").is_some())
+}
+
 /// Runtime JIT self-verification (`BROOD_JIT_VERIFY=1`). Runs the staged-stale-handle scan
 /// on every Brood→Brood call's staged args in **any** build (not just debug-assertions) —
 /// so a JIT+GC use-after-GC (bug #2) can be caught at the staging site (naming the callee +
@@ -1468,7 +1478,8 @@ fn jit_verify_staged(heap: &Heap, lo: usize, hi: usize, head: Symbol, site: u32,
         if log_args {
             let raw = unsafe { std::mem::transmute::<Value, [i64; 3]>(v) };
             eprintln!(
-                "[jit-verify-fn] call to '{head_name}' (site={site}) arg[{}] = {} raw=[{:#x},{:#x},{:#x}]",
+                "[jit-verify-fn] BY arm '{}' call to '{head_name}' (site={site}) arg[{}] = {} raw=[{:#x},{:#x},{:#x}]",
+                crate::core::value::symbol_name_opt(heap.jit_dbg_fn).unwrap_or("<unknown>"),
                 k - lo,
                 jit_describe_value(v),
                 raw[0], raw[1], raw[2],
@@ -5259,11 +5270,36 @@ pub(crate) fn jit_dispatch_call(
                 let env_root = heap.root_env(callee_env);
                 let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
                 let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, head);
+                // Fill the closure's capture slots from its captured env. The fast frame
+                // setup above placed only the params (and `extend_roots_to_nil` zeroed the
+                // rest) — it bypasses `push_frame`, which is where captures are normally
+                // filled. Without this, a callee WITH captures reads its captured lexicals
+                // (e.g. a fold reducer's free `dir`) as nil, producing wrong results /
+                // type errors far away (`path-join nil …` → `string-length: got nil`).
+                // capture_base == argc here: noptional == 0 && rest_slot is none (guarded
+                // above) and nrequired == argc (the arm was selected for this argc). Reads
+                // are alloc-free (no GC), so the nil-filled body slots above stay valid.
+                if !arm.capture_names.is_empty() {
+                    let cenv = heap.read_root_env(env_root);
+                    for (k, &name) in arm.capture_names.iter().enumerate() {
+                        let v = heap.capture_value(cenv, k, name);
+                        heap.set_root_at(stage_base + argc + k, v);
+                    }
+                }
                 heap.jit_native_depth = depth + 1;
                 let outcome = f(heap as *mut Heap, base as i64);
                 heap.jit_native_depth = depth;
                 heap.jit_call_env = saved;
                 heap.jit_dbg_fn = saved_fn;
+                // `f()` runs the callee, which allocates freely and so may have triggered a
+                // collection that *relocated* the captured env. `minor_collect` forwarded the
+                // rooted copy (`env_root`) but NOT the local `callee_env` EnvId — re-read the
+                // live id from its root before dropping it. Without this the deopt path below
+                // hands `vm_apply` a stale env handle → `push_frame`/`env_frame` use-after-GC
+                // (the whole reason `callee_env` was env-rooted at all). The other outcomes
+                // read their results from `roots` (already GC-updated), so this is the one
+                // post-`f()` consumer of the locally-held handle.
+                let callee_env = heap.read_root_env(env_root);
                 heap.truncate_env_roots(env_base);
                 match outcome {
                     // Done: result boxed in `roots[base]`. Take it, drop the frame.
@@ -5492,6 +5528,13 @@ pub(crate) fn jit_tier(
     // installed, so the fast-link / dispatch paths have nothing to call either.
     if no_jit_enabled() {
         return None;
+    }
+    if no_jit_computed() {
+        if let Some(c) = arm.chunk.as_ref() {
+            if c.code.iter().any(|i| matches!(i, Inst::Call { tail: false, head: None, .. })) {
+                return None;
+            }
+        }
     }
     let mut code = arm.jit_code.load(Acquire);
     if code == crate::jit::BAILED || code == crate::jit::QUEUED {

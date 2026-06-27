@@ -3332,13 +3332,14 @@ impl Heap {
             gen == expected,
             "use-after-GC: {} handle ({} slot {}) is from epoch {}, but that generation is \
              now epoch {} — a handle held across a collection without being re-rooted \
-             (handle {:#x}).",
+             (handle {:#x}). [current JIT arm: '{}']",
             what,
             space,
             index,
             gen,
             expected,
             raw,
+            crate::core::value::symbol_name_opt(self.jit_dbg_fn).unwrap_or("<none/computed>"),
         );
     }
 
@@ -3366,6 +3367,38 @@ impl Heap {
         } else {
             None
         }
+    }
+
+    /// Is `v` a handle whose slab index is **out of bounds** for its region's slab — i.e.
+    /// garbage read from a freed/wrong location (a recycled roots buffer, an unspilled
+    /// register that went stale across a collection)? Catches bug-#2 garbage that
+    /// `dbg_value_stale` misses (the garbage's region/epoch bits don't read as a clean
+    /// LOCAL-stale handle). Returns `Some((kind, index, slab_len))` if OOB.
+    pub fn dbg_value_oob(&self, v: Value) -> Option<(&'static str, usize, usize)> {
+        macro_rules! check {
+            ($id:expr, $name:expr, $field:ident) => {{
+                let id = $id;
+                let idx = id.index();
+                // Only LOCAL (nursery/old) — the bug-#2 garbage is young/local; PRELUDE/RUNTIME
+                // are stable boxcar slabs (different len API), skip.
+                let len = match id.region() {
+                    LOCAL if id.is_old() => self.old.$field.len(),
+                    LOCAL => self.local.$field.len(),
+                    _ => return None,
+                };
+                if idx >= len {
+                    return Some(($name, idx, len));
+                }
+            }};
+        }
+        match v {
+            Value::Pair(id) => check!(id, "pair", pairs),
+            Value::Vector(id) | Value::Range(id) => check!(id, "vector", vectors),
+            Value::Map(id) => check!(id, "map", maps),
+            Value::Str(id) => check!(id, "string", strings),
+            _ => {}
+        }
+        None
     }
 
     // ===== Accessors — read LOCAL/PRELUDE/RUNTIME values =======================
@@ -5127,6 +5160,17 @@ impl Heap {
             return None;
         }
         if arm.nslots == 0 || arm.noptional != 0 || arm.rest_slot.is_some() {
+            return None;
+        }
+        // A closure WITH captures can't fast-link: the fast-link / fast-frame frame setup
+        // (`jit_run_fast_link`, `brood_rt_fast_frame`) places only params and nil-fills the
+        // rest — it skips `push_frame`, which is where capture slots are filled from the
+        // captured env. Linking one would leave its captured lexicals nil (read as nil in
+        // the body). A capturing closure `def`'d globally and called via a free-global head
+        // would otherwise hit this. Fall back to the native-link block / slow path, which
+        // fill captures. (Top-level `defn`s have no captures, so the hot recursive case is
+        // unaffected.)
+        if !arm.capture_names.is_empty() {
             return None;
         }
         if arm.compile_epoch.load(Acquire) != epoch {
