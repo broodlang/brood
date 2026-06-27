@@ -24,22 +24,7 @@ static JIT_ARM_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// spills); if the predicate ever under-counts, the lowering bails safely rather than
 /// corrupting. `0` under `--without-jit`, so that build's frames are unchanged.
 #[cfg(feature = "jit")]
-/// EXPERIMENT (bug #2): `BROOD_SPILL_ALL_HANDLES=1` — eager-spill every `Op::Handle` to a
-/// roots slot the instant it's produced, so no handle ever lives in a Cranelift register
-/// across a safepoint. Tests whether register-resident handles (the no-stack-map gap) are
-/// the bug: if pong2 goes clean with this set, the core fix is "handles only in roots".
-#[cfg(feature = "jit")]
-pub(crate) fn spill_all_handles_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_SPILL_ALL_HANDLES").is_some())
-}
-
 pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
-    // Eager-spill (experiment) needs a slot per handle-producing instruction — over-reserve
-    // by the whole bytecode length (each Inst pushes ≤1 value) so the scan never runs out.
-    if spill_all_handles_enabled() {
-        return code.len();
-    }
     if non_tail_call_count(code) < 2 {
         return 0;
     }
@@ -718,14 +703,6 @@ fn jit_lower_arm_inner(
     let rb_id = m
         .declare_function("brood_rt_roots_base", Linkage::Import, &rb_sig)
         .ok()?;
-    // EXPERIMENT (bug #2): brood_rt_load_slot(heap, abs_idx, out) — opaque slot reload.
-    let mut loadslot_sig = m.make_signature();
-    loadslot_sig.params.push(AbiParam::new(ptr_ty));
-    loadslot_sig.params.push(AbiParam::new(types::I64));
-    loadslot_sig.params.push(AbiParam::new(ptr_ty));
-    let loadslot_id = m
-        .declare_function("brood_rt_load_slot", Linkage::Import, &loadslot_sig)
-        .ok()?;
     // brood_rt_tick(heap) -> u8  (nonzero = the process should yield)
     let mut tick_sig = m.make_signature();
     tick_sig.params.push(AbiParam::new(ptr_ty));
@@ -968,7 +945,6 @@ fn jit_lower_arm_inner(
         }
     };
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
-    let loadslot_ref = m.declare_func_in_func(loadslot_id, b.func);
     let tick_ref = m.declare_func_in_func(tick_id, b.func);
     let incap_ref = m.declare_func_in_func(incap_id, b.func);
     let car_ref = m.declare_func_in_func(car_id, b.func);
@@ -1059,12 +1035,6 @@ fn jit_lower_arm_inner(
     // into (the out-pointer ABI). One per arm, reused: each result is read straight back
     // into registers before the next op.
     let out_slot = b.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        STRIDE as u32,
-        3,
-    ));
-    // EXPERIMENT (bug #2): scratch for the opaque slot reload.
-    let slot_scratch = b.create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         STRIDE as u32,
         3,
@@ -1518,27 +1488,17 @@ fn jit_lower_arm_inner(
                     k < nslots,
                     "[jit-slot] read_words Op::Slot({k}) >= nslots {nslots} (spill_base {spill_base}, reserve {reserve}) — slot count undercounted",
                 );
-                let (w0, w1, w2) = if spill_all_handles_enabled() {
-                    // EXPERIMENT: opaque reload — Cranelift can't forward a spill store to this.
-                    let i = b.ins().iadd_imm(base, k as i64);
-                    let out = b.ins().stack_addr(ptr_ty, slot_scratch, 0);
-                    b.ins().call(loadslot_ref, &[heap, i, out]);
-                    (
-                        b.ins().stack_load(types::I64, slot_scratch, 0),
-                        b.ins().stack_load(types::I64, slot_scratch, PAYLOAD_OFFSET as i32),
-                        b.ins().stack_load(types::I64, slot_scratch, PAYLOAD_OFFSET as i32 + 8),
-                    )
-                } else {
-                    let roots_base = b.use_var(rb_var);
-                    let i = b.ins().iadd_imm(base, k as i64);
-                    let o = b.ins().imul_imm(i, STRIDE);
-                    let addr = b.ins().iadd(roots_base, o);
-                    (
-                        b.ins().load(types::I64, MemFlags::new(), addr, 0),
-                        b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32),
-                        b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8),
-                    )
-                };
+                let roots_base = b.use_var(rb_var);
+                let i = b.ins().iadd_imm(base, k as i64);
+                let o = b.ins().imul_imm(i, STRIDE);
+                let addr = b.ins().iadd(roots_base, o);
+                let w0 = b.ins().load(types::I64, MemFlags::new(), addr, 0);
+                let w1 = b
+                    .ins()
+                    .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                let w2 = b
+                    .ins()
+                    .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8);
                 // NOTE: an in-IR validation call here (dbg_check_slot_ref) PERTURBS codegen —
                 // it forces register spills around the call that mask the very register-liveness
                 // bug we're hunting (#2). Validation lives in the Rust-side `brood_rt_push`.
@@ -2829,23 +2789,6 @@ fn jit_lower_arm_inner(
                 }
                 _ => return None,
             }
-            // EXPERIMENT (bug #2): eager-spill — move every freshly-produced Op::Handle into a
-            // roots slot, so no handle survives in a Cranelift register across a later safepoint
-            // (the suspected no-stack-map gap). If pong2 goes clean with BROOD_SPILL_ALL_HANDLES=1,
-            // the core fix is "handles live only in roots across safepoints".
-            if spill_all_handles_enabled() {
-                for d in 0..stack.len() {
-                    if matches!(stack[d], Op::Handle(..)) {
-                        if spill_next >= reserve {
-                            return None;
-                        }
-                        let slot = spill_base + spill_next;
-                        spill_next += 1;
-                        store_op(&mut b, slot as i64, stack[d]);
-                        stack[d] = Op::Slot(slot);
-                    }
-                }
-            }
             j += 1;
             if j == len {
                 // Fall off the end into Done: return the single result via roots[base].
@@ -2935,16 +2878,18 @@ fn jit_lower_arm_inner(
     // read JIT code pages at the crash pc (execute-only / superseded), so capture the bytes
     // here at compile time and correlate `pc - entry` offline. Captured before clear_context.
     #[cfg(debug_assertions)]
-    let dumped_bytes: Option<(String, Vec<u8>)> = {
+    let dump_name: Option<(String, usize)> = {
         match std::env::var("BROOD_DUMP_CODE") {
             Ok(want) if !want.is_empty() => {
                 let name = arm
                     .dbg_name
                     .map(crate::core::value::symbol_name)
                     .unwrap_or_default();
-                if name.contains(&want) {
-                    ctx.compiled_code()
-                        .map(|cc| (name, cc.code_buffer().to_vec()))
+                if want.split(',').any(|w| !w.is_empty() && name.contains(w)) {
+                    // Capture the code length now (compiled_code is cleared below); read the
+                    // RELOCATED bytes from the finalized entry pointer after finalize, so call
+                    // targets are real addresses (not 0x0 placeholders).
+                    ctx.compiled_code().map(|cc| (name, cc.code_buffer().len()))
                 } else {
                     None
                 }
@@ -2956,12 +2901,13 @@ fn jit_lower_arm_inner(
     m.finalize_definitions().ok()?;
     let entry = m.get_finalized_function(id);
     #[cfg(debug_assertions)]
-    if let Some((name, bytes)) = dumped_bytes {
+    if let Some((name, len)) = dump_name {
         let inlined = inline.is_some();
+        // SAFETY: `entry` is a finalized function of `len` bytes in r-x JIT memory.
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(entry, len) };
         eprintln!(
-            "[dump-code] arm='{name}' inlined={inlined} entry={:#x} len={} hex={}",
+            "[dump-code] arm='{name}' inlined={inlined} entry={:#x} len={len} hex={}",
             entry as usize,
-            bytes.len(),
             bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
         );
     }

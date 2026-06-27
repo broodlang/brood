@@ -4728,6 +4728,15 @@ struct JitCompiler {
     deferred: std::sync::mpsc::SyncSender<(Arc<CompiledArm>, Vec<u8>)>,
 }
 
+/// Permanent keep-alive for every `CompiledArm` whose native code was installed into the
+/// process-lifetime `GLOBAL_JIT` module. The native code bakes raw pointers into the arm's
+/// chunk `ConstVal`s (read by `brood_rt_const_load`), so the arm (chunk) must outlive the
+/// code — i.e. forever. Without this, the arm's only other owners are the closure / call-IC,
+/// which are dropped when a closure is rebound or a green process exits, freeing the chunk
+/// out from under still-installed native code (bug #2: a dangling ConstVal → garbage const).
+#[cfg(feature = "jit")]
+static JIT_ARM_KEEPALIVE: std::sync::Mutex<Vec<Arc<CompiledArm>>> = std::sync::Mutex::new(Vec::new());
+
 #[cfg(feature = "jit")]
 static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new(|| {
     use std::sync::atomic::Ordering::Release;
@@ -4768,7 +4777,19 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
                 }));
                 drop(jit); // install the pointer outside the module lock
                 match lowered {
-                    Ok(Some(ptr)) => slot.store(ptr as *mut u8, Release),
+                    Ok(Some(ptr)) => {
+                        slot.store(ptr as *mut u8, Release);
+                        // The installed native code lives forever in GLOBAL_JIT and bakes raw
+                        // pointers into this arm's chunk `ConstVal`s. Keep the arm (hence its
+                        // chunk) alive permanently so those pointers never dangle when the
+                        // closure / call-IC that referenced it is dropped (e.g. a green process
+                        // exits) — the bug-#2 use-after-free: a freed ConstVal chunk fed garbage
+                        // consts (a garbage map_get key) into still-installed native code.
+                        JIT_ARM_KEEPALIVE
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(arm.clone());
+                    }
                     Ok(None) => slot.store(crate::jit::BAILED, Release),
                     Err(_) => {
                         codegen_poisoned = true;
