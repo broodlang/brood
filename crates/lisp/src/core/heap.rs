@@ -4781,6 +4781,9 @@ impl Heap {
     ) -> Option<(usize, usize)> {
         // Bail unless we uniquely own the runtime region (no concurrent readers).
         Arc::get_mut(&mut self.runtime)?;
+        // Stall trace (BROOD_STALL_MS): RUNTIME-region compaction is a prime gameplay-lag
+        // suspect (it copies the whole live shared-code region). Log if it's slow.
+        let _sg = stall_guard("runtime-compact");
         let before = self.runtime.code.closures.count();
         // Move the old region out (owned) so we can read it while mutating self's
         // LOCAL slabs without a borrow conflict; the field is left empty meanwhile.
@@ -5312,7 +5315,11 @@ impl Heap {
     /// slow/stable dial, `BROOD_GC_STRESS=1` ⇒ every safepoint). No-op while GC is
     /// disabled (the builder heap during prelude construction). Shares all of its
     /// machinery — and the no-slot-reuse safety — with the [`flush`](Self::flush) helper.
+    // (stall_guard defined at module scope, below)
     pub fn collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
+        // Stall trace (BROOD_STALL_MS=<n>): log if this minor collection takes ≥ n ms — to
+        // pinpoint a gameplay lag spike. Works in release; zero cost unless the env is set.
+        let _sg = stall_guard("minor-gc");
         // GC trace (BROOD_GC_TRACE=1): log each minor collection's working set.
         #[cfg(debug_assertions)]
         {
@@ -6121,6 +6128,36 @@ macro_rules! flush_bound {
         }
         idx
     }};
+}
+
+/// Gameplay-lag diagnostic. `BROOD_STALL_MS=<n>`: anything wrapped in a `stall_guard`
+/// that runs ≥ n ms logs `[stall] <label> Nms` to stderr. Release-capable; zero cost
+/// (no `Instant`) unless the env is set. Used to pinpoint a long pause (GC vs compaction
+/// vs elsewhere) in a live session that can't be driven headless.
+fn stall_threshold_ms() -> Option<u128> {
+    static MS: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| std::env::var("BROOD_STALL_MS").ok().and_then(|v| v.parse().ok()))
+}
+
+pub(crate) struct StallGuard {
+    label: &'static str,
+    t0: std::time::Instant,
+    ms: u128,
+}
+impl Drop for StallGuard {
+    fn drop(&mut self) {
+        let el = self.t0.elapsed().as_millis();
+        if el >= self.ms {
+            eprintln!("[stall] {} took {}ms", self.label, el);
+        }
+    }
+}
+pub(crate) fn stall_guard(label: &'static str) -> Option<StallGuard> {
+    stall_threshold_ms().map(|ms| StallGuard {
+        label,
+        t0: std::time::Instant::now(),
+        ms,
+    })
 }
 
 fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
