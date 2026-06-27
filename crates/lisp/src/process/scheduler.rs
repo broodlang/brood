@@ -247,7 +247,18 @@ impl Drop for GcBlockGuard {
 
 /// How many `eval` loop iterations a process runs before it must yield its worker
 /// (cooperative fairness — the BEAM's mechanism). ~2000 ≈ the BEAM default; tunable.
-const REDUCTION_BUDGET: u32 = 2000;
+/// DEBUG (bug #2): `BROOD_REDUCTIONS=<n>` overrides it — a huge value effectively disables
+/// capture-mode preemption (processes run to completion, yielding only at `receive`), to
+/// test whether the capture/restore mechanism is the corruption source.
+fn reduction_budget() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("BROOD_REDUCTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2000)
+    })
+}
 
 /// Stack size for each worker thread. A green process runs its body directly on the
 /// worker thread (ADR-100 §8.4 — no coroutine stack), and the tree-walking eval recurses
@@ -425,9 +436,9 @@ fn preempt() {
     if let Some(c) = CURRENT.with(|c| c.borrow().clone()) {
         c.mailbox
             .reductions
-            .fetch_add(REDUCTION_BUDGET as u64, Ordering::Relaxed);
+            .fetch_add(reduction_budget() as u64, Ordering::Relaxed);
     }
-    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
+    REDUCTIONS.with(|r| r.set(reduction_budget()));
 }
 
 thread_local! {
@@ -602,7 +613,7 @@ pub(crate) fn capture_hard_kill_pending() -> bool {
 /// preempted on return. Not `std::thread::sleep`: a busy spinner shouldn't add fixed
 /// latency per iteration.
 pub fn yield_now() {
-    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
+    REDUCTIONS.with(|r| r.set(reduction_budget()));
     std::thread::yield_now();
 }
 
@@ -1244,7 +1255,7 @@ fn run_one(mut proc: Box<Process>) {
     WORKER_BUSY[wid].store(true, Ordering::Relaxed);
     // Fresh reduction budget for this scheduling quantum (decremented in the VM driver's
     // loop top via `tick_capture`; at zero the process captures + re-enqueues — preempt).
-    REDUCTIONS.with(|r| r.set(REDUCTION_BUDGET));
+    REDUCTIONS.with(|r| r.set(reduction_budget()));
 
     // The worker drives the body's bytecode (`vm_run_bc`) directly — no coroutine — so a
     // paused process's continuation is relocatable heap data (`Suspended`) and can resume
@@ -1268,7 +1279,7 @@ fn run_one(mut proc: Box<Process>) {
 fn finish_quantum(mailbox: &Arc<Mailbox>, wid: usize) {
     RUNNING.fetch_sub(1, Ordering::Relaxed); // pure diagnostic — see `run_one`
     WORKER_BUSY[wid].store(false, Ordering::Relaxed);
-    let used = REDUCTION_BUDGET.saturating_sub(REDUCTIONS.with(|r| r.get()));
+    let used = reduction_budget().saturating_sub(REDUCTIONS.with(|r| r.get()));
     mailbox.reductions.fetch_add(used as u64, Ordering::Relaxed);
 }
 
