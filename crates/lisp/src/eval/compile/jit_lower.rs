@@ -2779,8 +2779,22 @@ fn jit_lower_arm_inner(
                             let falsy = b.ins().bor(is_nil, false_bool);
                             b.ins().brif(falsy, tgt, &args, fall, &args);
                         }
-                        // Any other unboxed SSA value (raw `Op::Int(i64)`, `Op::Float`) is
-                        // always truthy in Brood.
+                        // A raw `Op::Int(i64)` here is AMBIGUOUS: it is either a genuine
+                        // unboxed int (always truthy in Brood) OR a boolean/comparison result
+                        // that crossed a block boundary and lost its `bool_param` typing at a
+                        // type-mixed merge (e.g. `(and one (<= …))`, where `and`'s short-circuit
+                        // can yield the non-bool `one` on one edge — downgrading the slot's
+                        // tracked bool-ness, so the comparison's 0/1 on the other edge is rebuilt
+                        // as a raw i64). With no tag we can't tell a falsy bool-0 from a truthy
+                        // int-0, so branching as "always truthy" silently mis-takes the truthy
+                        // edge (the bug that made `nest format` non-idempotent — a >width form
+                        // collapsed because its width-check `<=` 0 read as truthy). Deopt to the
+                        // VM, which has the real tagged value and branches correctly.
+                        Op::Int(_) => {
+                            b.ins().jump(deopt, &[]);
+                        }
+                        // `Op::Float`/`Op::HoistedVec`: unambiguously truthy (a float / a vector
+                        // is never a boolean), so branch to the truthy edge directly.
                         _ => {
                             b.ins().jump(fall, &args);
                         }
@@ -2884,8 +2898,16 @@ fn jit_lower_arm_inner(
                 let name = arm
                     .dbg_name
                     .map(crate::core::value::symbol_name)
-                    .unwrap_or_default();
-                if want.split(',').any(|w| !w.is_empty() && name.contains(w)) {
+                    .unwrap_or_else(|| format!("<anon:{}insts>", code.len()));
+                // `insts:N` matches by bytecode length (to catch anonymous arms); else by name.
+                let matched = want.split(',').any(|w| {
+                    if let Some(n) = w.strip_prefix("insts:") {
+                        n.parse::<usize>().ok() == Some(code.len())
+                    } else {
+                        !w.is_empty() && name.contains(w)
+                    }
+                });
+                if matched {
                     // Capture the code length now (compiled_code is cleared below); read the
                     // RELOCATED bytes from the finalized entry pointer after finalize, so call
                     // targets are real addresses (not 0x0 placeholders).
