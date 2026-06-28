@@ -2896,6 +2896,25 @@ fn dispatch(
                                 if arm.rest_slot.is_none() {
                                     (0..argc).map(|k| heap.root_at(base + k)).collect()
                                 } else {
+                                    // Rest arm: the rest elements were folded into a list at
+                                    // bind time, so they can't be reconstructed per-slot from
+                                    // `roots`; fall back to the pre-call `cur_argv`. Sound ONLY
+                                    // if no GC relocated those handles since capture — i.e. a
+                                    // rest arm never reaches here after a real safepoint (it's
+                                    // outside the JIT int-subset). A stale handle here is the
+                                    // bug #2 class (ADR-114) and would corrupt, so enforce the
+                                    // invariant in debug rather than leaving it as a silent
+                                    // assumption.
+                                    #[cfg(debug_assertions)]
+                                    for v in &cur_argv {
+                                        debug_assert!(
+                                            heap.dbg_value_stale(*v).is_none(),
+                                            "dispatch: stale LOCAL handle in the rest-arm \
+                                             cur_argv fallback after a JIT safepoint — the \
+                                             'rest arms never JIT post-safepoint' invariant \
+                                             broke (ADR-114; re-read from roots instead)"
+                                        );
+                                    }
                                     cur_argv
                                 };
                             heap.truncate_roots(base);
@@ -2923,6 +2942,25 @@ fn dispatch(
                                 if arm.rest_slot.is_none() {
                                     (0..argc).map(|k| heap.root_at(base + k)).collect()
                                 } else {
+                                    // Rest arm: the rest elements were folded into a list at
+                                    // bind time, so they can't be reconstructed per-slot from
+                                    // `roots`; fall back to the pre-call `cur_argv`. Sound ONLY
+                                    // if no GC relocated those handles since capture — i.e. a
+                                    // rest arm never reaches here after a real safepoint (it's
+                                    // outside the JIT int-subset). A stale handle here is the
+                                    // bug #2 class (ADR-114) and would corrupt, so enforce the
+                                    // invariant in debug rather than leaving it as a silent
+                                    // assumption.
+                                    #[cfg(debug_assertions)]
+                                    for v in &cur_argv {
+                                        debug_assert!(
+                                            heap.dbg_value_stale(*v).is_none(),
+                                            "dispatch: stale LOCAL handle in the rest-arm \
+                                             cur_argv fallback after a JIT safepoint — the \
+                                             'rest arms never JIT post-safepoint' invariant \
+                                             broke (ADR-114; re-read from roots instead)"
+                                        );
+                                    }
                                     cur_argv
                                 };
                             heap.truncate_roots(base);
