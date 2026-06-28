@@ -451,6 +451,11 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 (defn table? (x)
   "True if `x` is an in-memory table (from `(table)`) — Brood's shared mutable ETS store."
   (%eq (type-of x) :table))
+;; Copy an immutable map into a fresh mutable table. Used only by the compiler's
+;; linear-map-accumulator rewrite (docs/linear-map-accumulator.md) to seed the
+;; private table from the accumulator's input map; never surfaced to user code.
+(defn %table-from-map (m)
+  (reduce (fn (t kv) (table-put t (first kv) (second kv))) (table) (map-pairs m)))
 ;; `fn?` holds for both Brood closures (:fn) and Rust builtins (:native).
 (defn fn? (x)
   "True if `x` is callable (a closure or a primitive)."
