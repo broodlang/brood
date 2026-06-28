@@ -257,6 +257,22 @@ fn check_value_leaf(
     }
 }
 
+/// Conservative reachability scan: does `sym` appear as a `Value::Sym`
+/// *anywhere* in `form` — recursively, including in binder positions and
+/// inside `quote`? Used by the unused-`let`-binding lint. False negatives are
+/// acceptable (a shadowed reference counted as "used"); zero false positives.
+fn sym_appears_in(heap: &Heap, form: Value, sym: Symbol) -> bool {
+    match form {
+        Value::Sym(s) => s == sym,
+        Value::Pair(pid) => {
+            let (car, cdr) = heap.pair(pid);
+            sym_appears_in(heap, car, sym) || sym_appears_in(heap, cdr, sym)
+        }
+        Value::Vector(vid) => heap.vector(vid).iter().any(|&v| sym_appears_in(heap, v, sym)),
+        _ => false,
+    }
+}
+
 /// What the walk does at a head symbol. `Generic` is the fall-through for any
 /// head that isn't one of the recognised special forms / skip-body markers —
 /// the walk treats it as a normal call (resolves sig + arity, checks for
@@ -1112,6 +1128,44 @@ fn check_let(
     }
     for &body_form in &items[2..] {
         check_into(heap, body_form, &scope, out);
+    }
+    // Unused let binding lint. For each bound name, warn if it never appears
+    // as a Value::Sym in any part of its visible scope: subsequent binding
+    // elements + the body (plus preceding binding elements for letrec, where
+    // any RHS may reference any other name). The scan is conservative — it
+    // counts occurrences in binder positions and in quoted forms, so the only
+    // errors are false negatives (missed warnings), never false positives.
+    //
+    // Exempt: names starting with `_` (the "intentionally unused" convention).
+    {
+        let mut j = 0;
+        while j < binds.len() {
+            if let Value::Sym(name) = binds[j] {
+                let nm = name_of(name);
+                if !nm.starts_with('_') {
+                    // letrec: also scan preceding elements (mutual recursion).
+                    let preceding_used = letrec
+                        && binds[..j].iter().any(|&f| sym_appears_in(heap, f, name));
+                    let following_used =
+                        binds[j + 2..].iter().any(|&f| sym_appears_in(heap, f, name));
+                    let body_used = items[2..].iter().any(|&f| sym_appears_in(heap, f, name));
+                    if !preceding_used && !following_used && !body_used {
+                        // Only warn for user-written `let`s (those the reader
+                        // assigned a source position). Compiler-generated lets
+                        // (from match/pattern expansion) have no position and
+                        // are exempt: their names are user-chosen but the
+                        // "unused" status is an expansion artifact.
+                        if let Some(pos) = heap.form_pos_only(form) {
+                            out.push((
+                                Some(pos),
+                                format!("unused let binding: {}", nm),
+                            ));
+                        }
+                    }
+                }
+            }
+            j += 2;
+        }
     }
 }
 

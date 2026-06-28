@@ -15,7 +15,7 @@
   (test "a body after the blank line is captured"
     (let (r (parse-request "POST /x HTTP/1.0\r\nContent-Length: 5\r\n\r\nhello"))
       ;; :body is a bytes value (raw); decode it for a text body
-      (assert= (bytes->string (get r :body)) "hello"))))
+      (assert= (utf8-bytes->string (get r :body)) "hello"))))
 
 (describe "http: response rendering"
   (test "status line, Content-Length, and body"
@@ -183,7 +183,7 @@
                    (fn (req)
                      (ok (str (get req :method)
                            "|"
-                           (bytes->string (get req :body))
+                           (utf8-bytes->string (get req :body))
                            "|"
                            (get (get req :headers) "x-token"))))))))
       (let (port (receive ([:port p] p) (after 5000 :timeout)))

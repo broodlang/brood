@@ -133,7 +133,7 @@
   (test "known digest of \"abc\" (hex of raw == FIPS vector)"
     (assert= "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
              (encoding/hex-encode-bytes (hash/sha256-raw hash-test--abc))))
-  (test "raw digest agrees with the hex digest (%sha256-bytes)"
+  (test "raw digest agrees with the hex digest (sha256-bytes)"
     (assert= (hash/sha256-bytes hash-test--abc)
              (encoding/hex-encode-bytes (hash/sha256-raw hash-test--abc))))
   (test "empty input is the empty-string digest"

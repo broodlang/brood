@@ -66,17 +66,23 @@ perf-stats = []
 # release/bundle builds link none of it. Stage 0: callback table + JITModule skeleton.
 jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "dep:cranelift-frontend"]
 # tree-sitter parsing for *foreign* languages — the `tree-sitter-parse` builtin
-# (ADR: multi-language modes / ROADMAP §C). tree-sitter is the incremental,
-# error-tolerant parser that produces, for Ruby/Elixir/…, the same positioned CST
-# node shape (`{:kind :start :end :kids}`) Brood's own reader gives for `.blsp` —
-# so `std/tool/sexp`'s structural navigation and the editor's mode services run
-# over a foreign tree unchanged. The grammar crates carry vendored C parsers
-# (their own ABI via `tree-sitter-language`), so this is a heavier native build;
-# it's a runtime capability (a modern editor needs it), so it's in `default` and
-# the lean `make install` adds it explicitly (`--features brood/treesit`), unlike
-# the windowing stack which stays opt-in. Add a language = add one grammar crate
-# here + one arm in `src/treesit.rs`.
-treesit = ["dep:tree-sitter", "dep:tree-sitter-ruby", "dep:tree-sitter-elixir"]
+# (ADR: multi-language modes / ROADMAP §C). `treesit` is the *generic mechanism*
+# only: the incremental, error-tolerant parser runtime + the projection to the
+# same positioned-CST node shape (`{:kind :start :end :kids}`) Brood's own reader
+# gives for `.blsp`, so `std/tool/sexp`'s navigation and the editor's mode
+# services run over a foreign tree unchanged. It is in `default` and ships no
+# language grammar — the kernel deliberately knows no specific language. A grammar
+# is opt-in: `--features treesit-ruby` (or `treesit-grammars` for the lot) links
+# its vendored C parser and lights up `:ruby` in `tree-sitter-parse`. Add a
+# language = a `treesit-<lang>` feature here + one cfg'd arm in `src/treesit.rs`.
+# (Dynamic runtime grammar loading — no compile-time enum at all — is the planned
+# end state; see docs/roadmap.md.)
+treesit = ["dep:tree-sitter"]
+treesit-ruby = ["treesit", "dep:tree-sitter-ruby"]
+treesit-elixir = ["treesit", "dep:tree-sitter-elixir"]
+# Convenience bundle: every demo grammar. The test suite + `make install` build
+# with this so the grammar-dependent tests run and a shipped editor keeps Ruby/Elixir.
+treesit-grammars = ["treesit-ruby", "treesit-elixir"]
 
 [dependencies]
 # Allocator backend for the counting global allocator (core/alloc.rs). Brood is a

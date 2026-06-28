@@ -18,6 +18,8 @@ v4 and v7 are random; v7 also embeds a ms timestamp prefix for chronological
 sort order. v3 and v5 are deterministic: same namespace + name → same UUID,
 always — useful for content-based IDs and idempotent generation.")
 
+(require 'hash)   ; v3/v5 hash names over namespace+name (hash/md5-bytes, hash/sha1-bytes)
+
 ;; ---- hex helpers ------------------------------------------------------------
 
 (def uuid--hex-digits "0123456789abcdef")
@@ -201,11 +203,11 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
   "Generate a name-based UUID v3 (MD5). Given the same `ns-uuid` and `name`,
 always returns the same UUID. Use `uuid/ns-dns`, `uuid/ns-url`, `uuid/ns-oid`,
 or `uuid/ns-x500` as the namespace, or supply your own UUID string."
-  (uuid--name-based ns-uuid name %md5-bytes 3))
+  (uuid--name-based ns-uuid name hash/md5-bytes 3))
 
 (defn uuid-v5 (ns-uuid name)
   "Generate a name-based UUID v5 (SHA-1). Given the same `ns-uuid` and `name`,
 always returns the same UUID. Prefer v5 over v3 (SHA-1 > MD5). Use
 `uuid/ns-dns`, `uuid/ns-url`, `uuid/ns-oid`, or `uuid/ns-x500` as the
 namespace, or supply your own UUID string."
-  (uuid--name-based ns-uuid name %sha1-bytes 5))
+  (uuid--name-based ns-uuid name hash/sha1-bytes 5))

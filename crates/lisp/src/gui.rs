@@ -291,6 +291,9 @@ mod disabled {
     pub fn inset(_px: f32) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
+    pub fn bg(_rgb: Option<[u8; 3]>) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
     pub fn register_family(
         _name: u32,
         _regular: Vec<u8>,
@@ -304,13 +307,13 @@ mod disabled {
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    close, draw, focus, font, fullscreen, grab, held_key, icon, inset, maximize, open,
+    bg, close, draw, focus, font, fullscreen, grab, held_key, icon, inset, maximize, open,
     register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    close, draw, focus, font, fullscreen, grab, held_key, icon, inset, maximize, open,
+    bg, close, draw, focus, font, fullscreen, grab, held_key, icon, inset, maximize, open,
     register_family, size, title,
 };
 
@@ -402,6 +405,10 @@ pub(crate) mod backend {
     // The default font family keyword (`:mono`), and the default cell pixel size.
     const DEFAULT_FAMILY: &str = "mono";
     const DEFAULT_PX: f32 = 15.0;
+    // Cell height as a multiple of the font px. A touch looser than a terminal's
+    // typical ~1.2 so text gets vertical breathing room and the grid reads as an
+    // editor, not a console. Drives `cell_h` (and so the row count) in `recompute`.
+    const LINE_HEIGHT: f32 = 1.4;
 
     // Catppuccin Mocha *base* — matches theme.blsp so Op::Clear fills with the right colour.
     const DEFAULT_BG: [u8; 3] = [0x1e, 0x1e, 0x2e];
@@ -468,6 +475,11 @@ pub(crate) mod backend {
         /// `gui-inset!`. The grid loses `2*inset` px of usable area per axis, so its
         /// cell count shrinks; the window re-renders at the new size.
         Inset { px: f32 },
+        /// Set the window background — the fill for `Op::Clear`, the pre-clear, and the
+        /// inset margin / snap remainder outside the cell grid — for every open window
+        /// and ones opened later. Behind `gui-bg!`; `None` restores `DEFAULT_BG`. Pure
+        /// repaint, no metric change.
+        Background { rgb: Option<[u8; 3]> },
         /// Register a font family (interned `name`) from raw TTF bytes per style, so
         /// a face's `:family` can select it. Parsed on the GUI thread and shared by
         /// every renderer. Behind `gui-font-register`.
@@ -757,6 +769,19 @@ pub(crate) mod backend {
         Ok(())
     }
 
+    /// `(gui-bg! rgb)` — set the window background (clear / inset-margin / snap-remainder
+    /// fill) on every window + the default for ones opened later. `None` restores
+    /// `DEFAULT_BG`. No-op (silently) if the GUI thread never started.
+    pub fn bg(rgb: Option<[u8; 3]>) -> Result<(), String> {
+        if headless() {
+            return Ok(());
+        }
+        if let Ok(g) = gui() {
+            let _ = g.lock().unwrap().send_event(UserEvent::Background { rgb });
+        }
+        Ok(())
+    }
+
     /// `(gui-title! id text)` — set window `id`'s title-bar text at runtime. Routed
     /// through the event-loop proxy like `font`; a no-op (silently) if the GUI thread
     /// never started or `id` isn't a live window.
@@ -995,6 +1020,7 @@ pub(crate) mod backend {
         base_px: f32,
         default_family: Option<u32>,
         default_inset: f32,
+        default_bg: Option<[u8; 3]>,
     ) -> Result<Win, String> {
         let (w, h) = size.unwrap_or((840.0, 560.0));
         let window = elwt
@@ -1023,6 +1049,8 @@ pub(crate) mod backend {
         }
         // honour a global default content inset set before this window opened
         renderer.set_inset(default_inset);
+        // honour a global default window background set before this window opened
+        renderer.set_bg(default_bg);
         Ok(Win {
             window,
             backend,
@@ -1057,6 +1085,9 @@ pub(crate) mod backend {
         default_px: f32,
         /// Global default content inset (logical px) applied to windows opened later.
         default_inset: f32,
+        /// Global default window background applied to windows opened later; `None` =
+        /// `DEFAULT_BG`.
+        default_bg: Option<[u8; 3]>,
         /// winit 0.30 only lets a window be created once the event loop is
         /// **resumed** (an `ActiveEventLoop` whose platform display is live). On
         /// desktop `resumed` fires before the first user event, but rather than
@@ -1097,6 +1128,7 @@ pub(crate) mod backend {
                 self.default_px,
                 self.default_family,
                 self.default_inset,
+                self.default_bg,
             ) {
                 Ok(win) => {
                     update_cells(&win.window, &win.renderer, &win.size);
@@ -1261,6 +1293,15 @@ pub(crate) mod backend {
                         w.window.request_redraw();
                     }
                 }
+                UserEvent::Background { rgb } => {
+                    self.default_bg = rgb;
+                    for w in self.wins.values_mut() {
+                        w.renderer.set_bg(rgb);
+                        // Background is a pure repaint — no metric change, so no
+                        // `update_cells`/snap.
+                        w.window.request_redraw();
+                    }
+                }
                 // Register a font family from raw TTF bytes; parse here and share it
                 // with every renderer. A bad font is dropped (the family stays
                 // unregistered, so `:family` falls back to the default).
@@ -1307,6 +1348,8 @@ pub(crate) mod backend {
                 WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
                 WindowEvent::Resized(_) => {
                     update_cells(&w.window, &w.renderer, &w.size);
+                    // The sub-cell remainder is centred at paint time (`grid_origin`), so
+                    // there's no window-resize snap to do here — it works on every WM.
                     // Wake the app loop so it re-renders at the new (cols, rows)
                     // now, rather than after its (possibly long) poll timeout.
                     let (cols, rows) = *w.size.lock().unwrap();
@@ -1421,7 +1464,9 @@ pub(crate) mod backend {
                     // But while a button is held, crossing into a NEW cell emits a
                     // `:drag` (cell-granular, so still bounded), which is how a divider
                     // drag is tracked (ADR-077).
-                    let cell = px_to_cell(position, &w.renderer);
+                    let psz = w.window.inner_size();
+                    let cell =
+                        px_to_cell(position, &w.renderer, psz.width as usize, psz.height as usize);
                     if cell != w.cursor {
                         w.cursor = cell;
                         let (col, row) = w.cursor;
@@ -1592,6 +1637,7 @@ pub(crate) mod backend {
             default_family: None,
             default_px: DEFAULT_PX,
             default_inset: 0.0,
+            default_bg: None,
             resumed: false,
             pending_open: Vec::new(),
         };
@@ -1604,6 +1650,8 @@ pub(crate) mod backend {
     fn apply_font(w: &mut Win, family: Option<u32>, px: Option<f32>) {
         w.renderer.set_font(family, px);
         update_cells(&w.window, &w.renderer, &w.size);
+        // A new font changes the cell size; the new sub-cell remainder is re-centred at
+        // paint time (`grid_origin`), so there's nothing to resize here.
         w.window.request_redraw();
     }
 
@@ -1621,15 +1669,16 @@ pub(crate) mod backend {
         *size.lock().unwrap() = (cols, rows);
     }
 
-    /// A window pixel position to a (col, row) character cell, clamped to u16. The
-    /// inset (the same the grid is drawn with) is subtracted first, so a click lands on
-    /// the cell painted under it; a click in the inset margin clamps to the edge cell.
-    fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer) -> (u16, u16) {
-        let inset = r.inset() as f64;
+    /// A window pixel position to a (col, row) character cell, clamped to u16. The grid
+    /// origin (`grid_origin` — inset plus the centred remainder, the same the grid is
+    /// painted with) is subtracted first, so a click lands on the cell painted under it;
+    /// a click in the surrounding margin clamps to the edge cell.
+    fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer, w_px: usize, h_px: usize) -> (u16, u16) {
+        let (ox, oy) = r.grid_origin(w_px, h_px);
         let col =
-            ((pos.x - inset).max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
+            ((pos.x - ox as f64).max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
         let row =
-            ((pos.y - inset).max(0.0) as usize / r.cell_h.max(1)).min(u16::MAX as usize) as u16;
+            ((pos.y - oy as f64).max(0.0) as usize / r.cell_h.max(1)).min(u16::MAX as usize) as u16;
         (col, row)
     }
 
@@ -1904,6 +1953,7 @@ pub(crate) mod backend {
         pub(crate) cell_h: usize,
         baseline: i32,   // pixels from a cell's top to the text baseline
         base_inset: f32, // logical-px content margin before the grid (ADR-079); 0 = flush
+        bg: Option<[u8; 3]>, // window background (clear/inset-margin fill); None = DEFAULT_BG
 
         // keyed by (cluster, family id, bold, italic, scale): the same cluster at a
         // different family/style/scale rasterises to a different baked canvas.
@@ -1929,6 +1979,7 @@ pub(crate) mod backend {
                 cell_h: 1,
                 baseline: 0,
                 base_inset: 0.0,
+                bg: None,
                 cache: HashMap::new(),
                 prev_pixels: Vec::new(),
                 damage_ring: Vec::new(),
@@ -1976,6 +2027,35 @@ pub(crate) mod backend {
             self.base_inset = px.max(0.0);
         }
 
+        /// The window background colour — the fill for `Op::Clear`, the pre-clear, and
+        /// (since it's outside every cell) the inset margin + the snap remainder. `None`
+        /// falls back to `DEFAULT_BG`. Behind `gui-bg!`, so an app's padding matches its
+        /// theme instead of showing the hardcoded default.
+        pub(crate) fn bg(&self) -> [u8; 3] {
+            self.bg.unwrap_or(DEFAULT_BG)
+        }
+
+        /// Set the window background (clear/inset-margin fill). No metric change — only a
+        /// repaint — so the caller just requests a redraw.
+        fn set_bg(&mut self, rgb: Option<[u8; 3]>) {
+            self.bg = rgb;
+        }
+
+        /// The grid's top-left origin in PHYSICAL px: the inset plus HALF the sub-cell
+        /// remainder on each axis. `cols`/`rows` are floor divisions, so the leftover
+        /// pixels that don't fill a whole cell are split evenly *around* the grid
+        /// (centred) instead of all dumped at the right/bottom edge as a lopsided margin —
+        /// the fix for the "too much space under the status bar" strip. WM-independent: no
+        /// window resize, so it works where `request_inner_size` is ignored. The mouse
+        /// hit-test (`px_to_cell`) shares it so clicks stay aligned with what's painted.
+        pub(crate) fn grid_origin(&self, w_px: usize, h_px: usize) -> (usize, usize) {
+            let inset = self.inset();
+            let (cw, ch) = (self.cell_w.max(1), self.cell_h.max(1));
+            let rem_w = w_px.saturating_sub(2 * inset) % cw;
+            let rem_h = h_px.saturating_sub(2 * inset) % ch;
+            (inset + rem_w / 2, inset + rem_h / 2)
+        }
+
         /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
         /// the default family at the current size × HiDPI scale, dropping the cluster
         /// cache (baked at the old px). The grid stays uniform — a per-face
@@ -1983,7 +2063,7 @@ pub(crate) mod backend {
         fn recompute(&mut self) {
             self.px = (self.base_px * self.scale as f32).max(1.0);
             self.cache.clear();
-            let line_h = (self.px * 1.3).round().max(1.0);
+            let line_h = (self.px * LINE_HEIGHT).round().max(1.0);
             self.cell_h = line_h as usize;
             // `name_of` returns owned data, so the immutable borrow ends on this
             // line — letting the `borrow_mut` below succeed (don't make it borrow).
@@ -2475,7 +2555,7 @@ pub(crate) mod backend {
         // tail splits those three, plus `body` (clear + op loop) vs `present` (blit).
         let t_setup = Instant::now();
         let (fb_w, fb_h) = (w as usize, h as usize);
-        let bg0 = pack(DEFAULT_BG);
+        let bg0 = pack(r.bg());
         // Coordinate contract: `r.cell_w`/`cell_h` are PHYSICAL (post-scale) pixels;
         // `Op` row/col are BASE cells (top-left pixel = col*cell_w, row*cell_h); a
         // face `:scale n` multiplies into that same physical grid (n×n base cells).
@@ -2490,11 +2570,12 @@ pub(crate) mod backend {
             }
         }
         let (cw, ch) = (r.cell_w, r.cell_h);
-        // The content inset shifts the whole grid's origin by `inset` px on each edge;
-        // every op's pixel base adds it, matching `update_cells` / `px_to_cell` so the
-        // painted grid and the hit-tested grid coincide. The `clear`/pre-clear already
-        // filled the margin with the background, so it reads as padding.
-        let inset = r.inset();
+        // The grid's origin: the inset plus half the sub-cell remainder, so the leftover
+        // pixels are centred around the grid rather than left as a lopsided bottom/right
+        // margin (`grid_origin`). `ox`/`oy` are the per-axis offsets every op's pixel base
+        // adds; `px_to_cell` shares them so painted and hit-tested grids coincide. The
+        // `clear`/pre-clear already filled the surrounding margin with the background.
+        let (ox, oy) = r.grid_origin(fb_w, fb_h);
         for op in frame {
             match op {
                 Op::Clear => {
@@ -2527,7 +2608,7 @@ pub(crate) mod backend {
                     // cells — a wide glyph (emoji, CJK) takes two.
                     let scale = face.scale.max(1) as usize;
                     let ch_s = ch * scale;
-                    let top = inset + *row as usize * ch;
+                    let top = oy + *row as usize * ch;
                     let mut cx = *col as usize;
                     let bg_packed = pack(bg);
                     for g in s.graphemes(true) {
@@ -2537,7 +2618,7 @@ pub(crate) mod backend {
                             continue;
                         }
                         let block_w = cells * cw * scale; // the cluster's pixel span
-                        let left = inset + cx * cw;
+                        let left = ox + cx * cw;
                         if paint_bg {
                             fill_cell(&mut buf, fb_w, fb_h, left, top, block_w, ch_s, bg_packed);
                         }
@@ -2578,8 +2659,8 @@ pub(crate) mod backend {
                             &mut buf,
                             fb_w,
                             fb_h,
-                            inset + *col as usize * cw,
-                            inset + *row as usize * ch,
+                            ox + *col as usize * cw,
+                            oy + *row as usize * ch,
                             *w as usize * cw,
                             *h as usize * ch,
                             pack(bg),
@@ -2594,8 +2675,8 @@ pub(crate) mod backend {
                         &mut buf,
                         fb_w,
                         fb_h,
-                        inset + *col as usize * cw,
-                        inset + *row as usize * ch,
+                        ox + *col as usize * cw,
+                        oy + *row as usize * ch,
                         cw,
                         ch,
                         *style,
@@ -2605,9 +2686,9 @@ pub(crate) mod backend {
                 // pointer-move in the window event handler (ADR-080).
                 Op::CursorZone { .. } => {}
                 Op::VSpans { row0, col0, cols } => {
-                    let top0 = inset + *row0 as usize * ch;
+                    let top0 = oy + *row0 as usize * ch;
                     for (i, segs) in cols.iter().enumerate() {
-                        let left = inset + (*col0 as usize + i) * cw;
+                        let left = ox + (*col0 as usize + i) * cw;
                         let mut y = top0;
                         for (h, color) in segs {
                             let span_h = *h as usize * ch;
@@ -2634,8 +2715,8 @@ pub(crate) mod backend {
                                 let bit = base + b.trailing_zeros() as usize;
                                 let x = bit % wmod;
                                 let y = bit / wmod;
-                                let left = inset + (*col0 as usize + x * asp) * cw;
-                                let top = inset + (*row0 as usize + y) * ch;
+                                let left = ox + (*col0 as usize + x * asp) * cw;
+                                let top = oy + (*row0 as usize + y) * ch;
                                 fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
                                 b &= b - 1;
                             }
@@ -2654,8 +2735,8 @@ pub(crate) mod backend {
                             let rgb = colors.get(&(bit as u64)).copied().unwrap_or(*default);
                             let x = bit % wmod;
                             let y = bit / wmod;
-                            let left = inset + (*col0 as usize + x * asp) * cw;
-                            let top = inset + (*row0 as usize + y) * ch;
+                            let left = ox + (*col0 as usize + x * asp) * cw;
+                            let top = oy + (*row0 as usize + y) * ch;
                             fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, pack(rgb));
                             b &= b - 1;
                         }

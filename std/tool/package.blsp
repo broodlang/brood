@@ -2,7 +2,7 @@
 ;;
 ;; Third-party Brood deps: source pinned in the manifest's :dependencies, cached
 ;; per-project, locked for reproducibility. Policy is here; the kernel adds only
-;; thin mechanism (`%sha256`, later `%git-clone`/`%git-resolve-ref`/`%http-get`).
+;; thin mechanism (`%digest`, later `%git-clone`/`%git-resolve-ref`/`%http-get`).
 ;;
 ;; Slice 1 (this file): `:path` deps end-to-end — resolve a sibling-directory dep,
 ;; hash its tree, write project.lock.blsp, and add its `src/` to *load-path* so
@@ -21,8 +21,10 @@ land in a later slice."
   (:use format)
   (:use project))
 
+(require 'hash)   ; tree hashing over hash/sha256 + hash/sha256-bytes
+
 ;; --- canonical directory content hash (ADR-037 reproducibility) --------------
-;; A directory's hash is Brood over the single `%sha256` primitive: walk files in
+;; A directory's hash is Brood over the `hash/sha256` digest: walk files in
 ;; sorted order, and for each emit "<rel-path>\0<file-hash>\n", then hash the lot.
 ;; Approximates `git archive | sha256sum` without depending on git. Skips _deps/
 ;; and .git/ (a dep's nested cache / VCS data is not part of its content).
@@ -48,14 +50,14 @@ land in a later slice."
     (list-dir dir)))
 
 ;; Hash the file's raw bytes, not a UTF-8 string: `slurp` throws on a binary
-;; asset (image, font, …), so the old `(%sha256 (slurp path))` couldn't hash a
+;; asset (image, font, …), so the old `(hash/sha256 (slurp path))` couldn't hash a
 ;; tree that contained one. For a text file the hash is identical (its UTF-8
 ;; bytes are the file bytes), so existing lock hashes don't churn.
-(defn package--sha256-file (path) (%sha256-bytes (slurp-bytes path)))
+(defn package--sha256-file (path) (hash/sha256-bytes (slurp-bytes path)))
 
 (defn package-tree-hash (dir)
   "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."
-  (%sha256 (join ""
+  (hash/sha256 (join ""
              (map (fn (rel) (str rel "\0" (package--sha256-file (path-join dir rel)) "\n"))
                (package--tree-files dir)))))
 

@@ -3,48 +3,6 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
-## GUI: snap window to exact cell-grid size — eliminate pixel remainder (2026-06-28)
-
-**The problem.** `cols = usable_w / cell_w` and `rows = usable_h / cell_h` are floor
-divisions (gui.rs:1619–1620). The fractional pixels at the right and bottom edges are
-filled with `DEFAULT_BG` by `Op::Clear`, so the colour is right, but the *physical
-size* is visible: at 2× HiDPI with `:height 18` font (→ `cell_h = (18 × 1.3).round()
-= 23 px` logical = 46 px physical), the bottom strip can be up to 45 physical pixels
-≈ one full grid row. In myedit this read as "massive space underneath the status bar"
-and "unnecessary space on the right of the scrollbar". Short-term fix: dropped
-`*inset*` from 8 → 0 in myedit's `main.blsp` so the mandatory inset component is
-gone — the strip is now purely the integer remainder and colour-invisible. But on an
-unlucky window size it's still near one cell tall.
-
-**The proper fix: resize-to-fit snapping** (the standard terminal-emulator approach).
-After computing `(cols, rows)` from the incoming size, compute the ideal pixel size
-`ideal = (cols * cell_w + 2*inset, rows * cell_h + 2*inset)`. If that differs from
-the actual window size, call `window.request_inner_size(ideal_w, ideal_h)` via
-`winit`. The window then snaps to the nearest exact-cell multiple, leaving zero
-remainder.
-
-**Implementation** (all in `crates/lisp/src/gui.rs`):
-- In `recompute_cells` (lines ~1614–1621): after computing `cols`/`rows`, compute
-  `ideal_w = cols * cw + 2*inset`, `ideal_h = rows * ch + 2*inset`. If they don't
-  match `(sz.width, sz.height)`, store `ideal` as `pending_snap` on the `AppWin` and
-  call `window.request_inner_size(PhysicalSize::new(ideal_w, ideal_h))`.
-- **Guard against snap loops:** skip the snap when the incoming resize already equals
-  the last `pending_snap` sent — that resize *is* the snap response, so don't
-  re-snap.
-- **Fullscreen / maximized:** skip snapping when `window.fullscreen().is_some()` or
-  the maximized flag is set — the WM controls those sizes and will ignore the request
-  anyway.
-- No changes needed in `gui_gpu.rs` or any Brood-level module.
-
-**Constraints.**
-- Tiling WMs may silently reject `request_inner_size`; the snap is best-effort. If
-  rejected the remainder strip stays, nothing breaks.
-- No new Brood primitive — purely transparent backend behaviour triggered by existing
-  font/resize events.
-- Related context: `docs/gui-font-gaps.md` (general GUI display gaps); `gui.rs:407`
-  (`DEFAULT_BG` hardcoded to Catppuccin Mocha — a separate colour-configuration gap
-  if users want a different clear colour).
-
 ## Process `kill` primitive + per-test timeout (30s) (2026-05-30)
 
 Two linked pieces. The timeout depends on `kill` (without it a timed-out test can

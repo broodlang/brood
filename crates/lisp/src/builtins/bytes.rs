@@ -8,7 +8,7 @@ use crate::core::heap::Heap;
 use crate::core::value::{EnvId, Value};
 use crate::error::{error_codes, LispError, LispResult};
 
-use super::numeric::{arg, expect_int, expect_string};
+use super::numeric::{arg, expect_int};
 
 /// Borrow a `Value::Bytes`'s raw bytes, or a type error.
 fn as_bytes<'h>(heap: &'h Heap, who: &str, v: Value) -> Result<&'h [u8], LispError> {
@@ -105,29 +105,6 @@ pub(super) fn bytes_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
         out.extend_from_slice(as_bytes(heap, "bytes-concat", v)?);
     }
     Ok(heap.alloc_bytes(SharedBlob::new(&out)))
-}
-
-/// `(string->bytes s)` — the UTF-8 encoding of `s` as a bytes value.
-pub(super) fn string_to_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "string->bytes", arg(args, 0))?;
-    Ok(heap.alloc_bytes(SharedBlob::new(s.as_bytes())))
-}
-
-/// `(bytes->string b)` — decode `b` as UTF-8 into a string; errors on invalid UTF-8.
-pub(super) fn bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let owned = {
-        let b = as_bytes(heap, "bytes->string", arg(args, 0))?;
-        match std::str::from_utf8(b) {
-            Ok(s) => s.to_string(),
-            Err(e) => {
-                return Err(LispError::runtime(format!(
-                    "bytes->string: invalid UTF-8 at byte {}",
-                    e.valid_up_to()
-                )))
-            }
-        }
-    };
-    Ok(heap.alloc_string(&owned))
 }
 
 /// `(bytes-index-of haystack needle)` / `(bytes-index-of haystack needle from)` —

@@ -46,10 +46,10 @@
     (is (= (bytes-concat #b"ab" (bytes 67) #b"\xff") #b"abC\xff"))
     (is (= (bytes-concat) #b"")))
   (test "string<->bytes is UTF-8"
-    (is (= (string->bytes "AB") #b"AB"))
-    (is (= (string->bytes "é") #b"\xc3\xa9"))
-    (is (= (bytes->string #b"\xc3\xa9") "é"))
-    (is (= (bytes->string (string->bytes "round-trip ✓")) "round-trip ✓")))
+    (is (= (string->utf8-bytes "AB") #b"AB"))
+    (is (= (string->utf8-bytes "é") #b"\xc3\xa9"))
+    (is (= (utf8-bytes->string #b"\xc3\xa9") "é"))
+    (is (= (utf8-bytes->string (string->utf8-bytes "round-trip ✓")) "round-trip ✓")))
   (test "bytes->list"
     (is (= (bytes->list (bytes 1 2 3)) (list 1 2 3)))))
 
@@ -88,16 +88,16 @@
     (is (= (match (bytes 1 2 3 4) ((bytes a b & rest) [a b rest]) (_ :no))
           [1 2 (bytes 3 4)])))
   (test "literal prefix then capture the tail"
-    (is (= (match #b"GET /index" ((bytes #b"GET " & p) (bytes->string p)) (_ :other))
+    (is (= (match #b"GET /index" ((bytes #b"GET " & p) (utf8-bytes->string p)) (_ :other))
           "/index"))
     (is (= (match #b"POST /x"
-             ((bytes #b"GET " & p) [:get (bytes->string p)])
-             ((bytes #b"POST " & p) [:post (bytes->string p)])
+             ((bytes #b"GET " & p) [:get (utf8-bytes->string p)])
+             ((bytes #b"POST " & p) [:post (utf8-bytes->string p)])
              (_ :other))
           [:post "/x"])))
   (test "dynamic size — a length byte then that many bytes (TLV)"
     (is (= (match (bytes 3 65 66 67 99 100)
-             ((bytes len (body len) & rest) [len (bytes->string body) rest])
+             ((bytes len (body len) & rest) [len (utf8-bytes->string body) rest])
              (_ :no))
           [3 "ABC" (bytes 99 100)])))
   (test "fixed length is enforced (no & rest means exact)"

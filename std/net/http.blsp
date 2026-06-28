@@ -72,7 +72,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
     (if (nil? head)
       nil
       (let (marker (bytes-index-of head #b"\r\n\r\n")
-            clen (http--declared-length (bytes->string (subbytes head 0 marker))))
+            clen (http--declared-length (utf8-bytes->string (subbytes head 0 marker))))
         (if (= clen 0)
           head
           ;; `head` already holds everything read so far (incl. any body bytes in
@@ -123,11 +123,11 @@ you want text. Text mode is restored before returning so the response send path
   "Parse a raw HTTP request (`bytes`, from `http-read-request`) into
   `{:method :path :version :headers :body}` (`:headers` keys lower-cased). The head
   is ASCII and decoded to strings; `:body` is a `bytes` value (raw — decode it with
-  `bytes->string` for a text/form body). A string `raw` is accepted too (encoded to
+  `utf8-bytes->string` for a text/form body). A string `raw` is accepted too (encoded to
   bytes first), so `(parse-request \"GET /…\")` still works."
-  (let (raw (if (string? raw) (string->bytes raw) raw)
+  (let (raw (if (string? raw) (string->utf8-bytes raw) raw)
         marker (bytes-index-of raw #b"\r\n\r\n")
-        head (bytes->string (subbytes raw 0 marker))
+        head (utf8-bytes->string (subbytes raw 0 marker))
         body (subbytes raw (+ marker 4) (byte-length raw))
         lines (string-split head "\r\n")
         req (string-split (first lines) " "))

@@ -638,8 +638,8 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // Multi-valued map: one key may hold multiple values (a map of lists).
     // multimap-assoc, multimap-get, multimap-get-all, multimap-dissoc, …
     ("multimap", include_str!("../../../../std/multimap.blsp")),
-    // SHA-256 and HMAC-SHA256. sha256 is a clean alias for %sha256;
-    // hmac-sha256 is pure Brood over %sha256 per RFC 2104; hash-string is djb2.
+    // MD5/SHA-1/SHA-256/SHA-384/SHA-512 + HMAC, all Brood over the two `%digest`
+    // / `%hmac` prims (raw bytes); hex/string shaping via bytes->hex; hash-string is djb2.
     ("hash", include_str!("../../../../std/hash.blsp")),
     // LCS-based sequence diff: diff-seq, diff-lines, diff-summary, diff-patch,
     // diff-unified. O(m*n) time/space; suitable for small-to-medium sequences.
