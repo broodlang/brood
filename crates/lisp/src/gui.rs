@@ -328,6 +328,18 @@ pub(crate) mod backend {
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Instant;
 
+    // Paint-breakdown diagnostics (BROOD_STALL_MS): single GUI thread, so Relaxed is
+    // fine. Reset at each `paint` entry; when the paint runs >= the threshold, the
+    // breakdown line tells us whether the time is glyph re-rasterization (cache
+    // misses — e.g. an animated `:scale`) or just blitting a lot of pixels.
+    static PAINT_CLUSTERS: AtomicU64 = AtomicU64::new(0);
+    static PAINT_MISSES: AtomicU64 = AtomicU64::new(0);
+    static PAINT_BUILD_NS: AtomicU64 = AtomicU64::new(0);
+    fn paint_stall_ms() -> Option<u128> {
+        static MS: OnceLock<Option<u128>> = OnceLock::new();
+        *MS.get_or_init(|| std::env::var("BROOD_STALL_MS").ok().and_then(|v| v.parse().ok()))
+    }
+
     /// Max gap between consecutive presses (same button, same cell) that still counts
     /// as part of one click chain — the double/triple-click window, in milliseconds.
     const MULTI_CLICK_MS: u128 = 400;
@@ -2096,8 +2108,12 @@ pub(crate) mod backend {
             // The common single-char cluster keys via `ClusterKey::Char` with no
             // allocation; only a rare multi-char cluster allocates (a `Box<str>`).
             let key = (ClusterKey::of(g), fid, bold, italic, scale.max(1));
+            PAINT_CLUSTERS.fetch_add(1, Ordering::Relaxed);
             if !self.cache.contains_key(&key) {
+                let t0 = Instant::now();
                 let baked = self.build_cluster(g, fid, bold, italic, scale);
+                PAINT_BUILD_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                PAINT_MISSES.fetch_add(1, Ordering::Relaxed);
                 self.cache.insert(key.clone(), baked);
             }
             let cg = &self.cache[&key];
@@ -2342,18 +2358,33 @@ pub(crate) mod backend {
         r: &mut Renderer,
         frame: &[Op],
     ) {
+        // Paint-breakdown timing (BROOD_STALL_MS): reset the per-paint counters; the
+        // tail of this fn prints clusters/misses/build-time when the paint is slow.
+        let paint_t0 = paint_stall_ms().map(|ms| {
+            PAINT_CLUSTERS.store(0, Ordering::Relaxed);
+            PAINT_MISSES.store(0, Ordering::Relaxed);
+            PAINT_BUILD_NS.store(0, Ordering::Relaxed);
+            (ms, Instant::now())
+        });
+        let op_count = frame.len();
+        let ts_a = Instant::now();
         let sz = window.inner_size();
         let (w, h) = (sz.width.max(1), sz.height.max(1));
+        let ts_isz = Instant::now();
         if surface
             .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
             .is_err()
         {
             return;
         }
+        let ts_resize = Instant::now();
         let mut buf = match surface.buffer_mut() {
             Ok(b) => b,
             Err(_) => return,
         };
+        // Phase timer (BROOD_STALL_MS): `setup` = inner_size + resize + buffer_mut; the
+        // tail splits those three, plus `body` (clear + op loop) vs `present` (blit).
+        let t_setup = Instant::now();
         let (fb_w, fb_h) = (w as usize, h as usize);
         let bg0 = pack(DEFAULT_BG);
         // Coordinate contract: `r.cell_w`/`cell_h` are PHYSICAL (post-scale) pixels;
@@ -2543,6 +2574,31 @@ pub(crate) mod backend {
                 }
             }
         }
+        let t_body = Instant::now();
         let _ = buf.present();
+        // Slow-paint breakdown: when this paint took >= BROOD_STALL_MS, attribute the
+        // time across phases. `present` dominating = the softbuffer→window blit (a
+        // platform/software-render cost — candidate for damage-only present); `body`
+        // dominating with build~0 = the full-buffer clear + rect/blit fills.
+        if let Some((ms, t0)) = paint_t0 {
+            let el = t0.elapsed().as_millis();
+            if el >= ms {
+                let clusters = PAINT_CLUSTERS.load(Ordering::Relaxed);
+                let misses = PAINT_MISSES.load(Ordering::Relaxed);
+                let build_ms = PAINT_BUILD_NS.load(Ordering::Relaxed) / 1_000_000;
+                let setup_ms = t_setup.duration_since(t0).as_millis();
+                let inner_ms = ts_isz.duration_since(ts_a).as_millis();
+                let resize_ms = ts_resize.duration_since(ts_isz).as_millis();
+                let bufmut_ms = t_setup.duration_since(ts_resize).as_millis();
+                let body_ms = t_body.duration_since(t_setup).as_millis();
+                let present_ms = t_body.elapsed().as_millis();
+                eprintln!(
+                    "[gui-paint] {el}ms: fb={fb_w}x{fb_h} ops={op_count} \
+                     clusters={clusters} misses={misses} build={build_ms}ms | \
+                     setup={setup_ms}ms (inner={inner_ms} resize={resize_ms} bufmut={bufmut_ms}) \
+                     body={body_ms}ms present={present_ms}ms"
+                );
+            }
+        }
     }
 }
