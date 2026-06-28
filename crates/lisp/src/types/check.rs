@@ -865,6 +865,30 @@ mod tests {
             .is_empty(),
             "letrec mutual recursion: both f and g are used"
         );
+        // Binding used only inside a map literal — silent. Map literals are
+        // heap maps, not pairs, so the occurrence scan must descend into their
+        // keys and values too (regression: the editor's `{:start s :end e}`
+        // edit forms were all falsely flagged unused).
+        assert!(
+            file_warnings("(let (s 1) {:start s})").is_empty(),
+            "binding used as a map value should be silent"
+        );
+        assert!(
+            file_warnings("(let (k :a) {k 1})").is_empty(),
+            "binding used as a map key should be silent"
+        );
+        // …and a binding used only inside a closure that is itself a map value
+        // (the minibuffer `:on-complete (fn …)` pattern).
+        assert!(
+            file_warnings("(let (p 1) {:on-complete (fn (x) (+ x p))})").is_empty(),
+            "binding captured by a closure inside a map should be silent"
+        );
+        // The map descent must not mask genuine dead bindings.
+        let w = file_warnings("(let (s 1) {:start 2})");
+        assert!(
+            w.iter().any(|s| s.contains("unused let binding") && s.contains('s')),
+            "s unused even though a map literal is present, got {w:?}"
+        );
     }
 
     #[test]

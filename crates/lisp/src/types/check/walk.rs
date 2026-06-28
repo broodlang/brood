@@ -269,6 +269,14 @@ fn sym_appears_in(heap: &Heap, form: Value, sym: Symbol) -> bool {
             sym_appears_in(heap, car, sym) || sym_appears_in(heap, cdr, sym)
         }
         Value::Vector(vid) => heap.vector(vid).iter().any(|&v| sym_appears_in(heap, v, sym)),
+        // Map literals (`{:k v …}`) are heap maps, not pairs — scan both keys
+        // and values, or a binding used only inside a `{…}` (very common: the
+        // editor's minibuffer specs, `{:start s :end e}` edit forms) is falsely
+        // reported unused, breaking the "false negatives only" invariant.
+        Value::Map(mid) => heap
+            .map_entries(mid)
+            .iter()
+            .any(|&(k, v)| sym_appears_in(heap, k, sym) || sym_appears_in(heap, v, sym)),
         _ => false,
     }
 }
