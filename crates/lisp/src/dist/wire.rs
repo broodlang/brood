@@ -539,6 +539,14 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 "cannot send a bitset across nodes; it is local to its runtime",
             ));
         }
+        Message::Bytes(_) => {
+            // Mirrors Bitset: a raw-bytes `Arc<SharedBlob>` is runtime-local and not
+            // UTF-8, so it can't ride the `M_STR` path. Refuse across nodes for now.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot send a bytes value across nodes; it is local to its runtime",
+            ));
+        }
     }
     Ok(())
 }

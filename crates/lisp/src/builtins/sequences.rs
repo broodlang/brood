@@ -52,6 +52,13 @@ pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     match v {
         Value::Pair(p) => Ok(heap.car(p)),
         Value::Vector(id) => Ok(heap.vector(id).first().copied().unwrap_or(Value::nil())),
+        // Bytes are a sequence of ints 0–255; the head byte, or nil if empty.
+        Value::Bytes(id) => Ok(heap
+            .bytes(id)
+            .as_bytes()
+            .first()
+            .map(|&b| Value::int(b as i64))
+            .unwrap_or(Value::nil())),
         // A range is non-empty by construction, so its head is `lo`.
         Value::Range(id) => Ok(Value::int(heap.range_parts(id).0)),
         // A lazy seq-view realises (running its transducer) then yields the head
@@ -79,6 +86,11 @@ pub(super) fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         Value::Range(id) => {
             let (lo, hi, step) = heap.range_parts(id);
             Ok(heap.alloc_range(lo + step, hi, step))
+        }
+        // The tail of a bytes value is a fresh bytes value (all but the first byte).
+        Value::Bytes(id) => {
+            let tail: Vec<u8> = heap.bytes(id).as_bytes().iter().skip(1).copied().collect();
+            Ok(heap.alloc_bytes(crate::core::blob::SharedBlob::new(&tail)))
         }
         // A lazy seq-view realises then yields the tail of the resulting list.
         Value::SeqView(_) => match realize_seqview(heap, env, v)? {
@@ -112,6 +124,7 @@ pub(super) fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResul
         }
         Value::Str(id) => Ok(Value::boolean(heap.string(id).is_empty())),
         Value::Vector(id) => Ok(Value::boolean(heap.vector(id).is_empty())),
+        Value::Bytes(id) => Ok(Value::boolean(heap.bytes(id).as_bytes().is_empty())),
         Value::Map(id) => Ok(Value::boolean(heap.map_size(id) == 0)),
         _ => Err(LispError::wrong_type(heap, "empty?", "collection", x)),
     }

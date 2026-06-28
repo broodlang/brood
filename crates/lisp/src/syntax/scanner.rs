@@ -147,6 +147,14 @@ impl<'a> Scanner<'a> {
         Some(c)
     }
 
+    /// True if the unconsumed input begins with `prefix`. A cheap multi-char
+    /// lookahead — used by the reader/CST to tell a `#b"…"` bytes literal from a
+    /// `#`-prefixed symbol (`#`, like any non-delimiter, is an ordinary atom char).
+    #[inline]
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.src[self.pos..].starts_with(prefix)
+    }
+
     /// Skip whitespace (commas count) and `;` line comments — exactly what
     /// both parsers want between forms.
     pub fn skip_trivia(&mut self) {

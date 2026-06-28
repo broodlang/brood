@@ -44,8 +44,8 @@ use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    BigIntId, BsId, Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId, PairId,
-    Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE, RUNTIME,
+    BigIntId, BsId, BytesId, Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId,
+    PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
@@ -246,6 +246,7 @@ fn tag_rank(v: Value) -> u8 {
         ValueRef::Subprocess(_) => 16,
         ValueRef::Table(_) => 18,
         ValueRef::Bitset(_) => 19,
+        ValueRef::Bytes(_) => 20,
     }
 }
 
@@ -461,6 +462,10 @@ struct Slabs {
     /// UTF-8 string accessors / RUNTIME `String` slab would corrupt it — that was KI-4).
     /// The `Arc` is the unit of cross-process sharing (a refcount bump, not a byte copy).
     bitsets: Vec<Arc<SharedBlob>>,
+    /// **Raw bytes** — byte-clean immutable leaves, one `Arc<SharedBlob>` per live
+    /// value (mirrors `bitsets` exactly: arbitrary bytes, never UTF-8, own slab +
+    /// handle). The `Arc` is the unit of cross-process sharing.
+    bytes: Vec<Arc<SharedBlob>>,
     /// Text ropes (ADR-045). A `ropey::Rope` is itself `Arc`-shared internally,
     /// so this slab owns one cheap handle per live rope; cloning for an edit
     /// bumps refcounts, not bytes. Always inline (no SharedBlob split — ropes
@@ -485,6 +490,7 @@ fn slab_live_count(s: &Slabs) -> usize {
         + s.strings.len()
         + s.bigints.len()
         + s.bitsets.len()
+        + s.bytes.len()
         + s.ropes.len()
         + s.closures.len()
         + s.envs.len()
@@ -502,6 +508,7 @@ fn slab_bytes(s: &Slabs) -> usize {
         + s.strings.len() * size_of::<LocalString>()
         + s.bigints.len() * size_of::<num_bigint::BigInt>()
         + s.bitsets.len() * size_of::<Arc<SharedBlob>>()
+        + s.bytes.len() * size_of::<Arc<SharedBlob>>()
         + s.ropes.len() * size_of::<ropey::Rope>()
         + s.closures.len() * size_of::<Closure>()
         + s.natives.len() * size_of::<NativeFn>()
@@ -532,6 +539,7 @@ struct PoisonBits {
     strings: Vec<bool>,
     bigints: Vec<bool>,
     bitsets: Vec<bool>,
+    bytes: Vec<bool>,
     ropes: Vec<bool>,
     closures: Vec<bool>,
     envs: Vec<bool>,
@@ -574,6 +582,7 @@ pub struct LocalCheckpoint {
     strings: usize,
     bigints: usize,
     bitsets: usize,
+    bytes: usize,
     ropes: usize,
     closures: usize,
     envs: usize,
@@ -607,6 +616,10 @@ struct CodeSlabs {
     /// mirrors `bigints`). Raw immutable bytes via `Arc<SharedBlob>` — byte-clean, so a
     /// bitset is never read as UTF-8 text. Append-only; the Arc is shared, not copied.
     bitsets: boxcar::Vec<Arc<SharedBlob>>,
+    /// Raw bytes `def`'d into a global / captured by a promoted closure (mirrors
+    /// `bitsets` exactly). Byte-clean `Arc<SharedBlob>`, never read as UTF-8.
+    /// Append-only; the Arc is shared, not copied.
+    bytes: boxcar::Vec<Arc<SharedBlob>>,
     /// Ropes `def`'d into a global (shared read-only across this runtime's
     /// processes). A `ropey::Rope` is `Send + Sync` and immutable-by-construction
     /// here (every edit makes a fresh LOCAL rope), so sharing one by handle is
@@ -1199,6 +1212,7 @@ pub fn is_movable(v: Value) -> bool {
         ValueRef::Str(id) => id.region() == LOCAL,
         ValueRef::BigInt(id) => id.region() == LOCAL,
         ValueRef::Bitset(id) => id.region() == LOCAL,
+        ValueRef::Bytes(id) => id.region() == LOCAL,
         ValueRef::Rope(id) => id.region() == LOCAL,
         ValueRef::Fn(id) | ValueRef::Macro(id) => id.region() == LOCAL,
         _ => false,
@@ -1229,6 +1243,7 @@ pub fn needs_root_slot(v: Value) -> bool {
         ValueRef::Str(id) => shared(id.region()),
         ValueRef::BigInt(id) => shared(id.region()),
         ValueRef::Bitset(id) => shared(id.region()),
+        ValueRef::Bytes(id) => shared(id.region()),
         ValueRef::Rope(id) => shared(id.region()),
         ValueRef::Fn(id) | ValueRef::Macro(id) => shared(id.region()),
         _ => false,
@@ -1519,6 +1534,7 @@ impl Heap {
             strings: self.local.strings.len(),
             bigints: self.local.bigints.len(),
             bitsets: self.local.bitsets.len(),
+            bytes: self.local.bytes.len(),
             ropes: self.local.ropes.len(),
             closures: self.local.closures.len(),
             envs: self.local.envs.len(),
@@ -1558,6 +1574,7 @@ impl Heap {
         self.local.strings.truncate(cp.strings);
         self.local.bigints.truncate(cp.bigints);
         self.local.bitsets.truncate(cp.bitsets);
+        self.local.bytes.truncate(cp.bytes);
         self.local.ropes.truncate(cp.ropes);
         self.local.closures.truncate(cp.closures);
         self.local.envs.truncate(cp.envs);
@@ -2698,6 +2715,39 @@ impl Heap {
         }
     }
 
+    /// Materialise a `Value::Bytes` into LOCAL from an `Arc<SharedBlob>` of raw bytes
+    /// (mirrors [`alloc_bitset`](Self::alloc_bitset) exactly). Byte-clean — the bytes
+    /// are arbitrary, never assumed UTF-8.
+    pub fn alloc_bytes(&mut self, blob: Arc<SharedBlob>) -> Value {
+        let idx = self.local.bytes.len();
+        self.local.bytes.push(blob);
+        Value::bytes(BytesId::local_gen(idx, self.local_epoch))
+    }
+
+    /// Resolve a bytes handle to its `&Arc<SharedBlob>` (mirrors
+    /// [`bitset`](Self::bitset) exactly). Honours the GC poison/epoch tripwires. The
+    /// caller reads `.as_bytes()` — raw bytes, never decoded as UTF-8 text.
+    pub fn bytes(&self, id: BytesId) -> &Arc<SharedBlob> {
+        match id.region() {
+            LOCAL if id.is_old() => {
+                local_gc_check!(old, self, id, bytes, "bytes", "bytes");
+                &self.old.bytes[id.index()]
+            }
+            LOCAL => {
+                local_gc_check!(nursery, self, id, bytes, "bytes", "bytes");
+                &self.local.bytes[id.index()]
+            }
+            PRELUDE => &self.prelude.slabs.bytes[id.index()],
+            RUNTIME => self
+                .runtime
+                .code
+                .bytes
+                .get(id.index())
+                .expect("runtime bytes handle"),
+            _ => unreachable!("invalid handle region"),
+        }
+    }
+
     /// Read any integer `Value` (`Int` or `BigInt`) as an owned
     /// `num_bigint::BigInt`, promoting an `Int`. The bridge the arithmetic
     /// primitives use to compute in a single (big) domain. Returns `None` for a
@@ -2968,6 +3018,12 @@ impl Heap {
                 // NEVER through the UTF-8 string path (that was KI-4). Just an Arc bump.
                 let b = Arc::clone(self.bitset(id));
                 Value::bitset(BsId::runtime(self.runtime.code.bitsets.push(b)))
+            }
+            ValueRef::Bytes(id) if id.region() == LOCAL => {
+                // A leaf: share the Arc<SharedBlob> into the shared region byte-clean
+                // (mirrors Bitset) — never through the UTF-8 string path. Just an Arc bump.
+                let b = Arc::clone(self.bytes(id));
+                Value::bytes(BytesId::runtime(self.runtime.code.bytes.push(b)))
             }
             ValueRef::Rope(id) if id.region() == LOCAL => {
                 // Cheap `Arc`-node clone into the shared region; the rope is
@@ -3276,6 +3332,7 @@ impl Heap {
             self.poison.strings.clear();
             self.poison.bigints.clear();
             self.poison.bitsets.clear();
+            self.poison.bytes.clear();
             self.poison.ropes.clear();
             self.poison.closures.clear();
             self.poison.envs.clear();
@@ -3590,6 +3647,12 @@ impl Heap {
                 19u8.hash(h);
                 self.bitset(id).as_bytes().hash(h);
             }
+            ValueRef::Bytes(id) => {
+                // Distinct fresh tag byte (21) + the raw bytes, mirroring Bitset, so two
+                // equal byte values hash the same and never collide with another type.
+                21u8.hash(h);
+                self.bytes(id).as_bytes().hash(h);
+            }
             ValueRef::Float(f) => {
                 3u8.hash(h);
                 if f.is_nan() {
@@ -3790,6 +3853,7 @@ impl Heap {
             (BigInt(x), BigInt(y)) => self.bigint(x) == self.bigint(y),
             // Two bitsets are equal iff their raw bytes match (byte compare, not UTF-8).
             (Bitset(x), Bitset(y)) => self.bitset(x).as_bytes() == self.bitset(y).as_bytes(),
+            (Bytes(x), Bytes(y)) => self.bytes(x).as_bytes() == self.bytes(y).as_bytes(),
             (Float(x), Float(y)) => x == y,
             (Sym(x), Sym(y)) => x == y,
             (Keyword(x), Keyword(y)) => x == y,
@@ -5513,6 +5577,7 @@ impl Heap {
             self.poison.strings.clear();
             self.poison.bigints.clear();
             self.poison.bitsets.clear();
+            self.poison.bytes.clear();
             self.poison.ropes.clear();
             self.poison.closures.clear();
             self.poison.envs.clear();
@@ -5890,6 +5955,18 @@ impl Heap {
                             id.0,
                         );
                     }
+                    ValueRef::Bytes(id) if id.region() == LOCAL => {
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad(
+                            "bytes",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.bytes.len(),
+                            parent,
+                            id.0,
+                        );
+                    }
                     ValueRef::Rope(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
@@ -6029,6 +6106,7 @@ struct FlushForward {
     strings: HashMap<u32, u32>,
     bigints: HashMap<u32, u32>,
     bitsets: HashMap<u32, u32>,
+    bytes: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
     envs: HashMap<u32, u32>,
@@ -6067,6 +6145,7 @@ mint_fn!(mint_map, MapId);
 mint_fn!(mint_string, StrId);
 mint_fn!(mint_bigint, BigIntId);
 mint_fn!(mint_bitset, BsId);
+mint_fn!(mint_bytes, BytesId);
 mint_fn!(mint_rope, RopeId);
 mint_fn!(mint_closure, ClosureId);
 mint_fn!(mint_env, EnvId);
@@ -6204,6 +6283,9 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
         ValueRef::Bitset(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::bitset(flush_bitset(old, new, fwd, id))
         }
+        ValueRef::Bytes(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::bytes(flush_bytes(old, new, fwd, id))
+        }
         ValueRef::Rope(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::rope(flush_rope(old, new, fwd, id))
         }
@@ -6332,6 +6414,20 @@ fn flush_bitset(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BsId) 
     new.bitsets.push(b);
     fwd.bitsets.insert(key, new_idx as u32);
     fwd.mint_bitset(new_idx)
+}
+
+/// Flush a LOCAL bytes value (mirrors [`flush_bitset`] exactly). A byte-clean leaf —
+/// clone the `Arc<SharedBlob>` (a refcount bump, not a byte copy) into the new slab.
+fn flush_bytes(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BytesId) -> BytesId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.bytes.get(&key) {
+        return fwd.mint_bytes(new_idx as usize);
+    }
+    let b = old.bytes[flush_bound!(old.bytes, id, fwd, "bytes")].clone();
+    let new_idx = new.bytes.len();
+    new.bytes.push(b);
+    fwd.bytes.insert(key, new_idx as u32);
+    fwd.mint_bytes(new_idx)
 }
 
 fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) -> RopeId {
@@ -6587,6 +6683,7 @@ struct RuntimeForward {
     strings: HashMap<u32, u32>,
     bigints: HashMap<u32, u32>,
     bitsets: HashMap<u32, u32>,
+    bytes: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
     envs: HashMap<u32, u32>,
@@ -6622,6 +6719,9 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
         }
         ValueRef::Bitset(id) if id.region() == RUNTIME => {
             Value::bitset(flush_rt_bitset(old, new, fwd, id))
+        }
+        ValueRef::Bytes(id) if id.region() == RUNTIME => {
+            Value::bytes(flush_rt_bytes(old, new, fwd, id))
         }
         ValueRef::Rope(id) if id.region() == RUNTIME => {
             Value::rope(flush_rt_rope(old, new, fwd, id))
@@ -6744,6 +6844,19 @@ fn flush_rt_bitset(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, i
     let new_idx = new.bitsets.push(v);
     fwd.bitsets.insert(key, new_idx as u32);
     BsId::runtime(new_idx)
+}
+
+/// Flush a RUNTIME bytes value during a runtime-region compaction (mirrors
+/// [`flush_rt_bitset`] exactly). Byte-clean — clone the `Arc<SharedBlob>` into the new region.
+fn flush_rt_bytes(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: BytesId) -> BytesId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.bytes.get(&key) {
+        return BytesId::runtime(n as usize);
+    }
+    let v = old.bytes.get(id.index()).expect("rt bytes").clone();
+    let new_idx = new.bytes.push(v);
+    fwd.bytes.insert(key, new_idx as u32);
+    BytesId::runtime(new_idx)
 }
 
 fn flush_rt_rope(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: RopeId) -> RopeId {
@@ -6886,13 +6999,14 @@ fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env:
 /// the exact failure mode a moving collector must never ship. (In-bounds is a
 /// necessary soundness check; the redef test additionally pins the live *count*.)
 fn verify_rt_slabs(s: &CodeSlabs) -> bool {
-    let (np, nv, nm, ns, nb, nbs, nr, nc, ne) = (
+    let (np, nv, nm, ns, nb, nbs, nby, nr, nc, ne) = (
         s.pairs.count(),
         s.vectors.count(),
         s.maps.count(),
         s.strings.count(),
         s.bigints.count(),
         s.bitsets.count(),
+        s.bytes.count(),
         s.ropes.count(),
         s.closures.count(),
         s.envs.count(),
@@ -6909,6 +7023,7 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
             ValueRef::Str(id) if id.region() == RUNTIME => id.index() < ns,
             ValueRef::BigInt(id) if id.region() == RUNTIME => id.index() < nb,
             ValueRef::Bitset(id) if id.region() == RUNTIME => id.index() < nbs,
+            ValueRef::Bytes(id) if id.region() == RUNTIME => id.index() < nby,
             ValueRef::Rope(id) if id.region() == RUNTIME => id.index() < nr,
             ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => id.index() < nc,
             _ => true,

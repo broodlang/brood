@@ -38,6 +38,26 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
         ValueRef::BigInt(id) => out.push_str(&heap.bigint(id).to_string()),
         // A bitset prints as an opaque handle — its bytes are raw, not text.
         ValueRef::Bitset(id) => out.push_str(&format!("#<bitset {} bytes>", heap.bitset(id).len())),
+        // Raw bytes print as a `#b"…"` literal that re-reads to the same value:
+        // printable ASCII verbatim, the named escapes by name, every other byte as
+        // `\xHH`. Both readable and display use this form — bytes have no raw text.
+        ValueRef::Bytes(id) => {
+            out.push_str("#b\"");
+            for &byte in heap.bytes(id).as_bytes() {
+                match byte {
+                    b'"' => out.push_str("\\\""),
+                    b'\\' => out.push_str("\\\\"),
+                    b'\n' => out.push_str("\\n"),
+                    b'\t' => out.push_str("\\t"),
+                    b'\r' => out.push_str("\\r"),
+                    0x1b => out.push_str("\\e"),
+                    0x00 => out.push_str("\\0"),
+                    0x20..=0x7e => out.push(byte as char),
+                    _ => out.push_str(&format!("\\x{:02x}", byte)),
+                }
+            }
+            out.push('"');
+        }
         ValueRef::Float(f) => out.push_str(&format_float(f)),
         ValueRef::Sym(s) => out.push_str(symbol_name_ref(s)),
         ValueRef::Keyword(s) => {
