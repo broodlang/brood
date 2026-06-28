@@ -203,7 +203,18 @@
   (test "a hint wider than the room is truncated (so it never wraps)"
     (assert= (editor/lineedit/lineedit--fit (list ["abcd" nil] ["efgh" {:bold true}]) 6 '())
       (list ["abcd" nil] ["ef" {:bold true}]))
-    (assert= (editor/lineedit/lineedit--fit (list ["abc" nil]) 0 '()) '())))
+    (assert= (editor/lineedit/lineedit--fit (list ["abc" nil]) 0 '()) '()))
+  (test "match-echo: a bracket whose opener is on a prior line echoes that line"
+    ;; multi-line form: prior line "(defn foo (x)\n" (len 14) is read-only context (base),
+    ;; the current line "  (+ x 1))" is being edited; the final ) closes (defn foo.
+    (let (full "(defn foo (x)\n  (+ x 1))")
+      (assert= (editor/lineedit/lineedit--match-echo full 14 (string-length full))
+        (list ["matches " lineedit-face-hint] ["(defn foo (x)" hl-face-match]))
+      ;; a match on the current line (inner pair) is shown by the reverse-video override,
+      ;; so the echo stays nil
+      (is (nil? (editor/lineedit/lineedit--match-echo full 14 21)))
+      ;; not next to a bracket → nil
+      (is (nil? (editor/lineedit/lineedit--match-echo full 14 18))))))
 
 ;; Cross-process: an editor-state map crosses a heap boundary via send (deep copy)
 ;; and is edited on the far side, proving the immutable state survives copy-on-send

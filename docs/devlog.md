@@ -664,8 +664,16 @@ cell-grid-only). `*inset*` 0→8 now that the margin is centred + themed.
 input highlighter (`highlight-spans`) and ANSI-coloured on a TTY (plain on a pipe); a dim
 `; N ms` note prints when an eval exceeds `*repl-slow-ms*`; Guile-style `,` meta-commands
 (`,help` `,doc <name>` `,type <expr>` `,time <expr>` `,clear`) intercept at a fresh prompt
-before the reader; and a small wordmark banner. All builds clean (default + `brood/gui`);
-brood-edit `nest check` + 36 view-scroll tests green.
+before the reader; a plain one-line banner (the ASCII wordmark was too much).
+
+**Multi-line bracket matching (`std/editor/lineedit.blsp`).** The line editor repaints only
+the current physical line, so a `)` whose opener scrolled off a prior line could match (the
+analysis sees the whole form via the `prefix` context) but couldn't reverse-video its
+off-screen partner. Added `lineedit--match-echo`: when the matched opener is before the
+current line (`offset < base`), echo that opening line in the hint row (`matches (defn
+foo …`) — Emacs' `blink-matching-paren` for off-screen parens. Same-line matches still
+reverse-video; the echo only fills the gap. All builds clean (default + `brood/gui`);
+repl 14, lineedit 39, brood-edit 36 view-scroll green.
 
 ## 2026-06-28 — Minimize the builtin surface: crypto 21 prims → 2, tree-sitter grammars out of the default kernel
 
@@ -701,3 +709,23 @@ reports any `:lang` as "not built into this runtime (rebuild with
 `tree-sitter-parse` probe) so a bare `cargo test` stays green. Dynamic runtime
 grammar loading (no compile-time enum at all) is noted as the end state. Full
 suite 634/634 with grammars; the grammar suites skip cleanly without them.
+
+**Conversion-pair collapse (same session).** Found a third redundancy: `string->bytes`
+and `bytes->string` were duplicates of `string->utf8-bytes` / `utf8-bytes->string`
+(byte-identical UTF-8 encode; the decode pair only differed in that the `utf8-`
+one is more lenient — accepts a vector/list too). Removed the short pair, kept the
+explicit `utf8-` pair (matches Brood's symmetric `X->Y`/`Y->X` convention and the
+already-dominant `string->utf8-bytes`, 26 refs). Updated all call sites in
+`std/{encoding,crypto,url,net/http}.blsp` + tests and the reader's escape-hint.
+Net another **−2 prims** (builtin count 320 → ~300 across the session).
+
+`log2`/`log10` were evaluated and **kept**: deriving them from `ln` in Brood is a
+real correctness regression — `(/ (ln 1000) (ln 10))` = 2.9999999999999996 where
+the libm `(log10 1000)` is exactly 3.0. The Game-of-Life `bitset-*` kernels stay
+(perf kernels; explicitly declined).
+
+**Downstream:** the sibling `hatch` web framework used `%sha1` (RFC 6455 WebSocket
+accept-key) and `%sha256` (asset fingerprints / strong ETags) directly; migrated
+to `hash/sha1` / `hash/sha256` (+ `(require 'hash)`) in `src/http/websocket.blsp`,
+`src/web/{assets,static}.blsp` and the two affected test files. `nest test` in
+hatch: 526/526.

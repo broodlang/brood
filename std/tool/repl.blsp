@@ -53,13 +53,8 @@ the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 (defdyn *repl-prompt* "brood> ")
 (defdyn *repl-cont-prompt* "  ...   ")
 (def *repl-banner*
-  ;; A small wordmark + a one-line hint. Printed (dimmed) only on an interactive TTY.
-  (str "\e[35m"            ; magenta
-    "  ┌┐ ┬─┐ ┌─┐ ┌─┐ ┌┬┐\n"
-    "  ├┴┐├┬┘│ ││ │ │ ││\n"
-    "  └─┘┴└─└─┘└─┘─┴┘\n"
-    "\e[0m"
-    "\e[90m  a small lisp · ,help for commands · Ctrl-D to exit\e[0m"))
+  ;; A plain one-liner (printed only on an interactive TTY); the hint is dimmed.
+  "brood — \e[90m,help for commands · Ctrl-D to exit\e[0m")
 
 ;; Persistent history: an interactive session loads its history on start and saves
 ;; it (capped to the most recent *repl-history-max* entries) after each submitted
