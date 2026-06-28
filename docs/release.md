@@ -62,10 +62,10 @@ If you need data files, ship them alongside for now.
 ## The embedded lean+gui runtime (no Rust at release time)
 
 `nest release` does **not** append to your dev `brood`, and it does **not** need
-a compiler. `make install` builds one lean runtime and **bakes it into `nest`**
-(`crates/nest/build.rs` → `include_bytes!`); `nest release` just appends your app
-to that embedded copy — pure file-ops, no cargo/rustc. (Verified: it runs with an
-empty `PATH`.)
+a compiler. `make install` builds one lean (stripped, no-LTO) runtime and
+**bakes it into `nest`** (`crates/nest/build.rs` → `include_bytes!`); `nest
+release` just appends your app to that embedded copy — pure file-ops, no
+cargo/rustc. (Verified: it runs with an empty `PATH`.)
 
 The runtime is **lean** — `--no-default-features` strips, so it never compiles in:
 
@@ -82,9 +82,15 @@ minibuffer reuses it), plus `tcp`/`http`/`file`/`json`/`set`/`format`/`task`/
 `hatch`/`supervisor`/`ansi`/`package` — **and the `gui` backend** (it's a single
 variant that includes windowing, so `(gui-open)`/windowed apps just work).
 
-The runtime is built under the `release-lean` cargo profile (`strip` + fat `lto`
-+ one codegen unit), ~10 MB (with gui). So a shipped app is ~10 MB regardless of
-whether it's terminal or windowed.
+The embedded runtime is built by `make install` under the `release-fast` cargo
+profile — **stripped but not LTO'd** (parallel codegen, so the install builds in a
+fraction of the time the fat-LTO profile takes; the trade-off is a larger binary,
+since only fat LTO + one codegen unit dead-code-eliminates the big jit/gui/treesit
+dep tree). So a `make install`-baked runtime — and the apps `nest release` ships
+from it — trade size and a little runtime speed for a much faster install. The
+from-source fallback below (and an explicit `cargo build --profile release-lean`)
+still produce the fully fat-LTO'd `release-lean` runtime when you want the
+smallest/fastest shippable binary.
 
 `gc-stats`/`require 'test`/`require 'observer` etc. are therefore unavailable in a
 shipped app — that's the point. If you want one back, ship it as a `.blsp` on the

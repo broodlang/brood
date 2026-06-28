@@ -101,7 +101,7 @@ autotools-style `./configure` records build options.
 
 ```bash
 # the usual ./configure && make install — installs `brood`, `nest`, and the
-# `brood-lsp` language server into ~/.local/bin (lean release build)
+# `brood-lsp` language server into ~/.local/bin (lean, stripped release build)
 ./configure
 make install
 
@@ -131,8 +131,10 @@ Make sure `~/.local/bin` (or your chosen `PREFIX/bin`) is on your `PATH`.
 Run `./configure --help` for the full list.
 
 Building and installing are separate steps. `make release` compiles the
-optimized `brood`, `nest`, and `brood-lsp` binaries into `target/release-lean/`
-(gitignored); `make install` then just copies those three into `$(PREFIX)/bin`.
+optimized `brood`, `nest`, and `brood-lsp` binaries into `target/release-fast/`
+(gitignored) using the `release-fast` profile (stripped, no LTO — so it builds in
+a fraction of the time the fat-LTO `release-lean` profile takes, at the cost of a
+larger binary); `make install` then just copies those three into `$(PREFIX)/bin`.
 Running `make install` on its own builds first (it depends on `release`), so the
 one-liner above still works — but you can also `make release` to produce the
 binaries without touching the system, and `make install` later to place them.
@@ -142,7 +144,7 @@ hacking on the Rust, which never installs.)
 Other handy targets:
 
 ```bash
-make release   # build the optimized binaries into target/release-lean (no install)
+make release   # build the optimized binaries into target/release-fast (no install)
 make build     # debug build of the whole workspace (for development; does not install)
 make test      # Rust tests + the in-language suite (via cargo-nextest)
 make repl      # start the REPL without installing

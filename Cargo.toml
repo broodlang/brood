@@ -19,3 +19,16 @@ inherits = "release"
 strip = true
 lto = true
 codegen-units = 1
+
+# What `make install` builds: an optimized binary that is `strip`ped but does NOT
+# pay any LTO — parallel codegen keeps the build fast (no serial, minutes-long
+# link). The local-install counterpart of `release-lean`: same stripping, none of
+# the LTO build cost. Trade-off: the binary is bigger (~36 MB vs ~10 MB) because
+# only fat LTO + codegen-units=1 dead-code-eliminates the big jit/gui/treesit dep
+# tree — and thin LTO, measured, gave no size win here while building slower, so
+# it's not worth it. `nest release` still uses fat-LTO `release-lean` for the
+# shippable runtime. (A profile `strip` reliably strips the final binary;
+# `RUSTFLAGS=-C strip` does not.)
+[profile.release-fast]
+inherits = "release"
+strip = true
