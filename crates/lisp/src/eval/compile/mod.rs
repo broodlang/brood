@@ -1089,6 +1089,263 @@ fn ea_scalar_replace(node: &mut Node, next_slot: &mut usize) -> bool {
     changed
 }
 
+// ============ linear map-accumulator → Table rewrite (docs/linear-map-accumulator.md) ============
+//
+// A self-tail-recursive fold that threads an immutable-map accumulator one update
+// at a time pays an O(depth) path-copy per update (~2.25M node allocations for the
+// `wordcount` benchmark). When the accumulator is provably *linear* — never
+// aliased, never escapes except as the function's return — we represent it
+// internally as a private `Table` (already GC-safe, mutated in place) and snapshot
+// it back to an immutable map at the return. Sound because (a) the entry copies the
+// input map into a fresh table the function alone owns, so callers' maps are never
+// mutated, and (b) the intra-procedural reachability check below proves the slot is
+// only ever a whitelisted map op's first arg, the self-call threading arg, or the
+// return — exactly the "no alias analysis needed; a value is only reachable through
+// references the code creates" property `local_escapes` relies on. The observable
+// result is an ordinary immutable map (ADR-026 holds: the only mutable thing is a
+// `Table`, never surfaced). Gated behind `BROOD_LINMAP` while it stabilises.
+
+/// Whitelisted map READ ops (return a value — safe in any position) → Table op.
+fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
+    match value::symbol_name_opt(sym)? {
+        "map-get" => Some("table-get"),
+        "map-count" => Some("table-count"),
+        _ => None,
+    }
+}
+
+/// Whitelisted map UPDATE ops (return the new map — must be consumed at a sink) → Table op.
+fn linmap_update_op(sym: Symbol) -> Option<&'static str> {
+    match value::symbol_name_opt(sym)? {
+        "map-int-add" => Some("table-incr"),
+        "map-assoc" => Some("table-put"),
+        "map-dissoc" => Some("table-delete"),
+        _ => None,
+    }
+}
+
+/// The global symbol a call head resolves to, if it is a free-global head.
+fn call_head_sym(callee: &Node) -> Option<Symbol> {
+    match callee {
+        Node::Global(s) => Some(*s),
+        Node::GlobalIc { sym, .. } => Some(*sym),
+        _ => None,
+    }
+}
+
+/// Where a value flows: a "sink" is a position whose value is the accumulator's
+/// linear continuation — the self-call's own arg slot, or the function's return.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinSink {
+    Return,
+    SelfArg,
+    No,
+}
+
+/// True iff `(args[0] == Local(s))`.
+fn first_arg_is_local(args: &[Node], s: usize) -> bool {
+    matches!(args.first(), Some(Node::Local(k)) if *k == s)
+}
+
+/// Reachability check: every read of slot `s` is a whitelisted map op's first arg,
+/// the self-call's arg-`s` (threading), or a sink return — and update ops on `s`
+/// occur only at a sink (so the new map is linearly consumed, never aliased).
+/// Anything else → not linear (bail). `sink` is this position's flow role.
+fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
+    match node {
+        Node::Local(k) => *k != s || sink != LinSink::No,
+        Node::Call { callee, args, .. } => {
+            if let Some(h) = call_head_sym(callee) {
+                if first_arg_is_local(args, s) {
+                    if linmap_read_op(h).is_some()
+                        || (linmap_update_op(h).is_some() && sink != LinSink::No)
+                    {
+                        // args[0] (== Local(s)) is consumed by the op; the rest must
+                        // not mention s (s is the map, not a key/value/default).
+                        return args[1..].iter().all(|a| linmap_linear(a, s, LinSink::No));
+                    }
+                }
+            }
+            linmap_linear(callee, s, LinSink::No)
+                && args.iter().all(|a| linmap_linear(a, s, LinSink::No))
+        }
+        Node::SelfCall { args, .. } => args.iter().enumerate().all(|(i, a)| {
+            linmap_linear(a, s, if i == s { LinSink::SelfArg } else { LinSink::No })
+        }),
+        Node::If(c, t, e) => {
+            linmap_linear(c, s, LinSink::No)
+                && linmap_linear(t, s, sink)
+                && linmap_linear(e, s, sink)
+        }
+        Node::Do(xs) => {
+            let last = xs.len().saturating_sub(1);
+            xs.iter().enumerate().all(|(i, x)| {
+                linmap_linear(x, s, if i == last { sink } else { LinSink::No })
+            })
+        }
+        Node::LetBind { binds, body } => {
+            binds.iter().all(|(_, v)| linmap_linear(v, s, LinSink::No))
+                && linmap_linear(body, s, sink)
+        }
+        Node::Const(_) | Node::Global(_) | Node::GlobalIc { .. } => true,
+        // Vector / Map / Prim1 / Prim2 / MakeClosure / TryCatch: any read of s here
+        // is a genuine escape (capture, store, arithmetic on a map, …).
+        other => {
+            let mut ok = true;
+            walk_children(other, |c| ok = ok && linmap_linear(c, s, LinSink::No));
+            ok
+        }
+    }
+}
+
+/// Does `s` appear as the first arg of an UPDATE op anywhere? (Only then is the
+/// rewrite a win — a read-only accumulator gains nothing.)
+fn linmap_has_update(node: &Node, s: usize) -> bool {
+    if let Node::Call { callee, args, .. } = node {
+        if first_arg_is_local(args, s) {
+            if let Some(h) = call_head_sym(callee) {
+                if linmap_update_op(h).is_some() {
+                    return true;
+                }
+            }
+        }
+    }
+    let mut found = false;
+    walk_children(node, |c| found = found || linmap_has_update(c, s));
+    found
+}
+
+fn node_has_selfcall(node: &Node) -> bool {
+    if matches!(node, Node::SelfCall { .. }) {
+        return true;
+    }
+    let mut found = false;
+    walk_children(node, |c| found = found || node_has_selfcall(c));
+    found
+}
+
+/// Build `(name arg0 arg1 …)` as a fresh free-global call node. A free-global
+/// head needs a real call-site IC id (`vm_site_alloc`), not `NO_SITE`, or the JIT
+/// mis-lowers it (it lowers `Node::Global` heads through the site-keyed IC path).
+fn linmap_call(heap: &Heap, name: &str, args: Vec<Node>) -> Node {
+    Node::Call {
+        callee: Box::new(Node::Global(value::intern(name))),
+        args: args.into_boxed_slice(),
+        tail: false,
+        pos: None,
+        file: None,
+        site: heap.vm_site_alloc(),
+    }
+}
+
+/// Rewrite reads/updates/returns of slot `s` to the Table representation, in place.
+/// Mirrors `linmap_linear`'s traversal so each site is reached with its true sink.
+fn linmap_apply(node: &mut Node, s: usize, sink: LinSink, heap: &Heap) {
+    match node {
+        Node::Local(k) if *k == s => {
+            if sink == LinSink::Return {
+                let inner = std::mem::replace(node, Node::Local(s));
+                *node = linmap_call(heap, "table-snapshot", vec![inner]);
+            }
+            // SelfArg: thread the table handle unchanged. No: cannot occur (linear).
+        }
+        Node::Call { callee, args, site, .. } => {
+            if let Some(h) = call_head_sym(callee) {
+                if first_arg_is_local(args, s) {
+                    if let Some(tbl) = linmap_read_op(h) {
+                        // args[0] now reads the table; args[1..] don't mention s.
+                        // Fresh site so the head-symbol change re-keys the call IC.
+                        *callee = Box::new(Node::Global(value::intern(tbl)));
+                        *site = heap.vm_site_alloc();
+                        return;
+                    }
+                    if let Some(tbl) = linmap_update_op(h) {
+                        // Mutate the table in place; yield the table (thread) or its
+                        // snapshot (return). args[1..] are key/value/delta — unchanged.
+                        let taken = std::mem::replace(args, Box::new([]));
+                        let mut_call = Node::Call {
+                            callee: Box::new(Node::Global(value::intern(tbl))),
+                            args: taken,
+                            tail: false,
+                            pos: None,
+                            file: None,
+                            site: heap.vm_site_alloc(),
+                        };
+                        let yielded = match sink {
+                            LinSink::SelfArg => Node::Local(s),
+                            // Update in return position: snapshot the just-mutated table.
+                            _ => linmap_call(heap, "table-snapshot", vec![Node::Local(s)]),
+                        };
+                        *node = Node::Do(Box::new([mut_call, yielded]));
+                        return;
+                    }
+                }
+            }
+            linmap_apply(callee, s, LinSink::No, heap);
+            for a in args.iter_mut() {
+                linmap_apply(a, s, LinSink::No, heap);
+            }
+        }
+        Node::SelfCall { args, .. } => {
+            let n = args.len();
+            for (i, a) in args.iter_mut().enumerate() {
+                linmap_apply(a, s, if i == s && i < n { LinSink::SelfArg } else { LinSink::No }, heap);
+            }
+        }
+        Node::If(c, t, e) => {
+            linmap_apply(c, s, LinSink::No, heap);
+            linmap_apply(t, s, sink, heap);
+            linmap_apply(e, s, sink, heap);
+        }
+        Node::Do(xs) => {
+            let last = xs.len().saturating_sub(1);
+            for (i, x) in xs.iter_mut().enumerate() {
+                linmap_apply(x, s, if i == last { sink } else { LinSink::No }, heap);
+            }
+        }
+        Node::LetBind { binds, body } => {
+            for (_, v) in binds.iter_mut() {
+                linmap_apply(v, s, LinSink::No, heap);
+            }
+            linmap_apply(body, s, sink, heap);
+        }
+        other => walk_children_mut(other, |c| linmap_apply(c, s, LinSink::No, heap)),
+    }
+}
+
+/// If `body` folds a linear immutable-map accumulator (one of the `nrequired`
+/// params) through a self-tail loop, rewrite it to build a private `Table` and
+/// snapshot it at the return. Returns true iff it transformed the body.
+fn linmap_transform(body: &mut Node, nrequired: usize, heap: &Heap) -> bool {
+    if std::env::var_os("BROOD_LINMAP").is_none() {
+        return false; // opt-in while stabilising
+    }
+    if !node_has_selfcall(body) {
+        return false;
+    }
+    let Some(s) = (0..nrequired)
+        .find(|&s| linmap_has_update(body, s) && linmap_linear(body, s, LinSink::Return))
+    else {
+        return false;
+    };
+    linmap_apply(body, s, LinSink::Return, heap);
+    // Idempotent entry-convert: on external entry the slot holds the input map
+    // (copy it into a private table); on a self-call re-entry it already holds the
+    // table (the guard keeps it). Placed at the arm top so the self-tail re-entry
+    // re-runs it — cheap after the first iteration (a type check).
+    let enter = Node::If(
+        Box::new(linmap_call(heap, "table?", vec![Node::Local(s)])),
+        Box::new(Node::Local(s)),
+        Box::new(linmap_call(heap, "%table-from-map", vec![Node::Local(s)])),
+    );
+    let inner = std::mem::replace(body, Node::Local(s));
+    *body = Node::LetBind {
+        binds: Box::new([(s, enter)]),
+        body: Box::new(inner),
+    };
+    true
+}
+
 // ===================== recursive self-inlining (Phase B, §6b) =====================
 //
 // `docs/jit-optimizing-tier.md` §6b. A non-tail self-recursive call to a top-level
@@ -1695,6 +1952,10 @@ fn compile_arm(
     // `(nth p K)` to direct reads. Bumps `scope.max` for the element slots; makes the arm
     // simpler (fewer allocs, no `nth`), so it JITs better. No-op for arms without the pattern.
     ea_scalar_replace(&mut body, &mut scope.max);
+    // Linear map-accumulator → Table rewrite (docs/linear-map-accumulator.md): a
+    // provably-linear immutable-map fold becomes an in-place private-table build,
+    // snapshotted back to an immutable map at the return. Opt-in via `BROOD_LINMAP`.
+    linmap_transform(&mut body, nrequired, heap);
     // Recursive self-inlining (Phase B, §6b — two-stage tiering, devlog 2026-06-17):
     // PROBE depth-1 inlining of a top-level no-capture recursive `defn`'s body WITHOUT
     // mutating the original. The VM keeps the original small `body`/`chunk`/`nslots`;
