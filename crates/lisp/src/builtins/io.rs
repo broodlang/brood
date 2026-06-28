@@ -492,29 +492,39 @@ pub(super) fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(Value::socket(id))
 }
 
+/// Lower a tcp-send/proc-send payload to raw bytes. A `bytes` value is written
+/// verbatim. A string is UTF-8 in text mode; in a **binary**-mode socket/child it
+/// is the Latin-1 byte-string form (codepoints 0–255) — kept for back-compat with
+/// callers that build byte-strings, alongside the preferred `bytes` value.
+fn send_payload(heap: &Heap, who: &str, kind: &str, v: Value, binary: bool) -> Result<Vec<u8>, LispError> {
+    match v {
+        Value::Bytes(b) => Ok(heap.bytes(b).as_bytes().to_vec()),
+        Value::Str(_) => {
+            let s = expect_string(heap, who, v)?;
+            if binary {
+                let mut out = Vec::with_capacity(s.len());
+                for c in s.chars() {
+                    let n = c as u32;
+                    if n > 0xFF {
+                        return Err(LispError::runtime(format!(
+                            "{who}: codepoint U+{n:04X} is not a byte (0–255); a binary-mode {kind} sends raw bytes (a `bytes` value or a 0–255 codepoint string)",
+                        )));
+                    }
+                    out.push(n as u8);
+                }
+                Ok(out)
+            } else {
+                Ok(s.into_bytes())
+            }
+        }
+        other => Err(LispError::wrong_type(heap, who, "bytes or string", other)),
+    }
+}
+
 pub(super) fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_socket(heap, "tcp-send", arg(args, 0))?;
-    let data = expect_string(heap, "tcp-send", arg(args, 1))?;
-    if crate::net::is_binary(id) {
-        // Binary mode: write each codepoint as one raw byte (Latin-1). The string
-        // must be a byte-string (codepoints 0–255) — e.g. a WebSocket frame the
-        // caller built by UTF-8-encoding any text payload into this form.
-        let mut out = Vec::with_capacity(data.len());
-        for c in data.chars() {
-            let n = c as u32;
-            if n > 0xFF {
-                return Err(LispError::runtime(format!(
-                    "tcp-send: codepoint U+{:04X} is not a byte (0–255); a binary-mode socket sends raw bytes only",
-                    n
-                )));
-            }
-            out.push(n as u8);
-        }
-        crate::net::send(id, &out)
-    } else {
-        crate::net::send(id, data.as_bytes())
-    }
-    .map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
+    let out = send_payload(heap, "tcp-send", "socket", arg(args, 1), crate::net::is_binary(id))?;
+    crate::net::send(id, &out).map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
     Ok(Value::nil())
 }
 
@@ -604,26 +614,8 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-send", arg(args, 0))?;
-    let data = expect_string(heap, "proc-send", arg(args, 1))?;
-    if crate::proc::is_binary(id) {
-        // Binary mode: write each codepoint as one raw byte (Latin-1), mirroring
-        // tcp-send. The string must be a byte-string (codepoints 0–255).
-        let mut out = Vec::with_capacity(data.len());
-        for c in data.chars() {
-            let n = c as u32;
-            if n > 0xFF {
-                return Err(LispError::runtime(format!(
-                    "proc-send: codepoint U+{:04X} is not a byte (0–255); a binary-mode subprocess sends raw bytes only",
-                    n
-                )));
-            }
-            out.push(n as u8);
-        }
-        crate::proc::send(id, &out)
-    } else {
-        crate::proc::send(id, data.as_bytes())
-    }
-    .map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
+    let out = send_payload(heap, "proc-send", "subprocess", arg(args, 1), crate::proc::is_binary(id))?;
+    crate::proc::send(id, &out).map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
     Ok(Value::nil())
 }
 

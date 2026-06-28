@@ -39,12 +39,13 @@
   (test "raw bytes sent to `cat` come back unchanged in binary mode"
     (let (p (proc-spawn "cat" []))
       (proc-set-binary p true)
-      ;; bytes 0x00 0xFF 0x80 0x41 — 0xFF 0x80 alone is invalid UTF-8
-      (let (sent (str (int->char 0) (int->char 255) (int->char 128) (int->char 65)))
+      ;; bytes 0x00 0xFF 0x80 0x41 — 0xFF 0x80 alone is invalid UTF-8. Binary mode
+      ;; delivers a `bytes` value and proc-send accepts one, so they round-trip.
+      (let (sent (bytes 0 255 128 65))
         (proc-send p sent)
         (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
           (assert= got sent)
-          (assert= (into [] (map char->int (string->list got))) [0 255 128 65])
+          (assert= (into [] (bytes->list got)) [0 255 128 65])
           (proc-close p)))))
 
   (test "proc-send rejects a codepoint > 255 in binary mode"
