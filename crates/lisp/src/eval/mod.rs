@@ -131,7 +131,7 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     {
         static EVAL_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *EVAL_TRACE.get_or_init(|| {
-            std::env::var("BROOD_EVAL_TRACE").map_or(false, |v| v != "0" && !v.is_empty())
+            std::env::var("BROOD_EVAL_TRACE").is_ok_and(|v| v != "0" && !v.is_empty())
         }) {
             eprintln!("[eval-trace] {}", crate::syntax::printer::print(heap, expr));
         }

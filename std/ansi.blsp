@@ -1,0 +1,43 @@
+;; std/ansi.blsp — ANSI / VT100 escape-sequence stripping.
+;; Callers `(require 'ansi)` and use `ansi/strip-ansi`. Pure Brood over string
+;; primitives, no IO or editor dependency — reusable in any process that reads
+;; pipe output from a subprocess that emits colour escapes (a shell, a build
+;; tool, a test runner).
+(defmodule ansi
+  "ANSI / VT100 escape-sequence stripping for pipe output.
+Strips CSI colour/cursor sequences (`ESC [ … letter`, the SGR `m` and cursor
+`A`–`D`/`H`/`J`/`K` family) and bare carriage returns (`\\r`) — the characters a
+subprocess emits when it detects a TTY but gets a pipe instead. `strip-ansi` is
+the public entry point; the helpers are private (`--`).")
+
+(defn ansi--csi-final? (c)
+  "Whether `c` is the final byte of a CSI sequence — a letter (SGR `m`, cursor ops)."
+  (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" c))
+
+(defn ansi--csi-end (s i)
+  "Index just past the CSI final byte, scanning `s` from `i` (clamped to end)."
+  (cond
+    (>= i (string-length s)) i
+    (ansi--csi-final? (char-at s i)) (+ i 1)
+    :else (ansi--csi-end s (+ i 1))))
+
+(defn ansi--strip (s i out)
+  "Tail-recursive scan: copy `s[i..]` to the reversed char list `out`, dropping ANSI
+escape sequences and carriage returns."
+  (if (>= i (string-length s))
+    (apply str (reverse out))
+    (let (c (char-at s i))
+      (cond
+        (= c "\e") (if (and (< (+ i 1) (string-length s)) (= (char-at s (+ i 1)) "["))
+                     (ansi--strip s (ansi--csi-end s (+ i 2)) out)  ; CSI: skip to final byte
+                     (ansi--strip s (+ i 2) out))                   ; other ESC X: drop both
+        (= c "\r") (ansi--strip s (+ i 1) out)                      ; bare CR: drop
+        :else      (ansi--strip s (+ i 1) (cons c out))))))
+
+(defn strip-ansi (s)
+  "`s` with all ANSI escape sequences and bare carriage returns removed.
+Fast path: a chunk with no ESC byte only needs its CRs dropped (a single
+`replace` pass, no char-by-char scan)."
+  (if (includes? s "\e")
+    (ansi--strip s 0 ())
+    (replace s "\r" "")))

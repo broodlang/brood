@@ -73,6 +73,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const table_ty: Ty = Ty::of(Tag::Table);
     const bitset_ty: Ty = Ty::of(Tag::Bitset);
     const bytes_ty: Ty = Ty::of(Tag::Bytes);
+    const decimal_ty: Ty = Ty::of(Tag::Decimal);
     const kw: Ty = Ty::of(Tag::Keyword);
     const sym: Ty = Ty::of(Tag::Sym);
     const bool_ty: Ty = Ty::of(Tag::Bool);
@@ -643,6 +644,29 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], num.union(nil_ty)),
         string_to_number,
+    );
+    // `decimal` constructs an exact base-10 decimal from a string ("1.50"), an
+    // int (3), or a float (inexact source — uses its shortest round-trip form).
+    def(
+        heap,
+        "decimal",
+        Arity::exact(1),
+        Sig::new(vec![string.union(num)], decimal_ty),
+        numeric::prim_decimal,
+    );
+    def(
+        heap,
+        "decimal->string",
+        Arity::exact(1),
+        Sig::new(vec![decimal_ty], string),
+        numeric::prim_decimal_to_string,
+    );
+    def(
+        heap,
+        "decimal->float",
+        Arity::exact(1),
+        Sig::new(vec![decimal_ty], float),
+        numeric::prim_decimal_to_float,
     );
     // `to-fixed` renders a number with a fixed count of decimals — the one
     // float→text op `str`/`pr-str` can't express (they print shortest round-trip
@@ -1477,6 +1501,22 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![string, kw], map_ty),
         tree_sitter_parse,
+    );
+    // Incremental re-parse keyed by a buffer id (same CST shape, less work), and
+    // a cache-eviction hook for when a buffer closes. §C.
+    def(
+        heap,
+        "tree-sitter-reparse",
+        Arity::exact(3),
+        Sig::new(vec![int, string, kw], map_ty),
+        tree_sitter_reparse,
+    );
+    def(
+        heap,
+        "tree-sitter-forget",
+        Arity::exact(1),
+        Sig::new(vec![int], int),
+        tree_sitter_forget,
     );
     def(
         heap,
@@ -2469,6 +2509,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("utf8-bytes->string", &["bytes"], "Decode UTF-8 bytes (a bytes value, vector, or list of ints 0–255) into a string. Errors on invalid UTF-8."),
     ("to-fixed", &["x", "n"], "Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0."),
     ("string->number", &["s"], "Parse s strictly as an int (a bignum when out of i64 range), else a float, else nil (unlike read-string). The inverse of number->string."),
+    ("decimal", &["x"], "Construct an exact arbitrary-precision base-10 decimal from x: a string (\"1.50\"), an int (3), a bignum, or a float (converted from its shortest round-trip form, since a float is inexact). For money / Postgres numeric — values a float can't hold exactly. The literal form is a trailing M, e.g. 1.50M."),
+    ("decimal->string", &["d"], "The canonical decimal string of decimal d (no M suffix)."),
+    ("decimal->float", &["d"], "Decimal d as an (inexact) float."),
     ("sin",   &["x"], "The sine of x (radians). Returns a float."),
     ("cos",   &["x"], "The cosine of x (radians). Returns a float."),
     ("tan",   &["x"], "The tangent of x (radians). Returns a float."),
@@ -2550,6 +2593,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("clipboard-set!", &["s"], "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."),
     ("parse-source-positioned", &["s"], "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."),
     ("tree-sitter-parse", &["source", "lang"], "Parse source (a string) with the tree-sitter grammar named by keyword lang (:ruby, :elixir) into a positioned CST — the SAME node-map shape as parse-source-positioned (`{:kind :start :end :named}`; leaves add :text, nodes with children add :kids), :kind a keyword of the tree-sitter node type and :named false for anonymous tokens (keywords/punctuation). Char offsets, so std/sexp + the editor's fontify navigate it unchanged. Errors on an unknown language, or if the runtime was built without --features treesit."),
+    ("tree-sitter-reparse", &["key", "source", "lang"], "Like tree-sitter-parse, but incremental: caches the last (source, tree) for integer buffer id `key` and re-uses it (deriving the edit by diffing the old source) so only the changed region is re-scanned. Same positioned CST as tree-sitter-parse — incrementality is a pure optimization. Identical source re-uses the cached tree with no re-parse. Call tree-sitter-forget when the buffer closes."),
+    ("tree-sitter-forget", &["key"], "Drop every cached incremental tree for integer buffer id `key` (all languages); returns the count dropped. Call when a buffer closes so tree-sitter-reparse's cache can't grow unbounded."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
     ("reload-defs", &["path"], "Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil."),
@@ -2608,7 +2653,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%os-cmd", &["prog", "&", "args"], "Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}."),
     ("%halt", &["code"], "Terminate the process with exit code. Never returns."),
     ("%random-bytes", &["n"], "n cryptographically-strong random bytes as a bytes value."),
-    ("%chacha20-encrypt", &["key-bytes", "nonce-bytes", "plaintext-bytes"], "Encrypt plaintext-bytes with ChaCha20-Poly1305 (AEAD). key-bytes must be 32 bytes; nonce-bytes must be 12 bytes. Returns ciphertext bytes (plaintext + 16-byte auth tag)."),
+    ("%chacha20-encrypt", &["key-bytes", "nonce-bytes", "plaintext-bytes"], "Encrypt plaintext-bytes with ChaCha20-Poly1305 (AEAD). key-bytes must be 32 bytes; nonce-bytes must be 12 bytes. Returns ciphertext bytes (plaintext + 16-byte auth tag). NEVER reuse a (key, nonce) pair — use a fresh nonce per message (see crypto/random-nonce)."),
     ("%chacha20-decrypt", &["key-bytes", "nonce-bytes", "ciphertext-bytes"], "Decrypt ciphertext-bytes with ChaCha20-Poly1305. Returns plaintext bytes, or :error if authentication fails."),
     ("%pbkdf2-sha256-bytes", &["password-bytes", "salt-bytes", "iterations", "key-len"], "PBKDF2-HMAC-SHA256 key derivation over byte-sequence password and salt (raw bytes, not UTF-8 strings — a binary salt round-trips faithfully). Returns a key-len-byte bytes value. Use iterations >= 600000 for password storage."),
     ("macroexpand-1", &["form"], "Expand form by a single macro step."),

@@ -34,7 +34,7 @@
 
 use brood::cli_support::{report_error, run_on_main_stack, FullTermGuard, RawTermGuard};
 use brood::Interp;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 mod mcp;
 mod release;
@@ -62,6 +62,21 @@ struct Cli {
 
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// Which editor grammar `nest grammar` emits (ADR-092). A `ValueEnum` so clap
+/// lists the choices in `--help`, rejects an unknown one with a formatted error,
+/// and offers shell completion — instead of a hand-rolled match + `exit(2)`.
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum GrammarTarget {
+    /// A VS Code TextMate grammar (JSON).
+    #[value(alias = "vscode", alias = "textmate")]
+    Tmlanguage,
+    /// The `brood-special-forms` defconst for Emacs.
+    Emacs,
+    /// The `tree-sitter-brood` `queries/highlights.scm`.
+    #[value(alias = "treesitter", alias = "highlights")]
+    TreeSitter,
 }
 
 #[derive(Subcommand, Debug)]
@@ -217,8 +232,9 @@ enum Cmd {
     /// `queries/highlights.scm`). E.g.
     /// `nest grammar > brood-vscode/syntaxes/brood.tmLanguage.json`.
     Grammar {
-        /// What to emit: `tmlanguage` (default), `emacs`, or `tree-sitter`.
-        target: Option<String>,
+        /// What to emit (default `tmlanguage`).
+        #[arg(value_enum, default_value_t = GrammarTarget::Tmlanguage)]
+        target: GrammarTarget,
     },
 
     /// Serve the project over Model Context Protocol on stdio so an agent
@@ -347,7 +363,7 @@ fn run_main(cli: Cli) {
             &args,
         ),
         Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
-        Cmd::Grammar { target } => cmd_grammar(&mut interp, target.as_deref()),
+        Cmd::Grammar { target } => cmd_grammar(&mut interp, target),
         Cmd::Fetch => run(&mut interp, "(require 'package) (package/fetch)"),
         Cmd::Update { names } => cmd_update(&mut interp, &names),
         Cmd::Tree => run(&mut interp, "(require 'package) (package/tree)"),
@@ -728,17 +744,13 @@ fn cmd_doc(interp: &mut Interp, module: Option<&str>, all: bool) {
 /// a VS Code TextMate grammar (JSON); `emacs` is the `brood-special-forms` defconst.
 /// Pure Brood — `std/tool/grammar.blsp` — so adding a special form updates every
 /// editor's highlighting from one place.
-fn cmd_grammar(interp: &mut Interp, target: Option<&str>) {
-    let call = match target.unwrap_or("tmlanguage") {
-        "tmlanguage" | "vscode" | "textmate" => "(grammar/tmlanguage)",
-        "emacs" => "(grammar/emacs-special-forms)",
-        "tree-sitter" | "treesitter" | "highlights" => "(grammar/tree-sitter-highlights)",
-        other => {
-            eprintln!(
-                "nest grammar: unknown target '{other}' (expected 'tmlanguage', 'emacs', or 'tree-sitter')"
-            );
-            std::process::exit(2);
-        }
+fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
+    // Exhaustive — clap already rejected any unknown value (with a listed-choices
+    // error) before we get here, so there's no fallback/exit(2) arm.
+    let call = match target {
+        GrammarTarget::Tmlanguage => "(grammar/tmlanguage)",
+        GrammarTarget::Emacs => "(grammar/emacs-special-forms)",
+        GrammarTarget::TreeSitter => "(grammar/tree-sitter-highlights)",
     };
     run(interp, &format!("(require 'grammar) (println {call})"));
 }

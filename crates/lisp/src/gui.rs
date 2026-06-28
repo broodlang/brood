@@ -403,9 +403,9 @@ pub(crate) mod backend {
     const DEFAULT_FAMILY: &str = "mono";
     const DEFAULT_PX: f32 = 15.0;
 
-    // A terminal-ish dark theme for unstyled cells.
-    const DEFAULT_BG: [u8; 3] = [0x10, 0x14, 0x18];
-    const DEFAULT_FG: [u8; 3] = [0xcd, 0xd6, 0xe0];
+    // Catppuccin Mocha *base* — matches theme.blsp so Op::Clear fills with the right colour.
+    const DEFAULT_BG: [u8; 3] = [0x1e, 0x1e, 0x2e];
+    const DEFAULT_FG: [u8; 3] = [0xcd, 0xd6, 0xf4];
     // The solid colour of a thin (bar / underline) cursor caret — crisp near-white,
     // since the cursor op carries no face to colour it from.
     const CURSOR_FG: [u8; 3] = [0xf5, 0xf5, 0xf5];
@@ -922,8 +922,11 @@ pub(crate) mod backend {
             _context: softbuffer::Context<Rc<Window>>,
             surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
         },
+        // Boxed: `GlWindow` is ~6 KB (GL context + programs + glyph cache), which
+        // would bloat every `Backend` — including the common `Cpu` one — to that
+        // size. The box keeps the enum a couple of words; the GPU path is cold.
         #[cfg(feature = "gui-gpu")]
-        Gpu(crate::gui_gpu::GlWindow),
+        Gpu(Box<crate::gui_gpu::GlWindow>),
     }
 
     #[cfg(feature = "gui-gpu")]
@@ -1007,7 +1010,7 @@ pub(crate) mod backend {
         #[cfg(feature = "gui-gpu")]
         let backend = if gpu_enabled() {
             eprintln!("brood gui: GPU (OpenGL) backend active");
-            Backend::Gpu(crate::gui_gpu::GlWindow::new(window.clone())?)
+            Backend::Gpu(Box::new(crate::gui_gpu::GlWindow::new(window.clone())?))
         } else {
             cpu_backend(&window)?
         };
@@ -1905,6 +1908,13 @@ pub(crate) mod backend {
         // keyed by (cluster, family id, bold, italic, scale): the same cluster at a
         // different family/style/scale rasterises to a different baked canvas.
         cache: HashMap<(ClusterKey, u32, bool, bool, u16), CachedGlyph>,
+
+        // Damage-only present state (opt-in via BROOD_GUI_DAMAGE; see `paint`).
+        // `prev_pixels` is the last *presented* framebuffer; `damage_ring` is the
+        // per-frame changed-bbox of recent frames (oldest→newest) so we can union
+        // the last `buffer.age()` frames' damage. Empty/unused when the flag is off.
+        prev_pixels: Vec<u32>,
+        damage_ring: Vec<DamageRect>,
     }
 
     impl Renderer {
@@ -1920,6 +1930,8 @@ pub(crate) mod backend {
                 baseline: 0,
                 base_inset: 0.0,
                 cache: HashMap::new(),
+                prev_pixels: Vec::new(),
+                damage_ring: Vec::new(),
             };
             r.recompute();
             r
@@ -2352,6 +2364,83 @@ pub(crate) mod backend {
         }
     }
 
+    /// A half-open damage rectangle in physical pixels: `[x0,x1) × [y0,y1)`.
+    #[derive(Clone, Copy)]
+    struct DamageRect {
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+    }
+
+    impl DamageRect {
+        const EMPTY: DamageRect = DamageRect { x0: 0, y0: 0, x1: 0, y1: 0 };
+        fn is_empty(&self) -> bool {
+            self.x1 <= self.x0 || self.y1 <= self.y0
+        }
+        fn union(self, o: DamageRect) -> DamageRect {
+            if self.is_empty() {
+                return o;
+            }
+            if o.is_empty() {
+                return self;
+            }
+            DamageRect {
+                x0: self.x0.min(o.x0),
+                y0: self.y0.min(o.y0),
+                x1: self.x1.max(o.x1),
+                y1: self.y1.max(o.y1),
+            }
+        }
+    }
+
+    /// The changed bounding box between `new` and `old` (both `w*h`), or `EMPTY`
+    /// when identical. Rows compare as slices first (a fast memcmp), so the
+    /// unchanged rows — the common case when only a line or two changed — cost one
+    /// comparison each.
+    fn damage_bbox(new: &[u32], old: &[u32], w: usize, h: usize) -> DamageRect {
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+        for y in 0..h {
+            let base = y * w;
+            let nr = &new[base..base + w];
+            let or = &old[base..base + w];
+            if nr == or {
+                continue;
+            }
+            let mut fx = 0;
+            while nr[fx] == or[fx] {
+                fx += 1;
+            }
+            let mut lx = w - 1;
+            while nr[lx] == or[lx] {
+                lx -= 1;
+            }
+            x0 = x0.min(fx);
+            x1 = x1.max(lx + 1);
+            if y0 == usize::MAX {
+                y0 = y;
+            }
+            y1 = y + 1;
+        }
+        if y0 == usize::MAX {
+            DamageRect::EMPTY
+        } else {
+            DamageRect { x0, y0, x1, y1 }
+        }
+    }
+
+    /// Damage-only present is **on by default**; `BROOD_GUI_DAMAGE=0` opts back to
+    /// a full-buffer blit every frame (the safe fallback) — a one-line escape hatch
+    /// if a backend ever mishandles damage. Read once.
+    fn gui_damage_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("BROOD_GUI_DAMAGE").map(|v| v != "0").unwrap_or(true))
+    }
+
+    /// How many recent frames' damage we keep — the cap on the buffer `age` we can
+    /// safely cover with a damage union (typical double/triple buffering is ≤ 3).
+    const DAMAGE_HISTORY: usize = 8;
+
     fn paint(
         surface: &mut softbuffer::Surface<Rc<winit::window::Window>, Rc<winit::window::Window>>,
         window: &winit::window::Window,
@@ -2575,7 +2664,64 @@ pub(crate) mod backend {
             }
         }
         let t_body = Instant::now();
-        let _ = buf.present();
+        // Present. Whenever we can't be *certain* a narrower damage is safe we blit
+        // the whole buffer — no corruption risk. By default we declare only the
+        // changed region (BROOD_GUI_DAMAGE=0 forces the full blit): the buffer we
+        // got holds content from `buf.age()` frames ago, so
+        // the damage we must declare is the union of the last `age` frames' changes
+        // (computed by diffing against the last presented pixels). A resize resets
+        // the history and full-presents. See `damage_bbox`/`DamageRect`.
+        if !gui_damage_enabled() {
+            let _ = buf.present();
+        } else {
+            let n = fb_w * fb_h;
+            if r.prev_pixels.len() != n {
+                // First frame or a resize: reset history, present the whole buffer.
+                r.prev_pixels.resize(n, 0);
+                r.prev_pixels.copy_from_slice(&buf);
+                r.damage_ring.clear();
+                let _ = buf.present();
+            } else {
+                let age = buf.age() as usize;
+                let this = damage_bbox(&buf, &r.prev_pixels, fb_w, fb_h);
+                // Save pixels + record damage BEFORE present (present consumes buf).
+                r.prev_pixels.copy_from_slice(&buf);
+                r.damage_ring.push(this);
+                if r.damage_ring.len() > DAMAGE_HISTORY {
+                    let drop = r.damage_ring.len() - DAMAGE_HISTORY;
+                    r.damage_ring.drain(0..drop);
+                }
+                // Safe to narrow only if the buffer's age is known (≠0) and within
+                // our recorded history; else full-present.
+                let acc = if age != 0 && age <= r.damage_ring.len() {
+                    r.damage_ring
+                        .iter()
+                        .rev()
+                        .take(age)
+                        .fold(DamageRect::EMPTY, |a, d| a.union(*d))
+                } else {
+                    DamageRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: fb_w,
+                        y1: fb_h,
+                    }
+                };
+                if acc.is_empty() {
+                    // Nothing changed across the relevant frames (zero-area damage
+                    // is invalid) — a cheap full present.
+                    let _ = buf.present();
+                } else {
+                    let rect = softbuffer::Rect {
+                        x: acc.x0 as u32,
+                        y: acc.y0 as u32,
+                        width: NonZeroU32::new((acc.x1 - acc.x0) as u32).unwrap(),
+                        height: NonZeroU32::new((acc.y1 - acc.y0) as u32).unwrap(),
+                    };
+                    let _ = buf.present_with_damage(&[rect]);
+                }
+            }
+        }
         // Slow-paint breakdown: when this paint took >= BROOD_STALL_MS, attribute the
         // time across phases. `present` dominating = the softbuffer→window blit (a
         // platform/software-render cost — candidate for damage-only present); `body`

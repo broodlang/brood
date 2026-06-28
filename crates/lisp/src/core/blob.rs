@@ -45,6 +45,10 @@ impl SharedBlob {
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
 }
 
 /// Per-runtime registry for shared blobs. Phase 1 holds only a debug-only

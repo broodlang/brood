@@ -116,7 +116,7 @@ impl OpenKey {
         let len = u32::from_be_bytes(len) as usize;
         // A sealed frame is `plaintext + TAG_LEN`; reject an over-large prefix
         // before allocating (mirrors the plaintext `read_frame_capped` ceiling).
-        if len > MAX_FRAME + TAG_LEN || len < TAG_LEN {
+        if !(TAG_LEN..=MAX_FRAME + TAG_LEN).contains(&len) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("sealed frame length {len} out of range"),

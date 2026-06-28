@@ -719,10 +719,8 @@ pub(super) fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
 /// by `runtime_collect` per registered live arm.
 pub fn rewrite_arm_handles(arm: &CompiledArm, f: &mut dyn FnMut(Value) -> Value) {
     rewrite_node(&arm.body, f);
-    for d in arm.optional_defaults.iter() {
-        if let Some(n) = d {
-            rewrite_node(n, f);
-        }
+    for n in arm.optional_defaults.iter().flatten() {
+        rewrite_node(n, f);
     }
     if let Some(chunk) = &arm.chunk {
         rewrite_chunk(chunk, f);
@@ -918,7 +916,7 @@ impl Inst {
             Inst::Prim2SlotSlot { op, slot_a, slot_b, head, .. } => format!("Prim2SlotSlot({op:?}, s{slot_a},s{slot_b}, {})", crate::core::value::symbol_name_ref(*head)),
             Inst::Prim2SlotInt { op, slot_a, int_b, head, .. } => format!("Prim2SlotInt({op:?}, s{slot_a},{int_b}, {})", crate::core::value::symbol_name_ref(*head)),
             Inst::Call { argc, tail, head, .. } => format!("Call(argc={argc}, tail={tail}, head={})",
-                head.map(|s| crate::core::value::symbol_name_ref(s)).unwrap_or("computed")),
+                head.map(crate::core::value::symbol_name_ref).unwrap_or("computed")),
             Inst::SelfCall { argc } => format!("SelfCall({argc})"),
             Inst::MakeClosure { names, .. } => format!("MakeClosure(captures={})", names.len()),
             Inst::TryCatch { .. } => "TryCatch".into(),

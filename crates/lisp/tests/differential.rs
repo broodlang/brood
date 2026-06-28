@@ -32,7 +32,7 @@ fn eval_on(src: &str, vm: bool) -> Result<String, String> {
     let mut interp = Interp::new();
     let out = match interp.eval_str(src) {
         Ok(v) => Ok(interp.print(v)),
-        Err(e) => Err(e.message),
+        Err(e) => Err(e.message.clone()),
     };
     set_forced_engine(None);
     out

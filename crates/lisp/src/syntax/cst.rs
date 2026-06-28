@@ -41,6 +41,9 @@ pub enum NodeKind {
     Keyword,
     Int,
     Float,
+    /// A `M`-suffixed decimal literal (`1.50M`). Its own kind so `nest format`
+    /// preserves it round-trippably.
+    Decimal,
     Str,
     Bool,
     Nil,
@@ -382,6 +385,10 @@ impl<'a> Cst<'a> {
             // rejects this as a parse error; in the tooling tree it's an
             // `Error` token so the LSP flags it the same way.
             AtomKind::IntOverflow => NodeKind::Error,
+            // A valid `M`-suffixed decimal literal is its own kind; an invalid one
+            // (bad numeric prefix) is an `Error`, like `IntOverflow`.
+            AtomKind::Decimal => NodeKind::Decimal,
+            AtomKind::DecimalInvalid => NodeKind::Error,
         };
         self.leaf(kind, start)
     }

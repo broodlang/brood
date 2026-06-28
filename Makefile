@@ -202,12 +202,15 @@ gui-debug: ## Build + install JIT+GUI brood/nest with GC debug-assertions ARMED,
 fmt: ## Format all Rust code
 	cargo fmt
 
-clippy: ## Lint with clippy (all targets + all features; warnings reported, not fatal)
+clippy: ## Lint with clippy (all targets + all features; warnings are FATAL via -D warnings)
 	# `--all-features` type-checks + lints the optional backends (the `gui`
 	# feature: winit/softbuffer/fontdue) too, so a dependency bump that breaks
 	# `gui.rs` is caught here at the gate, not at `make install`. Compile/lint
 	# only — GUI *runtime* behaviour still needs an on-display check (WITH_GUI=1).
-	cargo clippy --all-targets --all-features
+	# `-D warnings` makes warning-clean a hard gate — a new lint fails the build.
+	# The deliberate style exceptions are documented `#![allow(...)]`s in
+	# crates/lisp/src/lib.rs and crates/lsp/src/main.rs.
+	cargo clippy --all-targets --all-features -- -D warnings
 
 check: clippy test ## Lint + test (the pre-commit gate). Run `make fmt` separately — it rewrites files.
 

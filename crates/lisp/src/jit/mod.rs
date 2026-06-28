@@ -33,7 +33,7 @@ use std::sync::{LazyLock, Mutex};
 fn jit_cb_trace_enabled() -> bool {
     static CB_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CB_TRACE.get_or_init(|| {
-        std::env::var("BROOD_JIT_CB_TRACE").map_or(false, |v| v != "0" && !v.is_empty())
+        std::env::var("BROOD_JIT_CB_TRACE").is_ok_and(|v| v != "0" && !v.is_empty())
     })
 }
 
@@ -50,7 +50,7 @@ pub(crate) static GLOBAL_JIT: LazyLock<Mutex<Jit>> = LazyLock::new(|| Mutex::new
 /// Sentinel in [`crate::eval::compile::CompiledArm`]`::jit_code` for an arm that was
 /// tried and is out of the JIT's subset — distinct from null (untried) and a real,
 /// 8-aligned code pointer.
-pub(crate) const BAILED: *mut u8 = 1 as *mut u8;
+pub(crate) const BAILED: *mut u8 = std::ptr::dangling_mut::<u8>();
 
 /// Sentinel: the arm is hot and has been handed to the background compiler thread, but
 /// its native code isn't installed yet. Callers run the VM until the real pointer
@@ -81,6 +81,10 @@ impl Jit {
         // The extra compile cost is paid on the background compiler thread, off the hot
         // path; the optimizations are semantics-preserving, so the GC discipline is
         // unaffected. Falls back to default flags if the host rejects the setting.
+        // The fallback closure yields cranelift's own (large) error in its Err arm,
+        // which trips `result_large_err`; it's an external type we don't control and
+        // the value is discarded (`|_|`), so the size is irrelevant here.
+        #[allow(clippy::result_large_err)]
         let mut builder =
             JITBuilder::with_flags(&[("opt_level", "speed")], default_libcall_names())
                 .or_else(|_| JITBuilder::new(default_libcall_names()))
@@ -118,24 +122,24 @@ impl Jit {
         #[cfg(debug_assertions)]
         if std::env::var_os("BROOD_DUMP_CODE").is_some() {
             for (n, a) in [
-                ("roots_base", brood_rt_roots_base as usize),
-                ("call_slow", brood_rt_call_slow as usize),
-                ("fast_frame", brood_rt_fast_frame as usize),
-                ("fastlink_base", brood_rt_fastlink_base as usize),
-                ("push", brood_rt_push as usize),
-                ("car", brood_rt_car as usize),
-                ("cdr", brood_rt_cdr as usize),
-                ("cons", brood_rt_cons as usize),
-                ("global", brood_rt_global as usize),
-                ("global_ic", brood_rt_global_ic as usize),
-                ("const_load", brood_rt_const_load as usize),
-                ("vector_ref", brood_rt_vector_ref as usize),
-                ("vector_base", brood_rt_vector_base as usize),
-                ("tick", brood_rt_tick as usize),
-                ("gc_safepoint", brood_rt_gc_safepoint as usize),
-                ("make_vector2", brood_rt_make_vector2 as usize),
-                ("global_epoch_ptr", brood_rt_global_epoch_ptr as usize),
-                ("dbg_set_staging", brood_rt_dbg_set_staging as usize),
+                ("roots_base", brood_rt_roots_base as *const () as usize),
+                ("call_slow", brood_rt_call_slow as *const () as usize),
+                ("fast_frame", brood_rt_fast_frame as *const () as usize),
+                ("fastlink_base", brood_rt_fastlink_base as *const () as usize),
+                ("push", brood_rt_push as *const () as usize),
+                ("car", brood_rt_car as *const () as usize),
+                ("cdr", brood_rt_cdr as *const () as usize),
+                ("cons", brood_rt_cons as *const () as usize),
+                ("global", brood_rt_global as *const () as usize),
+                ("global_ic", brood_rt_global_ic as *const () as usize),
+                ("const_load", brood_rt_const_load as *const () as usize),
+                ("vector_ref", brood_rt_vector_ref as *const () as usize),
+                ("vector_base", brood_rt_vector_base as *const () as usize),
+                ("tick", brood_rt_tick as *const () as usize),
+                ("gc_safepoint", brood_rt_gc_safepoint as *const () as usize),
+                ("make_vector2", brood_rt_make_vector2 as *const () as usize),
+                ("global_epoch_ptr", brood_rt_global_epoch_ptr as *const () as usize),
+                ("dbg_set_staging", brood_rt_dbg_set_staging as *const () as usize),
             ] {
                 eprintln!("[rt-addr] {n} = {a:#x}");
             }
@@ -509,6 +513,10 @@ thread_local! {
 }
 
 /// DEBUG ONLY: record the call site about to stage its args.
+///
+/// # Safety
+/// A JIT runtime callback: `_heap` is the (unused here) `Heap` pointer the
+/// trampoline passes by ABI; callers must invoke it only from JIT'd code.
 #[cfg(debug_assertions)]
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_dbg_set_staging(_heap: *mut Heap, site: u32) {
@@ -520,6 +528,10 @@ pub unsafe extern "C" fn brood_rt_dbg_set_staging(_heap: *mut Heap, site: u32) {
 /// index the JIT read (`base + slot`), `w0` its tag word. A garbage tag here is the
 /// earliest point the corruption is observable; report the slot index vs. roots_len so we
 /// can tell an out-of-frame read (`nslots` undercount) from an in-frame corrupted slot.
+///
+/// # Safety
+/// `heap` must be a valid, live `Heap` pointer (it is dereferenced); a JIT
+/// runtime callback invoked only from JIT'd code, which upholds that.
 #[cfg(debug_assertions)]
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_dbg_check_slot(heap: *mut Heap, w0: i64, w1: i64, w2: i64, abs_idx: i64) {

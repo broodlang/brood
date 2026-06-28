@@ -866,7 +866,7 @@ pub(super) fn collect_bytes(name: &'static str, bv: Value, heap: &mut Heap) -> R
                     Value::Pair(id) => {
                         let (h, t) = heap.pair(id);
                         match h {
-                            Value::Int(n) if n >= 0 && n <= 255 => out.push(n as u8),
+                            Value::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
                             other => {
                                 return Err(LispError::wrong_type(
                                     heap,
@@ -1146,6 +1146,10 @@ pub(super) fn random_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// encryption (ChaCha20-Poly1305). `key-bytes` must be exactly 32 bytes;
 /// `nonce-bytes` must be exactly 12 bytes. Returns the ciphertext (plaintext
 /// length + 16-byte Poly1305 authentication tag) as a byte vector.
+///
+/// **NEVER reuse a (key, nonce) pair.** A fresh nonce is required per message —
+/// reuse breaks both confidentiality *and* the Poly1305 integrity guarantee.
+/// Nonce generation is the caller's responsibility (see `crypto/random-nonce`).
 pub(super) fn chacha20_encrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
     let key_bytes = collect_bytes("%chacha20-encrypt", arg(args, 0), heap)?;
@@ -1227,7 +1231,7 @@ pub(super) fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         ));
     }
     let hlen = 32usize; // SHA-256 output bytes
-    let block_count = (key_len as usize + hlen - 1) / hlen;
+    let block_count = (key_len as usize).div_ceil(hlen);
     let mut dk = Vec::with_capacity(key_len as usize);
     for i in 1u32..=(block_count as u32) {
         // U_1 = HMAC(password, salt || INT(i))

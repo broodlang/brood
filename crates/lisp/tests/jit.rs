@@ -26,7 +26,7 @@ fn run(src: &'static str) -> Result<String, String> {
             let mut interp = Interp::new();
             match interp.eval_str(src) {
                 Ok(v) => Ok(interp.print(v)),
-                Err(e) => Err(e.message),
+                Err(e) => Err(e.message.clone()),
             }
         })
         .expect("spawn jit test thread")
@@ -99,7 +99,7 @@ fn comparisons_and_maps_are_correct_under_jit() {
         let got = interp
             .eval_str(&src)
             .map(|v| interp.print(v))
-            .map_err(|e| e.message);
+            .map_err(|e| e.message.clone());
         assert_eq!(
             got.as_deref(),
             Ok(want),

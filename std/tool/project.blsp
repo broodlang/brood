@@ -1290,6 +1290,257 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "# it out of the language stats (it's Brood, not Clojure).\n"
     "*.blsp linguist-language=Clojure linguist-detectable=false\n"))
 
+;; --- `hatch` template: Hatch web app + Postgres-backed form ----------------
+;; Generates a minimal but runnable Hatch web application with a message board
+;; backed by PostgreSQL. The scaffold is self-contained: `nest run` starts the
+;; server after setting $PG* env vars (or with a local Postgres at the defaults).
+;;
+;; Files generated (in addition to the shared manifest + docs):
+;;   project.blsp (overwritten with hatch + store-postgres deps)
+;;   src/main.blsp           — entry point: logger + DB + HTTP
+;;   src/db.blsp             — DB singleton (schema + CRUD helpers)
+;;   src/web/endpoint.blsp   — HTTP listener
+;;   src/web/layout.blsp     — HTML shell (Tailwind + daisyUI via CDN)
+;;   src/web/routes.blsp     — routes with session/CSRF pipeline
+;;   src/web/views/home.blsp — home page
+;;   src/web/views/messages.blsp — Postgres-backed message board
+;;   tests/main_test.blsp
+;;   tests/web/views/messages_test.blsp
+
+(defn project--hatch-manifest-template (nm)
+  (str ";; " nm " — a Hatch web application.\n"
+    ";;\n"
+    ";; Serves a Postgres-backed message board at GET/POST /messages.\n"
+    ";; Swap the :path deps for :git deps when targeting a published release.\n"
+    "(project\n"
+    "  :name \"" nm "\"\n"
+    "  :version \"0.1.0\"\n"
+    "  :dependencies [[hatch :path \"../hatch\"]\n"
+    "                 [store-postgres :path \"../store-postgres\"]]\n"
+    "  :format-plugins [hatch])\n"))
+
+(defn project--hatch-main-template (nm)
+  (str "(defmodule main \"Entry point for " nm ".\"\n"
+    "  (:use web/endpoint :only [serve])\n"
+    "  (:use log :only [start-logger])\n"
+    "  (:alias db))\n"
+    "\n"
+    "(defn db-opts ()\n"
+    "  \"Postgres connection opts from $PG* env vars, with development defaults.\"\n"
+    "  {:host (or (getenv \"PGHOST\") \"127.0.0.1\")\n"
+    "   :port (string->number (or (getenv \"PGPORT\") \"5432\"))\n"
+    "   :user (or (getenv \"PGUSER\") \"postgres\")\n"
+    "   :password (or (getenv \"PGPASSWORD\") \"postgres\")\n"
+    "   :database (or (getenv \"PGDATABASE\") \"" nm "\")\n"
+    "   :size 5})\n"
+    "\n"
+    "(defn main ()\n"
+    "  \"Start logging, open the DB pool + migrate, boot the endpoint, and park.\"\n"
+    "  (start-logger)\n"
+    "  (db/start (db-opts))\n"
+    "  (serve)\n"
+    "  (receive (:shutdown nil)))\n"))
+
+(defn project--hatch-db-template (_nm)
+  (str "(defmodule db\n"
+    "  \"Database singleton: the shared repo handle and messages schema.\n"
+    "  Call `(db/start opts)` once from `main`; handlers then use\n"
+    "  `(db/all-messages)` / `(db/insert-message row)`.\"\n"
+    "  (:alias repo)\n"
+    "  (:alias query)\n"
+    "  (:alias pg))\n"
+    "\n"
+    "(def *repo* nil)\n"
+    "\n"
+    "(def messages-schema\n"
+    "  {:table :messages\n"
+    "   :primary-key :id\n"
+    "   :fields {:id :serial :name :text :body :text}})\n"
+    "\n"
+    "(defn start (opts)\n"
+    "  \"Open the Postgres pool and migrate the messages table. Call once at boot.\"\n"
+    "  (def *repo* (repo/open (pg/adaptor) opts))\n"
+    "  (repo/migrate *repo* messages-schema)\n"
+    "  :ok)\n"
+    "\n"
+    "(defn all-messages ()\n"
+    "  \"All messages, oldest first (id ASC).\"\n"
+    "  (repo/all *repo* (-> (query/from :messages) (query/order-by :id :asc))))\n"
+    "\n"
+    "(defn insert-message (row)\n"
+    "  \"Insert a `{:name ... :body ...}` row; return the inserted row with `:id`.\"\n"
+    "  (repo/insert *repo* :messages row))\n"))
+
+(defn project--hatch-endpoint-template (_nm)
+  (str "(defmodule web/endpoint \"HTTP endpoint: bridges raw requests through the router.\"\n"
+    "  (:alias http/server)\n"
+    "  (:alias web/conn)\n"
+    "  (:alias web/routes)\n"
+    "  (:alias web/live)\n"
+    "  (:alias web/errors)\n"
+    "  (:alias task))\n"
+    "\n"
+    "; Hard deadline per request — kills a wedged handler and returns 504.\n"
+    "(def *handler-timeout-ms* 30000)\n"
+    "\n"
+    "(defn adapter (request)\n"
+    "  \"Bridge an http/server request through the router to a response.\"\n"
+    "  (let (conn (conn/build request)\n"
+    "        h (task/task\n"
+    "            (fn () (conn/conn->response (routes/app-router conn)))\n"
+    "            {:timeout *handler-timeout-ms*}))\n"
+    "    (receive\n"
+    "      ([:task-done ~h resp] (errors/themed resp))\n"
+    "      ([:task-error ~h _msg] (errors/error-response 500))\n"
+    "      ([:task-timeout ~h] (errors/error-response 504)))))\n"
+    "\n"
+    "(defn port ()\n"
+    "  \"Serve on $HATCH_PORT if set and numeric, else 5000.\"\n"
+    "  (or (string->number (or (getenv \"HATCH_PORT\") \"\")) 5000))\n"
+    "\n"
+    "(defn serve ()\n"
+    "  \"Start the HTTP listener on `(port)`.\"\n"
+    "  (server/start (port) adapter (live/live-dispatcher) {}))\n"))
+
+(defn project--hatch-layout-template (nm)
+  (str "(defmodule web/layout \"Shared HTML page shell — Tailwind + daisyUI via CDN.\"\n"
+    "  (:use web/template))\n"
+    "\n"
+    "(defn layout (title & children)\n"
+    "  [:html {:data-theme \"light\"}\n"
+    "    [:head {}\n"
+    "      [:meta {:charset \"utf-8\"}]\n"
+    "      [:meta {:name \"viewport\" :content \"width=device-width, initial-scale=1\"}]\n"
+    "      [:title {} title]\n"
+    "      [:link {:rel \"stylesheet\"\n"
+    "              :href \"https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css\"}]\n"
+    "      [:script {:src \"https://cdn.tailwindcss.com\"} \"\"]]\n"
+    "    [:body {:class \"min-h-screen bg-base-100 text-base-content\"}\n"
+    "      [:div {:class \"navbar bg-base-300 shadow-sm sticky top-0 z-50\"}\n"
+    "        [:div {:class \"navbar-start\"}\n"
+    "          [:a {:href \"/\" :class \"btn btn-ghost text-xl\"} \"" nm "\"]]\n"
+    "        [:div {:class \"navbar-end\"}\n"
+    "          [:a {:href \"/messages\" :class \"btn btn-ghost btn-sm\"} \"Messages\"]]]\n"
+    "      [:main {:class \"max-w-2xl mx-auto p-6\"} children]]])\n"))
+
+(defn project--hatch-routes-template (_nm)
+  (str "(defmodule web/routes \"HTTP routes — session + CSRF protected.\"\n"
+    "  (:use web/router)\n"
+    "  (:alias web/session)\n"
+    "  (:alias web/csrf))\n"
+    "\n"
+    "; Set $SECRET_KEY_BASE in production. Never ship this dev fallback.\n"
+    "(def session-secret\n"
+    "  (or (getenv \"SECRET_KEY_BASE\") \"dev-only-insecure-secret-change-me\"))\n"
+    "\n"
+    "(defrouter app-router\n"
+    "  (get \"/\" web/views/home/index)\n"
+    "  (through [(session/fetch-session session-secret) session/fetch-flash csrf/protect-from-forgery]\n"
+    "    (get \"/messages\" web/views/messages/index)\n"
+    "    (post \"/messages\" web/views/messages/create)))\n"))
+
+(defn project--hatch-home-template (nm)
+  (str "(defmodule web/views/home \"Home page.\"\n"
+    "  (:use web/page)\n"
+    "  (:use web/layout))\n"
+    "\n"
+    "(defn index (conn)\n"
+    "  \"GET / — welcome page.\"\n"
+    "  (page conn\n"
+    "    (layout \"" nm "\"\n"
+    "      [:h1 {:class \"text-3xl font-bold mb-4\"} \"Welcome to " nm "!\"]\n"
+    "      [:p {:class \"mb-4 opacity-70\"} \"A Hatch web app backed by PostgreSQL.\"]\n"
+    "      [:a {:href \"/messages\" :class \"btn btn-primary\"} \"View messages\"])))\n"))
+
+(defn project--hatch-messages-view-template (_nm)
+  (str "(defmodule web/views/messages\n"
+    "  \"GET /messages — list messages + form. POST /messages — insert + redirect.\"\n"
+    "  (:use web/page)\n"
+    "  (:use web/layout)\n"
+    "  (:use web/conn)\n"
+    "  (:alias web/session)\n"
+    "  (:alias web/csrf)\n"
+    "  (:alias db))\n"
+    "\n"
+    "(defn index (conn)\n"
+    "  \"GET /messages — render the message board.\"\n"
+    "  (let (msgs (db/all-messages))\n"
+    "    (page conn\n"
+    "      (layout \"Messages\"\n"
+    "        [:h1 {:class \"text-2xl font-bold mb-4\"} \"Message board\"]\n"
+    "        (flash-banner conn)\n"
+    "        (message-list msgs)\n"
+    "        (new-message-form conn)))))\n"
+    "\n"
+    "(defn flash-banner (conn)\n"
+    "  \"One-shot success banner from the flash, or nothing.\"\n"
+    "  (let (msg (web/session/get-flash conn \"info\"))\n"
+    "    (if (nil? msg) \"\" [:div {:class \"alert alert-success mb-4\"} [:span {} msg]])))\n"
+    "\n"
+    "(defn message-list (msgs)\n"
+    "  \"Render message cards, or an empty-state prompt.\"\n"
+    "  (if (empty? msgs)\n"
+    "    [:p {:class \"opacity-60 mb-6\"} \"No messages yet -- be the first!\"]\n"
+    "    [:div {:class \"space-y-3 mb-6\"}\n"
+    "      (map (fn (m)\n"
+    "             [:div {:class \"card bg-base-200\"}\n"
+    "               [:div {:class \"card-body py-3\"}\n"
+    "                 [:p {:class \"font-semibold\"} (get m :name)]\n"
+    "                 [:p {} (get m :body)]]])\n"
+    "           msgs)]))\n"
+    "\n"
+    "(defn new-message-form (conn)\n"
+    "  \"The form to post a new message.\"\n"
+    "  [:form {:method \"post\" :action \"/messages\" :class \"card bg-base-200\"}\n"
+    "    [:div {:class \"card-body space-y-3\"}\n"
+    "      [:h2 {:class \"card-title\"} \"Post a message\"]\n"
+    "      (web/csrf/csrf-input conn)\n"
+    "      [:label {:class \"label\"} [:span {:class \"label-text\"} \"Name\"]]\n"
+    "      [:input {:name \"name\" :placeholder \"Your name\"\n"
+    "               :class \"input input-bordered w-full\"}]\n"
+    "      [:label {:class \"label\"} [:span {:class \"label-text\"} \"Message\"]]\n"
+    "      [:textarea {:name \"body\" :rows \"3\" :placeholder \"Say something...\"\n"
+    "                  :class \"textarea textarea-bordered w-full\"} \"\"]\n"
+    "      [:div {:class \"card-actions\"}\n"
+    "        [:button {:class \"btn btn-primary\"} \"Post\"]]]])\n"
+    "\n"
+    "(defn create (conn)\n"
+    "  \"POST /messages -- validate, insert into Postgres, and PRG-redirect.\"\n"
+    "  (let (name (or (param conn \"name\") \"\")\n"
+    "        body (or (param conn \"body\") \"\"))\n"
+    "    (if (or (blank? name) (blank? body))\n"
+    "      (-> conn\n"
+    "        (web/session/put-flash \"info\" \"Name and message are required.\")\n"
+    "        (redirect-resp \"/messages\"))\n"
+    "      (do\n"
+    "        (db/insert-message {:name name :body body})\n"
+    "        (-> conn\n"
+    "          (web/session/put-flash \"info\" \"Message posted!\")\n"
+    "          (redirect-resp \"/messages\"))))))\n"))
+
+(defn project--hatch-main-test-template (_nm)
+  (str ";; Smoke test: ensure main loads without error.\n"
+    "(defmodule main-test (:use main) (:use test))\n"
+    "\n"
+    "(describe \"main\"\n"
+    "  (test \"main is callable\" (is (fn? main))))\n"))
+
+(defn project--hatch-messages-test-template (_nm)
+  (str ";; Pure rendering tests for web/views/messages -- no database needed.\n"
+    ";; (db/*repo* starts nil at load time; DB functions are only called at request time.)\n"
+    "(defmodule web-views-messages-test\n"
+    "  (:use test)\n"
+    "  (:use web/template :only [render])\n"
+    "  (:use web/views/messages :only [message-list]))\n"
+    "\n"
+    "(describe \"message-list\"\n"
+    "  (test \"empty state shows invitation\"\n"
+    "    (is (> (index-of (render (message-list (list))) \"No messages yet\") -1)))\n"
+    "  (test \"renders message name and body\"\n"
+    "    (let (html (render (message-list (list {:id 1 :name \"Ada\" :body \"Hello!\"}))))\n"
+    "      (is (> (index-of html \"Ada\") -1))\n"
+    "      (is (> (index-of html \"Hello!\") -1)))))\n"))
+
 ;; (new-project "foobar") — scaffold ./foobar with a runnable two-module
 ;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
 ;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
@@ -1298,7 +1549,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; .claude/skills/writing-brood skill, so the project is self-contained for
 ;; AI-assisted editing. Errors on a bad name; an existing folder is reused (its
 ;; scaffold files overwritten), not rejected.
-(def *project-templates* ["default" "tui-loop" "gen" "editor" "gui"])
+(def *project-templates* ["default" "tui-loop" "gen" "editor" "gui" "hatch"])
 
 ;; Write the template-specific src/ + tests/ files; return the list of relative
 ;; paths written (for the summary). The shared files (manifest, CLAUDE.md, guide,
@@ -1328,6 +1579,30 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
                      (spit (path-join tests-dir "main_test.blsp")
                        (project--gui-test-template actual-name))
                      [(str nm "/src/main.blsp") (str nm "/tests/main_test.blsp")])
+    (= tmpl "hatch") (let (web-dir (path-join src-dir "web")
+                           views-dir (path-join web-dir "views")
+                           tests-web-dir (path-join tests-dir "web")
+                           tests-views-dir (path-join tests-web-dir "views"))
+                       (make-dir web-dir)
+                       (make-dir views-dir)
+                       (make-dir tests-web-dir)
+                       (make-dir tests-views-dir)
+                       (spit (path-join nm "project.blsp") (project--hatch-manifest-template actual-name))
+                       (spit (path-join src-dir "main.blsp") (project--hatch-main-template actual-name))
+                       (spit (path-join src-dir "db.blsp") (project--hatch-db-template actual-name))
+                       (spit (path-join web-dir "endpoint.blsp") (project--hatch-endpoint-template actual-name))
+                       (spit (path-join web-dir "layout.blsp") (project--hatch-layout-template actual-name))
+                       (spit (path-join web-dir "routes.blsp") (project--hatch-routes-template actual-name))
+                       (spit (path-join views-dir "home.blsp") (project--hatch-home-template actual-name))
+                       (spit (path-join views-dir "messages.blsp") (project--hatch-messages-view-template actual-name))
+                       (spit (path-join tests-dir "main_test.blsp") (project--hatch-main-test-template actual-name))
+                       (spit (path-join tests-views-dir "messages_test.blsp") (project--hatch-messages-test-template actual-name))
+                       [(str nm "/src/main.blsp") (str nm "/src/db.blsp")
+                         (str nm "/src/web/endpoint.blsp") (str nm "/src/web/layout.blsp")
+                         (str nm "/src/web/routes.blsp")
+                         (str nm "/src/web/views/home.blsp") (str nm "/src/web/views/messages.blsp")
+                         (str nm "/tests/main_test.blsp")
+                         (str nm "/tests/web/views/messages_test.blsp")])
     else (do
            (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
            (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))
@@ -1338,7 +1613,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
              (str nm "/tests/hello_test.blsp")])))
 
 (defn new-project (nm &optional template)
-  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), or `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), or `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than

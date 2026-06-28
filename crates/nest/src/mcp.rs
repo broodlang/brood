@@ -739,6 +739,9 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
         // precision loss, so emit it as its decimal string (loud, lossless)
         // rather than a rounded float.
         Value::BigInt(id) => Ok(Json::String(heap.bigint(id).to_string())),
+        // A decimal is exact base-10; JSON's float `Number` can't carry it without
+        // precision loss, so emit its canonical decimal string (loud, lossless).
+        Value::Decimal(id) => Ok(Json::String(heap.decimal(id).to_string())),
         Value::Float(f) => {
             // serde_json::Number can't carry NaN or infinity; rather than
             // emit `null` and silently lose data, fail.

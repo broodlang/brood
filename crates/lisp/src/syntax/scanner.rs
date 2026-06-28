@@ -319,7 +319,7 @@ impl<'a> Scanner<'a> {
         let mut digits = 0;
         loop {
             match self.bump() {
-                Some('}') if digits >= 1 && digits <= 6 => return char::from_u32(code),
+                Some('}') if (1..=6).contains(&digits) => return char::from_u32(code),
                 Some(c) if digits < 6 => {
                     if let Some(h) = c.to_digit(16) {
                         code = code * 16 + h;

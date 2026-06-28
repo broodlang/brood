@@ -23,6 +23,15 @@ pub enum AtomKind {
     /// A `:keyword` (the leading `:` is part of the token; strip it to intern).
     Keyword,
     Symbol,
+    /// A Clojure-style **decimal** literal: a numeric token with a trailing `M`
+    /// (or `m`) — `1.50M`, `0M`, `-3.14M`, `100M`. The reader strips the suffix
+    /// from the token and parses the prefix as a `bigdecimal::BigDecimal`.
+    /// Additive: a token like `1.5M` was never a valid number before.
+    Decimal,
+    /// A decimal-shaped token (trailing `M`/`m`) whose numeric prefix doesn't parse
+    /// as a decimal — the reader turns it into a parse error, the CST an `Error` node
+    /// (mirrors [`AtomKind::IntOverflow`]).
+    DecimalInvalid,
 }
 
 /// Classify an atom token. No heap needed — atoms are numbers/keywords/symbols.
@@ -32,6 +41,22 @@ pub fn classify(token: &str) -> AtomKind {
         "true" => return AtomKind::Bool(true),
         "false" => return AtomKind::Bool(false),
         _ => {}
+    }
+    // A Clojure-style decimal literal: a trailing `M`/`m` on a numeric-shaped
+    // prefix (`1.50M`, `0M`, `-3.14M`, `100M`). Checked before everything else so
+    // the `M` is never mistaken for a symbol char. Additive — these tokens were
+    // never valid numbers. A bare `M` (no numeric prefix) stays a symbol.
+    if token.len() > 1 && (token.ends_with('M') || token.ends_with('m')) {
+        let prefix = &token[..token.len() - 1];
+        let shape = numeric_shape(prefix);
+        // The prefix must be a *complete* number (int- or float-shaped); a `+`/`-`
+        // alone, or a trailing sign, isn't. `BigDecimal::parse` is the final say.
+        if shape.numeric {
+            if prefix.parse::<bigdecimal::BigDecimal>().is_ok() {
+                return AtomKind::Decimal;
+            }
+            return AtomKind::DecimalInvalid;
+        }
     }
     if let Ok(i) = token.parse::<i64>() {
         return AtomKind::Int(i);

@@ -42,7 +42,7 @@ audio = ["dep:rodio"]
 # immediate (non-vsync) swapchain — the win for high-cell-count sims (Game of Life),
 # where the CPU full-framebuffer present is the bottleneck. Text shaping (cosmic-text)
 # is unchanged; glyphs upload to a GL texture atlas (later increment).
-gui-gpu = ["gui", "dep:glow", "dep:glutin", "dep:glutin-winit", "dep:raw-window-handle"]
+gui-gpu = ["gui", "dep:glow", "dep:glutin", "dep:raw-window-handle"]
 # OS clipboard access (the `clipboard-get` / `clipboard-set!` builtins), via `arboard`.
 # Pulled in by `gui` (a windowed editor wants copy/paste with other apps), but its own
 # feature so it can be enabled alone. Without it the builtins are graceful no-ops
@@ -105,18 +105,28 @@ boxcar = "0.2"
 # bindings are built on every function call and are almost always tiny (≤ a handful),
 # so keeping them inline avoids a heap allocation per call — which also matters extra
 # here because the byte-counting global allocator taxes every alloc with atomics.
-smallvec = "1"
+# `union` packs the inline-array and spilled (ptr,cap) reps into a union instead
+# of an enum, dropping the discriminant word — up to 8 bytes smaller per SmallVec.
+# Sound here because every element type we store is trivially-copyable (`Value` is
+# Copy, plus (Symbol,Value)/MapId/usize). Shrinks the hot-path CHAMP `MapNode`
+# (two SmallVecs, rebuilt on every `assoc`) and the per-call argv/env vecs.
+smallvec = { version = "1", features = ["union"] }
 # Arbitrary-precision integers (ADR: bignums). Brood ints are i64 in the common
 # case (`Value::Int`); a value that overflows i64 promotes to a heap `BigInt`
 # leaf, and demotes back to `Int` the moment a result fits again (the
 # normalize invariant — a `BigInt` is always strictly outside the i64 range).
 # Backs overflow-promoting +/-/*, division/mod, arbitrary-width bitwise ops, and
 # unbounded bit-shifts (the Life bitboard wants one big int per row, shifted by
-# the row width). `num-traits` for `Zero`/`Signed`/`ToPrimitive`; `num-integer`
-# for `div_rem`/`Integer` on `BigInt`.
+# the row width). `num-traits` for `Zero`/`Signed`/`ToPrimitive`. (Even division
+# uses `BigInt`'s inherent `%`/`/`, which truncate toward zero like i64 — so no
+# `num-integer`/`div_rem` dependency is needed.)
 num-bigint = "0.4.6"
 num-traits = "0.2"
-num-integer = "0.1"
+# Arbitrary-precision base-10 decimals (`Value::Decimal`): exact money / Postgres
+# `numeric` values a binary `f64` can't represent. Built on `num-bigint` (already a
+# dep) — a `BigDecimal` is a `BigInt` mantissa + an `i64` scale. Mirrors the bignum
+# leaf for storage/GC; the `M`-suffix literal (`1.50M`) and the `decimal` builtin.
+bigdecimal = "0.4"
 # HMAC-SHA256 for the node-link handshake (ADR-034 v2): the cookie isn't sent on
 # the wire — each side proves possession of it by HMAC'ing a peer-supplied
 # nonce, so an eavesdropper can't replay the value. Vetted RustCrypto crates;
@@ -168,7 +178,11 @@ webpki-roots = "1"
 # Server-side TLS (tls-listen): parse PEM cert/key the app provides, and rcgen
 # generates a self-signed cert for zero-config dev TLS (tls-self-signed).
 rustls-pemfile = "2"
-rcgen = "0.13"
+# `default-features = false` + `aws_lc_rs` drops rcgen's default `ring` backend, so
+# the binary links ONE crypto provider (aws-lc-rs, already pulled by rustls) instead
+# of both — smaller tree, one C-toolchain dep, and no rustls provider ambiguity.
+# `pem` keeps `serialize_pem` for tls-self-signed.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 
 # The optional `gui` frontend's stack (see the [features] note above). All three
 # are pulled in only with `--features gui`; a default build links none of them.
@@ -182,15 +196,15 @@ rcgen = "0.13"
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 # Audio output for the `audio-beep` builtin (feature `audio`, pulled in by `gui`).
-# default-features off so we link only synthesis + output, no format decoders.
-rodio = { version = "0.20", optional = true, default-features = false }
+# default-features off drops the format decoders (symphonia/flac/mp3/…); we keep
+# only `playback` (the cpal output path) — all we need to play synthesised tones.
+rodio = { version = "0.22", optional = true, default-features = false, features = ["playback"] }
 # Optional GPU backend (the `gui-gpu` feature). glutin creates a GL context on the
-# existing winit window via raw-window-handle 0.6 (the same rwh line winit 0.30 speaks),
-# glutin-winit bridges the two, and glow is the thin GL function loader. No vsync coupling:
-# the surface is set to an immediate swap interval. CPU `gui` builds link none of these.
-glow = { version = "0.16", optional = true }
+# existing winit window via raw-window-handle 0.6 directly (the same rwh line winit
+# 0.30 speaks), and glow is the thin GL function loader. No vsync coupling: the
+# surface is set to an immediate swap interval. CPU `gui` builds link none of these.
+glow = { version = "0.17", optional = true }
 glutin = { version = "0.32", optional = true }
-glutin-winit = { version = "0.5", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 # OS clipboard (text only). `default-features = false` drops the `image-data` default
 # (no `image` crate pulled in); `wayland-data-control` adds Wayland support alongside the
@@ -207,10 +221,10 @@ cosmic-text = { version = "0.19", optional = true }
 # tables — so the width primitive is available in the lean runtime too.
 unicode-width = "0.2"
 unicode-segmentation = "1"
-cranelift-jit = { version = "0.132.1", optional = true }
-cranelift-module = { version = "0.132.1", optional = true }
-cranelift-codegen = { version = "0.132.1", optional = true }
-cranelift-frontend = { version = "0.132.1", optional = true }
+cranelift-jit = { version = "0.133", optional = true }
+cranelift-module = { version = "0.133", optional = true }
+cranelift-codegen = { version = "0.133", optional = true }
+cranelift-frontend = { version = "0.133", optional = true }
 
 # uid/gid → owner/group name resolution for `file-stat`'s `ls -l`-style listing
 # (getpwuid/getgrgid). Unix-only; already in the dependency tree (transitive).

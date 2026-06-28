@@ -33,6 +33,11 @@ pub enum Message {
     /// have independent heaps) without a custom byte layout. The receiver's
     /// `from_message` parses it and `int_from_bigint`-normalizes it.
     BigInt(String),
+    /// An arbitrary-precision base-10 decimal, sent as its canonical decimal
+    /// string (mirrors [`Message::BigInt`]) — a portable form that round-trips
+    /// across nodes without a custom byte layout. The receiver's `from_message`
+    /// parses it back into a `Value::Decimal`.
+    Decimal(String),
     Float(f64),
     /// A small string sent inline by deep copy. Used for strings below
     /// [`crate::core::blob::SHARED_BLOB_THRESHOLD`] (where atomic refcount
@@ -173,6 +178,8 @@ fn to_message_rec(
         Value::Bool(b) => Message::Bool(b),
         Value::Int(n) => Message::Int(n),
         Value::BigInt(id) => Message::BigInt(heap.bigint(id).to_string()),
+        // A decimal ships as its canonical decimal string (mirrors BigInt).
+        Value::Decimal(id) => Message::Decimal(heap.decimal(id).to_string()),
         // A bitset always ships its Arc<SharedBlob> by reference (no byte copy) — its
         // whole point. Byte-clean: never read as a UTF-8 string.
         Value::Bitset(id) => Message::Bitset(Arc::clone(heap.bitset(id))),
@@ -422,6 +429,12 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
             // Normalize through `int_from_bigint` so a value that (against the
             // sender's invariant) fits i64 still demotes to `Int`.
             Ok(n) => heap.int_from_bigint(n),
+            // A malformed decimal string can only come from a corrupt/forged
+            // wire frame; fall back to 0 rather than panic the receiver.
+            Err(_) => Value::int(0),
+        },
+        Message::Decimal(s) => match s.parse::<bigdecimal::BigDecimal>() {
+            Ok(n) => heap.alloc_decimal(n),
             // A malformed decimal string can only come from a corrupt/forged
             // wire frame; fall back to 0 rather than panic the receiver.
             Err(_) => Value::int(0),
