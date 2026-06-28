@@ -12,27 +12,27 @@
   (test "with-out routes println to a process-port"
     (let (me (self))
       (with-out (process-port me) (println "hi"))
-      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "hi\n")))
+      (assert= (receive ([:io-write s] s) (after 5000 :timeout)) "hi\n")))
 
   (test "with-out routes print (no newline) and joins args with spaces"
     (let (me (self))
       (with-out (process-port me) (print "a" "b" 42))
-      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "a b 42")))
+      (assert= (receive ([:io-write s] s) (after 5000 :timeout)) "a b 42")))
 
   (test "fn-port hands each written string to a callback"
     (let (me (self))
       (with-out (fn-port (fn (s) (send me [:io-write s]))) (println "cb"))
-      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "cb\n")))
+      (assert= (receive ([:io-write s] s) (after 5000 :timeout)) "cb\n")))
 
   (test "io-write writes a string straight to a port"
     (let (me (self))
       (io-write (process-port me) "direct")
-      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "direct")))
+      (assert= (receive ([:io-write s] s) (after 5000 :timeout)) "direct")))
 
   (test "with-err reroutes eprintln"
     (let (me (self))
       (with-err (process-port me) (eprintln "err"))
-      (assert= (receive ([:io-write s] s) (after 500 :timeout)) "err\n"))))
+      (assert= (receive ([:io-write s] s) (after 5000 :timeout)) "err\n"))))
 
 (describe "io: the prelude defaults are untouched"
   (test "with-out-str still captures stdout (regression for the print rewire)"

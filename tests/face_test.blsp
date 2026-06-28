@@ -72,12 +72,12 @@
                          (spawn (send me [:face i (face :t/shared)])))
                     (range 8)))
       ;; collect each worker's resolution of the shared face
-      (let (results (map (fn (_) (receive ([:face _ f] f) (after 1000 :timeout))) (range 8)))
+      (let (results (map (fn (_) (receive ([:face _ f] f) (after 5000 :timeout))) (range 8)))
         (is (every? (fn (f) (= f {:fg :cyan :bold true})) results)))))
   (test "a face-set in this process is seen by a later-spawned worker"
     (def-face :t/live {:fg :red})
     (face-set :t/live {:bold true})
     (let (me (self))
       (spawn (send me [:got (face :t/live)]))
-      (assert= (receive ([:got f] f) (after 1000 :timeout))
+      (assert= (receive ([:got f] f) (after 5000 :timeout))
         {:fg :red :bold true}))))

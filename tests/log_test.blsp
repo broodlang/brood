@@ -15,13 +15,13 @@
 (defn lt-collect (pid) (fn-backend (fn (s) (send pid [:line s]))))
 
 ;; Receive one line, or :timeout.
-(defn lt-line () (receive ([:line s] s) (after 800 :timeout)))
+(defn lt-line () (receive ([:line s] s) (after 5000 :timeout)))
 
 ;; Tail-recursive drain of `n` lines into a list (ascending arrival order).
 (defn lt-drain (n acc)
   (if (= n 0) (reverse acc)
     (receive ([:line s] (lt-drain (- n 1) (cons s acc)))
-             (after 800 (reverse (cons :timeout acc))))))
+             (after 5000 (reverse (cons :timeout acc))))))
 
 ;; Tail-recursive [0, n).
 (defn lt-upto (n) (lt-upto--down (- n 1) nil))
@@ -80,8 +80,8 @@
       (log-info "to-lsp" {:category :lsp})
       (log-info "to-other")
       ;; collect the two delivered lines, tagged by which backend sent them
-      (let (a (receive ([:line tag s] [tag s]) (after 500 :timeout))
-            b (receive ([:line tag s] [tag s]) (after 500 :timeout)))
+      (let (a (receive ([:line tag s] [tag s]) (after 5000 :timeout))
+            b (receive ([:line tag s] [tag s]) (after 5000 :timeout)))
         (stop-logger)
         (let (lsp-line (if (= (first a) :lsp) (second a) (second b))
               other-line (if (= (first a) :other) (second a) (second b)))

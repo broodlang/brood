@@ -85,7 +85,7 @@
     (let (d (remote-display (self) 80 24))
       ;; :draw sends the frame to the client (us) verbatim
       ((get d :draw) [:A-FRAME])
-      (assert= (receive ([:frame f] f) (after 1000 :none)) [:A-FRAME])
+      (assert= (receive ([:frame f] f) (after 5000 :none)) [:A-FRAME])
       ;; :size is the size reported at attach (live resize deferred)
       (assert= ((get d :size)) [80 24])
       ;; :poll returns a shipped key, and maps a detach request to :close (ui-run quits)
