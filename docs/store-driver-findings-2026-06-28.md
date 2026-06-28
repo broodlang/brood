@@ -98,12 +98,12 @@ string**. SCRAM's `ClientKey = HMAC(SaltedPassword, "Client Key")` needs HMAC ov
 **raw-byte key** (the PBKDF2 output) with **raw-byte output** (it gets XORed and re-hashed).
 A Brood string can't faithfully carry an arbitrary-byte key (its UTF-8 encoding ≠ the bytes).
 
-**Worked around** by implementing HMAC-SHA-256 over byte vectors in pure Brood
+**Was worked around** by implementing HMAC-SHA-256 over byte vectors in pure Brood
 (`wire/bytes.blsp` `hmac256`), built on `sha256-bytes`; validated against `hmac-sha256` and
 the RFC 4231 vector.
 
-**Suggested fix.** `%hmac-sha256-bytes (key-bv msg-bv) -> bv` (and `…-sha1/512`). The `hmac`
-crate is already a dependency (`std/hash.blsp` header).
+**Now (store migrated 2026-06-28):** store uses `hash/hmac-sha256-raw`; the `wire/bytes`
+reimplementation is deleted. The live pool authenticates SCRAM against real Postgres through it.
 
 ---
 
@@ -113,10 +113,9 @@ crate is already a dependency (`std/hash.blsp` header).
 Chaining digests over raw bytes (SCRAM `StoredKey = SHA256(ClientKey)`, then HMAC over
 `StoredKey`) forces a hex→bytes decode on every step.
 
-**Worked around** with `sha256v` = `hex->bytes ∘ sha256-bytes` (`wire/bytes.blsp`).
+**Was worked around** with `sha256v` = `hex->bytes ∘ sha256-bytes` (`wire/bytes.blsp`).
 
-**Suggested fix.** A raw-bytes-returning digest — either make `sha256-bytes` return a byte
-vector, or add `sha256-raw`/`%sha256-bytes->bytes`.
+**Now:** store uses `hash/sha256-raw` (byte vector in, byte vector out); the wrapper is deleted.
 
 ---
 
@@ -128,11 +127,11 @@ i.e. it UTF-8-decodes a byte-vector salt — and the underlying `%pbkdf2-sha256`
 `invalid UTF-8`, and even a string salt would be re-encoded as UTF-8 rather than used as raw
 bytes.
 
-**Worked around** by implementing PBKDF2-HMAC-SHA256 over byte vectors in pure Brood
-(`wire/bytes.blsp` `pbkdf2-sha256`), on top of `hmac256`. Correctness validated end to end:
-the SCRAM client proof matches the RFC 7677 §3 worked example.
+**Was worked around** by implementing PBKDF2-HMAC-SHA256 over byte vectors in pure Brood
+(`wire/bytes.blsp` `pbkdf2-sha256`), on top of `hmac256`.
 
-**Suggested fix.** `%pbkdf2-sha256-bytes (pw-bv salt-bv iterations key-len) -> bv`.
+**Now:** store calls `crypto/pbkdf2` directly with a byte-vector salt; the reimplementation is
+deleted. Still validated against the RFC 7677 §3 client proof (store `tests/wire_test.blsp`).
 
 ---
 
@@ -145,6 +144,9 @@ rebuilds — ~2s wall per connection on this machine. It dominates connection es
 handshake, not N). A native byte-PBKDF2 (#4) removes both the correctness gap and the latency
 (the `pbkdf2`/`hmac`/`sha2` crates do this in microseconds).
 
+**Confirmed (2026-06-28):** with the native `%pbkdf2-sha256-bytes`, store's connect + full
+SCRAM handshake against real Postgres now measures **~6 ms** (was ~2 s) — ~300× faster.
+
 ---
 
 ## 6. [MED · std/encoding] base64 and hex are UTF-8-bound
@@ -155,11 +157,11 @@ becomes two bytes. `hex-decode` builds a string and throws `invalid UTF-8` on an
 byte. SCRAM needs base64 of the client proof (raw HMAC bytes), base64-decode of the salt, and
 hex over digests.
 
-**Worked around** with byte-vector base64/hex in `wire/bytes.blsp`
+**Was worked around** with byte-vector base64/hex in `wire/bytes.blsp`
 (`b64-encode`/`b64-decode`/`hex->bytes`/`bytes->hex`).
 
-**Suggested fix.** Byte-vector variants: `base64-encode-bytes (bv) -> str`,
-`base64-decode->bytes (str) -> bv`, `hex-decode->bytes (str) -> bv`, `bytes->hex (bv) -> str`.
+**Now:** store uses `encoding/base64-encode-bytes` / `base64-decode-bytes` and
+`hex-encode-bytes` / `hex-decode-bytes`; the reimplementations are deleted.
 
 ---
 
