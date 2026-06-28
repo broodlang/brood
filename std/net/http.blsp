@@ -258,6 +258,15 @@ socket is registered *passive* (no reader until the worker calls
   ;; response is rendered and the socket closed; a `stream-response` gets only the
   ;; head, then the socket is handed to its `:stream` fn (which owns it from here —
   ;; it writes over time and closes when done), so the worker does not close it.
+  ;;
+  ;; Set binary mode BEFORE taking ownership: `tcp-controlling-process` is what
+  ;; starts the reader, and the reader decodes each chunk by the current flag.
+  ;; Setting binary *after* (as http-read-request also does) leaves a window —
+  ;; a chunk that arrives between handoff and that set-binary is decoded in text
+  ;; mode (UTF-8-lossy), mangling a binary body and miscounting Content-Length
+  ;; (the http binary-body flake). An accepted socket is passive until handoff,
+  ;; so nothing is read before this; doing it first makes the first read exact.
+  (tcp-set-binary c true)
   (tcp-controlling-process c (self))
   (let (raw (http-read-request c))
     (if (nil? raw)
