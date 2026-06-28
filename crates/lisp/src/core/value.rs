@@ -344,6 +344,7 @@ handle!(VecId);
 handle!(StrId);
 handle!(BigIntId);
 handle!(BsId);
+handle!(BytesId);
 handle!(RopeId);
 handle!(ClosureId);
 handle!(NativeId);
@@ -490,6 +491,13 @@ pub enum Value {
     /// bump, not a byte copy); `promote`/GC copy the Arc byte-clean. The `bitset-*`
     /// primitives are its only operations; `type-of` is `:bitset`.
     Bitset(BsId),
+    /// **Raw bytes** — an immutable byte-clean leaf backed by one
+    /// `crate::core::blob::SharedBlob`, mirroring [`Value::Bitset`] exactly: a heap
+    /// leaf handle into the per-process `bytes` slab holding no `Value` children,
+    /// whose bytes are arbitrary (NOT valid UTF-8) and must never flow through the
+    /// UTF-8-only string accessors. Shared across processes by Arc refcount;
+    /// `promote`/GC copy the Arc byte-clean.
+    Bytes(BytesId),
 }
 
 /// The **unpacked** view of a [`Value`] — the form you `match` against.
@@ -612,6 +620,10 @@ impl Value {
     pub fn bitset(id: BsId) -> Value {
         Value::Bitset(id)
     }
+    #[inline]
+    pub fn bytes(id: BytesId) -> Value {
+        Value::Bytes(id)
+    }
 
     // ----- hot accessors (for the `if let Value::X(..) = v` shape) -----
 
@@ -730,6 +742,7 @@ pub enum Tag {
     Subprocess,
     Table,
     Bitset,
+    Bytes,
 }
 
 impl Tag {
@@ -757,6 +770,7 @@ impl Tag {
             Tag::Subprocess => "subprocess",
             Tag::Table => "table",
             Tag::Bitset => "bitset",
+            Tag::Bytes => "bytes",
         }
     }
 
@@ -766,14 +780,14 @@ impl Tag {
     /// code that was essentially the entire `intern` cost (~98% of all interns were
     /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
     pub fn keyword(self) -> Symbol {
-        static KW: LazyLock<[Symbol; 20]> = LazyLock::new(|| {
-            const TAGS: [Tag; 20] = [
+        static KW: LazyLock<[Symbol; 21]> = LazyLock::new(|| {
+            const TAGS: [Tag; 21] = [
                 Tag::Nil, Tag::Bool, Tag::Int, Tag::Float, Tag::Sym, Tag::Keyword,
                 Tag::Str, Tag::Pair, Tag::Vector, Tag::Fn, Tag::Macro, Tag::Native,
                 Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Subprocess,
-                Tag::Table, Tag::Bitset,
+                Tag::Table, Tag::Bitset, Tag::Bytes,
             ];
-            let mut out = [0u32; 20];
+            let mut out = [0u32; 21];
             for t in TAGS {
                 out[t as usize] = intern(t.name());
             }
@@ -818,6 +832,7 @@ pub fn tag(v: Value) -> Tag {
         Value::Subprocess(_) => Tag::Subprocess,
         Value::Table(_) => Tag::Table,
         Value::Bitset(_) => Tag::Bitset,
+        Value::Bytes(_) => Tag::Bytes,
     }
 }
 

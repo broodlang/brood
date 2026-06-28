@@ -436,6 +436,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 (defn float? (x) "True if `x` is a float." (%eq (type-of x) :float))
 (defn bool? (x) "True if `x` is a boolean." (%eq (type-of x) :bool))
 (defn string? (x) "True if `x` is a string." (%eq (type-of x) :string))
+(defn bytes? (x) "True if `x` is a bytes value." (%eq (type-of x) :bytes))
 (defn symbol? (x) "True if `x` is a symbol." (%eq (type-of x) :symbol))
 (defn keyword? (x) "True if `x` is a keyword." (%eq (type-of x) :keyword))
 (defn vector? (x) "True if `x` is a vector." (%eq (type-of x) :vector))
@@ -521,6 +522,7 @@ current element and `acc` is the current accumulator."
     (seqview? coll) (fold (fn (n _) (%add n 1)) 0 coll)
     (string? coll) (string-length coll)
     (vector? coll) (vector-length coll)
+    (bytes? coll) (byte-length coll)
     (map? coll) (map-count coll)
     else (count--acc coll 0)))
 (def length count)
@@ -536,13 +538,15 @@ current element and `acc` is the current accumulator."
   ;; whole thing to the tree-walker. The `& default` arm keeps the explicit-default
   ;; behaviour for the rarer 3-arg call.
   ((coll i)
-    (if (vector? coll)
-      (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
-      (nth-list coll i nil)))
+    (cond
+      (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
+      (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) nil)
+      else (nth-list coll i nil)))
   ((coll i & default)
-    (if (vector? coll)
-      (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) (first default))
-      (nth-list coll i (first default)))))
+    (cond
+      (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) (first default))
+      (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) (first default))
+      else (nth-list coll i (first default)))))
 
 ;; ---- numeric helpers ----
 ;; ---- map operations ----
@@ -957,6 +961,7 @@ its printed form."
     (match-bind-sym? pat) (list pat)
     (match-quoted? pat) nil
     (match-pin? pat) nil
+    (match-bytes-pattern? pat) (match-bytes-vars (rest pat))
     (pair? pat) (match-seq-vars pat)
     (vector? pat) (match-seq-vars (match-vec->list pat))
     else nil))
@@ -980,10 +985,94 @@ its printed form."
     ; 'sym self-evaluates to the symbol
     (match-pin? pat) `(if (%eq ~target ~(second pat)) ~success ~fail)
     ; ~expr: match the value of expr
+    (match-bytes-pattern? pat) (match-compile-bytes (rest pat) target bound success fail)
+    ; (bytes seg…): destructure a bytes value, Elixir-style binary matching
     (pair? pat) (match-compile-list pat target bound success fail)
     (vector? pat) (match-compile-vector pat target bound success fail)
     else `(if (%eq ~target ~pat) ~success ~fail)))
 ; literal (number/string/keyword/bool/nil)
+
+;; ---- bytes patterns: (bytes seg…) — Elixir-style binary destructuring ----
+;; Each `seg` consumes bytes left-to-right from the target:
+;;   int / #b"…" literal   match those exact byte(s)
+;;   symbol                bind exactly one byte (as an int 0–255); `_` skips one
+;;   (sym n)               bind `n` bytes (as a bytes value); n may be an int OR a
+;;                         symbol bound by an earlier segment (dynamic size); `(_ n)` skips n
+;;   & rest                bind the remaining bytes (must be the last segment)
+;; Without a trailing `& rest`, the bytes must be consumed exactly (length match).
+
+(defn match-bytes-pattern? (pat)
+  (and (pair? pat) (= (first pat) (quote bytes))))
+
+(defn match-bytes-vars (segs)
+  (cond
+    (empty? segs) nil
+    (= (first segs) '&) (match-bytes-vars (rest segs))
+    (pair? (first segs)) (let (s (first (first segs)))      ; (sym n) sized
+                           (if (match-wildcard? s)
+                             (match-bytes-vars (rest segs))
+                             (cons s (match-bytes-vars (rest segs)))))
+    (match-bind-sym? (first segs)) (cons (first segs) (match-bytes-vars (rest segs)))
+    else (match-bytes-vars (rest segs))))                   ; literal → binds nothing
+
+(defn match-compile-bytes (segs target bound success fail)
+  `(if (bytes? ~target)
+     ~(match-bytes-segs segs target 0 bound success fail)
+     ~fail))
+
+(defn match-bytes-segs (segs target off bound success fail)
+  (cond
+    ;; exhausted: require the bytes were consumed exactly
+    (empty? segs) `(if (%eq ~off (byte-length ~target)) ~success ~fail)
+    ;; & rest — bind everything left (the tail must be exactly `& sym`)
+    (= (first segs) '&)
+      (if (= (count segs) 2)
+        `(let (~(second segs) (subbytes ~target ~off)) ~success)
+        (error "match: bytes pattern '&' must be followed by exactly one rest binding"))
+    else (match-bytes-seg (first segs) (rest segs) target off bound success fail)))
+
+(defn match-bytes-seg (seg more target off bound success fail)
+  (let (noff (gensym "off"))
+    (cond
+      ;; (sym n) — bind n bytes as a sub-bytes value; n is an int or an earlier binding
+      (pair? seg)
+        (let (s (first seg) szv (gensym "sz"))
+          `(let (~szv ~(second seg))
+             (if (and (>= ~szv 0) (<= (+ ~off ~szv) (byte-length ~target)))
+               (let (~@(if (match-wildcard? s) [] (list s `(subbytes ~target ~off (+ ~off ~szv))))
+                     ~noff (+ ~off ~szv))
+                 ~(match-bytes-segs more target noff
+                    (if (match-wildcard? s) bound (append bound (list s))) success fail))
+               ~fail)))
+      ;; _ — skip one byte
+      (match-wildcard? seg)
+        `(if (< ~off (byte-length ~target))
+           (let (~noff (+ ~off 1)) ~(match-bytes-segs more target noff bound success fail))
+           ~fail)
+      ;; symbol — bind one byte as an int (or, if already bound, require equality —
+      ;; non-linear patterns, consistent with the vector/list matchers)
+      (match-bind-sym? seg)
+        (if (match-member? seg bound)
+          `(if (and (< ~off (byte-length ~target)) (%eq (byte-at ~target ~off) ~seg))
+             (let (~noff (+ ~off 1)) ~(match-bytes-segs more target noff bound success fail))
+             ~fail)
+          `(if (< ~off (byte-length ~target))
+             (let (~seg (byte-at ~target ~off) ~noff (+ ~off 1))
+               ~(match-bytes-segs more target noff (append bound (list seg)) success fail))
+             ~fail))
+      ;; #b"…" literal — match those exact bytes (length known at expand time)
+      (bytes? seg)
+        (let (n (byte-length seg))
+          `(if (and (<= (+ ~off ~n) (byte-length ~target))
+                 (%eq (subbytes ~target ~off (+ ~off ~n)) ~seg))
+             (let (~noff (+ ~off ~n)) ~(match-bytes-segs more target noff bound success fail))
+             ~fail))
+      ;; int literal — match one exact byte
+      (int? seg)
+        `(if (and (< ~off (byte-length ~target)) (%eq (byte-at ~target ~off) ~seg))
+           (let (~noff (+ ~off 1)) ~(match-bytes-segs more target noff bound success fail))
+           ~fail)
+      else (error (str "match: invalid bytes-pattern segment " (pr-str seg))))))
 
 ;; list pattern: split off an optional `& rest` tail, then bind element-wise.
 (defn match-split (pats)

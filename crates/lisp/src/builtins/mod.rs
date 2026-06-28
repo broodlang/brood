@@ -14,12 +14,14 @@ use crate::types::{Sig, Ty};
 
 mod numeric;
 mod sequences;
+mod bytes;
 mod io;
 mod terminal;
 mod system;
 
 use numeric::*;
 use sequences::*;
+use bytes::*;
 use io::*;
 use terminal::*;
 use system::*;
@@ -70,6 +72,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const subprocess_ty: Ty = Ty::of(Tag::Subprocess);
     const table_ty: Ty = Ty::of(Tag::Table);
     const bitset_ty: Ty = Ty::of(Tag::Bitset);
+    const bytes_ty: Ty = Ty::of(Tag::Bytes);
     const kw: Ty = Ty::of(Tag::Keyword);
     const sym: Ty = Ty::of(Tag::Sym);
     const bool_ty: Ty = Ty::of(Tag::Bool);
@@ -623,6 +626,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![vec_ty], string),
         utf8_bytes_to_string,
     );
+    // ---- raw bytes (Value::Bytes) ----
+    def(heap, "bytes", Arity::any(), Sig::variadic(any, bytes_ty), bytes_make);
+    def(heap, "byte-length", Arity::exact(1), Sig::new(vec![bytes_ty], int), byte_length);
+    def(heap, "byte-at", Arity::exact(2), Sig::new(vec![bytes_ty, int], int), byte_at);
+    def(heap, "subbytes", Arity::range(2, 3), Sig::variadic(any, bytes_ty), subbytes);
+    def(heap, "bytes-concat", Arity::any(), Sig::variadic(bytes_ty, bytes_ty), bytes_concat);
+    def(heap, "string->bytes", Arity::exact(1), Sig::new(vec![string], bytes_ty), string_to_bytes);
+    def(heap, "bytes->string", Arity::exact(1), Sig::new(vec![bytes_ty], string), bytes_to_string);
+    def(heap, "bytes->list", Arity::exact(1), Sig::new(vec![bytes_ty], pair), bytes_to_list);
     // string->number returns int *or* float *or* nil (the parse-failed case).
     def(
         heap,

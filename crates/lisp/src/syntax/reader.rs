@@ -8,6 +8,7 @@
 //! heap. Lexical rules (where an atom ends, how to classify a token)
 //! continue to share [`atom`](super::atom).
 
+use crate::core::blob::SharedBlob;
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Value};
@@ -199,7 +200,52 @@ impl<'a> Parser<'a> {
                 v
             }
             '"' => self.read_string(),
+            '#' => self.read_hash(),
             _ => self.read_atom(),
+        }
+    }
+
+    /// Dispatch a leading `#`. Only `#b"…"` is special (a bytes literal); `#` is
+    /// otherwise an ordinary atom character, so anything else (`#q`, `#foo`) reads
+    /// as a symbol.
+    fn read_hash(&mut self) -> Result<Value, LispError> {
+        if self.s.starts_with("#b\"") {
+            self.s.bump(); // '#'
+            self.s.bump(); // 'b'
+            self.read_bytes()
+        } else {
+            self.read_atom()
+        }
+    }
+
+    /// Read a `#b"…"` bytes literal. The body is scanned like a string, then each
+    /// codepoint becomes one byte (the Latin-1 carrier convention used throughout
+    /// Brood's binary I/O): printable ASCII is itself, other bytes are `\xHH`. A
+    /// codepoint > 255 is an error — use `\xHH`, or `string->bytes` for UTF-8 text.
+    fn read_bytes(&mut self) -> Result<Value, LispError> {
+        self.s.bump(); // opening quote
+        let mut body = String::new();
+        match self.s.scan_string_body(Some(&mut body)) {
+            StringScan::Closed => {
+                let mut bytes = Vec::with_capacity(body.len());
+                for ch in body.chars() {
+                    let cp = ch as u32;
+                    if cp > 255 {
+                        return Err(self.err(format!(
+                            "bytes literal: codepoint U+{:04X} exceeds 255 — use \\xHH, \
+                             or string->bytes for UTF-8 text",
+                            cp
+                        )));
+                    }
+                    bytes.push(cp as u8);
+                }
+                Ok(self.heap.alloc_bytes(SharedBlob::new(&bytes)))
+            }
+            StringScan::Unterminated => Err(self.err_incomplete("unterminated bytes literal")),
+            StringScan::BadEscape { at } => Err(self.err_at(
+                self.s.pos_at(at),
+                "malformed escape in bytes literal: \\x needs two hex digits",
+            )),
         }
     }
 

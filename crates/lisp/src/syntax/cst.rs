@@ -189,6 +189,7 @@ impl<'a> Cst<'a> {
                 self.wrap(kind, start)
             }
             Some('"') => self.string(start),
+            Some('#') => self.hash(start),
             // A stray close delimiter is an error token; resume after it.
             Some(')') | Some(']') | Some('}') => {
                 self.s.bump();
@@ -334,6 +335,21 @@ impl<'a> Cst<'a> {
     /// becomes an `Error` node spanning to EOF, since `Node` carries no
     /// "recovered" sub-state — `Error` is how syntactic diagnostics find it.
     ///
+    /// A `#`-dispatched form. `#b"…"` is a bytes literal — scanned like a string
+    /// so the leaf span covers the whole `#b"…"` (the formatter preserves it
+    /// verbatim; it highlights as a string token). Any other `#x` is a tolerant
+    /// error token, like every CST error.
+    fn hash(&mut self, start: usize) -> Node {
+        if self.s.starts_with("#b\"") {
+            self.s.bump(); // '#'
+            self.s.bump(); // 'b'
+            self.string(start)
+        } else {
+            // `#` is an ordinary atom character (e.g. the symbol `#q`).
+            self.atom(start)
+        }
+    }
+
     /// Uses [`Scanner::scan_string_body`] with `out: None` — same body-walk
     /// the reader uses, just without decoding (the CST keeps content as the
     /// source span; readers slice it on demand).

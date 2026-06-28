@@ -1,0 +1,114 @@
+;; The `bytes` value type (Value::Bytes): the `#b"…"` literal, the surface API,
+;; the generic sequence protocol, equality/hashing, and survival across GC.
+(defmodule bytes-test (:use test))
+
+;; def'd into a global → promoted to the shared RUNTIME region (exercises the
+;; promote + RUNTIME-flush paths).
+(def *global-bytes* (bytes 1 2 3 255))
+
+(describe "bytes: construction, predicate, type"
+  (test "literal equals the constructor; type-of; predicate"
+    (is (= #b"Hi!" (bytes 72 105 33)))
+    (is (= (type-of #b"x") :bytes))
+    (is (bytes? #b""))
+    (refute (bytes? "x"))
+    (refute (bytes? [1 2 3])))
+  (test "construct from a vector or a list"
+    (is (= (bytes [1 2 255]) #b"\x01\x02\xff"))
+    (is (= (bytes (list 65 66)) #b"AB")))
+  (test "a non-byte int is rejected"
+    (is (= (first (try (bytes 256) (catch _ [:error]))) :error))
+    (is (= (first (try (bytes -1) (catch _ [:error]))) :error))))
+
+(describe "bytes: sequence protocol"
+  (test "count / byte-length"
+    (is (= (count (bytes 1 2 3)) 3))
+    (is (= (byte-length #b"hello") 5))
+    (is (= (count #b"") 0)))
+  (test "nth / get / byte-at yield ints 0–255"
+    (let (b (bytes 10 20 30))
+      (is (= (nth b 0) 10))
+      (is (= (get b 2) 30))
+      (is (= (byte-at b 1) 20))
+      (is (= (nth b 9 :none) :none))))
+  (test "first / rest / empty?"
+    (is (= (first (bytes 7 8 9)) 7))
+    (is (= (rest (bytes 7 8 9)) (bytes 8 9)))
+    (is (= (first #b"") nil))
+    (is (empty? #b""))
+    (refute (empty? #b"x"))))
+
+(describe "bytes: slicing, concat, conversions"
+  (test "subbytes"
+    (is (= (subbytes #b"hello" 1 3) #b"el"))
+    (is (= (subbytes #b"hello" 2) #b"llo")))
+  (test "bytes-concat (literals and constructed)"
+    (is (= (bytes-concat #b"ab" (bytes 67) #b"\xff") #b"abC\xff"))
+    (is (= (bytes-concat) #b"")))
+  (test "string<->bytes is UTF-8"
+    (is (= (string->bytes "AB") #b"AB"))
+    (is (= (string->bytes "é") #b"\xc3\xa9"))
+    (is (= (bytes->string #b"\xc3\xa9") "é"))
+    (is (= (bytes->string (string->bytes "round-trip ✓")) "round-trip ✓")))
+  (test "bytes->list"
+    (is (= (bytes->list (bytes 1 2 3)) (list 1 2 3)))))
+
+(describe "bytes: equality + hashing"
+  (test "content equality, not identity"
+    (is (= #b"abc" (bytes 97 98 99)))
+    (refute (= #b"abc" #b"abd")))
+  (test "works as a map key (content hash matches content equality)"
+    (let (m (assoc {} #b"k" 42))
+      (is (= (get m (bytes 107)) 42)))))   ; #b"k" and (bytes 107) are equal keys
+
+(describe "bytes: GC survival"
+  :isolated
+  (test "LOCAL bytes survive forced collections with content intact"
+    (let (mk (fn (i) (bytes (mod i 256) (mod (* i 3) 256) 255))
+          xs (into [] (map mk (range 1000))))
+      (gc-collect)
+      ;; churn: 30k throwaway bytes to force tenuring + a major collection
+      (count (into [] (map (fn (i) (bytes (mod i 256))) (range 30000))))
+      (gc-collect)
+      (is (= (count xs) 1000))
+      (is (= (nth xs 0) (mk 0)))
+      (is (= (nth xs 500) (mk 500)))
+      (is (= (nth xs 999) (mk 999)))
+      (is (= (byte-at (nth xs 999) 2) 255))))
+  (test "a promoted (global) bytes survives collection"
+    (gc-collect)
+    (is (= *global-bytes* (bytes 1 2 3 255)))
+    (is (= (byte-length *global-bytes*) 4))))
+
+(describe "bytes: pattern matching (Elixir-style binary destructuring)"
+  (test "literal pattern matches by content"
+    (is (= (match #b"GET" (#b"GET" :get) (#b"PUT" :put) (_ :other)) :get))
+    (is (= (match (bytes 1 2) (#b"\x01\x02" :ok) (_ :no)) :ok)))
+  (test "head bytes + rest"
+    (is (= (match (bytes 1 2 3 4) ((bytes a b & rest) [a b rest]) (_ :no))
+          [1 2 (bytes 3 4)])))
+  (test "literal prefix then capture the tail"
+    (is (= (match #b"GET /index" ((bytes #b"GET " & p) (bytes->string p)) (_ :other))
+          "/index"))
+    (is (= (match #b"POST /x"
+             ((bytes #b"GET " & p) [:get (bytes->string p)])
+             ((bytes #b"POST " & p) [:post (bytes->string p)])
+             (_ :other))
+          [:post "/x"])))
+  (test "dynamic size — a length byte then that many bytes (TLV)"
+    (is (= (match (bytes 3 65 66 67 99 100)
+             ((bytes len (body len) & rest) [len (bytes->string body) rest])
+             (_ :no))
+          [3 "ABC" (bytes 99 100)])))
+  (test "fixed length is enforced (no & rest means exact)"
+    (is (= (match (bytes 1 2) ((bytes a b) [a b]) (_ :wrong)) [1 2]))
+    (is (= (match (bytes 1 2 3) ((bytes a b) [a b]) (_ :wrong)) :wrong)))
+  (test "_ skips bytes"
+    (is (= (match (bytes 10 20 30) ((bytes _ x _) x) (_ :no)) 20)))
+  (test "no clause matches falls through to the catch-all"
+    (is (= (match #b"hi" ((bytes #b"GET " & p) p) (_ :fallthrough)) :fallthrough)))
+  (test "a non-bytes value never matches a bytes pattern"
+    (is (= (match [1 2 3] ((bytes a & r) a) (_ :not-bytes)) :not-bytes)))
+  (test "non-linear: a repeated binder requires equal bytes"
+    (is (= (match (bytes 5 5) ((bytes a a) :equal) (_ :diff)) :equal))
+    (is (= (match (bytes 5 6) ((bytes a a) :equal) (_ :diff)) :diff))))
