@@ -148,8 +148,8 @@ loop, and a message matched by no clause is dropped (so the mailbox can't leak).
         clauses (if doc (rest clauses) clauses)
         state-sym (first params)
         ;; Lifecycle clauses are pulled out; the rest are message clauses.
-        init-clause (first (filter (fn (c) (= (first c) 'init)) clauses))
-        term-clause (first (filter (fn (c) (= (first c) 'terminate)) clauses))
+        init-clause (find (fn (c) (= (first c) 'init)) clauses)
+        term-clause (find (fn (c) (= (first c) 'terminate)) clauses)
         msg-clauses (filter (fn (c) (not (member? (first c) (list 'init 'terminate)))) clauses)
         ;; Envelope clauses (cast/call/query) are matched BEFORE info clauses,
         ;; regardless of declaration order, so a broad `info` pattern can never

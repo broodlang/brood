@@ -85,7 +85,7 @@ the forward-order `prefix`."
 
 (defn pane-selected-path (tree)
   "The path of the selected leaf (`()` for a lone pane)."
-  (first (filter (fn (p) (get (pane--get tree p) :selected)) (pane-leaf-paths tree))))
+  (find (fn (p) (get (pane--get tree p) :selected)) (pane-leaf-paths tree)))
 
 (defn pane--clear (node)
   "The tree with the `:selected` marker cleared from every leaf."

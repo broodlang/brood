@@ -57,11 +57,11 @@ interpreted and the bottleneck in structural navigation.)"
   "The deepest container node strictly containing `point` (descending into
 list/vector/map children); the root if none. Reader-macro wrappers are navigated
 as a unit — descending through them is a deferred refinement."
-  (let (hit (first (filter (fn (k)
-                             (and (container-kind? (get k :kind))
-                               (< (get k :start) point)
-                               (< point (get k :end))))
-                     (or (get anode :kids) (list)))))
+  (let (hit (find (fn (k)
+                    (and (container-kind? (get k :kind))
+                      (< (get k :start) point)
+                      (< point (get k :end))))
+              (or (get anode :kids) (list))))
     (if (nil? hit) anode (enclosing hit point))))
 
 (defn forms-of (anode)
@@ -143,7 +143,7 @@ there is none (the Emacs `forward-sexp`)."
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        nxt (first (filter (fn (f) (>= (get f :start) rp)) (forms-of enc))))
+        nxt (find (fn (f) (>= (get f :start) rp)) (forms-of enc)))
     (if (nil? nxt) point (+ base (get nxt :end)))))
 
 (defn point-backward (text point)
@@ -167,8 +167,8 @@ none."
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        lst (first (filter (fn (f) (and (container-kind? (get f :kind)) (>= (get f :start) rp)))
-                     (forms-of enc))))
+        lst (find (fn (f) (and (container-kind? (get f :kind)) (>= (get f :start) rp)))
+              (forms-of enc)))
     (if (nil? lst) point (+ base (get lst :start) 1))))
 
 (defn point-defun-start (text point)
@@ -177,8 +177,8 @@ unchanged if `point` isn't within one."
   (let ([base sub] (narrow text point)
         rp (- point base)
         root (tree sub)
-        top (first (filter (fn (f) (and (<= (get f :start) rp) (<= rp (get f :end))))
-                     (forms-of root))))
+        top (find (fn (f) (and (<= (get f :start) rp) (<= rp (get f :end))))
+              (forms-of root)))
     (if (nil? top) point (+ base (get top :start)))))
 
 ;; ---- pure structural edits: (text point) -> [new-text new-point] ------------
@@ -207,7 +207,7 @@ delimiter past that form (Emacs/paredit `forward-slurp-sexp`)."
       (let ([tr enc] ctx
             ee (get enc :end)
             parent (enclosing tr (get enc :start))
-            nxt (first (filter (fn (f) (>= (get f :start) ee)) (forms-of parent))))
+            nxt (find (fn (f) (>= (get f :start) ee)) (forms-of parent)))
         (if (nil? nxt)
           nil
           (let (ne (get nxt :end))
@@ -280,8 +280,8 @@ form's siblings (paredit `raise-sexp`)."
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
-            cur (first (filter (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
-                         (forms-of enc))))
+            cur (find (fn (f) (and (<= (get f :start) point) (<= point (get f :end))))
+                  (forms-of enc)))
         (if (nil? cur)
           nil
           (let (cs (get cur :start) ce (get cur :end))
@@ -308,7 +308,7 @@ form's siblings (paredit `raise-sexp`)."
 new open (paredit `wrap-round`)."
   (let (tr (tree text)
         enc (enclosing tr point)
-        nxt (first (filter (fn (f) (>= (get f :end) point)) (forms-of enc))))
+        nxt (find (fn (f) (>= (get f :end) point)) (forms-of enc)))
     (if (nil? nxt)
       nil
       (let (ns (get nxt :start) ne (get nxt :end))

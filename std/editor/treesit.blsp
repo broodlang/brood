@@ -71,9 +71,9 @@ restyles the editor on its next frame."
   "Depth-first `[start end face]` spans (ascending — children are in source order).
 When `face-of` gives a node a face, colour the WHOLE node and stop; else descend."
   (let (fc (face-of node))
-    (if (not (nil? fc))
+    (if fc
       (list [(get node :start) (get node :end) fc])
-      (apply concat (map (fn (c) (ts--spans c face-of)) (or (get node :kids) []))))))
+      (mapcat (fn (c) (ts--spans c face-of)) (or (get node :kids) [])))))
 
 (defn fontify (text lang face-of)
   "A `:fontify` service: `[start end face]` colour spans for `text` parsed as the
@@ -89,7 +89,7 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 ;; any node with `:kids`; a "form" is a NAMED node (anonymous tokens — keywords,
 ;; punctuation — are skipped, like sexp skips whitespace/comments).
 
-(defn ts--container? (node) (not (nil? (get node :kids))))
+(defn ts--container? (node) (get node :kids))
 
 (defn ts--named-kids (node)
   "The named children of `node` (grammar nodes, not anonymous tokens)."
@@ -97,11 +97,11 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 
 (defn ts--enclosing (node point)
   "The deepest container node strictly containing `point`; `node` if none."
-  (let (hit (first (filter (fn (k)
-                             (and (ts--container? k)
-                               (< (get k :start) point)
-                               (< point (get k :end))))
-                     (or (get node :kids) []))))
+  (let (hit (find (fn (k)
+                    (and (ts--container? k)
+                      (< (get k :start) point)
+                      (< point (get k :end))))
+              (or (get node :kids) [])))
     (if (nil? hit) node (ts--enclosing hit point))))
 
 (defn ts--root? (node root)
@@ -112,7 +112,7 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
   (let (root (tree-sitter-parse text lang)
         enc (ts--enclosing root point)
-        nxt (first (filter (fn (f) (>= (get f :start) point)) (ts--named-kids enc))))
+        nxt (find (fn (f) (>= (get f :start) point)) (ts--named-kids enc)))
     (if (nil? nxt) point (get nxt :end))))
 
 (defn point-backward (text lang point)
@@ -133,17 +133,17 @@ unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
 if none."
   (let (root (tree-sitter-parse text lang)
         enc (ts--enclosing root point)
-        lst (first (filter (fn (f) (and (ts--container? f) (>= (get f :start) point)))
-                     (ts--named-kids enc))))
+        lst (find (fn (f) (and (ts--container? f) (>= (get f :start) point)))
+              (ts--named-kids enc)))
     (if (nil? lst) point (get lst :start))))
 
 (defn ts--chain-rest (node point)
   "The containers strictly enclosing `point` below `node`, outermost first — each a
 container that contains the next. `()` at the leaf."
-  (let (hit (first (filter (fn (k) (and (ts--container? k)
-                                     (< (get k :start) point)
-                                     (< point (get k :end))))
-                     (or (get node :kids) []))))
+  (let (hit (find (fn (k) (and (ts--container? k)
+                            (< (get k :start) point)
+                            (< point (get k :end))))
+              (or (get node :kids) [])))
     (if (nil? hit) () (cons hit (ts--chain-rest hit point)))))
 
 (def ts--def-kinds
