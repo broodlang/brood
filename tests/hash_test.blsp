@@ -124,9 +124,9 @@
 (def hash-test--abc [97 98 99])
 
 (describe "sha256-raw"
-  (test "returns a 32-byte vector"
+  (test "returns a 32-byte bytes value"
     (let (d (hash/sha256-raw hash-test--abc))
-      (is (vector? d))
+      (is (bytes? d))
       (assert= 32 (count d))))
   (test "bytes are in 0-255"
     (is (every? (fn (b) (and (>= b 0) (<= b 255))) (hash/sha256-raw hash-test--abc))))
@@ -174,9 +174,9 @@
 (def hash-test--rfc4231-msg (crypto/str->bytes "Hi There"))
 
 (describe "hmac-sha256-raw"
-  (test "returns a 32-byte vector"
+  (test "returns a 32-byte bytes value"
     (let (m (hash/hmac-sha256-raw hash-test--rfc4231-key hash-test--rfc4231-msg))
-      (is (vector? m))
+      (is (bytes? m))
       (assert= 32 (count m))))
   (test "RFC 4231 Test Case 1 (binary key)"
     (assert= "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"

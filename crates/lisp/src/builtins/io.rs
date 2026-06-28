@@ -846,9 +846,11 @@ pub(super) fn sha256_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     Ok(heap.alloc_string(&digest_to_hex(Sha256::digest(s.as_bytes()))))
 }
 
-/// Extract a vector or list of byte ints (0–255) from a `Value`.
+/// Extract raw bytes from a `Value`: a `bytes` value, or (leniently) a vector
+/// or list of byte ints (0–255).
 pub(super) fn collect_bytes(name: &'static str, bv: Value, heap: &mut Heap) -> Result<Vec<u8>, LispError> {
     match bv {
+        Value::Bytes(id) => Ok(heap.bytes(id).as_bytes().to_vec()),
         Value::Vector(id) => {
             let vec = heap.vector(id).to_vec();
             vec.iter()
@@ -903,13 +905,12 @@ pub(super) fn digest_to_hex(digest: impl AsRef<[u8]>) -> String {
     hex
 }
 
-/// Allocate a raw-byte result (digest, HMAC, derived key) as a Brood byte
-/// vector of ints 0–255 — the raw-byte counterpart of `digest_to_hex`. The
-/// byte-oriented crypto layer (store-driver findings 2/3) returns these so
-/// digests can be chained over bytes without a hex round-trip at each step.
-pub(super) fn bytes_to_vec(bytes: impl AsRef<[u8]>, heap: &mut Heap) -> Value {
-    let vals: Vec<Value> = bytes.as_ref().iter().map(|&b| Value::int(b as i64)).collect();
-    heap.alloc_vector(vals)
+/// Allocate a raw-byte result (digest, HMAC, derived key) as a Brood `bytes`
+/// value — the raw-byte counterpart of `digest_to_hex`. The byte-oriented
+/// crypto layer (store-driver findings 2/3) returns these so digests can be
+/// chained over bytes without a hex round-trip at each step.
+pub(super) fn bytes_to_value(bytes: impl AsRef<[u8]>, heap: &mut Heap) -> Value {
+    heap.alloc_bytes(crate::core::blob::SharedBlob::new(bytes.as_ref()))
 }
 
 /// `(%sha256-bytes bytes)` — hex SHA-256 of a vector or list of byte integers.
@@ -982,44 +983,44 @@ pub(super) fn md5_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 // then HMAC over `StoredKey` — needs the raw bytes, not a hex string that would
 // have to be decoded again at each step (store-driver findings #3).
 
-/// `(%sha256-raw bytes)` — SHA-256 of a byte vector, returned as a 32-byte vector.
+/// `(%sha256-raw bytes)` — SHA-256 of a byte sequence, returned as a 32-byte bytes value.
 pub(super) fn sha256_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use sha2::{Digest, Sha256};
     let bytes = collect_bytes("%sha256-raw", arg(args, 0), heap)?;
     let d = Sha256::digest(&bytes);
-    Ok(bytes_to_vec(d, heap))
+    Ok(bytes_to_value(d, heap))
 }
 
-/// `(%sha1-raw bytes)` — SHA-1 of a byte vector, returned as a 20-byte vector.
+/// `(%sha1-raw bytes)` — SHA-1 of a byte sequence, returned as a 20-byte bytes value.
 pub(super) fn sha1_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use sha1::{Digest, Sha1};
     let bytes = collect_bytes("%sha1-raw", arg(args, 0), heap)?;
     let d = Sha1::digest(&bytes);
-    Ok(bytes_to_vec(d, heap))
+    Ok(bytes_to_value(d, heap))
 }
 
-/// `(%sha384-raw bytes)` — SHA-384 of a byte vector, returned as a 48-byte vector.
+/// `(%sha384-raw bytes)` — SHA-384 of a byte sequence, returned as a 48-byte bytes value.
 pub(super) fn sha384_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use sha2::{Digest, Sha384};
     let bytes = collect_bytes("%sha384-raw", arg(args, 0), heap)?;
     let d = Sha384::digest(&bytes);
-    Ok(bytes_to_vec(d, heap))
+    Ok(bytes_to_value(d, heap))
 }
 
-/// `(%sha512-raw bytes)` — SHA-512 of a byte vector, returned as a 64-byte vector.
+/// `(%sha512-raw bytes)` — SHA-512 of a byte sequence, returned as a 64-byte bytes value.
 pub(super) fn sha512_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use sha2::{Digest, Sha512};
     let bytes = collect_bytes("%sha512-raw", arg(args, 0), heap)?;
     let d = Sha512::digest(&bytes);
-    Ok(bytes_to_vec(d, heap))
+    Ok(bytes_to_value(d, heap))
 }
 
-/// `(%md5-raw bytes)` — MD5 of a byte vector, returned as a 16-byte vector.
+/// `(%md5-raw bytes)` — MD5 of a byte sequence, returned as a 16-byte bytes value.
 pub(super) fn md5_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use md5::{Digest, Md5};
     let bytes = collect_bytes("%md5-raw", arg(args, 0), heap)?;
     let d = Md5::digest(&bytes);
-    Ok(bytes_to_vec(d, heap))
+    Ok(bytes_to_value(d, heap))
 }
 
 // ---- HMAC primitives -------------------------------------------------------
@@ -1067,7 +1068,7 @@ pub(super) fn hmac_sha512_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 // encoding ≠ the bytes), and SCRAM keys/outputs are XORed and re-hashed as raw
 // bytes — so the string-keyed `%hmac-*` can't serve them (store-driver findings #2).
 
-/// `(%hmac-sha256-raw key-bytes msg-bytes)` — HMAC-SHA256 over byte vectors → 32-byte vector.
+/// `(%hmac-sha256-raw key-bytes msg-bytes)` — HMAC-SHA256 over byte sequences → 32-byte bytes value.
 pub(super) fn hmac_sha256_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
@@ -1076,10 +1077,10 @@ pub(super) fn hmac_sha256_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     let mut mac = Hmac::<Sha256>::new_from_slice(&key)
         .map_err(|e| LispError::runtime(format!("%hmac-sha256-raw: {e}")))?;
     mac.update(&msg);
-    Ok(bytes_to_vec(mac.finalize().into_bytes(), heap))
+    Ok(bytes_to_value(mac.finalize().into_bytes(), heap))
 }
 
-/// `(%hmac-sha1-raw key-bytes msg-bytes)` — HMAC-SHA1 over byte vectors → 20-byte vector.
+/// `(%hmac-sha1-raw key-bytes msg-bytes)` — HMAC-SHA1 over byte sequences → 20-byte bytes value.
 pub(super) fn hmac_sha1_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use hmac::{Hmac, KeyInit, Mac};
     use sha1::Sha1;
@@ -1088,10 +1089,10 @@ pub(super) fn hmac_sha1_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     let mut mac = Hmac::<Sha1>::new_from_slice(&key)
         .map_err(|e| LispError::runtime(format!("%hmac-sha1-raw: {e}")))?;
     mac.update(&msg);
-    Ok(bytes_to_vec(mac.finalize().into_bytes(), heap))
+    Ok(bytes_to_value(mac.finalize().into_bytes(), heap))
 }
 
-/// `(%hmac-sha512-raw key-bytes msg-bytes)` — HMAC-SHA512 over byte vectors → 64-byte vector.
+/// `(%hmac-sha512-raw key-bytes msg-bytes)` — HMAC-SHA512 over byte sequences → 64-byte bytes value.
 pub(super) fn hmac_sha512_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha512;
@@ -1100,7 +1101,7 @@ pub(super) fn hmac_sha512_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     let mut mac = Hmac::<Sha512>::new_from_slice(&key)
         .map_err(|e| LispError::runtime(format!("%hmac-sha512-raw: {e}")))?;
     mac.update(&msg);
-    Ok(bytes_to_vec(mac.finalize().into_bytes(), heap))
+    Ok(bytes_to_value(mac.finalize().into_bytes(), heap))
 }
 
 /// Run `git` with `args` (optionally in `cwd`), capturing stdout+stderr. The
@@ -1134,8 +1135,8 @@ pub(super) fn git_or_err(args: &[&str], cwd: Option<&str>) -> Result<(), LispErr
     }
 }
 
-/// `(%random-bytes n)` — `n` cryptographically-strong random bytes as a vector of
-/// ints 0–255. Useful for generating keys, nonces, and salts.
+/// `(%random-bytes n)` — `n` cryptographically-strong random bytes as a Brood
+/// bytes value. Useful for generating keys, nonces, and salts.
 pub(super) fn random_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let n = expect_int(heap, "%random-bytes", arg(args, 0))?;
     if !(0..=65536).contains(&n) {
@@ -1146,8 +1147,7 @@ pub(super) fn random_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     let mut bytes = vec![0u8; n as usize];
     getrandom::fill(&mut bytes)
         .map_err(|e| LispError::runtime(format!("%random-bytes: OS RNG unavailable: {e}")))?;
-    let vals: Vec<Value> = bytes.iter().map(|&b| Value::int(b as i64)).collect();
-    Ok(heap.alloc_vector(vals))
+    Ok(bytes_to_value(&bytes, heap))
 }
 
 /// `(%chacha20-encrypt key-bytes nonce-bytes plaintext-bytes)` — authenticated
@@ -1177,8 +1177,7 @@ pub(super) fn chacha20_encrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_slice())
         .map_err(|e| LispError::runtime(format!("%chacha20-encrypt: {e}")))?;
-    let vals: Vec<Value> = ciphertext.iter().map(|&b| Value::int(b as i64)).collect();
-    Ok(heap.alloc_vector(vals))
+    Ok(bytes_to_value(&ciphertext, heap))
 }
 
 /// `(%chacha20-decrypt key-bytes nonce-bytes ciphertext-bytes)` — authenticated
@@ -1205,10 +1204,7 @@ pub(super) fn chacha20_decrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         .map_err(|e| LispError::runtime(format!("%chacha20-decrypt: {e}")))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     match cipher.decrypt(nonce, ciphertext.as_slice()) {
-        Ok(plaintext) => {
-            let vals: Vec<Value> = plaintext.iter().map(|&b| Value::int(b as i64)).collect();
-            Ok(heap.alloc_vector(vals))
-        }
+        Ok(plaintext) => Ok(bytes_to_value(&plaintext, heap)),
         Err(_) => Ok(Value::keyword(value::intern("error"))),
     }
 }
@@ -1217,7 +1213,7 @@ pub(super) fn chacha20_decrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 /// a key from a password using PBKDF2-HMAC-SHA256 (RFC 2898). `password-bytes`
 /// and `salt-bytes` are byte vectors (raw bytes, not UTF-8-decoded strings — so
 /// a base64-decoded binary salt round-trips faithfully, store-driver finding #4).
-/// Returns a byte vector of `key-len` bytes. Use `iterations` ≥ 600,000 for
+/// Returns a bytes value of `key-len` bytes. Use `iterations` ≥ 600,000 for
 /// password storage (NIST SP 800-132 2023). Implemented over the `hmac` + `sha2`
 /// crates — microseconds where the pure-Brood version cost ~2s/connection (#5).
 pub(super) fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -1262,7 +1258,7 @@ pub(super) fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         dk.extend_from_slice(&t);
     }
     dk.truncate(key_len as usize);
-    Ok(bytes_to_vec(&dk, heap))
+    Ok(bytes_to_value(&dk, heap))
 }
 
 /// `(%git-resolve-ref url ref)` — resolve `ref` (a tag, branch, or commit) at the
@@ -1424,8 +1420,8 @@ pub(super) fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&content))
 }
 
-/// `(slurp-bytes path)` — read the whole file at `path` as a byte vector (ints
-/// 0–255). The byte-faithful read `slurp` can't be: `slurp` is UTF-8 and throws
+/// `(slurp-bytes path)` — read the whole file at `path` as a bytes value. The
+/// byte-faithful read `slurp` can't be: `slurp` is UTF-8 and throws
 /// on a non-text file, whereas this reads any bytes (images, archives, a binary
 /// asset to hash via `%sha256-bytes`). Pairs with `%sha256-bytes`/`%sha256-raw`
 /// and the `encoding` byte variants.
@@ -1435,7 +1431,7 @@ pub(super) fn slurp_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
         LispError::runtime(format!("slurp-bytes: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
-    Ok(bytes_to_vec(&bytes, heap))
+    Ok(bytes_to_value(&bytes, heap))
 }
 
 /// `(file-size path)` — the size of `path` in bytes, or nil if it's missing.

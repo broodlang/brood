@@ -36,7 +36,7 @@ use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3."
   (%md5-bytes bytes))
 
 (defn md5-raw (bytes)
-  "MD5 of a byte vector, returned as a 16-byte vector (raw digest, not hex)."
+  "MD5 of a byte sequence (bytes value, vector, or list), returned as a bytes value (raw digest, not hex)."
   (%md5-raw bytes))
 
 ;; ---- SHA-1 ------------------------------------------------------------------
@@ -51,7 +51,7 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
   (%sha1-bytes bytes))
 
 (defn sha1-raw (bytes)
-  "SHA-1 of a byte vector, returned as a 20-byte vector (raw digest, not hex)."
+  "SHA-1 of a byte sequence (bytes value, vector, or list), returned as a bytes value (raw digest, not hex)."
   (%sha1-raw bytes))
 
 ;; ---- SHA-256 ----------------------------------------------------------------
@@ -65,9 +65,9 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
   (%sha256-bytes bytes))
 
 (defn sha256-raw (bytes)
-  "SHA-256 of a byte vector, returned as a 32-byte vector (raw digest, not hex).
-Use when chaining digests over raw bytes — e.g. SCRAM `StoredKey = SHA256(ClientKey)`
-— so there's no hex decode between steps."
+  "SHA-256 of a byte sequence (bytes value, vector, or list), returned as a bytes
+value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. SCRAM
+`StoredKey = SHA256(ClientKey)` — so there's no hex decode between steps."
   (%sha256-raw bytes))
 
 ;; ---- SHA-384 ----------------------------------------------------------------
@@ -81,7 +81,7 @@ Use when chaining digests over raw bytes — e.g. SCRAM `StoredKey = SHA256(Clie
   (%sha384-bytes bytes))
 
 (defn sha384-raw (bytes)
-  "SHA-384 of a byte vector, returned as a 48-byte vector (raw digest, not hex)."
+  "SHA-384 of a byte sequence (bytes value, vector, or list), returned as a bytes value (raw digest, not hex)."
   (%sha384-raw bytes))
 
 ;; ---- SHA-512 ----------------------------------------------------------------
@@ -95,7 +95,7 @@ Use when chaining digests over raw bytes — e.g. SCRAM `StoredKey = SHA256(Clie
   (%sha512-bytes bytes))
 
 (defn sha512-raw (bytes)
-  "SHA-512 of a byte vector, returned as a 64-byte vector (raw digest, not hex)."
+  "SHA-512 of a byte sequence (bytes value, vector, or list), returned as a bytes value (raw digest, not hex)."
   (%sha512-raw bytes))
 
 ;; ---- HMAC (RFC 2104) --------------------------------------------------------
@@ -126,18 +126,18 @@ SHA-1 is not collision-resistant; prefer hmac-sha256 for new protocols."
 ;; raw bytes) needs these rather than the string-keyed hmac-sha* above.
 
 (defn hmac-sha256-raw (key-bytes msg-bytes)
-  "HMAC-SHA256 over a byte-vector `key-bytes` and `msg-bytes`. Returns a 32-byte
-vector (raw MAC, not hex)."
+  "HMAC-SHA256 over byte-sequence `key-bytes` and `msg-bytes`. Returns a 32-byte
+bytes value (raw MAC, not hex)."
   (%hmac-sha256-raw key-bytes msg-bytes))
 
 (defn hmac-sha1-raw (key-bytes msg-bytes)
-  "HMAC-SHA1 over a byte-vector `key-bytes` and `msg-bytes`. Returns a 20-byte
-vector (raw MAC, not hex). SHA-1 is not collision-resistant; prefer hmac-sha256-raw."
+  "HMAC-SHA1 over byte-sequence `key-bytes` and `msg-bytes`. Returns a 20-byte
+bytes value (raw MAC, not hex). SHA-1 is not collision-resistant; prefer hmac-sha256-raw."
   (%hmac-sha1-raw key-bytes msg-bytes))
 
 (defn hmac-sha512-raw (key-bytes msg-bytes)
-  "HMAC-SHA512 over a byte-vector `key-bytes` and `msg-bytes`. Returns a 64-byte
-vector (raw MAC, not hex)."
+  "HMAC-SHA512 over byte-sequence `key-bytes` and `msg-bytes`. Returns a 64-byte
+bytes value (raw MAC, not hex)."
   (%hmac-sha512-raw key-bytes msg-bytes))
 
 ;; ---- non-cryptographic ------------------------------------------------------

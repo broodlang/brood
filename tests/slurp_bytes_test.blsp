@@ -1,6 +1,6 @@
 ;; tests/slurp_bytes_test.blsp — byte-faithful file reads (`slurp-bytes`) and the
 ;; package-hashing invariant it preserves. `slurp` is UTF-8 (throws on a binary
-;; file); `slurp-bytes` reads any bytes into a vector, so a package tree with a
+;; file); `slurp-bytes` reads any bytes into a bytes value, so a package tree with a
 ;; binary asset can be hashed (store-driver findings #7 / package-hash gap).
 ;;
 ;; Fixtures live under a unique /tmp dir per call (random-token), purged at load.
@@ -17,11 +17,11 @@
     d))
 
 (describe "slurp-bytes: text files"
-  (test "returns a byte vector equal to the file's UTF-8 bytes"
+  (test "returns a bytes value equal to the file's UTF-8 bytes"
     (let (p (path-join (sb-tmp) "t.txt"))
       (spit p "héllo")                       ; 'é' is two UTF-8 bytes
       (let (bs (slurp-bytes p))
-        (is (vector? bs))
+        (is (bytes? bs))
         (assert= bs (string->utf8-bytes "héllo")))))
 
   (test "package-hash invariant: %sha256-bytes∘slurp-bytes == %sha256∘slurp"
@@ -45,7 +45,7 @@
     (let (path (path-join (sb-tmp) "blob.bin"))
       (sb-write-binary path)
       (assert-error (slurp path))
-      (assert= (slurp-bytes path) [255 128 65])))
+      (assert= (into [] (slurp-bytes path)) [255 128 65])))
 
   (test "hashing a binary file matches the OS sha256 (printf '\\377\\200\\101')"
     ;; printf '\377\200\101' | sha256sum

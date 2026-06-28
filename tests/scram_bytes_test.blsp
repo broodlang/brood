@@ -36,7 +36,7 @@
 (describe "SCRAM-SHA-256 client-key chain over raw bytes"
   (test "base64-decode-bytes recovers the binary salt (not valid UTF-8)"
     (assert= [91 109 153 104 157 18 53 142 236 160 75 20 18 54 250 129]
-             (encoding/base64-decode-bytes scram-test--salt-b64)))
+             (into [] (encoding/base64-decode-bytes scram-test--salt-b64))))
 
   (test "SaltedPassword matches the RFC 7677 reference"
     (assert= "c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d"
@@ -54,11 +54,11 @@
       (assert= "586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6"
                (encoding/hex-encode-bytes (scram-stored-key sp)))))
 
-  (test "the chain is byte-faithful — no intermediate value is a string"
+  (test "the chain is byte-faithful — every intermediate value is a bytes value"
     (let (sp (scram-salted-password "pencil" scram-test--salt-b64 scram-test--iters))
-      (is (vector? sp))
-      (is (vector? (hash/hmac-sha256-raw sp (crypto/str->bytes "Client Key"))))
-      (is (vector? (scram-stored-key sp))))))
+      (is (bytes? sp))
+      (is (bytes? (hash/hmac-sha256-raw sp (crypto/str->bytes "Client Key"))))
+      (is (bytes? (scram-stored-key sp))))))
 
 ;; ---- across processes: the chain under concurrency --------------------------
 ;; CLAUDE.md requires every value-carrying feature to be exercised across cores:

@@ -1215,68 +1215,13 @@ pub(super) fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 
 pub(super) fn string_to_utf8_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "string->utf8-bytes", arg(args, 0))?;
-    let items: Vec<Value> = s.as_bytes().iter().map(|&b| Value::int(b as i64)).collect();
-    Ok(heap.alloc_vector(items))
+    let bytes = s.as_bytes().to_vec();
+    Ok(super::io::bytes_to_value(&bytes, heap))
 }
 
 pub(super) fn utf8_bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // Accepts a vector *or* a proper list of byte integers (0–255).
-    let v = arg(args, 0);
-    let items: Vec<Value> = match v {
-        Value::Vector(id) => heap.vector(id).to_vec(),
-        Value::Nil => vec![],
-        Value::Pair(_) => {
-            let mut out = Vec::new();
-            let mut cur = v;
-            loop {
-                match cur {
-                    Value::Pair(id) => {
-                        let (head, tail) = heap.pair(id);
-                        out.push(head);
-                        cur = tail;
-                    }
-                    Value::Nil => break,
-                    other => {
-                        return Err(LispError::wrong_type(
-                            heap,
-                            "utf8-bytes->string",
-                            "proper list",
-                            other,
-                        ))
-                    }
-                }
-            }
-            out
-        }
-        other => {
-            return Err(LispError::wrong_type(
-                heap,
-                "utf8-bytes->string",
-                "vector or list",
-                other,
-            ))
-        }
-    };
-    let mut bytes = Vec::with_capacity(items.len());
-    for (i, val) in items.iter().enumerate() {
-        match val {
-            Value::Int(n) if *n >= 0 && *n <= 255 => bytes.push(*n as u8),
-            Value::Int(n) => {
-                return Err(LispError::runtime(format!(
-                    "utf8-bytes->string: byte at index {} is out of range: {}",
-                    i, n
-                )))
-            }
-            other => {
-                return Err(LispError::wrong_type(
-                    heap,
-                    "utf8-bytes->string",
-                    "int",
-                    *other,
-                ))
-            }
-        }
-    }
+    // Accepts a `bytes` value, or (leniently) a vector or list of byte ints.
+    let bytes = super::io::collect_bytes("utf8-bytes->string", arg(args, 0), heap)?;
     match String::from_utf8(bytes) {
         Ok(s) => Ok(heap.alloc_string(&s)),
         Err(e) => Err(LispError::runtime(format!(
