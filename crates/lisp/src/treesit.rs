@@ -101,15 +101,26 @@ pub fn forget(key: i64) -> i64 {
     (before - cache.len()) as i64
 }
 
-/// The grammar for a language keyword's name. One arm per supported language —
-/// the single place a new language plugs in (plus its `Cargo.toml` dep).
+/// The grammar for a language keyword's name. Each arm is gated on its own
+/// `treesit-<lang>` feature — the kernel ships no grammar by default (a `treesit`
+/// build with no grammar feature has zero arms and reports every language as not
+/// built in). One cfg'd arm per language is the single place a grammar plugs in
+/// (plus its `Cargo.toml` dep). The unused-var `allow` covers the no-grammar
+/// build, where `lang` is only echoed in the error.
 #[cfg(feature = "treesit")]
+#[cfg_attr(
+    not(any(feature = "treesit-ruby", feature = "treesit-elixir")),
+    allow(unused_variables)
+)]
 fn language_for(lang: &str) -> Result<tree_sitter::Language, LispError> {
     match lang {
+        #[cfg(feature = "treesit-ruby")]
         "ruby" => Ok(tree_sitter_ruby::LANGUAGE.into()),
+        #[cfg(feature = "treesit-elixir")]
         "elixir" => Ok(tree_sitter_elixir::LANGUAGE.into()),
         other => Err(LispError::runtime(format!(
-            "tree-sitter-parse: unknown language :{other} (have :ruby :elixir)"
+            "tree-sitter-parse: language :{other} is not built into this runtime \
+             (rebuild with --features treesit-{other}, or treesit-grammars for all)"
         ))),
     }
 }

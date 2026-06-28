@@ -6285,10 +6285,24 @@ shape if a large-file profile ever demands it — the policy above wouldn't chan
 one arm in `treesit.rs::language_for` + a face table and a layer in the editor —
 no kernel change. Keyword colouring is cross-language (an anonymous alphabetic
 token is a `:syntax/keyword`), so per-language tables name only the handful of
-*named* nodes they colour. The `treesit` feature being in `default` means dev
-builds and the in-language suite compile the grammars (a one-time build-time
-cost); the lean install adds `--features brood/treesit` explicitly since it builds
-`--no-default-features`.
+*named* nodes they colour.
+
+**Follow-up (2026-06-28) — grammars are out of the default kernel.** The original
+`treesit` feature bundled the Ruby/Elixir grammar crates, so a stock build linked
+two *language-specific* parsers into the language core — the kernel knew named
+languages. That contradicts "kernel = mechanism": the language itself shouldn't
+enumerate Ruby/Elixir. Split it. `treesit` is now the **generic mechanism only**
+(the tree-sitter runtime + the positioned-CST projection) and stays in `default`;
+each grammar is an opt-in `treesit-<lang>` feature (`treesit-ruby`,
+`treesit-elixir`, + a `treesit-grammars` bundle). `language_for`'s arms are each
+`#[cfg(feature = "treesit-<lang>")]`, so a default build enumerates **no** language
+and `tree-sitter-parse` reports any `:lang` as "not built into this runtime
+(rebuild with --features treesit-<lang>)". `make test` / `make install` opt into
+`treesit-grammars`; the two grammar test files self-skip (a runtime probe) so a
+bare `cargo test` stays green. **End state:** dynamic runtime grammar loading
+(`.so`/`.wasm` at runtime, no compile-time enum at all) — then the kernel ships
+neither grammar nor language list; deferred until a real editor mode needs it
+(ADR-011).
 
 ## ADR-104 — Persistent child processes: a `Value::Subprocess` over the mailbox seam, not a richer `%os-cmd`
 

@@ -1,9 +1,15 @@
 ;; std/hash.blsp — cryptographic and non-cryptographic hashing. (require 'hash)
 ;;
-;; Exposes the %sha*/%%md5 primitives under public names and provides HMAC
-;; implementations. Use sha256 or sha512 for security-sensitive work;
-;; md5 and sha1 are broken for collision resistance but remain useful for
-;; checksums and legacy protocols (e.g. UUID v3/v5, Git, HTTP ETags).
+;; All digests and HMACs are Brood over exactly two Rust primitives — `%digest`
+;; and `%hmac` — each taking an algorithm keyword (:md5/:sha1/:sha256/:sha384/
+;; :sha512) and byte-sequence input, returning the RAW digest/MAC as a bytes
+;; value. The two axes of variation the kernel used to carry as 21 separate prims
+;; — string-vs-bytes input and hex-vs-raw output — are pure policy and live here:
+;; string input is `string->utf8-bytes`, hex output is `bytes->hex`. (ADR-006.)
+;;
+;; Use sha256 or sha512 for security-sensitive work; md5 and sha1 are broken for
+;; collision resistance but remain useful for checksums and legacy protocols
+;; (e.g. UUID v3/v5, Git, HTTP ETags).
 
 (defmodule hash
   "Hashing utilities: MD5, SHA-1, SHA-256, SHA-384, SHA-512, and HMAC variants.
@@ -24,102 +30,115 @@
     (hash/hmac-sha256 \"secret\" \"message\")
     ;; => \"8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b\"")
 
+;; ---- hex encoding -----------------------------------------------------------
+
+(def hash--hex-digits "0123456789abcdef")
+
+(defn hash--byte->hex (b)
+  (str (char-at hash--hex-digits (quot b 16))
+       (char-at hash--hex-digits (rem b 16))))
+
+(defn bytes->hex (bytes)
+  "Lowercase hex string of a byte sequence (bytes value, vector, or list of byte
+ints 0–255). The output shaping for every digest/HMAC below."
+  (join "" (map hash--byte->hex (seq bytes))))
+
 ;; ---- MD5 --------------------------------------------------------------------
 
 (defn md5 (s)
   "Lowercase hex MD5 of string `s`'s UTF-8 bytes. NOT collision-resistant;
 use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3."
-  (%md5 s))
+  (bytes->hex (%digest :md5 (string->utf8-bytes s))))
 
 (defn md5-bytes (bytes)
-  "Lowercase hex MD5 of a vector or list of byte integers 0–255."
-  (%md5-bytes bytes))
+  "Lowercase hex MD5 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
+  (bytes->hex (%digest :md5 bytes)))
 
 (defn md5-raw (bytes)
   "MD5 of a byte sequence (bytes value, vector, or list), returned as a bytes value (raw digest, not hex)."
-  (%md5-raw bytes))
+  (%digest :md5 bytes))
 
 ;; ---- SHA-1 ------------------------------------------------------------------
 
 (defn sha1 (s)
   "Lowercase hex SHA-1 of string `s`'s UTF-8 bytes. NOT collision-resistant;
 use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
-  (%sha1 s))
+  (bytes->hex (%digest :sha1 (string->utf8-bytes s))))
 
 (defn sha1-bytes (bytes)
-  "Lowercase hex SHA-1 of a vector or list of byte integers 0–255."
-  (%sha1-bytes bytes))
+  "Lowercase hex SHA-1 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
+  (bytes->hex (%digest :sha1 bytes)))
 
 (defn sha1-raw (bytes)
   "SHA-1 of a byte sequence (bytes value, vector, or list), returned as a bytes value (raw digest, not hex)."
-  (%sha1-raw bytes))
+  (%digest :sha1 bytes))
 
 ;; ---- SHA-256 ----------------------------------------------------------------
 
 (defn sha256 (s)
   "Lowercase hex SHA-256 of string `s`'s UTF-8 bytes."
-  (%sha256 s))
+  (bytes->hex (%digest :sha256 (string->utf8-bytes s))))
 
 (defn sha256-bytes (bytes)
-  "Lowercase hex SHA-256 of a vector or list of byte integers 0–255."
-  (%sha256-bytes bytes))
+  "Lowercase hex SHA-256 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
+  (bytes->hex (%digest :sha256 bytes)))
 
 (defn sha256-raw (bytes)
   "SHA-256 of a byte sequence (bytes value, vector, or list), returned as a bytes
 value (raw digest, not hex). Use when chaining digests over raw bytes — e.g. SCRAM
 `StoredKey = SHA256(ClientKey)` — so there's no hex decode between steps."
-  (%sha256-raw bytes))
+  (%digest :sha256 bytes))
 
 ;; ---- SHA-384 ----------------------------------------------------------------
 
 (defn sha384 (s)
   "Lowercase hex SHA-384 of string `s`'s UTF-8 bytes."
-  (%sha384 s))
+  (bytes->hex (%digest :sha384 (string->utf8-bytes s))))
 
 (defn sha384-bytes (bytes)
-  "Lowercase hex SHA-384 of a vector or list of byte integers 0–255."
-  (%sha384-bytes bytes))
+  "Lowercase hex SHA-384 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
+  (bytes->hex (%digest :sha384 bytes)))
 
 (defn sha384-raw (bytes)
   "SHA-384 of a byte sequence (bytes value, vector, or list), returned as a bytes value (raw digest, not hex)."
-  (%sha384-raw bytes))
+  (%digest :sha384 bytes))
 
 ;; ---- SHA-512 ----------------------------------------------------------------
 
 (defn sha512 (s)
   "Lowercase hex SHA-512 of string `s`'s UTF-8 bytes."
-  (%sha512 s))
+  (bytes->hex (%digest :sha512 (string->utf8-bytes s))))
 
 (defn sha512-bytes (bytes)
-  "Lowercase hex SHA-512 of a vector or list of byte integers 0–255."
-  (%sha512-bytes bytes))
+  "Lowercase hex SHA-512 of a byte sequence (bytes value, vector, or list of byte ints 0–255)."
+  (bytes->hex (%digest :sha512 bytes)))
 
 (defn sha512-raw (bytes)
   "SHA-512 of a byte sequence (bytes value, vector, or list), returned as a bytes value (raw digest, not hex)."
-  (%sha512-raw bytes))
+  (%digest :sha512 bytes))
 
 ;; ---- HMAC (RFC 2104) --------------------------------------------------------
 ;;
-;; Implemented as Rust primitives over the `hmac` crate (already a dependency
-;; for the node-link handshake and PBKDF2). The pure-Brood RFC 2104 construction
-;; (hash-then-hex-decode round-trips) was ~200x slower than the SHA primitives.
+;; String-keyed HMAC with hex output, over the single `%hmac` primitive. The key
+;; and message are UTF-8-encoded; for arbitrary-byte keys/messages use the -raw
+;; variants below.
 
 (defn hmac-sha256 (key message)
   "HMAC-SHA256 of `message` using `key`. Both are strings; result is lowercase hex."
-  (%hmac-sha256 key message))
+  (bytes->hex (%hmac :sha256 (string->utf8-bytes key) (string->utf8-bytes message))))
 
 (defn hmac-sha1 (key message)
   "HMAC-SHA1 of `message` using `key`. Both are strings; result is lowercase hex.
 SHA-1 is not collision-resistant; prefer hmac-sha256 for new protocols."
-  (%hmac-sha1 key message))
+  (bytes->hex (%hmac :sha1 (string->utf8-bytes key) (string->utf8-bytes message))))
 
 (defn hmac-sha512 (key message)
   "HMAC-SHA512 of `message` using `key`. Both are strings; result is lowercase hex."
-  (%hmac-sha512 key message))
+  (bytes->hex (%hmac :sha512 (string->utf8-bytes key) (string->utf8-bytes message))))
 
 ;; ---- raw-byte HMAC ----------------------------------------------------------
 ;;
-;; HMAC over a raw-byte key and message, returning the raw MAC as a byte vector.
+;; HMAC over a raw-byte key and message, returning the raw MAC as a bytes value.
 ;; A Brood string can't faithfully carry an arbitrary-byte key (its UTF-8
 ;; encoding ≠ the bytes), so binary-protocol auth (e.g. Postgres SCRAM-SHA-256,
 ;; whose ClientKey = HMAC(SaltedPassword, "Client Key") is XORed and re-hashed as
@@ -128,17 +147,17 @@ SHA-1 is not collision-resistant; prefer hmac-sha256 for new protocols."
 (defn hmac-sha256-raw (key-bytes msg-bytes)
   "HMAC-SHA256 over byte-sequence `key-bytes` and `msg-bytes`. Returns a 32-byte
 bytes value (raw MAC, not hex)."
-  (%hmac-sha256-raw key-bytes msg-bytes))
+  (%hmac :sha256 key-bytes msg-bytes))
 
 (defn hmac-sha1-raw (key-bytes msg-bytes)
   "HMAC-SHA1 over byte-sequence `key-bytes` and `msg-bytes`. Returns a 20-byte
 bytes value (raw MAC, not hex). SHA-1 is not collision-resistant; prefer hmac-sha256-raw."
-  (%hmac-sha1-raw key-bytes msg-bytes))
+  (%hmac :sha1 key-bytes msg-bytes))
 
 (defn hmac-sha512-raw (key-bytes msg-bytes)
   "HMAC-SHA512 over byte-sequence `key-bytes` and `msg-bytes`. Returns a 64-byte
 bytes value (raw MAC, not hex)."
-  (%hmac-sha512-raw key-bytes msg-bytes))
+  (%hmac :sha512 key-bytes msg-bytes))
 
 ;; ---- non-cryptographic ------------------------------------------------------
 

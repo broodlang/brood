@@ -590,3 +590,114 @@ fixes (smallvec `union`, cranelift `MemFlagsData::trusted()`, ropey borrow-not-c
 x25519 `was_contributory`, rcgen→aws_lc_rs dropping `ring`, removed dead `glutin-winit`),
 tree-sitter incremental parse + `:error`/`:missing` CST keys, and the softbuffer damage
 present.
+
+## 2026-06-28 — Checker: unused let binding lint + goals reframe
+
+**Unused `let` locals** (`crates/lisp/src/types/check/walk.rs`): added
+`sym_appears_in` (conservative recursive scan for a symbol in a form) and extended
+`check_let` to emit "unused let binding: x" for each bound name that never appears
+in its visible scope (subsequent binding RHSs + body; preceding bindings too for
+`letrec`). Key design choices:
+
+- **Conservative scan**: counts any occurrence (binder positions, quoted forms) →
+  zero false positives at the cost of false negatives for shadowed names.
+- **`_`-prefix exemption**: names starting with `_` are silently skipped.
+- **Position gate**: compiler-generated `let`s (match/pattern expansion) have no
+  reader-assigned source position — `heap.form_pos_only(form)` returns `None`.
+  Skipping when `None` correctly exempts pattern variables (`([a b] :vec)` match
+  arms) that are unused in the branch body, with zero change to the expansion
+  machinery. Found via `type_check_catalog` false-positive in the same run.
+- **`let*` is already `let`**: compile pass rewrites `let*` → `let`; lint is free.
+
+**Goals reframe** (`docs/roadmap.md`): replaced "never gates" with the correct
+formulation — **gate what is provably local and static; advisory at reload
+boundaries**. Globals are `dynamic()` because hot reload works by rebinding them;
+static gating on global types would reject valid reloads. The right split: Elixir's
+checker for the *interior* of a function/let-scope; Erlang's late binding for globals
+and module boundaries.
+
+## 2026-06-28 — Checker: expand curated-sigs table (25 new entries)
+
+Added 25 entries to `CURATED_SIGS` in `crates/lisp/src/types/check/sigs.rs`, covering
+the stdlib functions that have branchy/recursive/variadic/rest-param or `apply`-based
+bodies that `infer_sig` can't walk:
+
+- **Equality**: `=` / `not=` (multi-arm closures; pins `bool` result so `(+ 1 (= x y))` is caught).
+- **String conversion**: `number->string` (`num → str`, tighter domain than the `str` primitive's `any`), `string->symbol` (`str → sym`).
+- **String predicates**: `starts-with?`, `ends-with?`, `string-contains?` (`str,str → bool`), `blank?` (`str → bool`).
+- **String transforms**: `trim`/`triml`/`trimr` (`str → str`), `replace` (`str,str,str → str`), `string-repeat` (`str,int → str`), `pad-left`/`pad-right` (`str,int → str`), `char-at` (`str,int → str`).
+- **String/list conversions**: `string->list` (`str → list`), `list->string` (`seq → str`), `string-codepoints` (`str → vector`), `string-from-codepoints` (`seq → str`).
+- **Format**: `format` (`str, &any → str` — catches non-string template arg and flows string result out).
+- **Search → int**: `index-of`, `index-where` (`cb1,seq → int`), `string-index-of` (`str,str → int`).
+
+New `curated_equality_and_string_sigs` test covers domain checks (arg-type errors) and
+result-type flow (return value used in a numeric or string sink). All 634 suite tests pass.
+
+## 2026-06-28 — GUI: less-TUI refinements (centred remainder, themed bg, line-height, slim scrollbar) + a cooler REPL
+
+**Kill the lopsided remainder margin — centre it instead of resizing the window.**
+`cols`/`rows` are floor divisions of the usable pixel size, so an arbitrary window
+leaves up to one cell of remainder. The first cut *snapped* the window
+(`request_inner_size`) to a whole-cell multiple — but that's WM-dependent and a
+compositor that ignores the request leaves the strip (brood-edit: "too much margin at
+the bottom" on a non-maximised window). Replaced it with **`grid_origin`**: the grid's
+top-left is `inset + remainder/2` per axis, so the sub-cell leftover is split evenly on
+*every* edge (centred) rather than dumped at the bottom/right. WM-independent (no resize),
+and `px_to_cell` shares the origin so clicks stay aligned. Dropped `snap_to_grid` and its
+`pending_snap`.
+
+**`gui-bg!` (new builtin).** Sets the window background — the `Op::Clear` / pre-clear /
+inset-margin fill — so the padding around the grid matches the app's theme instead of the
+hardcoded Catppuccin `DEFAULT_BG`. Global like `gui-inset!` (a `UserEvent::Background`,
+a `Renderer.bg` field, `disabled` stub + `PRIMITIVE_DOCS`). brood-edit wires `(gui-bg!
+*base*)`.
+
+**Line-height** the magic `1.3` cell-height multiplier is now a named `LINE_HEIGHT = 1.4`
+const — a touch looser so the grid reads as an editor, not a console.
+
+**Slim scrollbar (brood-edit, pure Brood).** The pane scrollbar draws the `▕` right-eighth
+block glyph per row (faint track + brighter thumb) instead of full-cell `rect` blocks — a
+~1px modern rule via an ordinary `text` op + `:fg` face, no new kernel op (stays
+cell-grid-only). `*inset*` 0→8 now that the margin is centred + themed.
+
+**Cooler REPL (`std/tool/repl.blsp`, pure Brood).** Result output is re-lexed with the
+input highlighter (`highlight-spans`) and ANSI-coloured on a TTY (plain on a pipe); a dim
+`; N ms` note prints when an eval exceeds `*repl-slow-ms*`; Guile-style `,` meta-commands
+(`,help` `,doc <name>` `,type <expr>` `,time <expr>` `,clear`) intercept at a fresh prompt
+before the reader; and a small wordmark banner. All builds clean (default + `brood/gui`);
+brood-edit `nest check` + 36 view-scroll tests green.
+
+## 2026-06-28 — Minimize the builtin surface: crypto 21 prims → 2, tree-sitter grammars out of the default kernel
+
+Two language-surface trims (ADR-006: write the language in the language; kernel =
+mechanism, Brood = policy).
+
+**Crypto.** `std/hash.blsp` was a thin pass-through over **21** near-identical Rust
+prims (`%sha256`/`%sha1`/`%sha384`/`%sha512`/`%md5` × {string→hex, bytes→hex,
+bytes→raw} = 15 digests, + 6 `%hmac-*`). The only genuinely-primitive part is
+"run this algorithm over these bytes, get raw bytes" — the string-vs-bytes input
+and hex-vs-raw output axes are pure formatting Brood can do. Collapsed to **two**
+keyword-dispatched prims: `(%digest algo bytes)` and `(%hmac algo key msg)`
+(`algo` ∈ `:md5 :sha1 :sha256 :sha384 :sha512`), both → a `bytes` value.
+`std/hash.blsp` rebuilds every public name over them — `string->utf8-bytes` for
+string input, a new pure-Brood `hash/bytes->hex` for hex output. The public
+`hash/*` API is byte-for-byte unchanged (verified vs FIPS/known vectors). Net
+**−19 Rust prims**, formatting moved into Brood. Updated the two direct
+`%`-prim callers (`std/uuid.blsp` v3/v5 → `hash/md5-bytes`/`hash/sha1-bytes`;
+`std/tool/package.blsp` tree hashing → `hash/sha256`/`hash/sha256-bytes`).
+pbkdf2/chacha/random-bytes prims untouched.
+
+**Tree-sitter (ADR-103 follow-up).** The kernel hardcoded `:ruby`/`:elixir` —
+both grammar crates were in `default` features, so a stock build linked two
+language parsers into the language core. Nothing real depended on them (only the
+two grammar test files + docstrings; no ruby/elixir mode exists yet). Split the
+feature: `treesit` is now the **generic mechanism only** (the tree-sitter runtime
++ positioned-CST projection, still in `default`); the grammars are opt-in
+`treesit-ruby`/`treesit-elixir` (+ a `treesit-grammars` bundle). `language_for`'s
+arms are each `#[cfg]`-gated, so a default build enumerates **no** language and
+reports any `:lang` as "not built into this runtime (rebuild with
+--features treesit-<lang>)". `make test` and `make install` opt into
+`treesit-grammars`; the two grammar test files **self-skip** (runtime
+`tree-sitter-parse` probe) so a bare `cargo test` stays green. Dynamic runtime
+grammar loading (no compile-time enum at all) is noted as the end state. Full
+suite 634/634 with grammars; the grammar suites skip cleanly without them.

@@ -828,14 +828,112 @@ pub(super) fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::nil())
 }
 
-/// `(%sha256 s)` — the lowercase hex SHA-256 of `s`'s UTF-8 bytes. The single
-/// hashing mechanism for the package manager (ADR-037); per-file hashing
-/// (`(%sha256 (slurp p))`) and the canonical directory-tree hash are Brood over
-/// it (`std/package.blsp`), keeping a directory walk out of the kernel.
-pub(super) fn sha256_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha256};
-    let s = expect_string(heap, "%sha256", arg(args, 0))?;
-    Ok(heap.alloc_string(&digest_to_hex(Sha256::digest(s.as_bytes()))))
+/// Hash algorithm selector for `%digest` / `%hmac`, decoded from the leading
+/// keyword arg. This is the single place the kernel enumerates digest
+/// algorithms; all string-input and hex-output shaping is Brood policy in
+/// `std/hash.blsp` (over `string->utf8-bytes` and `bytes->hex`).
+#[derive(Clone, Copy)]
+enum HashAlgo {
+    Md5,
+    Sha1,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+fn hash_algo(name: &'static str, kw: Value, heap: &mut Heap) -> Result<HashAlgo, LispError> {
+    let sym = match kw {
+        Value::Keyword(s) => s,
+        other => return Err(LispError::wrong_type(heap, name, "algorithm keyword", other)),
+    };
+    match value::symbol_name(sym).as_str() {
+        "md5" => Ok(HashAlgo::Md5),
+        "sha1" => Ok(HashAlgo::Sha1),
+        "sha256" => Ok(HashAlgo::Sha256),
+        "sha384" => Ok(HashAlgo::Sha384),
+        "sha512" => Ok(HashAlgo::Sha512),
+        other => Err(LispError::runtime(format!(
+            "{name}: unknown algorithm :{other} (want :md5 :sha1 :sha256 :sha384 :sha512)"
+        ))),
+    }
+}
+
+/// `(%digest algo bytes)` — raw digest of a byte sequence (`bytes` value, vector,
+/// or list of byte ints) under algorithm keyword `algo`, returned as a bytes
+/// value. The single digest primitive: string-input and hex-output variants are
+/// Brood wrappers in `std/hash.blsp` (collapsed the former 15 `%sha*`/`%md5`
+/// prims to this one — ADR-006 / dogfooding).
+pub(super) fn digest(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let algo = hash_algo("%digest", arg(args, 0), heap)?;
+    let bytes = collect_bytes("%digest", arg(args, 1), heap)?;
+    let out: Vec<u8> = match algo {
+        HashAlgo::Md5 => {
+            use md5::{Digest, Md5};
+            Md5::digest(&bytes).to_vec()
+        }
+        HashAlgo::Sha1 => {
+            use sha1::{Digest, Sha1};
+            Sha1::digest(&bytes).to_vec()
+        }
+        HashAlgo::Sha256 => {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(&bytes).to_vec()
+        }
+        HashAlgo::Sha384 => {
+            use sha2::{Digest, Sha384};
+            Sha384::digest(&bytes).to_vec()
+        }
+        HashAlgo::Sha512 => {
+            use sha2::{Digest, Sha512};
+            Sha512::digest(&bytes).to_vec()
+        }
+    };
+    Ok(bytes_to_value(&out, heap))
+}
+
+/// `(%hmac algo key-bytes msg-bytes)` — HMAC of `msg-bytes` keyed by `key-bytes`
+/// (both byte sequences) under algorithm keyword `algo`, returned as a bytes
+/// value. String-keyed / hex-output variants are Brood wrappers in
+/// `std/hash.blsp` (collapsed the former 6 `%hmac-*` prims to this one).
+pub(super) fn hmac(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use hmac::{Hmac, KeyInit, Mac};
+    let algo = hash_algo("%hmac", arg(args, 0), heap)?;
+    let key = collect_bytes("%hmac", arg(args, 1), heap)?;
+    let msg = collect_bytes("%hmac", arg(args, 2), heap)?;
+    let mac_err = |e| LispError::runtime(format!("%hmac: {e}"));
+    let out: Vec<u8> = match algo {
+        HashAlgo::Md5 => {
+            use md5::Md5;
+            let mut mac = Hmac::<Md5>::new_from_slice(&key).map_err(mac_err)?;
+            mac.update(&msg);
+            mac.finalize().into_bytes().to_vec()
+        }
+        HashAlgo::Sha1 => {
+            use sha1::Sha1;
+            let mut mac = Hmac::<Sha1>::new_from_slice(&key).map_err(mac_err)?;
+            mac.update(&msg);
+            mac.finalize().into_bytes().to_vec()
+        }
+        HashAlgo::Sha256 => {
+            use sha2::Sha256;
+            let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(mac_err)?;
+            mac.update(&msg);
+            mac.finalize().into_bytes().to_vec()
+        }
+        HashAlgo::Sha384 => {
+            use sha2::Sha384;
+            let mut mac = Hmac::<Sha384>::new_from_slice(&key).map_err(mac_err)?;
+            mac.update(&msg);
+            mac.finalize().into_bytes().to_vec()
+        }
+        HashAlgo::Sha512 => {
+            use sha2::Sha512;
+            let mut mac = Hmac::<Sha512>::new_from_slice(&key).map_err(mac_err)?;
+            mac.update(&msg);
+            mac.finalize().into_bytes().to_vec()
+        }
+    };
+    Ok(bytes_to_value(&out, heap))
 }
 
 /// Extract raw bytes from a `Value`: a `bytes` value, or (leniently) a vector
@@ -887,213 +985,12 @@ pub(super) fn collect_bytes(name: &'static str, bv: Value, heap: &mut Heap) -> R
     }
 }
 
-pub(super) fn digest_to_hex(digest: impl AsRef<[u8]>) -> String {
-    let bytes = digest.as_ref();
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write;
-        let _ = write!(hex, "{:02x}", b);
-    }
-    hex
-}
-
 /// Allocate a raw-byte result (digest, HMAC, derived key) as a Brood `bytes`
-/// value — the raw-byte counterpart of `digest_to_hex`. The byte-oriented
+/// value — the raw-byte counterpart of the Brood `bytes->hex` shaping. The byte-oriented
 /// crypto layer (store-driver findings 2/3) returns these so digests can be
 /// chained over bytes without a hex round-trip at each step.
 pub(super) fn bytes_to_value(bytes: impl AsRef<[u8]>, heap: &mut Heap) -> Value {
     heap.alloc_bytes(crate::core::blob::SharedBlob::new(bytes.as_ref()))
-}
-
-/// `(%sha256-bytes bytes)` — hex SHA-256 of a vector or list of byte integers.
-pub(super) fn sha256_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha256};
-    let bytes = collect_bytes("%sha256-bytes", arg(args, 0), heap)?;
-    Ok(heap.alloc_string(&digest_to_hex(Sha256::digest(&bytes))))
-}
-
-/// `(%sha1 s)` — lowercase hex SHA-1 of string `s`'s UTF-8 bytes.
-pub(super) fn sha1_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha1::{Digest, Sha1};
-    let s = expect_string(heap, "%sha1", arg(args, 0))?;
-    Ok(heap.alloc_string(&digest_to_hex(Sha1::digest(s.as_bytes()))))
-}
-
-/// `(%sha1-bytes bytes)` — hex SHA-1 of a vector or list of byte integers.
-pub(super) fn sha1_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha1::{Digest, Sha1};
-    let bytes = collect_bytes("%sha1-bytes", arg(args, 0), heap)?;
-    Ok(heap.alloc_string(&digest_to_hex(Sha1::digest(&bytes))))
-}
-
-/// `(%sha384 s)` — lowercase hex SHA-384 of string `s`'s UTF-8 bytes.
-pub(super) fn sha384_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha384};
-    let s = expect_string(heap, "%sha384", arg(args, 0))?;
-    Ok(heap.alloc_string(&digest_to_hex(Sha384::digest(s.as_bytes()))))
-}
-
-/// `(%sha384-bytes bytes)` — hex SHA-384 of a vector or list of byte integers.
-pub(super) fn sha384_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha384};
-    let bytes = collect_bytes("%sha384-bytes", arg(args, 0), heap)?;
-    Ok(heap.alloc_string(&digest_to_hex(Sha384::digest(&bytes))))
-}
-
-/// `(%sha512 s)` — lowercase hex SHA-512 of string `s`'s UTF-8 bytes.
-pub(super) fn sha512_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha512};
-    let s = expect_string(heap, "%sha512", arg(args, 0))?;
-    Ok(heap.alloc_string(&digest_to_hex(Sha512::digest(s.as_bytes()))))
-}
-
-/// `(%sha512-bytes bytes)` — hex SHA-512 of a vector or list of byte integers.
-pub(super) fn sha512_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha512};
-    let bytes = collect_bytes("%sha512-bytes", arg(args, 0), heap)?;
-    Ok(heap.alloc_string(&digest_to_hex(Sha512::digest(&bytes))))
-}
-
-/// `(%md5 s)` — lowercase hex MD5 of string `s`'s UTF-8 bytes.
-pub(super) fn md5_hex(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use md5::{Digest, Md5};
-    let s = expect_string(heap, "%md5", arg(args, 0))?;
-    Ok(heap.alloc_string(&digest_to_hex(Md5::digest(s.as_bytes()))))
-}
-
-/// `(%md5-bytes bytes)` — hex MD5 of a vector or list of byte integers.
-pub(super) fn md5_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use md5::{Digest, Md5};
-    let bytes = collect_bytes("%md5-bytes", arg(args, 0), heap)?;
-    Ok(heap.alloc_string(&digest_to_hex(Md5::digest(&bytes))))
-}
-
-// ---- raw-byte digests ------------------------------------------------------
-//
-// These take a byte vector and return the digest as a *byte vector* (not hex).
-// Chaining digests over raw bytes — e.g. SCRAM's `StoredKey = SHA256(ClientKey)`
-// then HMAC over `StoredKey` — needs the raw bytes, not a hex string that would
-// have to be decoded again at each step (store-driver findings #3).
-
-/// `(%sha256-raw bytes)` — SHA-256 of a byte sequence, returned as a 32-byte bytes value.
-pub(super) fn sha256_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha256};
-    let bytes = collect_bytes("%sha256-raw", arg(args, 0), heap)?;
-    let d = Sha256::digest(&bytes);
-    Ok(bytes_to_value(d, heap))
-}
-
-/// `(%sha1-raw bytes)` — SHA-1 of a byte sequence, returned as a 20-byte bytes value.
-pub(super) fn sha1_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha1::{Digest, Sha1};
-    let bytes = collect_bytes("%sha1-raw", arg(args, 0), heap)?;
-    let d = Sha1::digest(&bytes);
-    Ok(bytes_to_value(d, heap))
-}
-
-/// `(%sha384-raw bytes)` — SHA-384 of a byte sequence, returned as a 48-byte bytes value.
-pub(super) fn sha384_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha384};
-    let bytes = collect_bytes("%sha384-raw", arg(args, 0), heap)?;
-    let d = Sha384::digest(&bytes);
-    Ok(bytes_to_value(d, heap))
-}
-
-/// `(%sha512-raw bytes)` — SHA-512 of a byte sequence, returned as a 64-byte bytes value.
-pub(super) fn sha512_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use sha2::{Digest, Sha512};
-    let bytes = collect_bytes("%sha512-raw", arg(args, 0), heap)?;
-    let d = Sha512::digest(&bytes);
-    Ok(bytes_to_value(d, heap))
-}
-
-/// `(%md5-raw bytes)` — MD5 of a byte sequence, returned as a 16-byte bytes value.
-pub(super) fn md5_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use md5::{Digest, Md5};
-    let bytes = collect_bytes("%md5-raw", arg(args, 0), heap)?;
-    let d = Md5::digest(&bytes);
-    Ok(bytes_to_value(d, heap))
-}
-
-// ---- HMAC primitives -------------------------------------------------------
-
-/// `(%hmac-sha256 key message)` — HMAC-SHA256 → lowercase hex.
-pub(super) fn hmac_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha2::Sha256;
-    let key = expect_string(heap, "%hmac-sha256", arg(args, 0))?;
-    let msg = expect_string(heap, "%hmac-sha256", arg(args, 1))?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
-        .map_err(|e| LispError::runtime(format!("%hmac-sha256: {e}")))?;
-    mac.update(msg.as_bytes());
-    Ok(heap.alloc_string(&digest_to_hex(mac.finalize().into_bytes())))
-}
-
-/// `(%hmac-sha1 key message)` — HMAC-SHA1 → lowercase hex.
-pub(super) fn hmac_sha1_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha1::Sha1;
-    let key = expect_string(heap, "%hmac-sha1", arg(args, 0))?;
-    let msg = expect_string(heap, "%hmac-sha1", arg(args, 1))?;
-    let mut mac = Hmac::<Sha1>::new_from_slice(key.as_bytes())
-        .map_err(|e| LispError::runtime(format!("%hmac-sha1: {e}")))?;
-    mac.update(msg.as_bytes());
-    Ok(heap.alloc_string(&digest_to_hex(mac.finalize().into_bytes())))
-}
-
-/// `(%hmac-sha512 key message)` — HMAC-SHA512 → lowercase hex.
-pub(super) fn hmac_sha512_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha2::Sha512;
-    let key = expect_string(heap, "%hmac-sha512", arg(args, 0))?;
-    let msg = expect_string(heap, "%hmac-sha512", arg(args, 1))?;
-    let mut mac = Hmac::<Sha512>::new_from_slice(key.as_bytes())
-        .map_err(|e| LispError::runtime(format!("%hmac-sha512: {e}")))?;
-    mac.update(msg.as_bytes());
-    Ok(heap.alloc_string(&digest_to_hex(mac.finalize().into_bytes())))
-}
-
-// ---- raw-byte HMAC ---------------------------------------------------------
-//
-// HMAC over a raw-byte key and message, returning the raw MAC as a byte vector.
-// A Brood string can't faithfully carry an arbitrary-byte key (its UTF-8
-// encoding ≠ the bytes), and SCRAM keys/outputs are XORed and re-hashed as raw
-// bytes — so the string-keyed `%hmac-*` can't serve them (store-driver findings #2).
-
-/// `(%hmac-sha256-raw key-bytes msg-bytes)` — HMAC-SHA256 over byte sequences → 32-byte bytes value.
-pub(super) fn hmac_sha256_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha2::Sha256;
-    let key = collect_bytes("%hmac-sha256-raw", arg(args, 0), heap)?;
-    let msg = collect_bytes("%hmac-sha256-raw", arg(args, 1), heap)?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key)
-        .map_err(|e| LispError::runtime(format!("%hmac-sha256-raw: {e}")))?;
-    mac.update(&msg);
-    Ok(bytes_to_value(mac.finalize().into_bytes(), heap))
-}
-
-/// `(%hmac-sha1-raw key-bytes msg-bytes)` — HMAC-SHA1 over byte sequences → 20-byte bytes value.
-pub(super) fn hmac_sha1_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha1::Sha1;
-    let key = collect_bytes("%hmac-sha1-raw", arg(args, 0), heap)?;
-    let msg = collect_bytes("%hmac-sha1-raw", arg(args, 1), heap)?;
-    let mut mac = Hmac::<Sha1>::new_from_slice(&key)
-        .map_err(|e| LispError::runtime(format!("%hmac-sha1-raw: {e}")))?;
-    mac.update(&msg);
-    Ok(bytes_to_value(mac.finalize().into_bytes(), heap))
-}
-
-/// `(%hmac-sha512-raw key-bytes msg-bytes)` — HMAC-SHA512 over byte sequences → 64-byte bytes value.
-pub(super) fn hmac_sha512_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha2::Sha512;
-    let key = collect_bytes("%hmac-sha512-raw", arg(args, 0), heap)?;
-    let msg = collect_bytes("%hmac-sha512-raw", arg(args, 1), heap)?;
-    let mut mac = Hmac::<Sha512>::new_from_slice(&key)
-        .map_err(|e| LispError::runtime(format!("%hmac-sha512-raw: {e}")))?;
-    mac.update(&msg);
-    Ok(bytes_to_value(mac.finalize().into_bytes(), heap))
 }
 
 /// Run `git` with `args` (optionally in `cwd`), capturing stdout+stderr. The
@@ -1419,8 +1316,8 @@ pub(super) fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// `(slurp-bytes path)` — read the whole file at `path` as a bytes value. The
 /// byte-faithful read `slurp` can't be: `slurp` is UTF-8 and throws
 /// on a non-text file, whereas this reads any bytes (images, archives, a binary
-/// asset to hash via `%sha256-bytes`). Pairs with `%sha256-bytes`/`%sha256-raw`
-/// and the `encoding` byte variants.
+/// asset to hash via `hash/sha256-bytes`). Pairs with `hash/sha256-bytes` /
+/// `hash/sha256-raw` and the `encoding` byte variants.
 pub(super) fn slurp_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "slurp-bytes", arg(args, 0))?;
     let bytes = std::fs::read(&path).map_err(|e| {

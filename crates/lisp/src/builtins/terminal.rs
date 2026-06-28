@@ -1077,6 +1077,28 @@ pub(super) fn gui_inset(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(Value::nil())
 }
 
+/// `(gui-bg! color)` — set the window background: the fill for `:clear`, the pre-clear,
+/// and (being outside every cell) the inset margin + the cell-grid snap remainder. So a
+/// GUI app's padding matches its own theme instead of the hardcoded default. `color` is
+/// a keyword (`:base`-style named colour), an `[r g b]` vector, or a `"#rrggbb"` hex
+/// string; `nil` restores the default. Applies to every open window + ones opened later.
+/// GUI only; returns nil.
+pub(super) fn gui_bg(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let rgb = match arg(args, 0) {
+        Value::Nil => None,
+        other => Some(face_rgb(heap, other).ok_or_else(|| {
+            LispError::wrong_type(
+                heap,
+                "gui-bg!",
+                "a colour (keyword, [r g b] vector, or \"#rrggbb\" string) or nil",
+                other,
+            )
+        })?),
+    };
+    crate::gui::bg(rgb).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
 /// `(gui-font-register name styles)` — register font family `name` (a keyword) from
 /// `styles`, a map of style → TTF file path: `{:regular "…" :bold "…" :italic "…"
 /// :bold-italic "…"}`. Only `:regular` is required; a missing style reuses the

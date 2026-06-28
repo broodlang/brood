@@ -46,11 +46,11 @@ cryptographically secure random bytes.
 
 (defn str->bytes (s)
   "Encode string `s` as a bytes value (its UTF-8 bytes)."
-  (string->bytes s))
+  (string->utf8-bytes s))
 
 (defn bytes->str (b)
   "Decode a bytes value of UTF-8 bytes to a string."
-  (bytes->string b))
+  (utf8-bytes->string b))
 
 ;; ---- ChaCha20-Poly1305 AEAD -------------------------------------------------
 ;;

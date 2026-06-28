@@ -143,6 +143,57 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("join", Sig::new(vec![any, seq], str_ty));
     put("string-capitalize", Sig::new(vec![str_ty], str_ty));
     put("string-split", Sig::new(vec![str_ty, str_ty], Ty::LIST));
+    // Equality: `=`/`not=` are multi-arm closures; infer_sig bails on multi-arm.
+    // Pin the bool result so `(+ 1 (= x y))` is caught.
+    for n in ["=", "not="] {
+        put(n, Sig::variadic(any, bool_ty));
+    }
+    // String conversions: branchy bodies or `apply` — infer_sig bails.
+    //   number->string — (str n): `str` has any domain; curate tighter (num → str).
+    //   string->symbol — if-guard over (string? s).
+    put("number->string", Sig::new(vec![num], str_ty));
+    put("string->symbol", Sig::new(vec![str_ty], sym_ty));
+    // String predicates: nested calls or let+branch bodies.
+    //   starts-with?/ends-with? — let + and + branch.
+    //   string-contains?        — (>= (index-of s needle) 0): nested call.
+    //   blank?                  — let + cond recursion.
+    for n in ["starts-with?", "ends-with?", "string-contains?"] {
+        put(n, Sig::new(vec![str_ty, str_ty], bool_ty));
+    }
+    put("blank?", Sig::new(vec![str_ty], bool_ty));
+    // String transforms: all call recursive helpers or use `apply`; infer_sig bails.
+    //   trim/triml/trimr   — call tail-recursive aux helpers.
+    //   replace            — if-branch over join/string-split.
+    //   string-repeat      — (apply str (repeat n s)).
+    //   pad-left/pad-right — let + if.
+    //   char-at            — (substring s i (inc i)): nested call.
+    for n in ["trim", "triml", "trimr"] {
+        put(n, Sig::new(vec![str_ty], str_ty));
+    }
+    put("replace", Sig::new(vec![str_ty, str_ty, str_ty], str_ty));
+    put("string-repeat", Sig::new(vec![str_ty, int], str_ty));
+    for n in ["pad-left", "pad-right"] {
+        put(n, Sig::new(vec![str_ty, int], str_ty));
+    }
+    put("char-at", Sig::new(vec![str_ty, int], str_ty));
+    // String/list conversions: recursive helpers or `apply`.
+    //   string->list           — calls string->list--acc (recursive).
+    //   list->string           — (apply str cs).
+    //   string-codepoints      — (into [] (map char->int (string->list s))).
+    //   string-from-codepoints — (apply str (map int->char cs)).
+    put("string->list", Sig::new(vec![str_ty], Ty::LIST));
+    put("list->string", Sig::new(vec![seq], str_ty));
+    put("string-codepoints", Sig::new(vec![str_ty], Ty::of(Tag::Vector)));
+    put("string-from-codepoints", Sig::new(vec![seq], str_ty));
+    // format: variadic with a required string template arg and a string result.
+    put("format", Sig::with_rest(vec![str_ty], any, str_ty));
+    // Search → int: all have branchy/recursive/optional-param bodies.
+    //   index-of      — multi-clause cond over collection type.
+    //   index-where   — tail-recursive helper; 1-ary predicate.
+    //   string-index-of — &optional from param; infer_sig bails.
+    put("index-of", Sig::new(vec![any, any], int));
+    put("index-where", Sig::new(vec![cb1, seq], int));
+    put("string-index-of", Sig::new(vec![str_ty, str_ty], int));
     m
 });
 

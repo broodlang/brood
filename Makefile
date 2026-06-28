@@ -33,12 +33,13 @@ AUDIO_FEATURES := $(if $(filter-out 0,$(WITH_AUDIO)),--features brood/audio,)
 # run user code (brood, nest); the LSP doesn't run hot user code, so it's left out.
 WITH_JIT ?= 1
 JIT_FEATURES := $(if $(filter-out 0,$(WITH_JIT)),--features brood/jit,)
-# tree-sitter (foreign-language editor modes — ruby/elixir, ROADMAP §C) is a
-# baseline runtime capability a modern editor needs, so the lean install always
-# bakes it in. `make install` builds `--no-default-features`, so it's named here
-# explicitly (cargo unions repeated `--features` flags, so this composes with
-# GUI_FEATURES). Unlike the windowing stack it is NOT gated on configure.
-TS_FEATURES := --features brood/treesit
+# tree-sitter (foreign-language editor modes — ruby/elixir, ROADMAP §C). The
+# generic `treesit` mechanism is in `default`, but the language grammars are NOT
+# (the kernel ships no language-specific parser). A product install still wants
+# them, so the lean install bakes in `treesit-grammars` explicitly. `make install`
+# builds `--no-default-features`, so it's named here (cargo unions repeated
+# `--features` flags, so this composes with GUI_FEATURES). Not gated on configure.
+TS_FEATURES := --features brood/treesit-grammars
 
 # Local (gitignored — `target/` is in .gitignore) output dir for the optimized
 # binaries. `make release` builds into here; `make install` copies them out to
@@ -87,7 +88,11 @@ test: ## Run Rust tests + the in-language suite via cargo-nextest (each test cas
 	# contained to that case instead of aborting the whole binary). `--no-fail-fast`
 	# surfaces every result. Install: `make ensure-nextest` (or see https://nexte.st).
 	@command -v cargo-nextest >/dev/null 2>&1 || { echo ">>> cargo-nextest not found — run 'make ensure-nextest' (or install from https://nexte.st)"; exit 1; }
-	cargo nextest run --no-fail-fast
+	# Grammars are out of `default` (the kernel ships no language-specific parser),
+	# so the suite opts into `treesit-grammars` to exercise the ruby/elixir tests.
+	# The .blsp grammar tests also self-skip when absent, so a bare `cargo nextest`
+	# (no grammars) stays green too.
+	cargo nextest run --no-fail-fast --features brood/treesit-grammars
 	cargo test --doc   # nextest doesn't run doctests; none today, kept so future ones still run
 
 test-both: ## Run the whole suite through BOTH engines (tree-walker + VM) — the differential gate (ADR-076)

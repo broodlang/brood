@@ -24,7 +24,7 @@
         (is (bytes? bs))
         (assert= bs (string->utf8-bytes "héllo")))))
 
-  (test "package-hash invariant: %sha256-bytes∘slurp-bytes == %sha256∘slurp"
+  (test "package-hash invariant: sha256-bytes∘slurp-bytes == sha256∘slurp"
     ;; The reason switching package--sha256-file to bytes doesn't churn existing
     ;; lock hashes: for a text file the two are byte-identical.
     (let (p (path-join (sb-tmp) "src.blsp"))

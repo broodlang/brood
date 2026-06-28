@@ -633,8 +633,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(heap, "byte-at", Arity::exact(2), Sig::new(vec![bytes_ty, int], int), byte_at);
     def(heap, "subbytes", Arity::range(2, 3), Sig::variadic(any, bytes_ty), subbytes);
     def(heap, "bytes-concat", Arity::any(), Sig::variadic(bytes_ty, bytes_ty), bytes_concat);
-    def(heap, "string->bytes", Arity::exact(1), Sig::new(vec![string], bytes_ty), string_to_bytes);
-    def(heap, "bytes->string", Arity::exact(1), Sig::new(vec![bytes_ty], string), bytes_to_string);
+    // String<->bytes conversion is UTF-8 (a Brood string is UTF-8, like Rust's),
+    // exposed under the explicit `string->utf8-bytes` / `utf8-bytes->string` names
+    // (registered above) — the former duplicate `string->bytes` / `bytes->string`
+    // prims were removed (they did the identical UTF-8 encode/decode).
     def(heap, "bytes->list", Arity::exact(1), Sig::new(vec![bytes_ty], pair), bytes_to_list);
     def(heap, "bytes-index-of", Arity::range(2, 3), Sig::new(vec![bytes_ty, bytes_ty], int), bytes_index_of);
     // string->number returns int *or* float *or* nil (the parse-failed case).
@@ -1194,6 +1196,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![Ty::of_tags(&[Tag::Int, Tag::Float])], nil_ty),
         gui_inset,
     );
+    // The window background (`gui-bg!`): the clear / inset-margin / snap-remainder fill,
+    // so a GUI app's padding matches its theme instead of the hardcoded default.
+    def(
+        heap,
+        "gui-bg!",
+        Arity::exact(1),
+        Sig::new(
+            vec![Ty::of_tags(&[Tag::Keyword, Tag::Vector, Tag::Str, Tag::Nil])],
+            nil_ty,
+        ),
+        gui_bg,
+    );
     // The one process-introspection accessor the language can't reach from Brood
     // (the mailbox queue lives behind the scheduler registry). Everything else an
     // observer shows — pid id, liveness — is assembled in Brood (std/observer.blsp).
@@ -1710,168 +1724,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, string], nil_ty),
         copy_file,
     );
-    // The one hashing primitive (ADR-037): SHA-256 of a string's bytes → hex.
-    // Per-file and directory-tree hashing for the package manager are Brood over
-    // this + `slurp`/`list-dir` (std/package.blsp), not a directory primitive.
+    // The two hashing primitives. `%digest` and `%hmac` take an algorithm keyword
+    // (:md5/:sha1/:sha256/:sha384/:sha512) + byte-sequence input and return the
+    // RAW digest/MAC as a bytes value. Everything else — string input (via
+    // `string->utf8-bytes`), hex output (via `bytes->hex`), and the public
+    // `sha256`/`hmac-sha256`/… names — is Brood policy in std/hash.blsp. (Collapsed
+    // the former 15 `%sha*`/`%md5` + 6 `%hmac-*` prims to these two: ADR-006, the
+    // variation was pure formatting Brood can do.) The package manager (ADR-037)
+    // hashes files/trees in Brood over these.
     def(
         heap,
-        "%sha256",
-        Arity::exact(1),
-        Sig::new(vec![string], string),
-        sha256_hex,
-    );
-    // SHA-256 of a byte vector (HMAC construction and other binary hashing).
-    // Counterpart to %sha256 which takes a string; this takes a vector of ints.
-    def(
-        heap,
-        "%sha256-bytes",
-        Arity::exact(1),
-        Sig::new(vec![any], string),
-        sha256_hex_bytes,
-    );
-    // SHA-1, SHA-384, SHA-512, and MD5 — string and byte-vector variants.
-    // String variants hash UTF-8 bytes; -bytes variants hash arbitrary byte ints.
-    def(
-        heap,
-        "%sha1",
-        Arity::exact(1),
-        Sig::new(vec![string], string),
-        sha1_hex,
-    );
-    def(
-        heap,
-        "%sha1-bytes",
-        Arity::exact(1),
-        Sig::new(vec![any], string),
-        sha1_hex_bytes,
-    );
-    def(
-        heap,
-        "%sha384",
-        Arity::exact(1),
-        Sig::new(vec![string], string),
-        sha384_hex,
-    );
-    def(
-        heap,
-        "%sha384-bytes",
-        Arity::exact(1),
-        Sig::new(vec![any], string),
-        sha384_hex_bytes,
-    );
-    def(
-        heap,
-        "%sha512",
-        Arity::exact(1),
-        Sig::new(vec![string], string),
-        sha512_hex,
-    );
-    def(
-        heap,
-        "%sha512-bytes",
-        Arity::exact(1),
-        Sig::new(vec![any], string),
-        sha512_hex_bytes,
-    );
-    def(
-        heap,
-        "%md5",
-        Arity::exact(1),
-        Sig::new(vec![string], string),
-        md5_hex,
-    );
-    def(
-        heap,
-        "%md5-bytes",
-        Arity::exact(1),
-        Sig::new(vec![any], string),
-        md5_hex_bytes,
-    );
-    // Raw-byte digests: byte vector → digest as a byte vector (not hex). Lets a
-    // digest chain over raw bytes (SCRAM's StoredKey = SHA256(ClientKey), then
-    // HMAC over StoredKey) without a hex decode at each step (store findings #3).
-    def(
-        heap,
-        "%sha256-raw",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        sha256_raw,
-    );
-    def(
-        heap,
-        "%sha1-raw",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        sha1_raw,
-    );
-    def(
-        heap,
-        "%sha384-raw",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        sha384_raw,
-    );
-    def(
-        heap,
-        "%sha512-raw",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        sha512_raw,
-    );
-    def(
-        heap,
-        "%md5-raw",
-        Arity::exact(1),
-        Sig::new(vec![any], bytes_ty),
-        md5_raw,
-    );
-    // HMAC primitives — one-call Rust implementations over the hmac crate already
-    // present for the node handshake. Replaces the pure-Brood RFC 2104 construction
-    // in std/hash.blsp which was ~200x slower due to hex-encode/decode round-trips.
-    def(
-        heap,
-        "%hmac-sha256",
+        "%digest",
         Arity::exact(2),
-        Sig::new(vec![string, string], string),
-        hmac_sha256_fn,
+        Sig::new(vec![kw, any], bytes_ty),
+        digest,
     );
     def(
         heap,
-        "%hmac-sha1",
-        Arity::exact(2),
-        Sig::new(vec![string, string], string),
-        hmac_sha1_fn,
-    );
-    def(
-        heap,
-        "%hmac-sha512",
-        Arity::exact(2),
-        Sig::new(vec![string, string], string),
-        hmac_sha512_fn,
-    );
-    // Raw-byte HMAC: byte-vector key + message → byte-vector MAC. A string can't
-    // carry an arbitrary-byte key faithfully, and SCRAM XORs/re-hashes the raw
-    // MAC bytes, so the string-keyed %hmac-* can't serve binary auth (findings #2).
-    def(
-        heap,
-        "%hmac-sha256-raw",
-        Arity::exact(2),
-        Sig::new(vec![bytes_ty, bytes_ty], bytes_ty),
-        hmac_sha256_raw,
-    );
-    def(
-        heap,
-        "%hmac-sha1-raw",
-        Arity::exact(2),
-        Sig::new(vec![bytes_ty, bytes_ty], bytes_ty),
-        hmac_sha1_raw,
-    );
-    def(
-        heap,
-        "%hmac-sha512-raw",
-        Arity::exact(2),
-        Sig::new(vec![bytes_ty, bytes_ty], bytes_ty),
-        hmac_sha512_raw,
+        "%hmac",
+        Arity::exact(3),
+        Sig::new(vec![kw, any, any], bytes_ty),
+        hmac,
     );
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
@@ -2592,7 +2465,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("clipboard-get", &[], "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."),
     ("clipboard-set!", &["s"], "Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off."),
     ("parse-source-positioned", &["s"], "Parse s into a CST of maps, each `{:kind :start :end}` (leaves add :text, containers/wrappers add :kids) with half-open character offsets — for structural navigation (std/sexp)."),
-    ("tree-sitter-parse", &["source", "lang"], "Parse source (a string) with the tree-sitter grammar named by keyword lang (:ruby, :elixir) into a positioned CST — the SAME node-map shape as parse-source-positioned (`{:kind :start :end :named}`; leaves add :text, nodes with children add :kids), :kind a keyword of the tree-sitter node type and :named false for anonymous tokens (keywords/punctuation). Char offsets, so std/sexp + the editor's fontify navigate it unchanged. Errors on an unknown language, or if the runtime was built without --features treesit."),
+    ("tree-sitter-parse", &["source", "lang"], "Parse source (a string) with the tree-sitter grammar named by keyword lang into a positioned CST — the SAME node-map shape as parse-source-positioned (`{:kind :start :end :named}`; leaves add :text, nodes with children add :kids), :kind a keyword of the tree-sitter node type and :named false for anonymous tokens (keywords/punctuation). Char offsets, so std/sexp + the editor's fontify navigate it unchanged. The generic mechanism is in the default build, but the kernel ships NO language grammar — a grammar is opt-in (e.g. --features treesit-ruby, or treesit-grammars for all). Errors if the named language's grammar isn't built in, or if the runtime was built without --features treesit."),
     ("tree-sitter-reparse", &["key", "source", "lang"], "Like tree-sitter-parse, but incremental: caches the last (source, tree) for integer buffer id `key` and re-uses it (deriving the edit by diffing the old source) so only the changed region is re-scanned. Same positioned CST as tree-sitter-parse — incrementality is a pure optimization. Identical source re-uses the cached tree with no re-parse. Call tree-sitter-forget when the buffer closes."),
     ("tree-sitter-forget", &["key"], "Drop every cached incremental tree for integer buffer id `key` (all languages); returns the count dropped. Call when a buffer closes so tree-sitter-reparse's cache can't grow unbounded."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
@@ -2610,29 +2483,10 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spit", &["path", "s"], "Write string s to the file at path."),
     ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
-    ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with %sha256-bytes/%sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
+    ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
-    ("%sha256", &["s"], "Lowercase hex SHA-256 of string s's bytes. The package manager's one hashing primitive (ADR-037); file/tree hashing is Brood over it."),
-    ("%sha256-bytes", &["bytes"], "Lowercase hex SHA-256 of a vector (or list) of byte integers 0–255. Use this for hashing arbitrary binary data; %sha256 hashes UTF-8 string bytes."),
-    ("%sha1",         &["s"],     "Lowercase hex SHA-1 of string s's UTF-8 bytes. NOT collision-resistant; use sha256 for security-sensitive hashing."),
-    ("%sha1-bytes",   &["bytes"], "Lowercase hex SHA-1 of a vector (or list) of byte integers 0–255."),
-    ("%sha384",       &["s"],     "Lowercase hex SHA-384 of string s's UTF-8 bytes."),
-    ("%sha384-bytes", &["bytes"], "Lowercase hex SHA-384 of a vector (or list) of byte integers 0–255."),
-    ("%sha512",       &["s"],     "Lowercase hex SHA-512 of string s's UTF-8 bytes."),
-    ("%sha512-bytes", &["bytes"], "Lowercase hex SHA-512 of a vector (or list) of byte integers 0–255."),
-    ("%md5",          &["s"],     "Lowercase hex MD5 of string s's UTF-8 bytes. NOT collision-resistant; use sha256 for security-sensitive hashing."),
-    ("%md5-bytes",    &["bytes"], "Lowercase hex MD5 of a vector (or list) of byte integers 0–255."),
-    ("%sha256-raw",   &["bytes"], "SHA-256 of a byte sequence, returned as a 32-byte bytes value (raw digest, not hex). For chaining digests over raw bytes without a hex round-trip at each step."),
-    ("%sha1-raw",     &["bytes"], "SHA-1 of a byte sequence, returned as a 20-byte bytes value (raw digest, not hex)."),
-    ("%sha384-raw",   &["bytes"], "SHA-384 of a byte sequence, returned as a 48-byte bytes value (raw digest, not hex)."),
-    ("%sha512-raw",   &["bytes"], "SHA-512 of a byte sequence, returned as a 64-byte bytes value (raw digest, not hex)."),
-    ("%md5-raw",      &["bytes"], "MD5 of a byte sequence, returned as a 16-byte bytes value (raw digest, not hex)."),
-    ("%hmac-sha256", &["key", "message"], "HMAC-SHA256 of `message` keyed with `key` (both strings). Returns lowercase hex. RFC 2104 over sha2."),
-    ("%hmac-sha1",   &["key", "message"], "HMAC-SHA1 of `message` keyed with `key`. Returns lowercase hex. Not collision-resistant; prefer hmac-sha256."),
-    ("%hmac-sha512", &["key", "message"], "HMAC-SHA512 of `message` keyed with `key`. Returns lowercase hex."),
-    ("%hmac-sha256-raw", &["key-bytes", "msg-bytes"], "HMAC-SHA256 over a byte-sequence key and message, returned as a 32-byte bytes value. For binary-protocol auth (SCRAM) where the key is raw bytes and the MAC is XORed/re-hashed."),
-    ("%hmac-sha1-raw",   &["key-bytes", "msg-bytes"], "HMAC-SHA1 over a byte-sequence key and message, returned as a 20-byte bytes value."),
-    ("%hmac-sha512-raw", &["key-bytes", "msg-bytes"], "HMAC-SHA512 over a byte-sequence key and message, returned as a 64-byte bytes value."),
+    ("%digest", &["algo", "bytes"], "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp."),
+    ("%hmac", &["algo", "key-bytes", "msg-bytes"], "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp."),
     ("%git-resolve-ref", &["url", "ref"], "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037)."),
     ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),
     ("%rm-rf", &["path"], "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037)."),
@@ -2700,6 +2554,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gui-draw", &["id", "frame"], "Paint a frame (the same render-op vector term-draw takes) to window id; returns nil. Unknown ops are skipped (forward-compatible). A text op's face may carry :scale n (GUI only, integer >=1, capped at 16): the text is drawn n× larger in an n×n block of cells anchored at its row/col — the per-pane/per-buffer font knob; the terminal frontend renders scale 1. A `[:cursor row col]` op may carry an optional `style` keyword (`[:cursor row col style]`) — :block (default, a 50% overlay), :bar (a thin caret on the cell's left edge), or :underline (a rule along the cell bottom). A `[:rect row col w h face]` op fills a w×h cell block with the face's background colour — a solid panel painted directly (no glyphs), the multi-row generalisation of a status bar. A `[:cursor-zone x y w h shape]` op marks a hover hot-zone: while the pointer is over it the window shows the resize cursor `shape` (:col-resize ↔ / :row-resize ↕), hit-tested on the GUI thread (ADR-080); it draws nothing and the terminal ignores it. A `[:vspans row0 col0 cols]` op is the column-renderer fast path (raycasters, spectrum bars): `cols` is a vector with one entry per cell-column (`col0`, `col0+1`, …), each a top-to-bottom stack of `[height colour]` segments painted from `row0` down — `colour` a face keyword (`:red`), an `[r g b]` triple (0..255), or nil (transparent). The per-cell fill happens natively here, so a wide scene costs the Brood side O(columns), not O(cells); GUI-only (the terminal ignores it)."),
     ("gui-font!", &["id?", "spec"], "Set a cell font from spec, a map {:family <keyword> :height <px>} (both keys optional): :family picks a registered font family (bundled :mono, or one added by gui-font-register), :height the cell pixel size. (gui-font! spec) sets the global default — every open window and ones opened later; (gui-font! id spec) retunes just window id, leaving the global default and other windows alone, so two windows can run different fonts. Per-section fonts within a window come from a face's :family/:scale. Needs --features gui. Returns nil."),
     ("gui-inset!", &["px"], "Set the window content inset to px logical pixels: a blank margin before the cell grid on every window edge, so a GUI app's text breathes instead of sitting flush against the frame. Applies to every open window and the default for ones opened later; the grid loses 2*px per axis (fewer cells) and re-renders. The inset is shared by the renderer and mouse hit-testing, so clicks stay aligned. Needs --features gui. Returns nil."),
+    ("gui-bg!", &["color"], "Set the window background colour: the fill for :clear, the per-frame pre-clear, and — being outside every cell — the gui-inset! margin and the cell-grid snap remainder. So a GUI app's padding matches its own theme background instead of the hardcoded default. color is a keyword named colour, an [r g b] vector (0..255 per channel), or a \"#rrggbb\"/\"#rgb\" hex string; nil restores the default. Applies to every open window and the default for ones opened later (a pure repaint — no grid change). Needs --features gui. Returns nil."),
     ("gui-font-register", &["name", "styles"], "Register font family name (a keyword) from styles, a map of style → TTF file path {:regular \"…\" :bold \"…\" :italic \"…\" :bold-italic \"…\"}. Only :regular is required; a missing style reuses the regular file. Afterwards a face's :family <name> (or gui-font!) selects it. Needs --features gui. Returns name."),
     ("term-raw-enter", &[], "Enter raw mode only — NO alternate screen, cursor stays visible, scrollback preserved. The seam for an inline line editor (the REPL); use term-enter instead for a full-screen TUI. Pair with term-raw-leave."),
     ("term-raw-leave", &[], "Leave raw mode (the teardown for term-raw-enter). Idempotent with the panic-path restore."),

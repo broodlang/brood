@@ -814,6 +814,136 @@ mod tests {
     }
 
     #[test]
+    fn unused_let_binding_lint() {
+        // Basic unused binding — warned.
+        let w = file_warnings("(let (x 1) 2)");
+        assert!(
+            w.iter().any(|s| s.contains("unused let binding") && s.contains('x')),
+            "expected unused-binding warning for x, got {w:?}"
+        );
+        // Binding used in body — silent.
+        assert!(
+            file_warnings("(let (x 1) x)").is_empty(),
+            "used binding should be silent"
+        );
+        // Binding used in subsequent binding RHS — silent.
+        assert!(
+            file_warnings("(let (x 1 y (+ x 1)) y)").is_empty(),
+            "x used by y's RHS should be silent"
+        );
+        // Only one of two is unused.
+        let w = file_warnings("(let (x 1 y 2) x)");
+        assert!(
+            w.iter().any(|s| s.contains("unused let binding") && s.contains('y')),
+            "y should be flagged unused, got {w:?}"
+        );
+        assert!(
+            w.iter().all(|s| !s.contains('x') || !s.contains("unused")),
+            "x should not be flagged, got {w:?}"
+        );
+        // `_`-prefixed names are exempt.
+        assert!(
+            file_warnings("(let (_x 1) 2)").is_empty(),
+            "_x should be exempt from unused-binding lint"
+        );
+        // match pattern variables (compiler-generated let, no source position)
+        // must be exempt — a common pattern: match on shape, ignore values.
+        assert!(
+            file_warnings("(match (list 1 2) ([a b] :vec) (_ :other))").is_empty(),
+            "match pattern variables should be exempt (no FP)"
+        );
+        // Nested let: inner binding used only in inner body.
+        assert!(
+            file_warnings("(let (x 1) (let (y x) y))").is_empty(),
+            "nested let: both x and y are used"
+        );
+        // letrec: mutual recursion keeps both used.
+        assert!(
+            file_warnings(
+                "(letrec (f (fn (n) (if (= n 0) 1 (g (- n 1)))) g (fn (n) (f n))) (f 5))"
+            )
+            .is_empty(),
+            "letrec mutual recursion: both f and g are used"
+        );
+    }
+
+    #[test]
+    fn curated_equality_and_string_sigs() {
+        // = / not= are multi-arm closures; pin bool result so numeric sinks catch it.
+        assert!(warnings("(+ 1 (= x y))")
+            .iter()
+            .any(|w| w.contains('+') && w.contains("bool")));
+        assert!(warnings("(+ 1 (not= x y))")
+            .iter()
+            .any(|w| w.contains('+') && w.contains("bool")));
+        // number->string requires a number.
+        assert!(warnings("(number->string \"oops\")")
+            .iter()
+            .any(|w| w.contains("number->string") && w.contains("number")));
+        // number->string returns a string — feeding to string-length is fine (silent).
+        assert!(warnings("(string-length (number->string 42))").is_empty());
+        // string->symbol requires a string.
+        assert!(warnings("(string->symbol 99)")
+            .iter()
+            .any(|w| w.contains("string->symbol") && w.contains("string")));
+        // String predicates require string args.
+        for f in ["starts-with?", "ends-with?", "string-contains?"] {
+            assert!(
+                warnings(&format!("({f} 5 \"x\")"))
+                    .iter()
+                    .any(|w| w.contains(f) && w.contains("string")),
+                "{f}: expected string-domain warning"
+            );
+        }
+        assert!(warnings("(blank? 0)")
+            .iter()
+            .any(|w| w.contains("blank?") && w.contains("string")));
+        // String transforms require string args and return strings.
+        for f in ["trim", "triml", "trimr"] {
+            assert!(
+                warnings(&format!("({f} 5)"))
+                    .iter()
+                    .any(|w| w.contains(f) && w.contains("string")),
+                "{f}: expected string-domain warning"
+            );
+            // Result is string — safe to pass to string-length.
+            assert!(
+                warnings(&format!("(string-length ({f} s))")).is_empty(),
+                "{f}: result should type as string"
+            );
+        }
+        assert!(warnings("(replace 5 \"a\" \"b\")")
+            .iter()
+            .any(|w| w.contains("replace") && w.contains("string")));
+        assert!(warnings("(string-repeat 3 5)")
+            .iter()
+            .any(|w| w.contains("string-repeat") && w.contains("string")));
+        assert!(warnings("(format 5 \"extra\")")
+            .iter()
+            .any(|w| w.contains("format") && w.contains("string")));
+        // format returns a string.
+        assert!(warnings("(string-length (format \"hi %s\" x))").is_empty());
+        // index-of/index-where/string-index-of return int — safe to add.
+        assert!(warnings("(+ 1 (index-of coll x))").is_empty());
+        assert!(warnings("(+ 1 (string-index-of s needle))").is_empty());
+        // Correct uses stay silent.
+        for ok in [
+            "(= 1 2)",
+            "(not= x y)",
+            "(starts-with? s \"pre\")",
+            "(ends-with? s \".blsp\")",
+            "(trim s)",
+            "(replace s \"a\" \"b\")",
+        ] {
+            assert!(
+                warnings(ok).iter().all(|w| !w.contains("expects")),
+                "{ok} should be silent: {:?}",
+                warnings(ok)
+            );
+        }
+    }
+
+    #[test]
     fn skips_error_testing_forms() {
         // `try` and the error-asserting helpers deliberately exercise failures,
         // so misuse inside them is not flagged.

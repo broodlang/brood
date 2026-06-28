@@ -19,6 +19,25 @@
     (first (filter (fn (x) (not (nil? x)))
              (map (fn (c) (tst-find c k)) (or (get node :kids) []))))))
 
+;; The ruby/elixir grammars are opt-in (--features treesit-grammars); the kernel
+;; ships none by default. Detect each and skip the grammar-dependent suites when
+;; absent, so a bare `cargo test` (no grammars) stays green — `make test` builds
+;; them in and runs them.
+(defn tst-grammar? (lang)
+  (try (do (tree-sitter-parse "" lang) true) (catch _ false)))
+(def tst-ruby? (tst-grammar? :ruby))
+(def tst-elixir? (tst-grammar? :elixir))
+
+;; The first descendant (incl. self) for which `(pred node)` is truthy, or nil.
+(defn tst-search (node pred)
+  (if (pred node)
+    node
+    (first (filter (fn (x) (not (nil? x)))
+             (map (fn (c) (tst-search c pred)) (or (get node :kids) []))))))
+
+;; ---- grammar-dependent suites (skipped without --features treesit-grammars) -
+(when (and tst-ruby? tst-elixir?)
+
 ;; ---- ruby ------------------------------------------------------------------
 
 (describe "tree-sitter-parse ruby"
@@ -75,13 +94,6 @@
       (is (not (nil? (tst-find bin :identifier))))
       (is (not (nil? (tst-find bin :integer)))))))
 
-;; The first descendant (incl. self) for which `(pred node)` is truthy, or nil.
-(defn tst-search (node pred)
-  (if (pred node)
-    node
-    (first (filter (fn (x) (not (nil? x)))
-             (map (fn (c) (tst-search c pred)) (or (get node :kids) []))))))
-
 ;; ---- error recovery --------------------------------------------------------
 ;; tree-sitter is error-tolerant: it returns a tree even for broken source, and
 ;; the projected CST surfaces the recovery state so an editor can draw squiggles.
@@ -136,7 +148,11 @@
         (tree-sitter-parse "y = 2\n" :elixir))
       (tree-sitter-forget k))))
 
+)  ; end (when (and tst-ruby? tst-elixir?) …) — grammar-dependent suites
+
 ;; ---- errors ----------------------------------------------------------------
+;; Runs regardless of grammars: an unknown language throws whether or not any
+;; grammar is built in.
 
 (describe "tree-sitter-parse errors"
   (test "an unknown language throws"

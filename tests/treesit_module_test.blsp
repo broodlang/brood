@@ -12,6 +12,13 @@
 (require 'editor/highlight)   ; registers the :syntax/* faces fontify resolves
 (require 'editor/treesit)
 
+;; The ruby/elixir grammars are opt-in (--features treesit-grammars); the kernel
+;; ships none by default. Skip these suites when absent so a bare `cargo test`
+;; stays green — `make test` builds them in and runs them.
+(defn tsm-grammar? (lang)
+  (try (do (tree-sitter-parse "" lang) true) (catch _ false)))
+(def tsm-grammars? (and (tsm-grammar? :ruby) (tsm-grammar? :elixir)))
+
 ;; A small Ruby method, used across the navigation tests. Offsets:
 ;;   0       8         18  22
 ;;   def foo\n  x = 1\nend\n
@@ -19,6 +26,8 @@
 
 (def rb-faces {:comment :syntax/comment :string :syntax/string :integer :syntax/number
                :def :syntax/keyword :end :syntax/keyword :identifier :syntax/function})
+
+(when tsm-grammars?
 
 (describe "treesit fontify"
   (test "produces ascending, non-overlapping [start end face] spans"
@@ -85,3 +94,5 @@
   (test "motions are no-ops with nothing to move to"
     ;; past the end, forward stays put
     (assert= (treesit/point-forward rb :ruby (string-length rb)) (string-length rb))))
+
+)  ; end (when tsm-grammars? …) — grammar-dependent suites

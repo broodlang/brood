@@ -394,8 +394,13 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   "strong arrow", sound where you ask for it). All policy in Brood, never
   required, never gates. Plus soundness-oracle tests (results never
   under-approximate; correct programs never warn) and curated sigs for common
-  predicates. `docs/type-annotations.md`. ⬜ Future: expanded curated-sigs table
-  (`str`/`println`/`number->string`/… result types); rest-param notation in `(sig …)`;
+  predicates. `docs/type-annotations.md`. ✅ **Expanded curated-sigs table**
+  (2026-06-28): 25 new entries covering `=`/`not=`, `number->string`/`string->symbol`,
+  string predicates (`starts-with?`/`ends-with?`/`string-contains?`/`blank?`), string
+  transforms (`trim`/`triml`/`trimr`/`replace`/`string-repeat`/`pad-left`/`pad-right`/
+  `char-at`), string/list conversions (`string->list`/`list->string`/`string-codepoints`/
+  `string-from-codepoints`), `format`, and search (`index-of`/`index-where`/
+  `string-index-of`). ⬜ Future: rest-param notation in `(sig …)`;
   `BROOD_CONTRACTS=1` enforce-every-`sig` switch; element-level `(list E)` runtime
   checks.
 - ✅ **Maps** (ADR-030 + ADR-040) — immutable `{ }` literals + `get`/`assoc`/
@@ -639,24 +644,24 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   (arity/type findings anchor to the call head, not the offending argument —
   wants `Pos` threaded through `types/check.rs`'s walk, a focused refactor of
   that GC-rooting-sensitive pass); and the **create-missing-`defn`** code action.
-- ⬜ **[checker] warn on unused bindings** (post-expansion lint, 2026-06-14) — the
+- 🟡 **[checker] warn on unused bindings** (post-expansion lint, 2026-06-14) — the
   checker today is direction-asymmetric: it flags names used but *not* in scope
-  (`unbound symbol`), never bindings present but *unreferenced*. Add an advisory lint
-  for the module-local cases that can be proven dead: unused `:use`/`:alias` imports,
-  unused module-private `defn`s, and unused `let` locals. **Hard constraint: it must
-  run *after* macro expansion.** The canonical trap (Hatch demo, `web/routes`): a
-  `(:use web/layout)` is referenced *nowhere* in the file's surface text — `layout`
-  only materialises inside the `(live …)` macro's expansion — so a syntactic pass
-  would call it dead and delete it, breaking the build. (The existing LSP
-  **remove-unused-`require`** code action, 2026-05-31, is exactly that syntactic
-  shape and would mis-handle this; an expansion-aware lint should supersede it.)
-  Soundness scope, to keep the **zero-false-positive** rule (ADR-011): module-local
-  only — *cannot* judge **exported** `defn`s (consumed by other modules), **dynamic
-  `require`**, or **qualified-symbol** references resolved without an import
-  (`web/views/home/index`); warn only when provably unused post-expansion. Surfaces
-  as a checker diagnostic + a matching expansion-aware LSP remove-unused code action.
-  Motivating case: a stray `(:use web/conn)` survived silently in `web/routes` while
-  the load-bearing `(:use web/layout)` *looks* unused — the asymmetry this closes.
+  (`unbound symbol`), never bindings present but *unreferenced*. ✅ **Unused `let`
+  locals** (2026-06-28): `check_let` now emits "unused let binding: x" for any
+  `let`/`let*`/`letrec` name that never appears in its visible scope (subsequent
+  binding RHSs + body forms). Conservative scan (counts any occurrence, including
+  binder positions and quoted forms) for zero false positives. Exempt: `_`-prefixed
+  names (intentional don't-care convention) and compiler-generated `let`s (match /
+  pattern expansion produces `let`s with no source position — the position gate
+  distinguishes these cleanly). **Hard constraint: must run after macro expansion** —
+  satisfied since `check_file` works on the fully-expanded tree. ⬜ Still open:
+  **unused `:use`/`:alias` imports** (needs per-module export tracking to know which
+  names each `:use` contributed, then a reference scan) and **unused module-private
+  `defn`s** (needs either a formal `private` visibility marker or a convention-based
+  heuristic — e.g. names containing `--`; currently all top-level `defn`s are
+  potentially exported). The `:use` case is the motivating one (a stray
+  `(:use web/conn)` survived silently while the load-bearing `(:use web/layout)`
+  *looks* unused).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.
@@ -666,17 +671,48 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
 > candidate to later replace with Brood. This holds for the CLI, the editor
 > commands, keymaps, and UI as the language grows capable enough.
 
-### Type system — what full Elixir parity would take (reference, not a target)
+### Type system — goals, hot-reload constraint, and what full Elixir parity would take
+
+#### Revised goal: gated where provably local; advisory at reload boundaries
+
+The original "never gates" framing was too conservative. A better statement:
+
+> **Gate what is provably local and static; stay advisory — or enforce at runtime
+> via `sig!` — on anything that crosses a hot-reload or module boundary.**
+
+**Why globals must stay `dynamic()`:** Erlang-style hot reload works by rebinding
+globals via `def` at runtime. If the checker gated on global types, a reload that
+changes a function's signature (the whole point of hot reload) would be rejected.
+Globals are `dynamic()` by design — they can be rebound to any type at any time,
+and the checker must not prevent that. This is load-bearing for the editor and for
+`nest run --watch`.
+
+**What *can* be gated:** anything whose type is fixed for its lifetime:
+- `let` / fn-param bindings (immutable within their scope)
+- function call arity and argument types (at the call site, not the definition)
+- pattern match coverage and dead-clause detection
+- `sig!` contracts (opt-in, enforced at the call boundary; replaced on reload — intentional)
+
+**What must stay advisory (or opt-in runtime):**
+- Global `def`/`defn` types — redefinable, so static gating = rejecting valid reloads
+- Inter-module type flow — a module consumer may reload independently
+- The return type of a global function — the caller sees `dynamic()`, not the declared type
+
+So the model is: **Elixir's checker for the *interior* of a function/let-scope;
+Erlang's late binding for globals and module boundaries.** This is the right split for
+a self-editing editor: the editor can tell you about a bad `let` binding locally, but
+must let the live image evolve freely.
+
+#### Map of distance to Elixir (reference, not a target)
 
 Brood's types follow the **Elixir set-theoretic model** (ADR-023/024/078/082) and
 share its *foundation*: types as sets of values, semantic subtyping, union/
 intersection/negation, function arrows, sequence element types, and occurrence
-typing. But the **goal is deliberately different** — Brood's checker is *advisory*
-(never gates, zero false positives, serves the live editor and hot reload), with
-soundness available **on opt-in** via `(sig! …)` runtime contracts (the strong
-arrow done with a runtime check, not static casts). Elixir's is a *sound, gating,
-whole-program* checker. So this list is a **map of the distance to Elixir**, kept
-for reference — **not a backlog we intend to burn down**. Each item is additive
+typing. Elixir's checker is *sound, gating, whole-program*; Brood's targets
+**local gating + global advisory**, with soundness available **on opt-in** via
+`(sig! …)` runtime contracts (the strong arrow done with a runtime check, not
+static casts). This list is a **map of the distance to Elixir**, kept for
+reference — **not a backlog we intend to burn down**. Each item is additive
 and gated on a real consumer (ADR-011); a few we are consciously **not** pursuing.
 
 What we already have on par: set-theoretic core, semantic subtyping, arrows +

@@ -45,13 +45,21 @@ until end of input (Ctrl-D).
 Driven from the shell by `brood` (no arguments) and `nest repl`. The prompts are
 the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 `binding` to customise."
-  (:use editor/lineedit))
+  (:use editor/lineedit)
+  (:use editor/highlight))  ; highlight-spans — colourised result output
 
 ;; ---- configuration (dynamic so a session can rebind them) -------------------
 
 (defdyn *repl-prompt* "brood> ")
 (defdyn *repl-cont-prompt* "  ...   ")
-(def *repl-banner* "brood — REPL (Ctrl-D to exit)")
+(def *repl-banner*
+  ;; A small wordmark + a one-line hint. Printed (dimmed) only on an interactive TTY.
+  (str "\e[35m"            ; magenta
+    "  ┌┐ ┬─┐ ┌─┐ ┌─┐ ┌┬┐\n"
+    "  ├┴┐├┬┘│ ││ │ │ ││\n"
+    "  └─┘┴└─└─┘└─┘─┴┘\n"
+    "\e[0m"
+    "\e[90m  a small lisp · ,help for commands · Ctrl-D to exit\e[0m"))
 
 ;; Persistent history: an interactive session loads its history on start and saves
 ;; it (capped to the most recent *repl-history-max* entries) after each submitted
@@ -63,6 +71,112 @@ the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 ;; — an unclosed form or string, i.e. "read another line", as opposed to a genuine
 ;; syntax error. A stable code, so matching it is robust (no delimiter re-scanning).
 (def *repl-incomplete-code* "E0002")
+
+;; Slow-eval timing: when an interactive eval takes at least this many ms, the loop
+;; prints a dim `; N ms` note after the value — feedback on what's expensive, hidden
+;; for the snappy common case.
+(def *repl-slow-ms* 200)
+
+;; ---- colourised output (TTY only) -------------------------------------------
+;; The printed result is re-lexed with the *same* highlighter the line editor paints
+;; input with (`highlight-spans`), and each span wrapped in an ANSI colour — so a
+;; returned list/map/keyword reads with the syntax colours, not as flat text. Plain
+;; (uncoloured) on a non-TTY so a piped/redirected session stays clean.
+
+(def repl--ansi-fg
+  ;; the named highlight colours (highlight.blsp's faces) -> ANSI SGR foreground code
+  {:red 31 :green 32 :yellow 33 :blue 34 :magenta 35 :cyan 36
+   :white 37 :grey 90 :dark-grey 90})
+
+(def repl--sgr-reset "\e[0m")
+
+(defn repl--sgr (face)
+  "The opening ANSI escape for a `{:fg <named-colour> :bold ?}` face, or nil when the
+face carries no colour we map (leave that span the default colour)."
+  (let (code (get repl--ansi-fg (get face :fg)))
+    (when code
+      (str "\e[" (if (get face :bold) "1;" "") code "m"))))
+
+(defn repl--paint-spans (src spans i)
+  "Emit `src` from offset `i`, wrapping each `[start end face]` span in its ANSI colour
+and leaving the gaps between spans uncoloured."
+  (if (empty? spans)
+    (substring src i)
+    (let ([s e face] (first spans)
+          painted (let (chunk (substring src s e) sgr (repl--sgr face))
+                    (if sgr (str sgr chunk repl--sgr-reset) chunk)))
+      (str (substring src i s) painted (repl--paint-spans src (rest spans) e)))))
+
+(defn repl--colorize (src)
+  "`src` with each lexical highlight span ANSI-coloured; unchanged when nothing
+highlights. Used to colour a printed result on an interactive TTY."
+  (let (spans (highlight-spans src))
+    (if (empty? spans) src (repl--paint-spans src spans 0))))
+
+;; ---- meta-commands (`,cmd` at a fresh prompt) -------------------------------
+;; Guile-style `,` commands for things that aren't expressions: docs, the type of a
+;; value, timing, a screen clear. `,` is unquote syntax, meaningless at top level, so
+;; it's a safe prefix. Only a *known* `,cmd` is intercepted — anything else falls
+;; through to the normal reader (so a real syntax error still reports normally).
+
+(def *repl-meta-names* '("help" "?" "doc" "type" "time" "clear"))
+
+(defn repl--meta-parts (line)
+  "Split a `,cmd arg…` line (sans the leading `,`) into `[cmd rest]`, `rest` trimmed."
+  (let (t (trim line)
+        sp (string-index-of t " "))
+    (if (< sp 0)
+      [t ""]
+      [(substring t 0 sp) (trim (substring t sp))])))
+
+(defn repl--meta? (line)
+  "True when `line` is a recognised `,cmd` meta-command (a leading `,` + known name)."
+  (and (> (string-length line) 0)
+    (= (char-at line 0) ",")
+    (let ([cmd _] (repl--meta-parts (substring line 1)))
+      (some? (fn (n) (= n cmd)) *repl-meta-names*))))
+
+(defn repl--meta-help ()
+  (println (str "\e[90m"
+    "  ,help ,?        this list\n"
+    "  ,doc  <name>    docstring + arglist of a function/macro/primitive\n"
+    "  ,type <expr>    evaluate <expr> and show its runtime type\n"
+    "  ,time <expr>    evaluate <expr> and show elapsed time\n"
+    "  ,clear          clear the screen"
+    "\e[0m")))
+
+(defn repl--meta-doc (name)
+  "Print the docstring + arglist for `name` (a function/macro/primitive), or a note."
+  (try
+    (let (d (eval-string (str "(doc " name ")"))
+          a (eval-string (str "(arglist " name ")")))
+      (println (str "\e[36m(" name (if a (str " " (join " " (map str a))) "") ")\e[0m"))
+      (println (if d (str "\e[90m" d "\e[0m") "\e[90m(no documentation)\e[0m")))
+    (catch e (println (str "\e[90m(no such name: " name ")\e[0m")))))
+
+(defn repl--meta-type (expr)
+  (try (println (str "\e[33m" (type-of (eval-string expr)) "\e[0m"))
+    (catch e (eprint (str (repl--error-message e) "\n")))))
+
+(defn repl--meta-time (expr)
+  (try
+    (let (t0 (now)
+          v (eval-string expr)
+          ms (- (now) t0))
+      (when (stdout-tty?) (println (repl--colorize (pr-str v))))
+      (println (str "\e[90m; " ms " ms\e[0m")))
+    (catch e (eprint (str (repl--error-message e) "\n")))))
+
+(defn repl--run-meta (line)
+  "Dispatch a `,cmd` meta-command line (verified by `repl--meta?`). Returns nil; the
+loop just continues to the next prompt."
+  (let ([cmd rest] (repl--meta-parts (substring line 1)))
+    (cond
+      (or (= cmd "help") (= cmd "?")) (repl--meta-help)
+      (= cmd "doc") (repl--meta-doc rest)
+      (= cmd "type") (repl--meta-type rest)
+      (= cmd "time") (repl--meta-time rest)
+      (= cmd "clear") (print "\e[2J\e[H"))))
 
 ;; ---- whitespace / comment skip ----------------------------------------------
 
@@ -99,12 +213,25 @@ code rather than re-scanning delimiters (ADR-049)."
         ""))
     (str "error: " (if (string? e) e (pr-str e)))))
 
+(defn repl--print-value (v)
+  "Print a result value — syntax-coloured (the input highlighter, reused) on an
+interactive TTY, plain on a pipe."
+  (let (s (pr-str v))
+    (println (if (stdout-tty?) (repl--colorize s) s))))
+
 (defn repl--eval-print (src)
-  "Evaluate `src` in the running image. Returns `:ok` after printing its value,
-`:more` if `src` is an incomplete form (read another line), or `:error` after
-reporting a real error. Never lets an error escape the loop."
+  "Evaluate `src` in the running image. Returns `:ok` after printing its (coloured)
+value — plus a dim `; N ms` note when the eval was slow — `:more` if `src` is an
+incomplete form (read another line), or `:error` after reporting a real error. Never
+lets an error escape the loop."
   (try
-    (do (println (pr-str (eval-string src))) :ok)
+    (let (t0 (now)
+          v (eval-string src)
+          ms (- (now) t0))
+      (repl--print-value v)
+      (when (and (stdout-tty?) (>= ms *repl-slow-ms*))
+        (println (str "\e[90m; " ms " ms\e[0m")))
+      :ok)
     (catch e
       (if (repl--incomplete? e)
         :more
@@ -181,6 +308,13 @@ incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
       (= (get r :kind) :cancel) {:eof false :history history}
       :else (let (line (get r :text))
               (cond
+                ;; A `,cmd` meta-command at a fresh prompt: run it, remember it for ↑/↓,
+                ;; and re-prompt (it isn't a form to evaluate).
+                (and (= acc "") (repl--meta? line))
+                (do (repl--run-meta line)
+                    (let (h2 (editor/lineedit/lineedit--remember history line))
+                      (when interactive (repl--save-history h2))
+                      {:eof false :history h2}))
                 ;; A blank / comment-only line at a fresh prompt: nothing to evaluate.
                 (and (= acc "") (not (repl--content? line 0 (string-length line) false))) {:eof false
                                                                                            :history history}
