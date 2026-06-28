@@ -157,7 +157,7 @@ fn fib(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 /// Tail-recursive `cons`-builder — every iteration resolves the *global* `cons`
 /// (a full lexical-chain walk to GLOBAL, then a globals-table probe) plus one
 /// allocation. The clearest measure of the global-lookup + dispatch tax the
-/// eval-dispatch campaign targets (see `docs/handoff-eval-dispatch.md`); the
+/// eval-dispatch campaign targets; the
 /// later lexical-addressing step should move this most.
 #[divan::bench(args = engine_grid![10_000, 100_000])]
 fn cons_build(bencher: divan::Bencher, (eng, n): (Eng, u64)) {

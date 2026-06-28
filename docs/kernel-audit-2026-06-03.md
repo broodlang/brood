@@ -136,7 +136,7 @@ medium. The code already knows the right pattern (`FRAME_PEERS` gates on
    no-ops. Several hundred lines of dead complexity in a 6100-line file. Delete it
    all (keep `PoisonBits`), simplify `local_live_count` to a raw slab-length sum.
 2. **[LOW value] Stale doc premise** — `compile.rs` has **zero** Rust `unsafe { }`
-   blocks; the "8 unsafe blocks" framing in `docs/handoff-vm-gc-memory.md` is
+   blocks; the old "8 unsafe blocks" framing is
    stale (all `unsafe` matches are the `Scope::unsafe_slots` letrec machinery).
    The real audit surface is the rooting discipline + the live-arm registry.
 3. **[LOW value] Harden "unreachable by prior check" sites** if ever touched —

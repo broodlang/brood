@@ -308,8 +308,8 @@ fn collects_below_the_outermost_eval() {
 /// Promoting a *cyclic* local graph — a closure whose captured scope binds the
 /// closure itself — must terminate, not stack-overflow. `def` (and `spawn`)
 /// promote a value into the shared append-only RUNTIME region; before `promote`
-/// grew a forwarding table the closure↔env back-edge recursed forever → SIGSEGV
-/// (`docs/handoff-gc.md` item #2). Covers the self-referential case and the
+/// grew a forwarding table the closure↔env back-edge recursed forever → SIGSEGV.
+/// Covers the self-referential case and the
 /// realistic `letrec` mutual-recursion case, and reads the promoted cycle back
 /// from a *separate* process (whose own LOCAL heap never held it) — proving the
 /// shared cyclic graph is sound cross-heap, per the multi-core test rule.

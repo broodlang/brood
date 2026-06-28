@@ -115,15 +115,8 @@ not for *how things are now*.
 
 | Document | What's in it |
 |---|---|
-| [handoff-blocking-io.md](handoff-blocking-io.md) | Handoff: blocking-IO → mailbox delivery (ADR-059). |
-| [handoff-eval-dispatch.md](handoff-eval-dispatch.md) | Handoff: the evaluator-dispatch performance campaign. |
-| [handoff-gc.md](handoff-gc.md) | Handoff: the GC bring-up. |
-| [handoff-vm-gc-memory.md](handoff-vm-gc-memory.md) | Handoff: VM × GC × memory interactions. |
-| [handoff-vm-callback-routing.md](handoff-vm-callback-routing.md) | Handoff: route native higher-order callbacks (`try`/`binding`/`apply`) through the VM, blocked on the `let`-self-ref `send` divergence (fix plan inside). |
 | [runtime-collector-exploration.md](runtime-collector-exploration.md) | Exploration of a collector for the shared RUNTIME code region. |
 | [memory-review.md](memory-review.md) | A full memory/GC review snapshot. |
-| [findings-closure-promotion-overflow.md](findings-closure-promotion-overflow.md) | Findings: closure-promotion stack overflow. |
-| [gol-findings-2026-05-30.md](gol-findings-2026-05-30.md) | Game-of-Life dogfooding findings (stdlib/DX gaps). |
 | [gc-flush-panic-mcp-2026-05-31.md](gc-flush-panic-mcp-2026-05-31.md) | Investigation of a GC flush panic under `nest mcp` (stale-binary). |
 | [lexical-addressing-gotchas.md](lexical-addressing-gotchas.md) | Gotchas hit while adding lexical addressing / VM closures. |
 
