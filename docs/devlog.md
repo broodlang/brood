@@ -562,3 +562,31 @@ recorded history, and full-presents (the prior exact behaviour) on any doubt or
 resize, so a wrong-damage corruption is impossible. Validated on a live display and
 made the **default**; `BROOD_GUI_DAMAGE=0` is the opt-out escape hatch. Builds clean
 across default/`jit`/`gui`/`gui-gpu`; suite 2499 passed.
+
+## 2026-06-28 — Tech-debt sweep: box `LispError`, zero clippy warnings, fatal gate
+
+**`LispError` is now one pointer wide.** It was a 144-byte struct returned by value in
+every `LispResult` (355 functions) — both a hot-path cost and 82% of the clippy noise
+(`result_large_err` ×479). Made it a newtype over a boxed `LispErrorData` with
+`Deref`/`DerefMut`, so **`LispResult` went 144 → 24 bytes** (6× smaller returns on the
+common `Ok` path; the box only allocates on the cold error path) with the change fully
+contained to `error.rs` — Deref keeps every `e.field` access, the `with_*`/`or_*`
+builders, and all 165 `Err(LispError::…)` sites unchanged. Brood suite green (2499);
+the only follow-on edits were three test sites that *moved* `e.message` out (now
+`.clone()`).
+
+**Clippy: 582 → 0 warnings, and the gate is now fatal.** `cargo clippy --fix` cleared
+the mechanical lints; the design-intentional ones got documented crate-level allows
+(`too_many_arguments`/`type_complexity` in the evaluator/codegen/render paths;
+`result_large_err` locally on cranelift's external error; the cosmetic doc-style lints;
+and a small set of style lints whose lint-preferred form is less clear in the kernel's
+index-based loops). Substantive fixes landed: boxed the 6 KB `Backend::Gpu` enum variant,
+`pub`→`pub(crate)` on `GlWindow::paint` (private type in public API), `SharedBlob::is_empty`,
+exact `bigdecimal_cmp_float` reuse, `# Safety` docs on the debug JIT callbacks, and the
+unused-var / always-true-assert test nits. `make clippy` now runs `-D warnings` so a new
+lint fails the build (docs/allows in `crates/lisp/src/lib.rs`). Also dropped a duplicate
+`expect!` macro definition. Earlier in the day: bumped deps to latest stable, the audit
+fixes (smallvec `union`, cranelift `MemFlagsData::trusted()`, ropey borrow-not-clone,
+x25519 `was_contributory`, rcgen→aws_lc_rs dropping `ring`, removed dead `glutin-winit`),
+tree-sitter incremental parse + `:error`/`:missing` CST keys, and the softbuffer damage
+present.
