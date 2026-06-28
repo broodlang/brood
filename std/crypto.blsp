@@ -1,7 +1,8 @@
 ;; std/crypto.blsp — symmetric encryption, key derivation, secure random bytes.
 ;; (require 'crypto)
 ;;
-;; All operations work with byte vectors (lists or vectors of ints 0–255).
+;; Raw-byte operations return and accept `bytes` values; the byte-consuming
+;; primitives also leniently accept a vector or list of ints 0–255.
 ;; Use `encoding/base64-encode` / `encoding/hex-encode` to serialise keys/nonces.
 
 (defmodule crypto
@@ -30,7 +31,7 @@ cryptographically secure random bytes.
 ;; ---- random bytes -----------------------------------------------------------
 
 (defn random-bytes (n)
-  "Return `n` cryptographically secure random bytes as a vector of ints 0–255."
+  "Return `n` cryptographically secure random bytes as a bytes value."
   (%random-bytes n))
 
 (defn random-key ()
@@ -44,12 +45,12 @@ cryptographically secure random bytes.
 ;; ---- byte/string conversion -------------------------------------------------
 
 (defn str->bytes (s)
-  "Encode string `s` as a vector of UTF-8 byte ints."
-  (into [] (string->utf8-bytes s)))
+  "Encode string `s` as a bytes value (its UTF-8 bytes)."
+  (string->bytes s))
 
-(defn bytes->str (bytes)
-  "Decode a vector of UTF-8 byte ints to a string."
-  (utf8-bytes->string bytes))
+(defn bytes->str (b)
+  "Decode a bytes value of UTF-8 bytes to a string."
+  (bytes->string b))
 
 ;; ---- ChaCha20-Poly1305 AEAD -------------------------------------------------
 ;;
@@ -64,17 +65,18 @@ cryptographically secure random bytes.
 (defn encrypt (key nonce plaintext-bytes)
   "Encrypt `plaintext-bytes` with ChaCha20-Poly1305. `key` must be 32 bytes;
 `nonce` must be 12 bytes. Returns ciphertext as a byte vector (plaintext +
-16-byte auth tag). Never reuse a (key, nonce) pair."
+16-byte auth tag). Inputs may be bytes values or vectors/lists of ints.
+Never reuse a (key, nonce) pair."
   (%chacha20-encrypt key nonce plaintext-bytes))
 
 (defn decrypt (key nonce ciphertext-bytes)
   "Decrypt `ciphertext-bytes` with ChaCha20-Poly1305. Returns the plaintext
 byte vector on success, or `:error` if authentication fails (wrong key/nonce
-or tampered ciphertext)."
+or tampered ciphertext). Inputs may be bytes values or vectors/lists of ints."
   (%chacha20-decrypt key nonce ciphertext-bytes))
 
 (defn encrypt-str (key nonce s)
-  "Encrypt the UTF-8 bytes of string `s`. Returns ciphertext byte vector."
+  "Encrypt the UTF-8 bytes of string `s`. Returns a ciphertext bytes value."
   (encrypt key nonce (str->bytes s)))
 
 (defn decrypt-str (key nonce ciphertext-bytes)
@@ -89,16 +91,16 @@ or tampered ciphertext)."
 ;; for password storage (NIST SP 800-132 2023 recommendation).
 
 (defn crypto--as-bytes (x)
-  "Coerce `x` to a byte vector: a string → its UTF-8 bytes; a byte vector/list →
-itself. Lets the raw-byte crypto primitives accept either shape at the seam."
+  "Coerce `x` to bytes: a string → its UTF-8 bytes value; bytes / a byte
+vector/list → itself. Lets the raw-byte crypto primitives accept either shape."
   (if (string? x) (str->bytes x) x))
 
 (defn pbkdf2 (password salt iterations key-len)
   "Derive a `key-len`-byte key from `password` and `salt` (each a string or a
-byte vector) using PBKDF2-HMAC-SHA256. A byte-vector salt is used as raw bytes —
-so a base64-decoded binary salt (e.g. Postgres SCRAM) round-trips faithfully
-rather than being UTF-8-decoded. Higher `iterations` = slower brute force; use
-≥ 600,000 for password storage."
+byte sequence) using PBKDF2-HMAC-SHA256, returned as a bytes value. A byte salt
+is used as raw bytes — so a base64-decoded binary salt (e.g. Postgres SCRAM)
+round-trips faithfully rather than being UTF-8-decoded. Higher `iterations` =
+slower brute force; use ≥ 600,000 for password storage."
   (%pbkdf2-sha256-bytes (crypto--as-bytes password)
                         (crypto--as-bytes salt)
                         iterations
@@ -107,7 +109,7 @@ rather than being UTF-8-decoded. Higher `iterations` = slower brute force; use
 ;; ---- utilities --------------------------------------------------------------
 
 (defn secure=? (a b)
-  "Constant-time equality check for byte vectors (prevents timing attacks).
+  "Constant-time equality check for byte sequences (prevents timing attacks).
 Returns true if `a` and `b` are identical, false otherwise."
   (and (= (count a) (count b))
        (= 0 (fold (fn (acc pair)
