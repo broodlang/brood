@@ -29,23 +29,24 @@ fn parse_size_handles_suffixes() {
 /// the soft limit — instead of growing unbounded and OOMing the host. The
 /// interpreter stays usable afterwards (it's an ordinary error, not a crash).
 ///
-/// `#[ignore]`d by default: this is the *only* test that deliberately drives an
-/// unbounded allocation, so if the soft-limit safepoint ever regresses it OOMs
-/// the host instead of failing cleanly — not something to hit unattended during
-/// a routine `cargo test`. Run it deliberately, when you can watch it, with
-/// `cargo test --test mem_limit -- --ignored`.
+/// Safe to run unattended: the `build` count is **bounded** (1M cells), so the
+/// worst case if the safepoint ever regressed is a finite ~tens-of-MiB list that
+/// completes and fails the `expect_err` *assertion* — not an unbounded host OOM.
+/// When the safepoint works (the normal case) it trips after the 4 MiB headroom,
+/// long before the cap. (The retained `acc` list means live bytes only grow, so
+/// GC can't reclaim it — the safepoint check is what stops the build.)
 #[test]
-#[ignore = "drives an unbounded allocation; run with --ignored when you can watch it (see doc comment)"]
 fn soft_limit_turns_runaway_into_catchable_error() {
     // Build the prelude with no limit, *then* cap just above current usage so
-    // the next chunk of allocation trips it. (GC is a no-op today, so a build
-    // loop's live bytes only grow — the safepoint check is what stops it.)
+    // the next chunk of allocation trips it.
     let mut interp = Interp::new();
-    let headroom = 4 * 1024 * 1024; // 4 MiB
+    let headroom = 4 * 1024 * 1024; // 4 MiB — trips here when the safepoint works
     alloc::set_soft_limit(alloc::live_bytes() + headroom);
 
+    // 1M cells is >> the 4 MiB headroom (so it always trips when the safepoint
+    // works) yet bounded (so a regression allocates a finite, survivable amount).
     let runaway = "(let (build (fn (n acc) (if (= n 0) acc (build (- n 1) (cons n acc))))) \
-                     (build 100000000 nil))";
+                     (build 1000000 nil))";
     let err = interp
         .eval_str(runaway)
         .expect_err("runaway allocation should hit the soft memory limit");
@@ -61,7 +62,7 @@ fn soft_limit_turns_runaway_into_catchable_error() {
     let caught = interp
         .eval_str(
             "(try (let (build (fn (n acc) (if (= n 0) acc (build (- n 1) (cons n acc))))) \
-                    (build 100000000 nil)) \
+                    (build 1000000 nil)) \
                (catch e :caught))",
         )
         .expect("memory error must be catchable");

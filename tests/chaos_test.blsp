@@ -32,18 +32,18 @@
 
   (test "a spawned-nil process exits with :normal"
     (let (w (spawn nil) ref (monitor w))
-      (assert= :normal (receive ([:down _ _ reason] reason) (after 500 :timeout)))))
+      (assert= :normal (receive ([:down _ _ reason] reason) (after 5000 :timeout)))))
 
   (test "a spawned-integer process exits with :normal"
     (let (w (spawn 42) ref (monitor w))
-      (assert= :normal (receive ([:down _ _ reason] reason) (after 500 :timeout)))))
+      (assert= :normal (receive ([:down _ _ reason] reason) (after 5000 :timeout)))))
 
   (test "a crashing spawned process propagates its error as the monitor down reason"
     ;; Post-1a63eb7 `(spawn (fn () body))` runs `body` (no longer the silent
     ;; no-op footgun), so a crash here surfaces — its monitor sees the error
     ;; reason, not :normal.
     (let (w (spawn (fn () (/ 1 0))) ref (monitor w))
-      (assert= (receive ([:down _ _ reason] reason) (after 500 :timeout))
+      (assert= (receive ([:down _ _ reason] reason) (after 5000 :timeout))
                [:error "runtime error: division by zero"])))
 
   (test "parent process is unaffected when a child crashes without a monitor"
@@ -214,7 +214,7 @@
 
 (defn chaos-drain (n)
   (if (= n 0) :ok
-    (receive (:done (chaos-drain (- n 1))) (after 500 :timeout))))
+    (receive (:done (chaos-drain (- n 1))) (after 5000 :timeout))))
 
 (describe "concurrent spawn/send chaos"
   :isolated

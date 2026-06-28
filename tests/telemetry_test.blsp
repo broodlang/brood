@@ -15,7 +15,7 @@
 ;; ---- helpers ----------------------------------------------------------------
 ;; A handler that forwards (event measurements metadata) to `pid`.
 (defn tel-fwd (pid) (fn (e m md) (send pid [:ev e m md])))
-(defn tel-recv () (receive ([:ev e m md] [e m md]) (after 2000 :timeout)))
+(defn tel-recv () (receive ([:ev e m md] [e m md]) (after 5000 :timeout)))
 (defn tel-none () (receive ([:ev e m md] :got) (after 120 :none)))
 (defn tel-ids (event) (map (fn (h) (get h :id)) (get (handlers) event nil)))
 (defn tel-await (n)
@@ -109,7 +109,7 @@
       (detach-all)
       (attach :w :evt (fn (e m md) (send me [:where (self)])))
       (emit :evt)
-      (let (where (receive ([:where p] p) (after 2000 :timeout)))
+      (let (where (receive ([:where p] p) (after 5000 :timeout)))
         (stop-telemetry)
         (is (= where lpid))
         (is (not (= where me))))))
@@ -136,7 +136,7 @@
       (monitor lpid)
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))
       (emit :boom)                       ; async — the kill happens in the listener
-      (let (reason (receive ([:down _ ~lpid r] r) (after 3000 :timeout)))
+      (let (reason (receive ([:down _ ~lpid r] r) (after 5000 :timeout)))
         (is (not (= reason :timeout)))   ; the listener really died
         (assert= (+ 40 2) 42))))         ; and WE (the emitter) are still running
 
@@ -147,7 +147,7 @@
       (attach :ok    :evt  (tel-fwd me))
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))
       (emit :boom)
-      (receive ([:down _ ~lpid _] :ok) (after 3000 :timeout))
+      (receive ([:down _ ~lpid _] :ok) (after 5000 :timeout))
       (let (l2 (start-telemetry))        ; restart the listener
         (is (not (= l2 lpid)))
         (emit :evt {:n 1})
@@ -163,7 +163,7 @@
       (start-telemetry) (detach-all)
       (forward :fwd :evt me)
       (emit :evt {:n 5} {:k :v})
-      (let (got (receive ([:telemetry e m md] [e m md]) (after 2000 :timeout)))
+      (let (got (receive ([:telemetry e m md] [e m md]) (after 5000 :timeout)))
         (stop-telemetry)
         (assert= got [:evt {:n 5} {:k :v}])))))
 

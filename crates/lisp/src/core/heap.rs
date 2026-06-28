@@ -4607,7 +4607,7 @@ impl Heap {
     ///
     /// This replaces the recurring manual save/restore pattern:
     ///
-    /// ```ignore
+    /// ```text
     /// let vb = heap.roots_len();
     /// let eb = heap.env_roots_len();
     /// // ... push roots ...

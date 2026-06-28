@@ -53,24 +53,26 @@
     ;; global-lookup call path too.
     (assert= :done (adv-tail-loop 30000)))
 
-  ;; NOTE — known segfault, NOT run here. `(spawn (fn ...))` from inside a
-  ;; let-bound recursive closure overflows the host stack: `Heap::promote_env`
-  ;; has no cycle detection, but a let-bound recursive closure captures the
-  ;; env that contains itself, so promoting it recurses infinitely through
-  ;; promote_closure → promote_env → promote(self-closure) → … . Repro:
-  ;;
-  ;;   (let (me (self)
-  ;;         loop (fn (n) (if (= n 0) :done
-  ;;                        (do (spawn (send me n)) (loop (- n 1))))))
-  ;;     (loop 5))
-  ;;
-  ;; → "thread 'main' has overflowed its stack" within 5 iterations.
-  ;;
-  ;; Workaround: hoist the recursive lambda to a top-level `defn`. The bug
-  ;; reproduces only when the closure's captured-env chain is cyclic, which
-  ;; only happens for let-bound recursive closures. Fix: cycle detection in
-  ;; `promote_env` (parallel to `FlushForward` in `flush_value`).
-)
+  ;; ONCE a known host-stack segfault, now FIXED — kept as a regression lock.
+  ;; `(spawn …)` from inside a let-bound recursive closure used to promote the
+  ;; closure's captured frame whole; that frame contains the self-referential
+  ;; `loop`, so promotion recursed infinitely → "thread 'main' has overflowed
+  ;; its stack" within ~5 iterations. The fix is in `closure_to_message`
+  ;; (process/message.rs): it copies only the *free* locals (so an unrelated
+  ;; self-ref binding in the frame is never dragged in) and tracks a `visited`
+  ;; set, so a closure that genuinely refers to itself returns a clean error
+  ;; instead of crashing.
+  (test "spawning from inside a let-bound recursive closure no longer segfaults"
+    ;; The body captures a local (`n`) from the same frame that holds `loop`;
+    ;; under the old whole-frame promotion this overflowed the host stack.
+    (let (loop (fn (n) (if (= n 0) :done (do (spawn (+ n 1)) (loop (- n 1))))))
+      (assert= :done (loop 8))))
+
+  (test "sending a self-referential local closure errors cleanly (was a segfault)"
+    ;; `send` serialises the closure; a local closure that refers to itself is
+    ;; rejected with a structured error rather than recursing into a crash.
+    (let (loop (fn (n) (if (= n 0) :done (loop (- n 1)))))
+      (assert-error (send (self) loop)))))
 
 ;;
 ;; --- Heap allocation --------------------------------------------------------

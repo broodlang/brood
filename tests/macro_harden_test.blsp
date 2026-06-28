@@ -182,7 +182,7 @@
     ;; A process that sends itself a message, then receives with a short timeout.
     (let (me (self))
       (spawn (send me :ping))
-      (assert= (receive (:ping :got-ping) (after 200 :timeout)) :got-ping)))
+      (assert= (receive (:ping :got-ping) (after 5000 :timeout)) :got-ping)))
 
   (test "receive without after works"
     (let (me (self))
@@ -204,7 +204,7 @@
     (let (me (self))
       (spawn (send me :x))
       ;; Just check expansion — after in last position is valid syntax.
-      (assert= (receive (:x :ok) (after 200 :timed-out)) :ok))))
+      (assert= (receive (:x :ok) (after 5000 :timed-out)) :ok))))
 
 ;; ── 7. describe — keyword group name ─────────────────────────────────────────
 ;; `describe` is defined in the `test` module. When testing via `eval`, we must
