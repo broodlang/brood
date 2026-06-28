@@ -6826,3 +6826,82 @@ vendored (it's ~33k LOC of C); taken as a normal cargo dep.
 **Note.** This subsumes the once-considered in-tree CHAMP node-array arena (its purpose was the
 same malloc churn). Remaining map-perf levers (single-pass `map-update`, shrinking the path-copy
 memcpy) are orthogonal and tracked separately (`champ-map-perf`).
+
+## ADR-114 — Keep the moving collector; kill the stale-handle bug class with JIT stack maps, not by switching to mark-sweep
+
+**Status:** proposed (2026-06-28). Analysis + recommendation; the architectural call is the
+maintainer's. Records why we evaluated replacing the per-process moving/copying collector with a
+**non-moving mark-sweep** heap and what the benchmarks say. No code change yet.
+
+**Context.** Brood's data is immutable (ADR-026/112) and processes are isolated (per-process LOCAL
+heap, messages deep-copied). The reasonable intuition — *"with immutability + isolation, GC should
+be easy; are we over-complicating it?"* — is half right, and worth pinning down precisely:
+
+- **What those properties already buy, and we cash in.** Because data never mutates, *old can never
+  point to young*, so the generational minor collection needs **no data write barrier / remembered
+  set** (the sole remembered set is the narrow `def`/env-frame *binding* rebind for hot reload,
+  ADR-013). Per-process heaps collect independently (no stop-the-world); a dead process frees its
+  whole heap wholesale. That is the payoff, and it is real.
+- **What they do *not* buy.** The complexity that remains is not from handling mutation (there is
+  none). It is from two **performance** choices layered on top: (1) a **moving/copying** nursery
+  (for bump allocation + compaction) and (2) a **JIT with no GC stack maps** (ADR-101). Together
+  these create the *stale-handle* bug class: a moving collector relocates LOCAL objects, and a
+  handle held across a collection — especially a JIT-staged call arg the collector can't see —
+  points at where the object *was*. The epoch stamps, poison bits, per-deref tripwire, and the
+  `BROOD_GC_VERIFY` heap verifier all exist **only** to catch that class. The recent run of
+  JIT+GC crashes (bug #2 — a stale LOCAL handle staged across a GC; see `jit-gc-frame-corruption`)
+  is squarely this.
+
+Immutable data is *nearly* acyclic, so a **non-moving** collector (mark-sweep, or refcounting)
+would be sound and would **erase the stale-handle class by construction** — handles never move, so
+none can go stale. (Not *purely* acyclic: closures capture environments and `def` rebinding can
+introduce cycles/old→young edges — exactly the corner the one remembered set covers — so RC would
+need a cycle collector; plain mark-sweep would not.) The question is what throughput that costs.
+
+**Measurements** (this machine, clean `--release --features jit`, min of 6; full data archived in
+`docs/benchmarks/2026-06-28*-gc-cost.md`). Method: A/B each workload **GC-on** vs **GC suppressed**
+(`BROOD_GC_FLOOR=500M` → 0 collections), so the delta is the *current copying collector's* cost.
+Survivor rate = `copied / (copied + reclaimed)` from `(gc-stats)`.
+
+| workload | survivor | collections | GC-on | GC-off | copying GC's effect |
+|----------|----------|-------------|-------|--------|---------------------|
+| `fib 32` (compute-bound) | — | 0 | 0.08s | 0.08s | none (no allocation pressure) |
+| `listsum` (build+fold 20k lists ×1500) | 14% | 474 | **0.93s** | 1.57s | **net −40%: copying is *faster*** |
+| `bintree` (depth-16 ×300) | 60% | 451 | 8.64s | **5.42s** | **+37%: copying is the cost** |
+
+Two findings decide it:
+
+1. **Copying is sometimes a net *win*, via compaction.** On `listsum`, GC-on beats GC-off by 40% —
+   compaction keeps the working set cache-hot, while the un-collected heap grows and thrashes. A
+   non-moving collector does not compact, so it forfeits this win (it stays bounded by reusing
+   freed slots, so it won't thrash like GC-off — but it won't get copying's perfect locality
+   either), *and* pays free-list allocation instead of bump-pointer (~1.5–3× per alloc, on **every**
+   workload — a flat mutator tax a copying nursery avoids).
+2. **Copying's cost is real only on high-survivor, allocation-pathological workloads** (`bintree`,
+   60% survivor, the GC-stress benchmark by design). There mark-sweep would likely *win* (it marks
+   the same live set but never copies it). But that is the minority case.
+
+Net: **throughput does not favor mark-sweep** — it's roughly a wash (a win on `bintree`, a loss on
+locality-bound/alloc-heavy code, nothing on compute-bound), plus a universal allocation tax. So the
+choice is **not** a throughput decision; it is *bug-class elimination + kernel simplicity* vs.
+*rewrite cost + losing bump-allocation/compaction*.
+
+**Decision (recommended).** **Keep the moving collector and eliminate the stale-handle class at its
+root by giving the JIT GC stack maps** (Cranelift `stack_map` support), so the collector can find
+and relocate JIT-staged roots instead of them going stale. This fixes the *actual* cause (GC blind
+to JIT roots) without surrendering the compaction/locality wins the data shows are worth keeping,
+and lets the epoch/tripwire/verifier machinery become pure debug aids rather than load-bearing.
+
+**Rejected alternative — switch to non-moving mark-sweep.** Tempting for kernel simplicity (no
+forwarding, no epochs, no "old never points to young" reasoning, tripwire/verifier deletable) and
+genuinely aligned with the "immutability should make this simple" instinct. Rejected as the
+*primary* path because the benchmarks show it trades away a measured locality/allocation win to fix
+a bug that stack maps also fix — a worse trade while the JIT is the performance story. It stays a
+live fallback: if JIT stack maps prove disproportionately hard in Cranelift, a non-moving LOCAL
+heap is the simplicity-first escape, and the immutability invariant guarantees it would be correct.
+
+**Trade.** Stack maps add JIT complexity (a safepoint map per call site; the collector learns to
+read it) but touch only the JIT↔GC seam, not the whole heap. Until they land, the debug tripwire +
+`BROOD_GC_VERIFY` + `BROOD_JIT_VERIFY` remain the safety net (and have caught every instance so
+far). Supersedes nothing; refines ADR-035/055 (the copying collector stays) and ADR-101 (the JIT
+gains a GC-root contract).

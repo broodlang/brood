@@ -294,6 +294,7 @@ Every session, oldest first. Full text: [devlog-archive.md](archive/devlog-archi
 - **2026-06-08** — corosensei removal §8.4 step 3: gen flake **fixed** + capture mode proven **correctness-equivalent**. The `%isolate` reap now `unlink_self(child)` before `(exit child :kill)`, so cleaning up a leftover `spawn-link`ed server can't back-propagate `:killed` and kill the isolate runner (the async-`stop`-vs-reap race is moot) — gen 8/8 flag-on. Full suite both modes (good binary): **1882/1902**, the **same 20 failures in both** — all environmental (≈15 tree-sitter, needs native grammars [WIP]; ≈5 package-`:git`, needs git/network, 120s timeouts) — so **capture mode adds zero failures**. Timing 218 s (off) vs 265 s (on) ≈ **+22%** (the 6× was the now-fixed deadlock/timeouts). So every capture-specific issue (the §8.1 native-nested footgun, the kill/monitor deadlock, the gen flake) is resolved; what's left for step 3 is the **flip-the-default decision** — correctness is proven, the open question is whether to eat the ~22% now (it lands before step 4's corosensei-deletion payoff) or optimise the capture hot path first. §6 plain-release bar holds flag on+off. Flag still **off**.
 - **2026-06-08** — corosensei removal §8.4 **steps 3-flip + 4 done: corosensei is gone.** Flipped the default and **deleted corosensei** in one move — the `BROOD_STATE_CAPTURE` flag, the `Run::{Coro|Capture}` split, the `corosensei` dep, all the coroutine plumbing (`Suspend`/`Yielder0`/`build_coro`/`resume_coro`/`handle_coro_outcome`), and `unsafe impl Send for Process` are removed. State capture is the **sole** scheduler engine; `Process` is now plain `Send` data and `run_one` always drives `vm_run_bc` (a body with no compiled 0-arg arm tree-walks on the worker thread, its `receive`s block — the §7.4 dirty carve-out). **Stealing generalised:** every process is heap-captured with no native stack, so `try_steal` takes **any** queued process (`pop_back`), `STEALABLE` counts all queued, and the now-vestigial `fresh` flag is dropped; `CORO_STACK_BYTES` → `WORKER_STACK_BYTES`. **Regression caught + fixed in validation:** a self-recursive pass-through `(defn hog () (hog))` spun **un-preemptibly** — ADR-069's pass-through opt flagged it as a thin wrapper redirecting `hog → hog`, and the redirect loop (`compile::dispatch` + `eval::eval`) relied on `tick()`→`preempt()` to yield, which is now a no-op (only the VM driver's loop-top `tick_capture` suspends). Both redirect loops now **break a self-cycle** (redirect resolving to the same closure by identity) and fall through to the normal call path, so it runs as a VM `SelfTail`/`Call` and preempts at the loop top (the closure's own name isn't known at `compute_passthrough` — a `defn` fn is anonymous). Validation: §6 plain-release KI-1 bar 10/10 + 5/5 `BROOD_GC_STRESS`; lib + differential (engines agree) + work-stealing + live-migration + preemption all green via nextest; full suite 553/555, the 2 failures pre-existing environmental (parser deep-nest stack flake — passes with `RUST_MIN_STACK=32M`; `dist` reconnect — fails on HEAD too, so not from this work). Suite runtime back to ~25 s (the +22% capture overhead is moot now that corosensei + its 16 MiB coroutine stacks are gone).
 - **2026-06-24** — JIT fast path: stale LOCAL handle (`StrId`) after GC in `dispatch`'s `_ =>` arm — deopt (outcome 1) fires after a sub-call returns a non-int, but GC already ran in `jit_dispatch_call`'s safepoint; `cur_argv` is stale; fix reads `roots[base..argc]` instead
+- **2026-06-28** — GC cost study + ADR-114: immutability/isolation already buy no-write-barrier + per-process collection; the leftover complexity (epochs/tripwire/verifier) is the *moving* collector's stale-handle class, not mutation. A/B measured copying GC = net −40% on locality-bound (listsum) to +37% on high-survivor (bintree), wash overall → keep the moving collector, kill stale handles with JIT GC stack maps (mark-sweep is the simplicity-first fallback). Plus broadened `BROOD_STALL_MS` (quantum + gui-paint guards) for the gameplay lag.
 
 ---
 
@@ -4393,3 +4394,51 @@ working after installing the fixed `nest` binary.
 
 **Commits.** brood `e000652`; pong reproducer `61af798`; hatch-demo
 `.gitignore` + lockfile `6424e6a`.
+
+## 2026-06-28 — GC cost study + ADR-114: keep the moving collector, fix stale handles with JIT stack maps (not mark-sweep)
+
+Prompted by the question *"immutability + process isolation should make GC easy
+— are we over-complicating it?"* — a good question, pinned down with data.
+
+**What the invariants already buy (and we cash in).** Immutability ⇒ old never
+points to young ⇒ **no data write barrier** (sole remembered set is the `def`/env
+rebind, ADR-013). Isolation ⇒ per-process collection, no stop-the-world,
+free-on-death. That part is genuinely simple.
+
+**What's left isn't from mutation.** The epoch stamps / poison bits / per-deref
+tripwire / `BROOD_GC_VERIFY` verifier all exist solely to catch the *stale-handle*
+class a **moving** collector creates — the bug #2 family (a JIT-staged LOCAL
+handle held across a collection). Immutable data is *nearly* acyclic, so a
+**non-moving** mark-sweep heap would erase that class by construction (handles
+never move). Question: what throughput does that cost?
+
+**Measured it** (A/B GC-on vs `BROOD_GC_FLOOR=500M` → 0 collections; clean
+`--release --features jit`; min of 6; archived
+`docs/benchmarks/2026-06-28T09-27-19Z-gc-cost.md`):
+
+| workload | survivor | GC-on | GC-off | copying GC effect |
+|---|---|---|---|---|
+| fib 32 (compute) | — (0 collections) | 0.08s | 0.08s | none |
+| listsum (14% surv) | 14% | **0.93s** | 1.57s | **−40%: copying *faster*** (compaction → cache-hot) |
+| bintree (60% surv) | 60% | 8.64s | **5.42s** | **+37%: copying is the cost** (copies live trees) |
+
+Findings: (1) compaction is sometimes a *net win* (listsum) — mark-sweep forfeits
+it and adds a free-list-vs-bump alloc tax on every workload; (2) copying only
+hurts on high-survivor allocation-pathological code (bintree, the GC-stress
+benchmark). **Throughput is a wash** → doesn't decide it.
+
+**ADR-114 (proposed).** Keep the moving collector; eliminate the stale-handle
+class at its root by giving the JIT **GC stack maps** (Cranelift `stack_map`) so
+the collector finds/relocates JIT-staged roots — fixes the actual cause without
+surrendering the measured compaction/locality win, and demotes the
+epoch/tripwire/verifier to pure debug aids. Mark-sweep recorded as the
+simplicity-first fallback if stack maps prove disproportionately hard.
+
+**Also (lag diagnostics).** The format/`JumpIfFalse` fix (4345d34) shipped; the
+gameplay lag still reproduces with no `[stall]` line, so the pause is neither
+minor-GC nor RUNTIME-compaction. Broadened `BROOD_STALL_MS`: a **quantum** guard
+in `scheduler::run_one` (catches a slow blocking builtin / long eval inside a
+green-process quantum, with pid) and a **gui-paint** guard in `gui.rs`
+`RedrawRequested` (the native render thread the scheduler guards can't see). Built
+a GUI-capable `nest` (`--features brood/jit,brood/gui`) with both; next freeze
+should name itself.
