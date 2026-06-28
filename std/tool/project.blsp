@@ -1322,24 +1322,16 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (defn project--hatch-main-template (nm)
   (str "(defmodule main \"Entry point for " nm ".\"\n"
     "  (:use web/endpoint :only [serve])\n"
-    "  (:use log :only [start-logger])\n"
-    "  (:alias db))\n"
-    "\n"
-    "(defn db-opts ()\n"
-    "  \"Postgres connection opts from $PG* env vars, with development defaults.\"\n"
-    "  {:host (or (getenv \"PGHOST\") \"127.0.0.1\")\n"
-    "   :port (string->number (or (getenv \"PGPORT\") \"5432\"))\n"
-    "   :user (or (getenv \"PGUSER\") \"postgres\")\n"
-    "   :password (or (getenv \"PGPASSWORD\") \"postgres\")\n"
-    "   :database (or (getenv \"PGDATABASE\") \"" nm "\")\n"
-    "   :size 5})\n"
+    "  (:use web/application :only [start default-logger-opts])\n"
+    "  (:alias db)\n"
+    "  (:alias pg))\n"
     "\n"
     "(defn main ()\n"
-    "  \"Start logging, open the DB pool + migrate, boot the endpoint, and park.\"\n"
-    "  (start-logger)\n"
-    "  (db/start (db-opts))\n"
-    "  (serve)\n"
-    "  (receive (:shutdown nil)))\n"))
+    "  \"Start logging, open the DB pool, boot the endpoint, and park.\"\n"
+    "  (start\n"
+    "    {:logger   (default-logger-opts)\n"
+    "     :children [(fn () (db/start (pg/opts-from-env \"" nm "\")))\n"
+    "                (fn () (serve))]}))\n"))
 
 (defn project--hatch-db-template (_nm)
   (str "(defmodule db\n"
@@ -1348,7 +1340,8 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "  `(db/all-messages)` / `(db/insert-message row)`.\"\n"
     "  (:alias repo)\n"
     "  (:alias query)\n"
-    "  (:alias pg))\n"
+    "  (:alias pg)\n"
+    "  (:alias web/repo))\n"
     "\n"
     "(def *repo* nil)\n"
     "\n"
@@ -1358,10 +1351,8 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "   :fields {:id :serial :name :text :body :text}})\n"
     "\n"
     "(defn start (opts)\n"
-    "  \"Open the Postgres pool and migrate the messages table. Call once at boot.\"\n"
-    "  (def *repo* (repo/open (pg/adaptor) opts))\n"
-    "  (repo/migrate *repo* messages-schema)\n"
-    "  :ok)\n"
+    "  \"Open the Postgres pool, migrate the messages table, and warm up the connections.\"\n"
+    "  (def *repo* (web/repo/start (pg/adaptor) opts [messages-schema])))\n"
     "\n"
     "(defn all-messages ()\n"
     "  \"All messages, oldest first (id ASC).\"\n"
@@ -1370,6 +1361,19 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "(defn insert-message (row)\n"
     "  \"Insert a `{:name ... :body ...}` row; return the inserted row with `:id`.\"\n"
     "  (repo/insert *repo* :messages row))\n"))
+
+(defn project--hatch-db-setup-template (nm)
+  (str "(defmodule db-setup\n"
+    "  \"Create the app database if absent, then run schema migrations.\n"
+    "  Run with: `nest run --main db-setup`\"\n"
+    "  (:alias pg)\n"
+    "  (:alias db))\n"
+    "\n"
+    "(defn main ()\n"
+    "  (let (o (pg/opts-from-env \"" nm "\"))\n"
+    "    (pg/create-database o)\n"
+    "    (db/start o)\n"
+    "    (println \"Done. Run `nest run` to start the server.\")))\n"))
 
 (defn project--hatch-endpoint-template (_nm)
   (str "(defmodule web/endpoint \"HTTP endpoint: bridges raw requests through the router.\"\n"
@@ -1590,6 +1594,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
                        (spit (path-join nm "project.blsp") (project--hatch-manifest-template actual-name))
                        (spit (path-join src-dir "main.blsp") (project--hatch-main-template actual-name))
                        (spit (path-join src-dir "db.blsp") (project--hatch-db-template actual-name))
+                       (spit (path-join src-dir "db-setup.blsp") (project--hatch-db-setup-template actual-name))
                        (spit (path-join web-dir "endpoint.blsp") (project--hatch-endpoint-template actual-name))
                        (spit (path-join web-dir "layout.blsp") (project--hatch-layout-template actual-name))
                        (spit (path-join web-dir "routes.blsp") (project--hatch-routes-template actual-name))
@@ -1598,6 +1603,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
                        (spit (path-join tests-dir "main_test.blsp") (project--hatch-main-test-template actual-name))
                        (spit (path-join tests-views-dir "messages_test.blsp") (project--hatch-messages-test-template actual-name))
                        [(str nm "/src/main.blsp") (str nm "/src/db.blsp")
+                         (str nm "/src/db-setup.blsp")
                          (str nm "/src/web/endpoint.blsp") (str nm "/src/web/layout.blsp")
                          (str nm "/src/web/routes.blsp")
                          (str nm "/src/web/views/home.blsp") (str nm "/src/web/views/messages.blsp")
@@ -1613,7 +1619,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
              (str nm "/tests/hello_test.blsp")])))
 
 (defn new-project (nm &optional template)
-  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), or `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), or `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps; run `nest run --main db-setup` once to create the database, then `nest run` to start). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than
