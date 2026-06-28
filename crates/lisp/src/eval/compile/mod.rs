@@ -1115,10 +1115,12 @@ fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
 }
 
 /// Whitelisted map UPDATE ops (return the new map — must be consumed at a sink) → Table op.
+/// Only ops that provably store serializable values (integers, removals) are whitelisted;
+/// `map-assoc` stores arbitrary `Value`s including ropes, which `table-put`/`table-snapshot`
+/// cannot serialize — so it is excluded until the Table can hold non-serializable values.
 fn linmap_update_op(sym: Symbol) -> Option<&'static str> {
     match value::symbol_name_opt(sym)? {
         "map-int-add" => Some("table-incr"),
-        "map-assoc" => Some("table-put"),
         "map-dissoc" => Some("table-delete"),
         _ => None,
     }
@@ -1224,126 +1226,32 @@ fn node_has_selfcall(node: &Node) -> bool {
     found
 }
 
-/// Build `(name arg0 arg1 …)` as a fresh free-global call node. A free-global
-/// head needs a real call-site IC id (`vm_site_alloc`), not `NO_SITE`, or the JIT
-/// mis-lowers it (it lowers `Node::Global` heads through the site-keyed IC path).
-fn linmap_call(heap: &Heap, name: &str, args: Vec<Node>) -> Node {
-    Node::Call {
-        callee: Box::new(Node::Global(value::intern(name))),
-        args: args.into_boxed_slice(),
-        tail: false,
-        pos: None,
-        file: None,
-        site: heap.vm_site_alloc(),
+/// Probe whether `(fn (params…) body…)` folds a **linear** immutable-map
+/// accumulator through a self-tail loop, returning that accumulator's param index
+/// if so. Backs the macroexpand-time wrapper-split (`eval/macros.rs`): it compiles
+/// a throwaway `Node` (like `self_inline_probe`) and runs the reachability analysis
+/// on it, so the soundness rule lives in exactly one place. Only a simple
+/// fixed-arity, no-capture top-level `defn` qualifies; anything else → `None`.
+pub(crate) fn linmap_probe(
+    heap: &Heap,
+    name: Symbol,
+    params: &[Symbol],
+    body: &[Value],
+) -> Option<usize> {
+    if std::env::var_os("BROOD_LINMAP").is_some_and(|v| v == "0") {
+        return None; // opt-out escape hatch
     }
-}
-
-/// Rewrite reads/updates/returns of slot `s` to the Table representation, in place.
-/// Mirrors `linmap_linear`'s traversal so each site is reached with its true sink.
-fn linmap_apply(node: &mut Node, s: usize, sink: LinSink, heap: &Heap) {
-    match node {
-        Node::Local(k) if *k == s => {
-            if sink == LinSink::Return {
-                let inner = std::mem::replace(node, Node::Local(s));
-                *node = linmap_call(heap, "table-snapshot", vec![inner]);
-            }
-            // SelfArg: thread the table handle unchanged. No: cannot occur (linear).
-        }
-        Node::Call { callee, args, site, .. } => {
-            if let Some(h) = call_head_sym(callee) {
-                if first_arg_is_local(args, s) {
-                    if let Some(tbl) = linmap_read_op(h) {
-                        // args[0] now reads the table; args[1..] don't mention s.
-                        // Fresh site so the head-symbol change re-keys the call IC.
-                        *callee = Box::new(Node::Global(value::intern(tbl)));
-                        *site = heap.vm_site_alloc();
-                        return;
-                    }
-                    if let Some(tbl) = linmap_update_op(h) {
-                        // Mutate the table in place; yield the table (thread) or its
-                        // snapshot (return). args[1..] are key/value/delta — unchanged.
-                        let taken = std::mem::replace(args, Box::new([]));
-                        let mut_call = Node::Call {
-                            callee: Box::new(Node::Global(value::intern(tbl))),
-                            args: taken,
-                            tail: false,
-                            pos: None,
-                            file: None,
-                            site: heap.vm_site_alloc(),
-                        };
-                        let yielded = match sink {
-                            LinSink::SelfArg => Node::Local(s),
-                            // Update in return position: snapshot the just-mutated table.
-                            _ => linmap_call(heap, "table-snapshot", vec![Node::Local(s)]),
-                        };
-                        *node = Node::Do(Box::new([mut_call, yielded]));
-                        return;
-                    }
-                }
-            }
-            linmap_apply(callee, s, LinSink::No, heap);
-            for a in args.iter_mut() {
-                linmap_apply(a, s, LinSink::No, heap);
-            }
-        }
-        Node::SelfCall { args, .. } => {
-            let n = args.len();
-            for (i, a) in args.iter_mut().enumerate() {
-                linmap_apply(a, s, if i == s && i < n { LinSink::SelfArg } else { LinSink::No }, heap);
-            }
-        }
-        Node::If(c, t, e) => {
-            linmap_apply(c, s, LinSink::No, heap);
-            linmap_apply(t, s, sink, heap);
-            linmap_apply(e, s, sink, heap);
-        }
-        Node::Do(xs) => {
-            let last = xs.len().saturating_sub(1);
-            for (i, x) in xs.iter_mut().enumerate() {
-                linmap_apply(x, s, if i == last { sink } else { LinSink::No }, heap);
-            }
-        }
-        Node::LetBind { binds, body } => {
-            for (_, v) in binds.iter_mut() {
-                linmap_apply(v, s, LinSink::No, heap);
-            }
-            linmap_apply(body, s, sink, heap);
-        }
-        other => walk_children_mut(other, |c| linmap_apply(c, s, LinSink::No, heap)),
+    let mut scope = Scope::with_params_enclosing(&[], Vec::new());
+    scope.self_call = Some((name, params.len()));
+    for &p in params {
+        scope.bind(p);
     }
-}
-
-/// If `body` folds a linear immutable-map accumulator (one of the `nrequired`
-/// params) through a self-tail loop, rewrite it to build a private `Table` and
-/// snapshot it at the return. Returns true iff it transformed the body.
-fn linmap_transform(body: &mut Node, nrequired: usize, heap: &Heap) -> bool {
-    if std::env::var_os("BROOD_LINMAP").is_none() {
-        return false; // opt-in while stabilising
+    let node = compile_body(heap, body, &mut scope, true)?;
+    if !node_has_selfcall(&node) {
+        return None;
     }
-    if !node_has_selfcall(body) {
-        return false;
-    }
-    let Some(s) = (0..nrequired)
-        .find(|&s| linmap_has_update(body, s) && linmap_linear(body, s, LinSink::Return))
-    else {
-        return false;
-    };
-    linmap_apply(body, s, LinSink::Return, heap);
-    // Idempotent entry-convert: on external entry the slot holds the input map
-    // (copy it into a private table); on a self-call re-entry it already holds the
-    // table (the guard keeps it). Placed at the arm top so the self-tail re-entry
-    // re-runs it — cheap after the first iteration (a type check).
-    let enter = Node::If(
-        Box::new(linmap_call(heap, "table?", vec![Node::Local(s)])),
-        Box::new(Node::Local(s)),
-        Box::new(linmap_call(heap, "%table-from-map", vec![Node::Local(s)])),
-    );
-    let inner = std::mem::replace(body, Node::Local(s));
-    *body = Node::LetBind {
-        binds: Box::new([(s, enter)]),
-        body: Box::new(inner),
-    };
-    true
+    (0..params.len())
+        .find(|&s| linmap_has_update(&node, s) && linmap_linear(&node, s, LinSink::Return))
 }
 
 // ===================== recursive self-inlining (Phase B, §6b) =====================
@@ -1952,10 +1860,6 @@ fn compile_arm(
     // `(nth p K)` to direct reads. Bumps `scope.max` for the element slots; makes the arm
     // simpler (fewer allocs, no `nth`), so it JITs better. No-op for arms without the pattern.
     ea_scalar_replace(&mut body, &mut scope.max);
-    // Linear map-accumulator → Table rewrite (docs/linear-map-accumulator.md): a
-    // provably-linear immutable-map fold becomes an in-place private-table build,
-    // snapshotted back to an immutable map at the return. Opt-in via `BROOD_LINMAP`.
-    linmap_transform(&mut body, nrequired, heap);
     // Recursive self-inlining (Phase B, §6b — two-stage tiering, devlog 2026-06-17):
     // PROBE depth-1 inlining of a top-level no-capture recursive `defn`'s body WITHOUT
     // mutating the original. The VM keeps the original small `body`/`chunk`/`nslots`;
