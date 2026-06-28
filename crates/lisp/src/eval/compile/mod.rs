@@ -1089,6 +1089,171 @@ fn ea_scalar_replace(node: &mut Node, next_slot: &mut usize) -> bool {
     changed
 }
 
+// ============ linear map-accumulator → Table rewrite (docs/linear-map-accumulator.md) ============
+//
+// A self-tail-recursive fold that threads an immutable-map accumulator one update
+// at a time pays an O(depth) path-copy per update (~2.25M node allocations for the
+// `wordcount` benchmark). When the accumulator is provably *linear* — never
+// aliased, never escapes except as the function's return — we represent it
+// internally as a private `Table` (already GC-safe, mutated in place) and snapshot
+// it back to an immutable map at the return. Sound because (a) the entry copies the
+// input map into a fresh table the function alone owns, so callers' maps are never
+// mutated, and (b) the intra-procedural reachability check below proves the slot is
+// only ever a whitelisted map op's first arg, the self-call threading arg, or the
+// return — exactly the "no alias analysis needed; a value is only reachable through
+// references the code creates" property `local_escapes` relies on. The observable
+// result is an ordinary immutable map (ADR-026 holds: the only mutable thing is a
+// `Table`, never surfaced). Gated behind `BROOD_LINMAP` while it stabilises.
+
+/// Whitelisted map READ ops (return a value — safe in any position) → Table op.
+fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
+    match value::symbol_name_opt(sym)? {
+        "map-get" => Some("table-get"),
+        "map-count" => Some("table-count"),
+        _ => None,
+    }
+}
+
+/// Whitelisted map UPDATE ops (return the new map — must be consumed at a sink) → Table op.
+/// Only ops that provably store serializable values (integers, removals) are whitelisted;
+/// `map-assoc` stores arbitrary `Value`s including ropes, which `table-put`/`table-snapshot`
+/// cannot serialize — so it is excluded until the Table can hold non-serializable values.
+fn linmap_update_op(sym: Symbol) -> Option<&'static str> {
+    match value::symbol_name_opt(sym)? {
+        "map-int-add" => Some("table-incr"),
+        "map-dissoc" => Some("table-delete"),
+        _ => None,
+    }
+}
+
+/// The global symbol a call head resolves to, if it is a free-global head.
+fn call_head_sym(callee: &Node) -> Option<Symbol> {
+    match callee {
+        Node::Global(s) => Some(*s),
+        Node::GlobalIc { sym, .. } => Some(*sym),
+        _ => None,
+    }
+}
+
+/// Where a value flows: a "sink" is a position whose value is the accumulator's
+/// linear continuation — the self-call's own arg slot, or the function's return.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinSink {
+    Return,
+    SelfArg,
+    No,
+}
+
+/// True iff `(args[0] == Local(s))`.
+fn first_arg_is_local(args: &[Node], s: usize) -> bool {
+    matches!(args.first(), Some(Node::Local(k)) if *k == s)
+}
+
+/// Reachability check: every read of slot `s` is a whitelisted map op's first arg,
+/// the self-call's arg-`s` (threading), or a sink return — and update ops on `s`
+/// occur only at a sink (so the new map is linearly consumed, never aliased).
+/// Anything else → not linear (bail). `sink` is this position's flow role.
+fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
+    match node {
+        Node::Local(k) => *k != s || sink != LinSink::No,
+        Node::Call { callee, args, .. } => {
+            if let Some(h) = call_head_sym(callee) {
+                if first_arg_is_local(args, s) {
+                    if linmap_read_op(h).is_some()
+                        || (linmap_update_op(h).is_some() && sink != LinSink::No)
+                    {
+                        // args[0] (== Local(s)) is consumed by the op; the rest must
+                        // not mention s (s is the map, not a key/value/default).
+                        return args[1..].iter().all(|a| linmap_linear(a, s, LinSink::No));
+                    }
+                }
+            }
+            linmap_linear(callee, s, LinSink::No)
+                && args.iter().all(|a| linmap_linear(a, s, LinSink::No))
+        }
+        Node::SelfCall { args, .. } => args.iter().enumerate().all(|(i, a)| {
+            linmap_linear(a, s, if i == s { LinSink::SelfArg } else { LinSink::No })
+        }),
+        Node::If(c, t, e) => {
+            linmap_linear(c, s, LinSink::No)
+                && linmap_linear(t, s, sink)
+                && linmap_linear(e, s, sink)
+        }
+        Node::Do(xs) => {
+            let last = xs.len().saturating_sub(1);
+            xs.iter().enumerate().all(|(i, x)| {
+                linmap_linear(x, s, if i == last { sink } else { LinSink::No })
+            })
+        }
+        Node::LetBind { binds, body } => {
+            binds.iter().all(|(_, v)| linmap_linear(v, s, LinSink::No))
+                && linmap_linear(body, s, sink)
+        }
+        Node::Const(_) | Node::Global(_) | Node::GlobalIc { .. } => true,
+        // Vector / Map / Prim1 / Prim2 / MakeClosure / TryCatch: any read of s here
+        // is a genuine escape (capture, store, arithmetic on a map, …).
+        other => {
+            let mut ok = true;
+            walk_children(other, |c| ok = ok && linmap_linear(c, s, LinSink::No));
+            ok
+        }
+    }
+}
+
+/// Does `s` appear as the first arg of an UPDATE op anywhere? (Only then is the
+/// rewrite a win — a read-only accumulator gains nothing.)
+fn linmap_has_update(node: &Node, s: usize) -> bool {
+    if let Node::Call { callee, args, .. } = node {
+        if first_arg_is_local(args, s) {
+            if let Some(h) = call_head_sym(callee) {
+                if linmap_update_op(h).is_some() {
+                    return true;
+                }
+            }
+        }
+    }
+    let mut found = false;
+    walk_children(node, |c| found = found || linmap_has_update(c, s));
+    found
+}
+
+fn node_has_selfcall(node: &Node) -> bool {
+    if matches!(node, Node::SelfCall { .. }) {
+        return true;
+    }
+    let mut found = false;
+    walk_children(node, |c| found = found || node_has_selfcall(c));
+    found
+}
+
+/// Probe whether `(fn (params…) body…)` folds a **linear** immutable-map
+/// accumulator through a self-tail loop, returning that accumulator's param index
+/// if so. Backs the macroexpand-time wrapper-split (`eval/macros.rs`): it compiles
+/// a throwaway `Node` (like `self_inline_probe`) and runs the reachability analysis
+/// on it, so the soundness rule lives in exactly one place. Only a simple
+/// fixed-arity, no-capture top-level `defn` qualifies; anything else → `None`.
+pub(crate) fn linmap_probe(
+    heap: &Heap,
+    name: Symbol,
+    params: &[Symbol],
+    body: &[Value],
+) -> Option<usize> {
+    if std::env::var_os("BROOD_LINMAP").is_some_and(|v| v == "0") {
+        return None; // opt-out escape hatch
+    }
+    let mut scope = Scope::with_params_enclosing(&[], Vec::new());
+    scope.self_call = Some((name, params.len()));
+    for &p in params {
+        scope.bind(p);
+    }
+    let node = compile_body(heap, body, &mut scope, true)?;
+    if !node_has_selfcall(&node) {
+        return None;
+    }
+    (0..params.len())
+        .find(|&s| linmap_has_update(&node, s) && linmap_linear(&node, s, LinSink::Return))
+}
+
 // ===================== recursive self-inlining (Phase B, §6b) =====================
 //
 // `docs/jit-optimizing-tier.md` §6b. A non-tail self-recursive call to a top-level
