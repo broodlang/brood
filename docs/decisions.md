@@ -6827,11 +6827,43 @@ vendored (it's ~33k LOC of C); taken as a normal cargo dep.
 same malloc churn). Remaining map-perf levers (single-pass `map-update`, shrinking the path-copy
 memcpy) are orthogonal and tracked separately (`champ-map-perf`).
 
-## ADR-114 — Keep the moving collector; kill the stale-handle bug class with JIT stack maps, not by switching to mark-sweep
+## ADR-114 — Keep the moving collector; the JIT already sidesteps stack maps, so harden the spill-to-roots discipline instead of switching to mark-sweep
 
-**Status:** proposed (2026-06-28). Analysis + recommendation; the architectural call is the
-maintainer's. Records why we evaluated replacing the per-process moving/copying collector with a
-**non-moving mark-sweep** heap and what the benchmarks say. No code change yet.
+**Status:** accepted (2026-06-28). Records why we evaluated replacing the per-process
+moving/copying collector with a **non-moving mark-sweep** heap (rejected on the benchmarks below)
+and — after reading the JIT↔GC code — *corrects an earlier draft of this ADR* that recommended
+adding JIT **GC stack maps**: investigation showed the JIT **already sidesteps stack maps by
+design**, so the real work is hardening the existing spill-to-roots discipline, not building stack
+maps. One debug-assertion landed (below); no collector change.
+
+**Correction (the stack-map premise was wrong).** An earlier draft recommended giving the JIT
+Cranelift stack maps so the collector could relocate JIT-staged roots in registers. Reading the
+code (`jit/mod.rs` ABI doc §6.2; `jit_lower.rs` call staging; `compile/mod.rs::dispatch`) showed
+that premise is false: Brood keeps `Value` as a 16-byte enum (NaN-boxing was measured and declined,
+`docs/value-repr.md`), so **a `Value` never rides in a register**. JIT'd code keeps *all* live
+`Value`s in `Heap::roots` (the operand stack the collector already scans) and holds only *unboxed*
+`i64`/`f64` in registers within a safepoint-free segment; before any call it **spills** every live
+`Op::Handle` deeper on the stack into a GC-visible frame slot (`jit_lower.rs` ~L1981). The ABI doc
+calls the no-stack-map problem *"the single hardest part of JIT-ing under a moving collector,
+sidestepped."* So stack maps would be **pure redundancy** — building them would add machinery for
+zero benefit, against the keep-it-minimal principle. The earlier draft is corrected here rather
+than left to mislead.
+
+**What the bug class actually is.** The bug #2 family (commits `dbf134a`, `e000652`, the 2026-06-24
+`dispatch` fix) is **not** a register-liveness problem. It is the **Rust dispatch/IC/deopt glue**
+caching a LOCAL `Value`/`EnvId` in a plain Rust local (`cur_argv: SmallVec<[Value;4]>`, a `fast` IC
+link) *before* a JIT sub-call's safepoint and reading it **stale** afterward instead of re-reading
+from `roots`/`env_roots` (which the collector relocates in place). The invariant: *any glue holding
+a LOCAL handle across a call that can GC must re-read it from `roots` after — never trust the
+pre-safepoint Rust-local copy.*
+
+**Audit (2026-06-28).** Only `compile/mod.rs::dispatch` holds a Rust-local `cur_argv` across
+`jit_tier`; its post-call arms already re-read from `roots[base..]` (the prior fixes). The VM
+trampoline caller (`vm_run_bc`, ~L4311) is roots-only — structurally immune. The one residual
+unverified spot was the `rest_slot.is_some()` → `cur_argv` fallback (documented dead-code for the
+JIT int-subset); it is now a `debug_assert!(heap.dbg_value_stale(v).is_none())` so a future
+regression of the invariant trips loudly in debug instead of corrupting. Detection at large already
+exists: the per-deref epoch tripwire, `BROOD_GC_VERIFY`, and `BROOD_JIT_VERIFY`.
 
 **Context.** Brood's data is immutable (ADR-026/112) and processes are isolated (per-process LOCAL
 heap, messages deep-copied). The reasonable intuition — *"with immutability + isolation, GC should
@@ -6843,13 +6875,13 @@ be easy; are we over-complicating it?"* — is half right, and worth pinning dow
   ADR-013). Per-process heaps collect independently (no stop-the-world); a dead process frees its
   whole heap wholesale. That is the payoff, and it is real.
 - **What they do *not* buy.** The complexity that remains is not from handling mutation (there is
-  none). It is from two **performance** choices layered on top: (1) a **moving/copying** nursery
-  (for bump allocation + compaction) and (2) a **JIT with no GC stack maps** (ADR-101). Together
-  these create the *stale-handle* bug class: a moving collector relocates LOCAL objects, and a
-  handle held across a collection — especially a JIT-staged call arg the collector can't see —
-  points at where the object *was*. The epoch stamps, poison bits, per-deref tripwire, and the
-  `BROOD_GC_VERIFY` heap verifier all exist **only** to catch that class. The recent run of
-  JIT+GC crashes (bug #2 — a stale LOCAL handle staged across a GC; see `jit-gc-frame-corruption`)
+  none). It is from one **performance** choice: a **moving/copying** nursery (for bump allocation +
+  compaction). A moving collector relocates LOCAL objects, so any handle held across a collection
+  without being re-read goes stale — the *stale-handle* bug class. (Staged JIT call args are **not**
+  the problem: they live in `Heap::roots`, which the collector scans and relocates; see the
+  correction above. The class is Rust-glue locals held across a safepoint.) The epoch stamps,
+  poison bits, per-deref tripwire, and the `BROOD_GC_VERIFY` heap verifier all exist **only** to
+  catch that class. The recent run of JIT+GC crashes (bug #2 family; see `jit-gc-frame-corruption`)
   is squarely this.
 
 Immutable data is *nearly* acyclic, so a **non-moving** collector (mark-sweep, or refcounting)
@@ -6886,22 +6918,27 @@ locality-bound/alloc-heavy code, nothing on compute-bound), plus a universal all
 choice is **not** a throughput decision; it is *bug-class elimination + kernel simplicity* vs.
 *rewrite cost + losing bump-allocation/compaction*.
 
-**Decision (recommended).** **Keep the moving collector and eliminate the stale-handle class at its
-root by giving the JIT GC stack maps** (Cranelift `stack_map` support), so the collector can find
-and relocate JIT-staged roots instead of them going stale. This fixes the *actual* cause (GC blind
-to JIT roots) without surrendering the compaction/locality wins the data shows are worth keeping,
-and lets the epoch/tripwire/verifier machinery become pure debug aids rather than load-bearing.
+**Decision.** **Keep the moving collector. Do not add JIT stack maps** — they would be redundant
+(the JIT keeps no `Value` in a register across a safepoint; see the correction above). Instead,
+**harden the spill-to-roots discipline** that already prevents the bug class: keep all live handles
+in `roots` in JIT'd code (done — `jit_lower.rs` spills before every call), and in the Rust glue
+*always re-read* LOCAL handles from `roots`/`env_roots` after any call that can GC. The one residual
+unverified site (the `dispatch` rest-arm `cur_argv` fallback) now carries a `debug_assert!` that the
+fallback handles are current-epoch, so a regression of the invariant fails loudly in debug. The
+epoch/tripwire/verifier stay as the always-available safety net.
 
 **Rejected alternative — switch to non-moving mark-sweep.** Tempting for kernel simplicity (no
 forwarding, no epochs, no "old never points to young" reasoning, tripwire/verifier deletable) and
-genuinely aligned with the "immutability should make this simple" instinct. Rejected as the
-*primary* path because the benchmarks show it trades away a measured locality/allocation win to fix
-a bug that stack maps also fix — a worse trade while the JIT is the performance story. It stays a
-live fallback: if JIT stack maps prove disproportionately hard in Cranelift, a non-moving LOCAL
-heap is the simplicity-first escape, and the immutability invariant guarantees it would be correct.
+genuinely aligned with the "immutability should make this simple" instinct. Rejected because the
+benchmarks show it trades away a measured locality/allocation win (and pays a flat free-list alloc
+tax) to fix a bug class the existing spill-to-roots discipline already prevents — a worse trade
+while the JIT is the performance story. It stays a live fallback: if the moving collector's
+glue-discipline cost ever outweighs its throughput win, a non-moving LOCAL heap is the
+simplicity-first escape, and the immutability invariant guarantees it would be correct.
 
-**Trade.** Stack maps add JIT complexity (a safepoint map per call site; the collector learns to
-read it) but touch only the JIT↔GC seam, not the whole heap. Until they land, the debug tripwire +
-`BROOD_GC_VERIFY` + `BROOD_JIT_VERIFY` remain the safety net (and have caught every instance so
-far). Supersedes nothing; refines ADR-035/055 (the copying collector stays) and ADR-101 (the JIT
-gains a GC-root contract).
+**Trade.** The cost of keeping the moving collector is the spill-to-roots discipline: JIT'd code
+must spill handles before calls (structural, done) and Rust glue must re-read from `roots` after
+safepoints (a reviewable invariant, now debug-checked at the last unguarded site). That is cheaper
+and lower-risk than either a stack-map implementation (redundant) or a collector rewrite
+(throughput regression). Supersedes nothing; refines ADR-035/055 (the copying collector stays) and
+ADR-101 (documents that the JIT's GC-root contract is spill-to-roots, *not* stack maps).
