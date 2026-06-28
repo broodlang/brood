@@ -544,6 +544,22 @@ matched pair reversed, or a lone unmatched bracket in the error face."
           (list [a hl-face-error])
           (list [a hl-face-match] [b hl-face-match]))))))
 
+(defn lineedit--match-echo (full base pos)
+  "When the cursor's bracket matches an opener on a *prior* line (offset `< base`, so
+it's above the single line this editor repaints), `[str face]` pieces echoing that
+opening line — the off-screen-match cue, like Emacs' `blink-matching-paren`. `nil`
+when the match (if any) is on the current line (the reverse-video override shows it)
+or absent. Multi-line forms in the REPL thread prior lines in as `base`-long context."
+  (let (m (bracket-match full pos))
+    (if (and (vector? m) (not (= (nth m 1) :unmatched)) (< (first m) base))
+      (let (a (first m)
+            bol (inc (string-last-index-of full "\n" (dec a)))
+            nl (string-index-of full "\n" a)
+            eol (if (< nl 0) (string-length full) nl)
+            line (trim (substring full bol eol)))
+        (list ["matches " lineedit-face-hint] [line hl-face-match]))
+      nil)))
+
 ;; ---- layout + rendering (IO) ------------------------------------------------
 
 (defn lineedit--cols ()
@@ -607,9 +623,14 @@ already be reflowed by the caller (`lineedit--loop`)."
          (lineedit--overrides full cursorpos)
          chunks
          (highlight-chunks full (+ base hs) vis overrides)
-         ;; no signature hint while reverse-searching (the line is a recalled match)
+         ;; The line below shows, in priority: nothing while reverse-searching; else the
+         ;; off-screen matching-bracket line for a multi-line form (so a `)` whose opener
+         ;; scrolled off still shows its match); else the enclosing call's signature hint.
          raw-hint
-         (if (nil? (get st :search)) (lineedit--hint-pieces full cursorpos) nil)
+         (if (get st :search)
+           nil
+           (or (lineedit--match-echo full base cursorpos)
+             (lineedit--hint-pieces full cursorpos)))
          hint
          (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
          cursor-col
