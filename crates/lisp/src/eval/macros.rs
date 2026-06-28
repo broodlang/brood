@@ -912,6 +912,12 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
             for item in items {
                 out.push(macroexpand_all_depth(heap, item, env, depth + 1)?);
             }
+            // Wrapper-split a linear immutable-map fold into an in-place table loop
+            // (docs/linear-map-accumulator.md); no-op unless BROOD_LINMAP is set and
+            // the def is a qualifying `(def NAME (fn …))`.
+            if let Some(split) = linmap_split_def(heap, &out) {
+                return Ok(split);
+            }
             Ok(rebuild_list(heap, original, out))
         }
         ValueRef::Vector(id) => {
@@ -951,6 +957,153 @@ fn rebuild_list(heap: &mut Heap, original: Value, items: Vec<Value>) -> Value {
         heap.set_form_pos(new_list, p);
     }
     new_list
+}
+
+/// Wrapper-split a **linear immutable-map fold** (docs/linear-map-accumulator.md).
+/// Given a fully-expanded `(def NAME (fn (P…) BODY…))` whose accumulator is provably
+/// linear (checked by `linmap_probe`), rewrite it to
+///
+/// ```text
+/// (do (def INNER (fn (P…) BODY'))                ; in-place table loop
+///     (def NAME  (fn (P…) (table-snapshot (INNER … (%table-from-map ACC) …)))))
+/// ```
+///
+/// where `BODY'` swaps the self-recursion head `NAME→INNER` and every whitelisted
+/// map op on the accumulator to its in-place `table-*` op. The inner loop builds a
+/// private table (seeded once by the wrapper, frozen once on return), so the
+/// per-update path-copy is gone with no per-iteration cost. Returns the replacement,
+/// or `None` to leave the `def` unchanged. `items` is the expanded `def` form.
+fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
+    if items.len() != 3 {
+        return None;
+    }
+    if !matches!(items[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::DEF)) {
+        return None;
+    }
+    let name_sym = match items[1].unpack() {
+        ValueRef::Sym(s) => s,
+        _ => return None,
+    };
+    let fn_items = heap.list_to_vec(items[2]).ok()?;
+    if fn_items.len() < 3
+        || !matches!(fn_items[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::FN))
+    {
+        return None;
+    }
+    let param_form = fn_items[1];
+    let param_vals = form_items(heap, param_form)?;
+    let mut params: Vec<value::Symbol> = Vec::with_capacity(param_vals.len());
+    for &pv in &param_vals {
+        match pv.unpack() {
+            ValueRef::Sym(s)
+                if !value::symbol_is(s, kw::AMP) && !value::symbol_is(s, kw::AMP_OPTIONAL) =>
+            {
+                params.push(s)
+            }
+            _ => return None, // &optional / & rest / pattern param → bail
+        }
+    }
+    let body = &fn_items[2..];
+    // A leading docstring complicates the split; skip it conservatively for now.
+    if body.len() > 1 && matches!(body[0].unpack(), ValueRef::Str(_)) {
+        return None;
+    }
+    // Soundness gate: reuse the Node-level reachability analysis as a probe.
+    let idx = crate::eval::compile::linmap_probe(heap, name_sym, &params, body)?;
+
+    let inner_val = value::gensym(&format!("{}/linmap-loop", value::symbol_name(name_sym)));
+    let inner_body: Vec<Value> = body
+        .iter()
+        .map(|&f| linmap_rewrite_form(heap, f, name_sym, inner_val, params[idx]))
+        .collect();
+    let mut inner_fn = vec![value::sym(kw::FN), param_form];
+    inner_fn.extend(inner_body);
+    let inner_fn = heap.list(inner_fn);
+    let inner_def = heap.list(vec![value::sym(kw::DEF), inner_val, inner_fn]);
+
+    let mut call = vec![inner_val];
+    for (i, &pv) in param_vals.iter().enumerate() {
+        if i == idx {
+            call.push(heap.list(vec![value::sym("%table-from-map"), pv]));
+        } else {
+            call.push(pv);
+        }
+    }
+    let inner_call = heap.list(call);
+    let snap = heap.list(vec![value::sym("table-snapshot"), inner_call]);
+    let wrapper_fn = heap.list(vec![value::sym(kw::FN), param_form, snap]);
+    let wrapper_def = heap.list(vec![value::sym(kw::DEF), items[1], wrapper_fn]);
+    Some(heap.list(vec![value::sym(kw::DO), inner_def, wrapper_def]))
+}
+
+/// Source rewrite for the inner loop of a wrapper-split: turn the self-recursion
+/// head `name → inner`, and each whitelisted map op whose first arg is the
+/// accumulator `acc` into its in-place table op (updates yield the table via a
+/// `do`; reads pass straight through). Must stay in lockstep with `linmap_probe`'s
+/// whitelist — the probe only admits a body whose every `acc` use is one of these.
+fn linmap_rewrite_form(
+    heap: &mut Heap,
+    form: Value,
+    name: value::Symbol,
+    inner: Value,
+    acc: value::Symbol,
+) -> Value {
+    let items = match form.unpack() {
+        ValueRef::Pair(_) => match heap.list_to_vec(form) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return form,
+        },
+        _ => return form, // atom: symbols (incl. a bare `acc` return) pass through
+    };
+    if let ValueRef::Sym(h) = items[0].unpack() {
+        let second_is_acc =
+            matches!(items.get(1).map(|v| v.unpack()), Some(ValueRef::Sym(s)) if s == acc);
+        if second_is_acc {
+            let update = if value::symbol_is(h, "map-int-add") {
+                Some("table-incr")
+            } else if value::symbol_is(h, "map-dissoc") {
+                Some("table-delete")
+            } else {
+                None
+            };
+            if let Some(t) = update {
+                // (op acc rest…) → (do (table-op acc rest…) acc) — mutate, yield table.
+                let mut c = vec![value::sym(t), items[1]];
+                for &a in &items[2..] {
+                    c.push(linmap_rewrite_form(heap, a, name, inner, acc));
+                }
+                let mutate = heap.list(c);
+                return heap.list(vec![value::sym(kw::DO), mutate, items[1]]);
+            }
+            let read = if value::symbol_is(h, "map-get") {
+                Some("table-get")
+            } else if value::symbol_is(h, "map-count") {
+                Some("table-count")
+            } else {
+                None
+            };
+            if let Some(t) = read {
+                let mut c = vec![value::sym(t), items[1]];
+                for &a in &items[2..] {
+                    c.push(linmap_rewrite_form(heap, a, name, inner, acc));
+                }
+                return heap.list(c);
+            }
+        }
+        if h == name {
+            // Self-recursion → call the inner loop instead.
+            let mut c = vec![inner];
+            for &a in &items[1..] {
+                c.push(linmap_rewrite_form(heap, a, name, inner, acc));
+            }
+            return heap.list(c);
+        }
+    }
+    let out: Vec<Value> = items
+        .iter()
+        .map(|&it| linmap_rewrite_form(heap, it, name, inner, acc))
+        .collect();
+    heap.list(out)
 }
 
 /// Rebuild a form expanding only `items[start..]` (the call's body/argument tail),
