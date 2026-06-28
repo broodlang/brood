@@ -57,10 +57,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
       ([:tcp-closed ~sock] acc)
       (after *http-read-timeout-ms* acc))))
 
-(defn http-read-request (sock)
-  "Read one HTTP request from `sock` (owned by the calling process): the head
-through the blank line, plus the body when `Content-Length` declares one. Returns
-the raw request string, or nil if the peer closed without sending anything."
+(defn http--read-raw (sock)
   (let (head (http--read-until sock "" "\r\n\r\n"))
     (if (nil? head)
       nil
@@ -68,6 +65,22 @@ the raw request string, or nil if the peer closed without sending anything."
         (if (= clen 0)
           head
           (http--read-to-length sock head (+ (index-of head "\r\n\r\n") 4 clen)))))))
+
+(defn http-read-request (sock)
+  "Read one HTTP request from `sock` (owned by the calling process): the head
+through the blank line, plus the body when `Content-Length` declares one. Returns
+the raw request string, or nil if the peer closed without sending anything.
+
+Reads in **binary mode** so the framing is byte-faithful: `Content-Length` counts
+BYTES, and in binary mode each wire byte is one codepoint, so the `string-length`
+top-up is exact (text mode miscounts a multi-byte UTF-8 body and silently corrupts
+a binary one). The returned body is a byte-string (Latin-1 carrier) — decode it if
+you want text. Text mode is restored before returning so the response send path
+(`tcp-send` of a UTF-8 string) is unaffected."
+  (tcp-set-binary sock true)
+  (let (raw (http--read-raw sock))
+    (tcp-set-binary sock false)
+    raw))
 
 ;; ---- parsing ----------------------------------------------------------------
 (defn http--split-first (s sep)

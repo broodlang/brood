@@ -893,6 +893,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "proc-set-binary",
+        Arity::exact(2),
+        Sig::new(vec![subprocess_ty, any], nil_ty),
+        proc_set_binary,
+    );
+    def(
+        heap,
         "proc-close",
         Arity::exact(1),
         Sig::new(vec![subprocess_ty], nil_ty),
@@ -1596,6 +1603,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "slurp-bytes",
+        Arity::exact(1),
+        Sig::new(vec![string], seq),
+        slurp_bytes,
+    );
+    def(
+        heap,
         "file-mtime",
         Arity::exact(1),
         Sig::new(vec![string], int.union(nil_ty)),
@@ -1720,6 +1734,44 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![any], string),
         md5_hex_bytes,
     );
+    // Raw-byte digests: byte vector → digest as a byte vector (not hex). Lets a
+    // digest chain over raw bytes (SCRAM's StoredKey = SHA256(ClientKey), then
+    // HMAC over StoredKey) without a hex decode at each step (store findings #3).
+    def(
+        heap,
+        "%sha256-raw",
+        Arity::exact(1),
+        Sig::new(vec![any], seq),
+        sha256_raw,
+    );
+    def(
+        heap,
+        "%sha1-raw",
+        Arity::exact(1),
+        Sig::new(vec![any], seq),
+        sha1_raw,
+    );
+    def(
+        heap,
+        "%sha384-raw",
+        Arity::exact(1),
+        Sig::new(vec![any], seq),
+        sha384_raw,
+    );
+    def(
+        heap,
+        "%sha512-raw",
+        Arity::exact(1),
+        Sig::new(vec![any], seq),
+        sha512_raw,
+    );
+    def(
+        heap,
+        "%md5-raw",
+        Arity::exact(1),
+        Sig::new(vec![any], seq),
+        md5_raw,
+    );
     // HMAC primitives — one-call Rust implementations over the hmac crate already
     // present for the node handshake. Replaces the pure-Brood RFC 2104 construction
     // in std/hash.blsp which was ~200x slower due to hex-encode/decode round-trips.
@@ -1743,6 +1795,30 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![string, string], string),
         hmac_sha512_fn,
+    );
+    // Raw-byte HMAC: byte-vector key + message → byte-vector MAC. A string can't
+    // carry an arbitrary-byte key faithfully, and SCRAM XORs/re-hashes the raw
+    // MAC bytes, so the string-keyed %hmac-* can't serve binary auth (findings #2).
+    def(
+        heap,
+        "%hmac-sha256-raw",
+        Arity::exact(2),
+        Sig::new(vec![any, any], seq),
+        hmac_sha256_raw,
+    );
+    def(
+        heap,
+        "%hmac-sha1-raw",
+        Arity::exact(2),
+        Sig::new(vec![any, any], seq),
+        hmac_sha1_raw,
+    );
+    def(
+        heap,
+        "%hmac-sha512-raw",
+        Arity::exact(2),
+        Sig::new(vec![any, any], seq),
+        hmac_sha512_raw,
     );
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
@@ -2263,9 +2339,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
-        "%pbkdf2-sha256",
+        "%pbkdf2-sha256-bytes",
         Arity::exact(4),
-        Sig::new(vec![string, string, int, int], seq),
+        Sig::new(vec![any, any, int, int], seq),
         pbkdf2_sha256_fn,
     );
     def(
@@ -2413,7 +2489,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
     ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
     ("proc-spawn", &["prog", "args", "opts"], "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned."),
-    ("proc-send", &["p", "s"], "Write the whole string s to subprocess p's stdin (blocking) and flush. Returns nil; throws if p is unknown/closed."),
+    ("proc-send", &["p", "s"], "Write the whole string s to subprocess p's stdin (blocking) and flush. Returns nil; throws if p is unknown/closed. In binary mode (see proc-set-binary) s must be a byte-string (codepoints 0–255), written as raw bytes."),
+    ("proc-set-binary", &["p", "on"], "Switch subprocess p between text mode (default) and binary mode (mirrors tcp-set-binary). In binary mode inbound [:proc …]/[:proc-err …] data is a byte-faithful Latin-1 string (one codepoint 0–255 per byte) and proc-send writes each codepoint as one raw byte — for a child speaking a binary protocol over stdio. Returns nil; throws if p is unknown/closed."),
     ("proc-close", &["p"], "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner."),
     ("table", &[], "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table-put/table-delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle."),
     ("table-put", &["t", "k", "v"], "Store v under key k in table t, overwriting any existing entry. Keys use the same structural equality as map keys. Returns t (for threading). Both k and v are deep-copied into the store."),
@@ -2474,7 +2551,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
     ("spit", &["path", "s"], "Write string s to the file at path."),
     ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
-    ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it)."),
+    ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
+    ("slurp-bytes", &["path"], "Read the whole file at path as a byte vector (ints 0–255). The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with %sha256-bytes/%sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
     ("%sha256", &["s"], "Lowercase hex SHA-256 of string s's bytes. The package manager's one hashing primitive (ADR-037); file/tree hashing is Brood over it."),
     ("%sha256-bytes", &["bytes"], "Lowercase hex SHA-256 of a vector (or list) of byte integers 0–255. Use this for hashing arbitrary binary data; %sha256 hashes UTF-8 string bytes."),
@@ -2486,9 +2564,17 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%sha512-bytes", &["bytes"], "Lowercase hex SHA-512 of a vector (or list) of byte integers 0–255."),
     ("%md5",          &["s"],     "Lowercase hex MD5 of string s's UTF-8 bytes. NOT collision-resistant; use sha256 for security-sensitive hashing."),
     ("%md5-bytes",    &["bytes"], "Lowercase hex MD5 of a vector (or list) of byte integers 0–255."),
+    ("%sha256-raw",   &["bytes"], "SHA-256 of a byte vector, returned as a 32-byte vector (raw digest, not hex). For chaining digests over raw bytes without a hex round-trip at each step."),
+    ("%sha1-raw",     &["bytes"], "SHA-1 of a byte vector, returned as a 20-byte vector (raw digest, not hex)."),
+    ("%sha384-raw",   &["bytes"], "SHA-384 of a byte vector, returned as a 48-byte vector (raw digest, not hex)."),
+    ("%sha512-raw",   &["bytes"], "SHA-512 of a byte vector, returned as a 64-byte vector (raw digest, not hex)."),
+    ("%md5-raw",      &["bytes"], "MD5 of a byte vector, returned as a 16-byte vector (raw digest, not hex)."),
     ("%hmac-sha256", &["key", "message"], "HMAC-SHA256 of `message` keyed with `key` (both strings). Returns lowercase hex. RFC 2104 over sha2."),
     ("%hmac-sha1",   &["key", "message"], "HMAC-SHA1 of `message` keyed with `key`. Returns lowercase hex. Not collision-resistant; prefer hmac-sha256."),
     ("%hmac-sha512", &["key", "message"], "HMAC-SHA512 of `message` keyed with `key`. Returns lowercase hex."),
+    ("%hmac-sha256-raw", &["key-bytes", "msg-bytes"], "HMAC-SHA256 over a byte-vector key and message, returned as a 32-byte vector. For binary-protocol auth (SCRAM) where the key is raw bytes and the MAC is XORed/re-hashed."),
+    ("%hmac-sha1-raw",   &["key-bytes", "msg-bytes"], "HMAC-SHA1 over a byte-vector key and message, returned as a 20-byte vector."),
+    ("%hmac-sha512-raw", &["key-bytes", "msg-bytes"], "HMAC-SHA512 over a byte-vector key and message, returned as a 64-byte vector."),
     ("%git-resolve-ref", &["url", "ref"], "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037)."),
     ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),
     ("%rm-rf", &["path"], "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037)."),
@@ -2511,7 +2597,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%random-bytes", &["n"], "n cryptographically-strong random bytes as a vector of ints 0–255."),
     ("%chacha20-encrypt", &["key-bytes", "nonce-bytes", "plaintext-bytes"], "Encrypt plaintext-bytes with ChaCha20-Poly1305 (AEAD). key-bytes must be 32 bytes; nonce-bytes must be 12 bytes. Returns ciphertext bytes (plaintext + 16-byte auth tag)."),
     ("%chacha20-decrypt", &["key-bytes", "nonce-bytes", "ciphertext-bytes"], "Decrypt ciphertext-bytes with ChaCha20-Poly1305. Returns plaintext bytes, or :error if authentication fails."),
-    ("%pbkdf2-sha256", &["password", "salt", "iterations", "key-len"], "PBKDF2-HMAC-SHA256 key derivation. Returns a key-len-byte vector. Use iterations >= 600000 for password storage."),
+    ("%pbkdf2-sha256-bytes", &["password-bytes", "salt-bytes", "iterations", "key-len"], "PBKDF2-HMAC-SHA256 key derivation over byte-vector password and salt (raw bytes, not UTF-8 strings — a binary salt round-trips faithfully). Returns a key-len-byte vector. Use iterations >= 600000 for password storage."),
     ("macroexpand-1", &["form"], "Expand form by a single macro step."),
     // `macroexpand` is a Brood prelude fn (ADR-064), documented via its docstring.
     ("gensym", &["prefix"], "A fresh, unique symbol, with an optional name prefix."),

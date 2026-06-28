@@ -1,0 +1,58 @@
+;; tests/slurp_bytes_test.blsp — byte-faithful file reads (`slurp-bytes`) and the
+;; package-hashing invariant it preserves. `slurp` is UTF-8 (throws on a binary
+;; file); `slurp-bytes` reads any bytes into a vector, so a package tree with a
+;; binary asset can be hashed (store-driver findings #7 / package-hash gap).
+;;
+;; Fixtures live under a unique /tmp dir per call (random-token), purged at load.
+
+(defmodule slurp-bytes-test (:use test))
+(require 'hash)
+(require 'encoding)
+
+(purge-stale-temp "brood-slurpb-")
+
+(defn sb-tmp ()
+  (let (d (temp-dir "brood-slurpb-"))
+    (make-dir d)
+    d))
+
+(describe "slurp-bytes: text files"
+  (test "returns a byte vector equal to the file's UTF-8 bytes"
+    (let (p (path-join (sb-tmp) "t.txt"))
+      (spit p "héllo")                       ; 'é' is two UTF-8 bytes
+      (let (bs (slurp-bytes p))
+        (is (vector? bs))
+        (assert= bs (string->utf8-bytes "héllo")))))
+
+  (test "package-hash invariant: %sha256-bytes∘slurp-bytes == %sha256∘slurp"
+    ;; The reason switching package--sha256-file to bytes doesn't churn existing
+    ;; lock hashes: for a text file the two are byte-identical.
+    (let (p (path-join (sb-tmp) "src.blsp"))
+      (spit p "(defn f (x) (* x x))\n")
+      (assert= (hash/sha256-bytes (slurp-bytes p))
+               (hash/sha256 (slurp p))))))
+
+(describe "slurp-bytes: binary files (what slurp can't read)"
+  :isolated
+  ;; Build a file of raw bytes 0xFF 0x80 0x41 via a subprocess — 0xFF 0x80 is not
+  ;; valid UTF-8, so `slurp` (read_to_string) throws on it but `slurp-bytes` reads
+  ;; it faithfully.
+  (defn sb-write-binary (path)
+    (let (p (proc-spawn "sh" ["-c" (str "printf '\\377\\200\\101' > " path)]))
+      (receive ([:proc-closed ~p _] :done) (after 5000 :timeout))))
+
+  (test "slurp throws on a non-UTF-8 file but slurp-bytes reads its bytes"
+    (let (path (path-join (sb-tmp) "blob.bin"))
+      (sb-write-binary path)
+      (assert-error (slurp path))
+      (assert= (slurp-bytes path) [255 128 65])))
+
+  (test "hashing a binary file matches the OS sha256 (printf '\\377\\200\\101')"
+    ;; printf '\377\200\101' | sha256sum
+    (let (path (path-join (sb-tmp) "blob2.bin"))
+      (sb-write-binary path)
+      (assert= "93a574562e1a3a9d1d3532381b3e3fab4679e0a1fd5de5794e91e8ddee34cca9"
+               (hash/sha256-bytes (slurp-bytes path)))
+      ;; and the raw-byte digest agrees (hex of it == the hex digest)
+      (assert= "93a574562e1a3a9d1d3532381b3e3fab4679e0a1fd5de5794e91e8ddee34cca9"
+               (encoding/hex-encode-bytes (hash/sha256-raw (slurp-bytes path)))))))

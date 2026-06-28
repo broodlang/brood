@@ -1394,7 +1394,7 @@ Run `nest doc <module>` for the full API of any module.
 | Module | `require` name | What it provides |
 |--------|---------------|-----------------|
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
-| `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode: `hex-encode`, `hex-decode`, `base64-encode`, `base64-decode` |
+| `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |
 | `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `mode`, `frequencies`, `stats-min`, `stats-max` |
 | `std/stream.blsp` | `'stream` | Process-based pull streams (lazy, I/O-friendly): sources (`stream-from-list`, `stream-range`, `stream-from-socket`), transformers (`stream-map`, `stream-filter`, `stream-chunk`, `stream-lines`), terminals (`stream-fold`, `stream-to-vector`, `stream-pipe`) |
 | `std/url.blsp` | `'url` | URL encoding/parsing: `percent-encode`, `percent-decode`, `query-encode`, `query-decode`, `parse-url`, `build-url` |
@@ -1403,11 +1403,11 @@ Run `nest doc <module>` for the full API of any module.
 | `std/template.blsp` | `'template` | `{{var}}` string templating: `render`, `render-all` |
 | `std/queue.blsp` | `'queue` | Purely functional FIFO queue and min-priority queue |
 | `std/multimap.blsp` | `'multimap` | Multi-valued map (one key → multiple values) |
-| `std/hash.blsp` | `'hash` | `sha256`, `hmac-sha256` (RFC 2104), `hash-string` (djb2) |
+| `std/hash.blsp` | `'hash` | `sha256`/`sha1`/`sha512`/`md5` (hex over strings or byte vectors), raw-byte digests (`sha256-raw` … → byte vectors, for chaining over bytes), `hmac-sha256` (RFC 2104) and raw-byte `hmac-sha256-raw`/`-sha1-raw`/`-sha512-raw` (byte-vector key+msg → byte vector, for binary-protocol auth), `hash-string` (djb2) |
 | `std/diff.blsp` | `'diff` | LCS-based sequence diff: `diff-seq`, `diff-lines`, `diff-summary`, `diff-patch`, `diff-unified` |
 | `std/path.blsp` | `'path` | Path string manipulation: `join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `with-extension` |
 | `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `working-dir`, `host`, `halt` |
-| `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2`, `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
+| `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
 | `std/agent.blsp` | `'agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 

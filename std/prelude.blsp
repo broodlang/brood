@@ -1202,19 +1202,22 @@ passed through (not re-wrapped), like `spawn`."
   nil)
 
 (defmacro remote-spawn (node expr)
-  "Run `expr` in a fresh process on `node` (a node-name keyword/symbol — `(node-name)` for the local node, or a connected peer's). Returns `nil`; the spawned process lives on the remote and runs detached (capture the parent's pid in a `let` and `(send parent (self))` from inside `expr` if you need its pid). `expr` ships as a closure (ADR-033) — free locals ride along, free globals re-resolve on the receiver. The **receiver** must have called `(start-remote-spawn)` (typically right after `node-start`); the macro itself does no setup on either side."
+  "Run `expr` in a fresh process on `node` (a node-name keyword/symbol — `(node-name)` for the local node, or a connected peer's). Returns `nil`; the spawned process lives on the remote and runs detached (capture the parent's pid in a `let` and `(send parent (self))` from inside `expr` if you need its pid). `expr` ships as a closure (ADR-033) — free locals ride along, free globals re-resolve on the receiver. A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `spawn`. The **receiver** must have called `(start-remote-spawn)` (typically right after `node-start`); the macro itself does no setup on either side."
   `(do
-     (send {:name :remote-spawn :node ~node} [:run (fn () ~expr)])
+     (send {:name :remote-spawn :node ~node}
+           [:run ~(if (spawn--thunk-form? expr) expr `(fn () ~expr))])
      nil))
 
 (defmacro remote-spawn-sync (node expr)
   "Like `remote-spawn`, but **synchronous**: run `expr` in a fresh process on
 `node` and return the child's pid (a remote pid carrying `node`'s `name@host`).
 Blocks until the receiver replies (5s timeout → throws). The receiver must have
-called `(start-remote-spawn)`. Use this when you need the child's pid — e.g. to
-`monitor`/`link` a remote child — rather than fire-and-forget."
+called `(start-remote-spawn)`. A zero-arg lambda `(fn () …)` body is passed
+through (not re-wrapped), like `spawn`. Use this when you need the child's pid —
+e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
   `(let (r# (ref))
-     (send {:name :remote-spawn :node ~node} [:run-sync (fn () ~expr) (self) r#])
+     (send {:name :remote-spawn :node ~node}
+           [:run-sync ~(if (spawn--thunk-form? expr) expr `(fn () ~expr)) (self) r#])
      (receive ([:spawned got# child#] :when (= got# r#) child#)
        (after 5000
          (throw "remote-spawn-sync: no reply (is start-remote-spawn running on the peer?)")))))

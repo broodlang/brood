@@ -104,6 +104,33 @@
             (is (string-contains? resp "200 OK"))
             (is (string-contains? resp "<h1>brood</h1>"))))))))
 
+(describe "http: a binary request body survives byte-faithfully"
+  ;; http-read-request reads in binary mode, so a POST body containing bytes that
+  ;; aren't valid UTF-8 (0xFF 0x80) reaches the handler intact — the old text-mode
+  ;; read replaced them with U+FFFD and miscounted Content-Length.
+  (test "the handler sees the exact body bytes the client posted"
+    (let (me (self))
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 ;; echo the body's byte codepoints back as text so the client can verify
+                 (serve-loop ls
+                   (fn (req)
+                     (text-response
+                       (pr-str (into [] (map char->int (string->list (get req :body)))))))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (c (tcp-connect "127.0.0.1" port))
+          ;; binary mode so we can put raw bytes 0xFF 0x80 0x41 in the body
+          (tcp-set-binary c true)
+          (let (body (str (int->char 255) (int->char 128) (int->char 65)))
+            (tcp-send c (str "POST /echo HTTP/1.0\r\nHost: localhost\r\n"
+                             "Content-Length: 3\r\n\r\n" body)))
+          (let (resp (tcp-drain c))
+            (tcp-close c)
+            (is (string-contains? resp "200 OK"))
+            ;; the body round-tripped as the exact bytes, not U+FFFD (65533)
+            (is (string-contains? resp "[255 128 65]"))))))))
+
 (describe "http: concurrent connections each get their own process"
   (test "many simultaneous GETs all complete (spawn-per-connection)"
     (let (me (self))

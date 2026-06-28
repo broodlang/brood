@@ -31,17 +31,22 @@ this repo.
 | # | Severity | Area | One-liner | Status |
 |---|----------|------|-----------|--------|
 | 1 | HIGH | prelude | `(spawn (fn () body))` silently no-ops | **Fixed** (`1a63eb7`) |
-| 2 | MED | std/hash | no raw-byte HMAC (string-only) | open |
-| 3 | MED | std/hash | `sha256-bytes` returns hex, not bytes | open |
-| 4 | MED | std/crypto | `pbkdf2` can't take a binary salt | open |
-| 5 | MED | perf | pure-Brood PBKDF2 ≈ 2s/connection | open (subsumed by #4) |
-| 6 | MED | std/encoding | base64/hex are UTF-8-bound, not byte-vector | open |
-| 7 | LOW | ergonomics | binary I/O rides a Latin-1 string carrier | open |
+| 2 | MED | std/hash | no raw-byte HMAC (string-only) | **Fixed** — `hmac-sha256-raw`/`-sha1-raw`/`-sha512-raw` |
+| 3 | MED | std/hash | `sha256-bytes` returns hex, not bytes | **Fixed** — `sha256-raw` (+ `sha1`/`sha384`/`sha512`/`md5` `-raw`) |
+| 4 | MED | std/crypto | `pbkdf2` can't take a binary salt | **Fixed** — `pbkdf2` accepts byte-vector password/salt |
+| 5 | MED | perf | pure-Brood PBKDF2 ≈ 2s/connection | **Fixed** — native `%pbkdf2-sha256-bytes` (subsumed by #4) |
+| 6 | MED | std/encoding | base64/hex are UTF-8-bound, not byte-vector | **Fixed** — `*-encode-bytes`/`*-decode-bytes` variants |
+| 7 | LOW | ergonomics | binary I/O rides a Latin-1 string carrier | open (roadmap: per-socket bytes mode) |
 | 8 | LOW | types | no decimal/bignum → `numeric` decodes to string | open |
 
-**Highest-leverage item:** findings 2, 3, 4, and 6 are one change — *a raw-byte crypto/encoding
-layer*. It removes the ~150 lines of `wire/bytes.blsp` reimplementation, fixes correctness for
-any binary-protocol auth (Postgres SCRAM, Redis, AMQP…), and erases the ~2s/connection cost.
+**Highest-leverage item (DONE 2026-06-28):** findings 2, 3, 4, 5, and 6 landed as one change —
+*a raw-byte crypto/encoding layer*. New raw-byte primitives (`%sha*-raw`, `%hmac-*-raw`,
+`%pbkdf2-sha256-bytes`) and pure-Brood byte-vector base64/hex variants remove the ~150 lines of
+`wire/bytes.blsp` reimplementation, fix correctness for any binary-protocol auth (Postgres SCRAM,
+Redis, AMQP…), and erase the ~2s/connection cost (native PBKDF2 is microseconds). The full SCRAM
+client-key chain is now expressible directly over the stdlib — see `tests/scram_bytes_test.blsp`,
+which validates it against the RFC 7677 §3 vectors (and across processes). Only the two LOW items
+(7: the Latin-1 carrier; 8: decimal/bignum) remain.
 
 ---
 
@@ -72,6 +77,17 @@ same. Non-lambda bodies and `(spawn name expr)` are unchanged; `gen`/`agent` (wh
 where `my-thunk` is a 0-arg fn value is the same no-op and the macro can't catch it. The
 advisory type checker could warn when a `spawn` body statically has function type (i.e. the
 process would evaluate to an uncalled function and do nothing).
+
+**Sibling found & fixed (2026-06-28 audit).** A follow-up sweep for the same bug class found
+that `remote-spawn`/`remote-spawn-sync` (std/prelude.blsp) wrapped their body in `(fn () …)`
+*unconditionally* — they never got the `spawn--thunk-form?` guard. So `(remote-spawn node
+(fn () body))` shipped `[:run (fn () (fn () body))]`; the receiver's `(spawn (thunk))` ran the
+outer thunk, which returned the *inner* `(fn () body)` value and discarded it — the identical
+silent no-op, two layers deep. Fixed by applying the same guard; `tests/remote_spawn_test.blsp`
+now exercises both the bare-expr and literal-lambda forms against the local node. (The same
+sweep cleared every other body/thunk macro — `try`, `binding`, `span`, `for`, `gen`, `agent`,
+`task`, … — which *return* the body value rather than *calling* a produced thunk, so a literal
+lambda there is just the return value, not a discard.)
 
 ---
 
@@ -157,6 +173,27 @@ vectors) for the crypto/math, with conversions at the seams (`wire/bytes.blsp`).
 
 The roadmap's per-socket bytes mode (`[:tcp sock bytevec]`) and/or a real bytes value type
 would remove the carrier dance. Not blocking — just a persistent tax on any binary protocol.
+
+**Concrete instances confirmed by the 2026-06-28 byte/UTF-8 audit — all three fixed the same day**
+(each kept the Latin-1-carrier convention rather than waiting on a bytevector value kind):
+- **Subprocess `proc-*` stdio had no binary toggle** (proc.rs `from_utf8_lossy` inbound,
+  `as_bytes` outbound) — unlike sockets. **Fixed:** added `proc-set-binary` mirroring
+  `tcp-set-binary` (per-child flag, Latin-1 byte-string carrier inbound, `proc-send` writes
+  codepoints as raw bytes). `tests/proc_test.blsp` round-trips raw bytes (incl. invalid-UTF-8
+  `0xFF 0x80`) through `cat`.
+- **`slurp` throws on a non-UTF-8 file**, so `package--sha256-file` couldn't hash a package tree
+  with a binary asset. **Fixed:** added `slurp-bytes` (file → byte vector); `package--sha256-file`
+  now `(%sha256-bytes (slurp-bytes p))` — identical hash for text files (no lock churn), and binary
+  assets hash instead of throwing. `tests/slurp_bytes_test.blsp` covers both + the no-churn invariant.
+- **`std/net/http.blsp` never set binary mode**, corrupting a non-UTF-8 request body and miscounting
+  `Content-Length` (bytes vs codepoints). **Fixed:** `http-read-request` reads in binary mode (exact
+  framing) then restores text mode before the response path. `tests/http_test.blsp` posts a binary
+  body end-to-end and the handler sees the exact bytes.
+
+(`%sha256`-of-a-string and `bytes->str`/`utf8-bytes->string`-throwing-on-non-text remain *by design*
+— they're the text-oriented forms; `%sha256-raw` / `*-decode-bytes` / `crypto/decrypt` are the
+byte-faithful counterparts. The underlying ergonomics (no bytevector kind; binary rides a string
+carrier) is the still-open part of #7 — a deliberate language-surface deferral.)
 
 ---
 

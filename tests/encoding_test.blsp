@@ -118,3 +118,56 @@
     (let (bytes (str (int->char 0) (int->char 0) (int->char 63)))
       (assert= "AAA/" (encoding/base64-encode bytes))
       (assert= "AAA_" (encoding/base64-url-encode bytes)))))
+
+;; ---- byte-vector variants (byte-faithful, no UTF-8 round-trip) --------------
+;; The string functions UTF-8-encode, so a byte ≥ 0x80 becomes two bytes; the
+;; -bytes variants carry arbitrary binary one byte per byte.
+
+(describe "hex-encode-bytes / hex-decode-bytes"
+  (test "encode a byte vector"
+    (assert= "deadbeef" (encoding/hex-encode-bytes [222 173 190 239])))
+  (test "uppercase variant"
+    (assert= "DEADBEEF" (encoding/hex-encode-bytes-upper [222 173 190 239])))
+  (test "decode to a byte vector"
+    (assert= [222 173 190 239] (encoding/hex-decode-bytes "deadbeef")))
+  (test "decode-bytes returns a vector, not a string"
+    (is (vector? (encoding/hex-decode-bytes "00ff"))))
+  (test "round-trips a high byte the string path would mangle"
+    ;; 0xFF alone is not valid UTF-8; the string hex-decode can't carry it
+    (assert= [255] (encoding/hex-decode-bytes (encoding/hex-encode-bytes [255]))))
+  (test "full 0x00-0xFF round-trip"
+    (let (all (into [] (range 256)))
+      (assert= all (encoding/hex-decode-bytes (encoding/hex-encode-bytes all)))))
+  (test "empty input decodes to an empty vector (not nil)"
+    (assert= [] (encoding/hex-decode-bytes "")))
+  (test "odd length returns nil"
+    (assert= nil (encoding/hex-decode-bytes "abc")))
+  (test "invalid chars return nil"
+    (assert= nil (encoding/hex-decode-bytes "zz"))))
+
+(describe "base64-encode-bytes / base64-decode-bytes"
+  (test "RFC 4648 vectors over bytes"
+    (assert= "Zm9v" (encoding/base64-encode-bytes [102 111 111]))   ; "foo"
+    (assert= "Zg=="  (encoding/base64-encode-bytes [102])))          ; "f"
+  (test "encodes a high byte the string path would mangle"
+    ;; byte 0xFB → "+w==" using the '+' of the standard alphabet
+    (assert= "+w==" (encoding/base64-encode-bytes [251])))
+  (test "decode to a byte vector"
+    (assert= [102 111 111] (encoding/base64-decode-bytes "Zm9v")))
+  (test "decode-bytes returns a vector, not a string"
+    (is (vector? (encoding/base64-decode-bytes "Zm9v"))))
+  (test "empty input decodes to an empty vector (not nil)"
+    (assert= [] (encoding/base64-decode-bytes "")))
+  (test "invalid input returns nil"
+    (assert= nil (encoding/base64-decode-bytes "Zg=!")))
+  (test "full 0x00-0xFF round-trip"
+    (let (all (into [] (range 256)))
+      (assert= all (encoding/base64-decode-bytes (encoding/base64-encode-bytes all)))))
+  (test "url-safe byte round-trip"
+    (let (bs [0 255 128 63 62])
+      (assert= bs (encoding/base64-url-decode-bytes
+                    (encoding/base64-url-encode-bytes bs)))))
+  (test "url-safe avoids + and /"
+    (let (s (encoding/base64-url-encode-bytes [251 255]))
+      (refute (string-contains? s "+"))
+      (refute (string-contains? s "/")))))
