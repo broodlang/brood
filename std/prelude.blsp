@@ -1139,9 +1139,19 @@ its printed form."
 ;; picking up the new code via the next global lookup. When the process
 ;; dies, its registered name is reaped (`process::deregister` →
 ;; `dist::unregister_dead_pid`), so a later reload re-spawns cleanly.
+;; A literal zero-arg lambda `(fn () …)` is *already* a process thunk. Re-wrapping
+;; it (`(fn () (fn () …))`) would make the process merely build a closure and
+;; discard it — a silent no-op, the classic spawn footgun. So pass such a form
+;; through unwrapped: `(spawn (fn () body))` and `(spawn body)` then mean the same.
+(defn spawn--thunk-form? (form)
+  (and (list? form) (not (empty? form)) (= (first form) 'fn)
+    (let (params (second form)) (and (list? params) (empty? params)))))
+
 (defmacro spawn (head & more)
-  "Run an expression in a new green process; returns its pid. Two shapes:
-  - `(spawn expr)` — anonymous.
+  "Run an expression in a new green process; returns its pid. Shapes:
+  - `(spawn expr)` — anonymous; `expr` is the process body.
+  - `(spawn (fn () expr))` — same as above (a zero-arg lambda is the body too, so
+    the Erlang `spawn(fun() -> … end)` habit just works, no silent no-op).
   - `(spawn name expr)` — named & idempotent: returns the existing pid if
     a live process is already registered under `name`. The hot-reload-friendly
     form (reloading the file doesn't fire a second worker).
@@ -1151,9 +1161,11 @@ its printed form."
   ;; Param name is `more` (not `rest`) so the body can still call the
   ;; prelude's `rest` function without param-shadowing itself.
   (if (empty? more)
-    `(%spawn (fn () ~head))
+    (if (spawn--thunk-form? head) `(%spawn ~head) `(%spawn (fn () ~head)))
     (if (empty? (rest more))
-      `(%spawn-named ~head (fn () ~(first more)))
+      (if (spawn--thunk-form? (first more))
+        `(%spawn-named ~head ~(first more))
+        `(%spawn-named ~head (fn () ~(first more))))
       (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
 
 (defmacro spawn-link (expr)
@@ -1164,8 +1176,11 @@ if it `(trap-exit true)`'d). The link is established *before* the child runs, so
 instant exit reaches the caller with its **true** reason — unlike a separate
 `(let (p (spawn expr)) (link p) p)`, where a child that exits in the gap is linked dead
 and reports `:noproc` (losing `:normal`). Supervised children should use this so a fast
-`:normal` exit isn't misread as a crash."
-  `(%spawn-link (fn () ~expr)))
+`:normal` exit isn't misread as a crash. A zero-arg lambda `(fn () …)` body is
+passed through (not re-wrapped), like `spawn`."
+  (if (spawn--thunk-form? expr)
+    `(%spawn-link ~expr)
+    `(%spawn-link (fn () ~expr))))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk
