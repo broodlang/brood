@@ -433,7 +433,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // `(assoc m k1 v1 …)` → `map<K, V>`, preserving the input's refinement.
     // We only carry the refinement forward; we don't try to refine based on the
     // new k/v arguments (too expensive, no false-positive risk either way).
-    if value::symbol_is(head, "assoc") && items.len() >= 4 && (items.len() - 2) % 2 == 0 {
+    if value::symbol_is(head, "assoc") && items.len() >= 4 && (items.len() - 2).is_multiple_of(2) {
         let map_arg = *items.get(1)?;
         if let Some((k, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
             return Some(Ty::map_of(k.clone(), v.clone()));

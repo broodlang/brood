@@ -44,8 +44,9 @@ use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    BigIntId, BsId, BytesId, Closure, ClosureArm, ClosureId, EnvId, MapId, NativeFn, NativeId,
-    PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE, RUNTIME,
+    BigIntId, BsId, BytesId, Closure, ClosureArm, ClosureId, DecimalId, EnvId, MapId, NativeFn,
+    NativeId, PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE,
+    RUNTIME,
 };
 use crate::error::LispError;
 
@@ -197,24 +198,32 @@ struct EnvFrame {
 }
 
 /// Order a bignum against a float for `value_cmp`'s heterogeneous numeric
-/// fallback. Compares via `f64` (the bignum is converted, rounding); a `NaN`
-/// float is treated as `Equal` (matching the `Float`/`Float` arm's
-/// `unwrap_or(Equal)`). Exact at the magnitudes that matter here (a bignum
-/// is huge, a float comparison against it rarely needs sub-ULP precision).
+/// fallback, **exactly**. A `NaN` float is `Equal` (matching the `Float`/`Float`
+/// arm's `unwrap_or(Equal)`); ±∞ is beyond any finite bignum. Otherwise both
+/// sides convert to `BigDecimal` — every finite `f64` is a dyadic rational, so
+/// its decimal form is exact, as is the bignum's — and we compare in base 10.
+/// This avoids the precision loss of the old `BigInt::to_f64` path, which could
+/// misorder a bignum that lies inside f64's range but isn't exactly representable
+/// (e.g. between 2^53 and 2^1024) against a near-equal float.
 fn bigint_cmp_float(b: &num_bigint::BigInt, f: f64) -> std::cmp::Ordering {
-    use num_traits::ToPrimitive;
-    match b.to_f64() {
-        Some(bf) => bf.partial_cmp(&f).unwrap_or(std::cmp::Ordering::Equal),
-        // Magnitude past f64::MAX: order by the bignum's sign.
-        None => {
-            use num_traits::Signed;
-            if b.is_negative() {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            }
-        }
+    bigdecimal_cmp_float(&bigdecimal::BigDecimal::from(b.clone()), f)
+}
+
+/// Order a `BigDecimal` against a float **exactly** — the shared kernel of the
+/// bignum-vs-float and decimal-vs-float `value_cmp` arms. `NaN` is `Equal`
+/// (matching `Float`/`Float`'s `unwrap_or(Equal)`); ±∞ is beyond any finite
+/// value. Otherwise compare in base 10: every finite f64 is a dyadic rational,
+/// so its `BigDecimal` form is exact — no rounding either side.
+fn bigdecimal_cmp_float(b: &bigdecimal::BigDecimal, f: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if f.is_nan() {
+        return Ordering::Equal;
     }
+    if f.is_infinite() {
+        return if f > 0.0 { Ordering::Less } else { Ordering::Greater };
+    }
+    // Finite f64 always converts (only NaN/∞ fail, handled above).
+    b.cmp(&bigdecimal::BigDecimal::try_from(f).expect("finite f64 → BigDecimal"))
 }
 
 /// Tag ranks for `value_cmp`'s heterogeneous fallback. The order is mostly
@@ -225,7 +234,7 @@ fn tag_rank(v: Value) -> u8 {
     match v.unpack() {
         ValueRef::Nil => 0,
         ValueRef::Bool(_) => 1,
-        ValueRef::Int(_) | ValueRef::BigInt(_) | ValueRef::Float(_) => 2,
+        ValueRef::Int(_) | ValueRef::BigInt(_) | ValueRef::Float(_) | ValueRef::Decimal(_) => 2,
         ValueRef::Str(_) => 3,
         ValueRef::Keyword(_) => 4,
         ValueRef::Sym(_) => 5,
@@ -425,6 +434,7 @@ fn to_prelude(v: Value) -> Value {
         ValueRef::Map(id) => Value::map(MapId::prelude(id.index())),
         ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
         ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
+        ValueRef::Decimal(id) => Value::decimal(DecimalId::prelude(id.index())),
         ValueRef::Bitset(id) => Value::bitset(BsId::prelude(id.index())),
         ValueRef::Fn(id) => Value::func(ClosureId::prelude(id.index())),
         ValueRef::Macro(id) => Value::macro_(ClosureId::prelude(id.index())),
@@ -455,6 +465,11 @@ struct Slabs {
     /// no `Value` children. Every entry satisfies the normalize invariant
     /// (strictly outside the i64 range) — `Heap::int_from_bigint` enforces it.
     bigints: Vec<num_bigint::BigInt>,
+    /// Arbitrary-precision base-10 decimals (mirrors `bigints` exactly). One
+    /// `bigdecimal::BigDecimal` per live `Value::Decimal`; immutable, holds no
+    /// `Value` children. Unlike `bigints` there is no normalize-into-`Int`
+    /// invariant — a decimal is its own type and any value is stored as-is.
+    decimals: Vec<bigdecimal::BigDecimal>,
     /// **Bitsets** (KI-4 fix) — fixed-size immutable bit arrays as raw bytes, one
     /// `Arc<SharedBlob>` per live bitset (mirrors `bigints`: an immutable leaf holding
     /// no `Value` children). **Byte-clean**: the bytes are arbitrary, NOT UTF-8, so a
@@ -489,6 +504,7 @@ fn slab_live_count(s: &Slabs) -> usize {
         + s.maps.len()
         + s.strings.len()
         + s.bigints.len()
+        + s.decimals.len()
         + s.bitsets.len()
         + s.bytes.len()
         + s.ropes.len()
@@ -507,6 +523,7 @@ fn slab_bytes(s: &Slabs) -> usize {
         + s.maps.len() * size_of::<MapNode>()
         + s.strings.len() * size_of::<LocalString>()
         + s.bigints.len() * size_of::<num_bigint::BigInt>()
+        + s.decimals.len() * size_of::<bigdecimal::BigDecimal>()
         + s.bitsets.len() * size_of::<Arc<SharedBlob>>()
         + s.bytes.len() * size_of::<Arc<SharedBlob>>()
         + s.ropes.len() * size_of::<ropey::Rope>()
@@ -538,6 +555,7 @@ struct PoisonBits {
     maps: Vec<bool>,
     strings: Vec<bool>,
     bigints: Vec<bool>,
+    decimals: Vec<bool>,
     bitsets: Vec<bool>,
     bytes: Vec<bool>,
     ropes: Vec<bool>,
@@ -581,6 +599,7 @@ pub struct LocalCheckpoint {
     maps: usize,
     strings: usize,
     bigints: usize,
+    decimals: usize,
     bitsets: usize,
     bytes: usize,
     ropes: usize,
@@ -612,6 +631,9 @@ struct CodeSlabs {
     /// Bignums `def`'d into a global / baked as a literal into shared RUNTIME
     /// code (mirrors `strings`). Immutable, holds no handles; append-only.
     bigints: boxcar::Vec<num_bigint::BigInt>,
+    /// Decimals `def`'d into a global / baked as a literal into shared RUNTIME
+    /// code (mirrors `bigints`). Immutable, holds no handles; append-only.
+    decimals: boxcar::Vec<bigdecimal::BigDecimal>,
     /// Bitsets `def`'d into a global / captured by a promoted closure (KI-4 fix;
     /// mirrors `bigints`). Raw immutable bytes via `Arc<SharedBlob>` — byte-clean, so a
     /// bitset is never read as UTF-8 text. Append-only; the Arc is shared, not copied.
@@ -1211,6 +1233,7 @@ pub fn is_movable(v: Value) -> bool {
         ValueRef::Map(id) => id.region() == LOCAL,
         ValueRef::Str(id) => id.region() == LOCAL,
         ValueRef::BigInt(id) => id.region() == LOCAL,
+        ValueRef::Decimal(id) => id.region() == LOCAL,
         ValueRef::Bitset(id) => id.region() == LOCAL,
         ValueRef::Bytes(id) => id.region() == LOCAL,
         ValueRef::Rope(id) => id.region() == LOCAL,
@@ -1242,6 +1265,7 @@ pub fn needs_root_slot(v: Value) -> bool {
         ValueRef::Map(id) => shared(id.region()),
         ValueRef::Str(id) => shared(id.region()),
         ValueRef::BigInt(id) => shared(id.region()),
+        ValueRef::Decimal(id) => shared(id.region()),
         ValueRef::Bitset(id) => shared(id.region()),
         ValueRef::Bytes(id) => shared(id.region()),
         ValueRef::Rope(id) => shared(id.region()),
@@ -1533,6 +1557,7 @@ impl Heap {
             maps: self.local.maps.len(),
             strings: self.local.strings.len(),
             bigints: self.local.bigints.len(),
+            decimals: self.local.decimals.len(),
             bitsets: self.local.bitsets.len(),
             bytes: self.local.bytes.len(),
             ropes: self.local.ropes.len(),
@@ -1573,6 +1598,7 @@ impl Heap {
         self.local.maps.truncate(cp.maps);
         self.local.strings.truncate(cp.strings);
         self.local.bigints.truncate(cp.bigints);
+        self.local.decimals.truncate(cp.decimals);
         self.local.bitsets.truncate(cp.bitsets);
         self.local.bytes.truncate(cp.bytes);
         self.local.ropes.truncate(cp.ropes);
@@ -2682,6 +2708,38 @@ impl Heap {
         }
     }
 
+    /// Materialise a `Value::Decimal` into LOCAL from an owned `bigdecimal::BigDecimal`
+    /// (mirrors [`alloc_bigint`](Self::alloc_bigint)). Unlike a bignum there is no
+    /// normalize-into-`Int` invariant — a decimal is stored as-is.
+    pub fn alloc_decimal(&mut self, n: bigdecimal::BigDecimal) -> Value {
+        let idx = self.local.decimals.len();
+        self.local.decimals.push(n);
+        Value::decimal(DecimalId::local_gen(idx, self.local_epoch))
+    }
+
+    /// Resolve a decimal handle to its `&bigdecimal::BigDecimal` (mirrors
+    /// [`bigint`](Self::bigint)). Honours the GC poison/epoch tripwires like every leaf.
+    pub fn decimal(&self, id: DecimalId) -> &bigdecimal::BigDecimal {
+        match id.region() {
+            LOCAL if id.is_old() => {
+                local_gc_check!(old, self, id, decimals, "decimal", "decimals");
+                &self.old.decimals[id.index()]
+            }
+            LOCAL => {
+                local_gc_check!(nursery, self, id, decimals, "decimal", "decimals");
+                &self.local.decimals[id.index()]
+            }
+            PRELUDE => &self.prelude.slabs.decimals[id.index()],
+            RUNTIME => self
+                .runtime
+                .code
+                .decimals
+                .get(id.index())
+                .expect("runtime decimal handle"),
+            _ => unreachable!("invalid handle region"),
+        }
+    }
+
     /// Materialise a `Value::Bitset` into LOCAL from an `Arc<SharedBlob>` of raw bytes
     /// (KI-4 fix; mirrors [`alloc_bigint`](Self::alloc_bigint)). Byte-clean — the bytes
     /// are arbitrary, never assumed UTF-8 (the whole reason a bitset is not a `Str`).
@@ -2765,6 +2823,19 @@ impl Heap {
     /// `value_cmp`'s integer arms, which match-guard on integer-ness first.
     fn bigint_of(&self, v: Value) -> num_bigint::BigInt {
         self.as_bigint(v).expect("bigint_of on a non-integer value")
+    }
+
+    /// Read any *exact* number (`Int`, `BigInt`, or `Decimal`) as an owned
+    /// `bigdecimal::BigDecimal`, for the decimal arithmetic path. Returns `None`
+    /// for a `Float` (inexact — the float-contagion path handles that) or a
+    /// non-number.
+    pub fn as_bigdecimal(&self, v: Value) -> Option<bigdecimal::BigDecimal> {
+        match v.unpack() {
+            ValueRef::Int(i) => Some(bigdecimal::BigDecimal::from(i)),
+            ValueRef::BigInt(id) => Some(bigdecimal::BigDecimal::from(self.bigint(id).clone())),
+            ValueRef::Decimal(id) => Some(self.decimal(id).clone()),
+            _ => None,
+        }
     }
 
     /// Install a pre-existing `Arc<SharedBlob>` as a new LOCAL string slot.
@@ -2921,7 +2992,7 @@ impl Heap {
             ValueRef::Sym(s) => s,
             _ => return None,
         };
-        if crate::eval::is_special_form(head_sym) || arm.params.iter().any(|&p| p == head_sym) {
+        if crate::eval::is_special_form(head_sym) || arm.params.contains(&head_sym) {
             return None;
         }
         let mut map: SmallVec<[usize; 4]> = SmallVec::new();
@@ -3012,6 +3083,11 @@ impl Heap {
                 // A leaf: clone the value into the shared region (no children).
                 let n = self.bigint(id).clone();
                 Value::bigint(BigIntId::runtime(self.runtime.code.bigints.push(n)))
+            }
+            ValueRef::Decimal(id) if id.region() == LOCAL => {
+                // A leaf: clone the value into the shared region (no children).
+                let n = self.decimal(id).clone();
+                Value::decimal(DecimalId::runtime(self.runtime.code.decimals.push(n)))
             }
             ValueRef::Bitset(id) if id.region() == LOCAL => {
                 // A leaf: share the Arc<SharedBlob> into the shared region byte-clean —
@@ -3331,6 +3407,7 @@ impl Heap {
             self.poison.maps.clear();
             self.poison.strings.clear();
             self.poison.bigints.clear();
+            self.poison.decimals.clear();
             self.poison.bitsets.clear();
             self.poison.bytes.clear();
             self.poison.ropes.clear();
@@ -3653,6 +3730,15 @@ impl Heap {
                 21u8.hash(h);
                 self.bytes(id).as_bytes().hash(h);
             }
+            ValueRef::Decimal(id) => {
+                // Distinct fresh tag byte (22). CRITICAL: numerically equal decimals
+                // (`1.5M` / `1.50M`) must hash equal, but BigDecimal's representation
+                // (and hash) differs by scale. `normalized()` strips trailing zeros to
+                // a canonical form, so equal values hash the same — matching the
+                // normalized-equality used in `equal` below.
+                22u8.hash(h);
+                self.decimal(id).normalized().to_string().hash(h);
+            }
             ValueRef::Float(f) => {
                 3u8.hash(h);
                 if f.is_nan() {
@@ -3851,6 +3937,11 @@ impl Heap {
             // the normalize invariant keeps their ranges disjoint — so those
             // mixed pairs fall through to `_ => false`.
             (BigInt(x), BigInt(y)) => self.bigint(x) == self.bigint(y),
+            // Two decimals are equal iff their values are numerically equal —
+            // `1.5M` == `1.50M`. Compare via `normalized()` (the same canonical form
+            // hashed above) so equality and hashing agree. A decimal is its own type,
+            // so a Decimal vs an Int/Float falls through to `_ => false`.
+            (Decimal(x), Decimal(y)) => self.decimal(x).normalized() == self.decimal(y).normalized(),
             // Two bitsets are equal iff their raw bytes match (byte compare, not UTF-8).
             (Bitset(x), Bitset(y)) => self.bitset(x).as_bytes() == self.bitset(y).as_bytes(),
             (Bytes(x), Bytes(y)) => self.bytes(x).as_bytes() == self.bytes(y).as_bytes(),
@@ -4024,6 +4115,24 @@ impl Heap {
             (BigInt(_) | Int(_), BigInt(_) | Int(_)) => self.bigint_of(a).cmp(&self.bigint_of(b)),
             (BigInt(x), Float(y)) => bigint_cmp_float(self.bigint(x), y),
             (Float(x), BigInt(y)) => bigint_cmp_float(self.bigint(y), x).reverse(),
+            // Decimals order by value; against an Int/BigInt promote both to
+            // BigDecimal; against a Float compare exactly in base 10 (the f64 is
+            // an exact decimal — so ordering is precise, unlike the arithmetic
+            // tower's deliberate float contagion).
+            (Decimal(x), Decimal(y)) => self.decimal(x).cmp(self.decimal(y)),
+            (Decimal(x), Int(y)) => self
+                .decimal(x)
+                .cmp(&bigdecimal::BigDecimal::from(y)),
+            (Int(x), Decimal(y)) => bigdecimal::BigDecimal::from(x)
+                .cmp(self.decimal(y)),
+            (Decimal(x), BigInt(y)) => self
+                .decimal(x)
+                .cmp(&bigdecimal::BigDecimal::from(self.bigint(y).clone())),
+            (BigInt(x), Decimal(y)) => {
+                bigdecimal::BigDecimal::from(self.bigint(x).clone()).cmp(self.decimal(y))
+            }
+            (Decimal(x), Float(y)) => bigdecimal_cmp_float(self.decimal(x), y),
+            (Float(x), Decimal(y)) => bigdecimal_cmp_float(self.decimal(y), x).reverse(),
             (Str(x), Str(y)) => self.string(x).cmp(self.string(y)),
             // Symbols/keywords sort by spelling so it's stable and human-meaningful.
             (Sym(x), Sym(y)) | (Keyword(x), Keyword(y)) => {
@@ -5389,7 +5498,7 @@ impl Heap {
         {
             static GC_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *GC_TRACE.get_or_init(|| {
-                std::env::var("BROOD_GC_TRACE").map_or(false, |v| v != "0" && !v.is_empty())
+                std::env::var("BROOD_GC_TRACE").is_ok_and(|v| v != "0" && !v.is_empty())
             }) {
                 eprintln!(
                     "[gc-trace] collect: nursery pairs={} vecs={} strs={} envs={} closures={} | old pairs={} vecs={}",
@@ -5576,6 +5685,7 @@ impl Heap {
             self.poison.maps.clear();
             self.poison.strings.clear();
             self.poison.bigints.clear();
+            self.poison.decimals.clear();
             self.poison.bitsets.clear();
             self.poison.bytes.clear();
             self.poison.ropes.clear();
@@ -5943,6 +6053,18 @@ impl Heap {
                             id.0,
                         );
                     }
+                    ValueRef::Decimal(id) if id.region() == LOCAL => {
+                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        bad(
+                            "decimal",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.decimals.len(),
+                            parent,
+                            id.0,
+                        );
+                    }
                     ValueRef::Bitset(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
@@ -6105,6 +6227,7 @@ struct FlushForward {
     maps: HashMap<u32, u32>,
     strings: HashMap<u32, u32>,
     bigints: HashMap<u32, u32>,
+    decimals: HashMap<u32, u32>,
     bitsets: HashMap<u32, u32>,
     bytes: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
@@ -6144,6 +6267,7 @@ mint_fn!(mint_vector, VecId);
 mint_fn!(mint_map, MapId);
 mint_fn!(mint_string, StrId);
 mint_fn!(mint_bigint, BigIntId);
+mint_fn!(mint_decimal, DecimalId);
 mint_fn!(mint_bitset, BsId);
 mint_fn!(mint_bytes, BytesId);
 mint_fn!(mint_rope, RopeId);
@@ -6280,6 +6404,9 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
         ValueRef::BigInt(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::bigint(flush_bigint(old, new, fwd, id))
         }
+        ValueRef::Decimal(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::decimal(flush_decimal(old, new, fwd, id))
+        }
         ValueRef::Bitset(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::bitset(flush_bitset(old, new, fwd, id))
         }
@@ -6400,6 +6527,20 @@ fn flush_bigint(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BigInt
     new.bigints.push(n);
     fwd.bigints.insert(key, new_idx as u32);
     fwd.mint_bigint(new_idx)
+}
+
+/// Flush a LOCAL decimal (mirrors [`flush_bigint`]). A leaf — clone the value into
+/// the new slab (the old slab drops right after `flush`).
+fn flush_decimal(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: DecimalId) -> DecimalId {
+    let key = id.index() as u32;
+    if let Some(&new_idx) = fwd.decimals.get(&key) {
+        return fwd.mint_decimal(new_idx as usize);
+    }
+    let n = old.decimals[flush_bound!(old.decimals, id, fwd, "decimal")].clone();
+    let new_idx = new.decimals.len();
+    new.decimals.push(n);
+    fwd.decimals.insert(key, new_idx as u32);
+    fwd.mint_decimal(new_idx)
 }
 
 /// Flush a LOCAL bitset (KI-4; mirrors [`flush_bigint`]). A byte-clean leaf — clone the
@@ -6682,6 +6823,7 @@ struct RuntimeForward {
     maps: HashMap<u32, u32>,
     strings: HashMap<u32, u32>,
     bigints: HashMap<u32, u32>,
+    decimals: HashMap<u32, u32>,
     bitsets: HashMap<u32, u32>,
     bytes: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
@@ -6716,6 +6858,9 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
         }
         ValueRef::BigInt(id) if id.region() == RUNTIME => {
             Value::bigint(flush_rt_bigint(old, new, fwd, id))
+        }
+        ValueRef::Decimal(id) if id.region() == RUNTIME => {
+            Value::decimal(flush_rt_decimal(old, new, fwd, id))
         }
         ValueRef::Bitset(id) if id.region() == RUNTIME => {
             Value::bitset(flush_rt_bitset(old, new, fwd, id))
@@ -6831,6 +6976,24 @@ fn flush_rt_bigint(
     let new_idx = new.bigints.push(v);
     fwd.bigints.insert(key, new_idx as u32);
     BigIntId::runtime(new_idx)
+}
+
+/// Flush a RUNTIME decimal during a runtime-region compaction (mirrors
+/// [`flush_rt_bigint`]). A leaf — clone the value into the new region.
+fn flush_rt_decimal(
+    old: &CodeSlabs,
+    new: &CodeSlabs,
+    fwd: &mut RuntimeForward,
+    id: DecimalId,
+) -> DecimalId {
+    let key = id.index() as u32;
+    if let Some(&n) = fwd.decimals.get(&key) {
+        return DecimalId::runtime(n as usize);
+    }
+    let v = old.decimals.get(id.index()).expect("rt decimal").clone();
+    let new_idx = new.decimals.push(v);
+    fwd.decimals.insert(key, new_idx as u32);
+    DecimalId::runtime(new_idx)
 }
 
 /// Flush a RUNTIME bitset during a runtime-region compaction (KI-4; mirrors
@@ -6999,12 +7162,13 @@ fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env:
 /// the exact failure mode a moving collector must never ship. (In-bounds is a
 /// necessary soundness check; the redef test additionally pins the live *count*.)
 fn verify_rt_slabs(s: &CodeSlabs) -> bool {
-    let (np, nv, nm, ns, nb, nbs, nby, nr, nc, ne) = (
+    let (np, nv, nm, ns, nb, nd, nbs, nby, nr, nc, ne) = (
         s.pairs.count(),
         s.vectors.count(),
         s.maps.count(),
         s.strings.count(),
         s.bigints.count(),
+        s.decimals.count(),
         s.bitsets.count(),
         s.bytes.count(),
         s.ropes.count(),
@@ -7022,6 +7186,7 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
             ValueRef::Map(id) if id.region() == RUNTIME => id.index() < nm,
             ValueRef::Str(id) if id.region() == RUNTIME => id.index() < ns,
             ValueRef::BigInt(id) if id.region() == RUNTIME => id.index() < nb,
+            ValueRef::Decimal(id) if id.region() == RUNTIME => id.index() < nd,
             ValueRef::Bitset(id) if id.region() == RUNTIME => id.index() < nbs,
             ValueRef::Bytes(id) if id.region() == RUNTIME => id.index() < nby,
             ValueRef::Rope(id) if id.region() == RUNTIME => id.index() < nr,
@@ -7339,7 +7504,7 @@ mod gen_handle_tests {
         // Only the nursery env keeps the keeper alive.
         let mut er = vec![nursery_env];
         h.minor_collect(false, &mut [], &mut er); // flip
-        let nursery_env = er[0];
+        let _nursery_env = er[0];
         h.major_collect(&mut [], &mut er); // compact — decoys freed, keeper moves
         let nursery_env = er[0];
 
@@ -7389,7 +7554,7 @@ mod gen_handle_tests {
         h.env_define(nursery_env, sym, keeper_pair);
         let mut er = vec![nursery_env];
         h.minor_collect(false, &mut [], &mut er);
-        let nursery_env = er[0];
+        let _nursery_env = er[0];
         h.major_collect(&mut [], &mut er);
         let nursery_env = er[0];
 
@@ -7448,7 +7613,7 @@ mod gen_handle_tests {
         h.env_define(nursery_env, sym, keeper_fn);
         let mut er = vec![nursery_env];
         h.minor_collect(false, &mut [], &mut er);
-        let nursery_env = er[0];
+        let _nursery_env = er[0];
         h.major_collect(&mut [], &mut er);
         let nursery_env = er[0];
 
@@ -7484,7 +7649,7 @@ mod gen_handle_tests {
         // Inflate: 20 decoy envs + the keeper env (all tenured).
         let mut decoy_envs: Vec<EnvId> = (0..20).map(|_| h.new_env(None)).collect();
         let keeper_env = h.new_env(None);
-        h.env_define(keeper_env, sym, Value::float(3.14));
+        h.env_define(keeper_env, sym, Value::float(1.25));
         decoy_envs.push(keeper_env);
         h.minor_collect(true, &mut [], &mut decoy_envs);
         let keeper_env_old = decoy_envs.pop().unwrap();
@@ -7522,7 +7687,7 @@ mod gen_handle_tests {
         // The env lookup chain must work: env_get returns throb = 3.14.
         let val = h.env_get(env_id, sym).expect("throb must be findable");
         assert!(
-            matches!(val.unpack(), ValueRef::Float(f) if (f - 3.14).abs() < 1e-9),
+            matches!(val.unpack(), ValueRef::Float(f) if (f - 1.25).abs() < 1e-9),
             "throb should be 3.14, got {val:?}"
         );
     }
@@ -7758,7 +7923,7 @@ mod gen_handle_tests {
         let child_env = h.new_env(Some(parent_old));
         let mut er = vec![child_env];
         h.minor_collect(false, &mut [], &mut er);
-        let child_env = er[0];
+        let _child_env = er[0];
         h.major_collect(&mut [], &mut er);
         let child_env = er[0];
 
@@ -7949,5 +8114,55 @@ mod gen_handle_tests {
             _ => unreachable!(),
         };
         check_str(h.local.vectors[vec_id.index()][0], "vector elem");
+    }
+}
+
+#[cfg(test)]
+mod bigint_cmp_float_tests {
+    use super::bigint_cmp_float;
+    use num_bigint::BigInt;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn exact_against_a_float_inside_f64_range() {
+        // 2^70 is exactly representable as f64; 2^70 ± 1 are NOT (each rounds to
+        // 2^70). The old `BigInt::to_f64` path rounded the bignum and so called
+        // all three Equal; the exact BigDecimal comparison orders them correctly.
+        let p70 = BigInt::from(2u8).pow(70);
+        let one = BigInt::from(1);
+        let f = 2f64.powi(70);
+        assert_eq!(bigint_cmp_float(&p70, f), Ordering::Equal);
+        assert_eq!(bigint_cmp_float(&(&p70 + &one), f), Ordering::Greater);
+        assert_eq!(bigint_cmp_float(&(&p70 - &one), f), Ordering::Less);
+    }
+
+    #[test]
+    fn nan_is_equal_and_infinities_order_by_sign() {
+        let b = BigInt::from(5);
+        assert_eq!(bigint_cmp_float(&b, f64::NAN), Ordering::Equal);
+        assert_eq!(bigint_cmp_float(&b, f64::INFINITY), Ordering::Less);
+        assert_eq!(bigint_cmp_float(&b, f64::NEG_INFINITY), Ordering::Greater);
+    }
+
+    #[test]
+    fn beyond_f64_range_orders_by_sign() {
+        let huge = BigInt::from(2u8).pow(2000); // > f64::MAX
+        assert_eq!(bigint_cmp_float(&huge, 1.0), Ordering::Greater);
+        assert_eq!(bigint_cmp_float(&(-huge), 1.0), Ordering::Less);
+    }
+
+    #[test]
+    fn decimal_vs_float_is_exact() {
+        use super::bigdecimal_cmp_float;
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+        // The decimal 0.1 is exactly 1/10; the f64 `0.1` is slightly larger
+        // (0.1000000000000000055…). Exact comparison must order them, not call
+        // them equal (which the old `to_f64` round-trip did).
+        let exact_tenth = BigDecimal::from_str("0.1").unwrap();
+        assert_eq!(bigdecimal_cmp_float(&exact_tenth, 0.1_f64), Ordering::Less);
+        // 0.5 is exactly representable, so they're equal.
+        let half = BigDecimal::from_str("0.5").unwrap();
+        assert_eq!(bigdecimal_cmp_float(&half, 0.5_f64), Ordering::Equal);
     }
 }

@@ -75,6 +75,67 @@
       (is (not (nil? (tst-find bin :identifier))))
       (is (not (nil? (tst-find bin :integer)))))))
 
+;; The first descendant (incl. self) for which `(pred node)` is truthy, or nil.
+(defn tst-search (node pred)
+  (if (pred node)
+    node
+    (first (filter (fn (x) (not (nil? x)))
+             (map (fn (c) (tst-search c pred)) (or (get node :kids) []))))))
+
+;; ---- error recovery --------------------------------------------------------
+;; tree-sitter is error-tolerant: it returns a tree even for broken source, and
+;; the projected CST surfaces the recovery state so an editor can draw squiggles.
+
+(describe "tree-sitter-parse error recovery"
+  (test "a syntax error surfaces an :error node"
+    (let (root (tree-sitter-parse "@\n" :ruby)
+          err (tst-search root (fn (n) (get n :error))))
+      (refute (nil? err))
+      (is (get err :error))))
+
+  (test "an inserted token surfaces a zero-width :missing node"
+    ;; `def foo` with no matching `end` makes tree-sitter insert a zero-width
+    ;; MISSING `end` for recovery — :kind can't signal that, so :missing must.
+    (let (root (tree-sitter-parse "def foo\n" :ruby)
+          miss (tst-search root (fn (n) (get n :missing))))
+      (refute (nil? miss))
+      (is (get miss :missing))
+      (assert= (get miss :start) (get miss :end))))   ; zero width
+
+  (test "valid source carries no :error or :missing nodes"
+    (let (root (tree-sitter-parse "x = 1\n" :ruby))
+      (is (nil? (tst-search root (fn (n) (or (get n :error) (get n :missing)))))))))
+
+;; ---- incremental reparse ---------------------------------------------------
+;; `tree-sitter-reparse` caches the prior tree per buffer key and edits it in
+;; place; the result must be IDENTICAL to a from-scratch `tree-sitter-parse`
+;; (incrementality is a pure optimization), across inserts/deletes/multibyte.
+
+(describe "tree-sitter-reparse"
+  (test "incremental result equals a from-scratch parse after each edit"
+    (let (k 9001
+          edits (list "x = 1\n"               ; initial
+                      "x = 12\n"              ; insert a char
+                      "x = 12\ny = 3\n"       ; append a line
+                      "x = 12\n"              ; delete the line
+                      "café = 12\n"           ; multibyte edit
+                      "def f\n  café\nend\n"  ; larger change
+                      "def f\n  café\nend\n") ; identical (no-op reparse)
+          ok (reduce (fn (acc s)
+                       (and acc (= (tree-sitter-reparse k s :ruby)
+                                   (tree-sitter-parse s :ruby))))
+                     true edits))
+      (is ok)
+      ;; forget drops the buffer's cached tree and reports the count.
+      (assert= (tree-sitter-forget k) 1)
+      (assert= (tree-sitter-forget k) 0)))   ; already gone
+
+  (test "first reparse with no cache equals a fresh parse"
+    (let (k 9002)
+      (assert= (tree-sitter-reparse k "y = 2\n" :elixir)
+        (tree-sitter-parse "y = 2\n" :elixir))
+      (tree-sitter-forget k))))
+
 ;; ---- errors ----------------------------------------------------------------
 
 (describe "tree-sitter-parse errors"

@@ -12,7 +12,6 @@
 //! this module only owns the *render target*. winit, input, and the draw-op protocol are
 //! all unchanged.
 
-use std::ffi::CString;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -173,10 +172,10 @@ impl GlWindow {
         let _ = surface.set_swap_interval(&context, SwapInterval::DontWait);
 
         let gl = unsafe {
-            glow::Context::from_loader_function(|s| {
-                let c = CString::new(s).unwrap();
-                display.get_proc_address(c.as_c_str()).cast()
-            })
+            // `_cstr` hands us the `&CStr` glow already has and glutin wants — no
+            // round-trip through `CString` (which the plain `from_loader_function`
+            // would force, since it converts to `&str` and back).
+            glow::Context::from_loader_function_cstr(|c| display.get_proc_address(c).cast())
         };
 
         let (program, vao, inst_vbo, u_viewport) = unsafe { build_pipeline(&gl)? };
@@ -216,7 +215,7 @@ impl GlWindow {
     /// Draw one frame: clear, expand the solid-fill ops to quads, one instanced draw,
     /// then present. `cw`/`ch` are the cell pixel size, `inset` the content margin —
     /// the same coordinate contract the CPU `paint` uses, so positions agree.
-    pub fn paint(&mut self, frame: &[Op], renderer: &mut crate::gui::backend::Renderer) {
+    pub(crate) fn paint(&mut self, frame: &[Op], renderer: &mut crate::gui::backend::Renderer) {
         let (cw, ch, inset) = (renderer.cell_w.max(1), renderer.cell_h.max(1), renderer.inset());
         let size = self.window.inner_size();
         let (fw, fh) = (size.width.max(1), size.height.max(1));

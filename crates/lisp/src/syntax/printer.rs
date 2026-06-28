@@ -36,6 +36,13 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
         ValueRef::Int(n) => out.push_str(&n.to_string()),
         // A bignum prints as its decimal string, exactly like an `Int`.
         ValueRef::BigInt(id) => out.push_str(&heap.bigint(id).to_string()),
+        // A decimal prints as its canonical decimal string with the `M` suffix so
+        // it round-trips through the reader (e.g. `1.50M`). Both readable and
+        // display use this form.
+        ValueRef::Decimal(id) => {
+            out.push_str(&heap.decimal(id).to_string());
+            out.push('M');
+        }
         // A bitset prints as an opaque handle — its bytes are raw, not text.
         ValueRef::Bitset(id) => out.push_str(&format!("#<bitset {} bytes>", heap.bitset(id).len())),
         // Raw bytes print as a `#b"…"` literal that re-reads to the same value:

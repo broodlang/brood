@@ -418,6 +418,9 @@ const M_CLOSURE: u8 = 13;
 /// An arbitrary-precision integer, sent as its decimal string (see
 /// [`Message::BigInt`]) — portable across nodes with independent heaps.
 const M_BIGINT: u8 = 14;
+/// An arbitrary-precision base-10 decimal, sent as its canonical decimal string
+/// (mirrors [`M_BIGINT`] / [`Message::Decimal`]) — portable across nodes.
+const M_DECIMAL: u8 = 15;
 
 fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     match m {
@@ -430,6 +433,10 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
         }
         Message::BigInt(s) => {
             w.push(M_BIGINT);
+            put_str(w, s);
+        }
+        Message::Decimal(s) => {
+            w.push(M_DECIMAL);
             put_str(w, s);
         }
         Message::Float(f) => {
@@ -613,6 +620,7 @@ fn decode_msg_at(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
         M_TRUE => Message::Bool(true),
         M_INT => Message::Int(get_i64(r)?),
         M_BIGINT => Message::BigInt(get_str(r)?),
+        M_DECIMAL => Message::Decimal(get_str(r)?),
         M_FLOAT => Message::Float(f64::from_bits(get_u64(r)?)),
         M_STR => Message::Str(get_str(r)?),
         M_SYM => Message::Sym(get_sym(r)?),

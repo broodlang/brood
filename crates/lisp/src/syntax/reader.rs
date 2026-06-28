@@ -404,6 +404,19 @@ impl<'a> Parser<'a> {
                     format!("malformed integer literal: {}", token),
                 )),
             },
+            // A `M`-suffixed decimal literal (`1.50M`). `classify` already validated
+            // the prefix, so strip the suffix and parse it as a BigDecimal.
+            AtomKind::Decimal => match token[..token.len() - 1].parse::<bigdecimal::BigDecimal>() {
+                Ok(n) => Ok(self.heap.alloc_decimal(n)),
+                Err(_) => Err(self.err_at(
+                    self.s.pos_at(token_start),
+                    format!("malformed decimal literal: {}", token),
+                )),
+            },
+            AtomKind::DecimalInvalid => Err(self.err_at(
+                self.s.pos_at(token_start),
+                format!("malformed decimal literal: {}", token),
+            )),
         }
     }
 }

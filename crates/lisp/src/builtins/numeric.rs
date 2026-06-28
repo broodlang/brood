@@ -3,15 +3,6 @@ use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 use crate::core::keywords as kw;
 use super::realize_seqview;
-#[allow(unused_macros)]
-macro_rules! expect {
-    ($heap:expr, $who:expr, $v:expr, $expected:literal, $($pat:pat => $extract:expr),+ $(,)?) => {
-        match $v {
-            $($pat => Ok($extract),)+
-            __other => Err(LispError::wrong_type($heap, $who, $expected, __other)),
-        }
-    };
-}
 
 pub(super) fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).copied().unwrap_or(Value::nil())
@@ -77,6 +68,22 @@ pub(super) fn expect_rope(heap: &Heap, who: &str, v: Value) -> Result<ropey::Rop
     )
 }
 
+/// Require a rope, returned **borrowed** — no clone. For the read-only query
+/// builtins (length/line/slice/…), all of ropey's queries take `&self`, so the
+/// heap borrow can be held for the duration. Use this instead of `expect_rope`
+/// whenever the rope isn't edited; it skips the per-call `Arc`-node clone on the
+/// editor's hot path (viewport render calls `rope-line`/`rope-slice` per line per
+/// frame). Reach for `expect_rope` only when allocating a fresh, edited rope.
+pub(super) fn expect_rope_ref<'h>(
+    heap: &'h Heap,
+    who: &str,
+    v: Value,
+) -> Result<&'h ropey::Rope, LispError> {
+    expect!(heap, who, v, "rope",
+        Value::Rope(id) => heap.rope(id),
+    )
+}
+
 /// Require an integer; otherwise a self-identifying type error.
 pub(super) fn expect_int(heap: &Heap, who: &str, v: Value) -> Result<i64, LispError> {
     expect!(heap, who, v, "int",
@@ -108,13 +115,31 @@ pub(super) fn is_integer(v: Value) -> bool {
     matches!(v, Value::Int(_) | Value::BigInt(_))
 }
 
+/// True iff `v` is a `Decimal`. A decimal is a number but **not** an integer, so
+/// it routes through the exact-base-10 arithmetic path, not the bignum path.
+pub(super) fn is_decimal(v: Value) -> bool {
+    matches!(v, Value::Decimal(_))
+}
+
+/// True iff both operands are *exact* numbers (`Int`/`BigInt`/`Decimal`) — the
+/// shape `value_cmp` orders precisely (no f64 precision loss). A `Float` operand
+/// is excluded so the comparison falls to the inexact f64 path.
+fn both_exact(a: Value, b: Value) -> bool {
+    (is_integer(a) || is_decimal(a)) && (is_integer(b) || is_decimal(b))
+}
+
 /// Coerce an integer-or-float `Value` to `f64` for the float arithmetic path —
-/// like [`expect_number`] but a `BigInt` also coerces (via its `to_f64`), so a
-/// mixed `(+ 2^200 1.5)` works rather than rejecting the bignum.
+/// like [`expect_number`] but a `BigInt`/`Decimal` also coerces (via its
+/// `to_f64`), so a mixed `(+ 2^200 1.5)` / `(+ 1.5M 2.0)` works rather than
+/// rejecting it. A decimal coerced to f64 is the float-contagion path.
 pub(super) fn num_to_f64(heap: &Heap, who: &str, v: Value) -> Result<f64, LispError> {
     use num_traits::ToPrimitive;
     match v {
         Value::BigInt(id) => Ok(heap.bigint(id).to_f64().unwrap_or(f64::INFINITY)),
+        Value::Decimal(id) => {
+            use bigdecimal::ToPrimitive as _;
+            Ok(heap.decimal(id).to_f64().unwrap_or(f64::INFINITY))
+        }
         _ => expect_number(heap, who, v),
     }
 }
@@ -130,6 +155,7 @@ pub(super) fn num_bin(
     who: &str,
     int_op: fn(i64, i64) -> Option<i64>,
     big_op: fn(num_bigint::BigInt, num_bigint::BigInt) -> num_bigint::BigInt,
+    dec_op: fn(bigdecimal::BigDecimal, bigdecimal::BigDecimal) -> bigdecimal::BigDecimal,
     float_op: fn(f64, f64) -> f64,
 ) -> LispResult {
     let (a, b) = two(args, who)?;
@@ -150,7 +176,19 @@ pub(super) fn num_bin(
             let r = big_op(x, y);
             Ok(heap.int_from_bigint(r))
         }
-        // A float operand anywhere: the float path (a BigInt coerces via `f64`).
+        // A decimal operand, and the other is exact (Int/BigInt/Decimal): compute
+        // exactly in BigDecimal and return a `Decimal`. (A Float operand falls
+        // through to the float-contagion path below — float wins, inexact.)
+        _ if (is_decimal(a) || is_decimal(b))
+            && (is_integer(a) || is_decimal(a))
+            && (is_integer(b) || is_decimal(b)) =>
+        {
+            let x = heap.as_bigdecimal(a).expect("exact number");
+            let y = heap.as_bigdecimal(b).expect("exact number");
+            Ok(heap.alloc_decimal(dec_op(x, y)))
+        }
+        // A float operand anywhere: the float path (a BigInt/Decimal coerces via
+        // `f64` — float contagion, like Clojure's double contagion).
         _ => Ok(Value::Float(float_op(
             num_to_f64(heap, who, a)?,
             num_to_f64(heap, who, b)?,
@@ -166,6 +204,7 @@ pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         i64::checked_add,
         |a, b| a + b,
         |a, b| a + b,
+        |a, b| a + b,
     )
 }
 pub(super) fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -176,6 +215,7 @@ pub(super) fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         i64::checked_sub,
         |a, b| a - b,
         |a, b| a - b,
+        |a, b| a - b,
     )
 }
 pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -184,6 +224,7 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         args,
         "*",
         i64::checked_mul,
+        |a, b| a * b,
         |a, b| a * b,
         |a, b| a * b,
     )
@@ -197,6 +238,18 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
             .with_code(crate::error::error_codes::DIV_BY_ZERO)
             .with_hint("guard the denominator: (when (not= y 0) (/ x y))"));
     }
+    // A decimal operand with both operands exact (Int/BigInt/Decimal): exact
+    // BigDecimal division, returning a `Decimal`. (`bf == 0.0` above already
+    // rejected a zero denominator, so this never panics.) A Float operand falls
+    // through to the float-contagion path below.
+    if (is_decimal(a) || is_decimal(b))
+        && (is_integer(a) || is_decimal(a))
+        && (is_integer(b) || is_decimal(b))
+    {
+        let x = heap.as_bigdecimal(a).expect("exact number");
+        let y = heap.as_bigdecimal(b).expect("exact number");
+        return Ok(heap.alloc_decimal(x / y));
+    }
     match (a, b) {
         // Exact integer quotient when it divides evenly; otherwise a float.
         // `checked_*` guards the one overflowing case (`i64::MIN / -1`), which
@@ -209,12 +262,16 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         // evenly (demoted — `(/ 2^200 2^100)` is the exact `2^100`); otherwise a
         // float. Division by zero was already caught via `bf == 0.0`.
         _ if is_integer(a) && is_integer(b) => {
-            use num_integer::Integer;
             let x = heap.as_bigint(a).expect("integer");
             let y = heap.as_bigint(b).expect("integer");
-            let (q, r) = x.div_rem(&y);
+            // BigInt `%`/`/` both truncate toward zero (like i64), so an even
+            // division gives a zero remainder and the exact quotient. Compute the
+            // remainder first; only divide when it's the exact path (cold path,
+            // so the second pass is fine — and avoids pulling `num-integer` just
+            // for `div_rem`).
+            let r = &x % &y;
             if num_traits::Zero::is_zero(&r) {
-                Ok(heap.int_from_bigint(q))
+                Ok(heap.int_from_bigint(x / y))
             } else {
                 Ok(Value::Float(num_to_f64(heap, "/", a)? / bf))
             }
@@ -231,7 +288,7 @@ pub(super) fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // BigInt/float cases.
     let lt = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x < y,
-        _ if is_integer(a) && is_integer(b) => heap.value_cmp(a, b) == std::cmp::Ordering::Less,
+        _ if both_exact(a, b) => heap.value_cmp(a, b) == std::cmp::Ordering::Less,
         _ => num_to_f64(heap, "<", a)? < num_to_f64(heap, "<", b)?,
     };
     Ok(Value::boolean(lt))
@@ -245,7 +302,7 @@ pub(super) fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "<=")?;
     let le = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x <= y,
-        _ if is_integer(a) && is_integer(b) => heap.value_cmp(a, b) != std::cmp::Ordering::Greater,
+        _ if both_exact(a, b) => heap.value_cmp(a, b) != std::cmp::Ordering::Greater,
         _ => num_to_f64(heap, "<=", a)? <= num_to_f64(heap, "<=", b)?,
     };
     Ok(Value::boolean(le))
@@ -256,7 +313,7 @@ pub(super) fn prim_max(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     for &v in &args[1..] {
         let replace = match (best, v) {
             (Value::Int(a), Value::Int(b)) => b > a,
-            _ if is_integer(best) && is_integer(v) => {
+            _ if both_exact(best, v) => {
                 heap.value_cmp(best, v) == std::cmp::Ordering::Less
             }
             _ => num_to_f64(heap, "max", v)? > num_to_f64(heap, "max", best)?,
@@ -273,7 +330,7 @@ pub(super) fn prim_min(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     for &v in &args[1..] {
         let replace = match (best, v) {
             (Value::Int(a), Value::Int(b)) => b < a,
-            _ if is_integer(best) && is_integer(v) => {
+            _ if both_exact(best, v) => {
                 heap.value_cmp(best, v) == std::cmp::Ordering::Greater
             }
             _ => num_to_f64(heap, "min", v)? < num_to_f64(heap, "min", best)?,
@@ -528,7 +585,7 @@ pub(super) fn bs_alloc(heap: &mut Heap, bytes: &[u8]) -> Value {
 }
 
 pub(super) fn bs_nbytes(nbits: i64) -> usize {
-    ((nbits.max(0) as usize) + 7) / 8
+    (nbits.max(0) as usize).div_ceil(8)
 }
 
 pub(super) fn bs_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -538,9 +595,9 @@ pub(super) fn bs_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 pub(super) fn bs_ones(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let n = expect_int(heap, "bitset-ones", arg(args, 0))?.max(0) as usize;
-    let len = (n + 7) / 8;
+    let len = n.div_ceil(8);
     let mut out = vec![0xffu8; len];
-    if len > 0 && n % 8 != 0 {
+    if len > 0 && !n.is_multiple_of(8) {
         out[len - 1] = (1u8 << (n % 8)) - 1;
     }
     Ok(bs_alloc(heap, &out))
@@ -845,3 +902,68 @@ pub(super) fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 }
 
 
+
+// ---------- decimal ----------
+
+/// `(decimal x)` — construct an exact base-10 `Decimal` from a string ("1.50"),
+/// an int (3), or a float. A string parses exactly; an int is exact; a float is
+/// converted from its *shortest round-trip* decimal text (an f64 is inexact, so
+/// `(decimal 0.1)` is the decimal `0.1`, the value the literal `0.1` denotes,
+/// not the full binary expansion). A `BigInt` is also accepted (exact).
+pub(super) fn prim_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::str::FromStr;
+    let v = arg(args, 0);
+    let d = match v {
+        // Already a decimal — return it unchanged.
+        Value::Decimal(_) => return Ok(v),
+        Value::Int(n) => bigdecimal::BigDecimal::from(n),
+        Value::BigInt(id) => bigdecimal::BigDecimal::from(heap.bigint(id).clone()),
+        Value::Float(f) => {
+            if !f.is_finite() {
+                return Err(LispError::runtime(format!(
+                    "decimal: cannot represent non-finite float {f}"
+                )));
+            }
+            // Shortest round-trip text (what the printer would show), parsed exactly.
+            bigdecimal::BigDecimal::from_str(&format_decimal_from_float(f)).map_err(|_| {
+                LispError::runtime(format!("decimal: cannot convert float {f}"))
+            })?
+        }
+        Value::Str(id) => {
+            let s = heap.string(id).trim().to_string();
+            bigdecimal::BigDecimal::from_str(&s).map_err(|_| {
+                LispError::runtime(format!("decimal: malformed decimal string {s:?}"))
+            })?
+        }
+        other => return Err(LispError::wrong_type(heap, "decimal", "string or number", other)),
+    };
+    Ok(heap.alloc_decimal(d))
+}
+
+/// Render an f64 as the shortest decimal text that round-trips back to it — the
+/// same form the value printer uses, so `(decimal 1.5)` is `1.5M`, not the long
+/// binary expansion of the nearest f64.
+fn format_decimal_from_float(f: f64) -> String {
+    // `{}` on f64 already prints the shortest round-trip representation in Rust.
+    format!("{f}")
+}
+
+/// `(decimal->string d)` — the canonical decimal string of `d` (no `M` suffix).
+pub(super) fn prim_decimal_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let s = match v {
+        Value::Decimal(id) => heap.decimal(id).to_string(),
+        other => return Err(LispError::wrong_type(heap, "decimal->string", "decimal", other)),
+    };
+    Ok(heap.alloc_string(&s))
+}
+
+/// `(decimal->float d)` — `d` as an (inexact) `f64`.
+pub(super) fn prim_decimal_to_float(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use bigdecimal::ToPrimitive;
+    let v = arg(args, 0);
+    match v {
+        Value::Decimal(id) => Ok(Value::float(heap.decimal(id).to_f64().unwrap_or(f64::INFINITY))),
+        other => Err(LispError::wrong_type(heap, "decimal->float", "decimal", other)),
+    }
+}

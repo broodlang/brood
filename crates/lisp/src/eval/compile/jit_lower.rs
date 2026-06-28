@@ -396,7 +396,7 @@ fn jit_lower_arm_inner(
 ) -> Option<*const u8> {
     use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_PAIR};
     use cranelift_codegen::ir::{
-        condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlags, StackSlotData,
+        condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlagsData, StackSlotData,
         StackSlotKind,
     };
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -607,14 +607,14 @@ fn jit_lower_arm_inner(
         match inst {
             Inst::Jump(t) | Inst::JumpIfFalse(t) => {
                 is_leader[*t] = true;
-                if ip + 1 <= len {
+                if ip < len {
                     is_leader[ip + 1] = true;
                 }
             }
             // SelfCall jumps back to the loop header (block 0); the inst after it
             // (if any) starts a new (unreachable) block boundary.
             Inst::SelfCall { .. } => {
-                if ip + 1 <= len {
+                if ip < len {
                     is_leader[ip + 1] = true;
                 }
             }
@@ -1154,20 +1154,20 @@ fn jit_lower_arm_inner(
             let i = b.ins().iadd_imm(base, slot as i64);
             let o = b.ins().imul_imm(i, STRIDE);
             let addr = b.ins().iadd(roots_base, o);
-            let w0 = b.ins().load(types::I64, MemFlags::new(), addr, 0);
+            let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), addr, 0);
             let w1 = b
                 .ins()
-                .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
             let w2 = b
                 .ins()
-                .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8);
+                .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32 + 8);
             let c = b.ins().call(vbase_ref, &[heap, w0, w1, w2, len_addr]);
             let ptr = b.inst_results(c)[0];
             // null ptr ⇒ slot isn't a vector ⇒ deopt (VM runs the arm; same result).
             let cont = b.create_block();
             b.ins().brif(ptr, cont, &[], deopt, &[]);
             b.switch_to_block(cont);
-            let vlen = b.ins().load(types::I64, MemFlags::new(), len_addr, 0);
+            let vlen = b.ins().load(types::I64, MemFlagsData::trusted(), len_addr, 0);
             hoisted.insert(slot, (ptr, vlen));
         }
         // Resolve each hoisted global once (sorted for deterministic codegen). Unbound ⇒
@@ -1190,7 +1190,7 @@ fn jit_lower_arm_inner(
             let cont = b.create_block();
             b.ins().brif(ptr, cont, &[], deopt, &[]);
             b.switch_to_block(cont);
-            let vlen = b.ins().load(types::I64, MemFlags::new(), len_addr, 0);
+            let vlen = b.ins().load(types::I64, MemFlagsData::trusted(), len_addr, 0);
             hoisted_global.insert(sym, (ptr, vlen, w0, w1, w2));
         }
         // Scalar globals (#1): resolve each once at entry into its `Value` words — no vector
@@ -1212,7 +1212,7 @@ fn jit_lower_arm_inner(
         }
         if !hoisted_global.is_empty() || !hoisted_scalar.is_empty() {
             let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when globals are hoisted");
-            entry_epoch = Some(b.ins().load(types::I64, MemFlags::new(), ep_ptr, 0));
+            entry_epoch = Some(b.ins().load(types::I64, MemFlagsData::trusted(), ep_ptr, 0));
         }
     }
     // Initialize register-carry variables from roots (first iteration). Each param slot k is
@@ -1223,7 +1223,7 @@ fn jit_lower_arm_inner(
         let idx = b.ins().iadd_imm(base, k as i64);
         let off = b.ins().imul_imm(idx, STRIDE);
         let addr = b.ins().iadd(rb, off);
-        let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+        let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
         let expected_tag = if is_float {
             TAG_FLOAT as i64
         } else {
@@ -1233,9 +1233,9 @@ fn jit_lower_arm_inner(
         let cont = b.create_block();
         b.ins().brif(ok, cont, &[], deopt, &[]);
         b.switch_to_block(cont);
-        let bits = b.ins().load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+        let bits = b.ins().load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
         if is_float {
-            let f = b.ins().bitcast(types::F64, MemFlags::new(), bits);
+            let f = b.ins().bitcast(types::F64, MemFlagsData::new(), bits);
             b.def_var(var, f);
         } else {
             b.def_var(var, bits);
@@ -1276,13 +1276,13 @@ fn jit_lower_arm_inner(
         let idx = b.ins().iadd_imm(base, k);
         let off = b.ins().imul_imm(idx, STRIDE);
         let addr = b.ins().iadd(roots_base, off);
-        let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+        let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
         let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
         let cont = b.create_block();
         b.ins().brif(is_int, cont, &[], deopt, &[]);
         b.switch_to_block(cont);
         b.ins()
-            .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32)
+            .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32)
     };
     // `map` reorders the two operands into the primitive's `(x, y)` argument order —
     // e.g. `>` is `%lt` with `map = [1, 0]` (operands swapped), so the JIT must apply
@@ -1438,9 +1438,9 @@ fn jit_lower_arm_inner(
         let off = b.ins().imul_imm(idx, STRIDE);
         let addr = b.ins().iadd(roots_base, off);
         let tag = b.ins().iconst(types::I8, tag_byte as i64);
-        b.ins().store(MemFlags::new(), tag, addr, 0);
+        b.ins().store(MemFlagsData::trusted(), tag, addr, 0);
         b.ins()
-            .store(MemFlags::new(), payload, addr, PAYLOAD_OFFSET as i32);
+            .store(MemFlagsData::trusted(), payload, addr, PAYLOAD_OFFSET as i32);
     };
     // Copy the whole `Value` from frame slot `src` to slot `dst` (handle-safe — moves the
     // bytes verbatim, no interpretation). A `Value` is `STRIDE` bytes (`#[repr(C, u8)]`):
@@ -1462,8 +1462,8 @@ fn jit_lower_arm_inner(
         };
         let mut off = 0i32;
         while (off as i64) < STRIDE {
-            let w = b.ins().load(types::I64, MemFlags::new(), saddr, off);
-            b.ins().store(MemFlags::new(), w, daddr, off);
+            let w = b.ins().load(types::I64, MemFlagsData::trusted(), saddr, off);
+            b.ins().store(MemFlagsData::trusted(), w, daddr, off);
             off += 8;
         }
     };
@@ -1492,13 +1492,13 @@ fn jit_lower_arm_inner(
                 let i = b.ins().iadd_imm(base, k as i64);
                 let o = b.ins().imul_imm(i, STRIDE);
                 let addr = b.ins().iadd(roots_base, o);
-                let w0 = b.ins().load(types::I64, MemFlags::new(), addr, 0);
+                let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), addr, 0);
                 let w1 = b
                     .ins()
-                    .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                    .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
                 let w2 = b
                     .ins()
-                    .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32 + 8);
+                    .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32 + 8);
                 // NOTE: an in-IR validation call here (dbg_check_slot_ref) PERTURBS codegen —
                 // it forces register spills around the call that mask the very register-liveness
                 // bug we're hunting (#2). Validation lives in the Rust-side `brood_rt_push`.
@@ -1506,7 +1506,7 @@ fn jit_lower_arm_inner(
             }
             Op::Float(v) => {
                 // Box an unboxed `f64` as a whole `Value::Float`: [TAG_FLOAT, bits, 0].
-                let bits = b.ins().bitcast(types::I64, MemFlags::new(), v);
+                let bits = b.ins().bitcast(types::I64, MemFlagsData::new(), v);
                 let tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
                 let zero = b.ins().iconst(types::I64, 0);
                 [tag, bits, zero]
@@ -1534,11 +1534,11 @@ fn jit_lower_arm_inner(
         let i = b.ins().iadd_imm(base, dst);
         let o = b.ins().imul_imm(i, STRIDE);
         let addr = b.ins().iadd(roots_base, o);
-        b.ins().store(MemFlags::new(), w[0], addr, 0);
+        b.ins().store(MemFlagsData::trusted(), w[0], addr, 0);
         b.ins()
-            .store(MemFlags::new(), w[1], addr, PAYLOAD_OFFSET as i32);
+            .store(MemFlagsData::trusted(), w[1], addr, PAYLOAD_OFFSET as i32);
         b.ins()
-            .store(MemFlags::new(), w[2], addr, PAYLOAD_OFFSET as i32 + 8);
+            .store(MemFlagsData::trusted(), w[2], addr, PAYLOAD_OFFSET as i32 + 8);
     };
     // Materialise an operand to an unboxed `i64`: a register value as-is, a tag-checked
     // load of a frame slot, or a tag-checked extract of a `Handle`'s payload (a `Handle`
@@ -1598,7 +1598,7 @@ fn jit_lower_arm_inner(
                 let addr = b.ins().iadd(roots_base, o);
                 let pl = b
                     .ins()
-                    .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
+                    .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
                 return b.ins().band_imm(pl, 0xff);
             }
         }
@@ -1629,11 +1629,11 @@ fn jit_lower_arm_inner(
         match op {
             Op::Float(v) => v,
             Op::Slot(k) => {
-                if let Some(&(var, true)) = carry_vars.get(k as usize) {
+                if let Some(&(var, true)) = carry_vars.get(k) {
                     return b.use_var(var);
                 }
                 if let Some(v) =
-                    slot_f64_cache.borrow().get(k as usize).copied().flatten()
+                    slot_f64_cache.borrow().get(k).copied().flatten()
                 {
                     return v;
                 }
@@ -1641,15 +1641,15 @@ fn jit_lower_arm_inner(
                 let i = b.ins().iadd_imm(base, k as i64);
                 let o = b.ins().imul_imm(i, STRIDE);
                 let addr = b.ins().iadd(roots_base, o);
-                let tag = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+                let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
                 let is_f = b.ins().icmp_imm(IntCC::Equal, tag, TAG_FLOAT as i64);
                 let cont = b.create_block();
                 b.ins().brif(is_f, cont, &[], deopt, &[]);
                 b.switch_to_block(cont);
                 let bits = b
                     .ins()
-                    .load(types::I64, MemFlags::new(), addr, PAYLOAD_OFFSET as i32);
-                b.ins().bitcast(types::F64, MemFlags::new(), bits)
+                    .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
+                b.ins().bitcast(types::F64, MemFlagsData::new(), bits)
             }
             Op::Int(_) | Op::Bool(_) | Op::Handle(..) | Op::HoistedVec { .. } => {
                 b.ins().jump(deopt, &[]);
@@ -1716,7 +1716,7 @@ fn jit_lower_arm_inner(
             }
         }
         Op::Float(v) => {
-            let bits = b.ins().bitcast(types::I64, MemFlags::new(), v);
+            let bits = b.ins().bitcast(types::I64, MemFlagsData::new(), v);
             let tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
             let zero = b.ins().iconst(types::I64, 0);
             store_words(b, dst, [tag, bits, zero]);
@@ -2116,9 +2116,9 @@ fn jit_lower_arm_inner(
                         let stride = b.ins().iconst(types::I64, FL_SIZE);
                         let off = b.ins().imul(site_idx, stride);
                         let slot_ptr = b.ins().iadd(fl_base, off);
-                        let ep = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_epoch_off);
+                        let ep = b.ins().load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_epoch_off);
                         let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when icall is on");
-                        let gep = b.ins().load(types::I64, MemFlags::new(), ep_ptr, 0);
+                        let gep = b.ins().load(types::I64, MemFlagsData::trusted(), ep_ptr, 0);
                         let ep_ok = b.ins().icmp(IntCC::Equal, ep, gep);
                         b.ins().brif(ep_ok, chk_ident, &[], miss, &[]);
 
@@ -2131,18 +2131,18 @@ fn jit_lower_arm_inner(
                         // re-resolves correctly. Without this the fast path would jump into the
                         // wrong native code with the wrong arity (a SIGSEGV in release).
                         b.switch_to_block(chk_ident);
-                        let slot_sym = b.ins().load(types::I32, MemFlags::new(), slot_ptr, fl_sym_off);
+                        let slot_sym = b.ins().load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_sym_off);
                         let sym_ok = b.ins().icmp(IntCC::Equal, slot_sym, head_v);
-                        let slot_argc = b.ins().load(types::I32, MemFlags::new(), slot_ptr, fl_argc_off);
+                        let slot_argc = b.ins().load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_argc_off);
                         let argc_ok = b.ins().icmp(IntCC::Equal, slot_argc, argc_v);
                         let ident_ok = b.ins().band(sym_ok, argc_ok);
                         b.ins().brif(ident_ok, hit, &[], miss, &[]);
 
                         // hit: read (code, nslots, env) and run the fast frame.
                         b.switch_to_block(hit);
-                        let code_v = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_code_off);
-                        let nslots_v = b.ins().load(types::I32, MemFlags::new(), slot_ptr, fl_nslots_off);
-                        let env_v = b.ins().load(types::I64, MemFlags::new(), slot_ptr, fl_env_off);
+                        let code_v = b.ins().load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_code_off);
+                        let nslots_v = b.ins().load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_nslots_off);
+                        let env_v = b.ins().load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);
                         let ffc = b.ins().call(
                             fastframe_ref,
                             &[heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v],
@@ -2235,16 +2235,16 @@ fn jit_lower_arm_inner(
                                     b.ins().iadd_imm(pair_ptr, field_off)
                                 };
                                 let rw0 =
-                                    b.ins().load(types::I64, MemFlags::new(), field_ptr, 0);
+                                    b.ins().load(types::I64, MemFlagsData::trusted(), field_ptr, 0);
                                 let rw1 = b.ins().load(
                                     types::I64,
-                                    MemFlags::new(),
+                                    MemFlagsData::trusted(),
                                     field_ptr,
                                     PAYLOAD_OFFSET as i32,
                                 );
                                 let rw2 = b.ins().load(
                                     types::I64,
-                                    MemFlags::new(),
+                                    MemFlagsData::trusted(),
                                     field_ptr,
                                     PAYLOAD_OFFSET as i32 + 8,
                                 );
@@ -2340,13 +2340,13 @@ fn jit_lower_arm_inner(
                             b.switch_to_block(cont);
                             let off = b.ins().imul_imm(idx, STRIDE);
                             let elem = b.ins().iadd(ptr, off);
-                            let w0 = b.ins().load(types::I64, MemFlags::new(), elem, 0);
+                            let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
                             let w1 =
                                 b.ins()
-                                    .load(types::I64, MemFlags::new(), elem, PAYLOAD_OFFSET as i32);
+                                    .load(types::I64, MemFlagsData::trusted(), elem, PAYLOAD_OFFSET as i32);
                             let w2 = b.ins().load(
                                 types::I64,
-                                MemFlags::new(),
+                                MemFlagsData::trusted(),
                                 elem,
                                 PAYLOAD_OFFSET as i32 + 8,
                             );
@@ -2407,16 +2407,16 @@ fn jit_lower_arm_inner(
                             b.switch_to_block(cont);
                             let off = b.ins().imul_imm(idx, STRIDE);
                             let elem = b.ins().iadd(ptr, off);
-                            let w0 = b.ins().load(types::I64, MemFlags::new(), elem, 0);
+                            let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
                             let w1 = b.ins().load(
                                 types::I64,
-                                MemFlags::new(),
+                                MemFlagsData::trusted(),
                                 elem,
                                 PAYLOAD_OFFSET as i32,
                             );
                             let w2 = b.ins().load(
                                 types::I64,
-                                MemFlags::new(),
+                                MemFlagsData::trusted(),
                                 elem,
                                 PAYLOAD_OFFSET as i32 + 8,
                             );
@@ -2569,7 +2569,7 @@ fn jit_lower_arm_inner(
                                 while (off as i64) < STRIDE {
                                     words.push((
                                         off,
-                                        b.ins().load(types::I64, MemFlags::new(), addr, off),
+                                        b.ins().load(types::I64, MemFlagsData::trusted(), addr, off),
                                     ));
                                     off += 8;
                                 }
@@ -2596,7 +2596,7 @@ fn jit_lower_arm_inner(
                             // A float arg — box as Value::Float (TAG_FLOAT + bits). The
                             // next iteration reads it back via `as_f64` (tag-checked).
                             Op::Float(v) => {
-                                let bits = b.ins().bitcast(types::I64, MemFlags::new(), v);
+                                let bits = b.ins().bitcast(types::I64, MemFlagsData::new(), v);
                                 let tag = b.ins().iconst(types::I8, TAG_FLOAT as i64);
                                 vals.push(vec![(0, tag), (PAYLOAD_OFFSET as i32, bits)]);
                             }
@@ -2613,7 +2613,7 @@ fn jit_lower_arm_inner(
                         let o = b.ins().imul_imm(idx, STRIDE);
                         let addr = b.ins().iadd(roots_base, o);
                         for &(off, w) in words {
-                            b.ins().store(MemFlags::new(), w, addr, off);
+                            b.ins().store(MemFlagsData::trusted(), w, addr, off);
                         }
                     }
                     // Register-carry update: keep carry_vars in sync with the new slot values.
@@ -2636,11 +2636,11 @@ fn jit_lower_arm_inner(
                                         let addr = b.ins().iadd(rb2, o);
                                         let bits = b.ins().load(
                                             types::I64,
-                                            MemFlags::new(),
+                                            MemFlagsData::trusted(),
                                             addr,
                                             PAYLOAD_OFFSET as i32,
                                         );
-                                        b.ins().bitcast(types::F64, MemFlags::new(), bits)
+                                        b.ins().bitcast(types::F64, MemFlagsData::new(), bits)
                                     }
                                 };
                                 b.def_var(var, f);
@@ -2659,7 +2659,7 @@ fn jit_lower_arm_inner(
                                         let addr = b.ins().iadd(rb2, o);
                                         b.ins().load(
                                             types::I64,
-                                            MemFlags::new(),
+                                            MemFlagsData::trusted(),
                                             addr,
                                             PAYLOAD_OFFSET as i32,
                                         )
@@ -2688,7 +2688,7 @@ fn jit_lower_arm_inner(
                         // the back-edge. A plain load matches the `Relaxed` atomic; the guard only
                         // needs to eventually observe a concurrent `def`'s bump.
                         let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when a global is hoisted");
-                        let now_ep = b.ins().load(types::I64, MemFlags::new(), ep_ptr, 0);
+                        let now_ep = b.ins().load(types::I64, MemFlagsData::trusted(), ep_ptr, 0);
                         let changed = b.ins().icmp(IntCC::NotEqual, now_ep, entry_ep);
                         let ck = b.create_block();
                         b.ins().brif(changed, deopt, &[], ck, &[]);
@@ -2749,11 +2749,11 @@ fn jit_lower_arm_inner(
                                     let i = b.ins().iadd_imm(base, k as i64);
                                     let o = b.ins().imul_imm(i, STRIDE);
                                     let addr = b.ins().iadd(roots_base, o);
-                                    let t8 = b.ins().load(types::I8, MemFlags::new(), addr, 0);
+                                    let t8 = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
                                     let tagv = b.ins().uextend(types::I64, t8);
                                     let pl = b.ins().load(
                                         types::I64,
-                                        MemFlags::new(),
+                                        MemFlagsData::trusted(),
                                         addr,
                                         PAYLOAD_OFFSET as i32,
                                     );

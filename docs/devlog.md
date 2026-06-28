@@ -491,3 +491,74 @@ the suite's proven-stable 5000ms (absence-checks and deliberate timeout-fires le
 intact); un-`#[ignore]`d `mem_limit` with a bounded runaway (safe unattended); fenced
 the `root_scope` doc example as `text`. `make test`: 629 passed, 0 skipped, 0 timed
 out; doctests 1 passed, 0 ignored.
+
+## 2026-06-28 — Dependency refresh to latest stable + a docs-driven crate audit
+
+**Latest-stable bumps.** Moved the workspace onto current stable for every dep that
+had one: `rustls` 0.23.41, `rcgen` 0.14.8 (`CertifiedKey.key_pair`→`signing_key`),
+`lsp-server` 0.8.0 (no code change — the only break, `Message::write(&self)`, isn't
+called), `rodio` 0.22.2 (rewrote the audio backend onto `DeviceSinkBuilder`/`mixer`;
+`convert_samples` is gone; added the `playback` feature since `default-features=false`
+now drops it), `glow` 0.17 (additive — no migration), and `cranelift` 0.132→0.133
+(the big one: `MemFlags` became an interned `u16` index, so all 52 JIT `load`/`store`
+sites moved to `MemFlagsData::new()`). The crypto-stack **dedup** stays parked — it
+needs `chacha20poly1305 0.11` to ship stable (only an rc, stalled since Feb).
+
+**Audit + fixes.** Swept every direct dep against its docs (8 parallel readers). Applied:
+`smallvec` `union` feature (shrinks the hot `MapNode` + per-call argv/env vecs; sound —
+all element types are `Copy`); the JIT's own heap loads/stores now use
+`MemFlagsData::trusted()` (the ~40 provably-aligned/non-trapping accesses; the 6 scalar
+`bitcast`s keep `new()`); a borrowing `expect_rope_ref` for the 7 read-only rope builtins
+(skips an `Arc`-node clone on the editor render path); an x25519 `was_contributory()`
+check in the node handshake (makes the low-order-key guard explicit rather than emergent
+from the cookie-MAC); `rcgen` switched to `aws_lc_rs` so **`ring` is dropped** (one crypto
+provider, not two); and the dead `glutin-winit` dep removed (gui_gpu builds the GL surface
+via raw-window-handle directly).
+
+**This-round cleanups.** `tree-sitter-parse` now projects `:error`/`:missing` recovery
+state into the CST (only when set; +3 tests); the `%chacha20-encrypt` Rust docstring +
+`PRIMITIVE_DOCS` got the nonce-reuse warning (the Brood side already had it + a
+`random-nonce` helper); dropped `num-integer` by computing even bignum division with
+`BigInt`'s inherent `%`/`/`; `glow` loader uses `from_loader_function_cstr` (no `CString`
+round-trip); `nest grammar`'s target is now a clap `ValueEnum` (lists choices + a
+formatted error instead of a hand-rolled `exit(2)`); fixed the stale `Content-Length`
+comment in `nest/Cargo.toml` (the MCP transport is newline-delimited). And
+`bigint_cmp_float` (the `value_cmp` bignum-vs-float fallback) now compares
+*exactly* via `BigDecimal` instead of rounding the bignum to f64 — so a bignum
+inside f64's range but not exactly representable (e.g. 2^70±1 vs the f64 2^70) is
+ordered correctly rather than called equal (+3 Rust unit tests). Suite green
+throughout (2497 passed) across default + `jit` + `gui-gpu`.
+
+## 2026-06-28 — Exact Decimal/Float ordering, tree-sitter incremental parse, damage-only GUI present
+
+Follow-on round taking three audit items to completion.
+
+**Exact Decimal-vs-Float ordering.** Generalised the bignum-vs-float fix into a
+shared `bigdecimal_cmp_float` and applied it to the `value_cmp` Decimal/Float arms,
+which had the same `to_f64()` precision loss — sort ordering of mixed decimals and
+floats (e.g. the decimal `0.1` vs the f64 `0.1`, which is slightly larger) is now
+exact, not rounded-then-compared (+1 unit test). Ordering is exact even though the
+arithmetic tower still does deliberate float contagion — distinct concerns.
+
+**Tree-sitter incremental parsing (ROADMAP §C).** New `tree-sitter-reparse key
+source lang` keyed by a buffer id: caches the last `(source, tree)` and re-uses it
+via `Tree::edit` + `parse(.., Some(old_tree))`, so only the changed region is
+re-scanned — what a self-editing editor needs to reparse on each keystroke. The edit
+is derived by **diffing** the cached source against the new (longest common prefix +
+suffix → one `InputEdit`, snapped to char boundaries), so the editor needn't track
+edit ranges. `Parser`s are pooled and `Tree`s cached in global `Mutex` maps (both are
+`Send+Sync`; green processes migrate across worker threads, so thread-local wouldn't
+hit). `tree-sitter-forget key` evicts on buffer close; the cache is capped. The result
+is **identical** to a from-scratch parse — a test asserts incremental == scratch across
+insert/delete/append/multibyte/no-op edits (incrementality is pure optimization).
+
+**Damage-only GUI present (softbuffer).** The CPU `gui` backend now declares only the
+changed screen region instead of blitting the whole framebuffer — the win for the
+typing case the paint-stall trace flagged as present-bound. Correct under
+multi-buffering via softbuffer's `Buffer::age()`: the declared damage is the union of
+the last `age` frames' changed bboxes (diffed against the last presented pixels).
+**Safe by construction** — it narrows only when the buffer age is known and within
+recorded history, and full-presents (the prior exact behaviour) on any doubt or
+resize, so a wrong-damage corruption is impossible. Validated on a live display and
+made the **default**; `BROOD_GUI_DAMAGE=0` is the opt-out escape hatch. Builds clean
+across default/`jit`/`gui`/`gui-gpu`; suite 2499 passed.

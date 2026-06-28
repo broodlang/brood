@@ -219,7 +219,7 @@ fn sources<'a>(
         };
         if let Some(&doc) = open.get(&pb) {
             out.push(Source::Open { uri, doc });
-        } else if let Some(text) = std::fs::read_to_string(&path).ok() {
+        } else if let Ok(text) = std::fs::read_to_string(&path) {
             out.push(Source::Disk { uri, text });
         }
     }

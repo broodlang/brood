@@ -34,7 +34,7 @@ use crate::core::value::{self, Symbol, Tag, Value};
 /// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
 /// order**; the compiler can't enumerate variants, so `tag_universe_is_consistent`
 /// (below) is what guards completeness, ordering, and the universe size.
-const ALL_TAGS: [Tag; 21] = [
+const ALL_TAGS: [Tag; 22] = [
     Tag::Nil,
     Tag::Bool,
     Tag::Int,
@@ -56,6 +56,7 @@ const ALL_TAGS: [Tag; 21] = [
     Tag::Table,
     Tag::Bitset,
     Tag::Bytes,
+    Tag::Decimal,
 ];
 
 /// The number of tag atoms — derived from [`ALL_TAGS`], not hand-counted.
@@ -149,8 +150,11 @@ impl Ty {
     pub const NEVER: Ty = Ty::flat(0);
     /// `⊤` — every tag; the type of any value. A supertype of every type.
     pub const ANY: Ty = Ty::flat(UNIVERSE);
-    /// `int ∪ float` — the named union the prelude's `number?` predicate implies.
-    pub const NUMBER: Ty = Ty::flat((1u32 << bit(Tag::Int)) | (1u32 << bit(Tag::Float)));
+    /// `int ∪ float ∪ decimal` — the named union the prelude's `number?` predicate
+    /// implies. A `decimal` is a number (but not an integer).
+    pub const NUMBER: Ty = Ty::flat(
+        (1u32 << bit(Tag::Int)) | (1u32 << bit(Tag::Float)) | (1u32 << bit(Tag::Decimal)),
+    );
     /// `nil ∪ pair` — the named union the prelude's `list?` predicate implies.
     pub const LIST: Ty = Ty::flat((1u32 << bit(Tag::Nil)) | (1u32 << bit(Tag::Pair)));
 
@@ -297,6 +301,7 @@ impl Ty {
             "bool?" => Ty::of(Tag::Bool),
             "int?" => Ty::of(Tag::Int),
             "float?" => Ty::of(Tag::Float),
+            "decimal?" => Ty::of(Tag::Decimal),
             "symbol?" => Ty::of(Tag::Sym),
             "keyword?" => Ty::of(Tag::Keyword),
             "string?" => Ty::of(Tag::Str),
@@ -920,7 +925,12 @@ mod tests {
 
     #[test]
     fn singletons_and_named_unions() {
-        assert_eq!(Ty::NUMBER, Ty::of(Tag::Int).union(Ty::of(Tag::Float)));
+        assert_eq!(
+            Ty::NUMBER,
+            Ty::of(Tag::Int)
+                .union(Ty::of(Tag::Float))
+                .union(Ty::of(Tag::Decimal))
+        );
         assert_eq!(Ty::LIST, Ty::of(Tag::Nil).union(Ty::of(Tag::Pair)));
         assert!(Ty::of(Tag::Int).contains_tag(Tag::Int));
         assert!(!Ty::of(Tag::Int).contains_tag(Tag::Float));
@@ -952,8 +962,11 @@ mod tests {
         let not_nil = Ty::of(Tag::Nil).negate();
         assert!(!not_nil.contains_tag(Tag::Nil));
         assert!(not_nil.contains_tag(Tag::Int));
-        // number \ int = float
-        assert_eq!(Ty::NUMBER.difference(Ty::of(Tag::Int)), Ty::of(Tag::Float));
+        // number \ int = float ∪ decimal
+        assert_eq!(
+            Ty::NUMBER.difference(Ty::of(Tag::Int)),
+            Ty::of(Tag::Float).union(Ty::of(Tag::Decimal))
+        );
     }
 
     #[test]

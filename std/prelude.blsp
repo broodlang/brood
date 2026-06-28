@@ -288,6 +288,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
     (%eq t 'number) (number? v)
     (%eq t 'int) (int? v)
     (%eq t 'float) (float? v)
+    (%eq t 'decimal) (decimal? v)
     (%eq t 'string) (string? v)
     (%eq t 'bool) (bool? v)
     (%eq t 'keyword) (keyword? v)
@@ -437,6 +438,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 (defn bool? (x) "True if `x` is a boolean." (%eq (type-of x) :bool))
 (defn string? (x) "True if `x` is a string." (%eq (type-of x) :string))
 (defn bytes? (x) "True if `x` is a bytes value." (%eq (type-of x) :bytes))
+(defn decimal? (x) "True if `x` is an exact base-10 decimal (e.g. `1.50M`)." (%eq (type-of x) :decimal))
 (defn symbol? (x) "True if `x` is a symbol." (%eq (type-of x) :symbol))
 (defn keyword? (x) "True if `x` is a keyword." (%eq (type-of x) :keyword))
 (defn vector? (x) "True if `x` is a vector." (%eq (type-of x) :vector))
@@ -455,7 +457,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
 
 ;; ---- derived predicates ----
-(defn number? (x) "True if `x` is an int or a float." (or (int? x) (float? x)))
+(defn number? (x) "True if `x` is an int, a float, or a decimal." (or (int? x) (float? x) (decimal? x)))
 (defn list? (x) "True if `x` is a proper list (`nil` or a pair)." (or (nil? x) (pair? x)))
 
 ;; ---- list aliases & accessors ----

@@ -343,6 +343,7 @@ handle!(PairId);
 handle!(VecId);
 handle!(StrId);
 handle!(BigIntId);
+handle!(DecimalId);
 handle!(BsId);
 handle!(BytesId);
 handle!(RopeId);
@@ -498,6 +499,16 @@ pub enum Value {
     /// UTF-8-only string accessors. Shared across processes by Arc refcount;
     /// `promote`/GC copy the Arc byte-clean.
     Bytes(BytesId),
+    /// An arbitrary-precision base-10 **decimal** — a heap leaf handle into the
+    /// per-process `decimals` slab, mirroring [`Value::BigInt`] exactly (an
+    /// immutable leaf holding no `Value` children, backed by `bigdecimal::BigDecimal`
+    /// which builds on `num-bigint`). For *exact* base-10 numbers (money, Postgres
+    /// `numeric`) that a binary `Float` cannot represent without precision loss.
+    /// **Unlike** `BigInt` (which [`tag`] folds into `Tag::Int`), a decimal is its
+    /// OWN type: `type-of` is `:decimal`, distinct from `int`/`float`. Numerically
+    /// equal decimals (`1.5M` / `1.50M`) compare and hash equal (normalized).
+    /// Added at the END of the enum to preserve the JIT's pinned discriminant order.
+    Decimal(DecimalId),
 }
 
 /// The **unpacked** view of a [`Value`] — the form you `match` against.
@@ -624,6 +635,10 @@ impl Value {
     pub fn bytes(id: BytesId) -> Value {
         Value::Bytes(id)
     }
+    #[inline]
+    pub fn decimal(id: DecimalId) -> Value {
+        Value::Decimal(id)
+    }
 
     // ----- hot accessors (for the `if let Value::X(..) = v` shape) -----
 
@@ -743,6 +758,7 @@ pub enum Tag {
     Table,
     Bitset,
     Bytes,
+    Decimal,
 }
 
 impl Tag {
@@ -771,6 +787,7 @@ impl Tag {
             Tag::Table => "table",
             Tag::Bitset => "bitset",
             Tag::Bytes => "bytes",
+            Tag::Decimal => "decimal",
         }
     }
 
@@ -780,14 +797,14 @@ impl Tag {
     /// code that was essentially the entire `intern` cost (~98% of all interns were
     /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
     pub fn keyword(self) -> Symbol {
-        static KW: LazyLock<[Symbol; 21]> = LazyLock::new(|| {
-            const TAGS: [Tag; 21] = [
+        static KW: LazyLock<[Symbol; 22]> = LazyLock::new(|| {
+            const TAGS: [Tag; 22] = [
                 Tag::Nil, Tag::Bool, Tag::Int, Tag::Float, Tag::Sym, Tag::Keyword,
                 Tag::Str, Tag::Pair, Tag::Vector, Tag::Fn, Tag::Macro, Tag::Native,
                 Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Subprocess,
-                Tag::Table, Tag::Bitset, Tag::Bytes,
+                Tag::Table, Tag::Bitset, Tag::Bytes, Tag::Decimal,
             ];
-            let mut out = [0u32; 21];
+            let mut out = [0u32; 22];
             for t in TAGS {
                 out[t as usize] = intern(t.name());
             }
@@ -833,6 +850,8 @@ pub fn tag(v: Value) -> Tag {
         Value::Table(_) => Tag::Table,
         Value::Bitset(_) => Tag::Bitset,
         Value::Bytes(_) => Tag::Bytes,
+        // A decimal is its OWN type — distinct from int/float (unlike BigInt).
+        Value::Decimal(_) => Tag::Decimal,
     }
 }
 
@@ -890,7 +909,7 @@ impl ClosureArm {
     }
     /// Does this arm accept a call of `argc` arguments?
     pub fn accepts(&self, argc: usize) -> bool {
-        argc >= self.min_arity() && self.max_arity().map_or(true, |m| argc <= m)
+        argc >= self.min_arity() && self.max_arity().is_none_or(|m| argc <= m)
     }
 }
 

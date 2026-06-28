@@ -17,6 +17,9 @@
 // `fluent_uri` type clippy can't prove is immutable), but it's an interned,
 // effectively-immutable URI — the canonical document-store key. False positive.
 #![allow(clippy::mutable_key_type)]
+// LSP handlers thread the document store + position + params (8 args); bundling
+// them buys nothing. Accepted crate-wide like the lib (see its note).
+#![allow(clippy::too_many_arguments)]
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;

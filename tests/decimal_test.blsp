@@ -1,0 +1,108 @@
+;; The `decimal` value type (Value::Decimal): the `M`-suffix literal, the surface
+;; API, exact base-10 arithmetic, the numeric tower (int/float contagion),
+;; equality/hashing (normalized), printer round-trip, and survival across GC.
+(defmodule decimal-test (:use test))
+
+;; def'd into a global → promoted to the shared RUNTIME region (exercises the
+;; promote + RUNTIME-flush paths).
+(def *global-decimal* 12345.6789M)
+
+(describe "decimal: literal, type, predicate"
+  (test "literal + type-of + decimal?"
+    (is (= (type-of 1.50M) :decimal))
+    (is (decimal? 1.5M))
+    (is (decimal? 0M))
+    (is (decimal? -3.14M))
+    (is (decimal? 100M))
+    (refute (decimal? 1.5))      ; a float is not a decimal
+    (refute (decimal? 1))        ; an int is not a decimal
+    (refute (decimal? "1.5")))
+  (test "a decimal is a number but not an integer"
+    (is (number? 1.5M))
+    (is (number? 100M))
+    (refute (int? 1.5M))
+    (refute (float? 1.5M))))
+
+(describe "decimal: distinct from float"
+  (test "1.5M is not equal to the float 1.5, but converts to it"
+    (refute (= 1.5M 1.5))                  ; different types
+    (is (= (decimal->float 1.5M) 1.5)))
+  (test "decimal->string / decimal->float"
+    (is (= (decimal->string 1.50M) "1.50"))
+    (is (= (decimal->float 0.25M) 0.25))))
+
+(describe "decimal: exact arithmetic"
+  (test "the classic float-fails case is exact in decimal"
+    (is (= (+ 0.1M 0.2M) 0.3M)))         ; (+ 0.1 0.2) as floats is NOT 0.3
+  (test "multiplication"
+    (is (= (* 2M 3M) 6M))
+    (is (= (* 1.5M 2M) 3.0M)))
+  (test "subtraction"
+    (is (= (- 1.00M 0.99M) 0.01M)))
+  (test "division"
+    (is (= (/ 10M 4M) 2.5M))
+    (is (= (/ 1M 8M) 0.125M)))
+  (test "division by zero errors (not a panic)"
+    (is (= (first (try (/ 1M 0M) (catch _ [:error]))) :error))))
+
+(describe "decimal: numeric tower contagion"
+  (test "mixed int + decimal -> decimal (exact)"
+    (is (= (+ 1 2.5M) 3.5M))
+    (is (decimal? (+ 1 2.5M)))
+    (is (= (* 3 0.1M) 0.3M))
+    (is (decimal? (- 10 0.5M))))
+  (test "mixed float + decimal -> float (float wins, inexact)"
+    (is (= (+ 1.0 2.5M) 3.5))
+    (is (float? (+ 1.0 2.5M)))
+    (is (float? (* 2.0 1.5M))))
+  (test "comparisons across int / decimal"
+    (is (< 1.5M 2M))
+    (is (< 1.5M 2))                       ; decimal vs int
+    (is (<= 2.0M 2M))
+    (is (> 3M 2.5M))
+    (is (= (max 1M 2.5M 2M) 2.5M))
+    (is (= (min 1.5M 1M 2M) 1M))))
+
+(describe "decimal: construction"
+  (test "(decimal x) from string / int / float"
+    (is (= (decimal "1.50") 1.50M))
+    (is (= (decimal 3) 3M))
+    (is (= (decimal 0.25) 0.25M)))
+  (test "(decimal d) on a decimal is identity"
+    (is (= (decimal 1.5M) 1.5M)))
+  (test "a malformed decimal string errors"
+    (is (= (first (try (decimal "not-a-number") (catch _ [:error]))) :error))))
+
+(describe "decimal: normalized equality + hashing"
+  (test "1.5M == 1.50M (numerically equal regardless of scale)"
+    (is (= 1.5M 1.50M))
+    (is (= 0.30M 0.3M))
+    (is (= 100M 100.00M)))
+  (test "equal decimals hash equal (work as the same map key)"
+    (let (m (assoc {} 1.5M :a))
+      (is (= (get m 1.50M) :a))           ; 1.5M and 1.50M are the same key
+      (is (= (get m 1.500M) :a)))))
+
+(describe "decimal: printer round-trip"
+  (test "pr-str emits the M suffix and re-reads to the same value"
+    (is (= (read-string (pr-str 1.50M)) 1.50M))
+    (is (= (read-string (pr-str -3.14M)) -3.14M))
+    (is (= (read-string (pr-str 0M)) 0M))
+    (is (= (read-string (pr-str 100M)) 100M))))
+
+(describe "decimal: GC survival"
+  :isolated
+  (test "LOCAL decimals survive forced collections with value intact"
+    (let (xs (into [] (map (fn (i) (* (decimal i) 0.01M)) (range 1000))))
+      (gc-collect)
+      ;; churn: 30k throwaway decimals to force tenuring + a major collection
+      (count (into [] (map (fn (i) (* (decimal i) 0.5M)) (range 30000))))
+      (gc-collect)
+      (is (= (count xs) 1000))
+      (is (= (nth xs 0) 0.00M))
+      (is (= (nth xs 100) 1.00M))
+      (is (= (nth xs 999) 9.99M))))
+  (test "a promoted (global) decimal survives collection"
+    (gc-collect)
+    (is (= *global-decimal* 12345.6789M))
+    (is (decimal? *global-decimal*))))

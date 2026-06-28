@@ -134,7 +134,9 @@ fn walk(
         NodeKind::Symbol => push_symbol(node, src, tree, role, index, out),
         NodeKind::Keyword => emit(node, src, index, T_ENUM_MEMBER, 0, out),
         NodeKind::Str => emit(node, src, index, T_STRING, 0, out),
-        NodeKind::Int | NodeKind::Float => emit(node, src, index, T_NUMBER, 0, out),
+        NodeKind::Int | NodeKind::Float | NodeKind::Decimal => {
+            emit(node, src, index, T_NUMBER, 0, out)
+        }
         NodeKind::Bool | NodeKind::Nil => emit(node, src, index, T_KEYWORD, 0, out),
         NodeKind::Comment => emit(node, src, index, T_COMMENT, 0, out),
         NodeKind::Whitespace | NodeKind::Error => {}

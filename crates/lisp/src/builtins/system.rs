@@ -78,12 +78,14 @@ pub(super) fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Valu
     let tag = |k: &'static str| Value::keyword(value::intern(k));
     match node.kind {
         // Leaves: [kind raw-text].
-        Symbol | Keyword | Int | Float | Str | Bool | Nil | Whitespace | Comment | Error => {
+        Symbol | Keyword | Int | Float | Decimal | Str | Bool | Nil | Whitespace | Comment
+        | Error => {
             let k = match node.kind {
                 Symbol => "symbol",
                 Keyword => "keyword",
                 Int => "int",
                 Float => "float",
+                Decimal => "decimal",
                 Str => "str",
                 Bool => "bool",
                 Nil => "nil",
@@ -184,6 +186,7 @@ pub(super) fn cst_node_kind_name(kind: cst::NodeKind) -> &'static str {
         Keyword => "keyword",
         Int => "int",
         Float => "float",
+        Decimal => "decimal",
         Str => "str",
         Bool => "bool",
         Nil => "nil",
@@ -213,7 +216,8 @@ pub(super) fn cst_to_positioned(heap: &mut Heap, node: &cst::Node, src: &str, b2
     ];
     match node.kind {
         // Leaves carry their raw source text; positions alone make them navigable.
-        Symbol | Keyword | Int | Float | Str | Bool | Nil | Whitespace | Comment | Error => {
+        Symbol | Keyword | Int | Float | Decimal | Str | Bool | Nil | Whitespace | Comment
+        | Error => {
             let text = heap.alloc_string(node.text(src));
             pairs.push((kw("text"), text));
         }
@@ -249,6 +253,26 @@ pub(super) fn tree_sitter_parse(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
         }
     };
     crate::treesit::parse(heap, &src, &lang)
+}
+
+/// `(tree-sitter-reparse key source lang)` — incremental re-parse keyed by buffer
+/// id `key`; same positioned CST as `tree-sitter-parse`, less work. Mechanism in
+/// `crate::treesit` (feature-gated).
+pub(super) fn tree_sitter_reparse(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let key = expect_int(heap, "tree-sitter-reparse", arg(args, 0))?;
+    let src = expect_string(heap, "tree-sitter-reparse", arg(args, 1))?;
+    let lang = match arg(args, 2) {
+        Value::Keyword(s) => value::symbol_name(s),
+        v => return Err(LispError::wrong_type(heap, "tree-sitter-reparse", "keyword", v)),
+    };
+    crate::treesit::parse_incremental(heap, key, &src, &lang)
+}
+
+/// `(tree-sitter-forget key)` — drop the cached incremental tree(s) for buffer
+/// `key`; returns the count dropped. Call when a buffer closes.
+pub(super) fn tree_sitter_forget(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let key = expect_int(heap, "tree-sitter-forget", arg(args, 0))?;
+    Ok(Value::int(crate::treesit::forget(key)))
 }
 
 /// `(reload-defs path)` — like `load`, but only re-evaluates **definitions**
@@ -670,6 +694,9 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // A small backtracking regular-expression engine, pure Brood (literals, ., * + ?,
     // ^ $, [...] sets, \d \w \s, |, groups; no ranges/captures yet). Opt-in.
     ("regex", include_str!("../../../../std/regex.blsp")),
+    // ANSI / VT100 escape-sequence stripping for pipe output (CSI sequences + CR).
+    // Used by bshell and compile to clean subprocess output before display.
+    ("ansi", include_str!("../../../../std/ansi.blsp")),
     ("editor/ui", include_str!("../../../../std/editor/ui.blsp")),
     // Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
     // model (ADR-090): the app runs on the daemon, a thin `attach` client paints

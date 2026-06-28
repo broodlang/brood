@@ -116,7 +116,7 @@ pub enum Control {
 }
 
 #[derive(Debug, Clone)]
-pub struct LispError {
+pub struct LispErrorData {
     pub kind: ErrorKind,
     pub message: String,
     /// `Some` iff this is a [`Control`] signal riding the error channel (a suspend),
@@ -142,6 +142,31 @@ pub struct LispError {
     /// `"scheduler race under -j 0 — try -j 1"`. Set by raise sites that
     /// know the common gotcha; omitted otherwise.
     pub hint: Option<String>,
+}
+
+/// `LispError` is a thin newtype over a **boxed** [`LispErrorData`]. It's returned
+/// in every [`LispResult`], so keeping it one pointer wide (8 bytes) keeps the
+/// happy-path `Result<Value, LispError>` small (~24 B vs the ~144 B it would be
+/// inline) — the error payload heap-allocates only on the cold error path.
+/// `Deref`/`DerefMut` expose the fields transparently, so every `e.kind` /
+/// `e.message` / … access and the `with_*` / `or_*` builders read exactly as if the
+/// fields were inline; constructors are the only sites that box.
+#[derive(Debug, Clone)]
+pub struct LispError(Box<LispErrorData>);
+
+impl std::ops::Deref for LispError {
+    type Target = LispErrorData;
+    #[inline]
+    fn deref(&self) -> &LispErrorData {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for LispError {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut LispErrorData {
+        &mut self.0
+    }
 }
 
 // ---------- error codes (see `docs/error-codes.md`) ---------------------------
@@ -203,7 +228,7 @@ pub mod error_codes {
 
 impl LispError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        LispError {
+        LispError(Box::new(LispErrorData {
             kind,
             message: message.into(),
             control: None,
@@ -212,13 +237,13 @@ impl LispError {
             file: None,
             code: None,
             hint: None,
-        }
+        }))
     }
 
     /// Build a [`Control`] signal (rides the error channel; not a real error).
     /// `kind`/`message` are inert placeholders so the struct stays well-formed.
     pub fn control(c: Control) -> Self {
-        LispError {
+        LispError(Box::new(LispErrorData {
             kind: ErrorKind::Runtime,
             message: String::new(),
             control: Some(c),
@@ -227,7 +252,7 @@ impl LispError {
             file: None,
             code: None,
             hint: None,
-        }
+        }))
     }
 
     /// The `receive`-on-empty suspend control signal (ADR-100 §7). See [`Control`].
@@ -349,7 +374,7 @@ impl LispError {
     /// throws **don't** carry a code — the user controls the payload shape; if
     /// they want one, they throw a map with `:code` themselves.
     pub fn thrown(value: Value, heap: &crate::core::heap::Heap) -> Self {
-        LispError {
+        LispError(Box::new(LispErrorData {
             kind: ErrorKind::User,
             message: crate::syntax::printer::display(heap, value),
             control: None,
@@ -358,7 +383,7 @@ impl LispError {
             file: None,
             code: None,
             hint: None,
-        }
+        }))
     }
 
     /// Project the structured fields into a Brood map for `catch` consumption.

@@ -145,6 +145,17 @@ pub(super) fn handshake<S: Read + Write>(
     // nonce first (both ends order it the same regardless of role), so both compute
     // identical directional keys.
     let shared = my_secret.diffie_hellman(&PublicKey::from(peer_eph_pub));
+    // Reject a non-contributory exchange: a low-order/zero peer key forces the
+    // shared secret to a known constant (x25519-dalek's documented guard). Both
+    // ephemeral pubkeys are already folded into the cookie-HMAC above, so this is
+    // unreachable without the cookie — but the check makes the guarantee explicit
+    // rather than resting on that emergent property.
+    if !shared.was_contributory() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "non-contributory X25519 exchange (low-order peer key)",
+        ));
+    }
     let (init_nonce, resp_nonce) = match role {
         Role::Initiator => (my_nonce, peer_nonce),
         Role::Responder => (peer_nonce, my_nonce),

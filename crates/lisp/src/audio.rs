@@ -23,7 +23,7 @@ pub fn beep(freq: f32, ms: u64, vol: f32) {
 #[cfg(feature = "audio")]
 mod backend {
     use rodio::source::SineWave;
-    use rodio::{OutputStream, Source};
+    use rodio::{DeviceSinkBuilder, Source};
     use std::sync::mpsc::{self, Sender};
     use std::sync::OnceLock;
     use std::time::Duration;
@@ -59,16 +59,18 @@ mod backend {
             let started = std::thread::Builder::new()
                 .name("brood-audio".into())
                 .spawn(move || {
-                    // Own the device for the thread's life (the stream must stay alive).
-                    let (_stream, handle) = match OutputStream::try_default() {
+                    // Own the device for the thread's life (the sink must stay alive).
+                    let stream = match DeviceSinkBuilder::open_default_sink() {
                         Ok(s) => s,
                         Err(_) => return,
                     };
+                    let mixer = stream.mixer();
                     while let Ok(b) = rx.recv() {
                         let tone = SineWave::new(b.freq)
                             .take_duration(Duration::from_millis(b.ms))
                             .amplify(b.vol);
-                        let _ = handle.play_raw(tone.convert_samples());
+                        // `add` mixes concurrently, so overlapping beeps stack.
+                        mixer.add(tone);
                     }
                 });
             match started {

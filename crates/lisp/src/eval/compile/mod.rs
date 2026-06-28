@@ -980,15 +980,15 @@ fn is_elem_read(a: &Node, b: &Node, slot: usize, nelems: usize) -> Option<usize>
 fn walk_children<F: FnMut(&Node)>(node: &Node, mut f: F) {
     match node {
         Node::If(a, b, c) => { f(a); f(b); f(c); }
-        Node::Do(xs) => xs.iter().for_each(|x| f(x)),
+        Node::Do(xs) => xs.iter().for_each(&mut f),
         Node::LetBind { binds, body } => {
             binds.iter().for_each(|(_, v)| f(v));
             f(body);
         }
-        Node::Call { callee, args, .. } => { f(callee); args.iter().for_each(|a| f(a)); }
-        Node::SelfCall { args, .. } => args.iter().for_each(|a| f(a)),
+        Node::Call { callee, args, .. } => { f(callee); args.iter().for_each(&mut f); }
+        Node::SelfCall { args, .. } => args.iter().for_each(&mut f),
         Node::MakeClosure { captures, .. } => captures.iter().for_each(|(_, v)| f(v)),
-        Node::Vector(xs) => xs.iter().for_each(|x| f(x)),
+        Node::Vector(xs) => xs.iter().for_each(&mut f),
         Node::Map(kvs) => kvs.iter().for_each(|(k, v)| { f(k); f(v); }),
         Node::Prim2 { a, b, .. } => { f(a); f(b); }
         Node::Prim1 { a, .. } => f(a),
@@ -1001,15 +1001,15 @@ fn walk_children<F: FnMut(&Node)>(node: &Node, mut f: F) {
 fn walk_children_mut<F: FnMut(&mut Node)>(node: &mut Node, mut f: F) {
     match node {
         Node::If(a, b, c) => { f(a); f(b); f(c); }
-        Node::Do(xs) => xs.iter_mut().for_each(|x| f(x)),
+        Node::Do(xs) => xs.iter_mut().for_each(&mut f),
         Node::LetBind { binds, body } => {
             binds.iter_mut().for_each(|(_, v)| f(v));
             f(body);
         }
-        Node::Call { callee, args, .. } => { f(callee); args.iter_mut().for_each(|a| f(a)); }
-        Node::SelfCall { args, .. } => args.iter_mut().for_each(|a| f(a)),
+        Node::Call { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
+        Node::SelfCall { args, .. } => args.iter_mut().for_each(&mut f),
         Node::MakeClosure { captures, .. } => captures.iter_mut().for_each(|(_, v)| f(v)),
-        Node::Vector(xs) => xs.iter_mut().for_each(|x| f(x)),
+        Node::Vector(xs) => xs.iter_mut().for_each(&mut f),
         Node::Map(kvs) => kvs.iter_mut().for_each(|(k, v)| { f(k); f(v); }),
         Node::Prim2 { a, b, .. } => { f(a); f(b); }
         Node::Prim1 { a, .. } => f(a),
@@ -3442,7 +3442,7 @@ fn exec_chunk(
         {
             static VM_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *VM_TRACE.get_or_init(|| {
-                std::env::var("BROOD_VM_TRACE").map_or(false, |v| v != "0" && !v.is_empty())
+                std::env::var("BROOD_VM_TRACE").is_ok_and(|v| v != "0" && !v.is_empty())
             }) {
                 eprintln!("[vm-trace ip={}] {}", *ip - 1, inst.trace_name());
             }
@@ -3976,7 +3976,7 @@ fn exec_chunk(
                     const BACKEDGE_TIER_INTERVAL: u32 = 256;
                     let edges = back_edges.wrapping_add(1);
                     *back_edges = edges;
-                    if edges % BACKEDGE_TIER_INTERVAL == 0 {
+                    if edges.is_multiple_of(BACKEDGE_TIER_INTERVAL) {
                         let code = arm.jit_code.load(std::sync::atomic::Ordering::Acquire);
                         let installed = !code.is_null()
                             && code != crate::jit::BAILED
@@ -5695,8 +5695,8 @@ pub(crate) fn jit_tier(
     //      sizing key), set `inline_installed`, and run the VM this one activation. The next
     //      entry sizes the frame to `active_nslots()` (= `inline_nslots`) and runs the inlined
     //      native. One VM activation on the transition — negligible.
-    if arm.inline_name.is_some() {
-        if !arm.inline_installed.load(Acquire) {
+    if arm.inline_name.is_some()
+        && !arm.inline_installed.load(Acquire) {
             let ic = arm.inline_code.load(Acquire);
             if ic.is_null() {
                 // Not yet compiled/enqueued. Elect a single enqueuer via the queued flag.
@@ -5736,7 +5736,6 @@ pub(crate) fn jit_tier(
             // `ic == BAILED`: the inlined body fell out of subset — leave the small native
             // installed forever (it's correct + fast). No retry.
         }
-    }
     // Publish freshly-compiled native code to the shared cache so the runtime's other
     // processes install it directly instead of recompiling (the spawn lever). The
     // `swap` guard makes this one lock acquire per arm-instance, not one per call; a
@@ -7095,7 +7094,7 @@ mod tests {
 
 #[test]
 fn test_inst_size() {
+    // Not an assertion — just surfaces the IR `Inst` size in test output (a
+    // regression in it shows up here). A non-zero size is guaranteed by the type.
     eprintln!("Inst size: {}", std::mem::size_of::<Inst>());
-    // This test always passes — it just prints the size.
-    assert!(true);
 }
