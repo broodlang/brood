@@ -61,7 +61,7 @@ server, and the web frontend come later (see the roadmap).
 | [distribution.md](distribution.md) | **Distributed nodes**: node-tagged pids, TCP links, location-transparent `send`, remote monitors, closure shipping, the HMAC handshake (ADR-034/073/074/081). |
 | [node-connect.md](node-connect.md) | Node-connect ergonomics: default-cookie file, name-addressed transport, `nest run --name` (ADR-068). |
 | [supervision.md](supervision.md) | **Reverted-then-userland.** The kernel supervisor that shipped briefly and was stripped (race source), why, and the userland `spawn`+`monitor` pattern that replaced it (ADR-039 reverted → ADR-044). |
-| [known-issues.md](known-issues.md) | The live **KI-N** issue list: open kernel/runtime bugs, their repros, and status. Read before chasing a crash. |
+| [known-issues.md](known-issues.md) | The **resolved** kernel/runtime defects (KI-1…4 + platform gaps), each condensed to cause + fix + the regression test that guards it. The load-bearing invariants to not reintroduce. |
 
 ## Editor (M2 and beyond)
 
