@@ -29,17 +29,21 @@
 //! this runtime's processes; not node-portable (the id names an OS process on this
 //! host — the dist wire codec rejects it).
 //!
-//! **TEXT-ONLY MECHANISM — BINARY-UNSAFE.** Like the socket mechanism, inbound
-//! bytes are delivered as a Brood string via `from_utf8_lossy`: any byte run that
-//! isn't valid UTF-8 is **silently replaced** with U+FFFD. This is fine for text
-//! protocols (JSON-RPC over stdio, line protocols) and unsafe for binary ones.
-//! Brood has no arbitrary-bytes value kind to carry raw bytes; adding one is a
-//! language-surface decision, not a fix to make here (see `crate::net`).
+//! **Text mode (default) is BINARY-UNSAFE; flip to binary mode for raw bytes.**
+//! By default inbound bytes are delivered as a Brood string via `from_utf8_lossy`:
+//! any byte run that isn't valid UTF-8 is **silently replaced** with U+FFFD —
+//! fine for text protocols (JSON-RPC over stdio, line protocols), wrong for binary
+//! ones. `proc-set-binary` switches a child to **binary mode** (mirroring the
+//! socket's `tcp-set-binary`): inbound `[:proc …]`/`[:proc-err …]` data is then a
+//! Latin-1 byte-string (one codepoint 0–255 per byte received) and `proc-send`
+//! writes each codepoint as one raw byte — byte-faithful both directions. Brood
+//! still has no arbitrary-bytes value kind, so the byte-string carrier is the
+//! convention (see `crate::net`).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -59,6 +63,11 @@ struct Proc {
     /// locks it briefly to `kill`; the reader locks it briefly to `try_wait`.
     /// Never held across a blocking call, so the two never deadlock.
     child: Arc<Mutex<Child>>,
+    /// Binary mode (default off). Shared with the reader threads, which load it
+    /// per chunk, so `proc-set-binary` flips an already-running child mid-stream.
+    /// In binary mode inbound bytes are delivered as a Latin-1 byte-string and
+    /// `proc-send` writes codepoints as raw bytes (mirrors `net`'s socket flag).
+    binary: Arc<AtomicBool>,
 }
 
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Proc>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -73,13 +82,19 @@ fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Proc>> {
 /// Build a `[:proc handle data]` (stdout) or `[:proc-err handle data]` (stderr)
 /// message for an inbound chunk.
 ///
-/// BINARY-UNSAFE: `bytes` is forced through `from_utf8_lossy` (see the module
-/// doc) — lossless for UTF-8 text, lossy otherwise.
-fn data_msg(tag: &str, id: u64, bytes: &[u8]) -> Message {
+/// Text mode forces `bytes` through `from_utf8_lossy` (lossless for UTF-8,
+/// lossy otherwise); binary mode maps each byte to its Latin-1 codepoint (0–255)
+/// for a byte-faithful carrier — see the module doc and `net::tcp_data_msg`.
+fn data_msg(tag: &str, id: u64, bytes: &[u8], binary: bool) -> Message {
+    let data = if binary {
+        bytes.iter().map(|&b| b as char).collect()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
     Message::Vector(vec![
         Message::Keyword(value::intern(tag)),
         Message::Subprocess(id),
-        Message::Str(String::from_utf8_lossy(bytes).into_owned()),
+        Message::Str(data),
     ])
 }
 
@@ -98,14 +113,20 @@ fn closed_msg(id: u64, code: Option<i32>) -> Message {
 /// Read `src` to EOF on a non-worker thread, emitting one `[<tag> id data]`
 /// message per chunk to `subscriber`. Used for both stdout (`:proc`) and stderr
 /// (`:proc-err`).
-fn start_pipe_reader<R: Read + Send + 'static>(id: u64, tag: &'static str, src: R, subscriber: u64) {
+fn start_pipe_reader<R: Read + Send + 'static>(
+    id: u64,
+    tag: &'static str,
+    src: R,
+    subscriber: u64,
+    binary: Arc<AtomicBool>,
+) {
     spawn_io_source(subscriber, "brood-proc-reader", move |sink| {
         let mut rd = src;
         let mut buf = [0u8; 65536];
         loop {
             match rd.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => sink.emit(data_msg(tag, id, &buf[..n])),
+                Ok(n) => sink.emit(data_msg(tag, id, &buf[..n], binary.load(Ordering::Acquire))),
                 Err(_) => break,
             }
         }
@@ -119,14 +140,20 @@ fn start_pipe_reader<R: Read + Send + 'static>(id: u64, tag: &'static str, src: 
 /// with a brief lock + short nap (never holding the lock while blocked) so a
 /// concurrent `proc-close`/`kill` can always take the lock. On exit, drop the
 /// registry entry.
-fn start_stdout_reader(id: u64, out: ChildStdout, child: Arc<Mutex<Child>>, subscriber: u64) {
+fn start_stdout_reader(
+    id: u64,
+    out: ChildStdout,
+    child: Arc<Mutex<Child>>,
+    subscriber: u64,
+    binary: Arc<AtomicBool>,
+) {
     spawn_io_source(subscriber, "brood-proc-stdout", move |sink| {
         let mut rd = out;
         let mut buf = [0u8; 65536];
         loop {
             match rd.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => sink.emit(data_msg("proc", id, &buf[..n])),
+                Ok(n) => sink.emit(data_msg("proc", id, &buf[..n], binary.load(Ordering::Acquire))),
                 Err(_) => break,
             }
         }
@@ -184,16 +211,42 @@ pub fn spawn(
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let child = Arc::new(Mutex::new(child));
+    let binary = Arc::new(AtomicBool::new(false));
     reg().insert(
         id,
         Proc {
             stdin: Arc::new(Mutex::new(stdin)),
             child: child.clone(),
+            binary: binary.clone(),
         },
     );
-    start_stdout_reader(id, stdout, child, subscriber);
-    start_pipe_reader(id, "proc-err", stderr, subscriber);
+    start_stdout_reader(id, stdout, child, subscriber, binary.clone());
+    start_pipe_reader(id, "proc-err", stderr, subscriber, binary);
     Ok(id)
+}
+
+/// `(proc-set-binary handle on)` — switch `handle` between text mode (default)
+/// and binary mode. Binary mode is byte-faithful both directions: inbound
+/// `[:proc …]`/`[:proc-err …]` data is a Latin-1 byte-string (one codepoint
+/// 0–255 per byte) and `proc-send` writes codepoints as raw bytes. Errors if the
+/// handle is unknown (already closed). Mirrors `net::set_binary`.
+pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
+    let reg = reg();
+    match reg.get(&id) {
+        Some(p) => {
+            p.binary.store(on, Ordering::Release);
+            Ok(())
+        }
+        None => Err(bad_proc()),
+    }
+}
+
+/// Whether `handle` is in binary mode (false for an unknown/closed handle).
+pub fn is_binary(id: u64) -> bool {
+    reg()
+        .get(&id)
+        .map(|p| p.binary.load(Ordering::Relaxed))
+        .unwrap_or(false)
 }
 
 /// `(proc-send handle data)` — write all of `data` to the child's stdin (blocking)

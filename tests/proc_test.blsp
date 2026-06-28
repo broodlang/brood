@@ -30,6 +30,29 @@
         (let (code (receive ([:proc-closed ~p c] c) (after 5000 :timeout)))
           (is (nil? code)))))))
 
+(describe "proc: binary mode is byte-faithful both directions"
+  :isolated
+  ;; In binary mode proc-send writes each codepoint 0–255 as one raw byte and the
+  ;; reader delivers each byte as one codepoint, so arbitrary bytes (incl. 0x00
+  ;; and bytes ≥ 0x80 that are NOT valid UTF-8) round-trip through `cat` exactly —
+  ;; the text-mode default would mangle them via from_utf8_lossy / UTF-8 re-encode.
+  (test "raw bytes sent to `cat` come back unchanged in binary mode"
+    (let (p (proc-spawn "cat" []))
+      (proc-set-binary p true)
+      ;; bytes 0x00 0xFF 0x80 0x41 — 0xFF 0x80 alone is invalid UTF-8
+      (let (sent (str (int->char 0) (int->char 255) (int->char 128) (int->char 65)))
+        (proc-send p sent)
+        (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
+          (assert= got sent)
+          (assert= (into [] (map char->int (string->list got))) [0 255 128 65])
+          (proc-close p)))))
+
+  (test "proc-send rejects a codepoint > 255 in binary mode"
+    (let (p (proc-spawn "cat" []))
+      (proc-set-binary p true)
+      (assert-error (proc-send p "π"))   ; U+03C0 is not a single byte
+      (proc-close p))))
+
 (describe "proc: stdout stream + exit code"
   :isolated
   (test "a child's stdout then [:proc-closed handle code] with its exit status"

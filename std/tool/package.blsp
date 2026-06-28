@@ -47,7 +47,11 @@ land in a later slice."
     nil
     (list-dir dir)))
 
-(defn package--sha256-file (path) (%sha256 (slurp path)))
+;; Hash the file's raw bytes, not a UTF-8 string: `slurp` throws on a binary
+;; asset (image, font, …), so the old `(%sha256 (slurp path))` couldn't hash a
+;; tree that contained one. For a text file the hash is identical (its UTF-8
+;; bytes are the file bytes), so existing lock hashes don't churn.
+(defn package--sha256-file (path) (%sha256-bytes (slurp-bytes path)))
 
 (defn package-tree-hash (dir)
   "The canonical SHA-256 (hex) of a directory's file contents — order-independent of the filesystem, stable across machines (ADR-037)."

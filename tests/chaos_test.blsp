@@ -38,9 +38,13 @@
     (let (w (spawn 42) ref (monitor w))
       (assert= :normal (receive ([:down _ _ reason] reason) (after 500 :timeout)))))
 
-  (test "a crashing spawned process exits with :normal (error does not propagate as reason)"
+  (test "a crashing spawned process propagates its error as the monitor down reason"
+    ;; Post-1a63eb7 `(spawn (fn () body))` runs `body` (no longer the silent
+    ;; no-op footgun), so a crash here surfaces — its monitor sees the error
+    ;; reason, not :normal.
     (let (w (spawn (fn () (/ 1 0))) ref (monitor w))
-      (assert= :normal (receive ([:down _ _ reason] reason) (after 500 :timeout)))))
+      (assert= (receive ([:down _ _ reason] reason) (after 500 :timeout))
+               [:error "runtime error: division by zero"])))
 
   (test "parent process is unaffected when a child crashes without a monitor"
     (let (w (spawn (fn () (/ 1 0))))

@@ -628,7 +628,7 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
     ("system", include_str!("../../../../std/system.blsp")),
     // Authenticated encryption (ChaCha20-Poly1305), PBKDF2 key derivation, secure
-    // random bytes. Wraps the %chacha20-* and %pbkdf2-sha256 primitives.
+    // random bytes. Wraps the %chacha20-* and %pbkdf2-sha256-bytes primitives.
     ("crypto", include_str!("../../../../std/crypto.blsp")),
     // Process-backed state cell: start/get/update/get-and-update/cast/stop.
     // A thin Brood layer over spawn/send/receive for the common "stateful process" case.

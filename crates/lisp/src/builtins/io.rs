@@ -605,8 +605,33 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-send", arg(args, 0))?;
     let data = expect_string(heap, "proc-send", arg(args, 1))?;
-    crate::proc::send(id, data.as_bytes())
-        .map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
+    if crate::proc::is_binary(id) {
+        // Binary mode: write each codepoint as one raw byte (Latin-1), mirroring
+        // tcp-send. The string must be a byte-string (codepoints 0–255).
+        let mut out = Vec::with_capacity(data.len());
+        for c in data.chars() {
+            let n = c as u32;
+            if n > 0xFF {
+                return Err(LispError::runtime(format!(
+                    "proc-send: codepoint U+{:04X} is not a byte (0–255); a binary-mode subprocess sends raw bytes only",
+                    n
+                )));
+            }
+            out.push(n as u8);
+        }
+        crate::proc::send(id, &out)
+    } else {
+        crate::proc::send(id, data.as_bytes())
+    }
+    .map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
+    Ok(Value::nil())
+}
+
+pub(super) fn proc_set_binary(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_subprocess(heap, "proc-set-binary", arg(args, 0))?;
+    let on = crate::eval::truthy(arg(args, 1));
+    crate::proc::set_binary(id, on)
+        .map_err(|e| LispError::runtime(format!("proc-set-binary: {}", e)))?;
     Ok(Value::nil())
 }
 
@@ -878,6 +903,15 @@ pub(super) fn digest_to_hex(digest: impl AsRef<[u8]>) -> String {
     hex
 }
 
+/// Allocate a raw-byte result (digest, HMAC, derived key) as a Brood byte
+/// vector of ints 0–255 — the raw-byte counterpart of `digest_to_hex`. The
+/// byte-oriented crypto layer (store-driver findings 2/3) returns these so
+/// digests can be chained over bytes without a hex round-trip at each step.
+pub(super) fn bytes_to_vec(bytes: impl AsRef<[u8]>, heap: &mut Heap) -> Value {
+    let vals: Vec<Value> = bytes.as_ref().iter().map(|&b| Value::int(b as i64)).collect();
+    heap.alloc_vector(vals)
+}
+
 /// `(%sha256-bytes bytes)` — hex SHA-256 of a vector or list of byte integers.
 pub(super) fn sha256_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use sha2::{Digest, Sha256};
@@ -941,6 +975,53 @@ pub(super) fn md5_hex_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     Ok(heap.alloc_string(&digest_to_hex(Md5::digest(&bytes))))
 }
 
+// ---- raw-byte digests ------------------------------------------------------
+//
+// These take a byte vector and return the digest as a *byte vector* (not hex).
+// Chaining digests over raw bytes — e.g. SCRAM's `StoredKey = SHA256(ClientKey)`
+// then HMAC over `StoredKey` — needs the raw bytes, not a hex string that would
+// have to be decoded again at each step (store-driver findings #3).
+
+/// `(%sha256-raw bytes)` — SHA-256 of a byte vector, returned as a 32-byte vector.
+pub(super) fn sha256_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha256};
+    let bytes = collect_bytes("%sha256-raw", arg(args, 0), heap)?;
+    let d = Sha256::digest(&bytes);
+    Ok(bytes_to_vec(d, heap))
+}
+
+/// `(%sha1-raw bytes)` — SHA-1 of a byte vector, returned as a 20-byte vector.
+pub(super) fn sha1_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha1::{Digest, Sha1};
+    let bytes = collect_bytes("%sha1-raw", arg(args, 0), heap)?;
+    let d = Sha1::digest(&bytes);
+    Ok(bytes_to_vec(d, heap))
+}
+
+/// `(%sha384-raw bytes)` — SHA-384 of a byte vector, returned as a 48-byte vector.
+pub(super) fn sha384_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha384};
+    let bytes = collect_bytes("%sha384-raw", arg(args, 0), heap)?;
+    let d = Sha384::digest(&bytes);
+    Ok(bytes_to_vec(d, heap))
+}
+
+/// `(%sha512-raw bytes)` — SHA-512 of a byte vector, returned as a 64-byte vector.
+pub(super) fn sha512_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use sha2::{Digest, Sha512};
+    let bytes = collect_bytes("%sha512-raw", arg(args, 0), heap)?;
+    let d = Sha512::digest(&bytes);
+    Ok(bytes_to_vec(d, heap))
+}
+
+/// `(%md5-raw bytes)` — MD5 of a byte vector, returned as a 16-byte vector.
+pub(super) fn md5_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use md5::{Digest, Md5};
+    let bytes = collect_bytes("%md5-raw", arg(args, 0), heap)?;
+    let d = Md5::digest(&bytes);
+    Ok(bytes_to_vec(d, heap))
+}
+
 // ---- HMAC primitives -------------------------------------------------------
 
 /// `(%hmac-sha256 key message)` — HMAC-SHA256 → lowercase hex.
@@ -977,6 +1058,49 @@ pub(super) fn hmac_sha512_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
         .map_err(|e| LispError::runtime(format!("%hmac-sha512: {e}")))?;
     mac.update(msg.as_bytes());
     Ok(heap.alloc_string(&digest_to_hex(mac.finalize().into_bytes())))
+}
+
+// ---- raw-byte HMAC ---------------------------------------------------------
+//
+// HMAC over a raw-byte key and message, returning the raw MAC as a byte vector.
+// A Brood string can't faithfully carry an arbitrary-byte key (its UTF-8
+// encoding ≠ the bytes), and SCRAM keys/outputs are XORed and re-hashed as raw
+// bytes — so the string-keyed `%hmac-*` can't serve them (store-driver findings #2).
+
+/// `(%hmac-sha256-raw key-bytes msg-bytes)` — HMAC-SHA256 over byte vectors → 32-byte vector.
+pub(super) fn hmac_sha256_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    let key = collect_bytes("%hmac-sha256-raw", arg(args, 0), heap)?;
+    let msg = collect_bytes("%hmac-sha256-raw", arg(args, 1), heap)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key)
+        .map_err(|e| LispError::runtime(format!("%hmac-sha256-raw: {e}")))?;
+    mac.update(&msg);
+    Ok(bytes_to_vec(mac.finalize().into_bytes(), heap))
+}
+
+/// `(%hmac-sha1-raw key-bytes msg-bytes)` — HMAC-SHA1 over byte vectors → 20-byte vector.
+pub(super) fn hmac_sha1_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha1::Sha1;
+    let key = collect_bytes("%hmac-sha1-raw", arg(args, 0), heap)?;
+    let msg = collect_bytes("%hmac-sha1-raw", arg(args, 1), heap)?;
+    let mut mac = Hmac::<Sha1>::new_from_slice(&key)
+        .map_err(|e| LispError::runtime(format!("%hmac-sha1-raw: {e}")))?;
+    mac.update(&msg);
+    Ok(bytes_to_vec(mac.finalize().into_bytes(), heap))
+}
+
+/// `(%hmac-sha512-raw key-bytes msg-bytes)` — HMAC-SHA512 over byte vectors → 64-byte vector.
+pub(super) fn hmac_sha512_raw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha512;
+    let key = collect_bytes("%hmac-sha512-raw", arg(args, 0), heap)?;
+    let msg = collect_bytes("%hmac-sha512-raw", arg(args, 1), heap)?;
+    let mut mac = Hmac::<Sha512>::new_from_slice(&key)
+        .map_err(|e| LispError::runtime(format!("%hmac-sha512-raw: {e}")))?;
+    mac.update(&msg);
+    Ok(bytes_to_vec(mac.finalize().into_bytes(), heap))
 }
 
 /// Run `git` with `args` (optionally in `cwd`), capturing stdout+stderr. The
@@ -1089,44 +1213,46 @@ pub(super) fn chacha20_decrypt(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     }
 }
 
-/// `(%pbkdf2-sha256 password salt iterations key-len)` — derive a key from a
-/// password using PBKDF2-HMAC-SHA256 (RFC 2898). Returns a byte vector of
-/// `key-len` bytes. Use `iterations` ≥ 600,000 for password storage
-/// (NIST SP 800-132 2023). Implemented over the `hmac` + `sha2` crates.
+/// `(%pbkdf2-sha256-bytes password-bytes salt-bytes iterations key-len)` — derive
+/// a key from a password using PBKDF2-HMAC-SHA256 (RFC 2898). `password-bytes`
+/// and `salt-bytes` are byte vectors (raw bytes, not UTF-8-decoded strings — so
+/// a base64-decoded binary salt round-trips faithfully, store-driver finding #4).
+/// Returns a byte vector of `key-len` bytes. Use `iterations` ≥ 600,000 for
+/// password storage (NIST SP 800-132 2023). Implemented over the `hmac` + `sha2`
+/// crates — microseconds where the pure-Brood version cost ~2s/connection (#5).
 pub(super) fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
-    let password = expect_string(heap, "%pbkdf2-sha256", arg(args, 0))?;
-    let salt = expect_string(heap, "%pbkdf2-sha256", arg(args, 1))?;
-    let iterations = expect_int(heap, "%pbkdf2-sha256", arg(args, 2))?;
-    let key_len = expect_int(heap, "%pbkdf2-sha256", arg(args, 3))?;
+    let pw = collect_bytes("%pbkdf2-sha256-bytes", arg(args, 0), heap)?;
+    let salt = collect_bytes("%pbkdf2-sha256-bytes", arg(args, 1), heap)?;
+    let iterations = expect_int(heap, "%pbkdf2-sha256-bytes", arg(args, 2))?;
+    let key_len = expect_int(heap, "%pbkdf2-sha256-bytes", arg(args, 3))?;
     if iterations <= 0 {
         return Err(LispError::runtime(
-            "%pbkdf2-sha256: iterations must be positive",
+            "%pbkdf2-sha256-bytes: iterations must be positive",
         ));
     }
     if !(1..=512).contains(&key_len) {
         return Err(LispError::runtime(
-            "%pbkdf2-sha256: key-len must be in 1..=512",
+            "%pbkdf2-sha256-bytes: key-len must be in 1..=512",
         ));
     }
     let hlen = 32usize; // SHA-256 output bytes
     let block_count = (key_len as usize + hlen - 1) / hlen;
-    let pw = password.as_bytes();
     let mut dk = Vec::with_capacity(key_len as usize);
     for i in 1u32..=(block_count as u32) {
         // U_1 = HMAC(password, salt || INT(i))
-        let mut mac = HmacSha256::new_from_slice(pw)
-            .map_err(|e| LispError::runtime(format!("%pbkdf2-sha256: {e}")))?;
-        mac.update(salt.as_bytes());
+        let mut mac = HmacSha256::new_from_slice(&pw)
+            .map_err(|e| LispError::runtime(format!("%pbkdf2-sha256-bytes: {e}")))?;
+        mac.update(&salt);
         mac.update(&i.to_be_bytes());
         let mut u: Vec<u8> = mac.finalize().into_bytes().to_vec();
         let mut t = u.clone();
         // U_n = HMAC(password, U_{n-1}); T_i = XOR of all U_j
         for _ in 1..(iterations as u32) {
-            let mut mac2 = HmacSha256::new_from_slice(pw)
-                .map_err(|e| LispError::runtime(format!("%pbkdf2-sha256: {e}")))?;
+            let mut mac2 = HmacSha256::new_from_slice(&pw)
+                .map_err(|e| LispError::runtime(format!("%pbkdf2-sha256-bytes: {e}")))?;
             mac2.update(&u);
             u = mac2.finalize().into_bytes().to_vec();
             for j in 0..hlen {
@@ -1136,8 +1262,7 @@ pub(super) fn pbkdf2_sha256_fn(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         dk.extend_from_slice(&t);
     }
     dk.truncate(key_len as usize);
-    let vals: Vec<Value> = dk.iter().map(|&b| Value::int(b as i64)).collect();
-    Ok(heap.alloc_vector(vals))
+    Ok(bytes_to_vec(&dk, heap))
 }
 
 /// `(%git-resolve-ref url ref)` — resolve `ref` (a tag, branch, or commit) at the
@@ -1297,6 +1422,20 @@ pub(super) fn slurp(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(heap.alloc_string(&content))
+}
+
+/// `(slurp-bytes path)` — read the whole file at `path` as a byte vector (ints
+/// 0–255). The byte-faithful read `slurp` can't be: `slurp` is UTF-8 and throws
+/// on a non-text file, whereas this reads any bytes (images, archives, a binary
+/// asset to hash via `%sha256-bytes`). Pairs with `%sha256-bytes`/`%sha256-raw`
+/// and the `encoding` byte variants.
+pub(super) fn slurp_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "slurp-bytes", arg(args, 0))?;
+    let bytes = std::fs::read(&path).map_err(|e| {
+        LispError::runtime(format!("slurp-bytes: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(bytes_to_vec(&bytes, heap))
 }
 
 /// `(file-size path)` — the size of `path` in bytes, or nil if it's missing.

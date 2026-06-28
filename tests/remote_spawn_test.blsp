@@ -1,0 +1,31 @@
+;; tests/remote_spawn_test.blsp — remote-spawn / remote-spawn-sync against the
+;; LOCAL node (no TCP setup needed: sending to {:name :remote-spawn :node
+;; (node-name)} resolves the locally-registered server). Guards the footgun that
+;; `(remote-spawn node (fn () body))` once double-wrapped the body into
+;; `(fn () (fn () body))`, so the receiver ran nothing — the same silent no-op
+;; that `1a63eb7` fixed for `spawn`/`spawn-link`, now fixed here too.
+
+(defmodule remote-spawn-test (:use test))
+
+(describe "remote-spawn against the local node"
+  :isolated
+
+  (test "a bare-expression body runs on the remote (always worked)"
+    (start-remote-spawn)
+    (let (parent (self))
+      (remote-spawn (node-name) (send parent [:expr-ran 7]))
+      (assert= 7 (receive ([:expr-ran v] v) (after 2000 :timeout)))))
+
+  (test "a literal (fn () …) body runs — no longer the double-wrap no-op"
+    (start-remote-spawn)
+    (let (parent (self))
+      (remote-spawn (node-name) (fn () (send parent [:lambda-ran 9])))
+      (assert= 9 (receive ([:lambda-ran v] v) (after 2000 :timeout)))))
+
+  (test "remote-spawn-sync returns the child pid and runs a literal-lambda body"
+    (start-remote-spawn)
+    (let (parent (self)
+          child  (remote-spawn-sync (node-name)
+                   (fn () (send parent [:sync-ran 11]))))
+      (is (pid? child))
+      (assert= 11 (receive ([:sync-ran v] v) (after 2000 :timeout))))))

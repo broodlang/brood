@@ -35,6 +35,10 @@ use sha256 for security-sensitive work. Useful for checksums, ETags, UUID v3."
   "Lowercase hex MD5 of a vector or list of byte integers 0–255."
   (%md5-bytes bytes))
 
+(defn md5-raw (bytes)
+  "MD5 of a byte vector, returned as a 16-byte vector (raw digest, not hex)."
+  (%md5-raw bytes))
+
 ;; ---- SHA-1 ------------------------------------------------------------------
 
 (defn sha1 (s)
@@ -46,6 +50,10 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
   "Lowercase hex SHA-1 of a vector or list of byte integers 0–255."
   (%sha1-bytes bytes))
 
+(defn sha1-raw (bytes)
+  "SHA-1 of a byte vector, returned as a 20-byte vector (raw digest, not hex)."
+  (%sha1-raw bytes))
+
 ;; ---- SHA-256 ----------------------------------------------------------------
 
 (defn sha256 (s)
@@ -55,6 +63,12 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
 (defn sha256-bytes (bytes)
   "Lowercase hex SHA-256 of a vector or list of byte integers 0–255."
   (%sha256-bytes bytes))
+
+(defn sha256-raw (bytes)
+  "SHA-256 of a byte vector, returned as a 32-byte vector (raw digest, not hex).
+Use when chaining digests over raw bytes — e.g. SCRAM `StoredKey = SHA256(ClientKey)`
+— so there's no hex decode between steps."
+  (%sha256-raw bytes))
 
 ;; ---- SHA-384 ----------------------------------------------------------------
 
@@ -66,6 +80,10 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
   "Lowercase hex SHA-384 of a vector or list of byte integers 0–255."
   (%sha384-bytes bytes))
 
+(defn sha384-raw (bytes)
+  "SHA-384 of a byte vector, returned as a 48-byte vector (raw digest, not hex)."
+  (%sha384-raw bytes))
+
 ;; ---- SHA-512 ----------------------------------------------------------------
 
 (defn sha512 (s)
@@ -75,6 +93,10 @@ use sha256 for security-sensitive work. Useful for UUID v5, Git hashes."
 (defn sha512-bytes (bytes)
   "Lowercase hex SHA-512 of a vector or list of byte integers 0–255."
   (%sha512-bytes bytes))
+
+(defn sha512-raw (bytes)
+  "SHA-512 of a byte vector, returned as a 64-byte vector (raw digest, not hex)."
+  (%sha512-raw bytes))
 
 ;; ---- HMAC (RFC 2104) --------------------------------------------------------
 ;;
@@ -94,6 +116,29 @@ SHA-1 is not collision-resistant; prefer hmac-sha256 for new protocols."
 (defn hmac-sha512 (key message)
   "HMAC-SHA512 of `message` using `key`. Both are strings; result is lowercase hex."
   (%hmac-sha512 key message))
+
+;; ---- raw-byte HMAC ----------------------------------------------------------
+;;
+;; HMAC over a raw-byte key and message, returning the raw MAC as a byte vector.
+;; A Brood string can't faithfully carry an arbitrary-byte key (its UTF-8
+;; encoding ≠ the bytes), so binary-protocol auth (e.g. Postgres SCRAM-SHA-256,
+;; whose ClientKey = HMAC(SaltedPassword, "Client Key") is XORed and re-hashed as
+;; raw bytes) needs these rather than the string-keyed hmac-sha* above.
+
+(defn hmac-sha256-raw (key-bytes msg-bytes)
+  "HMAC-SHA256 over a byte-vector `key-bytes` and `msg-bytes`. Returns a 32-byte
+vector (raw MAC, not hex)."
+  (%hmac-sha256-raw key-bytes msg-bytes))
+
+(defn hmac-sha1-raw (key-bytes msg-bytes)
+  "HMAC-SHA1 over a byte-vector `key-bytes` and `msg-bytes`. Returns a 20-byte
+vector (raw MAC, not hex). SHA-1 is not collision-resistant; prefer hmac-sha256-raw."
+  (%hmac-sha1-raw key-bytes msg-bytes))
+
+(defn hmac-sha512-raw (key-bytes msg-bytes)
+  "HMAC-SHA512 over a byte-vector `key-bytes` and `msg-bytes`. Returns a 64-byte
+vector (raw MAC, not hex)."
+  (%hmac-sha512-raw key-bytes msg-bytes))
 
 ;; ---- non-cryptographic ------------------------------------------------------
 

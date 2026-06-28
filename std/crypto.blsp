@@ -88,12 +88,21 @@ or tampered ciphertext)."
 ;; stored alongside the derived key (it's not secret). Use iterations ≥ 600,000
 ;; for password storage (NIST SP 800-132 2023 recommendation).
 
+(defn crypto--as-bytes (x)
+  "Coerce `x` to a byte vector: a string → its UTF-8 bytes; a byte vector/list →
+itself. Lets the raw-byte crypto primitives accept either shape at the seam."
+  (if (string? x) (str->bytes x) x))
+
 (defn pbkdf2 (password salt iterations key-len)
-  "Derive a `key-len`-byte key from `password` (string) and `salt` (string or
-byte vector) using PBKDF2-HMAC-SHA256. Higher `iterations` = slower brute force.
-Use ≥ 600,000 iterations for password storage."
-  (let (salt-str (if (string? salt) salt (bytes->str salt)))
-    (%pbkdf2-sha256 password salt-str iterations key-len)))
+  "Derive a `key-len`-byte key from `password` and `salt` (each a string or a
+byte vector) using PBKDF2-HMAC-SHA256. A byte-vector salt is used as raw bytes —
+so a base64-decoded binary salt (e.g. Postgres SCRAM) round-trips faithfully
+rather than being UTF-8-decoded. Higher `iterations` = slower brute force; use
+≥ 600,000 for password storage."
+  (%pbkdf2-sha256-bytes (crypto--as-bytes password)
+                        (crypto--as-bytes salt)
+                        iterations
+                        key-len))
 
 ;; ---- utilities --------------------------------------------------------------
 
