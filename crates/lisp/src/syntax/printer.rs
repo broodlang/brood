@@ -43,8 +43,6 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str(&heap.decimal(id).to_string());
             out.push('M');
         }
-        // A bitset prints as an opaque handle — its bytes are raw, not text.
-        ValueRef::Bitset(id) => out.push_str(&format!("#<bitset {} bytes>", heap.bitset(id).len())),
         // Raw bytes print as a `#b"…"` literal that re-reads to the same value:
         // printable ASCII verbatim, the named escapes by name, every other byte as
         // `\xHH`. Both readable and display use this form — bytes have no raw text.

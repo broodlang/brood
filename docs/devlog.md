@@ -591,6 +591,33 @@ x25519 `was_contributory`, rcgen→aws_lc_rs dropping `ring`, removed dead `glut
 tree-sitter incremental parse + `:error`/`:missing` CST keys, and the softbuffer damage
 present.
 
+## 2026-06-28 — Checker: unused `:use` imports (Pass 4.5) + unused private defns (Pass 4.6)
+
+Two new advisory lints in `check_file`, running after the hygiene pass:
+
+**Unused `:use` imports (Pass 4.5)** — warns when a `(:use mod)` clause contributes
+public names that are never referenced in the file's expanded forms. Implementation:
+`extract_use_module_names` parses `:use` keywords from the *unexpanded* defmodule header
+(the clauses lower away after expansion); `heap.imported_pairs()` (snapshotted during Pass 1
+before the import table is restored) provides the bare→qualified mapping; a single
+`collect_all_syms` walk over all expanded forms builds the reference set; grouping by module
+prefix and checking intersection emits "unused :use import: mod" for strays. Modules that
+contributed zero public names (failed require, empty export set) are skipped silently — no
+false positives. Added to `walk.rs`: `collect_all_syms` / `collect_syms_into`.
+
+**Unused module-private defns (Pass 4.6)** — warns when a `(def name …)` whose bare segment
+contains `--` (the private-name convention, same gate as `%refer`'s refer-all skip) is never
+referenced outside its own definition. Implementation: `collect_private_defs` scans the
+expanded tree for `(def name …)` with a private bare name; `sym_used_beyond_def` rescans,
+skipping the binding-name slot of the def itself (so a self-recursive private fn isn't
+flagged) but checking all other forms freely. Warning shows just the bare name (not the
+qualified path). Public names are never checked — they may be used by other files. Added to
+`walk.rs`: `sym_used_beyond_def`.
+
+7 new tests in `mod tests`: unused `:use` flagged, used `:use` silent, no-`:use` silent,
+private unused flagged, private used silent, self-recursive private silent, `_`-prefix not
+treated as private.
+
 ## 2026-06-28 — Checker: unused let binding lint + goals reframe
 
 **Unused `let` locals** (`crates/lisp/src/types/check/walk.rs`): added
@@ -666,14 +693,23 @@ input highlighter (`highlight-spans`) and ANSI-coloured on a TTY (plain on a pip
 (`,help` `,doc <name>` `,type <expr>` `,time <expr>` `,clear`) intercept at a fresh prompt
 before the reader; a plain one-line banner (the ASCII wordmark was too much).
 
-**Multi-line bracket matching (`std/editor/lineedit.blsp`).** The line editor repaints only
-the current physical line, so a `)` whose opener scrolled off a prior line could match (the
-analysis sees the whole form via the `prefix` context) but couldn't reverse-video its
-off-screen partner. Added `lineedit--match-echo`: when the matched opener is before the
-current line (`offset < base`), echo that opening line in the hint row (`matches (defn
-foo …`) — Emacs' `blink-matching-paren` for off-screen parens. Same-line matches still
-reverse-video; the echo only fills the gap. All builds clean (default + `brood/gui`);
-repl 14, lineedit 39, brood-edit 36 view-scroll green.
+**Multi-line line editor (`std/editor/lineedit.blsp`).** The editor read one physical line
+at a time (prior lines frozen in scrollback as read-only `:prefix`), so a `)` whose opener
+was on an earlier line couldn't reverse-video its partner in place. Reworked it into a true
+multi-line editor: `:text` now holds newlines, with `:complete?` (an Enter predicate) and a
+`:cont-prompt` enabling multi-line mode. Enter inserts a newline while the form is
+incomplete (the REPL's `repl--complete?` = `read-all` minus the E0002 incomplete signal),
+else submits. C-a/C-e are line-aware; ↑/↓ move between the form's lines and fall through to
+history at the top/bottom. Rendering moves up over the previous block (`:last-row`), clears,
+reprints **every** line, and reparks — so a bracket pair lights up across lines in place
+(verified in the op stream: opener on line 0 and closer on line 1 both `{:reverse true}`).
+The single-line path is kept intact (horizontal scroll + signature hint, the common case);
+multi-line kicks in only once the text has a newline. The REPL now does one multi-line
+interactive read per form (the line-by-line accumulation stays for the piped path). The
+old `:prefix` continuation + `match-echo` echo are superseded and removed. All pure pieces
+unit-tested (geometry, Enter logic, in-place-match op stream); repl 14, lineedit 41,
+observer 55 green; piped REPL multi-line + meta verified end-to-end. (The interactive
+relative-cursor render can't be driven headless — needs a human at a TTY to eyeball.)
 
 ## 2026-06-28 — Minimize the builtin surface: crypto 21 prims → 2, tree-sitter grammars out of the default kernel
 
@@ -729,3 +765,5 @@ accept-key) and `%sha256` (asset fingerprints / strong ETags) directly; migrated
 to `hash/sha1` / `hash/sha256` (+ `(require 'hash)`) in `src/http/websocket.blsp`,
 `src/web/{assets,static}.blsp` and the two affected test files. `nest test` in
 hatch: 526/526.
+
+**`Value::Bitset` removed entirely (same session).** The biggest single simplification: the `bitset` feature (13 `bitset-*` prims + a whole `Value::Bitset` kernel kind) had no consumer left — zero references in std/, tests/, or any in-repo `.blsp`; its only user was an external Game-of-Life GUI demo, now dead (confirmed with the user). Deleting it removed a `Value` variant and its arms across **8 kernel files**: `value.rs` (variant + `Tag::Bitset` + `BsId` handle, tag arrays 22→21), `heap.rs` (the LOCAL/old/prelude/RUNTIME `bitsets` slabs, `alloc_bitset`/`bitset` accessor, GC flush `flush_bitset`/`flush_rt_bitset`, poison/hash/equality/promote/verify arms — ~78 refs), `numeric.rs` (the impls + Game-of-Life fused kernels `bitset-life-step`/`-neighbour-sum`/`-planes`), `printer.rs`, `process/message.rs` (`Message::Bitset`), `dist/wire.rs`, `types/mod.rs` (the tag lattice). Kept the unrelated `bit-*` *integer* ops and the GUI cell-paint path (board is a bignum or byte string). Verified: clean build, full suite green (the lone failure is the user's concurrent WIP `lineedit--match-echo` test, unrelated), and the GC/concurrency suites pass under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. Builtin count now ~287 (was 320 at session start). KI-4 (the bitset-as-`Str` GC bug) is now moot; noted as superseded in known-issues.md.

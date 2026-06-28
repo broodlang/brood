@@ -71,7 +71,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const socket_ty: Ty = Ty::of(Tag::Socket);
     const subprocess_ty: Ty = Ty::of(Tag::Subprocess);
     const table_ty: Ty = Ty::of(Tag::Table);
-    const bitset_ty: Ty = Ty::of(Tag::Bitset);
     const bytes_ty: Ty = Ty::of(Tag::Bytes);
     const decimal_ty: Ty = Ty::of(Tag::Decimal);
     const kw: Ty = Ty::of(Tag::Keyword);
@@ -241,37 +240,6 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], vec_ty),
         bit_positions,
     );
-    // --- bitset: a fixed-size bit array backed by a refc SharedBlob (POC, ADR-107-adjacent).
-    // A `bitset` is its own `Value::Bitset` kind (KI-4) — raw bit-data bytes (LSB-first, bit i
-    // = byte i/8 bit i%8) in an `Arc<SharedBlob>`, NEVER a UTF-8 `Str` (that corrupted the GC
-    // on promote). ALWAYS stored shared, so it crosses `send`/`table` by reference (Arc bump),
-    // not a copy — unlike a bignum, which serialises to decimal. Ops are O(bytes) native loops.
-    def(heap, "bitset", Arity::exact(1), Sig::new(vec![int], bitset_ty), bs_make);
-    def(heap, "bitset-ones", Arity::exact(1), Sig::new(vec![int], bitset_ty), bs_ones);
-    def(heap, "bitset-and", Arity::exact(2), Sig::new(vec![bitset_ty, bitset_ty], bitset_ty), bs_and);
-    def(heap, "bitset-or", Arity::exact(2), Sig::new(vec![bitset_ty, bitset_ty], bitset_ty), bs_or);
-    def(heap, "bitset-xor", Arity::exact(2), Sig::new(vec![bitset_ty, bitset_ty], bitset_ty), bs_xor);
-    def(heap, "bitset-shl", Arity::exact(2), Sig::new(vec![bitset_ty, int], bitset_ty), bs_shl);
-    def(heap, "bitset-shr", Arity::exact(2), Sig::new(vec![bitset_ty, int], bitset_ty), bs_shr);
-    def(heap, "bitset-set", Arity::exact(2), Sig::new(vec![bitset_ty, int], bitset_ty), bs_set);
-    def(heap, "bitset-count", Arity::exact(1), Sig::new(vec![bitset_ty], int), bs_count);
-    def(heap, "bitset-positions", Arity::exact(1), Sig::new(vec![bitset_ty], vec_ty), bs_positions);
-    def(heap, "bitset-planes", Arity::exact(1), Sig::new(vec![vec_ty], vec_ty), bs_planes);
-    def(
-        heap,
-        "bitset-neighbour-sum",
-        Arity::exact(7),
-        Sig::new(vec![bitset_ty, bitset_ty, bitset_ty, bitset_ty, bitset_ty, int, int], vec_ty),
-        bs_neighbour_sum,
-    );
-    def(
-        heap,
-        "bitset-life-step",
-        Arity::exact(7),
-        Sig::new(vec![bitset_ty, bitset_ty, bitset_ty, bitset_ty, bitset_ty, int, int], bitset_ty),
-        bs_life_step,
-    );
-
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
     // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
@@ -2347,7 +2315,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("bit-shift-left", &["a", "n"], "Shift integer a left by n bits (0 <= n < 64); bits shifted past bit 63 are discarded."),
     ("bit-shift-right", &["a", "n"], "Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64)."),
     ("bit-count", &["a"], "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit-count -1) = 64). For a bignum it is the popcount of the magnitude."),
-    ("bit-positions", &["a"], "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit-positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit-shift-left 1 i); handy for enumerating a bitset's members."),
+    ("bit-positions", &["a"], "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit-positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit-shift-left 1 i); handy for enumerating the set bits of an integer."),
     ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
     ("first", &["coll"], "The head of a list or vector, or nil if empty."),
     ("rest", &["coll"], "All but the head of a list or vector."),

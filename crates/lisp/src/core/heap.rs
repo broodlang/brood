@@ -44,7 +44,7 @@ use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    BigIntId, BsId, BytesId, Closure, ClosureArm, ClosureId, DecimalId, EnvId, MapId, NativeFn,
+    BigIntId, BytesId, Closure, ClosureArm, ClosureId, DecimalId, EnvId, MapId, NativeFn,
     NativeId, PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE,
     RUNTIME,
 };
@@ -254,7 +254,6 @@ fn tag_rank(v: Value) -> u8 {
         ValueRef::Socket(_) => 15,
         ValueRef::Subprocess(_) => 16,
         ValueRef::Table(_) => 18,
-        ValueRef::Bitset(_) => 19,
         ValueRef::Bytes(_) => 20,
     }
 }
@@ -435,7 +434,6 @@ fn to_prelude(v: Value) -> Value {
         ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
         ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
         ValueRef::Decimal(id) => Value::decimal(DecimalId::prelude(id.index())),
-        ValueRef::Bitset(id) => Value::bitset(BsId::prelude(id.index())),
         ValueRef::Fn(id) => Value::func(ClosureId::prelude(id.index())),
         ValueRef::Macro(id) => Value::macro_(ClosureId::prelude(id.index())),
         ValueRef::Native(id) => Value::native(NativeId::prelude(id.index())),
@@ -470,16 +468,9 @@ struct Slabs {
     /// `Value` children. Unlike `bigints` there is no normalize-into-`Int`
     /// invariant — a decimal is its own type and any value is stored as-is.
     decimals: Vec<bigdecimal::BigDecimal>,
-    /// **Bitsets** (KI-4 fix) — fixed-size immutable bit arrays as raw bytes, one
-    /// `Arc<SharedBlob>` per live bitset (mirrors `bigints`: an immutable leaf holding
-    /// no `Value` children). **Byte-clean**: the bytes are arbitrary, NOT UTF-8, so a
-    /// bitset has its own slab + handle rather than masquerading as a `Value::Str` (the
-    /// UTF-8 string accessors / RUNTIME `String` slab would corrupt it — that was KI-4).
-    /// The `Arc` is the unit of cross-process sharing (a refcount bump, not a byte copy).
-    bitsets: Vec<Arc<SharedBlob>>,
     /// **Raw bytes** — byte-clean immutable leaves, one `Arc<SharedBlob>` per live
-    /// value (mirrors `bitsets` exactly: arbitrary bytes, never UTF-8, own slab +
-    /// handle). The `Arc` is the unit of cross-process sharing.
+    /// value (arbitrary bytes, never UTF-8, own slab + handle). The `Arc` is the unit
+    /// of cross-process sharing (a refcount bump, not a byte copy).
     bytes: Vec<Arc<SharedBlob>>,
     /// Text ropes (ADR-045). A `ropey::Rope` is itself `Arc`-shared internally,
     /// so this slab owns one cheap handle per live rope; cloning for an edit
@@ -505,7 +496,6 @@ fn slab_live_count(s: &Slabs) -> usize {
         + s.strings.len()
         + s.bigints.len()
         + s.decimals.len()
-        + s.bitsets.len()
         + s.bytes.len()
         + s.ropes.len()
         + s.closures.len()
@@ -524,7 +514,6 @@ fn slab_bytes(s: &Slabs) -> usize {
         + s.strings.len() * size_of::<LocalString>()
         + s.bigints.len() * size_of::<num_bigint::BigInt>()
         + s.decimals.len() * size_of::<bigdecimal::BigDecimal>()
-        + s.bitsets.len() * size_of::<Arc<SharedBlob>>()
         + s.bytes.len() * size_of::<Arc<SharedBlob>>()
         + s.ropes.len() * size_of::<ropey::Rope>()
         + s.closures.len() * size_of::<Closure>()
@@ -556,7 +545,6 @@ struct PoisonBits {
     strings: Vec<bool>,
     bigints: Vec<bool>,
     decimals: Vec<bool>,
-    bitsets: Vec<bool>,
     bytes: Vec<bool>,
     ropes: Vec<bool>,
     closures: Vec<bool>,
@@ -600,7 +588,6 @@ pub struct LocalCheckpoint {
     strings: usize,
     bigints: usize,
     decimals: usize,
-    bitsets: usize,
     bytes: usize,
     ropes: usize,
     closures: usize,
@@ -634,12 +621,8 @@ struct CodeSlabs {
     /// Decimals `def`'d into a global / baked as a literal into shared RUNTIME
     /// code (mirrors `bigints`). Immutable, holds no handles; append-only.
     decimals: boxcar::Vec<bigdecimal::BigDecimal>,
-    /// Bitsets `def`'d into a global / captured by a promoted closure (KI-4 fix;
-    /// mirrors `bigints`). Raw immutable bytes via `Arc<SharedBlob>` — byte-clean, so a
-    /// bitset is never read as UTF-8 text. Append-only; the Arc is shared, not copied.
-    bitsets: boxcar::Vec<Arc<SharedBlob>>,
     /// Raw bytes `def`'d into a global / captured by a promoted closure (mirrors
-    /// `bitsets` exactly). Byte-clean `Arc<SharedBlob>`, never read as UTF-8.
+    /// `bigints`). Byte-clean `Arc<SharedBlob>`, never read as UTF-8.
     /// Append-only; the Arc is shared, not copied.
     bytes: boxcar::Vec<Arc<SharedBlob>>,
     /// Ropes `def`'d into a global (shared read-only across this runtime's
@@ -1234,7 +1217,6 @@ pub fn is_movable(v: Value) -> bool {
         ValueRef::Str(id) => id.region() == LOCAL,
         ValueRef::BigInt(id) => id.region() == LOCAL,
         ValueRef::Decimal(id) => id.region() == LOCAL,
-        ValueRef::Bitset(id) => id.region() == LOCAL,
         ValueRef::Bytes(id) => id.region() == LOCAL,
         ValueRef::Rope(id) => id.region() == LOCAL,
         ValueRef::Fn(id) | ValueRef::Macro(id) => id.region() == LOCAL,
@@ -1266,7 +1248,6 @@ pub fn needs_root_slot(v: Value) -> bool {
         ValueRef::Str(id) => shared(id.region()),
         ValueRef::BigInt(id) => shared(id.region()),
         ValueRef::Decimal(id) => shared(id.region()),
-        ValueRef::Bitset(id) => shared(id.region()),
         ValueRef::Bytes(id) => shared(id.region()),
         ValueRef::Rope(id) => shared(id.region()),
         ValueRef::Fn(id) | ValueRef::Macro(id) => shared(id.region()),
@@ -1558,7 +1539,6 @@ impl Heap {
             strings: self.local.strings.len(),
             bigints: self.local.bigints.len(),
             decimals: self.local.decimals.len(),
-            bitsets: self.local.bitsets.len(),
             bytes: self.local.bytes.len(),
             ropes: self.local.ropes.len(),
             closures: self.local.closures.len(),
@@ -1599,7 +1579,6 @@ impl Heap {
         self.local.strings.truncate(cp.strings);
         self.local.bigints.truncate(cp.bigints);
         self.local.decimals.truncate(cp.decimals);
-        self.local.bitsets.truncate(cp.bitsets);
         self.local.bytes.truncate(cp.bytes);
         self.local.ropes.truncate(cp.ropes);
         self.local.closures.truncate(cp.closures);
@@ -2740,41 +2719,8 @@ impl Heap {
         }
     }
 
-    /// Materialise a `Value::Bitset` into LOCAL from an `Arc<SharedBlob>` of raw bytes
-    /// (KI-4 fix; mirrors [`alloc_bigint`](Self::alloc_bigint)). Byte-clean — the bytes
-    /// are arbitrary, never assumed UTF-8 (the whole reason a bitset is not a `Str`).
-    pub fn alloc_bitset(&mut self, blob: Arc<SharedBlob>) -> Value {
-        let idx = self.local.bitsets.len();
-        self.local.bitsets.push(blob);
-        Value::bitset(BsId::local_gen(idx, self.local_epoch))
-    }
-
-    /// Resolve a bitset handle to its `&Arc<SharedBlob>` (KI-4 fix; mirrors
-    /// [`bigint`](Self::bigint)). Honours the GC poison/epoch tripwires. The caller
-    /// reads `.as_bytes()` — a bitset is raw bytes, never decoded as UTF-8 text.
-    pub fn bitset(&self, id: BsId) -> &Arc<SharedBlob> {
-        match id.region() {
-            LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, bitsets, "bitset", "bitsets");
-                &self.old.bitsets[id.index()]
-            }
-            LOCAL => {
-                local_gc_check!(nursery, self, id, bitsets, "bitset", "bitsets");
-                &self.local.bitsets[id.index()]
-            }
-            PRELUDE => &self.prelude.slabs.bitsets[id.index()],
-            RUNTIME => self
-                .runtime
-                .code
-                .bitsets
-                .get(id.index())
-                .expect("runtime bitset handle"),
-            _ => unreachable!("invalid handle region"),
-        }
-    }
-
     /// Materialise a `Value::Bytes` into LOCAL from an `Arc<SharedBlob>` of raw bytes
-    /// (mirrors [`alloc_bitset`](Self::alloc_bitset) exactly). Byte-clean — the bytes
+    /// (mirrors [`alloc_bigint`](Self::alloc_bigint)). Byte-clean — the bytes
     /// are arbitrary, never assumed UTF-8.
     pub fn alloc_bytes(&mut self, blob: Arc<SharedBlob>) -> Value {
         let idx = self.local.bytes.len();
@@ -2783,7 +2729,7 @@ impl Heap {
     }
 
     /// Resolve a bytes handle to its `&Arc<SharedBlob>` (mirrors
-    /// [`bitset`](Self::bitset) exactly). Honours the GC poison/epoch tripwires. The
+    /// [`bigint`](Self::bigint)). Honours the GC poison/epoch tripwires. The
     /// caller reads `.as_bytes()` — raw bytes, never decoded as UTF-8 text.
     pub fn bytes(&self, id: BytesId) -> &Arc<SharedBlob> {
         match id.region() {
@@ -3089,15 +3035,9 @@ impl Heap {
                 let n = self.decimal(id).clone();
                 Value::decimal(DecimalId::runtime(self.runtime.code.decimals.push(n)))
             }
-            ValueRef::Bitset(id) if id.region() == LOCAL => {
-                // A leaf: share the Arc<SharedBlob> into the shared region byte-clean —
-                // NEVER through the UTF-8 string path (that was KI-4). Just an Arc bump.
-                let b = Arc::clone(self.bitset(id));
-                Value::bitset(BsId::runtime(self.runtime.code.bitsets.push(b)))
-            }
             ValueRef::Bytes(id) if id.region() == LOCAL => {
-                // A leaf: share the Arc<SharedBlob> into the shared region byte-clean
-                // (mirrors Bitset) — never through the UTF-8 string path. Just an Arc bump.
+                // A leaf: share the Arc<SharedBlob> into the shared region byte-clean —
+                // never through the UTF-8 string path. Just an Arc bump.
                 let b = Arc::clone(self.bytes(id));
                 Value::bytes(BytesId::runtime(self.runtime.code.bytes.push(b)))
             }
@@ -3408,7 +3348,6 @@ impl Heap {
             self.poison.strings.clear();
             self.poison.bigints.clear();
             self.poison.decimals.clear();
-            self.poison.bitsets.clear();
             self.poison.bytes.clear();
             self.poison.ropes.clear();
             self.poison.closures.clear();
@@ -3718,14 +3657,8 @@ impl Heap {
                 sign_byte.hash(h);
                 bytes.hash(h);
             }
-            ValueRef::Bitset(id) => {
-                // Distinct tag byte (19; 17=BigInt, 18=transient) + the raw bytes, so two
-                // equal bitsets hash the same and never collide with a string.
-                19u8.hash(h);
-                self.bitset(id).as_bytes().hash(h);
-            }
             ValueRef::Bytes(id) => {
-                // Distinct fresh tag byte (21) + the raw bytes, mirroring Bitset, so two
+                // Distinct fresh tag byte (21) + the raw bytes, so two
                 // equal byte values hash the same and never collide with another type.
                 21u8.hash(h);
                 self.bytes(id).as_bytes().hash(h);
@@ -3942,8 +3875,6 @@ impl Heap {
             // hashed above) so equality and hashing agree. A decimal is its own type,
             // so a Decimal vs an Int/Float falls through to `_ => false`.
             (Decimal(x), Decimal(y)) => self.decimal(x).normalized() == self.decimal(y).normalized(),
-            // Two bitsets are equal iff their raw bytes match (byte compare, not UTF-8).
-            (Bitset(x), Bitset(y)) => self.bitset(x).as_bytes() == self.bitset(y).as_bytes(),
             (Bytes(x), Bytes(y)) => self.bytes(x).as_bytes() == self.bytes(y).as_bytes(),
             (Float(x), Float(y)) => x == y,
             (Sym(x), Sym(y)) => x == y,
@@ -5686,7 +5617,6 @@ impl Heap {
             self.poison.strings.clear();
             self.poison.bigints.clear();
             self.poison.decimals.clear();
-            self.poison.bitsets.clear();
             self.poison.bytes.clear();
             self.poison.ropes.clear();
             self.poison.closures.clear();
@@ -6065,18 +5995,6 @@ impl Heap {
                             id.0,
                         );
                     }
-                    ValueRef::Bitset(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
-                        bad(
-                            "bitset",
-                            id.is_old(),
-                            id.generation(),
-                            id.index(),
-                            slabs.bitsets.len(),
-                            parent,
-                            id.0,
-                        );
-                    }
                     ValueRef::Bytes(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
@@ -6228,7 +6146,6 @@ struct FlushForward {
     strings: HashMap<u32, u32>,
     bigints: HashMap<u32, u32>,
     decimals: HashMap<u32, u32>,
-    bitsets: HashMap<u32, u32>,
     bytes: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
@@ -6268,7 +6185,6 @@ mint_fn!(mint_map, MapId);
 mint_fn!(mint_string, StrId);
 mint_fn!(mint_bigint, BigIntId);
 mint_fn!(mint_decimal, DecimalId);
-mint_fn!(mint_bitset, BsId);
 mint_fn!(mint_bytes, BytesId);
 mint_fn!(mint_rope, RopeId);
 mint_fn!(mint_closure, ClosureId);
@@ -6407,9 +6323,6 @@ fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -
         ValueRef::Decimal(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::decimal(flush_decimal(old, new, fwd, id))
         }
-        ValueRef::Bitset(id) if fwd.copies(id.region(), id.is_old()) => {
-            Value::bitset(flush_bitset(old, new, fwd, id))
-        }
         ValueRef::Bytes(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::bytes(flush_bytes(old, new, fwd, id))
         }
@@ -6543,21 +6456,7 @@ fn flush_decimal(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: Decim
     fwd.mint_decimal(new_idx)
 }
 
-/// Flush a LOCAL bitset (KI-4; mirrors [`flush_bigint`]). A byte-clean leaf — clone the
-/// `Arc<SharedBlob>` (a refcount bump, not a byte copy) into the new slab.
-fn flush_bitset(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BsId) -> BsId {
-    let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.bitsets.get(&key) {
-        return fwd.mint_bitset(new_idx as usize);
-    }
-    let b = old.bitsets[flush_bound!(old.bitsets, id, fwd, "bitset")].clone();
-    let new_idx = new.bitsets.len();
-    new.bitsets.push(b);
-    fwd.bitsets.insert(key, new_idx as u32);
-    fwd.mint_bitset(new_idx)
-}
-
-/// Flush a LOCAL bytes value (mirrors [`flush_bitset`] exactly). A byte-clean leaf —
+/// Flush a LOCAL bytes value (mirrors [`flush_bigint`]). A byte-clean leaf —
 /// clone the `Arc<SharedBlob>` (a refcount bump, not a byte copy) into the new slab.
 fn flush_bytes(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BytesId) -> BytesId {
     let key = id.index() as u32;
@@ -6824,7 +6723,6 @@ struct RuntimeForward {
     strings: HashMap<u32, u32>,
     bigints: HashMap<u32, u32>,
     decimals: HashMap<u32, u32>,
-    bitsets: HashMap<u32, u32>,
     bytes: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
@@ -6861,9 +6759,6 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
         }
         ValueRef::Decimal(id) if id.region() == RUNTIME => {
             Value::decimal(flush_rt_decimal(old, new, fwd, id))
-        }
-        ValueRef::Bitset(id) if id.region() == RUNTIME => {
-            Value::bitset(flush_rt_bitset(old, new, fwd, id))
         }
         ValueRef::Bytes(id) if id.region() == RUNTIME => {
             Value::bytes(flush_rt_bytes(old, new, fwd, id))
@@ -6996,21 +6891,8 @@ fn flush_rt_decimal(
     DecimalId::runtime(new_idx)
 }
 
-/// Flush a RUNTIME bitset during a runtime-region compaction (KI-4; mirrors
-/// [`flush_rt_bigint`]). Byte-clean — clone the `Arc<SharedBlob>` into the new region.
-fn flush_rt_bitset(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: BsId) -> BsId {
-    let key = id.index() as u32;
-    if let Some(&n) = fwd.bitsets.get(&key) {
-        return BsId::runtime(n as usize);
-    }
-    let v = old.bitsets.get(id.index()).expect("rt bitset").clone();
-    let new_idx = new.bitsets.push(v);
-    fwd.bitsets.insert(key, new_idx as u32);
-    BsId::runtime(new_idx)
-}
-
 /// Flush a RUNTIME bytes value during a runtime-region compaction (mirrors
-/// [`flush_rt_bitset`] exactly). Byte-clean — clone the `Arc<SharedBlob>` into the new region.
+/// [`flush_rt_bigint`]). Byte-clean — clone the `Arc<SharedBlob>` into the new region.
 fn flush_rt_bytes(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: BytesId) -> BytesId {
     let key = id.index() as u32;
     if let Some(&n) = fwd.bytes.get(&key) {
@@ -7162,14 +7044,13 @@ fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env:
 /// the exact failure mode a moving collector must never ship. (In-bounds is a
 /// necessary soundness check; the redef test additionally pins the live *count*.)
 fn verify_rt_slabs(s: &CodeSlabs) -> bool {
-    let (np, nv, nm, ns, nb, nd, nbs, nby, nr, nc, ne) = (
+    let (np, nv, nm, ns, nb, nd, nby, nr, nc, ne) = (
         s.pairs.count(),
         s.vectors.count(),
         s.maps.count(),
         s.strings.count(),
         s.bigints.count(),
         s.decimals.count(),
-        s.bitsets.count(),
         s.bytes.count(),
         s.ropes.count(),
         s.closures.count(),
@@ -7187,7 +7068,6 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
             ValueRef::Str(id) if id.region() == RUNTIME => id.index() < ns,
             ValueRef::BigInt(id) if id.region() == RUNTIME => id.index() < nb,
             ValueRef::Decimal(id) if id.region() == RUNTIME => id.index() < nd,
-            ValueRef::Bitset(id) if id.region() == RUNTIME => id.index() < nbs,
             ValueRef::Bytes(id) if id.region() == RUNTIME => id.index() < nby,
             ValueRef::Rope(id) if id.region() == RUNTIME => id.index() < nr,
             ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => id.index() < nc,

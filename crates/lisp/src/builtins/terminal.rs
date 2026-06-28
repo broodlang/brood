@@ -942,7 +942,7 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
             let col0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
             let w = expect_int(heap, "gui-draw", arg(&parts, 3))?.max(1) as u32;
             let aspect = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?).max(1);
-            // The board may be a bignum OR a `bitset` (a refc-shared `Str` of raw bytes) —
+            // The board may be a bignum OR a byte string (a refc-shared `Str` of raw bytes) —
             // decode either to little-endian set-bit bytes for the representation-agnostic paint.
             let bytes = match arg(&parts, 5) {
                 Value::Str(id) => match heap.local_shared_blob(id) {

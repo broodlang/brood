@@ -204,17 +204,38 @@
     (assert= (editor/lineedit/lineedit--fit (list ["abcd" nil] ["efgh" {:bold true}]) 6 '())
       (list ["abcd" nil] ["ef" {:bold true}]))
     (assert= (editor/lineedit/lineedit--fit (list ["abc" nil]) 0 '()) '()))
-  (test "match-echo: a bracket whose opener is on a prior line echoes that line"
-    ;; multi-line form: prior line "(defn foo (x)\n" (len 14) is read-only context (base),
-    ;; the current line "  (+ x 1))" is being edited; the final ) closes (defn foo.
-    (let (full "(defn foo (x)\n  (+ x 1))")
-      (assert= (editor/lineedit/lineedit--match-echo full 14 (string-length full))
-        (list ["matches " lineedit-face-hint] ["(defn foo (x)" hl-face-match]))
-      ;; a match on the current line (inner pair) is shown by the reverse-video override,
-      ;; so the echo stays nil
-      (is (nil? (editor/lineedit/lineedit--match-echo full 14 21)))
-      ;; not next to a bracket → nil
-      (is (nil? (editor/lineedit/lineedit--match-echo full 14 18))))))
+  (test "multi-line geometry: line-start/end, cursor row/col, up/down point"
+    (let (t "(defn f\n  (g x))")  ; newline at index 7
+      (assert= (editor/lineedit/lineedit--line-start t 10) 8)
+      (assert= (editor/lineedit/lineedit--line-end t 10) 16)
+      (assert= (editor/lineedit/lineedit--cursor-rc t 10) [1 2])
+      (assert= (editor/lineedit/lineedit--cursor-rc t 3) [0 3])
+      (assert= (editor/lineedit/lineedit--up-point t 10) 2)      ; col 2, line 0
+      (is (nil? (editor/lineedit/lineedit--up-point t 3)))       ; already on line 0
+      (assert= (editor/lineedit/lineedit--down-point t 3) 11)    ; col 3, line 1
+      (is (nil? (editor/lineedit/lineedit--down-point t 10)))))  ; last line
+  (test "Enter inserts a newline while the form is incomplete, submits when complete"
+    (let (incomplete? (fn (s) (= s "(defn f"))   ; complete unless exactly this
+          complete? (fn (s) (not (incomplete? s)))
+          mk (fn (text) (assoc (editor/lineedit/lineedit--init "x> " "" '() {:complete? complete?})
+                          :text text :point (string-length text))))
+      ;; incomplete form: Enter adds "\n", does NOT submit
+      (let (st (editor/lineedit/lineedit-submit (mk "(defn f") nil))
+        (assert= (get st :text) "(defn f\n")
+        (is (nil? (get st :done))))
+      ;; complete form: Enter submits
+      (let (st (editor/lineedit/lineedit-submit (mk "(+ 1 2)") nil))
+        (assert= (get st :done) :submit))))
+  (test "multi-line render lights the matching bracket pair in place across lines"
+    (let (st (assoc (editor/lineedit/lineedit--init "p> " "" '() {:cont-prompt "c> "})
+               :text "(a\n b)" :point 6)   ; cursor after the final ) which closes (a
+          ops (editor/lineedit/lineedit--multi-ops st))
+      ;; the opener "(" (line 0) and the closer ")" (line 1) both render reversed
+      (is (some? (fn (op) (= op [:print "(" {:reverse true}])) ops))
+      (is (some? (fn (op) (= op [:print ")" {:reverse true}])) ops))
+      ;; both physical lines are repainted (each carries its prompt)
+      (is (some? (fn (op) (= op [:print "p> "])) ops))
+      (is (some? (fn (op) (= op [:print "c> "])) ops)))))
 
 ;; Cross-process: an editor-state map crosses a heap boundary via send (deep copy)
 ;; and is edited on the far side, proving the immutable state survives copy-on-send
