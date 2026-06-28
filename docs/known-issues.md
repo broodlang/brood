@@ -20,6 +20,10 @@ their own raw-byte slab (LOCAL `Vec` + RUNTIME `boxcar`), byte-clean accessor /
 bitset can no longer reach a string accessor. **Guarded by:** the spawn-promote-a-
 bitset path under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
 
+> **Superseded 2026-06-28:** the whole `bitset` feature (the `Value::Bitset` kind +
+> 13 `bitset-*` prims) was removed — it had no in-repo or external consumer left.
+> The KI-4 fix is moot now that the type is gone; kept here as the historical record.
+
 ## KI-3 — RUNTIME compaction strands live VM / tree-walker constants · **fixed 2026-06-01**
 
 Once the ADR-076 RUNTIME compactor made promoted code-region handles movable, two

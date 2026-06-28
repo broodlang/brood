@@ -9,6 +9,7 @@
 //! are the tiny syntax-shape readers the rest of the walk shares; they're
 //! `pub(super)` so the sibling submodules (`sigs`, `guards`) can use them.
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use crate::core::heap::{Heap, SymbolMap};
@@ -279,6 +280,70 @@ fn sym_appears_in(heap: &Heap, form: Value, sym: Symbol) -> bool {
             .any(|&(k, v)| sym_appears_in(heap, k, sym) || sym_appears_in(heap, v, sym)),
         _ => false,
     }
+}
+
+/// Collect every `Value::Sym` that appears anywhere in `form` — recursively,
+/// including binder positions. Used by the unused-`:use` and unused-private-`defn`
+/// lints to build the full reference set of a file in one pass.
+fn collect_syms_into(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
+    match form {
+        Value::Sym(s) => {
+            out.insert(s);
+        }
+        Value::Pair(pid) => {
+            let (car, cdr) = heap.pair(pid);
+            collect_syms_into(heap, car, out);
+            collect_syms_into(heap, cdr, out);
+        }
+        Value::Vector(vid) => {
+            for &v in heap.vector(vid) {
+                collect_syms_into(heap, v, out);
+            }
+        }
+        Value::Map(mid) => {
+            for (k, v) in heap.map_entries(mid) {
+                collect_syms_into(heap, k, out);
+                collect_syms_into(heap, v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect every symbol that appears anywhere in `forms`.
+pub(super) fn collect_all_syms(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> {
+    let mut out = HashSet::new();
+    for &form in forms {
+        collect_syms_into(heap, form, &mut out);
+    }
+    out
+}
+
+/// True if `name` (a qualified def name like `my/mod/foo--bar`) appears in
+/// `forms` anywhere *other than* the binding-name slot of its own `(def name …)`.
+/// Scans the fn body of the def for self-recursion; scans all other forms freely.
+/// Used by the unused-private-`defn` lint.
+pub(super) fn sym_used_beyond_def(heap: &Heap, forms: &[Value], name: Symbol) -> bool {
+    for &form in forms {
+        if let Some(items) = list_items(heap, form) {
+            if let (Some(&Value::Sym(h)), Some(&Value::Sym(bound))) =
+                (items.first(), items.get(1))
+            {
+                if value::symbol_is(h, kw::DEF) && bound == name {
+                    for &body in items.get(2..).unwrap_or(&[]) {
+                        if sym_appears_in(heap, body, name) {
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        if sym_appears_in(heap, form, name) {
+            return true;
+        }
+    }
+    false
 }
 
 /// What the walk does at a head symbol. `Generic` is the fall-through for any

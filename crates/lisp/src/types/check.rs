@@ -117,11 +117,11 @@ mod walk;
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
-use crate::core::value::Value;
+use crate::core::value::{self as value, Symbol, Value};
 use crate::error::Pos;
 
 use ctx::Ctx;
-use walk::{check_into, collect_def_names};
+use walk::{check_into, collect_all_syms, collect_def_names, list_items, sym_used_beyond_def};
 
 /// True when `form` is a top-level `(require …)` call — the one form the
 /// checker pre-evaluates so a module's macros (e.g. `defprocess` from
@@ -148,6 +148,77 @@ fn is_ns_header(heap: &Heap, form: Value) -> bool {
         }
     }
     false
+}
+
+/// Parse the `(defmodule … (:use mod) …)` header from the *unexpanded* `forms`
+/// and return the module names explicitly listed in `:use` clauses.
+fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
+    for &form in forms {
+        if !is_ns_header(heap, form) {
+            continue;
+        }
+        // (defmodule name clause...)
+        let Value::Pair(p) = form else { continue };
+        let (_, rest) = heap.pair(p);
+        let Value::Pair(r) = rest else { continue };
+        let (_, clauses) = heap.pair(r); // skip the module name
+
+        let mut result = Vec::new();
+        let mut cur = clauses;
+        while let Value::Pair(p) = cur {
+            let (clause, next) = heap.pair(p);
+            // Each (:use mod …) clause starts with the :use keyword.
+            if let Some(items) = list_items(heap, clause) {
+                if let Some(Value::Keyword(kw_sym)) = items.first() {
+                    if value::symbol_is(*kw_sym, "use") {
+                        if let Some(&Value::Sym(mod_sym)) = items.get(1) {
+                            result.push(value::symbol_name(mod_sym).to_string());
+                        }
+                    }
+                }
+            }
+            cur = next;
+        }
+        return result;
+    }
+    Vec::new()
+}
+
+/// Scan the *expanded* `forms` for all `(def name …)` where the bare segment
+/// of `name` (after the last `/`) contains `--` (the module-private convention).
+/// Returns `(qualified_name_sym, def_form)` pairs so the caller can look up
+/// source positions.
+fn collect_private_defs(heap: &Heap, forms: &[Value]) -> Vec<(Symbol, Value)> {
+    let mut result = Vec::new();
+    for &form in forms {
+        collect_private_defs_in(heap, form, &mut result);
+    }
+    result
+}
+
+fn collect_private_defs_in(heap: &Heap, form: Value, out: &mut Vec<(Symbol, Value)>) {
+    let Some(items) = list_items(heap, form) else {
+        return;
+    };
+    if let Some(&Value::Sym(h)) = items.first() {
+        if value::symbol_is(h, kw::DEF) {
+            if let Some(&Value::Sym(name)) = items.get(1) {
+                let name_str = value::symbol_name(name);
+                let bare: &str = match name_str.rfind('/') {
+                    Some(i) => &name_str[i + 1..],
+                    None => name_str.as_str(),
+                };
+                if bare.contains("--") {
+                    out.push((name, form));
+                    return; // don't recurse into this def's body for more defs
+                }
+            }
+        }
+    }
+    // Recurse into sub-forms to find private defs nested in test/describe/do wrappers.
+    for &item in items.get(1..).unwrap_or(&[]) {
+        collect_private_defs_in(heap, item, out);
+    }
 }
 
 /// Check one form, returning a warning per provable misuse. Empty when nothing is
@@ -339,6 +410,59 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // a macro is applied). Reads only.
     for &form in &forms {
         hygiene::check_macro_hygiene(heap, form, &mut out);
+    }
+    // Pass 4.5: unused `(:use …)` imports — a `:use` clause that contributes no
+    // symbol ever referenced in the file's expanded forms. Read the `:use` module
+    // names from the *unexpanded* header (the clause is gone after expansion), then
+    // group the imported qualified names by source module and scan the expanded tree
+    // for references. Warn only when the module contributed ≥1 public name and none
+    // appear.
+    {
+        let use_modules = extract_use_module_names(heap, &forms);
+        if !use_modules.is_empty() {
+            let all_refs = collect_all_syms(heap, &expanded);
+            let imported = heap.imported_pairs();
+            // Group by source module: qualified name → module prefix.
+            let mut module_exports: std::collections::HashMap<String, Vec<Symbol>> =
+                std::collections::HashMap::new();
+            for (_, qual) in &imported {
+                let qname = value::symbol_name(*qual);
+                if let Some(slash) = qname.rfind('/') {
+                    module_exports
+                        .entry(qname[..slash].to_string())
+                        .or_default()
+                        .push(*qual);
+                }
+            }
+            for mod_name in &use_modules {
+                if let Some(exports) = module_exports.get(mod_name) {
+                    // The module contributed public names; warn if none are used.
+                    if !exports.iter().any(|q| all_refs.contains(q)) {
+                        out.push((None, format!("unused :use import: {mod_name}")));
+                    }
+                }
+                // If the module has no exports in the table (require failed or it's
+                // empty) skip silently — there's nothing actionable.
+            }
+        }
+    }
+    // Pass 4.6: unused module-private `defn`s — a `def` whose qualified name
+    // contains `--` (the module-private naming convention) but whose name never
+    // appears in the file outside its own definition. Only private names are
+    // checked; public names may be used by other files so we can't know here.
+    {
+        let private_defs = collect_private_defs(heap, &expanded);
+        for (name, def_form) in private_defs {
+            if !sym_used_beyond_def(heap, &expanded, name) {
+                let pos = heap.form_pos_only(def_form);
+                let qual = value::symbol_name(name);
+                let bare: &str = match qual.rfind('/') {
+                    Some(i) => &qual[i + 1..],
+                    None => qual.as_str(),
+                };
+                out.push((pos, format!("unused private function: {bare}")));
+            }
+        }
     }
     // Balance the GC roots we pushed for pass 1 (input forms + their
     // expansions). Safe to drop now: nothing after this consults `expanded`
@@ -2456,6 +2580,94 @@ mod tests {
             "an unknown init must not refine the reduce result: {w:?}"
         );
     }
+
+    // ---- unused :use import lint (Pass 4.5) ----
+
+    #[test]
+    fn unused_use_import_is_flagged() {
+        // `io` is an embedded module; not using any of its names should warn.
+        let ws = file_warnings("(defmodule test/mod (:use io))\n(defn foo (x) (+ x 1))");
+        assert!(
+            ws.iter().any(|w| w.contains("unused :use import") && w.contains("io")),
+            "expected unused :use import warning for io, got {ws:?}"
+        );
+    }
+
+    #[test]
+    fn used_use_import_is_silent() {
+        // `io-write` is one of io's public exports; using it makes the :use needed.
+        let ws = file_warnings(
+            "(defmodule test/mod (:use io))\n(defn foo (port s) (io-write port s))",
+        );
+        assert!(
+            !ws.iter().any(|w| w.contains("unused :use import")),
+            "used :use import should be silent, got {ws:?}"
+        );
+    }
+
+    #[test]
+    fn module_with_no_use_clauses_is_silent() {
+        // A defmodule with no :use clauses should never trigger the import lint.
+        let ws = file_warnings("(defmodule test/mod)\n(defn foo (x) x)");
+        assert!(
+            !ws.iter().any(|w| w.contains("unused :use import")),
+            "no :use clause → no import warning, got {ws:?}"
+        );
+    }
+
+    // ---- unused private defn lint (Pass 4.6) ----
+
+    #[test]
+    fn unused_private_defn_is_flagged() {
+        // helper--impl is never called — should warn.
+        let ws = file_warnings(
+            "(defmodule test/mod)\n(defn helper--impl (x) (+ x 1))\n(defn pub-fn (x) x)",
+        );
+        assert!(
+            ws.iter().any(|w| w.contains("unused private function") && w.contains("helper--impl")),
+            "expected unused private function warning for helper--impl, got {ws:?}"
+        );
+        // pub-fn is public (no --); never flagged.
+        assert!(
+            !ws.iter().any(|w| w.contains("pub-fn")),
+            "public function should not be flagged, got {ws:?}"
+        );
+    }
+
+    #[test]
+    fn used_private_defn_is_silent() {
+        // helper--impl is called from pub-fn — no warning.
+        let ws = file_warnings(
+            "(defmodule test/mod)\n(defn helper--impl (x) (+ x 1))\n(defn pub-fn (x) (helper--impl x))",
+        );
+        assert!(
+            !ws.iter().any(|w| w.contains("unused private function")),
+            "called private function should be silent, got {ws:?}"
+        );
+    }
+
+    #[test]
+    fn self_recursive_private_defn_is_silent() {
+        // A private fn that calls itself — the body reference counts as "used".
+        let ws = file_warnings(
+            "(defmodule test/mod)\n(defn fact--impl (n) (if (= n 0) 1 (* n (fact--impl (- n 1)))))\n(defn run (n) (fact--impl n))",
+        );
+        assert!(
+            !ws.iter().any(|w| w.contains("unused private function")),
+            "self-recursive private fn should be silent, got {ws:?}"
+        );
+    }
+
+    #[test]
+    fn underscore_prefix_is_not_private_convention() {
+        // A function named `_unused` is NOT private by the `--` convention and
+        // is NOT flagged by the private-defn lint (it may be used elsewhere).
+        let ws = file_warnings("(defmodule test/mod)\n(defn _unused (x) x)\n(defn pub (x) x)");
+        assert!(
+            !ws.iter().any(|w| w.contains("unused private function")),
+            "_unused should not be flagged by private-defn lint, got {ws:?}"
+        );
+    }
 }
 
 /// **Soundness oracles.** An advisory, never-gating checker can't have classic
@@ -2624,4 +2836,5 @@ mod soundness_oracle {
             assert!(bad.is_empty(), "FALSE POSITIVE on correct `{src}`: {bad:?}");
         }
     }
+
 }

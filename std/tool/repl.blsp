@@ -269,57 +269,64 @@ loop."
 
 ;; ---- I/O loop ---------------------------------------------------------------
 
-(defn repl--read-line (interactive acc history)
-  "Read one physical line. When `interactive` (stdin + stdout are both a TTY), the
-editor (`lineedit-read`) draws the prompt and edits with `acc` as read-only form
-context and `history` for ↑/↓. Otherwise a plain `read-line` — the piped path —
-echoing the prompt only when stdout is a TTY (a human watching, stdin redirected).
-Returns a map `{:kind :line|:eof|:cancel ...}` — `:cancel` is the editor's Ctrl-C."
-  (if interactive
-    (let (r (lineedit-read (if (= acc "") *repl-prompt* *repl-cont-prompt*) acc history))
+(defn repl--complete? (src)
+  "The Enter predicate for the multi-line line editor: true when `src` is a complete
+form — or a genuine *syntax* error, which should submit so eval reports it — and false
+only when the reader wants more input (the E0002 incomplete signal: insert a newline
+and keep editing). So `(defn foo` opens a continuation line; a balanced form submits."
+  (try (do (read-all src) true)
+    (catch e (not (repl--incomplete? e)))))
+
+(defn repl--submit (interactive form history)
+  "Act on a submitted `form`: run a `,cmd` meta-command, skip a blank/comment-only line,
+else eval + print it. Remembers it for ↑/↓ (persisted only for interactive sessions).
+Returns `{:eof false :history h}`."
+  (let (remember (fn ()
+                   (let (h2 (editor/lineedit/lineedit--remember history form))
+                     (when interactive (repl--save-history h2))
+                     {:eof false :history h2})))
+    (cond
+      (repl--meta? form) (do (repl--run-meta form) (remember))
+      (not (repl--content? form 0 (string-length form) false)) {:eof false :history history}
+      :else (do (repl--eval-print form) (remember)))))
+
+(defn repl--read-eval-interactive (history)
+  "Interactive read: the multi-line line editor reads a whole form in one session
+(Enter inserts a newline while the form is incomplete, repainting every line in place
+so bracket matches light up across lines), then we act on it. Ctrl-D on an empty line
+ends input; Ctrl-C drops the form and re-prompts."
+  (let (r (lineedit-read *repl-prompt* "" history
+            {:cont-prompt *repl-cont-prompt* :complete? repl--complete?}))
+    (cond
+      (get r :eof) {:eof true :history history}
+      (get r :cancel) {:eof false :history history}
+      :else (repl--submit true (get r :line) history))))
+
+(defn repl--read-eval-piped (acc history)
+  "Piped/redirected read: accumulate physical lines (no editor) until the form is
+complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplete form."
+  (do
+    (when (stdout-tty?) (print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
+    (let (line (read-line))
       (cond
-        (get r :eof) {:kind :eof}
-        (get r :cancel) {:kind :cancel}
-        :else {:kind :line :text (get r :line)}))
-    (do
-      (when (stdout-tty?) (print (if (= acc "") *repl-prompt* *repl-cont-prompt*)))
-      (let (line (read-line))
-        (if (nil? line) {:kind :eof} {:kind :line :text line})))))
+        (nil? line) (do
+                      (when (and (not (= acc "")) (= (repl--eval-print acc) :more))
+                        (eprint "error: incomplete input at end of input\n"))
+                      {:eof true :history history})
+        (and (= acc "") (repl--meta? line)) (do (repl--run-meta line) {:eof false :history history})
+        (and (= acc "") (not (repl--content? line 0 (string-length line) false)))
+        {:eof false :history history}
+        :else (let (src (str acc line "\n"))
+                (if (= (repl--eval-print src) :more)
+                  (repl--read-eval-piped src history)
+                  {:eof false :history history}))))))
 
 (defn repl--read-eval (interactive acc history)
-  "Read a line, accumulate it into `acc`, and evaluate. Recurses (without
-hibernating, so the partial form survives) to read another line when the form is
-incomplete. Ctrl-C drops the in-progress form and re-prompts. Returns a map
-`{:eof <bool> :history <list>}` — the (possibly extended) history threads back to
-`repl--loop`."
-  (let (r (repl--read-line interactive acc history))
-    (cond
-      ;; EOF: report a half-typed form if one is pending, then stop.
-      (= (get r :kind) :eof) (do
-                               (when (and (not (= acc "")) (= (repl--eval-print acc) :more))
-                                 (eprint "error: incomplete input at end of input\n"))
-                               {:eof true :history history})
-      ;; Ctrl-C: abandon the (possibly multi-line) form, fresh prompt next round.
-      (= (get r :kind) :cancel) {:eof false :history history}
-      :else (let (line (get r :text))
-              (cond
-                ;; A `,cmd` meta-command at a fresh prompt: run it, remember it for ↑/↓,
-                ;; and re-prompt (it isn't a form to evaluate).
-                (and (= acc "") (repl--meta? line))
-                (do (repl--run-meta line)
-                    (let (h2 (editor/lineedit/lineedit--remember history line))
-                      (when interactive (repl--save-history h2))
-                      {:eof false :history h2}))
-                ;; A blank / comment-only line at a fresh prompt: nothing to evaluate.
-                (and (= acc "") (not (repl--content? line 0 (string-length line) false))) {:eof false
-                                                                                           :history history}
-                :else (let (src (str acc line "\n"))
-                        (if (= (repl--eval-print src) :more)
-                          (repl--read-eval interactive src history)  ; incomplete — keep reading
-                          (let (h2 (editor/lineedit/lineedit--remember history src))
-                            ;; persist only interactive sessions (not piped/scripted runs)
-                            (when interactive (repl--save-history h2))
-                            {:eof false :history h2}))))))))
+  "Read one form and act on it, returning `{:eof <bool> :history <list>}`. Interactive
+sessions use the multi-line line editor; piped input accumulates physical lines."
+  (if interactive
+    (repl--read-eval-interactive history)
+    (repl--read-eval-piped acc history)))
 
 (defn repl--loop (interactive history)
   "Read-eval one form (skipping blank / comment-only input), then tail-recurse into

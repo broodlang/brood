@@ -34,7 +34,7 @@ use crate::core::value::{self, Symbol, Tag, Value};
 /// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
 /// order**; the compiler can't enumerate variants, so `tag_universe_is_consistent`
 /// (below) is what guards completeness, ordering, and the universe size.
-const ALL_TAGS: [Tag; 22] = [
+const ALL_TAGS: [Tag; 21] = [
     Tag::Nil,
     Tag::Bool,
     Tag::Int,
@@ -54,7 +54,6 @@ const ALL_TAGS: [Tag; 22] = [
     Tag::Socket,
     Tag::Subprocess,
     Tag::Table,
-    Tag::Bitset,
     Tag::Bytes,
     Tag::Decimal,
 ];

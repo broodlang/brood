@@ -644,24 +644,22 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   (arity/type findings anchor to the call head, not the offending argument —
   wants `Pos` threaded through `types/check.rs`'s walk, a focused refactor of
   that GC-rooting-sensitive pass); and the **create-missing-`defn`** code action.
-- 🟡 **[checker] warn on unused bindings** (post-expansion lint, 2026-06-14) — the
-  checker today is direction-asymmetric: it flags names used but *not* in scope
-  (`unbound symbol`), never bindings present but *unreferenced*. ✅ **Unused `let`
-  locals** (2026-06-28): `check_let` now emits "unused let binding: x" for any
-  `let`/`let*`/`letrec` name that never appears in its visible scope (subsequent
-  binding RHSs + body forms). Conservative scan (counts any occurrence, including
-  binder positions and quoted forms) for zero false positives. Exempt: `_`-prefixed
-  names (intentional don't-care convention) and compiler-generated `let`s (match /
-  pattern expansion produces `let`s with no source position — the position gate
-  distinguishes these cleanly). **Hard constraint: must run after macro expansion** —
-  satisfied since `check_file` works on the fully-expanded tree. ⬜ Still open:
-  **unused `:use`/`:alias` imports** (needs per-module export tracking to know which
-  names each `:use` contributed, then a reference scan) and **unused module-private
-  `defn`s** (needs either a formal `private` visibility marker or a convention-based
-  heuristic — e.g. names containing `--`; currently all top-level `defn`s are
-  potentially exported). The `:use` case is the motivating one (a stray
-  `(:use web/conn)` survived silently while the load-bearing `(:use web/layout)`
-  *looks* unused).
+- ✅ **[checker] warn on unused bindings / imports / private defns** (2026-06-28):
+  ✅ **Unused `let` locals** — `check_let` emits "unused let binding: x" for any
+  `let`/`let*`/`letrec` name that never appears in its visible scope. Conservative
+  scan; exempt: `_`-prefixed names and compiler-generated lets (match/pattern
+  expansion, detected via missing source position).
+  ✅ **Unused `:use` imports** (Pass 4.5) — after evaluating the `defmodule` header
+  in Pass 1, `imported_pairs()` gives every bare→qualified pair; `extract_use_module_names`
+  parses the `:use` clauses from the *unexpanded* header; a single `collect_all_syms`
+  pass over the expanded tree checks which qualified names are referenced. If a `:use`d
+  module contributed ≥1 public name but none are referenced → "unused :use import: M".
+  ✅ **Unused module-private `defn`s** (Pass 4.6) — `collect_private_defs` finds every
+  `(def qualified-name …)` in the expanded tree whose bare segment contains `--` (the
+  private convention; same gate as `%refer`'s refer-all skip). `sym_used_beyond_def`
+  scans all expanded forms skipping the binding-name slot of the def itself. If never
+  referenced → "unused private function: bare-name". Public names are never checked
+  (they may be used by other files).
 
 > v0.1 is the ✅ slice above: enough to be a real, usable language. The ⬜ items
 > complete M1.

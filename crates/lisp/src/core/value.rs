@@ -344,7 +344,6 @@ handle!(VecId);
 handle!(StrId);
 handle!(BigIntId);
 handle!(DecimalId);
-handle!(BsId);
 handle!(BytesId);
 handle!(RopeId);
 handle!(ClosureId);
@@ -482,18 +481,8 @@ pub enum Value {
     /// mutable state behind primitives (`table-*`), never a mutable `Value`. Local to
     /// this runtime (the registry is global to the OS process); not node-portable.
     Table(u64),
-    /// A **bitset** — a fixed-size immutable bit array backed by raw bytes
-    /// (`crate::core::blob::SharedBlob`), a heap leaf handle into the per-process
-    /// `bitsets` slab (mirrors [`Value::BigInt`]: an immutable leaf holding no `Value`
-    /// children). **Distinct from `Value::Str`**: a bitset's bytes are arbitrary (NOT
-    /// valid UTF-8), so it must never flow through the string accessors / the
-    /// UTF-8-only RUNTIME string slab — that is exactly the KI-4 bug. Like a large
-    /// string it shares its `Arc<SharedBlob>` across processes by reference (a refcount
-    /// bump, not a byte copy); `promote`/GC copy the Arc byte-clean. The `bitset-*`
-    /// primitives are its only operations; `type-of` is `:bitset`.
-    Bitset(BsId),
     /// **Raw bytes** — an immutable byte-clean leaf backed by one
-    /// `crate::core::blob::SharedBlob`, mirroring [`Value::Bitset`] exactly: a heap
+    /// `crate::core::blob::SharedBlob`: a heap
     /// leaf handle into the per-process `bytes` slab holding no `Value` children,
     /// whose bytes are arbitrary (NOT valid UTF-8) and must never flow through the
     /// UTF-8-only string accessors. Shared across processes by Arc refcount;
@@ -628,10 +617,6 @@ impl Value {
         Value::Table(id)
     }
     #[inline]
-    pub fn bitset(id: BsId) -> Value {
-        Value::Bitset(id)
-    }
-    #[inline]
     pub fn bytes(id: BytesId) -> Value {
         Value::Bytes(id)
     }
@@ -756,7 +741,6 @@ pub enum Tag {
     Socket,
     Subprocess,
     Table,
-    Bitset,
     Bytes,
     Decimal,
 }
@@ -785,7 +769,6 @@ impl Tag {
             Tag::Socket => "socket",
             Tag::Subprocess => "subprocess",
             Tag::Table => "table",
-            Tag::Bitset => "bitset",
             Tag::Bytes => "bytes",
             Tag::Decimal => "decimal",
         }
@@ -797,14 +780,14 @@ impl Tag {
     /// code that was essentially the entire `intern` cost (~98% of all interns were
     /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
     pub fn keyword(self) -> Symbol {
-        static KW: LazyLock<[Symbol; 22]> = LazyLock::new(|| {
-            const TAGS: [Tag; 22] = [
+        static KW: LazyLock<[Symbol; 21]> = LazyLock::new(|| {
+            const TAGS: [Tag; 21] = [
                 Tag::Nil, Tag::Bool, Tag::Int, Tag::Float, Tag::Sym, Tag::Keyword,
                 Tag::Str, Tag::Pair, Tag::Vector, Tag::Fn, Tag::Macro, Tag::Native,
                 Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Subprocess,
-                Tag::Table, Tag::Bitset, Tag::Bytes, Tag::Decimal,
+                Tag::Table, Tag::Bytes, Tag::Decimal,
             ];
-            let mut out = [0u32; 22];
+            let mut out = [0u32; 21];
             for t in TAGS {
                 out[t as usize] = intern(t.name());
             }
@@ -848,7 +831,6 @@ pub fn tag(v: Value) -> Tag {
         Value::Socket(_) => Tag::Socket,
         Value::Subprocess(_) => Tag::Subprocess,
         Value::Table(_) => Tag::Table,
-        Value::Bitset(_) => Tag::Bitset,
         Value::Bytes(_) => Tag::Bytes,
         // A decimal is its OWN type — distinct from int/float (unlike BigInt).
         Value::Decimal(_) => Tag::Decimal,

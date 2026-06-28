@@ -159,7 +159,7 @@ pub enum Op {
         w: u32,
         aspect: u16,
         /// The board's set bits as little-endian bytes (bit `y*w+x` = byte `i/8` bit `i%8`).
-        /// Decoded once at parse time from EITHER a bignum or a `bitset`, so the paint path
+        /// Decoded once at parse time from EITHER a bignum or a byte string, so the paint path
         /// is representation-agnostic — a plain set-bit byte scan.
         bytes: Vec<u8>,
         color: Option<[u8; 3]>,
@@ -1348,8 +1348,9 @@ pub(crate) mod backend {
                 WindowEvent::ModifiersChanged(m) => w.mods = m.state(),
                 WindowEvent::Resized(_) => {
                     update_cells(&w.window, &w.renderer, &w.size);
-                    // The sub-cell remainder is centred at paint time (`grid_origin`), so
-                    // there's no window-resize snap to do here — it works on every WM.
+                    // The sub-cell remainder is placed at paint time (`grid_origin`:
+                    // centred horizontally, anchored top vertically), so there's no
+                    // window-resize snap to do here — it works on every WM.
                     // Wake the app loop so it re-renders at the new (cols, rows)
                     // now, rather than after its (possibly long) poll timeout.
                     let (cols, rows) = *w.size.lock().unwrap();
@@ -1650,7 +1651,7 @@ pub(crate) mod backend {
     fn apply_font(w: &mut Win, family: Option<u32>, px: Option<f32>) {
         w.renderer.set_font(family, px);
         update_cells(&w.window, &w.renderer, &w.size);
-        // A new font changes the cell size; the new sub-cell remainder is re-centred at
+        // A new font changes the cell size; the new sub-cell remainder is re-placed at
         // paint time (`grid_origin`), so there's nothing to resize here.
         w.window.request_redraw();
     }
@@ -1670,7 +1671,7 @@ pub(crate) mod backend {
     }
 
     /// A window pixel position to a (col, row) character cell, clamped to u16. The grid
-    /// origin (`grid_origin` — inset plus the centred remainder, the same the grid is
+    /// origin (`grid_origin` — inset plus the remainder placement, the same the grid is
     /// painted with) is subtracted first, so a click lands on the cell painted under it;
     /// a click in the surrounding margin clamps to the edge cell.
     fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer, w_px: usize, h_px: usize) -> (u16, u16) {
@@ -2041,19 +2042,26 @@ pub(crate) mod backend {
             self.bg = rgb;
         }
 
-        /// The grid's top-left origin in PHYSICAL px: the inset plus HALF the sub-cell
-        /// remainder on each axis. `cols`/`rows` are floor divisions, so the leftover
-        /// pixels that don't fill a whole cell are split evenly *around* the grid
-        /// (centred) instead of all dumped at the right/bottom edge as a lopsided margin —
-        /// the fix for the "too much space under the status bar" strip. WM-independent: no
-        /// window resize, so it works where `request_inner_size` is ignored. The mouse
-        /// hit-test (`px_to_cell`) shares it so clicks stay aligned with what's painted.
+        /// The grid's top-left origin in PHYSICAL px, beyond the inset. `cols`/`rows`
+        /// are floor divisions, so an arbitrary window leaves up to one cell of sub-cell
+        /// remainder per axis that doesn't fill a whole cell. The two axes place it
+        /// differently:
+        ///   - **horizontal**: HALF the remainder, so the left/right margins stay
+        ///     symmetric (the grid is centred between them).
+        ///   - **vertical**: the FULL remainder above the grid — anchoring the leftover
+        ///     at the *top* pushes the grid down so its bottom row (the editor's mode
+        ///     line / status bar) sits flush against the window's bottom edge (modulo the
+        ///     inset), instead of floating on half a cell. The slack reads as headroom up
+        ///     top, where the eye expects it.
+        /// WM-independent (no window resize, so it works where `request_inner_size` is
+        /// ignored), and the mouse hit-test (`px_to_cell`) shares it so clicks stay
+        /// aligned with what's painted.
         pub(crate) fn grid_origin(&self, w_px: usize, h_px: usize) -> (usize, usize) {
             let inset = self.inset();
             let (cw, ch) = (self.cell_w.max(1), self.cell_h.max(1));
             let rem_w = w_px.saturating_sub(2 * inset) % cw;
             let rem_h = h_px.saturating_sub(2 * inset) % ch;
-            (inset + rem_w / 2, inset + rem_h / 2)
+            (inset + rem_w / 2, inset + rem_h)
         }
 
         /// Recompute the px size + cell metrics by shaping a reference glyph ('M') in
@@ -2701,7 +2709,7 @@ pub(crate) mod backend {
                 }
                 Op::Cells { row0, col0, w, aspect, bytes, color } => {
                     // Enumerate set bits by a single byte scan — O(bytes + live), and the
-                    // same code whether the board came in as a bignum or a bitset.
+                    // same code whether the board came in as a bignum or a byte string.
                     // Each cell is an `aspect`-wide × 1-tall block of screen cells.
                     if let Some(rgb) = color {
                         let packed = pack(*rgb);

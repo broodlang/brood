@@ -12,17 +12,18 @@
 ;;    part that polls keys and paints — exercised manually, like `repl`/`observe`.
 ;;  - Immutable state, no loops: the editor state is a map threaded through a
 ;;    tail-recursive loop; every keystroke returns a fresh state.
-;;  - One physical line at a time: the editor edits a single line and returns it,
-;;    a drop-in for `read-line`. Multi-line forms keep working via the REPL's
-;;    existing reader-driven accumulation (`std/repl.blsp`); the already-typed
-;;    prefix is threaded in as read-only context (`:prefix`) so highlighting,
-;;    bracket-matching, and signature hints still see the whole form.
+;;  - Single- or multi-line: with a `:complete?` predicate (the REPL passes one),
+;;    Enter inserts a newline while the form is incomplete and the whole multi-line
+;;    form is edited and repainted *in place* — so a bracket's match lights up across
+;;    lines, C-a/C-e are line-aware, and ↑/↓ move between the form's lines (falling
+;;    through to history at the top/bottom). Without it, Enter always submits (the
+;;    single-line `read-line` drop-in, e.g. the observer minibuffer).
 ;;  - Inline, not full-screen: raw mode only (no alternate screen), so the prompt
-;;    and submitted lines stay in the terminal's scrollback. Rendering is relative
-;;    (carriage-return + clear-below + reprint), and a long line horizontally
-;;    scrolls rather than wrapping (which would break single-line cursor math).
-;;    Display width approximates 1 column/char — wide CJK/emoji may misposition
-;;    the cursor (real wcwidth is a follow-up).
+;;    and submitted lines stay in the terminal's scrollback. Rendering is relative:
+;;    each repaint moves up over the previous block (`:last-row`), clears, reprints
+;;    every line, and reparks. A single line horizontally scrolls; multi-line forms
+;;    print each line in full (a line wider than the terminal wraps — cursor math
+;;    assumes it doesn't, a known edge with real wcwidth as a follow-up).
 
 (defmodule editor/lineedit
   "A raw-mode, emacs/readline-style line editor for the REPL, written in Brood
@@ -41,19 +42,26 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
 
 ;; ---- editor state -----------------------------------------------------------
 
-(defn lineedit--init (prompt prefix history)
-  "The fresh editor state for one read: empty line, point at 0, the read-only
-`prefix` (already-typed form context) and `history` (newest-first submitted lines)."
-  {:text ""
-   :point 0
-   :kill ""
-   :hist history
-   :hist-idx -1
-   :saved ""
-   :hscroll 0
-   :prompt prompt
-   :prefix prefix
-   :done nil})
+(defn lineedit--init (prompt prefix history &optional opts)
+  "The fresh editor state for one read: empty line, point at 0, the read-only `prefix`
+(legacy single-line form context) and `history` (newest-first submitted lines).
+`opts` (a map) enables multi-line editing: `:cont-prompt` (the prompt for lines after
+the first) and `:complete?` (a `text -> bool` predicate — when set, Enter inserts a
+newline while the form is incomplete instead of submitting)."
+  (let (o (or opts {}))
+    {:text ""
+     :point 0
+     :kill ""
+     :hist history
+     :hist-idx -1
+     :saved ""
+     :hscroll 0
+     :prompt prompt
+     :prefix prefix
+     :cont-prompt (or (get o :cont-prompt) prompt)
+     :complete? (get o :complete?)
+     :last-row 0
+     :done nil}))
 
 ;; ---- character helpers ------------------------------------------------------
 
@@ -102,6 +110,49 @@ is the word-constituent predicate (`lineedit--word-pred` picks it per mode)."
 `word?` the word-constituent predicate."
   (let (i (lineedit--bwd text p (fn (c) (not (word? c)))))
     (lineedit--bwd text i word?)))
+
+;; ---- multi-line geometry (pure) ---------------------------------------------
+;; `:text` may hold newlines (a multi-line form). Point is a flat offset; these map
+;; between that offset and (row, col) so motion, Enter, and rendering are line-aware.
+
+(defn lineedit--line-start (text p)
+  "Offset of the first char of the line containing point `p` (just after the previous
+newline, or 0)."
+  (inc (string-last-index-of text "\n" p)))
+
+(defn lineedit--line-end (text p)
+  "Offset of the end of the line containing point `p` (the next newline, or the end)."
+  (let (j (string-index-of text "\n" p))
+    (if (< j 0) (string-length text) j)))
+
+(defn lineedit--count-nl (s)
+  "How many newlines are in `s` (deleting them and measuring the length drop)."
+  (- (string-length s) (string-length (replace s "\n" ""))))
+
+(defn lineedit--cursor-rc (text p)
+  "Point `p` as `[row col]` — `row` the count of newlines before `p`, `col` the offset
+within that line."
+  [(lineedit--count-nl (substring text 0 p)) (- p (lineedit--line-start text p))])
+
+(defn lineedit--up-point (text p)
+  "Point one line up from `p`, keeping the column (clamped to the shorter line), or nil
+when `p` is already on the first line."
+  (let (ls (lineedit--line-start text p))
+    (if (= ls 0)
+      nil
+      (let (col (- p ls)
+            prev-start (lineedit--line-start text (dec ls)))  ; (dec ls) is the prior "\n"
+        (min (+ prev-start col) (dec ls))))))
+
+(defn lineedit--down-point (text p)
+  "Point one line down from `p`, keeping the column (clamped), or nil when `p` is on
+the last line."
+  (let (le (lineedit--line-end text p))
+    (if (>= le (string-length text))
+      nil
+      (let (col (- p (lineedit--line-start text p))
+            next-start (inc le))
+        (min (+ next-start col) (lineedit--line-end text next-start))))))
 
 ;; ---- pure edit operations ---------------------------------------------------
 
@@ -359,11 +410,11 @@ globals by default; a project can rebind it to complete its own vocabulary)."
   "Insert the typed character `key`."
   (lineedit--insert state key))
 (defn lineedit-beginning-of-line (state _)
-  "Move point to the start of the line (C-a)."
-  (lineedit--move state 0))
+  "Move point to the start of the current line (C-a) — line-aware for multi-line forms."
+  (lineedit--move state (lineedit--line-start (get state :text) (get state :point))))
 (defn lineedit-end-of-line (state _)
-  "Move point to the end of the line (C-e)."
-  (lineedit--move state (string-length (get state :text))))
+  "Move point to the end of the current line (C-e) — line-aware for multi-line forms."
+  (lineedit--move state (lineedit--line-end (get state :text) (get state :point))))
 (defn lineedit-forward-char (state _)
   "Move point one character right (C-f)."
   (lineedit--move state (inc (get state :point))))
@@ -399,18 +450,29 @@ globals by default; a project can rebind it to complete its own vocabulary)."
   "Swap the two characters around point (C-t)."
   (lineedit--transpose state))
 (defn lineedit-history-prev (state _)
-  "Recall the previous history entry (↑ / C-p)."
-  (lineedit--hist-prev state))
+  "Move to the previous line of a multi-line form if there is one above, else recall
+the previous (older) history entry (↑ / C-p)."
+  (let (up (lineedit--up-point (get state :text) (get state :point)))
+    (if (nil? up) (lineedit--hist-prev state) (lineedit--move state up))))
 (defn lineedit-history-next (state _)
-  "Recall the next history entry (↓ / C-n)."
-  (lineedit--hist-next state))
+  "Move to the next line of a multi-line form if there is one below, else recall the
+next (newer) history entry (↓ / C-n)."
+  (let (down (lineedit--down-point (get state :text) (get state :point)))
+    (if (nil? down) (lineedit--hist-next state) (lineedit--move state down))))
 (defn lineedit-complete (state _)
   "Complete the symbol under point (Tab)."
   (lineedit--complete state))
 (defn lineedit-clear-screen (state _)
   "Request a screen clear + redraw (C-l)."
   (assoc state :clear true))
-(defn lineedit-submit (state _) "Finish the line (Enter)." (assoc state :done :submit))
+(defn lineedit-submit (state _)
+  "Enter: submit the form. In multi-line mode (a `:complete?` predicate is on the
+state) when the text isn't yet a complete form, insert a newline instead so the form
+keeps growing — so a `(defn …` opens a fresh continuation line rather than submitting."
+  (let (complete? (get state :complete?))
+    (if (and complete? (not (complete? (get state :text))))
+      (lineedit--insert state "\n")
+      (assoc state :done :submit))))
 (defn lineedit-cancel (state _) "Abandon the line, re-prompt (C-c)." (assoc state :done :cancel))
 (defn lineedit-eof-or-delete (state _)
   "Signal EOF on an empty line, else delete forward (C-d) — readline semantics."
@@ -544,22 +606,6 @@ matched pair reversed, or a lone unmatched bracket in the error face."
           (list [a hl-face-error])
           (list [a hl-face-match] [b hl-face-match]))))))
 
-(defn lineedit--match-echo (full base pos)
-  "When the cursor's bracket matches an opener on a *prior* line (offset `< base`, so
-it's above the single line this editor repaints), `[str face]` pieces echoing that
-opening line — the off-screen-match cue, like Emacs' `blink-matching-paren`. `nil`
-when the match (if any) is on the current line (the reverse-video override shows it)
-or absent. Multi-line forms in the REPL thread prior lines in as `base`-long context."
-  (let (m (bracket-match full pos))
-    (if (and (vector? m) (not (= (nth m 1) :unmatched)) (< (first m) base))
-      (let (a (first m)
-            bol (inc (string-last-index-of full "\n" (dec a)))
-            nl (string-index-of full "\n" a)
-            eol (if (< nl 0) (string-length full) nl)
-            line (trim (substring full bol eol)))
-        (list ["matches " lineedit-face-hint] [line hl-face-match]))
-      nil)))
-
 ;; ---- layout + rendering (IO) ------------------------------------------------
 
 (defn lineedit--cols ()
@@ -593,70 +639,118 @@ available text columns, and prompt width for rendering."
   "Turn `[substring face]` highlight chunks into `[:print str face]` ops."
   (map (fn ([s f]) [:print s f]) chunks))
 
-(defn lineedit--render (st)
-  "Repaint the input line in place (relative motion): carriage-return, clear from
-the cursor down, reprint the prompt + the highlighted visible window, draw the
-signature hint on the line below (if any), then park the cursor at point. `st` must
-already be reflowed by the caller (`lineedit--loop`)."
+(defn lineedit--render-single (st)
+  "Repaint a SINGLE-line input in place (the common case): move up over any block left
+by a previous multi-line render, carriage-return, clear below, reprint prompt + the
+highlighted (horizontally-scrolled) window, draw the signature hint on the line below
+(if any), then park the cursor. Returns `st` with `:last-row` 0 (cursor ends on row 0)."
   (let (text (get st :text)
-         point
-         (get st :point)
-         prefix
-         (get st :prefix)
-         hs
-         (get st :hscroll)
-         avail
-         (get st :avail)
-         promptw
-         (get st :promptw)
-         base
-         (string-length prefix)
-         full
-         (str prefix text)
-         len
-         (string-length text)
-         vis
-         (substring text hs (min len (+ hs avail)))
-         cursorpos
-         (+ base point)
-         overrides
-         (lineedit--overrides full cursorpos)
-         chunks
-         (highlight-chunks full (+ base hs) vis overrides)
-         ;; The line below shows, in priority: nothing while reverse-searching; else the
-         ;; off-screen matching-bracket line for a multi-line form (so a `)` whose opener
-         ;; scrolled off still shows its match); else the enclosing call's signature hint.
-         raw-hint
-         (if (get st :search)
-           nil
-           (or (lineedit--match-echo full base cursorpos)
-             (lineedit--hint-pieces full cursorpos)))
-         hint
-         (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
-         cursor-col
-         (+ promptw (- point hs))
-         head
-         (append [[:cr] [:clear-below] [:print (lineedit--display-prompt st)]]
-           (lineedit--chunk-ops chunks))
-         tail
-         (if (nil? hint)
-           (list [:col cursor-col])
-           (append (cons [:nl] (lineedit--chunk-ops hint))
-             (list [:up 1] [:col cursor-col]))))
-    (term-emit (into [] (append head tail)))))
+         point (get st :point)
+         prefix (get st :prefix)
+         hs (get st :hscroll)
+         avail (get st :avail)
+         promptw (get st :promptw)
+         prev-row (or (get st :last-row) 0)
+         base (string-length prefix)
+         full (str prefix text)
+         len (string-length text)
+         vis (substring text hs (min len (+ hs avail)))
+         cursorpos (+ base point)
+         overrides (lineedit--overrides full cursorpos)
+         chunks (highlight-chunks full (+ base hs) vis overrides)
+         raw-hint (if (get st :search) nil (lineedit--hint-pieces full cursorpos))
+         hint (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
+         cursor-col (+ promptw (- point hs))
+         head (append
+                (if (> prev-row 0) (list [:up prev-row]) '())
+                [[:cr] [:clear-below] [:print (lineedit--display-prompt st)]]
+                (lineedit--chunk-ops chunks))
+         tail (if (nil? hint)
+                (list [:col cursor-col])
+                (append (cons [:nl] (lineedit--chunk-ops hint))
+                  (list [:up 1] [:col cursor-col]))))
+    (term-emit (into [] (append head tail)))
+    (assoc st :last-row 0)))
 
-(defn lineedit--render-final (state)
-  "Repaint the finished line once more (whole text, no scroll/cursor games), then
-drop to a fresh line — so the submitted line stays in scrollback as typed."
-  (let (prompt (get state :prompt)
-        text (get state :text)
-        prefix (get state :prefix)
+(defn lineedit--multi-line-ops (lines i offset base full overrides prompt cont)
+  "Render ops for the logical `lines` of a multi-line form: each line gets its prompt
+(`prompt` for the first, `cont` after) + its highlight chunks (lexed from `full`, so
+bracket-match overrides spanning lines apply), `[:nl]`-separated. `offset` tracks each
+line's start within the text (past `base`) so the lexer spans land on the right chars."
+  (if (empty? lines)
+    '()
+    (let (line (first lines)
+          pstr (if (= i 0) prompt cont)
+          chunks (highlight-chunks full (+ base offset) line overrides)
+          line-ops (cons [:print pstr] (lineedit--chunk-ops chunks))
+          here (if (= i 0) line-ops (cons [:nl] line-ops)))
+      (append here
+        (lineedit--multi-line-ops (rest lines) (inc i)
+          (+ offset (string-length line) 1) base full overrides prompt cont)))))
+
+(defn lineedit--multi-ops (st)
+  "The full op vector to repaint a MULTI-line form in place: up over the previous
+block, clear, all lines (prompt + highlight, partner brackets reverse-videoed *in
+place* since every line is repainted), then reposition to the cursor's row/col. Pure —
+tested in isolation."
+  (let (text (get st :text)
+        point (get st :point)
+        prefix (get st :prefix)
+        prompt (lineedit--display-prompt st)
+        cont (or (get st :cont-prompt) prompt)
+        prev-row (or (get st :last-row) 0)
         base (string-length prefix)
         full (str prefix text)
-        chunks (highlight-chunks full base text '()))
+        cursorpos (+ base point)
+        overrides (lineedit--overrides full cursorpos)
+        lines (string-split text "\n")
+        nlines (count lines)
+        [cur-row cur-col] (lineedit--cursor-rc text point)
+        promptw (string-length (if (= cur-row 0) prompt cont))
+        col (+ promptw cur-col)
+        up-to-cursor (- (dec nlines) cur-row))
+    (append
+      (if (> prev-row 0) (list [:up prev-row]) '())
+      (list [:cr] [:clear-below])
+      (lineedit--multi-line-ops lines 0 0 base full overrides prompt cont)
+      (if (> up-to-cursor 0) (list [:up up-to-cursor]) '())
+      (list [:cr] [:col col]))))
+
+(defn lineedit--render-multi (st)
+  "Repaint a multi-line form (emit `lineedit--multi-ops`), and record the cursor row in
+`:last-row` so the next render moves back up to the block top before clearing."
+  (do
+    (term-emit (into [] (lineedit--multi-ops st)))
+    (let ([cur-row _] (lineedit--cursor-rc (get st :text) (get st :point)))
+      (assoc st :last-row cur-row))))
+
+(defn lineedit--render (st)
+  "Repaint the input in place, returning `st` with an updated `:last-row`. Dispatches to
+the single-line path (with horizontal scroll + signature hint, the common case) unless
+the text spans multiple lines, in which case every line is repainted so a bracket's
+partner highlights in place. `st` must already be reflowed by `lineedit--loop`."
+  (if (string-contains? (get st :text) "\n")
+    (lineedit--render-multi st)
+    (lineedit--render-single st)))
+
+(defn lineedit--render-final (state)
+  "Repaint the finished form once more (all lines, no scroll/cursor games) and drop to a
+fresh line, so the submitted form stays in scrollback as typed. Works for one or many
+lines; moves up over any leftover render block first."
+  (let (prompt (lineedit--display-prompt state)
+        cont (or (get state :cont-prompt) prompt)
+        text (get state :text)
+        prefix (get state :prefix)
+        prev-row (or (get state :last-row) 0)
+        base (string-length prefix)
+        full (str prefix text)
+        lines (string-split text "\n"))
     (term-emit (into []
-                 (append [[:cr] [:clear-below] [:print prompt]]
-                   (append (lineedit--chunk-ops chunks) (list [:nl])))))))
+                 (append
+                   (if (> prev-row 0) (list [:up prev-row]) '())
+                   (list [:cr] [:clear-below])
+                   (lineedit--multi-line-ops lines 0 0 base full '() prompt cont)
+                   (list [:nl]))))))
 
 ;; ---- the event loop (IO) ----------------------------------------------------
 
@@ -692,25 +786,29 @@ drain it and either finish or loop with the new state."
 
 (defn lineedit--loop (state)
   "Reflow (so the horizontal-scroll window sticks), honour a pending C-l screen
-clear, render, then wait for input. Tail-recursive via `--await`."
+clear (which resets `:last-row` — the cursor is back at the top), render (threading the
+updated `:last-row` so the next repaint finds the block top), then wait for input.
+Tail-recursive via `--await`."
   (let (s1 (lineedit--reflow state)
         st (if (get s1 :clear)
-             (do (term-emit [[:clear-screen]]) (assoc s1 :clear nil))
-             s1))
-    (lineedit--render st)
-    (lineedit--await st)))
+             (do (term-emit [[:clear-screen]]) (assoc s1 :clear nil :last-row 0))
+             s1)
+        st2 (lineedit--render st))
+    (lineedit--await st2)))
 
-(defn lineedit-read (prompt prefix history)
-  "Read one line interactively (raw mode) and return `{:line <str|nil> :eof :cancel}`:
-`:line` the typed text on Enter (`:eof` true on Ctrl-D at an empty line, `:cancel`
-true on Ctrl-C). `prompt` is the prompt string, `prefix` the already-typed form so
-far (read-only context for highlighting/hints — \"\" for a fresh form), and
-`history` a newest-first list of prior submitted lines for ↑/↓. The terminal is
-restored even if rendering raises (the caller must be on a TTY)."
+(defn lineedit-read (prompt prefix history &optional opts)
+  "Read interactively (raw mode) and return `{:line <str|nil> :eof :cancel}`: `:line`
+the typed text on Enter (possibly multi-line — `:eof` true on Ctrl-D at an empty line,
+`:cancel` true on Ctrl-C). `prompt` is the prompt, `prefix` legacy read-only context
+(\"\" for a fresh form), `history` a newest-first list for ↑/↓. `opts` (a map) turns on
+multi-line editing: `:cont-prompt` for continuation lines and `:complete?` (a
+`text -> bool`) so Enter inserts a newline while the form is incomplete and the whole
+multi-line form is edited + repainted in place (bracket matches light up across lines).
+The terminal is restored even if rendering raises (the caller must be on a TTY)."
   (do
     (term-raw-enter)
     (let (result (try
-                   (lineedit--loop (lineedit--init prompt prefix history))
+                   (lineedit--loop (lineedit--init prompt prefix history opts))
                    (catch e (do (term-raw-leave) (throw e)))))
       (term-raw-leave)
       result)))
