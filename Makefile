@@ -42,17 +42,41 @@ TS_FEATURES := --features brood/treesit
 
 # Local (gitignored — `target/` is in .gitignore) output dir for the optimized
 # binaries. `make release` builds into here; `make install` copies them out to
-# $(PREFIX)/bin. So building and installing are separate steps.
-RELEASE_DIR := target/release-lean
+# $(PREFIX)/bin. So building and installing are separate steps. The `release-fast`
+# profile (Cargo.toml: stripped, no LTO) builds in a fraction of the time the
+# fat-LTO `release-lean` profile takes (bigger binary is the trade-off). (`release-lean`
+# still exists; `nest release` uses it for the shippable runtime.)
+RELEASE_DIR := target/release-fast
+
+# Performance build flags for `release`: debug-assertions + overflow-checks OFF.
+# rustc takes the LAST `-C <key>=` for a key, so these win even if the GC-debug
+# build mode (`RUSTFLAGS="-C debug-assertions=on"`, see CLAUDE.md) is exported in
+# the shell — the installed binary is never accidentally debug-armed (which would
+# carry the GC tripwire/verifier overhead and skew benchmarks). Stripping is the
+# `release-fast` profile's job (a profile `strip` reliably strips; `-C strip` here
+# would not).
+PERF_RUSTFLAGS := $(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off
+# Features baked into the binaries that RUN user code (brood, nest).
+# `--no-default-features` strips the dev/debug surface; cargo unions the rest.
+# brood-lsp runs no hot user code, so it takes none of these.
+RUN_FEATURES := --no-default-features $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
+
+# Copy the three binaries from $(1) into $(PREFIX)/bin — no rebuild, no cargo install.
+define install_binaries
+	@mkdir -p $(PREFIX)/bin
+	install -m755 $(1)/brood     $(PREFIX)/bin/brood
+	install -m755 $(1)/nest      $(PREFIX)/bin/nest
+	install -m755 $(1)/brood-lsp $(PREFIX)/bin/brood-lsp
+endef
 
 .DEFAULT_GOAL := help
 .PHONY: help build release test test-both breakagetests ensure-nextest bench benchmark quickbench suite repl configure install uninstall fmt clippy check clean
 
 help: ## Show this help
 	@echo "Brood — available make targets:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| sort \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build the whole workspace
 	cargo build
@@ -139,30 +163,19 @@ configure: ## Show current build options (./configure --with-gui to enable the G
 	@echo "Run ./configure --with-gui to enable the native window; ./configure --help for more."
 
 release: ## Build optimized `brood`, `nest` and `brood-lsp` into $(RELEASE_DIR) (gitignored; does NOT install — ./configure --with-gui first for the window)
-	# Build the optimized binaries into the local, gitignored $(RELEASE_DIR); the
-	# separate `install` target copies them out to $(PREFIX)/bin.
-	#
-	# Force a clean *performance* build: append `-C debug-assertions=off
-	# -C overflow-checks=off` to any ambient RUSTFLAGS. rustc takes the LAST
-	# `-C <key>=` for a key, so this wins even if the GC-debug build mode
-	# (`RUSTFLAGS="-C debug-assertions=on"`, see CLAUDE.md) is exported in the
-	# shell — so the installed binary is never accidentally debug-armed (which
-	# would carry the GC tripwire/verifier overhead and skew benchmarks).
-	# `--no-default-features` strips the dev/debug surface; `$(GUI_FEATURES)` adds
-	# `--features brood/gui` when GUI is configured.
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean --no-default-features -p cli $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
-	# Bake the `brood` runtime built above into `nest` (crates/nest/build.rs reads
-	# BROOD_EMBED_RUNTIME), so `nest release` ships a self-contained app with NO
-	# Rust at release time (ADR-038, docs/release.md).
-	BROOD_EMBED_RUNTIME=$(CURDIR)/$(RELEASE_DIR)/brood RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean --no-default-features -p nest $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off" cargo build --profile release-lean -p brood-lsp
+	# Build the configured (./configure) binaries into the local, gitignored
+	# $(RELEASE_DIR) with the `release-fast` profile (stripped, no LTO) — fast
+	# to build. The separate `install` target copies them out to
+	# $(PREFIX)/bin. The brood built here is embedded into nest (BROOD_EMBED_RUNTIME
+	# → ADR-038), so `nest release` ships a self-contained app with no Rust. (For an
+	# LTO'd shippable runtime, nest release rebuilds under `release-lean` — see
+	# docs/release.md.)
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(RUN_FEATURES)
+	BROOD_EMBED_RUNTIME=$(CURDIR)/$(RELEASE_DIR)/brood RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p nest $(RUN_FEATURES)
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p brood-lsp
 
-install: release ## Install the binaries built by `release` into $(PREFIX)/bin
-	# Just place the binaries built by `release` — no rebuild, no cargo install.
-	@mkdir -p $(PREFIX)/bin
-	install -m755 $(RELEASE_DIR)/brood     $(PREFIX)/bin/brood
-	install -m755 $(RELEASE_DIR)/nest      $(PREFIX)/bin/nest
-	install -m755 $(RELEASE_DIR)/brood-lsp $(PREFIX)/bin/brood-lsp
+install: release ## Build (per ./configure) + install `brood`, `nest`, `brood-lsp` into $(PREFIX)/bin
+	$(call install_binaries,$(RELEASE_DIR))
 
 uninstall: ## Remove the installed binaries from $(PREFIX)/bin (leaves the local $(RELEASE_DIR) build intact)
 	# Removes only what `install` placed on the system — the local release build
