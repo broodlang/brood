@@ -43,28 +43,41 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 ;; process — the per-connection handler). Accumulate until the head terminator,
 ;; then top up to Content-Length if a body is declared.
 
+;; The socket is in binary mode, so `[:tcp …]` chunks are `bytes` values: accumulate
+;; with `bytes-concat`, scan with `bytes-index-of`. The head is ASCII (decoded for
+;; parsing); the body stays raw `bytes` so a binary payload round-trips faithfully.
 (defn http--read-until (sock acc marker)
-  (if (>= (index-of acc marker) 0)
+  (if (>= (bytes-index-of acc marker) 0)
     acc
-    (receive ([:tcp ~sock d] (http--read-until sock (str acc d) marker))
-      ([:tcp-closed ~sock] (if (= acc "") nil acc))
-      (after *http-read-timeout-ms* (if (= acc "") nil acc)))))
+    (receive ([:tcp ~sock d] (http--read-until sock (bytes-concat acc d) marker))
+      ([:tcp-closed ~sock] (if (= (byte-length acc) 0) nil acc))
+      (after *http-read-timeout-ms* (if (= (byte-length acc) 0) nil acc)))))
 
-(defn http--read-to-length (sock acc target)
-  (if (>= (string-length acc) target)
-    acc
-    (receive ([:tcp ~sock d] (http--read-to-length sock (str acc d) target))
-      ([:tcp-closed ~sock] acc)
-      (after *http-read-timeout-ms* acc))))
+;; Body read, O(n): collect chunks in a list (O(1) per chunk) and join **once** at
+;; the end — never re-copy the growing buffer per chunk (that `(bytes-concat acc d)`
+;; loop is O(n²), which a large upload turns pathological). `chunks` is the reversed
+;; chunk list (head first), `have` the bytes gathered so far, `target` the total to
+;; reach (head end + Content-Length).
+(defn http--read-to-length (sock chunks have target)
+  (if (>= have target)
+    (apply bytes-concat (reverse chunks))
+    (receive
+      ([:tcp ~sock d]
+        (http--read-to-length sock (cons d chunks) (+ have (byte-length d)) target))
+      ([:tcp-closed ~sock] (apply bytes-concat (reverse chunks)))
+      (after *http-read-timeout-ms* (apply bytes-concat (reverse chunks))))))
 
 (defn http--read-raw (sock)
-  (let (head (http--read-until sock "" "\r\n\r\n"))
+  (let (head (http--read-until sock #b"" #b"\r\n\r\n"))
     (if (nil? head)
       nil
-      (let (clen (http--declared-length head))
+      (let (marker (bytes-index-of head #b"\r\n\r\n")
+            clen (http--declared-length (bytes->string (subbytes head 0 marker))))
         (if (= clen 0)
           head
-          (http--read-to-length sock head (+ (index-of head "\r\n\r\n") 4 clen)))))))
+          ;; `head` already holds everything read so far (incl. any body bytes in
+          ;; the chunk that completed the header); seed the chunk list with it.
+          (http--read-to-length sock (list head) (byte-length head) (+ marker 4 clen)))))))
 
 (defn http-read-request (sock)
   "Read one HTTP request from `sock` (owned by the calling process): the head
@@ -107,10 +120,15 @@ you want text. Text mode is restored before returning so the response send path
     (if (nil? v) 0 (let (n (string->number v)) (if (nil? n) 0 n)))))
 
 (defn parse-request (raw)
-  "Parse a raw HTTP request string into `{:method :path :version :headers :body}` (`:headers` keys lower-cased)."
-  (let (hb (http--split-first raw "\r\n\r\n")
-        head (first hb)
-        body (second hb)
+  "Parse a raw HTTP request (`bytes`, from `http-read-request`) into
+  `{:method :path :version :headers :body}` (`:headers` keys lower-cased). The head
+  is ASCII and decoded to strings; `:body` is a `bytes` value (raw — decode it with
+  `bytes->string` for a text/form body). A string `raw` is accepted too (encoded to
+  bytes first), so `(parse-request \"GET /…\")` still works."
+  (let (raw (if (string? raw) (string->bytes raw) raw)
+        marker (bytes-index-of raw #b"\r\n\r\n")
+        head (bytes->string (subbytes raw 0 marker))
+        body (subbytes raw (+ marker 4) (byte-length raw))
         lines (string-split head "\r\n")
         req (string-split (first lines) " "))
     {:method (nth req 0 "GET")

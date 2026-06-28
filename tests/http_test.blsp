@@ -14,7 +14,8 @@
       (assert= (get (get r :headers) "host") "example")))
   (test "a body after the blank line is captured"
     (let (r (parse-request "POST /x HTTP/1.0\r\nContent-Length: 5\r\n\r\nhello"))
-      (assert= (get r :body) "hello"))))
+      ;; :body is a bytes value (raw); decode it for a text body
+      (assert= (bytes->string (get r :body)) "hello"))))
 
 (describe "http: response rendering"
   (test "status line, Content-Length, and body"
@@ -113,11 +114,11 @@
       (spawn (do
                (let (ls (http-listen 0))
                  (send me [:port (tcp-local-port ls)])
-                 ;; echo the body's byte codepoints back as text so the client can verify
+                 ;; echo the body's bytes back as text so the client can verify
                  (serve-loop ls
                    (fn (req)
                      (text-response
-                       (pr-str (into [] (map char->int (string->list (get req :body)))))))))))
+                       (pr-str (into [] (bytes->list (get req :body))))))))))
       (let (port (receive ([:port p] p) (after 5000 :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           ;; binary mode so we can put raw bytes 0xFF 0x80 0x41 in the body
@@ -182,7 +183,7 @@
                    (fn (req)
                      (ok (str (get req :method)
                            "|"
-                           (get req :body)
+                           (bytes->string (get req :body))
                            "|"
                            (get (get req :headers) "x-token"))))))))
       (let (port (receive ([:port p] p) (after 5000 :timeout)))

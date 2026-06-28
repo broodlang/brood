@@ -86,15 +86,17 @@ fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Proc>> {
 /// lossy otherwise); binary mode maps each byte to its Latin-1 codepoint (0–255)
 /// for a byte-faithful carrier — see the module doc and `net::tcp_data_msg`.
 fn data_msg(tag: &str, id: u64, bytes: &[u8], binary: bool) -> Message {
-    let data = if binary {
-        bytes.iter().map(|&b| b as char).collect()
+    let payload = if binary {
+        // Binary mode: a first-class `bytes` value — byte-faithful, no Latin-1
+        // carrier (mirrors net::tcp_data_msg). `proc-send` accepts bytes too.
+        Message::Bytes(crate::core::blob::SharedBlob::new(bytes))
     } else {
-        String::from_utf8_lossy(bytes).into_owned()
+        Message::Str(String::from_utf8_lossy(bytes).into_owned())
     };
     Message::Vector(vec![
         Message::Keyword(value::intern(tag)),
         Message::Subprocess(id),
-        Message::Str(data),
+        payload,
     ])
 }
 

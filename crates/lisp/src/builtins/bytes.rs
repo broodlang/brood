@@ -130,6 +130,32 @@ pub(super) fn bytes_to_string(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     Ok(heap.alloc_string(&owned))
 }
 
+/// `(bytes-index-of haystack needle)` / `(bytes-index-of haystack needle from)` —
+/// the first index of the `needle` bytes in `haystack` at or after `from` (default
+/// 0), or -1 if not present. The byte-protocol workhorse (find a `\r\n\r\n`, a frame
+/// delimiter, …).
+pub(super) fn bytes_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let from = if args.len() >= 3 {
+        expect_int(heap, "bytes-index-of", arg(args, 2))?.max(0) as usize
+    } else {
+        0
+    };
+    let hay = as_bytes(heap, "bytes-index-of", arg(args, 0))?;
+    let needle = as_bytes(heap, "bytes-index-of", arg(args, 1))?;
+    let idx = if needle.is_empty() {
+        from.min(hay.len()) as i64
+    } else if from >= hay.len() {
+        -1
+    } else {
+        hay[from..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .map(|p| (p + from) as i64)
+            .unwrap_or(-1)
+    };
+    Ok(Value::int(idx))
+}
+
 /// `(bytes->list b)` — the bytes as a list of integers 0–255.
 pub(super) fn bytes_to_list(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let items: Vec<Value> = as_bytes(heap, "bytes->list", arg(args, 0))?

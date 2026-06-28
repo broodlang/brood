@@ -201,20 +201,18 @@ fn shutdown_sock(sock: Option<Sock>) {
 /// to carry raw bytes, and adding one is a language-surface decision, not a fix
 /// to make here. Lossless for valid UTF-8 (text protocols); lossy otherwise.
 fn tcp_data_msg(id: u64, bytes: &[u8], binary: bool) -> Message {
-    let data = if binary {
-        // Byte-faithful (binary mode): map each byte to its Latin-1 codepoint
-        // (0–255), so the delivered string holds the exact bytes received — one
-        // codepoint per byte, no UTF-8 interpretation. The inverse of the Latin-1
-        // encode `tcp-send` does for a binary socket.
-        bytes.iter().map(|&b| b as char).collect()
+    let payload = if binary {
+        // Binary mode: a first-class `bytes` value — byte-faithful, no Latin-1
+        // string carrier. `tcp-send` accepts a `bytes` value the same way.
+        Message::Bytes(crate::core::blob::SharedBlob::new(bytes))
     } else {
-        // Text mode (default): UTF-8, lossy for non-UTF-8 (see module doc).
-        String::from_utf8_lossy(bytes).into_owned()
+        // Text mode (default): a UTF-8 string, lossy for non-UTF-8 (see module doc).
+        Message::Str(String::from_utf8_lossy(bytes).into_owned())
     };
     Message::Vector(vec![
         Message::Keyword(value::intern("tcp")),
         Message::Socket(id),
-        Message::Str(data),
+        payload,
     ])
 }
 
@@ -665,7 +663,7 @@ fn build_server_config(cert_pem: &str, key_pem: &str) -> std::io::Result<Arc<Ser
 pub fn tls_self_signed(names: Vec<String>) -> std::io::Result<(String, String)> {
     let ck = rcgen::generate_simple_self_signed(names)
         .map_err(|e| invalid(&format!("tls: self-signed cert generation failed: {e}")))?;
-    Ok((ck.cert.pem(), ck.key_pair.serialize_pem()))
+    Ok((ck.cert.pem(), ck.signing_key.serialize_pem()))
 }
 
 /// `(tls-listen host port cert-pem key-pem)` — bind a TLS listener with the given PEM
