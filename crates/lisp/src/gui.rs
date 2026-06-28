@@ -1533,13 +1533,20 @@ pub(crate) mod backend {
                         );
                     }
                 }
-                WindowEvent::RedrawRequested => match &mut w.backend {
-                    Backend::Cpu { surface, .. } => paint(surface, &w.window, &mut w.renderer, &w.frame),
-                    #[cfg(feature = "gui-gpu")]
-                    Backend::Gpu(gl) => {
-                        gl.paint(&w.frame, &mut w.renderer);
+                WindowEvent::RedrawRequested => {
+                    // Stall trace (BROOD_STALL_MS): the GUI paint runs on this native
+                    // thread, outside the green-process scheduler — a slow frame (glyph
+                    // rasterization, softbuffer present, vsync block) is invisible to the
+                    // "quantum" guard, so it gets its own guard here.
+                    let _sg = crate::core::heap::stall_guard("gui-paint");
+                    match &mut w.backend {
+                        Backend::Cpu { surface, .. } => paint(surface, &w.window, &mut w.renderer, &w.frame),
+                        #[cfg(feature = "gui-gpu")]
+                        Backend::Gpu(gl) => {
+                            gl.paint(&w.frame, &mut w.renderer);
+                        }
                     }
-                },
+                }
                 _ => {}
             }
         }

@@ -1264,7 +1264,16 @@ fn run_one(mut proc: Box<Process>) {
     // worker multiplexes processes) and reads any capture-stack changes back afterwards.
     proc.install_ctx();
     set_capture_run(true);
+    // Stall trace (BROOD_STALL_MS): a green-process quantum is bounded by the reduction
+    // budget, so it should be quick — if one runs ≥ n ms, the time went into a blocking
+    // builtin (terminal render, file I/O, sleep) or a long native call, NOT minor GC /
+    // compaction (those have their own guards). Pinpoints a gameplay lag the GC guards miss.
+    let _sg = {
+        let pid = proc.pid;
+        crate::core::heap::stall_guard_pid("quantum", pid)
+    };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proc.drive()));
+    drop(_sg);
     set_capture_run(false);
     proc.save_ctx();
     finish_quantum(&mailbox, wid);

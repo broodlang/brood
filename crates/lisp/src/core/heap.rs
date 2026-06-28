@@ -6141,6 +6141,7 @@ fn stall_threshold_ms() -> Option<u128> {
 
 pub(crate) struct StallGuard {
     label: &'static str,
+    pid: Option<u64>,
     t0: std::time::Instant,
     ms: u128,
 }
@@ -6148,13 +6149,25 @@ impl Drop for StallGuard {
     fn drop(&mut self) {
         let el = self.t0.elapsed().as_millis();
         if el >= self.ms {
-            eprintln!("[stall] {} took {}ms", self.label, el);
+            match self.pid {
+                Some(p) => eprintln!("[stall] {} (pid {}) took {}ms", self.label, p, el),
+                None => eprintln!("[stall] {} took {}ms", self.label, el),
+            }
         }
     }
 }
 pub(crate) fn stall_guard(label: &'static str) -> Option<StallGuard> {
     stall_threshold_ms().map(|ms| StallGuard {
         label,
+        pid: None,
+        t0: std::time::Instant::now(),
+        ms,
+    })
+}
+pub(crate) fn stall_guard_pid(label: &'static str, pid: u64) -> Option<StallGuard> {
+    stall_threshold_ms().map(|ms| StallGuard {
+        label,
+        pid: Some(pid),
         t0: std::time::Instant::now(),
         ms,
     })
