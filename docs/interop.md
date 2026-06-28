@@ -128,7 +128,7 @@ instances slot into the existing one.
 
 A guest call is synchronous and CPU-bound — left alone it would hold its worker
 (the scheduler pins each process to one worker, no migration). It routes through
-the existing blocking story (`handoff-blocking-io.md`):
+the existing blocking story:
 
 - **Short, bounded calls** run inline with a **fuel cap**; exceeding it traps to
   a catchable Brood error (an extension can't wedge the scheduler).
@@ -320,8 +320,8 @@ but nothing forces it.
 ADR-037 (packages — the manifest/lock/cache this extends, and the "no install
 scripts" line this reframes), ADR-041 (blob heap — large byte payloads),
 ADR-045 (opaque immutable resource handle — the rope precedent for the WASM
-handle), ADR-043 (resource backstops — fuel/epoch), ADR-059/062 +
-`handoff-blocking-io.md` (deliver-to-mailbox; the offload pool a long guest call
+handle), ADR-043 (resource backstops — fuel/epoch), ADR-059/062
+(deliver-to-mailbox; the offload pool a long guest call
 uses), ADR-054/055 (moving/generational GC — why the boundary marshals), ADR-006
 (write the language in the language — wrapper + policy in Brood), `CLAUDE.md`
 (runtime-crate rule; "mutable state = a process or an opaque handle").

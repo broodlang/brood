@@ -18,8 +18,7 @@ Life whose per-frame hot spot is rebuilding a ~3.6k-entry colour map). Both are
 in the **allocation / GC** layer and gate real perf work; measured against the
 session `nest` (12 scheduler workers).
 
-- ⬜ **[ACTION] Go over the full brood-life language feedback** —
-  [`brood-life-feedback-2026-06-13.md`](brood-life-feedback-2026-06-13.md) is a
+- ⬜ **[ACTION] Go over the full brood-life language feedback** — a
   broader four-axis review from the test-bed (performance, code style, features,
   abstractions + types), beyond the two GC items below. **Triage it into roadmap
   items**, deciding accept / defer / reject per proposal. Headlines to rule on:
@@ -453,7 +452,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   - Validated by `crates/lisp/tests/gc.rs` (tail loops, server loops, depth-≥2
     loops, root and spawned, cyclic-promote cross-process, gc-stats/gc-collect/
     gc-trace) and the `BROOD_GC_STRESS=1` + `debug-assertions` tripwire. See
-    `memory-model.md`, `memory-review.md`, `handoff-vm-gc-memory.md`.
+    `memory-model.md`, `memory-review.md`.
   - 🟡 **RUNTIME-region collector** (ADR-072 Stage 5 → ADR-091). The per-process LOCAL
     heap is collected; the **shared mutable RUNTIME code region** (where `def`/hot-reload
     `promote`s code) grows with hot-reload churn. ✅ **Single-process** compaction is
@@ -614,7 +613,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   ADR-037 Slices 1–2 (lock + cache + git fetch). The **runtime half** (embed
   `wasmtime`, `%wasm-*` primitives, the marshalling layer) is independent and can
   be prototyped earlier from a local `.wasm`, but it has its own prereq — the
-  **Phase-3 blocking offload pool** (`handoff-blocking-io.md`, M4). **Demand-
+  **Phase-3 blocking offload pool** (M4). **Demand-
   driven (ADR-011):** pulled in by the first real native-needing package, which
   realistically lands during **M2+** editor-plugin work (regex engine, codec,
   highlighter) — so the package manager precedes it comfortably.
@@ -889,7 +888,7 @@ the workaround available today.
     *structural* lever is bytecode lowering. See `docs/benchmarking.md`. Also landed:
     `(def x <expr>)` runs its RHS on the VM; `%range-reduce` calls its reducer on the
     VM (`reduce`/`fold` over a range ~65–67% faster).
-  - ⬜ **Next VM items (planned — see [`handoff-vm-callback-routing.md`](handoff-vm-callback-routing.md)):**
+  - ⬜ **Next VM items (planned):**
     (1) fix the `let`-self-ref **send** divergence — a VM `let`-self-ref closure
     isn't *structurally* self-referential, so `send` accepts it where the tree-walker
     rejects (correctness gap + differential blind spot); (2) route the remaining

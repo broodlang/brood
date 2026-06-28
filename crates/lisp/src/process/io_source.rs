@@ -61,8 +61,7 @@ impl SubscriberHandle {
 /// caller returns immediately with a [`SubscriberHandle`] it can use to retarget
 /// delivery later. The spawned thread owns whatever it blocks on.
 ///
-/// This is the single place the thread-plus-`deliver` pattern lives — see ADR-059
-/// and `docs/handoff-blocking-io.md`.
+/// This is the single place the thread-plus-`deliver` pattern lives — see ADR-059.
 pub fn spawn_io_source<F>(subscriber: u64, name: &str, body: F) -> SubscriberHandle
 where
     F: FnOnce(&MailboxSink) + Send + 'static,

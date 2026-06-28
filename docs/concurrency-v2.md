@@ -365,7 +365,7 @@ A process blocked **inside a long native builtin** (e.g. a blocking socket read)
 still can't be migrated or preempted mid-call — there is no Brood-level safepoint
 in the middle of Rust code to capture a continuation at. This is exactly Erlang's
 *dirty scheduler* carve-out. Brood's builtins are nearly all short, so it's
-minor; the blocking-IO offload pool (`handoff-blocking-io.md`, M4) is the place
+minor; the blocking-IO offload pool (M4) is the place
 that already plans to push the genuinely-blocking ones off the worker threads.
 
 ### 7.5 Staging (keep the suite green at each step)

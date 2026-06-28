@@ -3221,8 +3221,7 @@ dropped its `(hibernate)`), [`memory-review.md`](memory-review.md) §6,
 ## ADR-059 — Blocking work delivers to a mailbox; it never pins a worker
 
 **Status:** accepted (2026-05-29). Phase 1 (GUI observer input) implemented; the
-general pattern (terminal, sockets, an offload pool) is planned —
-[`handoff-blocking-io.md`](handoff-blocking-io.md).
+general pattern (terminal, sockets, an offload pool) is planned.
 
 **Context.** The green scheduler has a small worker pool (≈`nproc`); green
 processes are cheap but workers are scarce. A process that makes a **native
@@ -3275,7 +3274,7 @@ We extend it to GUI input, and adopt it as the rule for blocking work generally.
 **References.** ADR-056 (multi-window GUI — whose worker-pinning trade-off this
 removes), ADR-046 (the display/input seam; predicted async-input-to-mailbox),
 ADR-043 (root-vs-worker thread + finite-poll model), ADR-033/034 (the dist
-reader-thread → mailbox precedent), [`handoff-blocking-io.md`](handoff-blocking-io.md),
+reader-thread → mailbox precedent),
 [`roadmap.md`](roadmap.md) M3/M4.
 
 ## ADR-060 — Sets are a library over maps; the `#{…}` literal is deferred
@@ -3465,7 +3464,7 @@ interacts with the green scheduler.
 **References.** ADR-059 (blocking work → mailbox; the seam this builds on),
 ADR-006 (language-in-the-language), ADR-026 (immutability — sockets are the
 Rust-backed mutable-resource escape hatch, like the rope), ADR-045 (rope, the
-other opaque handle), `docs/handoff-blocking-io.md`.
+other opaque handle).
 
 ## ADR-063 — `(exit pid reason)`: Erlang-style process termination
 
@@ -4112,7 +4111,7 @@ committed decisions:
   map-able). No new state concept.
 - **No worker pinning.** A guest call is CPU-bound; short calls run inline
   fuel-capped, long calls run on the Phase-3 **blocking offload pool** and
-  **deliver to the mailbox** (`handoff-blocking-io.md`) — the same rule as TCP,
+  **deliver to the mailbox** — the same rule as TCP,
   GUI input, and dist.
 - **Supply-chain door stays shut, reframed.** ADR-037 banned arbitrary install
   hooks; build-on-fetch keeps that because the build is a **declared toolchain
@@ -4149,7 +4148,7 @@ primitive.
 **References.** [`interop.md`](interop.md) (the full design), ADR-037 (packages —
 the manifest/lock/cache extended, the "no install scripts" line reframed),
 ADR-041 (blob heap), ADR-045 (opaque immutable resource handle), ADR-043
-(resource backstops — fuel/epoch), ADR-059/062 + `handoff-blocking-io.md`
+(resource backstops — fuel/epoch), ADR-059/062
 (deliver-to-mailbox offload), ADR-054/055 (moving/generational GC — why the
 boundary marshals), ADR-006 (write the language in the language — wrapper + policy
 in Brood), ADR-011 (defer power features).
@@ -4159,8 +4158,8 @@ in Brood), ADR-011 (defer power features).
 ## ADR-072 — Stage C: a generational nursery + tenured old generation
 
 **Status:** accepted (2026-05-30). The "make copying fast as well as stable"
-refinement deferred by `docs/memory-review.md` §6 and ADR-055; the last GC item on
-the `handoff-gc.md` list. Builds directly on the single-space copying collector
+refinement deferred by `docs/memory-review.md` §6 and ADR-055; the last remaining
+GC item. Builds directly on the single-space copying collector
 (ADR-055/061) and the generational-handle epoch (ADR-054).
 
 **Context.** Stage B's safepoint collector did a **full semi-space copy** every
@@ -4217,7 +4216,7 @@ object lives; LOCAL accessors route young vs. old by that bit, against two epoch
   release-only `cfg` slip.
 
 **References.** `docs/memory-review.md` §5–6 (the design space; Stage C as the
-"copying gets fast" point), `docs/memory-model.md`, `docs/handoff-gc.md` (item #5),
+"copying gets fast" point), `docs/memory-model.md`,
 ADR-054 (generational handles — the epoch this reuses per-generation), ADR-055
 (Stage B copying — the collector this refines), ADR-061 (collect at any depth —
 the operand-stack roots both minor and major relocate), ADR-026 (immutability — why
@@ -6085,7 +6084,7 @@ ongoing *CPU load*, and cannot self-correct when a process turns long-running
    KI-1 plain-release bar green. One carve-out remains, exactly as in BEAM: a
    process blocked inside a long **native builtin** has no Brood-level safepoint to
    capture, so it can't be migrated mid-call (the dirty-scheduler analogue; handled
-   by the M4 blocking-IO offload pool, `handoff-blocking-io.md`).
+   by the M4 blocking-IO offload pool).
 
 **Consequences.** Spawn distribution and fresh-backlog stealing are now BEAM-like,
 and placement is arguably more proactive than BEAM's spawn-on-current-scheduler

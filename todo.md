@@ -200,7 +200,7 @@ followed by `(` with no space) and say *"`println(...)` looks like a call —
 write `(println ...)`."* (Reader-level adjacency detection is the most robust spot;
 relates to the function-as-value lint just added to the checker.)
 
-## GoL findings 2026-05-30 (`docs/gol-findings-2026-05-30.md`) — to action
+## GoL findings 2026-05-30 — to action
 
 - ✅ **`contains?` was O(n)** (their #1, the headline — ~100× slower than `get`;
   the real cause of "very slow"). Fixed in `std/prelude.blsp`: `contains?` now
