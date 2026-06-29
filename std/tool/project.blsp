@@ -536,6 +536,84 @@ resolve in the advisory checker. Returns the project root."
     0
     (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--duplicate-def-warnings files))))
 
+;; --- unused module-private defns (whole-project, ADR-065 `--` convention) -----
+;; A `--` name is private *by convention*, not enforced: the editor legitimately
+;; references it from another module or a test by its qualified `mod/name`. So
+;; "is it used?" can only be answered across the *whole* project — a single-file
+;; check (the kind `check-file` runs) false-flags every cross-module-referenced
+;; private name. This pass parses every source + test file's CST (no eval), counts
+;; each symbol reference project-wide, and warns for a private def whose name is
+;; never referenced beyond its own definition — neither as a same-module bare call
+;; nor a cross-module / test `mod/name` reference. Comments don't count (the CST
+;; tags them `:comment`, not `:symbol`).
+
+;; Fold every `:symbol` node value in CST `node` into `acc` (name→count, keyed by
+;; the symbol's *string* — node values may be symbols, but qualified names are
+;; built with `str`, so both sides normalise the same way). Recurses through a
+;; node's value, which is one of: raw text (a leaf — nothing to do), a single
+;; child node (a wrapper like `:quote`, whose value is itself a `[:kind …]`
+;; node-vector), or a vector of child nodes (`:list`/`:vector`/`:map`/`:root`).
+;; A node-vector's first element is itself a node (a vector); a single child
+;; node's first element is its kind *keyword* — that's how the two are told apart,
+;; so a dispatch `{:tag mod/handler}` map or a quoted `'sym` is counted correctly.
+(defn project--walk-val (val acc)
+  (cond
+    (not (vector? val)) acc
+    (empty? val) acc
+    (keyword? (first val)) (project--node-syms--acc val acc)             ; val IS one node
+    :else (fold (fn (a c) (project--node-syms--acc c a)) acc val)))      ; val is a node-vector
+
+(defn project--node-syms--acc (node acc)
+  (if (= (project--node-kind node) :symbol)
+    (let (nm (str (project--node-val node))) (map-assoc acc nm (inc (map-get acc nm 0))))
+    (project--walk-val (project--node-val node) acc)))
+
+;; Project-wide symbol reference counts across `files` (a name→count map).
+(defn project--all-sym-counts (files)
+  (fold (fn (acc path)
+          (fold (fn (a node) (project--node-syms--acc node a))
+            acc
+            (project--node-val (parse-source (slurp path)))))
+    {}
+    files))
+
+;; The `--`-private defs in `path`, each as `[bare qualified]` (qualified via the
+;; file's `defmodule` namespace, like `project--file-def-names`).
+(defn project--file-private-defs (path)
+  (let (nodes (filter (fn (c) (= (project--node-kind c) :list))
+                (project--node-val (parse-source (slurp path))))
+        ns (first (keep project--module-name nodes)))
+    (keep (fn (node)
+            (let (nm (project--def-name node))
+              (when (and (not (nil? nm)) (string-contains? (str nm) "--"))
+                [(str nm) (str (project--qualify ns nm))])))
+      nodes)))
+
+;; Warning strings for private defs unreferenced anywhere in `files`. `used` =
+;; the bare name appears ≥2× (its own def, plus a same-module call) OR — when a
+;; module qualifies it — the qualified `mod/name` appears at all (a cross-module /
+;; test reference). `keep` over `files` keeps the warning attributed to its file.
+(defn project--unused-private-warnings (files)
+  (let (counts (project--all-sym-counts files))
+    (fold (fn (acc path)
+            (append acc
+              (keep (fn (pd)
+                      (let ([bare qual] pd
+                            used (or (>= (map-get counts bare 0) 2)
+                                   (and (not (= qual bare)) (>= (map-get counts qual 0) 1))))
+                        (when (not used)
+                          (str path ": warning: unused private function: " bare))))
+                (project--file-private-defs path))))
+      '()
+      files)))
+
+;; Print the unused-private warnings to stderr and return the count. Advisory;
+;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
+(defn project--check-unused-private (files)
+  (if (= (getenv "BROOD_NO_CHECK") "1")
+    0
+    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--unused-private-warnings files))))
+
 (defn check-project ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
   (let (root (project--find-root (cwd)))
@@ -543,6 +621,7 @@ resolve in the advisory checker. Returns the project root."
       (error "check-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project--ensure-loaded root)
     (project--check-duplicate-defs (project--source-files root))
+    (project--check-unused-private (project--all-files root))
     (project--check-files (project--all-files root))))
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry

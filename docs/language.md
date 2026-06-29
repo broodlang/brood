@@ -784,8 +784,12 @@ one name (so a failed `require` or an empty module is silent).
 
 **Unused module-private defns** — a `defn` whose bare name contains `--` (the
 private-by-convention marker, same gate as `(:use …)` refer-all skipping) but
-which is never called from within the same file. Public names are never checked
-because they may be used by other files.
+which is never referenced anywhere in the project — neither as a same-module
+unqualified call nor a cross-module / test `mod/name` reference. Checked at the
+*whole-project* layer (`nest check`), not by a single-file check: a `--` name is
+a convention, not enforced privacy, so it is legitimately reached from another
+module or a test by its qualified name, which a per-file scan can't see. Public
+names are never checked.
 
 ```clojure
 (defmodule my/mod)

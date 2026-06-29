@@ -800,3 +800,19 @@ brood-edit uses it for a **macOS-style overlay scrollbar**: a rounded `frect` pi
 sized/positioned in fractional cells (smooth, not row-quantised), hidden at rest,
 faded in on scroll and out after (`model/ed-scrollbar-wake` + a self-dropping
 `:scrollbar-fade` timer, so the editor idles again at rest), pinned while dragging.
+
+## 2026-06-29 — Checker: fix `:use` / private-defn lint false positives
+
+Both lints (added earlier this session) over-reported. **Unused `:use`**: only
+matched a module's *qualified* export names, so an import used the normal way —
+*unqualified* (`*green*`, not `theme/*green*`) — read as unused; also missed a
+file that reaches a module only by a qualified `mod/name` reference (incl. to its
+private `--` names, which aren't imported). Now counts the unqualified local alias
+and any `mod/…` qualified reference. **Unused private defn**: was a *per-file*
+check, but a `--` name is a convention, not enforced privacy — the editor reaches
+it cross-module / from tests by qualified name, invisible per-file. Moved to a
+*whole-project* Brood pass (`std/tool/project.blsp` `project--unused-private-warnings`,
+alongside the duplicate-def pass): parse every file's CST, count symbol refs
+project-wide, flag a private def referenced nowhere beyond its own definition.
+Removed the per-file Rust pass + its helpers; kept its tests' coverage at the
+project layer.

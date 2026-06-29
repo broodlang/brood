@@ -319,33 +319,6 @@ pub(super) fn collect_all_syms(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> 
     out
 }
 
-/// True if `name` (a qualified def name like `my/mod/foo--bar`) appears in
-/// `forms` anywhere *other than* the binding-name slot of its own `(def name …)`.
-/// Scans the fn body of the def for self-recursion; scans all other forms freely.
-/// Used by the unused-private-`defn` lint.
-pub(super) fn sym_used_beyond_def(heap: &Heap, forms: &[Value], name: Symbol) -> bool {
-    for &form in forms {
-        if let Some(items) = list_items(heap, form) {
-            if let (Some(&Value::Sym(h)), Some(&Value::Sym(bound))) =
-                (items.first(), items.get(1))
-            {
-                if value::symbol_is(h, kw::DEF) && bound == name {
-                    for &body in items.get(2..).unwrap_or(&[]) {
-                        if sym_appears_in(heap, body, name) {
-                            return true;
-                        }
-                    }
-                    continue;
-                }
-            }
-        }
-        if sym_appears_in(heap, form, name) {
-            return true;
-        }
-    }
-    false
-}
-
 /// What the walk does at a head symbol. `Generic` is the fall-through for any
 /// head that isn't one of the recognised special forms / skip-body markers —
 /// the walk treats it as a normal call (resolves sig + arity, checks for
