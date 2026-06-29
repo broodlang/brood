@@ -1,0 +1,45 @@
+;; CHAMP map stress at depth — the existing maps_test "at scale" tops out at 100
+;; keys (a shallow trie). This drives 2000+ keys (deep trie, many shared 5-bit
+;; hash prefixes per level), plus order-independence, dissoc/merge at scale,
+;; compound (vector) keys, and a cross-process deep-copy round-trip — the cases a
+;; collision/volume fuzz run exercised (added 2026-06-29; engine-independent).
+(defmodule map-stress-test (:use test))
+
+(def N 2000)
+(defn ms-build (n)       (reduce (fn (m i) (assoc m i (* i 3))) {} (range 0 n)))
+(defn ms-build-rev (n)   (reduce (fn (m i) (assoc m i (* i 3))) {} (reverse (range 0 n))))
+;; count keys whose lookup is wrong (0 = all correct)
+(defn ms-bad-gets (m n i bad)
+  (if (= i n) bad (ms-bad-gets m n (+ i 1) (if (= (get m i) (* i 3)) bad (+ bad 1)))))
+
+(describe "deep CHAMP trie correctness"
+  (test "every one of N keys looks up to its inserted value"
+    (let (m (ms-build N))
+      (assert= (count m) N)
+      (assert= (ms-bad-gets m N 0 0) 0)
+      (assert= (get m N) nil)))           ; absent key
+  (test "= is order-independent: same content built two ways is equal"
+    (assert= (ms-build N) (ms-build-rev N)))
+  (test "dissoc at scale: removing a key drops count by one and the get"
+    (let (m (ms-build N) m2 (dissoc m 0))
+      (assert= (count m2) (- N 1))
+      (assert= (get m2 0) nil)
+      (assert= (get m2 1) 3)))            ; neighbour untouched
+  (test "merge two large disjoint maps"
+    (let (a (ms-build N) b {N 1 (+ N 1) 2})
+      (assert= (count (merge a b)) (+ N 2))
+      (assert= (get (merge a b) N) 1)))
+  (test "compound (vector) keys hash and compare correctly"
+    (let (m (-> (ms-build 50) (assoc [1 2] :a) (assoc [1 3] :b) (assoc [1 2 3] :c)))
+      (assert= (get m [1 2]) :a)
+      (assert= (get m [1 3]) :b)
+      (assert= (get m [1 2 3]) :c)
+      (assert= (get m [9 9]) nil))))
+
+(describe "large map across processes (deep copy)"
+  :isolated
+  (test "a 2000-key map round-trips through send equal to the original"
+    (let (orig (ms-build N) me (self)
+          w (spawn (let (m (receive (x x))) (send me [:back m]))))
+      (send w orig)
+      (assert= (receive ([:back m] m)) orig))))
