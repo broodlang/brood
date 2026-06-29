@@ -275,20 +275,36 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       (= (node-kind n) :map) (render--pair-break (node-children n) indent "{" "}")
       else (render--break (node-children n) indent open close))))
 
-;; True if any direct-child whitespace of `n` contains a newline — the source
-;; broke this form across lines, so single-line emit would erase that intent.
-;; Idempotent: a single-line form has no inner newlines and answers false.
+;; True if `n` was broken across lines in the source — so collapsing it to one
+;; line would erase that intent. A form is broken if any of its direct-child
+;; whitespace contains a newline, OR if any structural child is itself broken.
+;;
+;; The recursion is load-bearing for idempotence. A multi-line form physically
+;; spans several lines, so it always contains a nested newline somewhere — but
+;; on a re-format that newline can sink one level deeper than the form whose
+;; break we're deciding. E.g. `(let (caught (try …multi-line…)))`: the author's
+;; newline sat between `caught` and the `(try …)`, so pass 1 kept the bindings
+;; list broken; but pass 1 re-emits `caught` and `(try …)` on the *same* line,
+;; pushing every newline down inside the `(try …)`. A shallow direct-child scan
+;; then sees no newline in the bindings list and collapses it — losing the
+;; break. Propagating broken-ness up from any nested form makes "broken" a true
+;; fixed point: a form that renders multi-line is recognised as broken on every
+;; subsequent pass. Idempotent: a fully single-line form has no inner newline at
+;; any depth and answers false.
 (defn had-author-newlines? (n)
   (let (k (node-kind n))
-    (if (or (= k :list) (= k :vector) (= k :map))
-      (had-author-newlines--scan (node-children n) 0 (vector-length (node-children n)))
-      false)))
+    (cond
+      (or (= k :list) (= k :vector) (= k :map))
+        (had-author-newlines--scan (node-children n) 0 (vector-length (node-children n)))
+      (wrapper? n) (had-author-newlines? (node-form n))
+      else false)))
 
 (defn had-author-newlines--scan (kids i n)
   (cond
     (= i n) false
     (let (c (vector-ref kids i))
-      (and (whitespace? c) (string-contains? (node-text c) "\n"))) true
+      (or (and (whitespace? c) (string-contains? (node-text c) "\n"))
+        (and (not (trivia? c)) (had-author-newlines? c)))) true
     else (had-author-newlines--scan kids (inc i) n)))
 
 (defn render--break (kids indent open close)
@@ -325,9 +341,15 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
                            (>= hdr-count 0) (min hdr-count (length args))
                            (nil? args) 0
                            (nil? (single-line (first args))) 0
+                           ;; A comment sitting between the head and its first
+                           ;; arg must stay visible: riding the arg up would skip
+                           ;; over the comment's `kids` slot (it precedes the
+                           ;; first body index) and silently drop it. Break
+                           ;; instead so the body walker emits the comment.
+                           (comment-before-first-arg? kids) 0
                            else 1))
              (let (header-args (take eff-hdr args)
-                   first-body-idx (kids--index-of-form kids (inc eff-hdr))
+                   first-body-idx (kids--index-after-form kids eff-hdr)
                    header-line (render--head-line head header-args pair-bind (inc indent))
                    body-text (if pair-bd
                                (render--body-pairs kids first-body-idx body-ind)
@@ -343,14 +365,56 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
                  close))))))
 
 (defn last-nonws-comment? (kids)
-  "True if `kids`' last non-whitespace child is a comment — the case where a
-closing delimiter has to break to its own line so it isn't swallowed."
+  "True if the body's LAST emitted block is a comment — the case where a closing
+delimiter has to break to its own line so it isn't swallowed. The last non-ws
+child being a comment is necessary but not sufficient: a *same-line* trailing
+comment on the final form is hoisted ABOVE that form by the body walkers, so the
+form (not the comment) is emitted last and the close must NOT break. Only an
+*own-line* comment (preceded by a newline) stays last in the output."
   (last-nonws-comment?--at kids (dec (vector-length kids))))
 (defn last-nonws-comment?--at (kids i)
   (cond
     (< i 0) false
     (whitespace? (vector-ref kids i)) (last-nonws-comment?--at kids (dec i))
-    else (comment? (vector-ref kids i))))
+    (comment? (vector-ref kids i)) (comment-on-own-line? kids (dec i))
+    else false))
+;; Scanning backward from `i`, was the comment that follows on its own line —
+;; i.e. NOT a same-line trailing comment that the body walker hoists above its
+;; form? A comment is hoisted (and so is *not* emitted last) only when it sits on
+;; the same line right after a FORM: the gap before it is whitespace without a
+;; newline, and the node before that gap is a structural form. Every other case
+;; is own-line and stays last: a newline in the preceding whitespace, a comment
+;; right after `(`, or a comment following another comment (each comment node
+;; carries its own trailing newline, so the separating whitespace is just
+;; indentation with no newline of its own).
+(defn comment-on-own-line? (kids i)
+  (cond
+    (< i 0) true
+    (and (whitespace? (vector-ref kids i)) (string-contains? (node-text (vector-ref kids i)) "\n")) true
+    ;; skip one newline-free whitespace gap, then look at what precedes it
+    (whitespace? (vector-ref kids i)) (comment-on-own-line?--prev kids (dec i))
+    else (comment-on-own-line?--prev kids i)))
+(defn comment-on-own-line?--prev (kids i)
+  (cond
+    (< i 0) true
+    (comment? (vector-ref kids i)) true
+    else false))
+
+;; True if a comment appears in `kids` between the head (first structural form)
+;; and the first argument (second structural form). Such a comment would be
+;; dropped by the generic-call head-ride (which jumps from the head straight to
+;; the first body form), so the caller breaks instead of riding when it's true.
+(defn comment-before-first-arg? (kids)
+  (let (head-i (kids--index-of-form kids 0) n (vector-length kids))
+    (and (< head-i n) (comment-before-next-form? kids (inc head-i) n))))
+;; Scanning forward from `i`, is the next non-whitespace node a comment (rather
+;; than a structural form)? Stops at the first form (false) or first comment (true).
+(defn comment-before-next-form? (kids i n)
+  (cond
+    (= i n) false
+    (whitespace? (vector-ref kids i)) (comment-before-next-form? kids (inc i) n)
+    (comment? (vector-ref kids i)) true
+    else false))
 
 ;; Index in `kids` of the (1-based) Nth structural form (0 = head).
 (defn kids--index-of-form (kids form-i)
@@ -361,6 +425,22 @@ closing delimiter has to break to its own line so it isn't swallowed."
     (= seen target) i
     (trivia? (vector-ref kids i)) (kids--index-of-form--at kids target seen (inc i) n)
     else (kids--index-of-form--at kids target (inc seen) (inc i) n)))
+
+;; The `kids` index immediately PAST the slot of the (0-based) `form-i`th
+;; structural form — i.e. where the body walk should begin so that any trivia
+;; (notably comments) sitting between the last head-line form and the first body
+;; form is still visited rather than skipped. Counts `form-i + 1` structural
+;; forms and returns the index one past the last of them; if there are fewer,
+;; returns the end. (`kids--index-of-form kids (inc form-i)` jumps to the *next*
+;; structural form, stepping over — and dropping — an intervening comment.)
+(defn kids--index-after-form (kids form-i)
+  (kids--index-after-form--at kids (inc form-i) 0 (vector-length kids)))
+(defn kids--index-after-form--at (kids remaining i n)
+  (cond
+    (= i n) n
+    (trivia? (vector-ref kids i)) (kids--index-after-form--at kids remaining (inc i) n)
+    (= remaining 1) (inc i)
+    else (kids--index-after-form--at kids (dec remaining) (inc i) n)))
 
 (defn render--head-line (head header-args pair-bind? indent-after-open)
   ;; "head a b c" — the head and any header args, space-separated. Uses

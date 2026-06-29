@@ -929,3 +929,40 @@ sibling. It doesn't leak — the `try` handler truncates roots to its entry poin
 the error path does no GC in between — but it's asymmetric with the other error
 paths. Left as-is: tightening it touches thrown-value rooting (the stale-handle bug
 class), so it warrants separate, careful work, not a drive-by change.
+
+## 2026-06-29 — Formatter: idempotence fix + a pre-existing comment-drop bug
+
+A property sweep over every `.blsp` file (format twice; assert
+`format(format(x)) == format(x)` and `read-all` preserved) found `nest format`
+was **not idempotent on 9 files** — and, chasing it, that the shipping formatter
+was **silently dropping comments** on 4 files (incl. `std/stream.blsp`). Both are
+in the pure-Brood formatter `std/format.blsp` (embedded via `include_str!`, so the
+fix needs a rebuild).
+
+**Root cause (idempotence).** "Keep a broken form broken" was decided by
+`had-author-newlines?`, which scanned only a form's *direct-child* whitespace for
+a `\n`. Not a fixed point: in `(let (caught (try …)))` the author's newline sits
+between `caught` and `(try …)` — a direct child of the *bindings list* — so pass 1
+keeps it broken; but the pair-walker re-emits `caught` and `(try …)` on the same
+line, sinking the newline one level *deeper* (into the `(try …)`). Pass 2's shallow
+scan no longer sees it on the bindings list → collapses. **Fix:** make
+`had-author-newlines?` recursive — a form is broken if a direct-child whitespace
+has a `\n` *or any structural child is itself broken* (wrappers delegate). "Broken"
+now propagates upward, so a multi-line render is recognised as broken on every
+later pass — a true fixed point.
+
+**Root cause (comment drop).** A generic call rides its first arg onto the head
+line (`eff-hdr=1`); the body walk then started at the *next structural form*,
+stepping over — and dropping — a comment sitting between the head and the rode-up
+arg. **Fix:** `comment-before-first-arg?` suppresses the head-ride when a comment
+precedes the first arg, and `kids--index-after-form` starts the body walk just past
+the last head-line form's slot (capturing intervening comments). Also refined
+`last-nonws-comment?` (via `comment-on-own-line?`) so the closing `)` breaks to its
+own line only for a genuine own-line/stacked trailing comment, not a hoisted
+same-line one.
+
+`std/format.blsp` +91/−11. Verified: the repro is now idempotent; all 9 failing
+files pass; a sweep over 208 `.blsp` files is idempotent + meaning-preserving (skip
+`nan` files for the `read-all` check); comment counts preserved on all 208 (the old
+formatter dropped them on 4); `format_test` 53/53, `sexp_test` 19/19, Rust CST
+tests pass.
