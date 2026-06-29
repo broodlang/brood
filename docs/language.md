@@ -757,6 +757,46 @@ exactly where you want soundness. The checker treats both identically. Writing a
 *type* never changes behaviour; opting into *enforcement* (`sig!`) does. Full
 design: [type-annotations.md](type-annotations.md) (ADR-082).
 
+### Advisory lints (non-type warnings)
+
+`nest check` / `brood --check` emit several additional warnings beyond type
+misuse — all advisory, zero false positives:
+
+**Unused `let` bindings** — a name bound in `let`/`let*`/`letrec` that never
+appears in its visible scope (subsequent binding RHSs + body). Names prefixed
+with `_` are exempt (intentional don't-care). Compiler-generated `let`s from
+match/pattern expansion are also exempt.
+
+```clojure
+(let (x 1 y 2) x)   ; warning: unused let binding: y
+(let (_y 1) 2)       ; silent — _-prefix means intentional
+```
+
+**Unused `:use` imports** — a `(:use mod)` clause whose contributed public names
+are never referenced in the file. Only fires when the module contributed at least
+one name (so a failed `require` or an empty module is silent).
+
+```clojure
+(defmodule my/app (:use io) (:use json))
+(defn handler (x) (json-encode x))
+; warning: unused :use import: io — io-write, stdout-port, etc. never used
+```
+
+**Unused module-private defns** — a `defn` whose bare name contains `--` (the
+private-by-convention marker, same gate as `(:use …)` refer-all skipping) but
+which is never called from within the same file. Public names are never checked
+because they may be used by other files.
+
+```clojure
+(defmodule my/mod)
+(defn helper--parse (s) …)   ; warning: unused private function: helper--parse
+(defn run (s) s)              ; (helper--parse is defined but never called)
+```
+
+All three lints share the "zero false positives" contract: they are conservative
+(count any occurrence, including in binder positions, as "used") and emit nothing
+when static information is ambiguous.
+
 ## Processes (concurrency)
 
 Erlang-style **green processes**: cheap, lightweight, share-nothing (each runs
@@ -1332,6 +1372,8 @@ project-unique). Every non-earmuff name is namespaced.
 Privacy is **soft** (Clojure/CL-style, not Racket sealing): a `foo--internal`
 name marked private by convention is skipped by `(:use)` refer-all but *still
 reachable* by its qualified spelling, so live redefinition and advice keep working.
+The advisory checker warns on private names (names whose bare segment contains `--`)
+that are defined but never called within the file — see [Advisory lints](#advisory-lints-non-type-warnings).
 At the REPL the namespace tracks the last `defmodule`; `(current-ns)` reports it.
 
 > Status: landed (ADR-065/066, 2026-05-30). `defmodule` is the single namespace
