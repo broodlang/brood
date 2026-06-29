@@ -11,7 +11,7 @@
 ;;   degenerate forms — (do), (if), (quote), (->), empty let, fn with no body
 ;;   malformed forms  — let odd-binding, let non-symbol name, quote arity
 ;;   dup fn params   — last binding wins, no error
-;;   read-string     — 1.2.3 as symbol, #q as symbol, unknown escape stripped
+;;   read-string     — 1.2.3 a malformed-float error, #q as symbol, unknown escape stripped
 ;;   apply / map     — zero-arg and non-fn errors
 
 (defmodule malformed-test (:use test))
@@ -256,10 +256,12 @@
 ;; ── 10. read-string edge cases ────────────────────────────────────────────────
 
 (describe "read-string edge cases"
-  (test "\"1.2.3\" is not a float — it parses as a symbol"
-    (let (v (read-string "1.2.3"))
-      (is (symbol? v))
-      (assert= "1.2.3" (str v))))
+  (test "\"1.2.3\" is a malformed float literal (number-intent fails loudly), not a symbol"
+    ;; a token that leads with a digit/sign/dot and holds only number chars is
+    ;; number-intent: if it doesn't parse, it's a parse error, not a symbol.
+    (assert-error (read-string "1.2.3"))
+    (assert-error (read-string "1e"))
+    (assert= 10000000.0 (read-string "1e7")))   ; the valid form still parses
 
   (test "\"#q\" reads as a symbol, not an error"
     (is (symbol? (read-string "#q"))))

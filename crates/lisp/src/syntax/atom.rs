@@ -32,6 +32,13 @@ pub enum AtomKind {
     /// as a decimal — the reader turns it into a parse error, the CST an `Error` node
     /// (mirrors [`AtomKind::IntOverflow`]).
     DecimalInvalid,
+    /// A float-shaped token (number-shaped, with a `.`/`e`/`E`) that does not parse
+    /// as an `f64` — e.g. `1e`, `1.2.3`, `1e+`, `1.2e3.4`. The reader turns it into
+    /// a parse error, the CST an `Error` node (mirrors [`AtomKind::IntOverflow`]).
+    /// The point: a token whose *intent* is clearly numeric (it led with a digit /
+    /// sign / dot and held only number characters) but is malformed should fail
+    /// loudly, not silently read back as a symbol.
+    FloatInvalid,
 }
 
 /// Classify an atom token. No heap needed — atoms are numbers/keywords/symbols.
@@ -85,6 +92,9 @@ pub fn classify(token: &str) -> AtomKind {
         if let Ok(f) = token.parse::<f64>() {
             return AtomKind::Float(f);
         }
+        // Float-shaped (number intent + a `.`/`e`/`E`) but unparseable — `1e`,
+        // `1.2.3`, `1e+`. A malformed number literal, NOT a symbol: fail loudly.
+        return AtomKind::FloatInvalid;
     }
     // A bare `:` is a symbol, not an empty keyword.
     if token.len() > 1 && token.starts_with(':') {

@@ -16,13 +16,14 @@
     (assert-error (read-string "\"no end"))
     (assert-error (read-string "\"\\x\""))
     (assert-error (read-string "\"\\u{110000}\"")))
-  (test "ambiguous number-shaped tokens: invalid floats fall back to symbols, a bad int errors"
-    ;; a token that isn't a valid number is a symbol (standard Lisp reader rule),
-    ;; so these don't error — they read as symbols; only a `-`-led malformed
-    ;; integer is rejected outright.
-    (assert= (type-of (read-string "1.2.3")) :symbol)
-    (assert= (type-of (read-string "1e")) :symbol)
-    (assert-error (read-string "--5")))
+  (test "number-shaped tokens that don't parse are a parse error, not a silent symbol"
+    ;; a token whose intent is numeric (leads with a digit/sign/dot, holds only
+    ;; number chars) but doesn't parse must fail loudly — it is NOT a symbol.
+    (assert= (read-string "1e7") 10000000.0)   ; valid float still parses
+    (assert-error (read-string "1e"))          ; float-shaped, malformed
+    (assert-error (read-string "1.2.3"))       ; float-shaped, malformed
+    (assert-error (read-string "1e+"))         ; float-shaped, malformed
+    (assert-error (read-string "--5")))        ; int-shaped, malformed
   (test "dangling reader sugar"
     (assert-error (read-string "'"))
     (assert-error (read-string "`"))
