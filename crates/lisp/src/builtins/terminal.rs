@@ -850,6 +850,7 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     let cells_t = value::intern("cells");
     let cells_rgb_t = value::intern("cells-rgb");
     let rect_t = value::intern("rect");
+    let frect_t = value::intern("frect");
     let mut ops = Vec::with_capacity(parsed.len());
     for (tag, parts) in parsed {
         if tag == clear_t {
@@ -873,6 +874,28 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                 h,
                 face,
             });
+        } else if tag == frect_t {
+            // [:frect x y w h face opacity radius] — a sub-cell rounded rect. x/y/w/h
+            // are cell-unit floats; opacity (default 1.0) and radius (cell units,
+            // default 0.0) are optional. GUI-only.
+            let num = |v: Value| -> f32 {
+                match v {
+                    Value::Int(n) => n as f32,
+                    Value::Float(f) => f as f32,
+                    _ => 0.0,
+                }
+            };
+            let x = num(arg(&parts, 1));
+            let y = num(arg(&parts, 2));
+            let w = num(arg(&parts, 3));
+            let h = num(arg(&parts, 4));
+            let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::nil()));
+            let opacity = match parts.get(6).copied() {
+                Some(v @ (Value::Int(_) | Value::Float(_))) => num(v),
+                _ => 1.0,
+            };
+            let radius = num(parts.get(7).copied().unwrap_or(Value::nil()));
+            ops.push(crate::gui::Op::FRect { x, y, w, h, face, opacity, radius });
         } else if tag == text_t {
             let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
             let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);

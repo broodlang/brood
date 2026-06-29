@@ -767,3 +767,36 @@ to `hash/sha1` / `hash/sha256` (+ `(require 'hash)`) in `src/http/websocket.blsp
 hatch: 526/526.
 
 **`Value::Bitset` removed entirely (same session).** The biggest single simplification: the `bitset` feature (13 `bitset-*` prims + a whole `Value::Bitset` kernel kind) had no consumer left — zero references in std/, tests/, or any in-repo `.blsp`; its only user was an external Game-of-Life GUI demo, now dead (confirmed with the user). Deleting it removed a `Value` variant and its arms across **8 kernel files**: `value.rs` (variant + `Tag::Bitset` + `BsId` handle, tag arrays 22→21), `heap.rs` (the LOCAL/old/prelude/RUNTIME `bitsets` slabs, `alloc_bitset`/`bitset` accessor, GC flush `flush_bitset`/`flush_rt_bitset`, poison/hash/equality/promote/verify arms — ~78 refs), `numeric.rs` (the impls + Game-of-Life fused kernels `bitset-life-step`/`-neighbour-sum`/`-planes`), `printer.rs`, `process/message.rs` (`Message::Bitset`), `dist/wire.rs`, `types/mod.rs` (the tag lattice). Kept the unrelated `bit-*` *integer* ops and the GUI cell-paint path (board is a bignum or byte string). Verified: clean build, full suite green (the lone failure is the user's concurrent WIP `lineedit--match-echo` test, unrelated), and the GC/concurrency suites pass under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. Builtin count now ~287 (was 320 at session start). KI-4 (the bitset-as-`Str` GC bug) is now moot; noted as superseded in known-issues.md.
+
+## 2026-06-28 — GUI: anchor the vertical sub-cell remainder at the top
+
+Follow-up to the centred-remainder change (same day, above). `grid_origin` split
+the sub-cell leftover evenly on *every* edge, so the editor's bottom mode line /
+status bar floated on `inset + rem_h/2` px instead of sitting flush at the window
+bottom. Changed the **vertical** placement to anchor the full remainder at the
+*top* (`oy = inset + rem_h`): the grid is pushed down, the slack reads as headroom,
+and the bottom row sits flush against the window edge (modulo `inset`). The
+**horizontal** axis still centres (`rem_w / 2`) so left/right margins stay
+symmetric. `px_to_cell` shares `grid_origin`, so mouse hits track the new origin
+with no extra change; doc comments updated. brood-edit: the status bar no longer
+floats. (Orthogonal to `*inset*`, which still pads all four edges.)
+
+## 2026-06-29 — GUI: `frect` sub-cell rounded-rect op + smooth overlay scrollbar
+
+The display vocabulary was entirely cell-granular (`clear`/`text`/`cursor`/`rect`/
+`vspans`), so brood-edit's scrollbar could only be a `▕` glyph snapped to the grid —
+a thin chunky terminal rule, not a smooth thumb. Added **`frect`**: a rounded
+rectangle whose position/size are **cell-unit floats** (so `0.5` cells wide, `12.7`
+tall at `y 3.25` are legal), alpha-blended (`opacity` 0..1) and anti-aliased. The
+GUI multiplies by the cell metrics + grid origin it already owns — resolution-
+independent, no pixel size exposed to Brood. Plumbed exactly where `vspans` goes:
+`std/editor/display.blsp` constructor, `terminal.rs` parse → `Op::FRect`, the `Op`
+enum + CPU painter (`fill_rrect`: an SDF rounding for AA corners, `blend` for
+opacity) in `gui.rs`, a parity arm in the inactive `gui_gpu.rs`. Terminal frontend
+skips it like `vspans`. A general toolkit primitive — sliders / progress bars /
+hairlines want it too.
+
+brood-edit uses it for a **macOS-style overlay scrollbar**: a rounded `frect` pill
+sized/positioned in fractional cells (smooth, not row-quantised), hidden at rest,
+faded in on scroll and out after (`model/ed-scrollbar-wake` + a self-dropping
+`:scrollbar-fade` timer, so the editor idles again at rest), pinned while dragging.
