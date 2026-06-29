@@ -1,0 +1,71 @@
+;; Arithmetic edge cases — the pathological corners a differential fuzzer
+;; (int/float/bignum/decimal × div-by-zero, overflow, i64::MIN, NaN/inf, shifts)
+;; exercised across all engines (added 2026-06-29). Complements math_test (normal
+;; arithmetic) and malformed_test (zero-arg / div-by-zero errors). Every result
+;; here is engine-independent — `make test` runs the suite through both the VM and
+;; the tree-walker (ADR-076), and the differential gate guards cross-engine parity.
+(defmodule arithmetic-edge-test (:use test))
+
+(def I64-MIN -9223372036854775808)
+(def I64-MAX 9223372036854775807)
+
+(describe "i64 boundary: ops that would overflow promote to bigint, never wrap"
+  (test "quot MIN/-1 promotes (would overflow i64)"
+    (assert= (quot I64-MIN -1) 9223372036854775808))
+  (test "abs of MIN promotes"
+    (assert= (abs I64-MIN) 9223372036854775808))
+  (test "negate MIN promotes"
+    (assert= (- I64-MIN) 9223372036854775808))
+  (test "rem MIN/-1 is 0 (no overflow)"
+    (assert= (rem I64-MIN -1) 0))
+  (test "MAX + 1 promotes to bigint"
+    (assert= (+ I64-MAX 1) 9223372036854775808)))
+
+(describe "NaN and infinity propagation (floats)"
+  (test "NaN is never equal to itself"
+    (is (not (= nan nan))))
+  (test "every ordering comparison against NaN is false"
+    (is (not (< nan 1))) (is (not (> nan 1))) (is (not (<= nan 1))) (is (not (>= nan 1))))
+  (test "infinity arithmetic"
+    (assert= (+ inf 1) inf)
+    (assert= (/ 1.0 inf) 0.0)
+    (is (not (= (- inf inf) (- inf inf)))))   ; inf - inf is NaN (≠ itself)
+  (test "max/min keep the first operand when the comparison is false (so NaN sticks)"
+    ;; native prim_max/min select via >/< and return the *original* operand
+    (is (not (= (max nan 5) 5)))      ; (max nan 5) → nan (5 > nan is false)
+    (assert= (max 5 nan) 5)           ; (max 5 nan) → 5  (nan > 5 is false)
+    (assert= (min 5 nan) 5)           ; (min 5 nan) → 5
+    (is (not (= (min nan 5) 5)))))    ; (min nan 5) → nan
+
+(describe "structural equality across the numeric tower (= is NOT numeric coercion)"
+  (test "an int is never = a float, decimal, even when numerically equal"
+    (is (not (= 1 1.0))) (is (not (= 1 1M))) (is (not (= 1.0 1M)))
+    (is (not (= 2.0 2))))             ; the JIT-miscompile regression, at the value level
+  (test "ordering DOES coerce across the tower (unlike =)"
+    (is (< 1 1.5)) (is (< 1M 2)) (is (<= 2 2.0)))
+  (test "bigint vs float comparison stays correct (no precision flip)"
+    (is (not (< 100000000000000000000 1.5)))   ; 1e20 is not < 1.5
+    (is (not (> 100000000000000000000 1e308)))  ; 1e20 < 1e308
+    (is (< 100000000000000000000 inf))))
+
+(describe "bitwise / shift edges"
+  (test "left shift past 63 bits promotes to bigint"
+    (assert= (bit-shift-left 1 70) 1180591620717411303424))
+  (test "a negative shift amount raises"
+    (assert-error (bit-shift-left 1 -1)))
+  (test "arithmetic right shift of -1 stays -1; plain shifts divide/multiply by 2^n"
+    (assert= (bit-shift-right -1 70) -1)
+    (assert= (bit-shift-right 1024 3) 128))
+  (test "bit-and / bit-not on negatives"
+    (assert= (bit-and -1 255) 255)
+    (assert= (bit-not 0) -1)))
+
+(describe "division-family zero and sign edges (errors are clean, not crashes)"
+  (test "integer/quot/rem/mod by zero each raise"
+    (assert-error (quot 5 0))
+    (assert-error (rem 5 0))
+    (assert-error (mod 5 0)))
+  (test "negative operands keep truncating-quot / sign-of-dividend-rem semantics"
+    (assert= (quot -17 5) -3)
+    (assert= (rem -17 5) -2)
+    (assert= (rem 17 -5) 2)))

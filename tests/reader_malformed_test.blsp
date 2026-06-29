@@ -1,0 +1,44 @@
+;; Reader hardening — malformed / "silly syntax" must produce a clean parse error,
+;; never a panic or segfault (added 2026-06-29, after a 500-input syntax fuzz run
+;; found 0 crashes). `read-string` surfaces the reader directly; `assert-error`
+;; confirms a clean error. Also pins a few valid-but-weird forms that MUST parse.
+(defmodule reader-malformed-test (:use test))
+
+;; one arg, fully balanced per line: (assert-error (read-string "S"))
+(describe "malformed input errors cleanly (no crash)"
+  (test "unbalanced / stray delimiters"
+    (assert-error (read-string "(((("))
+    (assert-error (read-string ")"))
+    (assert-error (read-string "[1 2"))
+    (assert-error (read-string "{:a"))
+    (assert-error (read-string "([)]")))
+  (test "unterminated / bad-escape strings"
+    (assert-error (read-string "\"no end"))
+    (assert-error (read-string "\"\\x\""))
+    (assert-error (read-string "\"\\u{110000}\"")))
+  (test "ambiguous number-shaped tokens: invalid floats fall back to symbols, a bad int errors"
+    ;; a token that isn't a valid number is a symbol (standard Lisp reader rule),
+    ;; so these don't error — they read as symbols; only a `-`-led malformed
+    ;; integer is rejected outright.
+    (assert= (type-of (read-string "1.2.3")) :symbol)
+    (assert= (type-of (read-string "1e")) :symbol)
+    (assert-error (read-string "--5")))
+  (test "dangling reader sugar"
+    (assert-error (read-string "'"))
+    (assert-error (read-string "`"))
+    (assert-error (read-string "~"))
+    (assert-error (read-string "~@")))
+  (test "pathologically deep nesting errors (depth cap), does not overflow"
+    (assert-error (read-string (string-repeat "(" 100000)))
+    (assert-error (read-string (string-repeat "[" 100000)))))
+
+(describe "valid but unusual forms still parse correctly"
+  (test "non-finite float literals read as floats"
+    (assert= (type-of (read-string "inf")) :float)
+    (assert= (type-of (read-string "nan")) :float))
+  (test "dotted pair and empty containers"
+    (assert= (read-string "(1 2 . 3)") (cons 1 (cons 2 3)))
+    (assert= (read-string "[]") [])
+    (assert= (read-string "()") '()))
+  (test "nested form parses to the right structure"
+    (assert= (read-string "(1 (2 (3)))") (list 1 (list 2 (list 3))))))
