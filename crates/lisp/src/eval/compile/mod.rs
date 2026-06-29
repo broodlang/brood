@@ -1158,14 +1158,13 @@ fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
         Node::Local(k) => *k != s || sink != LinSink::No,
         Node::Call { callee, args, .. } => {
             if let Some(h) = call_head_sym(callee) {
-                if first_arg_is_local(args, s) {
-                    if linmap_read_op(h).is_some()
-                        || (linmap_update_op(h).is_some() && sink != LinSink::No)
-                    {
-                        // args[0] (== Local(s)) is consumed by the op; the rest must
-                        // not mention s (s is the map, not a key/value/default).
-                        return args[1..].iter().all(|a| linmap_linear(a, s, LinSink::No));
-                    }
+                if first_arg_is_local(args, s)
+                    && (linmap_read_op(h).is_some()
+                        || (linmap_update_op(h).is_some() && sink != LinSink::No))
+                {
+                    // args[0] (== Local(s)) is consumed by the op; the rest must
+                    // not mention s (s is the map, not a key/value/default).
+                    return args[1..].iter().all(|a| linmap_linear(a, s, LinSink::No));
                 }
             }
             linmap_linear(callee, s, LinSink::No)
