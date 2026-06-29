@@ -417,6 +417,10 @@ impl<'a> Parser<'a> {
                 self.s.pos_at(token_start),
                 format!("malformed decimal literal: {}", token),
             )),
+            AtomKind::FloatInvalid => Err(self.err_at(
+                self.s.pos_at(token_start),
+                format!("malformed float literal: {}", token),
+            )),
         }
     }
 }

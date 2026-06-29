@@ -389,6 +389,9 @@ impl<'a> Cst<'a> {
             // (bad numeric prefix) is an `Error`, like `IntOverflow`.
             AtomKind::Decimal => NodeKind::Decimal,
             AtomKind::DecimalInvalid => NodeKind::Error,
+            // A float-shaped but unparseable token (`1e`, `1.2.3`) — a parse error
+            // in the reader; an `Error` token here so the LSP flags it the same.
+            AtomKind::FloatInvalid => NodeKind::Error,
         };
         self.leaf(kind, start)
     }
