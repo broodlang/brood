@@ -18,6 +18,7 @@
 ;;   [:cursor row col]              place the text cursor (a block caret)
 ;;   [:cursor row col style]        …shaped :block / :bar / :underline
 ;;   [:rect row col w h face]       fill a w×h cell block with `face`'s :bg colour
+;;   [:frect x y w h face op r]     sub-cell rounded rect (cell-unit floats); GUI-only
 ;; A FACE is a map of style attributes, any subset of:
 ;;   {:fg <colour> :bg <colour> :bold <truthy> :reverse <truthy>}
 ;; where a colour is either a palette keyword — :black :red :green :yellow :blue
@@ -79,6 +80,17 @@ space-fills each row in the face so the `:bg` shows. Other face attributes (`:fg
 `:bold`) are irrelevant — there are no glyphs — but a `:bg` (or `:reverse`) is what
 makes it visible; a face with no background paints nothing."
   [:rect row col w h face])
+
+(defn frect (x y w h face &optional (opacity 1.0) (radius 0.0))
+  "A **sub-cell** rounded-rectangle render op: like `rect`, but `x`/`y` (top-left) and
+`w`/`h` (size) are in **cell units as floats**, so the shape isn't snapped to the
+character grid — `0.4` cells wide, `12.7` tall at `y 3.25` are all fine. The GUI
+fills an anti-aliased, alpha-blended quad: `opacity` (0..1, default 1.0) fades it over
+whatever's behind, and `radius` (cell units, default 0.0 — use `(/ w 2)` for a pill)
+rounds the corners. `face`'s `:bg` (or `:fg` under `:reverse`) is the fill colour.
+The primitive a smooth scrollbar thumb / slider / progress bar wants. GUI-only — the
+terminal frontend skips it (like `vspans`)."
+  [:frect x y w h face opacity radius])
 
 (defn bar (row width s &optional (opts {}))
   "A full-width status / mode / **buffer bar**: string `s` drawn on `row` from column

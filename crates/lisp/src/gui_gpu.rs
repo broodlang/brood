@@ -251,6 +251,20 @@ impl GlWindow {
                         );
                     }
                 }
+                // Sub-cell rounded rect. This GPU path (a later increment) has no
+                // AA/alpha/round quad yet, so approximate with a solid opaque quad at
+                // the cell-unit float position; the active CPU painter does it properly.
+                Op::FRect { x, y, w, h, face, .. } => {
+                    if let Some(bg) = face.bg {
+                        push(
+                            insetf + *x * cwf,
+                            insetf + *y * chf,
+                            *w * cwf,
+                            *h * chf,
+                            bg,
+                        );
+                    }
+                }
                 Op::VSpans { row0, col0, cols } => {
                     let top0 = insetf + *row0 as f32 * chf;
                     for (i, segs) in cols.iter().enumerate() {

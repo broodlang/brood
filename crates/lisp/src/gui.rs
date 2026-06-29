@@ -121,6 +121,23 @@ pub enum Op {
         h: u16,
         face: Face,
     },
+    /// A **sub-cell** rounded rectangle: like `Rect`, but its position and size are in
+    /// **cell units as floats** (`x`/`y` top-left, `w`/`h` size — `0.4` cells wide,
+    /// `12.7` tall at `y = 3.25` are all legal), so it isn't snapped to the character
+    /// grid. The GUI multiplies by the cell metrics + grid origin to land on pixels and
+    /// fills an anti-aliased, alpha-blended (`opacity` 0..1) rounded (`radius`, in cell
+    /// units) quad — the primitive a smooth scrollbar thumb, slider, or progress bar
+    /// needs. GUI-only: the terminal frontend has no arm, so it's skipped (like
+    /// `VSpans`). `face`'s `:bg` (or `:fg` under `:reverse`) is the fill colour.
+    FRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        face: Face,
+        opacity: f32,
+        radius: f32,
+    },
     /// A rectangular hot-zone (cells) that asks the frontend to show `shape` while
     /// the pointer is over it — e.g. a resize cursor on a window divider. The GUI
     /// hit-tests it on pointer-move; the terminal ignores it. (ADR-080.)
@@ -2412,6 +2429,65 @@ pub(crate) mod backend {
         }
     }
 
+    /// Fill a sub-pixel-positioned rounded rectangle with `color` at `opacity` (0..1),
+    /// anti-aliased. The shape is a signed-distance field: the distance from each pixel
+    /// centre to the rect's rounded core (the rect inset by `radius` on every side)
+    /// gives a 1px coverage ramp at the edge, so corners and fractional edges read
+    /// smooth instead of stair-stepped. `radius == 0` is a sharp rect (full coverage
+    /// inside, just the opacity blend). Blends over whatever's already in `buf`
+    /// (`blend`), so a faded overlay shows the content beneath it.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_rrect(
+        buf: &mut [u32],
+        fb_w: usize,
+        fb_h: usize,
+        fx: f32,
+        fy: f32,
+        fw: f32,
+        fh: f32,
+        radius: f32,
+        color: [u8; 3],
+        opacity: f32,
+    ) {
+        if fw <= 0.0 || fh <= 0.0 || opacity <= 0.0 {
+            return;
+        }
+        let base = (opacity.clamp(0.0, 1.0) * 255.0) as f32;
+        let r = radius.max(0.0).min(fw / 2.0).min(fh / 2.0);
+        // The inner core the corners round around: the rect inset by `r` on each side.
+        let (rx0, ry0) = (fx + r, fy + r);
+        let (rx1, ry1) = (fx + fw - r, fy + fh - r);
+        let x0 = fx.floor().max(0.0) as usize;
+        let y0 = fy.floor().max(0.0) as usize;
+        let x1 = ((fx + fw).ceil().max(0.0) as usize).min(fb_w);
+        let y1 = ((fy + fh).ceil().max(0.0) as usize).min(fb_h);
+        for py in y0..y1 {
+            let cy = py as f32 + 0.5;
+            let row = py * fb_w;
+            for px in x0..x1 {
+                let cx = px as f32 + 0.5;
+                let dx = (rx0 - cx).max(cx - rx1).max(0.0);
+                let dy = (ry0 - cy).max(cy - ry1).max(0.0);
+                // Inside the straight body dx==dy==0 → full coverage; in a corner the
+                // euclidean distance past the core gives the rounded falloff.
+                let cov_f = if r <= 0.0 {
+                    1.0
+                } else {
+                    (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0)
+                };
+                if cov_f <= 0.0 {
+                    continue;
+                }
+                let cov = (base * cov_f) as u32;
+                if cov == 0 {
+                    continue;
+                }
+                let idx = row + px;
+                buf[idx] = blend(buf[idx], color, cov.min(255) as u8);
+            }
+        }
+    }
+
     /// Draw the text cursor at a cell per its `style`:
     ///   * `Block` — overlay 50% white on the whole cell, so the glyph under it
     ///     stays faintly visible (the terminal-style caret);
@@ -2578,9 +2654,10 @@ pub(crate) mod backend {
             }
         }
         let (cw, ch) = (r.cell_w, r.cell_h);
-        // The grid's origin: the inset plus half the sub-cell remainder, so the leftover
-        // pixels are centred around the grid rather than left as a lopsided bottom/right
-        // margin (`grid_origin`). `ox`/`oy` are the per-axis offsets every op's pixel base
+        // The grid's origin: the inset plus the sub-cell remainder placement (centred
+        // horizontally, anchored at the top vertically — see `grid_origin`), so the
+        // leftover pixels read as headroom up top and the bottom row sits flush rather
+        // than on a lopsided margin. `ox`/`oy` are the per-axis offsets every op's pixel base
         // adds; `px_to_cell` shares them so painted and hit-tested grids coincide. The
         // `clear`/pre-clear already filled the surrounding margin with the background.
         let (ox, oy) = r.grid_origin(fb_w, fb_h);
@@ -2672,6 +2749,25 @@ pub(crate) mod backend {
                             *w as usize * cw,
                             *h as usize * ch,
                             pack(bg),
+                        );
+                    }
+                }
+                Op::FRect { x, y, w, h, face, opacity, radius } => {
+                    // Sub-cell rounded rect: cell-unit floats → px via the same origin +
+                    // cell metrics every op shares, then an AA, alpha-blended fill.
+                    let bg = if face.reverse { face.fg } else { face.bg };
+                    if let Some(bg) = bg {
+                        fill_rrect(
+                            &mut buf,
+                            fb_w,
+                            fb_h,
+                            ox as f32 + *x * cw as f32,
+                            oy as f32 + *y * ch as f32,
+                            *w * cw as f32,
+                            *h * ch as f32,
+                            *radius * cw as f32,
+                            bg,
+                            *opacity,
                         );
                     }
                 }
