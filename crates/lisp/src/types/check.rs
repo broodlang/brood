@@ -115,13 +115,15 @@ mod recursion;
 mod sigs;
 mod walk;
 
+use std::collections::HashSet;
+
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self as value, Symbol, Value};
 use crate::error::Pos;
 
 use ctx::Ctx;
-use walk::{check_into, collect_all_syms, collect_def_names, list_items, sym_used_beyond_def};
+use walk::{check_into, collect_all_syms, collect_def_names, list_items};
 
 /// True when `form` is a top-level `(require …)` call — the one form the
 /// checker pre-evaluates so a module's macros (e.g. `defprocess` from
@@ -182,43 +184,6 @@ fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
         return result;
     }
     Vec::new()
-}
-
-/// Scan the *expanded* `forms` for all `(def name …)` where the bare segment
-/// of `name` (after the last `/`) contains `--` (the module-private convention).
-/// Returns `(qualified_name_sym, def_form)` pairs so the caller can look up
-/// source positions.
-fn collect_private_defs(heap: &Heap, forms: &[Value]) -> Vec<(Symbol, Value)> {
-    let mut result = Vec::new();
-    for &form in forms {
-        collect_private_defs_in(heap, form, &mut result);
-    }
-    result
-}
-
-fn collect_private_defs_in(heap: &Heap, form: Value, out: &mut Vec<(Symbol, Value)>) {
-    let Some(items) = list_items(heap, form) else {
-        return;
-    };
-    if let Some(&Value::Sym(h)) = items.first() {
-        if value::symbol_is(h, kw::DEF) {
-            if let Some(&Value::Sym(name)) = items.get(1) {
-                let name_str = value::symbol_name(name);
-                let bare: &str = match name_str.rfind('/') {
-                    Some(i) => &name_str[i + 1..],
-                    None => name_str.as_str(),
-                };
-                if bare.contains("--") {
-                    out.push((name, form));
-                    return; // don't recurse into this def's body for more defs
-                }
-            }
-        }
-    }
-    // Recurse into sub-forms to find private defs nested in test/describe/do wrappers.
-    for &item in items.get(1..).unwrap_or(&[]) {
-        collect_private_defs_in(heap, item, out);
-    }
 }
 
 /// Check one form, returning a warning per provable misuse. Empty when nothing is
@@ -422,48 +387,50 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         if !use_modules.is_empty() {
             let all_refs = collect_all_syms(heap, &expanded);
             let imported = heap.imported_pairs();
-            // Group by source module: qualified name → module prefix.
-            let mut module_exports: std::collections::HashMap<String, Vec<Symbol>> =
+            // Group each module's contributed names by source module. We record BOTH
+            // the qualified name AND the local (unqualified) alias the file actually
+            // calls — a `(:use …)` import is normally referenced *unqualified*
+            // (`*green*`, not `theme/*green*`), so matching only the qualified form
+            // (the old bug) reported every unqualified-used import as unused.
+            let mut module_names: std::collections::HashMap<String, Vec<Symbol>> =
                 std::collections::HashMap::new();
-            for (_, qual) in &imported {
+            for (local, qual) in &imported {
                 let qname = value::symbol_name(*qual);
                 if let Some(slash) = qname.rfind('/') {
-                    module_exports
-                        .entry(qname[..slash].to_string())
-                        .or_default()
-                        .push(*qual);
+                    let e = module_names.entry(qname[..slash].to_string()).or_default();
+                    e.push(*local);
+                    e.push(*qual);
+                }
+            }
+            // Module prefixes referenced via a *qualified* `mod/name` symbol anywhere
+            // in the file — so a file that reaches a module only by qualified reference
+            // (including to its private `--` names, which aren't imported at all) still
+            // counts the `:use` as load-bearing.
+            let mut qualified_mods: HashSet<String> = HashSet::new();
+            for &s in &all_refs {
+                let n = value::symbol_name(s);
+                if let Some(slash) = n.rfind('/') {
+                    qualified_mods.insert(n[..slash].to_string());
                 }
             }
             for mod_name in &use_modules {
-                if let Some(exports) = module_exports.get(mod_name) {
-                    // The module contributed public names; warn if none are used.
-                    if !exports.iter().any(|q| all_refs.contains(q)) {
+                // Only actionable when the module contributed importable names (it's in
+                // the table) — a failed require / macro-only / empty module is silent.
+                if let Some(names) = module_names.get(mod_name) {
+                    let used = names.iter().any(|s| all_refs.contains(s))
+                        || qualified_mods.contains(mod_name);
+                    if !used {
                         out.push((None, format!("unused :use import: {mod_name}")));
                     }
                 }
-                // If the module has no exports in the table (require failed or it's
-                // empty) skip silently — there's nothing actionable.
             }
         }
     }
-    // Pass 4.6: unused module-private `defn`s — a `def` whose qualified name
-    // contains `--` (the module-private naming convention) but whose name never
-    // appears in the file outside its own definition. Only private names are
-    // checked; public names may be used by other files so we can't know here.
-    {
-        let private_defs = collect_private_defs(heap, &expanded);
-        for (name, def_form) in private_defs {
-            if !sym_used_beyond_def(heap, &expanded, name) {
-                let pos = heap.form_pos_only(def_form);
-                let qual = value::symbol_name(name);
-                let bare: &str = match qual.rfind('/') {
-                    Some(i) => &qual[i + 1..],
-                    None => qual.as_str(),
-                };
-                out.push((pos, format!("unused private function: {bare}")));
-            }
-        }
-    }
+    // (Unused module-private `defn`s are checked at the *whole-project* layer
+    // — `std/tool/project.blsp` `project--unused-private-warnings` — not here: a
+    // `--` name is a convention, not enforced privacy, so the editor legitimately
+    // references it from other modules and tests by its qualified name, which a
+    // single-file pass can't see. A per-file check produced false positives.)
     // Balance the GC roots we pushed for pass 1 (input forms + their
     // expansions). Safe to drop now: nothing after this consults `expanded`
     // or `forms` against the heap.
@@ -2615,59 +2582,10 @@ mod tests {
         );
     }
 
-    // ---- unused private defn lint (Pass 4.6) ----
-
-    #[test]
-    fn unused_private_defn_is_flagged() {
-        // helper--impl is never called — should warn.
-        let ws = file_warnings(
-            "(defmodule test/mod)\n(defn helper--impl (x) (+ x 1))\n(defn pub-fn (x) x)",
-        );
-        assert!(
-            ws.iter().any(|w| w.contains("unused private function") && w.contains("helper--impl")),
-            "expected unused private function warning for helper--impl, got {ws:?}"
-        );
-        // pub-fn is public (no --); never flagged.
-        assert!(
-            !ws.iter().any(|w| w.contains("pub-fn")),
-            "public function should not be flagged, got {ws:?}"
-        );
-    }
-
-    #[test]
-    fn used_private_defn_is_silent() {
-        // helper--impl is called from pub-fn — no warning.
-        let ws = file_warnings(
-            "(defmodule test/mod)\n(defn helper--impl (x) (+ x 1))\n(defn pub-fn (x) (helper--impl x))",
-        );
-        assert!(
-            !ws.iter().any(|w| w.contains("unused private function")),
-            "called private function should be silent, got {ws:?}"
-        );
-    }
-
-    #[test]
-    fn self_recursive_private_defn_is_silent() {
-        // A private fn that calls itself — the body reference counts as "used".
-        let ws = file_warnings(
-            "(defmodule test/mod)\n(defn fact--impl (n) (if (= n 0) 1 (* n (fact--impl (- n 1)))))\n(defn run (n) (fact--impl n))",
-        );
-        assert!(
-            !ws.iter().any(|w| w.contains("unused private function")),
-            "self-recursive private fn should be silent, got {ws:?}"
-        );
-    }
-
-    #[test]
-    fn underscore_prefix_is_not_private_convention() {
-        // A function named `_unused` is NOT private by the `--` convention and
-        // is NOT flagged by the private-defn lint (it may be used elsewhere).
-        let ws = file_warnings("(defmodule test/mod)\n(defn _unused (x) x)\n(defn pub (x) x)");
-        assert!(
-            !ws.iter().any(|w| w.contains("unused private function")),
-            "_unused should not be flagged by private-defn lint, got {ws:?}"
-        );
-    }
+    // (The unused-module-private-`defn` lint moved to a whole-project Brood pass —
+    // `std/tool/project.blsp` `project--unused-private-warnings` — because a `--`
+    // name is referenced cross-module/by tests, which a single-file check can't see.
+    // Its coverage lives with the project tooling tests.)
 }
 
 /// **Soundness oracles.** An advisory, never-gating checker can't have classic
