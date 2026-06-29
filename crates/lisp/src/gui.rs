@@ -2452,7 +2452,7 @@ pub(crate) mod backend {
         if fw <= 0.0 || fh <= 0.0 || opacity <= 0.0 {
             return;
         }
-        let base = (opacity.clamp(0.0, 1.0) * 255.0) as f32;
+        let base = opacity.clamp(0.0, 1.0) * 255.0;
         let r = radius.max(0.0).min(fw / 2.0).min(fh / 2.0);
         // The inner core the corners round around: the rect inset by `r` on each side.
         let (rx0, ry0) = (fx + r, fy + r);
