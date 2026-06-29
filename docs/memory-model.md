@@ -7,12 +7,13 @@
 > once the nursery crosses `min_tenure`, else a young semi-space flip — and **never
 > recopies the old generation**; a rarer *major* compacts old when it doubles past
 > `major_floor`. This is sound with **almost no write barrier** because immutability
-> (ADR-026) forbids old→young pointers — the two exceptions are (1) a frame tenured
-> *mid-bind*, tracked in the `remembered` set (`env_define`), and (2) a **live
-> transient** tenured while still being built, tracked in `remembered_transients`
-> (`transient_assoc`/`transient_dissoc`): a transient cell is mutable, so after it
-> tenures an `assoc!` can repoint its `root` at a fresh young node. Both barriers
-> flush the recorded old object's young refs in place on the next minor and remap
+> (ADR-026) forbids old→young pointers — the **sole** exception is a frame tenured
+> *mid-bind*, tracked in the `remembered` set (`env_define`): a `def`/env-frame
+> *binding* rebind (ADR-013, the one binding mutation) can repoint an already-tenured
+> frame at a fresh young value. (User-facing transients were tried and removed —
+> ADR-026 — so there is **no** `remembered_transients` barrier; data is fully
+> immutable, leaving the env-frame rebind as the only old→young edge.) The barrier
+> flushes the recorded old object's young refs in place on the next minor and remaps
 > the set through the forwarding table on a major. Result on a
 > stateful workload (a process holding a large live set across churn): ~8× faster,
 > ~9× lower RSS, ~70× less copy volume than the single-space copy below; everything

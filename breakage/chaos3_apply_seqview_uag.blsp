@@ -1,0 +1,38 @@
+;;; chaos3_apply_seqview_uag.blsp — regression for the `(apply f <seq-view>)`
+;;; use-after-GC (found 2026-06-29).
+;;;
+;;; The `apply`-unfold in BOTH engines (`compile/mod.rs::dispatch` and the
+;;; tree-walker `eval/mod.rs`) split off the callee `real` and the leading args,
+;;; then realised a lazy seq-view tail arg — a full eval re-entry / GC safepoint
+;;; that RELOCATES LOCAL handles — without rooting `real`/leading-args across it.
+;;; The post-realise deref then saw a STALE closure/arg handle → use-after-GC
+;;; (tripwire under debug-assertions; silent corruption in plain release). Fix:
+;;; root + re-read across the realise (ADR-114 discipline).
+;;;
+;;; Run under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 make breakagetests` to drive a
+;;; collection at every safepoint and catch the stale handle at the bad deref.
+;;; Tail-recursive (green-process coroutine stack is small).
+(defmodule chaos3-apply-seqview-uag-test (:use test))
+
+;; callee is a FRESH local closure each call (a relocatable LOCAL handle), the
+;; tail arg is an unrealised lazy seq-view (`lmap` over a range).
+(defn count-via-apply (n)
+  (let (callee (fn (& xs) (count xs)))   ; fresh closure handle
+    (apply callee (lmap inc (range n)))))
+
+;; leading-arg variant: a fresh local list rides as a non-spliced leading arg, so
+;; it too is held across the realise (the stored-handle / heap-verifier variant).
+(defn lead-via-apply (n)
+  (let (pre (list :a :b :c))
+    (count (apply list pre (lmap inc (range n))))))
+
+(defn hammer (i acc f n)
+  (if (= i 0) acc (hammer (- i 1) (+ acc (f n)) f n)))
+
+(describe "apply over a lazy seq-view keeps the callee/args live across the realise" :isolated
+  (test "fresh-closure callee, seq-view tail — no stale handle"
+    ;; each call returns n; Σ over 200 calls of n=50 = 10000
+    (assert= (hammer 200 0 count-via-apply 50) 10000))
+  (test "local-list leading arg, seq-view tail — no stored stale handle"
+    ;; each returns 1 (the leading list) + n spliced = n+1; Σ over 200 of (40+1) = 8200
+    (assert= (hammer 200 0 lead-via-apply 40) 8200)))

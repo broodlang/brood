@@ -84,24 +84,27 @@ nest run --name foobar app.blsp     # brings the node up, then runs app.blsp
   `$BROOD_COOKIE` → the file → **generate + persist**. The generated secret is 32
   bytes from `getrandom` (the same CSPRNG the handshake nonce already uses,
   `dist/handshake.rs:174`), hex-encoded.
-- **Lives in Rust** as `dist::default_cookie() -> io::Result<String>`, exposed to
-  Brood as `(node-cookie)`. It must be Rust: the `nest observe --connect` path
-  resolves a cookie without a Brood image (`nest/src/main.rs:667`), and a `0600`
-  write + CSPRNG are OS mechanism, not language policy. This mirrors Erlang
-  reading `~/.erlang.cookie` inside the runtime, not in userland. (`spit` can't
-  set a file mode — `builtins.rs:846` — which is the concrete reason this is a
-  primitive.)
+- **As built, this lives in Brood, not Rust.** The original plan was a Rust
+  `dist::default_cookie()`; the implementation instead made cookie resolution
+  *policy in Brood* — `(node-cookie)` in `std/prelude.blsp` (ADR-068) over the
+  `getenv` / `random-token` / `spit-private` primitives (the kernel carries only
+  bytes). `spit-private` is the primitive that does the `0600` write a plain
+  `spit` can't, so the file-mode mechanism stays in Rust while the resolution
+  logic stays in Brood — mirroring Erlang's `~/.erlang.cookie` but expressed in
+  the language. There is **no** `dist::default_cookie()` symbol in the tree.
 
 `$BROOD_COOKIE` still wins so CI / multi-tenant setups can override without
 touching the file.
 
-**The fallback must cover the connecting side too, not just `node-start`.** The
-handshake reads the cookie from the global `NODE` (`dist/handshake.rs:58`). A
-runtime that calls `(connect "foobar")` without first calling `node-start` has an
-empty `NODE.cookie` and would fail auth against a default-cookie peer. So the
-resolution belongs at the handshake: **whenever `NODE.cookie` is empty, fall back
-to `default_cookie()`** — which makes "just connect, no node-start" work out of
-the box (the common client case), with the same secret both ends already share.
+**As built, the connecting side resolves its cookie at `node-start`, not via a
+handshake fallback.** The original plan was a handshake-time fallback (if
+`NODE.cookie` is empty, use `default_cookie()`), so a bare `(connect "foobar")`
+would work without `node-start`. The implementation took the simpler route: the
+prelude `connect` *requires* a prior `node-start` (it errors `:nonode`
+otherwise), and `node-start` is what calls `(node-cookie)` to populate
+`NODE.cookie`. The handshake then reads that `NODE.cookie` as-is
+(`dist/handshake.rs`) with **no empty-cookie fallback**. So the shared secret is
+resolved once, in Brood, at start — not lazily in the Rust handshake.
 
 ## 2. Name-addressed Unix-socket transport
 

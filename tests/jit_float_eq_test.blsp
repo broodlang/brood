@@ -1,0 +1,36 @@
+;; Regression test for a JIT miscompile of float `=` (structural-equality break).
+;;
+;; Brood `=` is *structural*: a Float is never equal to an Int, so `(= 2.0 2)` is
+;; false. The tier-1 JIT lowered a float-typed `PrimOp::Eq` to IEEE `fcmp Equal`,
+;; and the `(floatslot int-literal)` fusion coerces the int to f64 first — so once
+;; an arm with `(= x 2)` (x a float slot) tiered, `(= 2.0 2)` returned **true**.
+;; A silent wrong-answer miscompile in the default engine. The fix removes `Eq`
+;; from `emit_float_arith` (jit_lower.rs) so a float `=` bails the arm to the VM,
+;; whose `prim_apply_float` likewise defers `=` to the structural native `prim_eq`.
+;;
+;; These hammer the `=` arm past the tier threshold (8) in a single process
+;; (`:serial`), so they fail deterministically against the buggy JIT and pass on
+;; the VM / fixed JIT. `make test` also runs the whole suite through both engines
+;; (ADR-076), so the differential gate catches any re-divergence too.
+(defmodule jit-float-eq-test
+  (:use test))
+
+;; x is always a float (2.0); `(= x 2)` must stay false no matter how hot the arm.
+(defn eqf (x) (= x 2))
+;; count how many times the hot float `=` wrongly reports true (must be 0).
+(defn h-eq (i bad) (if (= i 0) bad (h-eq (- i 1) (if (eqf 2.0) (+ bad 1) bad))))
+
+;; `(= x 2)` where x holds the float 2.0 — also check the literal-first form and a
+;; float/float equal case still works (true) so we didn't over-correct.
+(defn eqf2 (x) (= 2 x))
+(defn h-eq2 (i bad) (if (= i 0) bad (h-eq2 (- i 1) (if (eqf2 2.0) (+ bad 1) bad))))
+(defn eqff (x) (= x 2.0))
+(defn h-eqff (i good) (if (= i 0) good (h-eqff (- i 1) (if (eqff 2.0) (+ good 1) good))))
+
+(describe "JIT float = stays structural after the arm tiers (regression)" :serial
+  (test "(= floatslot int-literal) is never true once hot"
+    (assert= (h-eq 4000 0) 0))
+  (test "(= int-literal floatslot) is never true once hot"
+    (assert= (h-eq2 4000 0) 0))
+  (test "(= floatslot float-literal) still works (2.0 = 2.0) once hot"
+    (assert= (h-eqff 4000 0) 4000)))

@@ -3,7 +3,7 @@
 //! Both ends of a fresh TCP connection drive the same four-step exchange
 //! before either accepts a steady-state frame:
 //!
-//! 1. **Magic + version** (4 bytes, `b"BRD\x02"`). A mismatch aborts before
+//! 1. **Magic + version** (4 bytes, `PROTOCOL_MAGIC` = `b"BRD\x05"`). A mismatch aborts before
 //!    any allocation — a stray HTTP request or port-scanner can't push us
 //!    past this point.
 //! 2. **Hello** (`{ node, nonce, addr }`) — each side announces its name, a

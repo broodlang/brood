@@ -816,3 +816,74 @@ alongside the duplicate-def pass): parse every file's CST, count symbol refs
 project-wide, flag a private def referenced nowhere beyond its own definition.
 Removed the per-file Rust pass + its helpers; kept its tests' coverage at the
 project layer.
+
+## 2026-06-29 — Stability hunt: 4 correctness bugs (float `=`/`max`/`min`, `apply`+seq-view UAG, inf/nan round-trip) + audits
+
+A focused robustness pass over the engines (GC, VM, tree-walker, JIT) and the
+distribution / hot-reload paths, plus a differential fuzzer and adversarial
+stress. The `.brood_crash_dump`'s old use-after-GC panics (bug #2 family) were
+already fixed by ADR-114 — **not reproducible on HEAD** under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. The audits found new bugs instead; all
+fixed with regression tests.
+
+**1. Float `=` JIT miscompile (high — silent wrong answers, default engine).**
+The tier-1 JIT lowered a float-typed `PrimOp::Eq` to IEEE `fcmp Equal`, and the
+`(floatslot int-literal)` fusion coerces the int to f64 first — so once an arm
+with `(= x 2)` (x a float slot) tiered, `(= 2.0 2)` returned **true**, though
+Brood `=` is *structural* (a Float is never equal to an Int). Fix: drop `Eq` from
+`emit_float_arith` (`jit_lower.rs`) so a float `=` bails the arm to the VM, whose
+`prim_apply_float` already defers `=` to the structural native `prim_eq`. Guard:
+`tests/jit_float_eq_test.blsp` + differential-corpus cases.
+
+**2. `(apply f <seq-view>)` use-after-GC (high — reachable memory corruption).**
+The `apply`-unfold in BOTH engines (`compile/mod.rs::dispatch` and the
+tree-walker `eval/mod.rs`) split off the callee `real` + leading args, then
+realised a lazy seq-view tail arg — a full `eval` re-entry / GC safepoint that
+relocates LOCAL handles — without rooting them across it. The post-realise deref
+then saw a stale closure/arg handle. Tripwire-confirmed on both engines; silent
+corruption in a plain release. Fix: `root_scope` + re-read across the realise
+(ADR-114 discipline). Guard: `breakage/chaos3_apply_seqview_uag.blsp` (GC-stress).
+Also hardened the latent sibling in `apply_builtin` (`system.rs`), unreachable
+today only because every `apply` call unfolds before the native.
+
+**3. Non-finite float round-trip (med).** The printer emits bare `inf`/`-inf`/
+`nan`, but the reader's atom classifier had no case for them, so they read back as
+*symbols* — `(read (pr-str x))` silently turned a float into a symbol, and the
+language produces these floats by design (`1e400`, overflow). Fix: the reader now
+classifies `inf`/`-inf`/`nan` as the matching float literals, reserved like
+`nil`/`true`/`false` (renamed one colliding `nan` test binding). Guard:
+`tests/float_roundtrip_test.blsp`.
+
+**4. `max`/`min` NaN + int/float-type divergence (low-med).** The VM inlined float
+`max`/`min` to Rust's `f64::max`/`min`, which discards NaN and forces a float
+result; the native `prim_max`/`prim_min` select via `>`/`<` and return the
+*original* operand (keeps NaN, preserves int-ness — `(max 5 3.0)` → Int `5`). Fix:
+defer float `max`/`min` to the native in `prim_apply_float` (`compile/mod.rs`),
+like `=`/bitwise already do. Guard: differential-corpus cases.
+
+**Cosmetic.** The VM frame-cap error reported a frame *count* as "bytes" and cited
+an unrelated byte budget; split out `bc_frame_depth_error` with an accurate
+message (`eval/mod.rs`).
+
+**Docs.** Removed a phantom `remembered_transients` write-barrier from
+`memory-model.md` (transients were removed, ADR-026 — the sole barrier is the
+env-frame rebind). Corrected `node-connect.md`: cookie resolution lives in the
+Brood prelude `node-cookie` (ADR-068), not a Rust `dist::default_cookie()`, and
+there is no handshake empty-cookie fallback (`connect` requires a prior
+`node-start`). Fixed the stale `BRD\x02` handshake magic comment (actual:
+`BRD\x05`). Updated CLAUDE.md: deep non-tail recursion in a green process is **no
+longer an uncatchable segfault** — the VM's `MAX_BC_FRAMES` cap (and the
+tree-walker's byte-budget guard) make it a clean, catchable `recursion too deep`
+error; verified a 5M-deep green process dies cleanly while main survives.
+
+**Audited clean.** Numeric tower (no float-`=` siblings — a wrong static type
+guess can only deopt, never miscompute), concurrency core (52 adversarial tests +
+the existing suites under GC verify), distribution (adversarial — handshake/AEAD/
+framing/monitors/closure-shipping hold), hot-reload (late-binding via epoch +
+RwLock, KI-3 compaction gating intact), pattern matching, reader hardening. A
+differential fuzzer (randomised numeric programs, JIT-warmed) ran **700 programs ×
+4 engine configs (tree-walker / no-jit / JIT / GC-stress) with 0 divergences**;
+combined hot-reload+JIT+GC+concurrency+RUNTIME-compaction, deopt storms, and
+`eval` storms all agree across engines and trip no tripwire. One benign formal
+data race remains noted (the JIT's non-atomic epoch read — sound on x86/ARM,
+TSan-only).
