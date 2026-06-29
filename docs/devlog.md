@@ -966,3 +966,43 @@ files pass; a sweep over 208 `.blsp` files is idempotent + meaning-preserving (s
 `nan` files for the `read-all` check); comment counts preserved on all 208 (the old
 formatter dropped them on 4); `format_test` 53/53, `sexp_test` 19/19, Rust CST
 tests pass.
+
+## 2026-06-29 — Checker: user `(sig …)` is now authoritative for callers, cross-module
+
+A user-declared `(sig name (A -> B))` only constrained callers in a **bare file**.
+Inside a `defmodule` it silently fell back to body-inference (the sig was keyed by
+the bare `sq` but a caller resolves to the qualified `b/sq`, so the per-file
+checker ctx missed it), and it never crossed module boundaries at all (the
+declaration lived only in the declaring file's checker context). So
+`(sig sq (int -> int))` over a body that infers `number` let `(sq 2.5)` through —
+both intra-module and from another module.
+
+**Fix.** Persist declared sigs on the heap, keyed by the module-qualified global
+symbol, and consult them first in the checker:
+- `heap.rs`: `RuntimeCode.declared_sigs: RwLock<SymbolMap<Value>>` (shared across
+  spawned processes like `globals`); `set_declared_sig` promotes the type-expr
+  `Value` into the RUNTIME region; `declared_sig_value` reads it. `core` stores a
+  `Value`, not a `types::Sig` — no `types` dependency.
+- A new `%register-sig` primitive (`builtins/system.rs`) qualifies the name via
+  `resolve_reference` — the *same* compile-pass entry `def` uses — so during the
+  load loop `(%register-sig 'sq …)` in module `b` registers under `b/sq`, the exact
+  key a call site resolves to. The `sig` / `sig!` macros now wrap their existing
+  expansion in `(do (%register-sig 'name 'type) …)`; prior semantics (no-op, or the
+  `sig!` runtime contract) are intact.
+- `sig_of` is now `declared_heap_sig → primitive_sig → curated_sig → infer_sig`, so
+  a declared sig overrides body inference. The file-local `ctx.declared_sig`
+  precedence in `walk.rs` is unchanged (still wins for bare files).
+
+**Verified.** A 2-module project (b: `(sig sq (int -> int))` / `(defn sq (x) (* x
+1))`, body infers `number`; a `(:use b)` calls `(sq 2.5)`) now flags both the
+cross-module and intra-module call as "b/sq: argument 1 expects **int**, got
+float" — the declared `int` crossed, not the inferred `number`; a pristine
+pre-change binary flagged neither. Durable Rust regression
+`declared_sig_is_authoritative_cross_module` (`crates/nest/tests/run_main.rs`)
+drives the real `nest` binary against a temp multi-module project. Gates:
+`type_check_catalog` 2/2, `types::` lib 164/164, full `-p brood --lib` 314/314,
+`nest test` 2544/2544, full in-language suite green, clippy clean.
+**False-positive-clean:** `nest check` over the project is unchanged vs a pristine
+baseline (std/ + tests/`.blsp` have zero `(sig …)`, so `declared_heap_sig` is
+always `None` there and `sig_of` is byte-identical; the only count delta is 17
+debug-only `%blob-ptr` warnings from the debug-assertions build).

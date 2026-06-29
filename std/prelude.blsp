@@ -243,9 +243,16 @@ is set, in which case it installs a runtime contract like `(sig! …)`. Type
 grammar: base names (`int` `string` `number` `list` `vector` `map` `fn` `any` …),
 arrows `(p… -> r)`, `(list E)`/`(vector E)`, `(or A B)`, and `(& rest-type)`
 for variadic tails."
-  (if (= (getenv "BROOD_CONTRACTS") "1")
-    `(sig! ~name ~type)
-    nil))
+  ;; Always register the declaration on the heap (keyed by the module-qualified
+  ;; global name, resolved as `def` would) so the checker treats it as `name`'s
+  ;; authoritative signature everywhere — intra-module and cross-module — not just
+  ;; in a bare file's per-file ctx. Then keep the existing semantics: a runtime
+  ;; no-op, or a `sig!` runtime contract under BROOD_CONTRACTS=1.
+  `(do
+     (%register-sig '~name '~type)
+     ~(if (= (getenv "BROOD_CONTRACTS") "1")
+        `(sig! ~name ~type)
+        nil)))
 
 ;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------
 ;; The opt-in *sound* half of the type system (the paper's "strong arrow", done
@@ -324,43 +331,48 @@ arrow'). Place it AFTER the function's definition — it rebinds `name`, preserv
 arity (so introspection and the reload-arity check are undisturbed). The checker
 reads it exactly like `(sig …)`. Supports a `&` rest marker:
 `(sig! f (int & number -> string))` checks fixed args then every rest arg."
-  (let (i (index-of type '->))
-    (if (< i 0)
-      nil                              ; not a (… -> …) type — nothing to enforce
-      (let (ptypes (take i type)
-            rtype (nth type (inc i))
-            amp-pos (index-of ptypes '&))
-        (if (< amp-pos 0)
-          ;; fixed arity
-          (let (params (map (fn (_) (gensym "arg")) (range (count ptypes)))
-                orig (gensym "orig")
-                r (gensym "ret"))
-            `(def ~name
-               (let (~orig ~name)
-                 (fn (~@params)
-                   (contract--check-args '~name '~ptypes (list ~@params) 1)
-                   (let (~r (~orig ~@params))
-                     (unless (type-matches? '~rtype ~r)
-                       (throw (str '~name ": result expected " '~rtype
-                                   ", got " (type-of ~r) " (" (pr-str ~r) ")")))
-                     ~r)))))
-          ;; variadic: (fixed… & rest-type -> ret)
-          (let (fixed-ptypes (take amp-pos ptypes)
-                rest-ptype (nth ptypes (inc amp-pos))
-                fixed-params (map (fn (_) (gensym "arg")) (range amp-pos))
-                rest-param (gensym "rest")
-                orig (gensym "orig")
-                r (gensym "ret"))
-            `(def ~name
-               (let (~orig ~name)
-                 (fn (~@fixed-params & ~rest-param)
-                   (contract--check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
-                   (contract--check-rest '~name '~rest-ptype ~rest-param)
-                   (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
-                     (unless (type-matches? '~rtype ~r)
-                       (throw (str '~name ": result expected " '~rtype
-                                   ", got " (type-of ~r) " (" (pr-str ~r) ")")))
-                     ~r))))))))))
+  ;; Register the declaration on the heap for the checker (keyed by the
+  ;; module-qualified global name) — same as `(sig …)` — then install the runtime
+  ;; contract. The `(do …)` keeps both effects at top level.
+  `(do
+     (%register-sig '~name '~type)
+     ~(let (i (index-of type '->))
+        (if (< i 0)
+          nil                          ; not a (… -> …) type — nothing to enforce
+          (let (ptypes (take i type)
+                rtype (nth type (inc i))
+                amp-pos (index-of ptypes '&))
+            (if (< amp-pos 0)
+              ;; fixed arity
+              (let (params (map (fn (_) (gensym "arg")) (range (count ptypes)))
+                    orig (gensym "orig")
+                    r (gensym "ret"))
+                `(def ~name
+                   (let (~orig ~name)
+                     (fn (~@params)
+                       (contract--check-args '~name '~ptypes (list ~@params) 1)
+                       (let (~r (~orig ~@params))
+                         (unless (type-matches? '~rtype ~r)
+                           (throw (str '~name ": result expected " '~rtype
+                                       ", got " (type-of ~r) " (" (pr-str ~r) ")")))
+                         ~r)))))
+              ;; variadic: (fixed… & rest-type -> ret)
+              (let (fixed-ptypes (take amp-pos ptypes)
+                    rest-ptype (nth ptypes (inc amp-pos))
+                    fixed-params (map (fn (_) (gensym "arg")) (range amp-pos))
+                    rest-param (gensym "rest")
+                    orig (gensym "orig")
+                    r (gensym "ret"))
+                `(def ~name
+                   (let (~orig ~name)
+                     (fn (~@fixed-params & ~rest-param)
+                       (contract--check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
+                       (contract--check-rest '~name '~rest-ptype ~rest-param)
+                       (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
+                         (unless (type-matches? '~rtype ~r)
+                           (throw (str '~name ": result expected " '~rtype
+                                       ", got " (type-of ~r) " (" (pr-str ~r) ")")))
+                         ~r)))))))))))
 
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
 ;; each subexpression evaluated at most once (a gensym holds it across the test).

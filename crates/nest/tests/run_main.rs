@@ -49,6 +49,68 @@ fn nest_run(dir: &Path, extra: &[&str]) -> String {
     stdout
 }
 
+/// Run `nest check` in `dir` and return combined stderr (where the GNU
+/// `FILE:LINE:COL: warning: …` lines are printed). `nest check` exits 0 even
+/// with warnings (advisory), so we don't assert on status.
+fn nest_check(dir: &Path) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_nest"))
+        .arg("check")
+        .current_dir(dir)
+        .output()
+        .expect("spawn nest check");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// A **user-declared `(sig …)` is authoritative for callers everywhere** — both
+/// inside the declaring module and across a `(:use …)` boundary — not just in a
+/// bare file (regression for the heap-backed declared-sig store + `%register-sig`).
+///
+/// Module `b` declares `(sig sq (int -> int))` but its body `(* x 1)` infers
+/// `number`; before the store, a caller (intra- or cross-module) resolved to the
+/// qualified global `b/sq` and fell back to that inferred `number`, which accepts
+/// a float — so `(sq 2.5)` was silently fine. With the store, the declared `int`
+/// wins and both call sites are flagged "expects int, got float".
+#[test]
+fn declared_sig_is_authoritative_cross_module() {
+    let dir =
+        std::env::temp_dir().join(format!("brood-nest-check-sig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(dir.join("project.blsp"), "(project\n  :name sigdemo)\n").unwrap();
+    // Module b: declared int, body infers number; plus an intra-module float call.
+    std::fs::write(
+        src.join("b.blsp"),
+        "(defmodule b)\n\
+         (sig sq (int -> int))\n\
+         (defn sq (x) (* x 1))\n\
+         (defn use-here () (sq 2.5))\n",
+    )
+    .unwrap();
+    // Module a: uses b, calls sq with a float across the module boundary.
+    std::fs::write(
+        src.join("a.blsp"),
+        "(defmodule a (:use b))\n\
+         (defn call-sq () (sq 2.5))\n",
+    )
+    .unwrap();
+
+    let warnings = nest_check(&dir);
+    // Cross-module: a's call is flagged, and crucially with the DECLARED `int`
+    // (not the body-inferred `number`, which would accept the float silently).
+    assert!(
+        warnings.contains("a.blsp") && warnings.contains("expects int, got float"),
+        "cross-module declared sig did not constrain a's caller:\n{warnings}"
+    );
+    // Intra-module: b's own call (resolving to the qualified `b/sq`) is flagged too.
+    assert!(
+        warnings.contains("b.blsp") && warnings.contains("expects int, got float"),
+        "intra-module declared sig did not constrain b's own caller:\n{warnings}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn nest_run_main_overrides_the_manifest_entry() {
     let dir = std::env::temp_dir().join(format!("brood-nest-run-main-{}", std::process::id()));
