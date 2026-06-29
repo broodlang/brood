@@ -734,6 +734,18 @@ pub struct RuntimeCode {
     /// because a raw code pointer isn't `Send`/`Sync`; reconstituted on read. Empty
     /// unless the JIT runs.
     jit_code_cache: RwLock<HashMap<(u64, u16), (usize, u64)>>,
+    /// User-declared `(sig name type)` signatures, keyed by the **module-qualified**
+    /// global `Symbol` (the same key `def` produces for `name`) and holding the raw
+    /// type-expression as a promoted RUNTIME `Value` (e.g. the `(int -> int)` form).
+    /// Registered by the `%register-sig` primitive when a `(sig …)` form evaluates,
+    /// so a declared sig is visible to the checker's `sig_of` *first* — ahead of
+    /// primitive/curated/inferred — both intra-module (the call resolves to the
+    /// qualified name the file-local ctx misses) and cross-module (`nest check`
+    /// loads the whole project image, so b's sig is present when a's caller is
+    /// checked). The stored value is a `Value`, not a `types::Sig`: the `core`
+    /// layer must not depend on `types` (the checker parses it on read). Shared
+    /// across the runtime's processes via `Arc`, like `globals`.
+    declared_sigs: RwLock<SymbolMap<Value>>,
 }
 
 /// Where a global was defined: the file, and the start position of its
@@ -754,6 +766,7 @@ impl Default for RuntimeCode {
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
+            declared_sigs: RwLock::new(SymbolMap::default()),
         }
     }
 }
@@ -774,6 +787,7 @@ impl RuntimeCode {
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
+            declared_sigs: RwLock::new(SymbolMap::default()),
         }
     }
 
@@ -4502,6 +4516,35 @@ impl Heap {
     /// no `Value`s are cloned.
     pub fn global_symbols(&self) -> Vec<Symbol> {
         self.runtime.globals_read().keys().copied().collect()
+    }
+
+    /// Register a user-declared `(sig name type)` signature: `sym` is the
+    /// module-qualified global symbol (the same key `def` would produce), `type_value`
+    /// the raw type-expression form (e.g. `(int -> int)`). The value is `promote`d into
+    /// the shared RUNTIME region first — the store is shared across the runtime's
+    /// processes (`Arc`) and must outlive the LOCAL heap, exactly like a global. Read
+    /// by the checker via [`Heap::declared_sig_value`]. Idempotent: a re-`def`/reload
+    /// just overwrites. (No `version` bump — declared sigs aren't consulted by the
+    /// per-process global inline cache.)
+    pub fn set_declared_sig(&mut self, sym: Symbol, type_value: Value) {
+        let shared = self.promote(type_value);
+        self.runtime
+            .declared_sigs
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(sym, shared);
+    }
+
+    /// The raw type-expression `Value` a `(sig …)` declared for the qualified global
+    /// `sym`, or `None`. The checker (`sig_of`) parses it to a signature and gives it
+    /// precedence over primitive/curated/inferred sigs. See [`Heap::set_declared_sig`].
+    pub fn declared_sig_value(&self, sym: Symbol) -> Option<Value> {
+        self.runtime
+            .declared_sigs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&sym)
+            .copied()
     }
 
     /// Restore the runtime's global bindings from a [`Heap::snapshot_globals`]

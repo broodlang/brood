@@ -2018,6 +2018,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym, any], nil_ty),
         refer,
     );
+    // `(%register-sig 'name 'type)` — record a user-declared `(sig …)` for the
+    // checker, keyed by the module-qualified global name (resolved as `def` would).
+    // The `sig`/`sig!` macros emit it; the checker's `sig_of` consults the store first.
+    def(
+        heap,
+        "%register-sig",
+        Arity::exact(2),
+        Sig::new(vec![sym, any], sym),
+        register_sig,
+    );
     // `(:alias mod [:as short])` lowers to this — register a module alias so a later
     // `short/name` reference resolves to `mod/name`.
     def(

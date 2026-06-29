@@ -1976,6 +1976,28 @@ pub(super) fn current_ns(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(heap.compile_ns().map(Value::Sym).unwrap_or(Value::nil()))
 }
 
+/// `(%register-sig 'name 'type)` — record a user-declared `(sig name type)` for the
+/// advisory checker. Emitted by the `sig`/`sig!` macros alongside their existing
+/// expansion. `name` is qualified to the current namespace *exactly as a `def` head
+/// would be* — via [`resolve_reference`](crate::eval::macros::resolve_reference), the
+/// same compile-pass entry point `def` uses (own-ns pre-scanned def heads + existing
+/// `ns/name` globals qualify; root/prelude names stay bare) — so the key matches the
+/// qualified global the call site resolves to. `type` is the raw type-expression form
+/// (e.g. `(int -> int)`), stored verbatim on the heap; the checker parses it on read
+/// and gives it precedence over inferred/curated sigs. A runtime value-producing call
+/// (returns the qualified name), so it composes inside the `sig` macro's expansion.
+pub(super) fn register_sig(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_symbol(heap, "%register-sig", arg(args, 0))?;
+    let type_value = arg(args, 1);
+    // Qualify the name to the current namespace, mirroring how `def` qualifies a
+    // definition head — so the store key is the same module-qualified symbol the
+    // call site resolves to (intra-module misses the bare file-local ctx; cross-module
+    // the sig isn't in the caller's ctx at all).
+    let qualified = crate::eval::macros::resolve_reference(heap, name);
+    heap.set_declared_sig(qualified, type_value);
+    Ok(Value::symbol(qualified))
+}
+
 /// `(%refer 'mod subset)` — add `(:use …)` imports to the current file's import
 /// table (ADR-065 inc-2). `mod` must already be loaded (the `ns` macro emits a
 /// `(require 'mod)` first). `subset` nil → refer every *public* `mod/name` (no

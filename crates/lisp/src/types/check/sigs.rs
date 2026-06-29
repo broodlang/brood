@@ -24,6 +24,7 @@ use crate::core::heap::{Heap, SymbolMap};
 use crate::core::value::{self, Arity, Symbol, Tag, Value};
 use crate::types::{Sig, Ty};
 
+use super::annot;
 use super::walk::list_items;
 
 /// Curated stdlib sigs, keyed by interned `Symbol`. Built once at first
@@ -332,12 +333,31 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     Some(Sig::new(param_tys, callee_sig.ret))
 }
 
-/// The signature for `sym`, from any of the three sources (primitive → curated
-/// → inferred). The non-inferring half is exposed as [`primitive_sig`] +
-/// [`curated_sig`] so [`infer_sig`] can consult the callee's sig *without*
-/// kicking off another inference (the rule says inference is one step deep).
+/// A **user-declared** signature for `sym` — the `(sig name (A -> B))` the author
+/// wrote, recorded on the heap (keyed by the module-qualified global) by the
+/// `%register-sig` primitive when the `(sig …)` form evaluated at load time. Read
+/// *first* by [`sig_of`], so the author's stated contract overrides body inference
+/// — the whole point of the cross-module/intra-module authoritative-sig path. Only
+/// an arrow type-expr yields a caller sig (a value `(sig x int)` records nothing
+/// here, mirroring [`annot::parse_sig_decl`]). The file-local `ctx.declared_sig`
+/// (walk.rs) still wins ahead of this for a bare file; this is the store that makes
+/// a declared sig authoritative where the file-local ctx misses (a qualified
+/// intra-module call, or a cross-module caller).
+pub(super) fn declared_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
+    let type_value = heap.declared_sig_value(sym)?;
+    annot::parse_type(heap, type_value)?.as_arrow().cloned()
+}
+
+/// The signature for `sym`, from any of the sources (user-declared → primitive →
+/// curated → inferred). A user `(sig …)` declaration is **authoritative** — read
+/// first so it overrides the body-inferred sig (e.g. a `number`-inferring body the
+/// author declared `int`). The non-inferring middle half is exposed as
+/// [`primitive_sig`] + [`curated_sig`] so [`infer_sig`] can consult the callee's
+/// sig *without* kicking off another inference (the rule says inference is one step
+/// deep).
 pub(super) fn sig_of(heap: &Heap, sym: Symbol) -> Option<Sig> {
-    primitive_sig(heap, sym)
+    declared_heap_sig(heap, sym)
+        .or_else(|| primitive_sig(heap, sym))
         .or_else(|| curated_sig(sym))
         .or_else(|| infer_sig(heap, sym))
 }
