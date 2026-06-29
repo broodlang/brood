@@ -1,0 +1,32 @@
+;; Regression: a Brood error raised inside JIT-compiled code must stay *catchable*
+;; — parked and re-raised as a normal Err, never an abort across the extern-"C"
+;; JIT callback boundary (added 2026-06-29, after a 300-program try/catch×JIT fuzz
+;; run found 0 aborts). These hammer a throwing arm past the tier threshold (~8)
+;; in a single process (`:serial`) so the throw originates from native code; the
+;; runtime must survive and the catch must fire every time.
+;;
+;; NOTE: a throw from inside JIT-*inlined* NON-TAIL recursion is a separate, still-
+;; open bug (the recursive self-inliner corrupts the operand stack on the
+;; error-unwind path) — repro in breakage/jit_inline_throw_unwind.blsp. The cases
+;; here use non-recursive throwing arms, which are correct.
+(defmodule jit-throw-catch-test
+  (:use test))
+
+;; JIT-eligible integer arithmetic that throws (div-by-zero) on a data edge.
+(defn risky (x) (quot 100 x))
+;; over i = N..1, (rem i 5) = 0 exactly floor(N/5) times → that many catches.
+(defn hammer (i caught)
+  (if (= i 0) caught
+    (hammer (- i 1) (+ caught (try (do (risky (rem i 5)) 0) (catch e 1))))))
+
+;; explicit (error ...) inside a warmed arm
+(defn checked (x) (if (< x 0) (error "negative") (* x 2)))
+(defn hammer2 (i caught)
+  (if (= i 0) caught
+    (hammer2 (- i 1) (+ caught (try (do (checked (- (rem i 3) 1)) 0) (catch e 1))))))
+
+(describe "errors raised in JIT'd code stay catchable after the arm tiers" :serial
+  (test "div-by-zero in a hot arm is caught every time, runtime survives"
+    (assert= (hammer 4000 0) 800))      ; multiples of 5 in 1..4000
+  (test "explicit (error) in a hot arm is caught"
+    (assert= (hammer2 3000 0) 1000)))   ; (rem i 3)-1 < 0 ⇔ rem=0 ⇔ 1000 of 3000
