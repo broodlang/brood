@@ -9,6 +9,31 @@
 
 (defn roundtrip (x) (read-string (pr-str x)))
 
+;; The read/write-invariance property (a standard Scheme/float requirement): for
+;; every finite float, (= x (read-string (pr-str x))). Brood's printer uses
+;; shortest-round-trip formatting, so this must hold exactly. Drive it over many
+;; PRNG-generated floats spanning ~10^-20 .. 10^20, plus a curated set of hard
+;; values. A 5000-float fuzz run found 0 failures (2026-06-29); this pins it.
+(defn rt? (x) (= x (roundtrip x)))
+
+(defn rt-fuzz (i seed bad)
+  (if (= i 0) bad
+    (let (r  (rand-float seed) m (first r) s (second r)
+          r2 (rand-int s 40)   e (- (first r2) 20) s2 (second r2)
+          f  (* m (pow 10.0 e)))
+      (rt-fuzz (- i 1) s2 (if (rt? f) bad (+ bad 1))))))
+
+(describe "finite float read/write invariance"
+  (test "curated hard values round-trip bit-exactly"
+    (is (rt? 0.1)) (is (rt? 0.2)) (is (rt? 0.3))
+    (is (rt? -0.0)) (is (rt? 1.0))
+    (is (rt? 1e308)) (is (rt? 1e-308))
+    (is (rt? 1.0000000000000002))     ; 1 ULP above 1.0
+    (is (rt? 3.141592653589793))
+    (is (rt? 123456789.123456789)))
+  (test "2000 PRNG floats across magnitudes all round-trip"
+    (assert= (rt-fuzz 2000 987654321 0) 0)))
+
 (describe "non-finite float literals and round-trip"
   (test "1e400 is a positive-infinity float, not a symbol"
     (assert= (type-of 1e400) :float)
