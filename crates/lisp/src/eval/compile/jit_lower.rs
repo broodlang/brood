@@ -368,11 +368,29 @@ pub(crate) fn jit_lower_arm(
     jit_lower_arm_inner(jit, arm, slot_tags, None)
 }
 
+/// Keeps the **inlined** body's `Node` + `Chunk` alive for the process lifetime. The
+/// inlined native code bakes the raw addresses of the spliced chunk's `ConstVal`s into
+/// itself (`brood_rt_const_load(cv_ptr, …)`, see `jit_lower_arm_inner`), exactly as the
+/// small-native path does for `arm.chunk` — but the inlined body lives in an *ephemeral*
+/// chunk re-derived here, NOT in `arm.chunk`. The arm-level `JIT_ARM_KEEPALIVE` retains
+/// `arm` (hence `arm.chunk`, the small body), so it does NOT cover this spliced chunk.
+/// Without retaining it, the chunk drops the instant `jit_lower_inlined_arm` returns, and
+/// every baked `cv` pointer dangles → `const_load` reads freed memory → garbage constants
+/// fed into still-installed native code (the JIT-inlined-throw corruption: `(error
+/// "bottom")` whose "bottom" const came out as a raw stack pointer). Process-lifetime, like
+/// the native code in `GLOBAL_JIT`; appended only on a successful inlined lowering.
+#[cfg(feature = "jit")]
+static JIT_INLINE_CHUNK_KEEPALIVE: std::sync::Mutex<Vec<(Box<Node>, Box<Chunk>)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Lower the **inlined** (deferred upgrade) body of a qualifying recursive arm. Re-derives
 /// the spliced body fresh from `arm.body` (the small original — the VM keeps it), compiles
 /// an ephemeral chunk, and lowers it against the larger `arm.inline_nslots` frame. Returns
 /// the inlined native pointer, or `None` if the spliced body falls out of the JIT subset.
 /// Per-engine frame sizing (`active_nslots`) keys on which version `jit_tier` installs.
+///
+/// On success the spliced `Node` + `Chunk` are moved into [`JIT_INLINE_CHUNK_KEEPALIVE`]
+/// so the `ConstVal` addresses baked into the native code never dangle (see that static).
 #[cfg(feature = "jit")]
 pub(crate) fn jit_lower_inlined_arm(
     jit: &mut crate::jit::Jit,
@@ -380,9 +398,24 @@ pub(crate) fn jit_lower_inlined_arm(
     slot_tags: &[u8],
 ) -> Option<*const u8> {
     let name = arm.inline_name?;
-    let spliced = rederive_inlined_body(&arm.body, name, arm.nrequired, arm.inline_stride)?;
-    let chunk = compile_chunk(&spliced)?;
-    jit_lower_arm_inner(jit, arm, slot_tags, Some((&spliced, &chunk, arm.inline_nslots)))
+    // Box the spliced body + chunk so their heap addresses (and the `ConstVal`s inside the
+    // chunk) are stable once stored in the keepalive below — `jit_lower_arm_inner` bakes
+    // those addresses into the native code, so they must not move after lowering.
+    let spliced: Box<Node> =
+        Box::new(rederive_inlined_body(&arm.body, name, arm.nrequired, arm.inline_stride)?);
+    let chunk: Box<Chunk> = Box::new(compile_chunk(&spliced)?);
+    let ptr = jit_lower_arm_inner(
+        jit,
+        arm,
+        slot_tags,
+        Some((&spliced, &chunk, arm.inline_nslots)),
+    )?;
+    // Lowering succeeded and baked raw `cv` pointers into the chunk — retain it forever.
+    JIT_INLINE_CHUNK_KEEPALIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((spliced, chunk));
+    Some(ptr)
 }
 
 /// Shared lowering core. `inline` overrides the body/chunk/nslots when lowering the
