@@ -40,6 +40,15 @@ pub fn classify(token: &str) -> AtomKind {
         "nil" => return AtomKind::Nil,
         "true" => return AtomKind::Bool(true),
         "false" => return AtomKind::Bool(false),
+        // Non-finite float literals — the exact inverse of `printer::format_float`,
+        // which emits bare `inf`/`-inf`/`nan`. Without these the printed form of an
+        // infinity/NaN (the language produces them by design: `1e400`, overflow)
+        // read back as a *symbol*, so `(read (pr-str x))` silently changed a float
+        // into a symbol. Reserved like `nil`/`true`/`false` (so `inf`/`nan` are not
+        // identifiers — the round-trip win outweighs losing three rare names).
+        "inf" => return AtomKind::Float(f64::INFINITY),
+        "-inf" => return AtomKind::Float(f64::NEG_INFINITY),
+        "nan" => return AtomKind::Float(f64::NAN),
         _ => {}
     }
     // A Clojure-style decimal literal: a trailing `M`/`m` on a numeric-shaped

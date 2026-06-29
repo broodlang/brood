@@ -369,9 +369,13 @@ co-author trailer, overriding any default that would append one.
    it from a shared global in many processes at once, and fan-in the results.
    See the `:isolated` "across processes" block in `tests/maps_test.blsp` for the
    pattern. **Caveat:** a `test` body runs in a green process whose coroutine
-   stack is small, so keep recursion in tests **tail-recursive** (O(1) stack) —
-   deep *non*-tail recursion overflows it (today that's an uncatchable segfault,
-   not a clean error; see `docs/devlog.md`).
+   stack is small, so prefer **tail-recursive** loops (O(1) stack). Deep *non*-tail
+   recursion is no longer an uncatchable segfault: under the VM it hits the
+   `MAX_BC_FRAMES` (~1M) frame cap and raises a clean, catchable `recursion too
+   deep` error (the tree-walker has the equivalent byte-budget guard), so a runaway
+   test fails its own process and the runtime survives. (Verified 2026-06-29; see
+   `docs/devlog.md`. The crash-dump tooling below still targets genuine SIGSEGVs —
+   e.g. a use-after-GC blow-up — not this case.)
 3. Update `docs/language.md` (it documents the language *as implemented*).
 4. Tick it off in `docs/roadmap.md`; add a dated entry to `docs/devlog.md`.
 5. If it reflects a real design choice, record an ADR in `docs/decisions.md`.

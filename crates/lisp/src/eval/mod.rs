@@ -618,12 +618,25 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     break;
                 }
                 let last = cur_argv.pop().expect("argv non-empty (checked above)");
-                let real = cur_argv.remove(0);
+                let mut real = cur_argv.remove(0);
                 // A lazy seq-view as the spliced arg list realises first —
-                // `seq_items` can't run its transducer.
+                // `seq_items` can't run its transducer. The realise re-enters `eval`
+                // (a GC safepoint that relocates LOCAL handles), so root `real` and
+                // the remaining leading args across it and re-read after — otherwise
+                // `(apply <local-closure> … <seq-view>)` derefs a stale handle →
+                // use-after-GC (ADR-114 re-read discipline; mirrors `realize_seqviews`).
                 let last = if matches!(last.unpack(), ValueRef::SeqView(_)) {
-                    crate::builtins::realize_seqview(heap, env, last)
-                        .map_err(|e| e.or_form_pos(heap, call_form))?
+                    heap.root_scope(|heap| -> LispResult {
+                        let real_r = heap.root(real);
+                        let arg_roots: Vec<_> = cur_argv.iter().map(|&v| heap.root(v)).collect();
+                        let realized = crate::builtins::realize_seqview(heap, env, last)?;
+                        real = heap.read_root(real_r);
+                        for (slot, &r) in cur_argv.iter_mut().zip(arg_roots.iter()) {
+                            *slot = heap.read_root(r);
+                        }
+                        Ok(realized)
+                    })
+                    .map_err(|e| e.or_form_pos(heap, call_form))?
                 } else {
                     last
                 };
@@ -1181,6 +1194,22 @@ pub(crate) fn passthrough_redirect_ok(inner: Value) -> Result<bool, LispError> {
 /// `vm_apply_inner`) raise — one constructor each so their message/code/hint
 /// stay byte-identical and can't drift. The caller adds engine-specific
 /// trimmings (`eval` attaches `or_form_pos`; the VM truncates its root stacks).
+
+/// "recursion too deep …" — the VM's call-frame-count guard (`MAX_BC_FRAMES`) for
+/// runaway non-tail recursion. Distinct from [`stack_depth_error`], whose `used` is
+/// a byte budget: here the limit is a *frame count*, so the message must not
+/// mis-state it as bytes or cite the unrelated byte budget.
+pub(crate) fn bc_frame_depth_error(frames: usize) -> LispError {
+    LispError::runtime(format!(
+        "recursion too deep: exceeded the VM's {frames}-frame non-tail-call \
+         limit (runaway non-tail recursion?)",
+    ))
+    .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
+    .with_hint(
+        "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
+         or drive the iteration with a process",
+    )
+}
 
 /// "recursion too deep …" — the stack-budget guard for runaway non-tail recursion.
 pub(crate) fn stack_depth_error(used: usize) -> LispError {

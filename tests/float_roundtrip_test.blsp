@@ -1,0 +1,33 @@
+;; Regression: non-finite floats (inf / -inf / nan) must round-trip through
+;; pr-str → read-string (found 2026-06-29). The printer emits bare `inf`/`-inf`/
+;; `nan`, but the reader's atom classifier had no case for them, so they read back
+;; as *symbols* — `(read (pr-str x))` silently turned a float into a symbol. The
+;; language produces these floats by design (`1e400`, overflow), so the lossy
+;; round-trip was reachable. Fix: the reader classifies `inf`/`-inf`/`nan` as the
+;; matching float literals (reserved like `nil`/`true`/`false`).
+(defmodule float-roundtrip-test (:use test))
+
+(defn roundtrip (x) (read-string (pr-str x)))
+
+(describe "non-finite float literals and round-trip"
+  (test "1e400 is a positive-infinity float, not a symbol"
+    (assert= (type-of 1e400) :float)
+    (assert= (type-of (roundtrip 1e400)) :float)
+    (is (= 1e400 (roundtrip 1e400))))
+  (test "-1e400 round-trips to negative infinity"
+    (assert= (type-of (roundtrip -1e400)) :float)
+    (is (= -1e400 (roundtrip -1e400))))
+  (test "bare inf / -inf literals read as floats"
+    (assert= (type-of inf) :float)
+    (assert= (type-of -inf) :float)
+    (is (= inf 1e400))
+    (is (= -inf -1e400)))
+  (test "nan is a float that never equals itself; prints and reads as nan"
+    (assert= (type-of nan) :float)
+    (is (not (= nan nan)))
+    (assert= (pr-str nan) "nan")
+    (assert= (type-of (read-string "nan")) :float))
+  (test "overflow-produced infinity prints as inf and round-trips"
+    (let (big (* 1e308 1e308))
+      (assert= (pr-str big) "inf")
+      (is (= big (roundtrip big))))))

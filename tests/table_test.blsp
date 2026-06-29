@@ -112,11 +112,11 @@
       (is (threw? (fn () (table-delete t (fn () 1)))))))
 
   (test "NaN cannot be a key (it never equals itself)"
-    (let (t (table) nan (- (* 1e308 1e308) (* 1e308 1e308)))
-      (is (not (= nan nan)))                       ; confirm we really have a NaN
-      (is (threw? (fn () (table-put t nan :v))))
-      (is (threw? (fn () (table-get t nan))))
-      (is (threw? (fn () (table-incr t nan)))))))
+    (let (t (table) nv (- (* 1e308 1e308) (* 1e308 1e308)))  ; `nan` is now a reserved float literal
+      (is (not (= nv nv)))                         ; confirm we really have a NaN
+      (is (threw? (fn () (table-put t nv :v))))
+      (is (threw? (fn () (table-get t nv))))
+      (is (threw? (fn () (table-incr t nv)))))))
 
 ;; ---- has? / delete / count --------------------------------------------------
 (describe "table: has?/delete/count"

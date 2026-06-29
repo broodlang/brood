@@ -928,27 +928,40 @@ pub(super) fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
     // refactors of the guard: anyone moving / tightening it can't accidentally
     // leave a bare `args[args.len() - 1]` indexing into an empty slice.
     let last = args.len() - 1;
-    let f = args[0];
-    let mut argv = args[1..last].to_vec();
-    // A lazy seq-view as the spliced final arg (`(apply f (map g xs))`) must be
-    // realised first — `seq_items` can't run its transducer.
-    let tail = match args[last] {
-        sv @ Value::SeqView(_) => realize_seqview(heap, env, sv)?,
-        other => other,
-    };
-    argv.extend(heap.seq_items(tail)?);
-    // Run the target through the active engine (the VM when on), so `apply`-as-a-value
-    // — `(map apply …)`, `(reduce apply …)`, apply stored in data — runs its callee
-    // compiled, consistent with a direct `(apply f …)` call. This is safe against the
-    // `(apply f …)`-driven tail recursion that once forced the tree-walker here
-    // (`apply_tail_recursion_does_not_overflow`): a **direct** `apply` call is unfolded
-    // by the VM's `dispatch` (it matches the resolved callee, so even `apply` bound to
-    // another name unfolds) and TCO'd by the driver, so it never reaches this native;
-    // `apply_builtin` is now only hit when a *native* HOF invokes `apply` per element,
-    // which loops rather than tail-recurses — one `apply_engine` frame per call, never
-    // accumulating. (Deep non-tail recursion in the callee is bounded by the VM's
-    // `MAX_BC_FRAMES` guard, not the native stack.)
-    apply_engine(heap, f, &argv, env)
+    // The spliced final arg may be a lazy seq-view (`(apply f (map g xs))`) whose
+    // realisation re-enters `eval` — a safepoint that can collect and *relocate*
+    // LOCAL handles. So the callee `f` and the spliced middle args must be rooted
+    // across the realise and re-read after, never trusted as pre-safepoint copies
+    // (the re-read discipline ADR-114 requires of any Rust glue holding a LOCAL
+    // handle across a GC-capable call; mirrors `prim_eq` / `range_reduce_slow`).
+    // Today the only native caller (`%range-reduce` via `apply_value`) never passes
+    // a seq-view here, so the realise branch is latent — but the rooting keeps the
+    // invariant intact for any future Rust HOF that does.
+    heap.root_scope(|heap| {
+        let f_r = heap.root(args[0]);
+        let mid_roots: Vec<_> = args[1..last].iter().map(|&v| heap.root(v)).collect();
+        // `seq_items` can't run a seq-view's transducer, so realise it first.
+        let tail = match args[last] {
+            sv @ Value::SeqView(_) => realize_seqview(heap, env, sv)?,
+            other => other,
+        };
+        // Re-read across the (possible) collection above before use.
+        let f = heap.read_root(f_r);
+        let mut argv: Vec<Value> = mid_roots.iter().map(|&r| heap.read_root(r)).collect();
+        argv.extend(heap.seq_items(tail)?);
+        // Run the target through the active engine (the VM when on), so `apply`-as-a-value
+        // — `(map apply …)`, `(reduce apply …)`, apply stored in data — runs its callee
+        // compiled, consistent with a direct `(apply f …)` call. This is safe against the
+        // `(apply f …)`-driven tail recursion that once forced the tree-walker here
+        // (`apply_tail_recursion_does_not_overflow`): a **direct** `apply` call is unfolded
+        // by the VM's `dispatch` (it matches the resolved callee, so even `apply` bound to
+        // another name unfolds) and TCO'd by the driver, so it never reaches this native;
+        // `apply_builtin` is now only hit when a *native* HOF invokes `apply` per element,
+        // which loops rather than tail-recurses — one `apply_engine` frame per call, never
+        // accumulating. (Deep non-tail recursion in the callee is bounded by the VM's
+        // `MAX_BC_FRAMES` guard, not the native stack.)
+        apply_engine(heap, f, &argv, env)
+    })
 }
 
 

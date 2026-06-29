@@ -1680,7 +1680,13 @@ fn jit_lower_arm_inner(
             PrimOp::Mul => Op::Float(b.ins().fmul(x, y)),
             PrimOp::Lt => Op::Int(b.ins().fcmp(FloatCC::LessThan, x, y)),
             PrimOp::Le => Op::Int(b.ins().fcmp(FloatCC::LessThanOrEqual, x, y)),
-            PrimOp::Eq => Op::Int(b.ins().fcmp(FloatCC::Equal, x, y)),
+            // `=` is NOT lowered for floats: Brood `=` is *structural*, so a Float
+            // is never equal to an Int (`(= 2.0 2)` is false), but IEEE `fcmp Equal`
+            // — after the int-literal-to-f64 coercion the `Prim2SlotInt` float path
+            // applies — would return true for `(= 2.0 2)`. Returning `None` bails the
+            // arm to the VM, whose `prim_apply_float` likewise returns `None` for `Eq`
+            // and defers to the structural native `prim_eq`. (Lt/Le are safe: ordering
+            // coerces int↔float identically on both engines.)
             _ => return None,
         })
     };

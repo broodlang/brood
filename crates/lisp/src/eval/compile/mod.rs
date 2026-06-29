@@ -2196,12 +2196,16 @@ fn prim_apply_float(op: PrimOp, x: Value, y: Value) -> Option<Value> {
         // (a NaN/inf denominator is not zero, so it stays inline, matching the
         // native's plain `a / b`).
         PrimOp::Div if b != 0.0 => Value::float(a / b),
-        PrimOp::Max => Value::float(a.max(b)),
-        PrimOp::Min => Value::float(a.min(b)),
+        // `max`/`min` are NOT inlined for floats: the native `prim_max`/`prim_min`
+        // select via `>`/`<` and return the *original* operand, so they (a) keep a
+        // NaN operand (`a > NaN` is false → the other is kept) and (b) preserve
+        // int-ness when the int operand wins (`(max 5 3.0)` → Int `5`). Rust's
+        // `f64::max`/`min` discard NaN and this path would force a `Value::float`,
+        // both diverging from the tree-walker (the reference). Defer to the native.
         // Bitwise ops are int-only; any float operand defers to the native (which errors).
         PrimOp::BitAnd | PrimOp::BitOr | PrimOp::BitXor => return None,
-        // `=` is structural (the native owns float equality), `rem`/`quot` take
-        // the numeric-tower path, and zero-denominator `%div` errors — defer.
+        // `=` is structural (the native owns float equality), `max`/`min` defer (above),
+        // `rem`/`quot` take the numeric-tower path, and zero-denominator `%div` errors — defer.
         _ => return None,
     })
 }
@@ -2948,11 +2952,27 @@ fn dispatch(
                 let list = cur_argv
                     .pop()
                     .expect("cur_argv non-empty (len >= 2, checked)");
-                let real = cur_argv.remove(0);
+                let mut real = cur_argv.remove(0);
                 // A lazy seq-view as the spliced arg list must realise first —
-                // `seq_items` can't run its transducer.
+                // `seq_items` can't run its transducer. The realise re-enters `eval`
+                // (a GC safepoint that relocates LOCAL handles), so the callee `real`
+                // and the remaining leading args must be rooted across it and re-read
+                // after — never trusted as pre-safepoint copies (ADR-114 re-read
+                // discipline; mirrors `realize_seqviews`/`prim_eq`). Without this,
+                // `(apply <local-closure> … <seq-view>)` derefs a stale closure/arg
+                // handle → use-after-GC.
                 let list = if matches!(list.unpack(), ValueRef::SeqView(_)) {
-                    crate::builtins::realize_seqview(heap, genv, list)?
+                    heap.root_scope(|heap| -> Result<Value, LispError> {
+                        let real_r = heap.root(real);
+                        let arg_roots: SmallVec<[_; 4]> =
+                            cur_argv.iter().map(|&v| heap.root(v)).collect();
+                        let realized = crate::builtins::realize_seqview(heap, genv, list)?;
+                        real = heap.read_root(real_r);
+                        for (slot, &r) in cur_argv.iter_mut().zip(arg_roots.iter()) {
+                            *slot = heap.read_root(r);
+                        }
+                        Ok(realized)
+                    })?
                 } else {
                     list
                 };
@@ -4618,7 +4638,7 @@ fn vm_run_bc(
             Ok(ChunkExit::Call { arm, args, genv }) => {
                 if frames.len() + 1 > MAX_BC_FRAMES {
                     unwind(heap);
-                    return Err(crate::eval::stack_depth_error(frames.len()));
+                    return Err(crate::eval::bc_frame_depth_error(frames.len()));
                 }
                 // Suspend the caller (resume at the already-advanced `cur_ip`) and
                 // switch the registers to the callee. `exec_chunk` already dropped the
