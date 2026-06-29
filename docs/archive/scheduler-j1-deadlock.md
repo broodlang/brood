@@ -5,7 +5,7 @@
 > growth* (`crates/lisp/src/process/scheduler.rs`; see the 2026-06-15 devlog). A worker
 > parked in a native-nested `receive` no longer strands the runnable child — the pool
 > floor guarantees another worker can pick it up. The minimal repro
-> (`j1_repro_test.blsp`) now **passes at `--max-parallel 1`** (was a deterministic
+> (`tests/scheduler_j1_test.blsp`) now **passes at `--max-parallel 1`** (was a deterministic
 > timeout). The analysis below is kept as the original report.
 
 ## Summary
