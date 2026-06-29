@@ -887,3 +887,45 @@ combined hot-reload+JIT+GC+concurrency+RUNTIME-compaction, deopt storms, and
 `eval` storms all agree across engines and trip no tripwire. One benign formal
 data race remains noted (the JIT's non-atomic epoch read — sound on x86/ARM,
 TSan-only).
+
+## 2026-06-29 — JIT use-after-free: inlined arm's spliced chunk dropped (throw-from-inlined-recursion abort)
+
+A try/catch × JIT fuzz pass (300 programs, 0 aborts for non-recursive throwing
+arms) plus a focused regression test surfaced a real JIT bug, since fixed.
+
+**Symptom.** A Brood error thrown from inside JIT-*inlined* NON-TAIL recursion,
+caught by an outer `try`, aborted the process (nondeterministic site: `Heap::native`
+"invalid handle region", a bounds check, or `brood_rt_push` "invalid value 0x70").
+Repro: `(defn deep (n) (if (= n 0) (error "bottom") (+ 1 (deep (- n 1)))))` warmed
+under `(try (deep 30) (catch e 1))` ~1000×. Localized to: JIT-only
+(`BROOD_NO_JIT`/`BROOD_VM=0` clean), inliner-only (`BROOD_NO_INLINE=1` clean),
+needs tiering+inlining, only when CAUGHT, only non-tail recursion.
+
+**Root cause — use-after-free, not a stack-unwind bug.** When a recursive arm
+self-inlines, `jit_lower_inlined_arm` re-derives a spliced body and compiles an
+*ephemeral* `Chunk` as a local. `jit_lower_arm_inner` bakes the **raw addresses of
+that chunk's `ConstVal`s** into the native code (`brood_rt_const_load(cv_ptr, …)`).
+But the local spliced `Node`/`Chunk` dropped the instant the function returned —
+and the arm-level `JIT_ARM_KEEPALIVE` only retains `arm.chunk` (the *small*,
+non-inlined body), never the spliced chunk. So every baked `cv` pointer dangled.
+When inlined `deep` reached `(error "bottom")`, the `const_load` of `"bottom"` read
+freed memory and returned a garbage `Value` (a stale stack address), which flowed
+through `error`'s rest-arg into `str`/`write_value` and was read as a native-fn
+handle with an OOB index → abort. Explains every clue: JIT-only, inliner-only,
+nondeterministic crash site (freed memory may or may not be reused), and only on
+the path that actually loads the inlined `"bottom"` const.
+
+**Fix** (`crates/lisp/src/eval/compile/jit_lower.rs`). Box the spliced `Node` +
+`Chunk` (stable addresses) and, on a successful lowering, move them into a new
+process-lifetime `JIT_INLINE_CHUNK_KEEPALIVE` static — mirroring `JIT_ARM_KEEPALIVE`
+for the small-native arm. The baked `ConstVal` pointers now live as long as the
+native code in `GLOBAL_JIT`. Compile-time only; no hot-path cost. Repro now prints
+`2000` deterministically on the default JIT+inline path; `BROOD_NO_INLINE` no longer
+needed. Guarded by `tests/jit_throw_catch_test.blsp` (the deep-non-tail case).
+
+**Known follow-up (benign, untouched).** `jit_dispatch_call`'s slow-path `Err`
+branch (`compile/mod.rs`) doesn't `truncate_roots(stage_base)` like its `Ok`
+sibling. It doesn't leak — the `try` handler truncates roots to its entry point and
+the error path does no GC in between — but it's asymmetric with the other error
+paths. Left as-is: tightening it touches thrown-value rooting (the stale-handle bug
+class), so it warrants separate, careful work, not a drive-by change.
