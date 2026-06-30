@@ -1,0 +1,36 @@
+;; Varied recursive fns warmed to JIT-inline, with different const types + allocation
+;; + throws; called from spawned workers while main redefines them (hot reload of
+;; inlined code → re-tier), under GC stress + RUNTIME compaction.
+(defn r-str (n)  (if (= n 0) "BASE-CONST-xyz" (str (r-str (- n 1)) "a")))      ; non-tail, string const + alloc
+(defn r-throw (n) (if (= n 0) (error "boom-const") (+ 1 (r-throw (- n 1)))))   ; non-tail throw (the fixed shape)
+(defn r-vec (n)  (if (= n 0) [9 9 9] (into (r-vec (- n 1)) [n])))              ; vector const + alloc
+(defn r-big (n)  (if (= n 0) 99999999999999999999 (+ n (r-big (- n 1)))))      ; bignum const
+(defn r-map (n)  (if (= n 0) {:k 0} (assoc (r-map (- n 1)) n n)))              ; map const + alloc
+
+(defn warm (f n a) (if (= n 0) :done (do (try (f a) (catch e nil)) (warm f (- n 1) a))))
+(defn warm-all ()
+  (do (warm r-str 3000 8) (warm r-throw 3000 12) (warm r-vec 3000 6)
+      (warm r-big 3000 10) (warm r-map 3000 6)))
+
+(defn worker (parent rounds)
+  (if (= rounds 0) (send parent :done)
+    (do (try (string-length (r-str 8)) (catch e nil))
+        (try (r-throw 15) (catch e nil))
+        (try (count (r-vec 6)) (catch e nil))
+        (try (r-big 10) (catch e nil))
+        (try (count (r-map 6)) (catch e nil))
+        (worker parent (- rounds 1)))))
+
+(defn churn (k)
+  (when (> k 0)
+    (def r-str (fn (n) (if (= n 0) "NEW-CONST" (str (r-str (- n 1)) "b"))))    ; redefine inlined fns
+    (def r-big (fn (n) (if (= n 0) 88888888888888888888 (* 2 (r-big (- n 1))))))
+    (churn (- k 1))))
+
+(defn collect (got n) (if (= got n) :ok (collect (+ got (do (receive (:done 1)) 1)) n)))
+(warm-all)
+(let (me (self) k 12)
+  (defn spawn-k (j) (when (> j 0) (spawn (worker me 40)) (spawn-k (- j 1))))
+  (spawn-k k)
+  (churn 120)
+  (println "torture result:" (collect 0 k)))

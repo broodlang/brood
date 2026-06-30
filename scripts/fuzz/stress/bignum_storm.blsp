@@ -1,0 +1,3 @@
+(defn fact (n acc) (if (= n 0) acc (fact (- n 1) (* acc n))))
+(defn storm (i acc) (if (= i 0) acc (storm (- i 1) (rem (+ acc (fact 180 1)) 1000000007))))
+(println "bignum-storm:" (storm 1500 0))
