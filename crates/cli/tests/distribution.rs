@@ -1833,3 +1833,218 @@ fn demonitor_node_stops_future_deliveries() {
          --- client stdout ---\n{stdout}\n--- client stderr ---\n{b_err}"
     );
 }
+
+/// The user's scenario, Erlang-style: a hub B with TWO peers (C and D). A late
+/// joiner that `connect`s to B *only* must transitively dial BOTH C and D — not
+/// just one. Guards against gossip that propagates a single peer but not the full
+/// peer set.
+#[test]
+fn cluster_mesh_late_joiner_reaches_all_hub_peers() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-mesh2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (port_a, port_b, port_c, port_d) = (free_port(), free_port(), free_port(), free_port());
+
+    let hub = format!(
+        "(node-start :b \"127.0.0.1:{port_b}\" \"secret-test-cookie-16+\")\n\
+         (defn idle () (do (sleep 1000) (idle))) (idle)\n"
+    );
+    let mk_spoke = |name: &str, port: u16| {
+        format!(
+            "(node-start :{name} \"127.0.0.1:{port}\" \"secret-test-cookie-16+\")\n\
+             (connect \"b@127.0.0.1:{port_b}\")\n\
+             (defn idle () (do (sleep 1000) (idle))) (idle)\n"
+        )
+    };
+    let spoke_c = mk_spoke("c", port_c);
+    let spoke_d = mk_spoke("d", port_d);
+    // A connects to B only, then must see BOTH C and D appear without ever naming them.
+    let spoke_a = format!(
+        "(node-start :a \"127.0.0.1:{port_a}\" \"secret-test-cookie-16+\")\n\
+         (connect \"b@127.0.0.1:{port_b}\")\n\
+         (defn wait-all (n)\n\
+            (cond (and (member? :c@127.0.0.1 (nodes)) (member? :d@127.0.0.1 (nodes)))\n\
+                    (println (str \"A-SEES-ALL nodes=\" (nodes)))\n\
+                  (<= n 0) (println (str \"A-MISSED nodes=\" (nodes)))\n\
+                  else (do (sleep 100) (wait-all (- n 1)))))\n\
+         (wait-all 200)\n"
+    );
+
+    let mut b = spawn_brood(&dir, "hub.blsp", &hub);
+    wait_until_listening(port_b);
+    let mut c = spawn_brood(&dir, "spoke_c.blsp", &spoke_c);
+    wait_until_listening(port_c);
+    let mut d = spawn_brood(&dir, "spoke_d.blsp", &spoke_d);
+    wait_until_listening(port_d);
+    let a = spawn_brood(&dir, "spoke_a.blsp", &spoke_a);
+
+    let out = a.wait_with_output().expect("spoke A finished");
+    for ch in [&mut b, &mut c, &mut d] {
+        let _ = ch.kill();
+        let _ = ch.wait();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("A-SEES-ALL"),
+        "A connected only to hub B (which had peers C and D) but did not reach BOTH.\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Full-mesh convergence from a CHAIN: a->b, b->c, c->d (each node names only its
+/// predecessor). The gossip must close the mesh transitively so EVERY node ends up
+/// connected to the other three. Each node writes "FULL" to its own result file
+/// once `(count (nodes))` reaches 3; the harness asserts all four converged.
+#[test]
+fn cluster_mesh_converges_to_full_mesh_from_a_chain() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-fullmesh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (pa, pb, pc, pd) = (free_port(), free_port(), free_port(), free_port());
+    let res = |n: &str| dir.join(format!("{n}.result")).display().to_string();
+
+    // node `name` listens on `port`, connects to `peer_port` (0 = none = the tail),
+    // then polls until it sees all 3 peers and records FULL.
+    let mk = |name: &str, port: u16, peer_port: u16| {
+        let connect = if peer_port == 0 {
+            String::new()
+        } else {
+            format!("(connect \"x@127.0.0.1:{peer_port}\")\n")
+        };
+        format!(
+            "(node-start :{name} \"127.0.0.1:{port}\" \"secret-test-cookie-16+\")\n\
+             {connect}\
+             (defn watch (n)\n\
+                (cond (= 3 (count (nodes))) (spit \"{r}\" \"FULL\")\n\
+                      (<= n 0) (spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+                      else (do (sleep 100) (watch (- n 1)))))\n\
+             (watch 250)\n\
+             (defn idle () (do (sleep 1000) (idle))) (idle)\n",
+            r = res(name)
+        )
+    };
+    // Note: connect target name is "x" but resolves by address; the real names are a/b/c/d.
+    // start tail first so each predecessor's connect target is listening.
+    let mut d = spawn_brood(&dir, "d.blsp", &mk("d", pd, 0));
+    wait_until_listening(pd);
+    let mut c = spawn_brood(&dir, "c.blsp", &mk("c", pc, pd));
+    wait_until_listening(pc);
+    let mut b = spawn_brood(&dir, "b.blsp", &mk("b", pb, pc));
+    wait_until_listening(pb);
+    let mut a = spawn_brood(&dir, "a.blsp", &mk("a", pa, pb));
+    wait_until_listening(pa);
+
+    // poll the four result files up to ~25s for all to say FULL
+    let mut full = [false; 4];
+    for _ in 0..250 {
+        for (i, n) in ["a", "b", "c", "d"].iter().enumerate() {
+            if let Ok(s) = std::fs::read_to_string(dir.join(format!("{n}.result"))) {
+                full[i] = s.contains("FULL");
+            }
+        }
+        if full.iter().all(|&x| x) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let mut reports = String::new();
+    for n in ["a", "b", "c", "d"] {
+        reports.push_str(&format!(
+            "{n}: {}\n",
+            std::fs::read_to_string(dir.join(format!("{n}.result"))).unwrap_or_else(|_| "<none>".into())
+        ));
+    }
+    for ch in [&mut a, &mut b, &mut c, &mut d] {
+        let _ = ch.kill();
+        let _ = ch.wait();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        full.iter().all(|&x| x),
+        "mesh did not fully converge from a chain — every node should see 3 peers.\n{reports}"
+    );
+}
+
+/// Adversarial mesh: a hub plus FOUR spokes all started back-to-back, each dialing
+/// the hub at ~the same instant. This maximises the race on the gossip path — four
+/// concurrent dials to the hub, then a storm of spoke<->spoke dials (6 links) that
+/// the connector tie-break (§1) and the PENDING_DIALS dedup must resolve without a
+/// crash or a duplicate link. Every one of the 5 nodes must end up seeing 4 peers.
+#[test]
+fn cluster_mesh_simultaneous_joins_converge() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-simul-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let hub_port = free_port();
+    let spoke_ports: Vec<u16> = (0..4).map(|_| free_port()).collect();
+    let res = |n: &str| dir.join(format!("{n}.result")).display().to_string();
+
+    // hub first: just listens + watches for the full mesh (4 peers).
+    let hub_src = format!(
+        "(node-start :h \"127.0.0.1:{hub_port}\" \"secret-test-cookie-16+\")\n\
+         (defn watch (n)\n\
+            (cond (= 4 (count (nodes))) (spit \"{r}\" \"FULL\")\n\
+                  (<= n 0) (spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+                  else (do (sleep 100) (watch (- n 1)))))\n\
+         (watch 250)\n\
+         (defn idle () (do (sleep 1000) (idle))) (idle)\n",
+        r = res("h")
+    );
+    let mut hub = spawn_brood(&dir, "h.blsp", &hub_src);
+    wait_until_listening(hub_port);
+    // four spokes started back-to-back, all dialing the hub
+    let mut spokes: Vec<std::process::Child> = Vec::new();
+    for (i, &p) in spoke_ports.iter().enumerate() {
+        let name = format!("s{i}");
+        let src = format!(
+            "(node-start :{name} \"127.0.0.1:{p}\" \"secret-test-cookie-16+\")\n\
+             (connect \"x@127.0.0.1:{hub_port}\")\n\
+             (defn watch (n)\n\
+                (cond (= 4 (count (nodes))) (spit \"{r}\" \"FULL\")\n\
+                      (<= n 0) (spit \"{r}\" (str \"PARTIAL \" (count (nodes))))\n\
+                      else (do (sleep 100) (watch (- n 1)))))\n\
+             (watch 250)\n\
+             (defn idle () (do (sleep 1000) (idle))) (idle)\n",
+            r = res(&name)
+        );
+        spokes.push(spawn_brood(&dir, &format!("{name}.blsp"), &src));
+    }
+
+    let names: Vec<String> = std::iter::once("h".to_string())
+        .chain((0..4).map(|i| format!("s{i}")))
+        .collect();
+    let mut full = vec![false; names.len()];
+    for _ in 0..250 {
+        for (i, n) in names.iter().enumerate() {
+            if let Ok(s) = std::fs::read_to_string(dir.join(format!("{n}.result"))) {
+                full[i] = s.contains("FULL");
+            }
+        }
+        if full.iter().all(|&x| x) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let mut reports = String::new();
+    for n in &names {
+        reports.push_str(&format!(
+            "{n}: {}\n",
+            std::fs::read_to_string(dir.join(format!("{n}.result"))).unwrap_or_else(|_| "<none>".into())
+        ));
+    }
+    let _ = hub.kill();
+    let _ = hub.wait();
+    for ch in &mut spokes {
+        let _ = ch.kill();
+        let _ = ch.wait();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        full.iter().all(|&x| x),
+        "simultaneous joins did not converge to a full 5-node mesh.\n{reports}"
+    );
+}
