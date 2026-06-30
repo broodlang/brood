@@ -2060,13 +2060,14 @@ mod tests {
 
     #[test]
     fn declared_return_type_mismatch_is_flagged() {
-        // Body yields a number, declared return is string → disjoint → flagged.
+        // Body yields an int (the integer-closed `+` rule: `int + int = int`),
+        // declared return is string → disjoint → flagged.
         let w = file_warnings("(sig f (int -> string)) (defn f (x) (+ x 1))");
         assert!(
             w.iter()
                 .any(|m| m.contains("f: declared return type string")
-                    && m.contains("yields number")),
-            "a number body vs a string return must warn: {w:?}"
+                    && m.contains("yields int")),
+            "an int body vs a string return must warn: {w:?}"
         );
         // A literal body mismatch too.
         let w = file_warnings(r#"(sig g (int -> int)) (defn g (x) "hello")"#);
@@ -2115,6 +2116,62 @@ mod tests {
             assert!(
                 w.iter().all(|m| !m.contains("return type")),
                 "a consistent return must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn precise_body_inference_int_closed_ops() {
+        // The "int int thing": `(* x x)` with `x : int` is precisely `int`, so a
+        // body declared `(int -> int)` must NOT warn (the false-positive flood the
+        // curated `number` result would otherwise produce).
+        let w = file_warnings("(sig f (int -> int)) (defn f (x) (* x x))");
+        assert!(
+            w.iter().all(|m| !m.contains("return type")),
+            "`(* int int)` declared int must not warn: {w:?}"
+        );
+        // A real lie still warns: an int body declared `string`.
+        let w = file_warnings("(sig f (int -> string)) (defn f (x) (* x 2))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("f: declared return type string")
+                    && m.contains("yields int")),
+            "an int body declared string must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn precise_body_inference_control_flow() {
+        // `(if (> x 0) x "neg")` yields `int | string`, which ⊄ int → must warn
+        // (precise control-flow inference: both branches pin a type).
+        let w = file_warnings(r#"(sig f (int -> int)) (defn f (x) (if (> x 0) x "neg"))"#);
+        assert!(
+            w.iter()
+                .any(|m| m.contains("f: declared return type int") && m.contains("string")),
+            "an `int | string` body declared int must warn: {w:?}"
+        );
+        // A branchy body that stays within the declared type must NOT warn.
+        let w = file_warnings("(sig f (int -> int)) (defn f (x) (if (> x 0) x 0))");
+        assert!(
+            w.iter().all(|m| !m.contains("return type")),
+            "an all-int branchy body declared int must not warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn precise_body_inference_defers_on_uncertainty() {
+        // A body ending in a call to an un-sig'd local/global is unknown → defer,
+        // never warn (graceful degradation keeps the check false-positive-clean).
+        for src in [
+            // an un-sig'd file-global call
+            "(defn helper (x) x) (sig f (int -> int)) (defn f (x) (helper x))",
+            // an un-sig'd let-bound local call
+            "(sig f (int -> int)) (defn f (x) (let (g (fn (y) y)) (g x)))",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("return type")),
+                "an unknown-result body must defer ({src}): {w:?}"
             );
         }
     }

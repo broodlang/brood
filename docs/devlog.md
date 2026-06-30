@@ -1006,3 +1006,43 @@ drives the real `nest` binary against a temp multi-module project. Gates:
 baseline (std/ + tests/`.blsp` have zero `(sig …)`, so `declared_heap_sig` is
 always `None` there and `sig_of` is byte-identical; the only count delta is 17
 debug-only `%blob-ptr` warnings from the debug-assertions build).
+
+## 2026-06-30 — Checker: precise body inference (merely-wider returns) + int-closed arithmetic
+
+The deferred type-system item — catching a function body that returns a value
+*wider* than its declared return (not just one provably disjoint) — landed, after
+removing the false-positive wall that had kept it deferred (ADR-011).
+
+**The wall, and why it wasn't real.** A precise return-check naively warns on every
+`int`-declared arithmetic function, because `+ - *` carry a blanket
+`(number number -> number)` sig and `(* int int)` types as `number`. But the
+checker *already* folds `BigInt → Tag::Int` (`value.rs:808`), so `int` means "any
+integer" and `(* int int) -> int` is **sound** — an integer op on integers yields
+an integer (i64 or bignum, both `Tag::Int`). No overflow/occurrence analysis
+needed; the wall was just a coarse sig.
+
+**Three pieces** (all in `crates/lisp/src/types/check/`):
+1. `guards.rs` `numeric_call_ty`: int-closed rule — `+ - * quot rem mod abs` over
+   all-`int` args → `int`; otherwise `None` (defer to the curated `number`, so
+   float/mixed never narrow and no int-vs-float caller-check regression). `/`
+   excluded. Wired into `expr_ty` before `sig_of`.
+2. `guards.rs` `control_flow_ty`: `expr_ty` now types `if`/`do`/`when`/`unless`/
+   `let`/`let*`/`letrec`/`cond`/`case`/`match`/`and`/`or` by unioning their result
+   positions (threading let-RHS types into scope; narrowing `if` branches via
+   `guard_assertion`). `None` if any contributing sub-form is unknown.
+3. `walk.rs` `gradual_of_compound`: `gradual_of` recurses through the control-flow
+   forms and joins branch `GradualTy`s. The load-bearing property — an all-precise
+   body (literals, sig-params, int-closed arithmetic) stays **`stat`** → checked
+   with `⊆` (catches a wider-than-declared body), while *any* over-approximated
+   call branch makes the join **`dynamic`** → checked with `∩≠⊥` (defers, never
+   over-warns). That precise/dynamic split is what keeps it false-positive-clean
+   instead of flooding on every `number`-result call.
+
+**Verified.** `(sig f (int -> int)) (defn f (x) (* x x))` no longer warns (the
+int-int fix); `(sig f (int -> string)) (defn f (x) (* x 2))` warns "yields int";
+`(sig f (int -> int)) (defn f (x) (if (> x 0) x "neg"))` warns "yields int |
+string"; a body ending in an un-sig'd call defers; `(if (int? x) x 0)` narrows and
+passes. Gates: **`nest check` zero new warnings** (the only diff vs baseline is the
+17 `%blob-ptr` debug-builtin lines, a nest-build-flag artifact — confirmed 0
+"declared return"/"yields" warnings on std/+tests/), `types::` 167, catalog 2/2,
+full in-language suite green, clippy clean, 3 new regression tests.

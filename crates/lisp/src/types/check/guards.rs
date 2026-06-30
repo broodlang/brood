@@ -262,6 +262,18 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     if value::symbol_is(s, kw::QUOTE) {
                         return items.get(1).map(|&d| Ty::of_value(d));
                     }
+                    // Control-flow forms whose value is one of their sub-forms —
+                    // typed by unioning the possible result positions, but *only*
+                    // when the head isn't a lexical local shadowing the special form.
+                    // CRITICAL for false-positive-freedom: if any contributing
+                    // sub-form types to `None` (unknown), `control_flow_ty` returns
+                    // `None`, so the whole form defers. A special-form head can't be
+                    // a callable global, so we never confuse this with a call.
+                    if !ctx.is_lexical_local(s) {
+                        if let Some(t) = control_flow_ty(heap, s, &items, ctx) {
+                            return Some(t);
+                        }
+                    }
                     // A user `(sig …)` declaration is authoritative for the
                     // result type — consult it unless a *lexical* local (fn/let)
                     // shadows the name. (A file-global with a declared sig is the
@@ -279,9 +291,13 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         }
                     }
                     // Sequence-aware refinements (`list`/`vector` constructors,
-                    // `first`/`last`/`nth` extractors) when the head isn't a local
-                    // shadow; else the callee's flat result type.
+                    // `first`/`last`/`nth` extractors) and the integer-closed
+                    // numeric rule — both when the head isn't a local shadow; else
+                    // the callee's flat result type.
                     if !ctx.is_local(s) {
+                        if let Some(t) = numeric_call_ty(heap, s, &items, ctx) {
+                            return Some(t);
+                        }
                         if let Some(t) = seq_aware_call_ty(heap, s, &items, ctx) {
                             return Some(t);
                         }
@@ -308,6 +324,208 @@ fn element_union(heap: &Heap, items: &[Value], ctx: &Ctx) -> Option<Ty> {
         });
     }
     acc
+}
+
+/// The static type of a **control-flow form** — one whose runtime value is one of
+/// its sub-forms (`if`/`when`/`do`/`let`/`cond`/`case`/`match`/`and`/`or`). The
+/// result is the union of the types at every position the form can yield from; the
+/// `let` family threads each binding's RHS type into the scope used to type the body
+/// (so `(let (x 5) (+ x 1))` sees `x : int`).
+///
+/// **False-positive discipline:** if *any* contributing sub-form types to `None`
+/// (unknown), the whole form is `None` (defer) — `branch_union` enforces this by
+/// short-circuiting on the first unknown. This graceful degradation is what keeps
+/// the precise return-check warning only when the body type is fully pinned. Returns
+/// `None` for a head that isn't one of these forms (the caller then falls through to
+/// the call/sig path).
+fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Option<Ty> {
+    // `(if test then else)` → ty(then) | ty(else). A two-arm `(if test then)`
+    // (no else) can also yield `nil`.
+    if value::symbol_is(head, kw::IF) {
+        return match items.len() {
+            4 => branch_union(heap, &[items[2], items[3]], ctx),
+            3 => Some(expr_ty(heap, items[2], ctx)?.union(Ty::of(Tag::Nil))),
+            _ => None,
+        };
+    }
+    // `(do … last)` → ty(last). Empty `(do)` is `nil`.
+    if value::symbol_is(head, kw::DO) {
+        return match items.last() {
+            Some(&last) if items.len() > 1 => expr_ty(heap, last, ctx),
+            _ => Some(Ty::of(Tag::Nil)),
+        };
+    }
+    // `(when test body…)` / `(unless test body…)` → ty(last body form) | nil
+    // (the test failing yields `nil`). Surface form; usually already lowered to
+    // `(if test (do …) nil)` by macroexpansion, but handled here for fragments.
+    if value::symbol_is(head, kw::WHEN) || value::symbol_is(head, kw::UNLESS) {
+        let last = *items.last()?;
+        if items.len() < 3 {
+            return Some(Ty::of(Tag::Nil));
+        }
+        return Some(expr_ty(heap, last, ctx)?.union(Ty::of(Tag::Nil)));
+    }
+    // `(let (bindings) body…)` / `(let* …)` / `(letrec …)` → ty(last body form),
+    // typed in a scope with each binding's RHS type threaded in (sequentially).
+    if value::symbol_is(head, kw::LET)
+        || value::symbol_is(head, kw::LET_STAR)
+        || value::symbol_is(head, kw::LETREC)
+    {
+        let binds = let_bindings(heap, *items.get(1)?)?;
+        if binds.len() % 2 != 0 {
+            return None;
+        }
+        let mut scope = ctx.clone();
+        let mut i = 0;
+        while i < binds.len() {
+            let Value::Sym(name) = binds[i] else {
+                // A destructuring binding — we can't pin the names; the body may
+                // depend on them, so defer the whole form.
+                return None;
+            };
+            let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
+            scope = scope.bind(name, rhs_ty);
+            i += 2;
+        }
+        let last = *items.last()?;
+        if items.len() < 3 {
+            return None;
+        }
+        return expr_ty(heap, last, &scope);
+    }
+    // `(cond test1 res1 test2 res2 … :else resN)` — union of the *result*
+    // positions (every odd index from 2 onward). Surface form (post-expansion this
+    // is nested `if`s, handled above); kept for fragments.
+    if value::symbol_is(head, kw::COND) {
+        let mut results = Vec::new();
+        let mut i = 2;
+        while i < items.len() {
+            results.push(items[i]);
+            i += 2;
+        }
+        if results.is_empty() {
+            return None;
+        }
+        return branch_union(heap, &results, ctx);
+    }
+    // `(case key v1 res1 v2 res2 … [default])` — `key` at index 1, then `val res`
+    // pairs from index 2; a lone trailing item is the default. Collect the result
+    // of each pair (index 3, 5, …) plus any trailing default.
+    if value::symbol_is(head, kw::CASE) && items.len() >= 4 {
+        let clauses = &items[2..];
+        let mut results = Vec::new();
+        let mut i = 0;
+        while i < clauses.len() {
+            if i + 1 < clauses.len() {
+                results.push(clauses[i + 1]); // the result of this `val res` pair
+                i += 2;
+            } else {
+                results.push(clauses[i]); // a lone trailing default
+                i += 1;
+            }
+        }
+        if results.is_empty() {
+            return None;
+        }
+        return branch_union(heap, &results, ctx);
+    }
+    // `(match scrutinee pat1 body1 pat2 body2 …)` — union of the arm *bodies*
+    // (every result position; we ignore pattern-narrowing, which is sound — just
+    // less precise). Bodies are at even offsets from index 3.
+    if value::symbol_is(head, kw::MATCH) {
+        let mut bodies = Vec::new();
+        let mut i = 3;
+        while i < items.len() {
+            bodies.push(items[i]);
+            i += 2;
+        }
+        if bodies.is_empty() {
+            return None;
+        }
+        return branch_union(heap, &bodies, ctx);
+    }
+    // `(and a b … last)` → union of operand types (a falsy operand short-circuits
+    // to itself, so any operand can be the value). `(or a b … last)` likewise.
+    // Empty `(and)` → true; empty `(or)` → nil. Surface forms (post-expansion both
+    // are `let`+`if`, handled above); kept for fragments.
+    if value::symbol_is(head, kw::AND) {
+        if items.len() == 1 {
+            return Some(Ty::of(Tag::Bool));
+        }
+        return branch_union(heap, &items[1..], ctx);
+    }
+    if value::symbol_is(head, kw::OR) {
+        if items.len() == 1 {
+            return Some(Ty::of(Tag::Nil));
+        }
+        return branch_union(heap, &items[1..], ctx);
+    }
+    None
+}
+
+/// The union of the types of several branch result forms, or `None` if *any* of
+/// them is unknown — the graceful-degradation rule that keeps the precise
+/// return-check from warning on a form whose value isn't fully pinned.
+fn branch_union(heap: &Heap, forms: &[Value], ctx: &Ctx) -> Option<Ty> {
+    let mut acc: Option<Ty> = None;
+    for &f in forms {
+        let t = expr_ty(heap, f, ctx)?;
+        acc = Some(match acc {
+            Some(a) => a.union(t),
+            None => t,
+        });
+    }
+    acc
+}
+
+/// Parse a `let`-family bindings form into a flat `[name val name val …]` vec —
+/// accepts both `(…)` lists and `[…]` vectors (the two shapes the reader emits),
+/// mirroring `walk::bindings`. `None` for any other shape.
+fn let_bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {
+    match form {
+        Value::Vector(id) => Some(heap.vector(id).to_vec()),
+        Value::Nil | Value::Pair(_) => list_items(heap, form),
+        _ => None,
+    }
+}
+
+/// Result type for the **integer-closed** arithmetic ops — the "int op int → int"
+/// rule. The curated sigs type `+ - * abs` etc. as `(number… -> number)`, which is
+/// sound but too wide: an integer operation on integers yields an integer (an i64
+/// or a bignum — both fold to `Tag::Int`; see `value::tag`), so when every argument
+/// is *known* and `⊆ int`, the result is exactly `int`. This is what lets
+/// `(defn f (x) (* x x))` declared `(int -> int)` not warn while keeping the wider
+/// `number` result for mixed/float operands.
+///
+/// Returns `None` (defer to the curated `number` sig) unless EVERY argument types
+/// to a known `⊆ int` type — so a float or unknown operand stays `number`, never
+/// narrowing below what the value can actually be (no int-vs-float caller-check
+/// regression). `/` is deliberately EXCLUDED: integer division can yield a float.
+fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Option<Ty> {
+    let is_int_closed = value::symbol_is(head, "+")
+        || value::symbol_is(head, "-")
+        || value::symbol_is(head, "*")
+        || value::symbol_is(head, "quot")
+        || value::symbol_is(head, "rem")
+        || value::symbol_is(head, "mod")
+        || value::symbol_is(head, "abs");
+    if !is_int_closed {
+        return None;
+    }
+    let int = Ty::of(Tag::Int);
+    // Every operand must be known and an integer; one float / unknown defers.
+    // (Zero operands — e.g. a bare `(+)` — also defers, leaving the curated sig.)
+    let args = items.get(1..)?;
+    if args.is_empty() {
+        return None;
+    }
+    for &arg in args {
+        let t = expr_ty(heap, arg, ctx)?;
+        if !t.is_subtype(&int) {
+            return None;
+        }
+    }
+    Some(int)
 }
 
 /// Element-aware result type for the sequence builtins — `None` falls through to
