@@ -215,9 +215,10 @@ fn to_message_rec(
             Message::List(out, pos)
         }
         // A lazy seq-view can't be realised here (`to_message` has only `&Heap`,
-        // no evaluator to run its transducer). The prelude `send`/`!` realise a
-        // view before it crosses, so this is the never-panic fallback for an
-        // escaped raw view: a clear error rather than silent corruption.
+        // no evaluator to run its transducer). `send` is a Rust builtin with no
+        // pre-realize step, so a raw view reaches here directly: return a clear
+        // error (the caller must realise it first) rather than risk silent
+        // corruption — never a panic.
         Value::SeqView(_) => {
             return Err(LispError::type_err(
                 "cannot send a lazy seq-view in a message; realise it first \
