@@ -16,7 +16,7 @@ use crate::core::heap::{Heap, SymbolMap};
 use crate::core::keywords as kw;
 use crate::core::value::{self, Arity, Symbol, Value};
 use crate::error::Pos;
-use crate::types::GradualTy;
+use crate::types::{GradualTy, Ty};
 
 use super::ctx::Ctx;
 use super::guards::{expr_ty, guard_assertion, is_syntactic_keyword};
@@ -880,6 +880,16 @@ fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
             None => GradualTy::dynamic(),
         };
     }
+    // A compound form: control-flow forms recurse into their result positions
+    // (each one's gradual type, joined), so a body assembled from *precise* pieces
+    // (literals, sig-params, integer-closed arithmetic) is `stat` (checked `⊆`,
+    // catching a merely-wider body), while any over-approximated call branch makes
+    // the join `dynamic` (the ∩-relation, which never over-warns on a widened type).
+    if matches!(expr, Value::Pair(_)) {
+        if let Some(g) = gradual_of_compound(heap, expr, ctx) {
+            return g;
+        }
+    }
     match expr_ty(heap, expr, ctx) {
         // A bare literal (not a call) is exact → static.
         Some(t) if !matches!(expr, Value::Pair(_)) => GradualTy::stat(t),
@@ -887,6 +897,171 @@ fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
         Some(t) => GradualTy::dynamic_within(t),
         None => GradualTy::dynamic(),
     }
+}
+
+/// The gradual type of a *compound* (`Pair`) expression when it's a form whose
+/// result we can type **precisely** — a control-flow form (whose value is one of
+/// its sub-forms) or the integer-closed arithmetic rule. Recurses into each result
+/// position via [`gradual_of`], so the staticness propagates: an all-precise body
+/// stays `stat` (warns on a merely-wider type via `⊆`), and any over-approximated
+/// call branch makes the join `dynamic` (defers on widening). Returns `None` for
+/// any other form (a plain call / unrecognised shape) — the caller then uses the
+/// flat `expr_ty` → `dynamic_within` path. Mirrors `guards::control_flow_ty`'s shape
+/// but carries the gradual `?` so the return/assignment check stays
+/// false-positive-clean.
+fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option<GradualTy> {
+    let items = list_items(heap, expr)?;
+    let Some(&Value::Sym(head)) = items.first() else {
+        return None;
+    };
+    // A lexical local can shadow a special-form name; then it isn't this form.
+    if ctx.is_lexical_local(head) {
+        return None;
+    }
+    // `(if test then else)` → join(then, else); `(if test then)` → then | nil.
+    // Narrow each branch by what the test guard asserts, mirroring `check_if` —
+    // so `(if (int? x) x 0)` types the then-branch's `x` as `int`, not the
+    // declared `number` (the precise return-check would otherwise false-positive).
+    if value::symbol_is(head, kw::IF) {
+        let test = items.get(1).copied().unwrap_or(Value::nil());
+        let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
+            Some(g) => {
+                let then_ctx = ctx.narrow(g.sym, g.ty.clone());
+                let else_ctx = if g.then_only {
+                    ctx.clone()
+                } else {
+                    ctx.narrow(g.sym, g.ty.negate())
+                };
+                (then_ctx, else_ctx)
+            }
+            None => (ctx.clone(), ctx.clone()),
+        };
+        return match items.len() {
+            4 => Some(
+                gradual_of(heap, items[2], &then_ctx).union(gradual_of(heap, items[3], &else_ctx)),
+            ),
+            3 => Some(gradual_of(heap, items[2], &then_ctx).union(GradualTy::stat(NIL_TY))),
+            _ => None,
+        };
+    }
+    // `(do … last)` → gradual(last). Empty `(do)` → nil.
+    if value::symbol_is(head, kw::DO) {
+        return match items.last() {
+            Some(&last) if items.len() > 1 => Some(gradual_of(heap, last, ctx)),
+            _ => Some(GradualTy::stat(NIL_TY)),
+        };
+    }
+    // `(when t body…)` / `(unless t body…)` → gradual(last) | nil.
+    if value::symbol_is(head, kw::WHEN) || value::symbol_is(head, kw::UNLESS) {
+        let &last = items.last()?;
+        if items.len() < 3 {
+            return Some(GradualTy::stat(NIL_TY));
+        }
+        return Some(gradual_of(heap, last, ctx).union(GradualTy::stat(NIL_TY)));
+    }
+    // `let`/`let*`/`letrec` → gradual(last body), with each binding's RHS type
+    // threaded into the scope (so a precise RHS makes its uses precise).
+    if value::symbol_is(head, kw::LET)
+        || value::symbol_is(head, kw::LET_STAR)
+        || value::symbol_is(head, kw::LETREC)
+    {
+        let binds = bindings(heap, *items.get(1)?)?;
+        if binds.len() % 2 != 0 || items.len() < 3 {
+            return None;
+        }
+        let mut scope = ctx.clone();
+        let mut i = 0;
+        while i < binds.len() {
+            let Value::Sym(name) = binds[i] else {
+                return None; // destructuring binder — can't pin; defer the form
+            };
+            let rhs_ty = expr_ty(heap, binds[i + 1], &scope);
+            scope = scope.bind(name, rhs_ty);
+            i += 2;
+        }
+        let &last = items.last()?;
+        return Some(gradual_of(heap, last, &scope));
+    }
+    // `(cond t1 r1 … :else rN)` → join of the result positions (odd index ≥ 2).
+    if value::symbol_is(head, kw::COND) {
+        let results: Vec<Value> = items[2..].iter().step_by(2).copied().collect();
+        return gradual_join(heap, &results, ctx);
+    }
+    // `(case key v1 r1 … [default])` → join of each pair's result + a lone default.
+    if value::symbol_is(head, kw::CASE) && items.len() >= 4 {
+        let clauses = &items[2..];
+        let mut results = Vec::new();
+        let mut i = 0;
+        while i < clauses.len() {
+            if i + 1 < clauses.len() {
+                results.push(clauses[i + 1]);
+                i += 2;
+            } else {
+                results.push(clauses[i]);
+                i += 1;
+            }
+        }
+        return gradual_join(heap, &results, ctx);
+    }
+    // `(match scrut pat1 body1 …)` → join of the arm bodies (even offset from 3).
+    if value::symbol_is(head, kw::MATCH) {
+        let bodies: Vec<Value> = items[3..].iter().step_by(2).copied().collect();
+        return gradual_join(heap, &bodies, ctx);
+    }
+    // `(and …)` / `(or …)` → join of operands (any can be the short-circuit value).
+    if value::symbol_is(head, kw::AND) {
+        if items.len() == 1 {
+            return Some(GradualTy::stat(Ty::of(value::Tag::Bool)));
+        }
+        return gradual_join(heap, &items[1..], ctx);
+    }
+    if value::symbol_is(head, kw::OR) {
+        if items.len() == 1 {
+            return Some(GradualTy::stat(NIL_TY));
+        }
+        return gradual_join(heap, &items[1..], ctx);
+    }
+    // The integer-closed arithmetic rule produces a *precise* `int` (not an
+    // over-approximation), so a `(* x x)`-style body declared `int` is `stat` and
+    // checked with `⊆` — no false positive (the rule only fires when every operand
+    // is a known integer; `guards::expr_ty` routes it through `numeric_call_ty`).
+    if let Some(t) = expr_ty(heap, expr, ctx) {
+        if is_int_closed_op(head) && t.is_subtype(&Ty::of(value::Tag::Int)) {
+            return Some(GradualTy::stat(t));
+        }
+    }
+    None
+}
+
+/// `nil` as a `Ty` — the value of an empty/else-less control-flow branch.
+const NIL_TY: Ty = Ty::of(value::Tag::Nil);
+
+/// Join the gradual types of several branch result forms (the `cond`/`case`/
+/// `match`/`and`/`or` arms). `None` when there are no results (an empty clause
+/// list — defer rather than invent a type).
+fn gradual_join(heap: &Heap, forms: &[Value], ctx: &Ctx) -> Option<GradualTy> {
+    let mut acc: Option<GradualTy> = None;
+    for &f in forms {
+        let g = gradual_of(heap, f, ctx);
+        acc = Some(match acc {
+            Some(a) => a.union(g),
+            None => g,
+        });
+    }
+    acc
+}
+
+/// Is `head` one of the integer-closed arithmetic ops whose result on integer
+/// operands is precisely `int` (mirrors `guards::numeric_call_ty`)? `/` is excluded
+/// (int/int can be a float).
+fn is_int_closed_op(head: Symbol) -> bool {
+    value::symbol_is(head, "+")
+        || value::symbol_is(head, "-")
+        || value::symbol_is(head, "*")
+        || value::symbol_is(head, "quot")
+        || value::symbol_is(head, "rem")
+        || value::symbol_is(head, "mod")
+        || value::symbol_is(head, "abs")
 }
 
 /// `(def name value)` — the binder is in position 1, the value in 2. Don't
