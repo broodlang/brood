@@ -47,3 +47,17 @@ own SIGKILL=137), any panic/SIGSEGV in a node's stderr, or a new `.brood_crash_d
 ## cargo-fuzz (coverage-guided, ASAN)
 
 See `crates/lisp/fuzz/README.md` (`reader` + `eval` targets; needs nightly).
+
+## GC/VM/JIT stress programs
+
+```
+scripts/fuzz/stress.sh
+```
+
+Runs `scripts/fuzz/stress/*.blsp` under `GC_STRESS`+`GC_VERIFY`+`RT_GC_FLOOR=1`
+(minor GC at every safepoint AND forced RUNTIME compaction), flagging any
+crash/tripwire. Programs: `eval_storm` (runtime code-gen: compiler+JIT under GC),
+`conc_storm` (20k spawns), `bigdata_storm` (major-GC churn over big nested maps),
+`bignum_storm` (arbitrary-precision soak), `inliner_torture` (varied recursive
+JIT-inlined fns + consts + throws + hot-reload), `gc_lifecycle` (every value kind
+held across GC + send + Table round-trips).

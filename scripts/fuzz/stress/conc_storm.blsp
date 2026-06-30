@@ -1,0 +1,4 @@
+(defn w (parent) (send parent (count (into [] (range 0 60)))))
+(defn sp (parent k) (when (> k 0) (spawn (w parent)) (sp parent (- k 1))))
+(defn col (got n acc) (if (= got n) acc (col (+ got 1) n (+ acc (receive (v v))))))
+(let (me (self)) (sp me 20000) (println "conc-storm:" (col 0 20000 0)))
