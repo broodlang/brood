@@ -1,0 +1,30 @@
+[package]
+name = "brood-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.brood]
+path = ".."
+
+# Keep the fuzz crate out of the parent workspace (cargo-fuzz builds it standalone
+# with nightly + ASAN + a sancov-instrumented dep tree).
+[workspace]
+
+[[bin]]
+name = "reader"
+path = "fuzz_targets/reader.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "eval"
+path = "fuzz_targets/eval.rs"
+test = false
+doc = false
