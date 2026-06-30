@@ -4386,6 +4386,11 @@ impl Heap {
     /// the `Arc`), so a JIT'd arm fetches this once at entry and loads through it each iteration.
     /// A plain `u64` load matches the `Relaxed` atomic load (a plain `mov` on the host); the
     /// guard only needs to *eventually* observe a concurrent `def`'s bump, which it does.
+    /// It is a formal data race in the abstract model (a plain load vs the writers'
+    /// `fetch_add(Relaxed)`), but a benign one on every supported target — and not even
+    /// ThreadSanitizer-observable, since TSan instruments rustc-compiled code, not the
+    /// Cranelift-JIT'd machine code that performs this load. An atomic op here would buy
+    /// nothing on these targets and reinstate the FFI cost, so the plain load stays.
     #[cfg(feature = "jit")]
     pub(crate) fn global_epoch_ptr(&self) -> *const u64 {
         &self.runtime.version as *const AtomicU64 as *const u64

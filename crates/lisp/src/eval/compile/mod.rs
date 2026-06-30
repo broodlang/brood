@@ -5660,6 +5660,13 @@ pub(crate) fn jit_dispatch_call(
             }
         }
         Err(e) => {
+            // Symmetric with the `Ok` arm: drop the call's staged operands
+            // (callee + args at `[stage_base, n)`) now that the call failed. Safe —
+            // the thrown value rides in `e` (off the roots stack), and this arm does
+            // no GC (only the `Ok` arm collects), so nothing can go stale; this just
+            // frees the staged roots immediately instead of leaving them for the
+            // `try` handler's `truncate_roots(entry_roots)` to reclaim later.
+            heap.truncate_roots(stage_base);
             heap.jit_pending_error = Some(e);
             None
         }
