@@ -1,0 +1,63 @@
+;; Hot reload / late binding (ADR-013) — the core property: a running process
+;; picks up a `def` redefinition's NEW behaviour on its next lookup, across the
+;; inline cache, the JIT fast-link, and RUNTIME compaction. Previously only
+;; indirectly covered (concurrency_race proves a rebind-underfoot doesn't crash;
+;; jit_shared_spawn proves between-batch JIT invalidation). This asserts the
+;; behaviour change directly, including cross-process and under concurrent load.
+;; `:isolated` — these `def` shared globals; isolate from the concurrent suite.
+(defmodule hot-reload-test (:use test))
+
+(describe "late binding (def redefinition is visible on the next call)" :isolated
+  (test "a caller picks up a redefined global fn within the same process"
+    (def hr-a (fn () 1))
+    (defn hr-call-a () (hr-a))
+    (let (before (hr-call-a) _ (def hr-a (fn () 2)) after (hr-call-a))
+      (assert= before 1)
+      (assert= after 2)))
+
+  (test "a JIT-tiered call site re-resolves after redefinition (fast-link invalidated)"
+    (def hr-b (fn (x) (* x 2)))
+    ;; warm hr-b past the tier threshold so its call site is JIT-linked
+    (defn hr-warm (i) (if (= i 0) :done (do (hr-b 5) (hr-warm (- i 1)))))
+    (hr-warm 5000)
+    (let (warmed (hr-b 5) _ (def hr-b (fn (x) (* x 100))) redef (hr-b 5))
+      (assert= warmed 10)
+      (assert= redef 500)))
+
+  (test "arity change on redefinition: an old-arity call errors cleanly (no corruption)"
+    (def hr-c (fn (x) x))
+    (def hr-c (fn (x y) (+ x y)))
+    (assert-error (hr-c 5))            ; 1-arg call against the new 2-arg fn
+    (assert= (hr-c 5 7) 12))           ; the new fn works
+
+  (test "a parked process observes a redefinition made while it was waiting"
+    (def hr-d (fn (x) (* x 2)))
+    (let (me (self)
+          w (spawn (do (send me [:r (hr-d 5)])
+                       (receive (:go :ok))
+                       (send me [:r (hr-d 5)]))))
+      (let (old (receive ([:r v] v)))
+        (def hr-d (fn (x) (* x 100)))  ; redefine while the worker is parked in receive
+        (send w :go)
+        (let (new (receive ([:r v] v)))
+          (assert= old 10)
+          (assert= new 500)))))
+
+  (test "concurrent redefinition under load never yields a torn/garbage value"
+    ;; 16 workers each call hr-e 100×; every result must be one of the impls'
+    ;; outputs (10/20/30) — never garbage — while main redefines hr-e underfoot.
+    (def hr-e (fn () 10))
+    (defn hr-valid? (v) (or (= v 10) (= v 20) (= v 30)))
+    (defn hr-worker (parent n bad)
+      (if (= n 0) (send parent [:done bad])
+        (hr-worker parent (- n 1) (if (hr-valid? (hr-e)) bad (+ bad 1)))))
+    (defn hr-spawn (parent k) (when (> k 0) (spawn (hr-worker parent 100 0)) (hr-spawn parent (- k 1))))
+    (defn hr-churn (k) (when (> k 0)
+                         (def hr-e (fn () 20)) (def hr-e (fn () 30)) (def hr-e (fn () 10))
+                         (hr-churn (- k 1))))
+    (defn hr-collect (got total bad)
+      (if (= got total) bad (hr-collect (+ got 1) total (+ bad (receive ([:done b] b))))))
+    (let (me (self))
+      (hr-spawn me 16)
+      (hr-churn 200)                   ; redefine hr-e ~600× while workers run
+      (assert= (hr-collect 0 16 0) 0)))) ; zero garbage results across 1600 calls
