@@ -393,6 +393,12 @@ fn rt_gc_floor() -> usize {
 /// majors geometrically rarer during a large-structure build — where the old gen
 /// is nearly all-live and a compaction copies everything for almost no reclaim —
 /// at the cost of retaining more tenured garbage between majors (memory for speed).
+/// Ceiling for the adaptive nursery threshold (see `collect`): the young gen may
+/// grow to at most this many objects before a minor GC, regardless of old-gen size.
+/// Bounds the transient young-garbage buffer for a large-heap churny process while
+/// sitting far above real build working sets (~8M objects ≈ a few hundred MB).
+const NURSERY_MAX: usize = 8 * 1024 * 1024;
+
 fn major_growth() -> usize {
     static G: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *G.get_or_init(|| {
@@ -5738,8 +5744,17 @@ impl Heap {
         // proportionally bigger nursery budget (memory bounded to ~a small multiple of
         // live), so large-structure builds collect O(log n) times; a small-live churny
         // process (e.g. a `spawn` fan-out worker) still sits at the floor. (2026-07-01)
+        // Capped at NURSERY_MAX: `should_collect` fires a minor when *young* reaches
+        // `gc_threshold`, so without a ceiling a process with a large live old gen that
+        // then *churns* transient young garbage would buffer ~2×old worth of it before
+        // collecting — young memory ballooning proportional to the old gen. The cap
+        // bounds that transient buffer while staying well above real build working sets
+        // (a lone process's floor is 64K; the cap is 8M ≈ a few hundred MB of nursery).
         let live_total = self.local_live_count() + self.old_live_count();
-        self.gc_threshold = std::cmp::max(gc_floor(), live_total.saturating_mul(2));
+        self.gc_threshold = std::cmp::max(
+            gc_floor(),
+            live_total.saturating_mul(2).min(NURSERY_MAX),
+        );
         // Escalate to a *major* (compact the old generation) only when it has grown
         // MAJOR_GROWTH× since the last major — so majors stay rare while minors keep
         // the nursery bounded. Grown 2×→4× (2026-07-01): during a large-structure
