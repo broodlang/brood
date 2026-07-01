@@ -1185,13 +1185,17 @@ kernel primitive), so neither walks nor materialises the entries.
 
 ### Predicates
 `nil?`  `pair?`  `list?`  `symbol?`  `keyword?`  `string?`  `number?`  `int?`
-`float?`  `bool?`  `fn?`  `vector?`  `map?`  `ref?`  `range?`
+`float?`  `decimal?`  `bool?`  `fn?`  `vector?`  `map?`  `ref?`  `range?`
+`pid?`  `table?`  `bytes?`  `rope?`
 
 - `(type-of x)` returns the runtime type tag as a keyword — `:int` `:float`
-  `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector` `:map` `:fn`
-  `:macro` `:native` `:ref` — the spellings mirror the predicates above. It's the
-  reflective primitive that in-language type checks build on; the predicates are
-  the common-case shortcuts.
+  `:decimal` `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector`
+  `:map` `:fn` `:macro` `:native` `:ref` `:pid` `:table` `:bytes` `:rope`
+  `:socket` `:subprocess` — the spellings mirror the predicates above (the last
+  two are opaque handles with no dedicated predicate). A lazy `range` reports
+  `:pair`, since it stands for the list it produces. It's the reflective
+  primitive that in-language type checks build on; the predicates are the
+  common-case shortcuts.
 
 ### Strings
 `str`  `pr-str`  `string-length`  `substring`  `char-at`  `string->list`

@@ -64,29 +64,37 @@ Brood/
           value.rs        Value, Tag, handle types, symbol interner, Closure/Arity
           heap.rs         per-process heap + shared regions, env chain, promotion, equality
           alloc.rs        process-wide byte-counting global allocator
-        syntax/         surface syntax (reader and printer round-trip)
+        syntax/         surface syntax (reader/printer round-trip + the tooling CST)
           reader.rs       text -> Value (recursive-descent parser)
           printer.rs      Value -> text
         eval/           the evaluation engine
           mod.rs          tree-walking evaluator + special forms + tail calls
+          compile/        the closure-compiling bytecode VM — the DEFAULT engine (ADR-076)
           macros.rs       quasiquote, macroexpand, the compile pass + pattern lowering
         types/          advisory types (nothing gates on it)
           mod.rs          the Ty / GradualTy set-theoretic lattice
           check.rs        advisory type checker over expanded forms
-        error.rs        LispError / LispResult / source Pos
-        process.rs      green-process scheduler (spawn/send/receive)
-        builtins.rs     the primitive kernel (functions implemented in Rust)
-      tests/            basic.rs (Rust e2e) + suite.rs (runs the .blsp suite)
+        builtins/         the primitive kernel — Rust functions, split by area
+                          (numeric / sequences / io / terminal / system / bytes)
+        process.rs + process/   green-process scheduler (spawn/send/receive/monitor)
+        dist.rs + dist/         distributed nodes (handshake/heartbeat/wire, ADR-033/034)
+        jit/              tier-1 Cranelift JIT callback surface (feature = "jit", ADR-101)
+        net.rs            non-blocking TCP socket mechanism (ADR-062)
+        gui.rs, audio.rs, treesit.rs   optional feature-gated frontends/parsers
+        bundle.rs         single-binary app bundling (ADR-038)
+        error.rs          LispError / LispResult / source Pos
+        cli_support.rs    file-runner / error-reporting shared by the binaries
+      tests/            Rust e2e + the .blsp suite (see the tests/ tree)
     cli/                the `brood` binary: REPL + file runner + `--test`
       src/main.rs
     nest/               the `nest` binary: project tooling — `new` / `test` / `doc` (ADR-028)
       src/main.rs
     lsp/                the `brood-lsp` binary: language server (ADR-025, lsp.md)
       src/main.rs
-  std/
+  std/                  grouped (ADR-085); bare module names despite the folders
     prelude.blsp        the core library, written in Brood itself
-    test.blsp           the test framework (loaded via `require`)
-    project.blsp        project model, test runner, scaffolding
+    tool/               the toolchain — test framework, project runner, docs, repl, …
+    editor/             the buffer/display/ui/keymap framework (M2/M3)
   tests/                the in-language suite (`tests/**/*_test.blsp`)
   docs/                 you are here  (see components.md for the full map)
 ```
