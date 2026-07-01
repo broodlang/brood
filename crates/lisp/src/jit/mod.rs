@@ -131,6 +131,14 @@ impl Jit {
             "brood_rt_pair_old_base",
             brood_rt_pair_old_base as *const u8,
         );
+        builder.symbol(
+            "brood_rt_vec_nursery_base",
+            brood_rt_vec_nursery_base as *const u8,
+        );
+        builder.symbol(
+            "brood_rt_vec_old_base",
+            brood_rt_vec_old_base as *const u8,
+        );
         builder.symbol("brood_rt_const_load", brood_rt_const_load as *const u8);
         // DEBUG (bug #2): print the callback addresses once, so an offline disasm of a
         // BROOD_DUMP_CODE'd arm can resolve each `movabs/call` target to a name.
@@ -350,7 +358,7 @@ pub unsafe extern "C" fn brood_rt_make_vector2(
     let h = &mut *heap;
     let a = words_to_val(a0, a1, a2);
     let b = words_to_val(b0, b1, b2);
-    *out = h.alloc_vector(vec![a, b]);
+    *out = h.alloc_vector2(a, b);
 }
 
 /// `first` of a `Value` (by word-triple), writing its car to `*out`. The JIT **tag-checks
@@ -394,6 +402,27 @@ pub unsafe extern "C" fn brood_rt_pair_nursery_base(heap: *mut Heap) -> *const u
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_pair_old_base(heap: *mut Heap) -> *const u8 {
     (*heap).local_pair_old_base()
+}
+
+/// Byte pointer to the LOCAL nursery **vector** slab, so a JIT arm can inline a
+/// small-vector element read instead of calling [`brood_rt_vector_ref`]. The
+/// vector analog of [`brood_rt_pair_nursery_base`].
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_vec_nursery_base(heap: *mut Heap) -> *const u8 {
+    (*heap).local_vec_nursery_base()
+}
+
+/// Byte pointer to the LOCAL old-generation vector slab. Companion to
+/// [`brood_rt_vec_nursery_base`].
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_vec_old_base(heap: *mut Heap) -> *const u8 {
+    (*heap).local_vec_old_base()
 }
 
 /// `rest` counterpart of [`brood_rt_car`] — writes the pair's cdr to `*out`.
