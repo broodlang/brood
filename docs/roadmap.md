@@ -163,14 +163,14 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
     Bench (Bc vs the `Node`-VM, medians): fib ~33% faster, sum_tail ~34%, reduce ~25%,
     defseq_map ~45%, cons_build ~30% — **faster across the board**. So
     `bytecode_enabled()` now defaults ON (`BROOD_BYTECODE=0` is the escape hatch,
-    mirroring `BROOD_VM=0`); full `make test` (550) green at the default.
+    mirroring `BROOD_VM=0`); full `make test` green at the default.
   - ✅ **Cleanup — retired the `Node`-walking executor.** Deleted `exec_node`, the
     `vm_apply_inner` `Node` trampoline, `Step::SelfTail`, and the `BROOD_BYTECODE`
     gating (`bytecode_enabled`/`set_force_bytecode`): the bytecode driver is the
     **sole VM executor**, `vm_apply` → `vm_run_bc` unconditionally. The `Node` tree
     stays as the lowering source (`compile_chunk`); `exec_value`/`exec_call` survive
     only for `push_frame`'s `&optional` defaults + top-level `run`; the tree-walker
-    (`BROOD_VM=0`) is the remaining fallback. Full `make test` (550) green.
+    (`BROOD_VM=0`) is the remaining fallback. Full `make test` green.
   - ✅ **Done (2026-06-08) — the migration → corosensei removal (architecture B).**
     Replace coroutine suspension with **state capture**: `receive`-on-empty unwinds
     `vm_run_bc` carrying `(frames, cur_*, ip)` as a heap struct in the `Process`;

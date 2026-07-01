@@ -1046,3 +1046,40 @@ passes. Gates: **`nest check` zero new warnings** (the only diff vs baseline is 
 17 `%blob-ptr` debug-builtin lines, a nest-build-flag artifact — confirmed 0
 "declared return"/"yields" warnings on std/+tests/), `types::` 167, catalog 2/2,
 full in-language suite green, clippy clean, 3 new regression tests.
+
+## 2026-07-01 — CLI polish + repo hygiene: colored diagnostics, rustfmt gate, CI
+
+A presentation/infrastructure pass (no language semantics touched). Four pieces:
+
+1. **Colored diagnostics.** `cli_support::report_error` now renders rustc-style on
+   a terminal: bold-red `error:` label and caret, bold message, bold-cyan `hint:`,
+   dimmed version footer. Gated on `stderr.is_terminal() && NO_COLOR` unset
+   (https://no-color.org) via a new `use_color()`, so a pipe / redirected stderr /
+   the LSP / MCP consumers stay **byte-for-byte** plain and editor-parseable — the
+   `FILE:LINE:COL:` prefix is never colored. Only the `<kind> error:` label is
+   colorized within the located line (found by substring, always precedes the
+   message). The ANSI is bare `&str` consts on the cold error path — no `crossterm`
+   writer pulled in. The type-checker's advisory `warning:` line is still plain
+   (a deliberately-scoped follow-up).
+2. **`ErrorKind::label()`.** Centralized the `"error:"` / `"<kind> error:"` prefix
+   in one method; `Display` now delegates to it (was a 6-arm match), so the label
+   text has a single source of truth that `report_error`'s colorizer also reads.
+3. **Clippy → clean on both feature sets.** The `set_capture_run` re-export was
+   `#[cfg(test)]` but its only caller is a `#[cfg(feature = "jit")]` test, so a
+   no-jit test build warned "unused import". Matched the cfg to the caller
+   (`#[cfg(all(test, feature = "jit"))]`). `cargo clippy --workspace --all-targets`
+   is now clean with `-D warnings` on **both** default and `--all-features`.
+4. **rustfmt gate + one-time format.** Added `rustfmt.toml` (pins the defaults,
+   `max_width = 100`) and ran `cargo fmt`. The tree was already ~99.5% conformant
+   (p99 line width 95), so the diff is almost entirely wrapping the ~360 long-line
+   outliers across 51 files, plus a couple alphabetized `use` groups — no semantic
+   changes. `cargo fmt --check` is now a meaningful gate.
+5. **CI.** First `.github/workflows/ci.yml` — a fast `fmt --check` job + a
+   build/test job (`clippy --all-targets --all-features -- -D warnings`, nextest
+   with `treesit-grammars`, doctests), mirroring `make check`. Installs the system
+   libs the `--all-features` surface needs (ALSA, xkbcommon, X11/Wayland, GL).
+
+**Verified.** `cargo build --workspace` green; clippy clean (default + all-features,
+`-D warnings`); `cargo fmt --check` clean; colored output confirmed via a pty
+(`script`), plain output confirmed byte-identical on a pipe. Pushed to `main`
+(3 commits: feature, style, ci).
