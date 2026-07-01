@@ -592,3 +592,13 @@ time regressions across the suite (`fib`/`loop`/`mandelbrot`/… flat), and lowe
 RSS on several rows. Memory-for-speed, but net memory is neutral-to-better because
 the rarer majors cut the transient 2×-copy peak. General: helps any code that builds
 a large sequence (`map`/`filter`/reduce-into/`cons` loops), not just `sort`.
+
+**Follow-up (same day): cap the nursery threshold** (`NURSERY_MAX` = 8M objects). A
+review caught that the total-live scaling was unbounded: `should_collect` fires a
+minor when *young* ≥ threshold, so a process with a large live old gen that then
+*churns* transient young garbage would buffer ~2×old before collecting — young memory
+ballooning with old-gen size (a long-running large-heap process, e.g. the editor;
+short benchmarks never hit it). Capped so the young buffer is bounded regardless of
+old-gen size, well above real build working sets (`sort` needs ~750K, `gen` 2M needs
+~4M — both under the cap, so the win is unaffected). Handle index is 32-bit, so the
+larger nurseries can't overflow it. 643 tests + differential + GC-stress still green.
