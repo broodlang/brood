@@ -2421,16 +2421,58 @@ pub(crate) mod backend {
         ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32
     }
 
-    /// Alpha-composite `fg` over destination pixel `dst` with coverage `cov` (0..=255).
+    /// sRGB byte (0..=255) → linear-light (0..=1). Built once. A glyph's coverage is
+    /// a *linear* quantity (fraction of the pixel the stroke covers), so correct
+    /// anti-aliased compositing has to happen in linear light — which means decoding
+    /// the stored sRGB colours here first. See [`blend`].
+    static SRGB_TO_LINEAR: std::sync::LazyLock<[f32; 256]> = std::sync::LazyLock::new(|| {
+        let mut t = [0.0f32; 256];
+        for (i, e) in t.iter_mut().enumerate() {
+            let c = i as f32 / 255.0;
+            *e = if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            };
+        }
+        t
+    });
+
+    /// linear-light (0..=1) → sRGB byte — the exact inverse of [`SRGB_TO_LINEAR`].
+    #[inline]
+    fn linear_to_srgb(c: f32) -> u32 {
+        let c = c.clamp(0.0, 1.0);
+        let s = if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0 + 0.5) as u32
+    }
+
+    /// Alpha-composite `fg` over destination pixel `dst` with coverage `cov` (0..=255),
+    /// **in linear light** so anti-aliased edges are weighted correctly. The rasteriser's
+    /// coverage is linear, but a naive sRGB-space lerp under-weights partial-coverage
+    /// pixels — on a dark theme (light text on `#1e1e2e`) that makes stems look thin and
+    /// the text fuzzy. Decoding to linear, blending, then re-encoding keeps strokes full
+    /// and edges crisp. The glyph interior (`cov == 255`) and exterior (`cov == 0`) — the
+    /// bulk of the pixels — take an exact fast path with no float work, so only the thin
+    /// anti-aliased rim pays the gamma cost.
     fn blend(dst: u32, fg: [u8; 3], cov: u8) -> u32 {
-        let a = cov as u32;
-        let inv = 255 - a;
-        let dr = (dst >> 16) & 0xff;
-        let dg = (dst >> 8) & 0xff;
-        let db = dst & 0xff;
-        let r = (fg[0] as u32 * a + dr * inv) / 255;
-        let g = (fg[1] as u32 * a + dg * inv) / 255;
-        let b = (fg[2] as u32 * a + db * inv) / 255;
+        if cov == 0 {
+            return dst;
+        }
+        if cov == 255 {
+            return pack(fg);
+        }
+        let a = cov as f32 / 255.0;
+        let lut = &*SRGB_TO_LINEAR;
+        let dr = lut[((dst >> 16) & 0xff) as usize];
+        let dg = lut[((dst >> 8) & 0xff) as usize];
+        let db = lut[(dst & 0xff) as usize];
+        let r = linear_to_srgb(lut[fg[0] as usize] * a + dr * (1.0 - a));
+        let g = linear_to_srgb(lut[fg[1] as usize] * a + dg * (1.0 - a));
+        let b = linear_to_srgb(lut[fg[2] as usize] * a + db * (1.0 - a));
         (r << 16) | (g << 8) | b
     }
 
