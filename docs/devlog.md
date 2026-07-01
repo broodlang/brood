@@ -562,3 +562,33 @@ lever is dispatch / env-lookup cost (`nqueens`/`pipeline`: ~325–398K env-hops;
 `pipeline`'s transducer arithmetic runs as indirect closure calls). The
 `BROOD_JIT_POISON_CARRY`-style validation (poison elided state → checksum diverges)
 is a good technique to reuse for any future carry-slot change.
+
+## 2026-07-01 — GC: scale the nursery threshold by *total* live (young+old); rarer majors
+
+Profiling `sort` (5th/7) found its cost isn't the sort — the numeric single-arg
+`(sort nums)` already uses the native `%sort-asc` — but **building the input list**.
+Decomposing a 2M-element `cons` loop: ~9% arithmetic, ~24% per-`cons` overhead,
+**~67% GC**. The collector was copying the growing, all-live accumulator far more
+than necessary.
+
+**Two root causes + fixes** (`core/heap.rs`):
+1. **Nursery threshold used young-only live.** After each minor GC the threshold
+   became `max(gc_floor, local_live_count*2)` — but a *tenuring* build moves its
+   survivors to the old gen, so young ≈ 0 and the threshold collapsed to the floor
+   (~64K), re-collecting every floor-worth of allocations → O(n/floor) minors while
+   building one structure. Fixed to scale by **total** live `(young+old)*2`, so a
+   large-live process earns a proportionally bigger nursery (O(log n) collects),
+   while a small-live churny process (a `spawn` worker) still sits at the floor —
+   no concurrency regression.
+2. **Majors doubled (`old*2`).** During a large build the old gen is nearly
+   all-live, so a major compacts the whole growing list and reclaims almost nothing.
+   Grown to `old*MAJOR_GROWTH` (default 4, `BROOD_MAJOR_GROWTH` override) — those
+   wasteful full-list compactions become geometrically rarer.
+
+**Measured.** A 2M-list build: 33→5 collections, 4.26M→2.35M objects copied,
+**0.44→0.32s (~27%)**; the `sort` benchmark **173→150 ms compute (~13%)**. All 643
+tests pass; JIT-vs-VM differential clean; `BROOD_GC_STRESS`+`GC_VERIFY` clean. No
+time regressions across the suite (`fib`/`loop`/`mandelbrot`/… flat), and lower peak
+RSS on several rows. Memory-for-speed, but net memory is neutral-to-better because
+the rarer majors cut the transient 2×-copy peak. General: helps any code that builds
+a large sequence (`map`/`filter`/reduce-into/`cons` loops), not just `sort`.
