@@ -388,6 +388,22 @@ fn rt_gc_floor() -> usize {
 /// floor makes majors periodic under stress (still exercised) and rare in normal
 /// operation (the old gen grows to a few MB before a compaction reclaims tenured
 /// garbage, so live tenured data isn't recopied often).
+/// Growth factor for the major-collection threshold: after a major, the next one
+/// fires when the old gen has grown this many× (was 2×). A larger factor makes
+/// majors geometrically rarer during a large-structure build — where the old gen
+/// is nearly all-live and a compaction copies everything for almost no reclaim —
+/// at the cost of retaining more tenured garbage between majors (memory for speed).
+fn major_growth() -> usize {
+    static G: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *G.get_or_init(|| {
+        std::env::var("BROOD_MAJOR_GROWTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n >= 2)
+            .unwrap_or(4)
+    })
+}
+
 fn major_floor() -> usize {
     static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *FLOOR.get_or_init(|| {
@@ -5713,14 +5729,30 @@ impl Heap {
         // nursery objects and never recopies the tenured old gen.
         let tenure = self.local_live_count() >= min_tenure();
         self.minor_collect(tenure, extra_roots, extra_envs);
-        self.gc_threshold = std::cmp::max(gc_floor(), self.local_live_count().saturating_mul(2));
-        // Escalate to a *major* (compact the old generation) only when it has
-        // doubled since the last major — so majors stay rare while minors keep the
-        // nursery bounded.
+        // Next minor fires when the *young* gen reaches `gc_threshold`. Scale it with
+        // the **total** live set (young + old), not just young: a tenuring build moves
+        // its survivors to the old gen, leaving young ≈ 0, so a young-only `live*2`
+        // collapsed to the floor and re-collected every floor-worth of allocations —
+        // O(n/floor) minor collects (and majors) while building one large structure.
+        // Counting old-gen live lets a process with a big live set earn a
+        // proportionally bigger nursery budget (memory bounded to ~a small multiple of
+        // live), so large-structure builds collect O(log n) times; a small-live churny
+        // process (e.g. a `spawn` fan-out worker) still sits at the floor. (2026-07-01)
+        let live_total = self.local_live_count() + self.old_live_count();
+        self.gc_threshold = std::cmp::max(gc_floor(), live_total.saturating_mul(2));
+        // Escalate to a *major* (compact the old generation) only when it has grown
+        // MAJOR_GROWTH× since the last major — so majors stay rare while minors keep
+        // the nursery bounded. Grown 2×→4× (2026-07-01): during a large-structure
+        // build the old gen is nearly all-live, so a major copies the whole growing
+        // list and reclaims almost nothing; a larger factor makes those wasteful
+        // full-list compactions far rarer (fewer, at geometrically spaced sizes),
+        // trading retained-garbage memory for copy throughput.
         if self.old_live_count() >= self.major_threshold {
             self.major_collect(extra_roots, extra_envs);
-            self.major_threshold =
-                std::cmp::max(major_floor(), self.old_live_count().saturating_mul(2));
+            self.major_threshold = std::cmp::max(
+                major_floor(),
+                self.old_live_count().saturating_mul(major_growth()),
+            );
         }
     }
 
