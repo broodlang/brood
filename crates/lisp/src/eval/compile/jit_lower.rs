@@ -439,7 +439,10 @@ fn jit_lower_arm_inner(
     slot_tags: &[u8],
     inline: Option<(&Node, &Chunk, usize)>,
 ) -> Option<*const u8> {
-    use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_PAIR};
+    use crate::core::value::jit_layout::{
+        PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_PAIR, TAG_VECTOR,
+    };
+    use crate::core::heap::VecStore as VS;
     use cranelift_codegen::ir::{
         condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlagsData, StackSlotData,
         StackSlotKind,
@@ -794,6 +797,15 @@ fn jit_lower_arm_inner(
     let pobase_id = m
         .declare_function("brood_rt_pair_old_base", Linkage::Import, &pbase_sig)
         .ok()?;
+    // Inline small-vector `nth` support: LOCAL vector-slab base pointers (same
+    // `heap -> *const u8` signature as the pair bases), for `slot + items_off +
+    // i*24` loads instead of per-read `brood_rt_vector_ref` FFI calls.
+    let vnbase_id = m
+        .declare_function("brood_rt_vec_nursery_base", Linkage::Import, &pbase_sig)
+        .ok()?;
+    let vobase_id = m
+        .declare_function("brood_rt_vec_old_base", Linkage::Import, &pbase_sig)
+        .ok()?;
     let mut cons_sig = m.make_signature();
     cons_sig.params.push(AbiParam::new(ptr_ty)); // heap
     cons_sig.params.push(AbiParam::new(ptr_ty)); // out
@@ -1005,6 +1017,8 @@ fn jit_lower_arm_inner(
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
     let pnbase_ref = m.declare_func_in_func(pnbase_id, b.func);
     let pobase_ref = m.declare_func_in_func(pobase_id, b.func);
+    let vnbase_ref = m.declare_func_in_func(vnbase_id, b.func);
+    let vobase_ref = m.declare_func_in_func(vobase_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
     let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
@@ -1960,6 +1974,89 @@ fn jit_lower_arm_inner(
         Op::Handle(w0, w1, w2)
     };
 
+    // Inline read of `(nth v <const idx>)` for a LOCAL small (inline) vector, the
+    // analog of the pair `first`/`rest` inline. Fetches the vector-slab base
+    // *per read* (a trivial FFI, not the hoist used for pairs) so it is safe even
+    // in arms with GC safepoints (a non-tail `Call` between reads) — `bintree`'s
+    // `check` is exactly that. Any slow condition (not a `Vector`, non-LOCAL
+    // region, spilled/large vector, or out-of-range index) deopts to the VM,
+    // which produces `nth`'s exact result. Element read is `slot + JIT_ITEMS_OFF +
+    // idx*STRIDE`; `vec` is the handle word-triple, `idx` a compile-time index.
+    let inline_vec_ref = |b: &mut FunctionBuilder,
+                          vec: [cranelift_codegen::ir::Value; 3],
+                          idx: i64|
+     -> Op {
+        let w0 = vec[0];
+        let w1 = vec[1];
+        // Tag byte must be Vector (Range/SeqView share the slab but tag differently).
+        let tagb = b.ins().band_imm(w0, 0xff);
+        let is_vec = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_VECTOR as i64);
+        let c1 = b.create_block();
+        b.ins().brif(is_vec, c1, &[], deopt, &[]);
+        b.switch_to_block(c1);
+        // Region: high 2 bits of the handle == 0 (LOCAL). Deopt for PRELUDE/RUNTIME.
+        let high2 = b.ins().ushr_imm(w1, 62);
+        let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0);
+        let c2 = b.create_block();
+        b.ins().brif(is_local, c2, &[], deopt, &[]);
+        b.switch_to_block(c2);
+        // Age bit 61 (0=nursery, 1=old) selects which slab base to fetch. Fetch it
+        // per-read so a prior safepoint that moved the slab can't leave it stale.
+        let age = b.ins().ushr_imm(w1, 61);
+        let is_old = b.ins().icmp_imm(IntCC::NotEqual, age, 0);
+        let nb = b.create_block();
+        let ob = b.create_block();
+        let merge = b.create_block();
+        b.append_block_param(merge, ptr_ty);
+        b.ins().brif(is_old, ob, &[], nb, &[]);
+        b.switch_to_block(nb);
+        let cn = b.ins().call(vnbase_ref, &[heap]);
+        let bn = b.inst_results(cn)[0];
+        b.ins().jump(merge, &[BlockArg::Value(bn)]);
+        b.switch_to_block(ob);
+        let co = b.ins().call(vobase_ref, &[heap]);
+        let bo = b.inst_results(co)[0];
+        b.ins().jump(merge, &[BlockArg::Value(bo)]);
+        b.switch_to_block(merge);
+        let base = b.block_params(merge)[0];
+        // Slot pointer: base + slab_index * stride. slab_index = low 32 bits.
+        let vidx = b.ins().band_imm(w1, 0xFFFF_FFFFi64);
+        let slot_off = b.ins().imul_imm(vidx, VS::JIT_STRIDE);
+        let slot_ptr = b.ins().iadd(base, slot_off);
+        // Discriminant byte must be `Inline` (spilled/large vectors deopt).
+        let disc = b
+            .ins()
+            .load(types::I8, MemFlagsData::trusted(), slot_ptr, VS::JIT_TAG_OFF);
+        let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
+        let c3 = b.create_block();
+        b.ins().brif(is_inline, c3, &[], deopt, &[]);
+        b.switch_to_block(c3);
+        // Bounds: idx < len (len is the inline element count, a u8).
+        let lenb = b
+            .ins()
+            .load(types::I8, MemFlagsData::trusted(), slot_ptr, VS::JIT_LEN_OFF);
+        let lenw = b.ins().uextend(types::I64, lenb);
+        let idxc = b.ins().iconst(types::I64, idx);
+        let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, idxc, lenw);
+        let c4 = b.create_block();
+        b.ins().brif(in_bounds, c4, &[], deopt, &[]);
+        b.switch_to_block(c4);
+        // Element read: slot_ptr + JIT_ITEMS_OFF + idx*size_of::<Value>().
+        let elem_off = VS::JIT_ITEMS_OFF as i64 + idx * (STRIDE);
+        let elem = b.ins().iadd_imm(slot_ptr, elem_off);
+        let r0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
+        let r1 = b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), elem, PAYLOAD_OFFSET as i32);
+        let r2 = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            elem,
+            PAYLOAD_OFFSET as i32 + 8,
+        );
+        Op::Handle(r0, r1, r2)
+    };
+
     // For each leader, which of its operand-stack block params carry a boolean (so the
     // entry reconstruction tags them `Op::Bool`, not `Op::Int`). Populated by the jump
     // sites (`Jump`/`JumpIfFalse`/leader fall-through), which run before the target block is
@@ -2619,14 +2716,13 @@ fn jit_lower_arm_inner(
                     ..
                 } => {
                     if matches!(op, PrimOp::VectorRef) {
-                        // `(nth v 0)` / `(nth v 1)` — constant index fused into the slot:
-                        // materialise `int_b` as a Value word-triple and call vector_ref.
+                        // `(nth v 0)` / `(nth v 1)` — constant index fused into the slot.
                         // slot_a is always the vector (source 0 after map normalisation).
+                        // Inline the read for a LOCAL small vector (deopting otherwise),
+                        // the analog of the pair car/cdr inline — this is `bintree`'s
+                        // `(nth node 0/1)` hot path.
                         let vec = read_words(&mut b, Op::Slot(*slot_a));
-                        let t = b.ins().iconst(types::I64, TAG_INT as i64);
-                        let v = b.ins().iconst(types::I64, *int_b);
-                        let z = b.ins().iconst(types::I64, 0);
-                        let h = vector_ref(&mut b, vec, [t, v, z]);
+                        let h = inline_vec_ref(&mut b, vec, *int_b);
                         stack.push(h);
                     } else
                     // `(cons slot int_literal)` or `(cons int_literal slot)` (after map

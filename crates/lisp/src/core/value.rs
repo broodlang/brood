@@ -1086,6 +1086,11 @@ pub(crate) mod jit_layout {
     /// Rope=8, Pair=9`. A `car`/`cdr` tag-check compares a slot's discriminant byte
     /// against this. Pinned by the layout test.
     pub const TAG_PAIR: u8 = 9;
+    /// `Value::Vector`'s discriminant (`… Pair=9, Vector=10, Range=11`). The JIT
+    /// tag-checks a slot's discriminant byte against this before an inline
+    /// small-vector element read (`Range`/`SeqView` share the backing slab but
+    /// carry their own tags, so they deopt to the VM). Pinned by the layout test.
+    pub const TAG_VECTOR: u8 = 10;
 }
 
 #[cfg(test)]
@@ -1125,6 +1130,20 @@ mod jit_layout_tests {
             pbytes[0],
             jit_layout::TAG_PAIR,
             "Value::Pair discriminant drifted"
+        );
+        // `Value::Vector`'s discriminant must match `TAG_VECTOR` (the JIT's inline
+        // small-vector element read tag-check); a variant reorder breaks it.
+        let vv = Value::Vector(VecId::local_gen(0, 0));
+        let vbytes = unsafe {
+            std::slice::from_raw_parts(
+                &vv as *const Value as *const u8,
+                std::mem::size_of::<Value>(),
+            )
+        };
+        assert_eq!(
+            vbytes[0],
+            jit_layout::TAG_VECTOR,
+            "Value::Vector discriminant drifted"
         );
         // `Value::Bool`'s discriminant must match `TAG_BOOL` (the JIT boxes a comparison
         // result as a Bool, not an Int); a variant reorder breaks it.

@@ -448,11 +448,147 @@ fn to_prelude(v: Value) -> Value {
     }
 }
 
+/// How many elements a vector stores **inline in its slab slot** before it
+/// spills to a heap `Vec` (see [`VecStore`]). Set to 2 — the hot small-vector
+/// case (2-element tuples like `bintree` nodes, 2-element `SeqView` backings) —
+/// kept small so an inline slot (~64 B) stays *below* the old `Vec<Value>`
+/// handle-plus-`malloc` footprint (a 24 B slot + a ≥48 B heap block). A larger
+/// cap would inline 3-element `Range` backings too, but at a bigger slot for
+/// *every* vector, which added GC-copy traffic on the copy-bound `bintree`
+/// (whose whole tree is live at once) — net CPU-negative in measurement.
+pub(crate) const INLINE_VEC_CAP: usize = 2;
+
+/// Element storage for one heap vector: **inline** in the slab slot for the
+/// common small case, or **spilled** to a heap `Vec` for larger vectors. This
+/// replaced a bare `Vec<Value>` per slot (`vectors: Vec<Vec<Value>>`), which
+/// paid a `malloc` on *every* vector allocation and forced element reads through
+/// a double indirection the JIT couldn't inline. A small vector is now a plain
+/// bump-push (like a pair), and its elements sit at a fixed offset in the slot
+/// so the JIT can inline the read the way it inlines a pair car/cdr.
+///
+/// An **enum** (not a struct with an always-present spill field), so the inline
+/// and spill forms share storage and a small vector costs no more than its two
+/// `Value`s plus a length. Both present as `&[Value]` through [`Deref`]/
+/// [`DerefMut`], so every reader (accessors, GC, message copy, builtins) is
+/// oblivious to which form backs a given vector. `#[repr(u8)]` pins the layout
+/// (tag byte at 0; the `Inline` variant's `len` at 8, `items` at 16) for the
+/// JIT's inline element read — see `jit_lower.rs`.
+#[repr(u8)]
+#[derive(Clone)]
+pub(crate) enum VecStore {
+    Inline {
+        len: u8,
+        items: [Value; INLINE_VEC_CAP],
+    },
+    Spill(Vec<Value>),
+}
+
+impl VecStore {
+    /// Wrap owned elements, inlining when they fit (no heap allocation) and
+    /// spilling otherwise. Consumes `items` so the spill path is a move, not a copy.
+    #[inline]
+    fn from_vec(items: Vec<Value>) -> Self {
+        if items.len() <= INLINE_VEC_CAP {
+            let mut inline = [Value::nil(); INLINE_VEC_CAP];
+            inline[..items.len()].copy_from_slice(&items);
+            VecStore::Inline {
+                len: items.len() as u8,
+                items: inline,
+            }
+        } else {
+            VecStore::Spill(items)
+        }
+    }
+
+    /// Build from a known element count + a per-index producer, inlining without
+    /// a temporary `Vec` when it fits. The GC copy path ([`flush_vector`]) uses
+    /// this so relocating a small survivor allocates nothing.
+    #[inline]
+    fn from_flushed(len: usize, mut producer: impl FnMut(usize) -> Value) -> Self {
+        if len <= INLINE_VEC_CAP {
+            let mut inline = [Value::nil(); INLINE_VEC_CAP];
+            for (i, slot) in inline[..len].iter_mut().enumerate() {
+                *slot = producer(i);
+            }
+            VecStore::Inline {
+                len: len as u8,
+                items: inline,
+            }
+        } else {
+            VecStore::Spill((0..len).map(producer).collect())
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[Value] {
+        match self {
+            VecStore::Inline { len, items } => &items[..*len as usize],
+            VecStore::Spill(v) => v,
+        }
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [Value] {
+        match self {
+            VecStore::Inline { len, items } => &mut items[..*len as usize],
+            VecStore::Spill(v) => v,
+        }
+    }
+
+    /// Heap bytes held *outside* the slab slot (the spilled `Vec`'s buffer), for
+    /// the byte-footprint accounting in [`slab_bytes`]. Inline vectors own none.
+    #[inline]
+    fn spilled_bytes(&self) -> usize {
+        match self {
+            VecStore::Spill(v) => v.capacity() * std::mem::size_of::<Value>(),
+            VecStore::Inline { .. } => 0,
+        }
+    }
+
+    // ---- Byte layout for the JIT's inline element read (jit_lower.rs) ----
+    // A `#[repr(u8)]` enum is laid out per RFC 2195 as a union of repr(C)
+    // variant-structs, each prefixed by the u8 discriminant. So for the `Inline`
+    // variant: discriminant @0, `len` @1, `items` @8 (8-aligned). The
+    // discriminant of the first variant (`Inline`) is 0. `JIT_STRIDE` is the
+    // slab stride. These are asserted against reality by `vecstore_jit_layout`.
+
+    /// Slab stride: bytes per `VecStore` slot.
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_STRIDE: i64 = std::mem::size_of::<VecStore>() as i64;
+    /// Discriminant byte offset within a slot.
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_TAG_OFF: i32 = 0;
+    /// Discriminant value that means `Inline` (inline-readable).
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_INLINE_TAG: i64 = 0;
+    /// `Inline.len` (u8) byte offset within a slot.
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_LEN_OFF: i32 = 1;
+    /// `Inline.items[0]` byte offset within a slot.
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_ITEMS_OFF: i32 = 8;
+}
+
+impl std::ops::Deref for VecStore {
+    type Target = [Value];
+    #[inline]
+    fn deref(&self) -> &[Value] {
+        self.as_slice()
+    }
+}
+
+impl std::ops::DerefMut for VecStore {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Value] {
+        self.as_mut_slice()
+    }
+}
+
 /// The slabs holding heap objects in the LOCAL data heap and the PRELUDE region.
 #[derive(Default)]
 struct Slabs {
     pairs: Vec<(Value, Value)>,
-    vectors: Vec<Vec<Value>>,
+    vectors: Vec<VecStore>,
     /// Maps as a flat slab of CHAMP nodes (ADR-040). Each [`MapNode`] is
     /// either a branch (two bitmaps + packed data/children arrays) or a
     /// max-depth collision leaf. The handle in `Value::Map(MapId)` points
@@ -512,7 +648,8 @@ fn slab_live_count(s: &Slabs) -> usize {
 fn slab_bytes(s: &Slabs) -> usize {
     use std::mem::size_of;
     s.pairs.len() * size_of::<(Value, Value)>()
-        + s.vectors.len() * size_of::<Vec<Value>>()
+        + s.vectors.len() * size_of::<VecStore>()
+        + s.vectors.iter().map(VecStore::spilled_bytes).sum::<usize>()
         + s.maps.len() * size_of::<MapNode>()
         + s.strings.len() * size_of::<LocalString>()
         + s.bigints.len() * size_of::<num_bigint::BigInt>()
@@ -615,7 +752,7 @@ pub struct LocalCheckpoint {
 #[derive(Default)]
 struct CodeSlabs {
     pairs: boxcar::Vec<(Value, Value)>,
-    vectors: boxcar::Vec<Vec<Value>>,
+    vectors: boxcar::Vec<VecStore>,
     maps: boxcar::Vec<MapNode>,
     strings: boxcar::Vec<String>,
     /// Bignums `def`'d into a global / baked as a literal into shared RUNTIME
@@ -1796,7 +1933,25 @@ impl Heap {
     }
 
     pub fn alloc_vector(&mut self, items: Vec<Value>) -> Value {
-        let idx = alloc_slot!(self, vectors, items);
+        let idx = alloc_slot!(self, vectors, VecStore::from_vec(items));
+        Value::vector(VecId::local_gen(idx, self.local_epoch))
+    }
+
+    /// Allocate a 2-element vector directly from its elements — a bump-push of an
+    /// inline [`VecStore`] with **no temporary `Vec`** (hence no `malloc`). The
+    /// JIT's `MakeVector(2)` runtime helper (`brood_rt_make_vector2`) uses this
+    /// so the overwhelmingly common 2-tuple allocation (e.g. every `bintree`
+    /// node) is as cheap as a `cons`. Larger literals still go through
+    /// [`alloc_vector`].
+    pub fn alloc_vector2(&mut self, a: Value, b: Value) -> Value {
+        let idx = alloc_slot!(
+            self,
+            vectors,
+            VecStore::Inline {
+                len: 2,
+                items: [a, b],
+            }
+        );
         Value::vector(VecId::local_gen(idx, self.local_epoch))
     }
 
@@ -1812,7 +1967,7 @@ impl Heap {
         let idx = alloc_slot!(
             self,
             vectors,
-            vec![Value::int(lo), Value::int(hi), Value::int(step)]
+            VecStore::from_vec(vec![Value::int(lo), Value::int(hi), Value::int(step)])
         );
         Value::range(VecId::local_gen(idx, self.local_epoch))
     }
@@ -1823,7 +1978,7 @@ impl Heap {
     /// vector slab exactly like [`Heap::alloc_range`], but its backing holds heap
     /// values (not just ints), so GC promote/flush/verify recurse into them.
     pub fn alloc_seqview(&mut self, source: Value, xform: Value) -> Value {
-        let idx = alloc_slot!(self, vectors, vec![source, xform]);
+        let idx = alloc_slot!(self, vectors, VecStore::from_vec(vec![source, xform]));
         Value::seqview(VecId::local_gen(idx, self.local_epoch))
     }
 
@@ -3071,13 +3226,13 @@ impl Heap {
                     .into_iter()
                     .map(|x| self.promote_in(x, fwd))
                     .collect();
-                Value::vector(VecId::runtime(self.runtime.code.vectors.push(items)))
+                Value::vector(VecId::runtime(self.runtime.code.vectors.push(VecStore::from_vec(items))))
             }
             // A range's backing `[lo hi step]` vector holds only ints (atoms) —
             // copy it across and keep the `Range` wrapper.
             ValueRef::Range(id) if id.region() == LOCAL => {
                 let items = self.vector(id).to_vec();
-                Value::range(VecId::runtime(self.runtime.code.vectors.push(items)))
+                Value::range(VecId::runtime(self.runtime.code.vectors.push(VecStore::from_vec(items))))
             }
             // A seq-view's backing `[source xform]` holds heap values (a
             // collection and a transducer closure), so promote each across like a
@@ -3089,7 +3244,7 @@ impl Heap {
                     .into_iter()
                     .map(|x| self.promote_in(x, fwd))
                     .collect();
-                Value::seqview(VecId::runtime(self.runtime.code.vectors.push(items)))
+                Value::seqview(VecId::runtime(self.runtime.code.vectors.push(VecStore::from_vec(items))))
             }
             ValueRef::Map(id) if id.region() == LOCAL => {
                 // Recursively promote the trie depth-first. Children are
@@ -4636,6 +4791,24 @@ impl Heap {
         self.old.pairs.as_ptr() as *const u8
     }
 
+    /// Raw byte pointer to the LOCAL nursery **vector** slab, so a no-call/no-GC
+    /// JIT arm can inline a small-vector element read (`slot + JIT_ITEMS_OFF +
+    /// i*STRIDE`) instead of calling `brood_rt_vector_ref` — the vector analog of
+    /// [`local_pair_nursery_base`]. Each slot is a [`VecStore`] (stride
+    /// [`VecStore::JIT_STRIDE`]); the JIT reads the discriminant + inline `len`
+    /// and deopts for a spilled (large) vector.
+    #[cfg(feature = "jit")]
+    pub(crate) fn local_vec_nursery_base(&self) -> *const u8 {
+        self.local.vectors.as_ptr() as *const u8
+    }
+
+    /// Raw byte pointer to the LOCAL old-generation vector slab. Companion to
+    /// [`local_vec_nursery_base`].
+    #[cfg(feature = "jit")]
+    pub(crate) fn local_vec_old_base(&self) -> *const u8 {
+        self.old.vectors.as_ptr() as *const u8
+    }
+
     /// Current root-stack depth, for a balanced `truncate_roots(roots_len())`
     /// guard around a region that may push variable numbers of roots.
     pub fn roots_len(&self) -> usize {
@@ -5945,7 +6118,7 @@ impl Heap {
                                 true,
                             )
                         {
-                            for &el in &slabs.vectors[id.index()] {
+                            for &el in slabs.vectors[id.index()].iter() {
                                 work.push(W::V(el, id.0));
                             }
                         }
@@ -5985,7 +6158,7 @@ impl Heap {
                                 true,
                             )
                         {
-                            for &el in &slabs.vectors[id.index()] {
+                            for &el in slabs.vectors[id.index()].iter() {
                                 work.push(W::V(el, id.0));
                             }
                         }
@@ -6457,15 +6630,25 @@ fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId)
     if let Some(&new_idx) = fwd.vectors.get(&key) {
         return fwd.mint_vector(new_idx as usize);
     }
-    let items: Vec<Value> = old.vectors[flush_bound!(old.vectors, id, fwd, "vector")].clone();
+    // Reserve the destination slot and record the forwarding *before* flushing
+    // elements (so shared/repeated references to this vector resolve to the
+    // placeholder), then build the survivor in place — inlining without a temp
+    // `Vec` for the common small case (`from_flushed`). The source slab is read
+    // element-by-element (`Value` is `Copy`), keeping `old`'s borrow immutable
+    // while `new`/`fwd` are borrowed mutably by `flush_value`.
+    let src_idx = flush_bound!(old.vectors, id, fwd, "vector");
+    let n = old.vectors[src_idx].len();
     let new_idx = new.vectors.len();
-    new.vectors.push(Vec::new());
+    new.vectors.push(VecStore::Inline {
+        len: 0,
+        items: [Value::nil(); INLINE_VEC_CAP],
+    });
     fwd.vectors.insert(key, new_idx as u32);
-    let copied: Vec<Value> = items
-        .into_iter()
-        .map(|x| flush_value(old, new, fwd, x))
-        .collect();
-    new.vectors[new_idx] = copied;
+    let store = VecStore::from_flushed(n, |i| {
+        let x = old.vectors[src_idx][i];
+        flush_value(old, new, fwd, x)
+    });
+    new.vectors[new_idx] = store;
     fwd.mint_vector(new_idx)
 }
 
@@ -6897,12 +7080,14 @@ fn flush_rt_vector(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, i
     if let Some(&n) = fwd.vectors.get(&key) {
         return VecId::runtime(n as usize);
     }
-    let items: Vec<Value> = old.vectors.get(id.index()).expect("rt vector").clone();
-    let copied: Vec<Value> = items
-        .into_iter()
-        .map(|x| flush_rt_value(old, new, fwd, x))
-        .collect();
-    let new_idx = new.vectors.push(copied);
+    let src = old.vectors.get(id.index()).expect("rt vector");
+    let n = src.len();
+    // Build in place — no temp `Vec` for the inline case. RUNTIME vectors are
+    // acyclic, so recording the forwarding after the build (as the pair path
+    // here also does) is safe. `src` and `flush_rt_value` share `old`'s
+    // immutable borrow; `new` is append-only via interior mutability.
+    let store = VecStore::from_flushed(n, |i| flush_rt_value(old, new, fwd, src[i]));
+    let new_idx = new.vectors.push(store);
     fwd.vectors.insert(key, new_idx as u32);
     VecId::runtime(new_idx)
 }
@@ -7243,6 +7428,49 @@ fn rewrite_local_rt_handles(
         if let Some(p) = fr.parent {
             fr.parent = Some(flush_rt_env(old, new, fwd, p));
         }
+    }
+}
+
+#[cfg(all(test, feature = "jit"))]
+mod vecstore_layout_tests {
+    use super::*;
+    use crate::core::value::Value;
+
+    /// Pin the byte layout the JIT hardcodes for its inline small-vector read
+    /// (`jit_lower.rs`): the `Inline` discriminant is 0, and `len`/`items` sit at
+    /// the advertised offsets within a slot. A `#[repr(u8)]` layout drift (e.g.
+    /// bumping `INLINE_VEC_CAP` or reordering fields) fails here rather than
+    /// silently miscompiling every `nth`.
+    #[test]
+    fn vecstore_jit_layout() {
+        let v = VecStore::Inline {
+            len: 2,
+            items: [Value::int(7), Value::int(9)],
+        };
+        let base = &v as *const VecStore as usize;
+        // Discriminant byte at offset 0 (repr(u8), RFC 2195).
+        let tag = unsafe { *(base as *const u8) };
+        assert_eq!(tag as i64, VecStore::JIT_INLINE_TAG, "Inline discriminant");
+        if let VecStore::Inline { len, items } = &v {
+            assert_eq!(
+                len as *const u8 as usize - base,
+                VecStore::JIT_LEN_OFF as usize,
+                "Inline.len offset"
+            );
+            assert_eq!(
+                items.as_ptr() as usize - base,
+                VecStore::JIT_ITEMS_OFF as usize,
+                "Inline.items offset"
+            );
+        }
+        assert_eq!(
+            std::mem::size_of::<VecStore>() as i64,
+            VecStore::JIT_STRIDE,
+            "slab stride"
+        );
+        // The JIT reads a Value element as 3 i64 words; the slab stride between
+        // elements is `size_of::<Value>()`.
+        assert_eq!(std::mem::size_of::<Value>(), 24, "Value stride");
     }
 }
 

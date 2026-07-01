@@ -481,3 +481,42 @@ A presentation/infrastructure pass (no language semantics touched). Four pieces:
 `-D warnings`); `cargo fmt --check` clean; colored output confirmed via a pty
 (`script`), plain output confirmed byte-identical on a pipe. Pushed to `main`
 (3 commits: feature, style, ci).
+
+## 2026-07-01 — Vectors: inline small-vector storage (closes the `bintree` heap gap)
+
+Closed the largest remaining compute gap from the benchmark suite (`bintree`,
+was 6th/7). Root cause was the **vector representation**, not JIT coverage (both
+hot arms already tier & lower): `vectors: Vec<Vec<Value>>` paid a **`malloc` per
+vector** — `bintree` allocates ~1.6M 2-element `[a b]` nodes/run — and forced
+`nth` reads through the `brood_rt_vector_ref` FFI (double indirection, the JIT
+couldn't inline). Pairs by contrast use a flat `Vec<(Value,Value)>` bump slab
+with JIT-inlined `first`/`rest`; this brings vectors to parity.
+
+1. **Inline storage.** `vectors: Vec<Vec<Value>>` → `Vec<VecStore>`, where
+   `VecStore` is a `#[repr(u8)] enum { Inline { len: u8, items: [Value; 2] },
+   Spill(Vec<Value>) }` (`INLINE_VEC_CAP = 2` — the hot 2-tuple / seqview case;
+   ranges & larger spill). It impls `Deref`/`DerefMut` to `[Value]`, so the
+   macro-generated accessor and all ~50 `.vector()` readers are **unchanged** —
+   only the alloc sites and a few direct-slab GC sites needed edits. `#[repr(u8)]`
+   pins the layout for the JIT (tag @0, `len` @1, `items` @8), asserted by
+   `vecstore_jit_layout`. Chose an enum over a struct-with-spill after a fat
+   `[Value;3]+Option<Vec>` struct (104 B) regressed the GC-copy-bound `bintree`;
+   the enum keeps a slot ≤ the old handle-plus-`malloc` footprint.
+2. **Direct allocation** (the biggest lever). `brood_rt_make_vector2` did
+   `alloc_vector(vec![a,b])` — a temp-`Vec` malloc+free *per node*. New
+   `alloc_vector2(a,b)` bump-pushes an inline `VecStore` directly. This flipped
+   `bintree` from a Phase-1 regression to a win.
+3. **JIT-inlined `nth`.** New `inline_vec_ref` lowering (`jit_lower.rs`) for
+   `(nth v <const>)`, the vector analog of the pair car/cdr inline: tag → region
+   → age → (fetch `brood_rt_vec_nursery_base`/`_old_base` **per read**, so it's
+   sound across GC safepoints — `check`'s non-tail calls) → spill-tag → bounds →
+   `slot + items_off + i*24`, deopting to the VM on any slow case. Added
+   `TAG_VECTOR = 10` (pinned in the value layout test).
+
+**Verified.** All 643 tests pass; `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean on
+the vector-heavy benchmarks; every benchmark checksum bit-identical to before.
+`bintree` compute **−8.5%** (harness, 128→117 ms; N=2000 wall 0.97→0.83 s ~14%),
+every other benchmark neutral (a harness `fib` +5.5% was thermal — re-measured
+flat), memory neutral. Likely lifts `bintree` 6th→4th (past Python/Ruby) — pending
+a full 7-language re-run. Follow-ups (low ROI, deferred): inline read at
+variable-index sites; in-arm inline alloc (blocked by make/check safepoints).
