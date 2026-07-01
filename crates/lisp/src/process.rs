@@ -78,9 +78,11 @@ pub(crate) use scheduler::{
     set_capture_top_level, tick_capture,
 };
 // Test-only: the JIT preempt unit test (`compile.rs`) drives a tiered arm as if it
-// were a capture-mode green process. Non-test callers reach it via `scheduler::` or
-// the local fn directly, so the re-export is test-gated to avoid an unused warning.
-#[cfg(test)]
+// were a capture-mode green process. That test is itself `#[cfg(feature = "jit")]`,
+// so the re-export must match — gating on bare `test` leaves it unused (and warned)
+// in a no-`jit` test build. Non-test callers reach it via `scheduler::` or the local
+// fn directly.
+#[cfg(all(test, feature = "jit"))]
 pub(crate) use scheduler::set_capture_run;
 
 pub(crate) use mailbox::{deliver, is_alive, read_name_address};
