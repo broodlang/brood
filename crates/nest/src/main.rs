@@ -443,7 +443,8 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
     // breakage the `.brood-skip-blsp-check` migration hatch was added for). Both
     // forms now return a warning count; non-zero → exit 1.
     let code = if files.is_empty() {
-        "(require 'project) (project/load-config) (require 'test) (project/check-project)".to_string()
+        "(require 'project) (project/load-config) (require 'test) (project/check-project)"
+            .to_string()
     } else {
         let list = files
             .iter()
@@ -958,7 +959,9 @@ fn cmd_release(
     // 4. One release binary per target (no --target = one, for the host).
     //    --runtime names a single specific base, so it can't serve a matrix.
     if runtime.is_some() && targets.len() > 1 {
-        eprintln!("nest release: --runtime names one base binary; use it with at most one --target");
+        eprintln!(
+            "nest release: --runtime names one base binary; use it with at most one --target"
+        );
         std::process::exit(2);
     }
     let stem = output.unwrap_or(&name);
@@ -973,7 +976,11 @@ fn cmd_release(
                 let out = if output.is_some() && targets.len() == 1 {
                     stem.to_string()
                 } else {
-                    let exe = if release::is_windows_triple(t) { ".exe" } else { "" };
+                    let exe = if release::is_windows_triple(t) {
+                        ".exe"
+                    } else {
+                        ""
+                    };
                     format!("{stem}-{}{exe}", release::target_suffix(t))
                 };
                 (Some(t.as_str()), std::path::PathBuf::from(out))

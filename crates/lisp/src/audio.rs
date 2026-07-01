@@ -43,7 +43,10 @@ mod backend {
                 .map(|v| v != "0" && !v.is_empty())
                 .unwrap_or(false)
         };
-        on("BROOD_GUI_HEADLESS") || std::env::var("BROOD_AUDIO").map(|v| v == "0").unwrap_or(false)
+        on("BROOD_GUI_HEADLESS")
+            || std::env::var("BROOD_AUDIO")
+                .map(|v| v == "0")
+                .unwrap_or(false)
     }
 
     /// The channel to the audio thread, started on first use. `None` when muted or

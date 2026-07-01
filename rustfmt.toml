@@ -1,0 +1,13 @@
+# rustfmt configuration for the Brood workspace.
+#
+# The codebase is already ~99.5% consistent with rustfmt's defaults — before
+# this file existed, `cargo fmt` touched only ~360 of ~79k lines, all of them
+# long lines that had drifted past the column limit (p99 line width was 95).
+# So the defaults *are* the house style; this file just pins them explicitly so
+# `cargo fmt --check` is a meaningful CI gate and no one is surprised by a large
+# diff on first run.
+edition = "2021"
+
+# rustfmt's default. Stated here because it's the one knob the code cares about:
+# the house style keeps lines under 100, and this is what the CI check enforces.
+max_width = 100

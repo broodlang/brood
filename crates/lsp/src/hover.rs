@@ -203,11 +203,18 @@ mod tests {
         // Load a module with a docstring, then hover its name in a `(:use …)` clause.
         let dir = std::env::temp_dir().join(format!("brood_use_hover_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("greeter.blsp"), "(defmodule greeter \"says hello\")\n").unwrap();
+        std::fs::write(
+            dir.join("greeter.blsp"),
+            "(defmodule greeter \"says hello\")\n",
+        )
+        .unwrap();
 
         let mut interp = Interp::new();
         interp
-            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .eval_str(&format!(
+                "(def *load-path* (cons \"{}\" *load-path*))",
+                dir.display()
+            ))
             .expect("extend load-path");
         interp.eval_str("(require 'greeter)").expect("load greeter");
 
@@ -247,7 +254,10 @@ mod tests {
                 _ => panic!("expected markup"),
             })
             .expect("hover on the :implements behaviour name");
-        assert!(md.contains("(behaviour Drawable)"), "header missing: {md:?}");
+        assert!(
+            md.contains("(behaviour Drawable)"),
+            "header missing: {md:?}"
+        );
         assert!(md.contains("`draw` (1 arg)"), "op missing: {md:?}");
         assert!(md.contains("`area` (1 arg)"), "op missing: {md:?}");
     }

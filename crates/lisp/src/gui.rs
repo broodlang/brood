@@ -357,7 +357,11 @@ pub(crate) mod backend {
     static PAINT_BUILD_NS: AtomicU64 = AtomicU64::new(0);
     fn paint_stall_ms() -> Option<u128> {
         static MS: OnceLock<Option<u128>> = OnceLock::new();
-        *MS.get_or_init(|| std::env::var("BROOD_STALL_MS").ok().and_then(|v| v.parse().ok()))
+        *MS.get_or_init(|| {
+            std::env::var("BROOD_STALL_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
     }
 
     /// Max gap between consecutive presses (same button, same cell) that still counts
@@ -973,15 +977,20 @@ pub(crate) mod backend {
 
     #[cfg(feature = "gui-gpu")]
     fn gpu_enabled() -> bool {
-        std::env::var("BROOD_GUI_GPU").map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
+        std::env::var("BROOD_GUI_GPU")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
     }
 
     fn cpu_backend(window: &Rc<Window>) -> Result<Backend, String> {
-        let context =
-            softbuffer::Context::new(window.clone()).map_err(|e| format!("softbuffer context: {e}"))?;
+        let context = softbuffer::Context::new(window.clone())
+            .map_err(|e| format!("softbuffer context: {e}"))?;
         let surface = softbuffer::Surface::new(&context, window.clone())
             .map_err(|e| format!("softbuffer surface: {e}"))?;
-        Ok(Backend::Cpu { _context: context, surface })
+        Ok(Backend::Cpu {
+            _context: context,
+            surface,
+        })
     }
 
     struct Win {
@@ -1273,8 +1282,11 @@ pub(crate) mod backend {
                 // restore. Like Maximize the resize that follows re-renders the grid.
                 UserEvent::Fullscreen { id, on } => {
                     if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
-                        w.window
-                            .set_fullscreen(if on { Some(Fullscreen::Borderless(None)) } else { None });
+                        w.window.set_fullscreen(if on {
+                            Some(Fullscreen::Borderless(None))
+                        } else {
+                            None
+                        });
                     }
                 }
                 // Cell font. `id: Some(w)` retunes just that window, leaving the
@@ -1483,8 +1495,12 @@ pub(crate) mod backend {
                     // `:drag` (cell-granular, so still bounded), which is how a divider
                     // drag is tracked (ADR-077).
                     let psz = w.window.inner_size();
-                    let cell =
-                        px_to_cell(position, &w.renderer, psz.width as usize, psz.height as usize);
+                    let cell = px_to_cell(
+                        position,
+                        &w.renderer,
+                        psz.width as usize,
+                        psz.height as usize,
+                    );
                     if cell != w.cursor {
                         w.cursor = cell;
                         let (col, row) = w.cursor;
@@ -1618,7 +1634,9 @@ pub(crate) mod backend {
                     // "quantum" guard, so it gets its own guard here.
                     let _sg = crate::core::heap::stall_guard("gui-paint");
                     match &mut w.backend {
-                        Backend::Cpu { surface, .. } => paint(surface, &w.window, &mut w.renderer, &w.frame),
+                        Backend::Cpu { surface, .. } => {
+                            paint(surface, &w.window, &mut w.renderer, &w.frame)
+                        }
                         #[cfg(feature = "gui-gpu")]
                         Backend::Gpu(gl) => {
                             gl.paint(&w.frame, &mut w.renderer);
@@ -1691,7 +1709,12 @@ pub(crate) mod backend {
     /// origin (`grid_origin` — inset plus the remainder placement, the same the grid is
     /// painted with) is subtracted first, so a click lands on the cell painted under it;
     /// a click in the surrounding margin clamps to the edge cell.
-    fn px_to_cell(pos: PhysicalPosition<f64>, r: &Renderer, w_px: usize, h_px: usize) -> (u16, u16) {
+    fn px_to_cell(
+        pos: PhysicalPosition<f64>,
+        r: &Renderer,
+        w_px: usize,
+        h_px: usize,
+    ) -> (u16, u16) {
         let (ox, oy) = r.grid_origin(w_px, h_px);
         let col =
             ((pos.x - ox as f64).max(0.0) as usize / r.cell_w.max(1)).min(u16::MAX as usize) as u16;
@@ -1969,8 +1992,8 @@ pub(crate) mod backend {
         px: f32,
         pub(crate) cell_w: usize,
         pub(crate) cell_h: usize,
-        baseline: i32,   // pixels from a cell's top to the text baseline
-        base_inset: f32, // logical-px content margin before the grid (ADR-079); 0 = flush
+        baseline: i32,       // pixels from a cell's top to the text baseline
+        base_inset: f32,     // logical-px content margin before the grid (ADR-079); 0 = flush
         bg: Option<[u8; 3]>, // window background (clear/inset-margin fill); None = DEFAULT_BG
 
         // keyed by (cluster, family id, bold, italic, scale): the same cluster at a
@@ -2538,7 +2561,12 @@ pub(crate) mod backend {
     }
 
     impl DamageRect {
-        const EMPTY: DamageRect = DamageRect { x0: 0, y0: 0, x1: 0, y1: 0 };
+        const EMPTY: DamageRect = DamageRect {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        };
         fn is_empty(&self) -> bool {
             self.x1 <= self.x0 || self.y1 <= self.y0
         }
@@ -2598,7 +2626,11 @@ pub(crate) mod backend {
     /// if a backend ever mishandles damage. Read once.
     fn gui_damage_enabled() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var("BROOD_GUI_DAMAGE").map(|v| v != "0").unwrap_or(true))
+        *ON.get_or_init(|| {
+            std::env::var("BROOD_GUI_DAMAGE")
+                .map(|v| v != "0")
+                .unwrap_or(true)
+        })
     }
 
     /// How many recent frames' damage we keep — the cap on the buffer `age` we can
@@ -2752,7 +2784,15 @@ pub(crate) mod backend {
                         );
                     }
                 }
-                Op::FRect { x, y, w, h, face, opacity, radius } => {
+                Op::FRect {
+                    x,
+                    y,
+                    w,
+                    h,
+                    face,
+                    opacity,
+                    radius,
+                } => {
                     // Sub-cell rounded rect: cell-unit floats → px via the same origin +
                     // cell metrics every op shares, then an AA, alpha-blended fill.
                     let bg = if face.reverse { face.fg } else { face.bg };
@@ -2803,7 +2843,14 @@ pub(crate) mod backend {
                         }
                     }
                 }
-                Op::Cells { row0, col0, w, aspect, bytes, color } => {
+                Op::Cells {
+                    row0,
+                    col0,
+                    w,
+                    aspect,
+                    bytes,
+                    color,
+                } => {
                     // Enumerate set bits by a single byte scan — O(bytes + live), and the
                     // same code whether the board came in as a bignum or a byte string.
                     // Each cell is an `aspect`-wide × 1-tall block of screen cells.
@@ -2827,7 +2874,15 @@ pub(crate) mod backend {
                         }
                     }
                 }
-                Op::CellsRgb { row0, col0, w, aspect, bytes, colors, default } => {
+                Op::CellsRgb {
+                    row0,
+                    col0,
+                    w,
+                    aspect,
+                    bytes,
+                    colors,
+                    default,
+                } => {
                     let asp = (*aspect).max(1) as usize;
                     let cell_w = asp * cw;
                     let wmod = (*w).max(1) as usize;

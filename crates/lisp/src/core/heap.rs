@@ -44,9 +44,8 @@ use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    BigIntId, BytesId, Closure, ClosureArm, ClosureId, DecimalId, EnvId, MapId, NativeFn,
-    NativeId, PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE,
-    RUNTIME,
+    BigIntId, BytesId, Closure, ClosureArm, ClosureId, DecimalId, EnvId, MapId, NativeFn, NativeId,
+    PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
@@ -220,7 +219,11 @@ fn bigdecimal_cmp_float(b: &bigdecimal::BigDecimal, f: f64) -> std::cmp::Orderin
         return Ordering::Equal;
     }
     if f.is_infinite() {
-        return if f > 0.0 { Ordering::Less } else { Ordering::Greater };
+        return if f > 0.0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
     }
     // Finite f64 always converts (only NaN/∞ fail, handled above).
     b.cmp(&bigdecimal::BigDecimal::try_from(f).expect("finite f64 → BigDecimal"))
@@ -1614,8 +1617,7 @@ impl Heap {
     pub fn set_form_pos(&mut self, v: Value, pos: crate::error::Pos) {
         if let Some(id) = v.as_pair() {
             if id.region() == crate::core::value::LOCAL {
-                let file: Option<Arc<str>> =
-                    self.current_file.as_deref().map(Arc::from);
+                let file: Option<Arc<str>> = self.current_file.as_deref().map(Arc::from);
                 self.form_pos.insert(form_pos_key(id), (pos, file));
             }
         }
@@ -1931,14 +1933,7 @@ impl Heap {
         Value::map(new_root)
     }
 
-    fn champ_int_add(
-        &mut self,
-        id: MapId,
-        key: Value,
-        delta: i64,
-        hash: u64,
-        depth: u32,
-    ) -> MapId {
+    fn champ_int_add(&mut self, id: MapId, key: Value, delta: i64, hash: u64, depth: u32) -> MapId {
         let node = self.map_node(id);
         let is_collision = node.is_collision;
         let data_map = node.data_map;
@@ -2007,8 +2002,15 @@ impl Heap {
             // Key absent — insert delta as new entry, splitting the slot.
             let other_hash = self.hash_value(existing_k);
             let new_val = Value::int(delta);
-            let child_id =
-                self.champ_split(existing_k, existing_v, other_hash, key, new_val, hash, depth + 1);
+            let child_id = self.champ_split(
+                existing_k,
+                existing_v,
+                other_hash,
+                key,
+                new_val,
+                hash,
+                depth + 1,
+            );
             let new_data_map = data_map ^ bit;
             let new_node_map = node_map | bit;
             let child_pos = map_champ::rank(new_node_map, slot);
@@ -3447,8 +3449,11 @@ impl Heap {
         if region != LOCAL {
             return None;
         }
-        let expected =
-            Self::epoch_in_gen_width(if is_old { self.old_epoch } else { self.local_epoch });
+        let expected = Self::epoch_in_gen_width(if is_old {
+            self.old_epoch
+        } else {
+            self.local_epoch
+        });
         if gen != expected {
             Some((name, gen, expected))
         } else {
@@ -3888,7 +3893,9 @@ impl Heap {
             // `1.5M` == `1.50M`. Compare via `normalized()` (the same canonical form
             // hashed above) so equality and hashing agree. A decimal is its own type,
             // so a Decimal vs an Int/Float falls through to `_ => false`.
-            (Decimal(x), Decimal(y)) => self.decimal(x).normalized() == self.decimal(y).normalized(),
+            (Decimal(x), Decimal(y)) => {
+                self.decimal(x).normalized() == self.decimal(y).normalized()
+            }
             (Bytes(x), Bytes(y)) => self.bytes(x).as_bytes() == self.bytes(y).as_bytes(),
             (Float(x), Float(y)) => x == y,
             (Sym(x), Sym(y)) => x == y,
@@ -4065,11 +4072,8 @@ impl Heap {
             // an exact decimal — so ordering is precise, unlike the arithmetic
             // tower's deliberate float contagion).
             (Decimal(x), Decimal(y)) => self.decimal(x).cmp(self.decimal(y)),
-            (Decimal(x), Int(y)) => self
-                .decimal(x)
-                .cmp(&bigdecimal::BigDecimal::from(y)),
-            (Int(x), Decimal(y)) => bigdecimal::BigDecimal::from(x)
-                .cmp(self.decimal(y)),
+            (Decimal(x), Int(y)) => self.decimal(x).cmp(&bigdecimal::BigDecimal::from(y)),
+            (Int(x), Decimal(y)) => bigdecimal::BigDecimal::from(x).cmp(self.decimal(y)),
             (Decimal(x), BigInt(y)) => self
                 .decimal(x)
                 .cmp(&bigdecimal::BigDecimal::from(self.bigint(y).clone())),
@@ -5200,8 +5204,14 @@ impl Heap {
     /// DEBUG ONLY: record call site `site`'s source position (compile time). See
     /// [`Self::dbg_site_pos`].
     #[cfg(debug_assertions)]
-    pub fn dbg_set_site_pos(&self, site: u32, pos: Option<crate::error::Pos>, file: Option<Arc<str>>) {
-        if let (Some(p), Some(slot)) = (pos, self.dbg_site_pos.borrow_mut().get_mut(site as usize)) {
+    pub fn dbg_set_site_pos(
+        &self,
+        site: u32,
+        pos: Option<crate::error::Pos>,
+        file: Option<Arc<str>>,
+    ) {
+        if let (Some(p), Some(slot)) = (pos, self.dbg_site_pos.borrow_mut().get_mut(site as usize))
+        {
             *slot = Some((p, file));
         }
     }
@@ -5209,13 +5219,13 @@ impl Heap {
     /// DEBUG ONLY: look up a call site's recorded source position as `file:line:col`.
     #[cfg(debug_assertions)]
     pub fn dbg_site_loc(&self, site: u32) -> String {
-        match self.dbg_site_pos.borrow().get(site as usize).and_then(|o| o.clone()) {
-            Some((p, file)) => format!(
-                "{}:{}:{}",
-                file.as_deref().unwrap_or("?"),
-                p.line,
-                p.col
-            ),
+        match self
+            .dbg_site_pos
+            .borrow()
+            .get(site as usize)
+            .and_then(|o| o.clone())
+        {
+            Some((p, file)) => format!("{}:{}:{}", file.as_deref().unwrap_or("?"), p.line, p.col),
             None => format!("<site {site}: no recorded pos>"),
         }
     }
@@ -6303,7 +6313,11 @@ macro_rules! flush_bound {
 /// vs elsewhere) in a live session that can't be driven headless.
 fn stall_threshold_ms() -> Option<u128> {
     static MS: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
-    *MS.get_or_init(|| std::env::var("BROOD_STALL_MS").ok().and_then(|v| v.parse().ok()))
+    *MS.get_or_init(|| {
+        std::env::var("BROOD_STALL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
 }
 
 pub(crate) struct StallGuard {
@@ -6708,8 +6722,7 @@ fn flush_nursery_old_refs(
             let n_body = nursery.closures[i].arms[arm_idx].body.len();
             for k in 0..n_body {
                 let v = nursery.closures[i].arms[arm_idx].body[k];
-                nursery.closures[i].arms[arm_idx].body[k] =
-                    flush_value(old_src, dest, fwd, v);
+                nursery.closures[i].arms[arm_idx].body[k] = flush_value(old_src, dest, fwd, v);
             }
         }
     }
@@ -6941,7 +6954,12 @@ fn flush_rt_decimal(
 
 /// Flush a RUNTIME bytes value during a runtime-region compaction (mirrors
 /// [`flush_rt_bigint`]). Byte-clean — clone the `Arc<SharedBlob>` into the new region.
-fn flush_rt_bytes(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: BytesId) -> BytesId {
+fn flush_rt_bytes(
+    old: &CodeSlabs,
+    new: &CodeSlabs,
+    fwd: &mut RuntimeForward,
+    id: BytesId,
+) -> BytesId {
     let key = id.index() as u32;
     if let Some(&n) = fwd.bytes.get(&key) {
         return BytesId::runtime(n as usize);
@@ -7586,7 +7604,15 @@ mod gen_handle_tests {
         drop(decoy_envs); // decoys now unreachable
 
         // Create a nursery closure that captures the OLD env (the "badge-ops" closure).
-        let cl = Closure::single(None, vec![], vec![], None, vec![], None, Some(keeper_env_old));
+        let cl = Closure::single(
+            None,
+            vec![],
+            vec![],
+            None,
+            vec![],
+            None,
+            Some(keeper_env_old),
+        );
         let cl_id = h.alloc_closure(cl);
         assert!(!cl_id.is_old(), "closure must be nursery");
 
@@ -7741,9 +7767,7 @@ mod gen_handle_tests {
             ValueRef::Map(id) => id,
             _ => unreachable!(),
         };
-        let result = h
-            .map_get(map_id, key)
-            .expect("key must survive flip+major");
+        let result = h.map_get(map_id, key).expect("key must survive flip+major");
         let new_idx = match result.unpack() {
             ValueRef::Str(id) => {
                 assert!(id.is_old());
@@ -7870,7 +7894,9 @@ mod gen_handle_tests {
             h.old.envs.len()
         );
         // The env lookup must traverse the parent chain correctly.
-        let val = h.env_get(child_env, sym).expect("v must be findable via parent");
+        let val = h
+            .env_get(child_env, sym)
+            .expect("v must be findable via parent");
         assert!(matches!(val.unpack(), ValueRef::Int(42)));
     }
 

@@ -74,6 +74,10 @@ mod tests {
         assert_eq!(r.start, Position::new(0, 0));
         // End is past the last content line (line 3, the `(def b 2)` line, plus
         // the trailing newline lands the cursor at the start of line 4).
-        assert!(r.end.line >= 3, "range reaches the last line, got {:?}", r.end);
+        assert!(
+            r.end.line >= 3,
+            "range reaches the last line, got {:?}",
+            r.end
+        );
     }
 }

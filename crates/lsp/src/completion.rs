@@ -248,7 +248,10 @@ mod tests {
         let tree = scope::analyze(&root, src);
         let at = src.rfind("uni").unwrap() as u32;
         let items = completions(&mut interp, &tree, &root, src, at);
-        let union = items.iter().find(|i| i.label == "union").expect("bare `union` offered");
+        let union = items
+            .iter()
+            .find(|i| i.label == "union")
+            .expect("bare `union` offered");
         assert_eq!(
             union.data.as_ref().and_then(|d| d.as_str()),
             Some("set/union"),
@@ -256,7 +259,10 @@ mod tests {
         );
         // and resolve uses that data to fetch the real signature.
         let r = resolve(&mut interp, union.clone());
-        assert!(r.detail.unwrap_or_default().contains("union"), "resolved signature");
+        assert!(
+            r.detail.unwrap_or_default().contains("union"),
+            "resolved signature"
+        );
     }
 
     #[test]
@@ -297,7 +303,10 @@ mod tests {
         std::fs::write(dir.join("greeter.blsp"), "(defmodule greeter)\n").unwrap();
         let mut interp = Interp::new();
         interp
-            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .eval_str(&format!(
+                "(def *load-path* (cons \"{}\" *load-path*))",
+                dir.display()
+            ))
             .unwrap();
 
         for src in ["(require '", "(defmodule app (:use "] {
@@ -308,8 +317,14 @@ mod tests {
                 .into_iter()
                 .map(|i| i.label)
                 .collect();
-            assert!(labels.contains(&"greeter".to_string()), "module missing in {src:?}: {labels:?}");
-            assert!(!labels.contains(&"+".to_string()), "generic global leaked into {src:?}");
+            assert!(
+                labels.contains(&"greeter".to_string()),
+                "module missing in {src:?}: {labels:?}"
+            );
+            assert!(
+                !labels.contains(&"+".to_string()),
+                "generic global leaked into {src:?}"
+            );
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -330,7 +345,15 @@ mod tests {
             .iter()
             .find(|i| i.label == "encode")
             .expect("op `encode` offered inside (defimpl Encode …)");
-        assert_eq!(enc.kind, Some(CompletionItemKind::METHOD), "tagged as a protocol op");
-        assert!(enc.detail.as_deref().unwrap_or("").contains("Encode op"), "{:?}", enc.detail);
+        assert_eq!(
+            enc.kind,
+            Some(CompletionItemKind::METHOD),
+            "tagged as a protocol op"
+        );
+        assert!(
+            enc.detail.as_deref().unwrap_or("").contains("Encode op"),
+            "{:?}",
+            enc.detail
+        );
     }
 }

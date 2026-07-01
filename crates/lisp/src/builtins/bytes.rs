@@ -57,7 +57,9 @@ pub(super) fn bytes_make(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 
 /// `(byte-length b)` — the number of bytes. O(1).
 pub(super) fn byte_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    Ok(Value::int(as_bytes(heap, "byte-length", arg(args, 0))?.len() as i64))
+    Ok(Value::int(
+        as_bytes(heap, "byte-length", arg(args, 0))?.len() as i64,
+    ))
 }
 
 /// `(byte-at b i)` — the byte at index `i` as an int 0–255 (out of range errors).
@@ -68,10 +70,12 @@ pub(super) fn byte_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     if i >= 0 && (i as usize) < b.len() {
         Ok(Value::int(b[i as usize] as i64))
     } else {
-        Err(
-            LispError::runtime(format!("byte-at: index {} out of range [0, {})", i, b.len()))
-                .with_code(error_codes::INDEX_OUT_OF_RANGE),
-        )
+        Err(LispError::runtime(format!(
+            "byte-at: index {} out of range [0, {})",
+            i,
+            b.len()
+        ))
+        .with_code(error_codes::INDEX_OUT_OF_RANGE))
     }
 }
 

@@ -3,10 +3,10 @@ use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 use crate::syntax::{cst, printer, reader};
 
-use super::numeric::{arg, expect_string, expect_int, expect_symbol};
+use super::numeric::{arg, expect_int, expect_string, expect_symbol};
+use super::realize_seqview;
 use crate::core::keywords as kw;
 use crate::eval::compile::apply_engine;
-use super::realize_seqview;
 macro_rules! expect {
     ($heap:expr, $who:expr, $v:expr, $expected:literal, $($pat:pat => $extract:expr),+ $(,)?) => {
         match $v {
@@ -204,7 +204,12 @@ pub(super) fn cst_node_kind_name(kind: cst::NodeKind) -> &'static str {
     }
 }
 
-pub(super) fn cst_to_positioned(heap: &mut Heap, node: &cst::Node, src: &str, b2c: &[u32]) -> Value {
+pub(super) fn cst_to_positioned(
+    heap: &mut Heap,
+    node: &cst::Node,
+    src: &str,
+    b2c: &[u32],
+) -> Value {
     use cst::NodeKind::*;
     let kw = |k: &'static str| Value::keyword(value::intern(k));
     let start = Value::int(b2c[node.span.start as usize] as i64);
@@ -263,7 +268,14 @@ pub(super) fn tree_sitter_reparse(args: &[Value], _: EnvId, heap: &mut Heap) -> 
     let src = expect_string(heap, "tree-sitter-reparse", arg(args, 1))?;
     let lang = match arg(args, 2) {
         Value::Keyword(s) => value::symbol_name(s),
-        v => return Err(LispError::wrong_type(heap, "tree-sitter-reparse", "keyword", v)),
+        v => {
+            return Err(LispError::wrong_type(
+                heap,
+                "tree-sitter-reparse",
+                "keyword",
+                v,
+            ))
+        }
     };
     crate::treesit::parse_incremental(heap, key, &src, &lang)
 }
@@ -358,16 +370,10 @@ pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
                         // recognised and re-evaluated. Without this, a `(deflive …)`
                         // top-level form would be skipped and its defs never reload.
                         nm.starts_with("def")
-                            && (nm == "def"
-                                || nm == "defmacro"
-                                || {
-                                    let resolved =
-                                        crate::eval::macros::resolve_reference(heap, s);
-                                    matches!(
-                                        heap.env_get(root, resolved),
-                                        Some(Value::Macro(_))
-                                    )
-                                })
+                            && (nm == "def" || nm == "defmacro" || {
+                                let resolved = crate::eval::macros::resolve_reference(heap, s);
+                                matches!(heap.env_get(root, resolved), Some(Value::Macro(_)))
+                            })
                     }
                     _ => false,
                 }
@@ -478,7 +484,12 @@ pub(super) fn load_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
 
 /// Shared body of `eval-string` / `%load-string`. When `reset_ns`, the current
 /// namespace is reset to root for the duration and the caller's restored after.
-pub(super) fn eval_string_inner(heap: &mut Heap, env: EnvId, src: &str, reset_ns: bool) -> LispResult {
+pub(super) fn eval_string_inner(
+    heap: &mut Heap,
+    env: EnvId,
+    src: &str,
+    reset_ns: bool,
+) -> LispResult {
     let root = heap.env_root(env);
     let forms = reader::read_all(heap, src)?;
     // When loading a module (`reset_ns`), bracket the namespace at root and
@@ -587,7 +598,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
     // the dev observer's tree sort *and* a shipped app's process list (myedit's
     // *Process List*), so a `nest release` binary needs it baked in.
-    ("proctree", include_str!("../../../../std/tool/proctree.blsp")),
+    (
+        "proctree",
+        include_str!("../../../../std/tool/proctree.blsp"),
+    ),
     // Run a thunk off the current process with an optional timeout + cancel
     // (ADR-006): `task` (async, tagged-reply handle), `cancel-task`, and the
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
@@ -670,7 +684,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // The shared named-face / theme registry (the counterpart to `keymap`): style
     // named once, referenced everywhere, restyled in one place. Required by `ui`
     // (so every ui-run app gets it) and the observer.
-    ("editor/face", include_str!("../../../../std/editor/face.blsp")),
+    (
+        "editor/face",
+        include_str!("../../../../std/editor/face.blsp"),
+    ),
     (
         "editor/display",
         include_str!("../../../../std/editor/display.blsp"),
@@ -709,11 +726,17 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // pane/divider geometry + drag-to-resize over `:drag` mouse events (ADR-077).
     // Reusable editor toolkit (content-agnostic); the keybindings + payload are
     // editor policy. Opt-in, never in the prelude.
-    ("editor/pane", include_str!("../../../../std/editor/pane.blsp")),
+    (
+        "editor/pane",
+        include_str!("../../../../std/editor/pane.blsp"),
+    ),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.
-    ("editor/ansi", include_str!("../../../../std/editor/ansi.blsp")),
+    (
+        "editor/ansi",
+        include_str!("../../../../std/editor/ansi.blsp"),
+    ),
     // Sets as a library over maps (ADR-062): a set is a map of `element → true`,
     // so membership/elements/size reuse `contains?`/`keys`/`count`; the module
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
@@ -780,7 +803,10 @@ const DEV_MODULES: &[(&str, &str)] = &[
     // language's own `(special-forms)` — one source of truth, no drift (ADR-092).
     ("grammar", include_str!("../../../../std/tool/grammar.blsp")),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
-    ("observer", include_str!("../../../../std/tool/observer.blsp")),
+    (
+        "observer",
+        include_str!("../../../../std/tool/observer.blsp"),
+    ),
     // The hot-reload file watcher — a dev-loop convenience.
     ("reload", include_str!("../../../../std/tool/reload.blsp")),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
@@ -964,7 +990,6 @@ pub(super) fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> Lisp
     })
 }
 
-
 // ---------- macros ----------
 
 pub(super) fn macroexpand_1(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
@@ -1088,7 +1113,6 @@ pub(super) fn check_string_structured(args: &[Value], _env: EnvId, heap: &mut He
     Ok(heap.list(out))
 }
 
-
 // ---------- source positions (editor tooling; see docs/tooling.md) ----------
 
 /// `(form-pos form)` — the `[line col]` (1-based) where `form` was read, or
@@ -1191,7 +1215,6 @@ pub(super) fn current_file(_args: &[Value], _env: EnvId, heap: &mut Heap) -> Lis
         None => Ok(Value::nil()),
     }
 }
-
 
 // ---------- introspection (editor tooling; see docs/lsp.md) ----------
 
@@ -1349,7 +1372,6 @@ pub(super) fn gensym(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(value::gensym(&prefix))
 }
 
-
 // ---------- errors / control ----------
 
 /// `(%make-macro f)` — tag the closure `f` as a macro: the expander calls it on
@@ -1419,7 +1441,6 @@ pub(super) fn blob_strong_count(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
         ))),
     }
 }
-
 
 // ---------- processes ----------
 
@@ -1637,7 +1658,11 @@ pub(super) fn make_ref(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// helpers — pre-fix this one used `type_err` and lost the offending value
 /// from the message, the one expect-family inconsistency the review flagged.
 
-pub(super) fn expect_node_name(heap: &Heap, who: &str, v: Value) -> Result<value::Symbol, LispError> {
+pub(super) fn expect_node_name(
+    heap: &Heap,
+    who: &str,
+    v: Value,
+) -> Result<value::Symbol, LispError> {
     expect!(heap, who, v, "keyword or symbol",
         Value::Keyword(s) => s,
         Value::Sym(s) => s,
@@ -2101,4 +2126,3 @@ pub(super) fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     }
     result
 }
-

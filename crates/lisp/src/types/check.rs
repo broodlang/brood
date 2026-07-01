@@ -507,7 +507,8 @@ mod tests {
     fn protocol_flags_an_arity_mismatch() {
         let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x y] x))");
         assert!(
-            ws.iter().any(|w| w.contains("`a` takes 1 arg(s), this impl has 2")),
+            ws.iter()
+                .any(|w| w.contains("`a` takes 1 arg(s), this impl has 2")),
             "{ws:?}"
         );
     }
@@ -520,7 +521,8 @@ mod tests {
 
     #[test]
     fn protocol_complete_impl_is_clean() {
-        let ws = file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x) (b [x] x))");
+        let ws =
+            file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x) (b [x] x))");
         assert!(!ws.iter().any(|w| w.contains("missing op")), "{ws:?}");
         assert!(!ws.iter().any(|w| w.contains("has no op")), "{ws:?}");
         assert!(!ws.iter().any(|w| w.contains("takes")), "{ws:?}");
@@ -533,7 +535,11 @@ mod tests {
         let ws = file_warnings(
             "(defbehaviour B (render [m]) (mount [p]))\n(defmodule foo (:implements B))\n(defn render (m) m)",
         );
-        assert!(ws.iter().any(|w| w.contains("behaviour B: this module is missing `mount`")), "{ws:?}");
+        assert!(
+            ws.iter()
+                .any(|w| w.contains("behaviour B: this module is missing `mount`")),
+            "{ws:?}"
+        );
     }
 
     #[test]
@@ -541,7 +547,11 @@ mod tests {
         let ws = file_warnings(
             "(defbehaviour B (render [m]))\n(defmodule foo (:implements B))\n(defn render (m extra) m)",
         );
-        assert!(ws.iter().any(|w| w.contains("`render` takes 2 arg(s), the behaviour needs 1")), "{ws:?}");
+        assert!(
+            ws.iter()
+                .any(|w| w.contains("`render` takes 2 arg(s), the behaviour needs 1")),
+            "{ws:?}"
+        );
     }
 
     #[test]
@@ -552,7 +562,8 @@ mod tests {
         // No conformance diagnostic (the bare-interp "unbound symbol: defbehaviour"
         // noise contains the substring "behaviour", so match the real messages).
         assert!(
-            !ws.iter().any(|w| w.contains("module is missing") || w.contains("the behaviour needs")),
+            !ws.iter()
+                .any(|w| w.contains("module is missing") || w.contains("the behaviour needs")),
             "{ws:?}"
         );
     }
@@ -909,7 +920,8 @@ mod tests {
         // Basic unused binding — warned.
         let w = file_warnings("(let (x 1) 2)");
         assert!(
-            w.iter().any(|s| s.contains("unused let binding") && s.contains('x')),
+            w.iter()
+                .any(|s| s.contains("unused let binding") && s.contains('x')),
             "expected unused-binding warning for x, got {w:?}"
         );
         // Binding used in body — silent.
@@ -925,7 +937,8 @@ mod tests {
         // Only one of two is unused.
         let w = file_warnings("(let (x 1 y 2) x)");
         assert!(
-            w.iter().any(|s| s.contains("unused let binding") && s.contains('y')),
+            w.iter()
+                .any(|s| s.contains("unused let binding") && s.contains('y')),
             "y should be flagged unused, got {w:?}"
         );
         assert!(
@@ -977,7 +990,8 @@ mod tests {
         // The map descent must not mask genuine dead bindings.
         let w = file_warnings("(let (s 1) {:start 2})");
         assert!(
-            w.iter().any(|s| s.contains("unused let binding") && s.contains('s')),
+            w.iter()
+                .any(|s| s.contains("unused let binding") && s.contains('s')),
             "s unused even though a map literal is present, got {w:?}"
         );
     }
@@ -1834,8 +1848,7 @@ mod tests {
         // the literal singleton `:foo`, so the diagnostic names that exact value.
         let w = warnings_expanded("(match x (:foo (first x)) (_ nil))");
         assert!(
-            w.iter()
-                .any(|s| s.contains("first") && s.contains(":foo")),
+            w.iter().any(|s| s.contains("first") && s.contains(":foo")),
             "match keyword-literal pattern should narrow x: {:?}",
             w
         );
@@ -2065,14 +2078,14 @@ mod tests {
         let w = file_warnings("(sig f (int -> string)) (defn f (x) (+ x 1))");
         assert!(
             w.iter()
-                .any(|m| m.contains("f: declared return type string")
-                    && m.contains("yields int")),
+                .any(|m| m.contains("f: declared return type string") && m.contains("yields int")),
             "an int body vs a string return must warn: {w:?}"
         );
         // A literal body mismatch too.
         let w = file_warnings(r#"(sig g (int -> int)) (defn g (x) "hello")"#);
         assert!(
-            w.iter().any(|m| m.contains("g: declared return type int") && m.contains("string")),
+            w.iter()
+                .any(|m| m.contains("g: declared return type int") && m.contains("string")),
             "a string-literal body vs an int return must warn: {w:?}"
         );
     }
@@ -2134,8 +2147,7 @@ mod tests {
         let w = file_warnings("(sig f (int -> string)) (defn f (x) (* x 2))");
         assert!(
             w.iter()
-                .any(|m| m.contains("f: declared return type string")
-                    && m.contains("yields int")),
+                .any(|m| m.contains("f: declared return type string") && m.contains("yields int")),
             "an int body declared string must warn: {w:?}"
         );
     }
@@ -2214,7 +2226,8 @@ mod tests {
         // requiring `test` makes `test/` a known prefix.
         let w = file_warnings("(require 'test) (test/no-such-fn 1)");
         assert!(
-            w.iter().any(|m| m.contains("unbound symbol: test/no-such-fn")),
+            w.iter()
+                .any(|m| m.contains("unbound symbol: test/no-such-fn")),
             "a typo in a known module must still be flagged: {w:?}"
         );
     }
@@ -2225,16 +2238,13 @@ mod tests {
         // syntax. (a) A macro that `def`s its symbol arg — the name must not look
         // unbound later. (b) A macro that splices an arg into a binder — the
         // spliced names must not look unbound.
-        let a = file_warnings(
-            "(defmacro mk (n) `(def ~n (fn (x) x))) (mk qf) (qf 5)",
-        );
+        let a = file_warnings("(defmacro mk (n) `(def ~n (fn (x) x))) (mk qf) (qf 5)");
         assert!(
             a.iter().all(|m| !m.contains("unbound symbol")),
             "a macro-defined name must not look unbound: {a:?}"
         );
-        let b = file_warnings(
-            "(defmacro wp (v & body) `(let ((a b) ~v) ~@body)) (wp [1 2] (+ a b))",
-        );
+        let b =
+            file_warnings("(defmacro wp (v & body) `(let ((a b) ~v) ~@body)) (wp [1 2] (+ a b))");
         assert!(
             b.iter().all(|m| !m.contains("unbound symbol")),
             "names a macro splices into a binder must not look unbound: {b:?}"
@@ -2278,9 +2288,15 @@ mod tests {
         );
         // `defn` (which expands to `(def name (fn …))`) and `lambda` too.
         let w = file_warnings("(defn h ((a) a) ((a b) (+ a b)))");
-        assert!(w.iter().all(|m| !m.contains("unbound symbol")), "defn: {w:?}");
+        assert!(
+            w.iter().all(|m| !m.contains("unbound symbol")),
+            "defn: {w:?}"
+        );
         let w = file_warnings("(def k (lambda ((a) a) ((a b) (+ a b))))");
-        assert!(w.iter().all(|m| !m.contains("unbound symbol")), "lambda: {w:?}");
+        assert!(
+            w.iter().all(|m| !m.contains("unbound symbol")),
+            "lambda: {w:?}"
+        );
     }
 
     #[test]
@@ -2303,7 +2319,8 @@ mod tests {
         // But an *eager* forward reference in a non-closure RHS still surfaces.
         let w = file_warnings("(defn t () (let (a undefined-thing b 1) a))");
         assert!(
-            w.iter().any(|m| m.contains("unbound symbol: undefined-thing")),
+            w.iter()
+                .any(|m| m.contains("unbound symbol: undefined-thing")),
             "an eager forward/undefined reference must still be flagged: {w:?}"
         );
     }
@@ -2506,7 +2523,8 @@ mod tests {
         ] {
             let w = warnings(src);
             assert!(
-                w.iter().any(|s| s.contains("number") || s.contains("string")),
+                w.iter()
+                    .any(|s| s.contains("number") || s.contains("string")),
                 "expected an element-type mismatch for {src}: {w:?}"
             );
         }
@@ -2612,7 +2630,8 @@ mod tests {
         // `io` is an embedded module; not using any of its names should warn.
         let ws = file_warnings("(defmodule test/mod (:use io))\n(defn foo (x) (+ x 1))");
         assert!(
-            ws.iter().any(|w| w.contains("unused :use import") && w.contains("io")),
+            ws.iter()
+                .any(|w| w.contains("unused :use import") && w.contains("io")),
             "expected unused :use import warning for io, got {ws:?}"
         );
     }
@@ -2620,9 +2639,8 @@ mod tests {
     #[test]
     fn used_use_import_is_silent() {
         // `io-write` is one of io's public exports; using it makes the :use needed.
-        let ws = file_warnings(
-            "(defmodule test/mod (:use io))\n(defn foo (port s) (io-write port s))",
-        );
+        let ws =
+            file_warnings("(defmodule test/mod (:use io))\n(defn foo (port s) (io-write port s))");
         assert!(
             !ws.iter().any(|w| w.contains("unused :use import")),
             "used :use import should be silent, got {ws:?}"
@@ -2811,5 +2829,4 @@ mod soundness_oracle {
             assert!(bad.is_empty(), "FALSE POSITIVE on correct `{src}`: {bad:?}");
         }
     }
-
 }

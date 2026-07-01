@@ -43,13 +43,12 @@ use lsp_types::request::{
 use lsp_types::{
     CodeActionParams, CodeActionProviderCapability, CompletionItem, CompletionOptions,
     CompletionParams, Diagnostic, DiagnosticSeverity, DocumentFormattingParams,
-    DocumentLinkOptions, DocumentLinkParams,
-    DocumentHighlightParams, DocumentSymbolParams, FoldingRangeParams,
-    FoldingRangeProviderCapability, GotoDefinitionParams, HoverParams, HoverProviderCapability,
-    InlayHintParams, OneOf, Position, PositionEncodingKind, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions, RenameParams,
-    SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokensFullOptions,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    DocumentHighlightParams, DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams,
+    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams, HoverParams,
+    HoverProviderCapability, InlayHintParams, OneOf, Position, PositionEncodingKind,
+    PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions,
+    RenameParams, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
     SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri, WorkspaceSymbolParams, WorkspaceSymbolResponse,
@@ -899,7 +898,10 @@ fn bootstrap_project(interp: &mut Interp, bootstrapped: &mut HashSet<PathBuf>, u
     // (this used to inline `project-setup`/`load-sources`/`require 'test` and
     // omitted `'format`). Policy lives in Brood (`setup-tooling-image`).
     if let Err(e) = brood::introspect::load_tooling_image(interp, &root.display().to_string()) {
-        eprintln!("brood-lsp: project bootstrap failed for {}: {e}", root.display());
+        eprintln!(
+            "brood-lsp: project bootstrap failed for {}: {e}",
+            root.display()
+        );
     }
     // Mark bootstrapped regardless of success — a partial load is consistent
     // (each top-level form's `eval_str` is checkpointed), and re-running on
@@ -1404,7 +1406,10 @@ mod server_tests {
         let sel: Vec<lsp_types::SelectionRange> =
             serde_json::from_value(r.result.unwrap()).unwrap();
         assert_eq!(sel.len(), 1, "one chain per position");
-        assert!(sel[0].parent.is_some(), "selection should expand to an enclosing form");
+        assert!(
+            sel[0].parent.is_some(),
+            "selection should expand to an enclosing form"
+        );
 
         shutdown(&client);
         handle.join().unwrap().unwrap();

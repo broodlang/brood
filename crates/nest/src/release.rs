@@ -74,7 +74,10 @@ pub(crate) fn resolve_runtime(runtime: Option<&str>, target: Option<&str>) -> Ve
     // No embedded runtime (a plain `cargo build` of `nest`): build one from source.
     let path = build_lean_runtime();
     std::fs::read(&path).unwrap_or_else(|e| {
-        eprintln!("nest release: cannot read built runtime {}: {e}", path.display());
+        eprintln!(
+            "nest release: cannot read built runtime {}: {e}",
+            path.display()
+        );
         std::process::exit(1);
     })
 }
@@ -89,7 +92,11 @@ pub(crate) fn runtime_cache_path(triple: &str) -> Option<std::path::PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    let bin = if is_windows_triple(triple) { "brood.exe" } else { "brood" };
+    let bin = if is_windows_triple(triple) {
+        "brood.exe"
+    } else {
+        "brood"
+    };
     Some(base.join("brood/runtimes").join(triple).join(bin))
 }
 
@@ -107,7 +114,11 @@ pub(crate) fn target_suffix(triple: &str) -> String {
         "windows"
     } else if triple.contains("linux") {
         // Keep the libc visible so a gnu + musl matrix can't collide.
-        if triple.ends_with("musl") { "linux-musl" } else { "linux" }
+        if triple.ends_with("musl") {
+            "linux-musl"
+        } else {
+            "linux"
+        }
     } else if triple.contains("freebsd") {
         "freebsd"
     } else {
@@ -156,7 +167,10 @@ fn build_lean_runtime() -> std::path::PathBuf {
     match status {
         Ok(s) if s.success() => lean_bin,
         Ok(s) => {
-            eprintln!("nest release: runtime build failed (cargo exited {:?})", s.code());
+            eprintln!(
+                "nest release: runtime build failed (cargo exited {:?})",
+                s.code()
+            );
             std::process::exit(1);
         }
         Err(e) => {
@@ -205,7 +219,10 @@ mod tests {
         assert_eq!(target_suffix("x86_64-unknown-linux-gnu"), "linux-x86_64");
         assert_eq!(target_suffix("aarch64-unknown-linux-gnu"), "linux-arm64");
         // musl keeps the libc visible so a gnu + musl matrix can't collide.
-        assert_eq!(target_suffix("x86_64-unknown-linux-musl"), "linux-musl-x86_64");
+        assert_eq!(
+            target_suffix("x86_64-unknown-linux-musl"),
+            "linux-musl-x86_64"
+        );
         assert_eq!(target_suffix("x86_64-pc-windows-msvc"), "windows-x86_64");
         assert_eq!(target_suffix("x86_64-unknown-freebsd"), "freebsd-x86_64");
         // An unrecognized OS keeps the whole triple — unambiguous, just longer.
@@ -225,7 +242,10 @@ mod tests {
         let p = runtime_cache_path("aarch64-apple-darwin");
         if let Some(p) = p {
             let s = p.to_string_lossy().into_owned();
-            assert!(s.ends_with("brood/runtimes/aarch64-apple-darwin/brood"), "{s}");
+            assert!(
+                s.ends_with("brood/runtimes/aarch64-apple-darwin/brood"),
+                "{s}"
+            );
         }
         if let Some(p) = runtime_cache_path("x86_64-pc-windows-msvc") {
             assert!(p.to_string_lossy().ends_with("brood.exe"));

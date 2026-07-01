@@ -220,7 +220,9 @@ fn flag_if_captures(
     if !scope_splices_param(heap, scope, params) {
         return;
     }
-    let pos = heap.form_pos_only(tpl).or_else(|| heap.form_pos_only(macro_form));
+    let pos = heap
+        .form_pos_only(tpl)
+        .or_else(|| heap.form_pos_only(macro_form));
     out.push((
         pos,
         format!(

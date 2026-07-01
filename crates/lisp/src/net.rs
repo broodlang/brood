@@ -48,7 +48,9 @@ use std::time::{Duration, Instant};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
+};
 
 use crate::core::value;
 use crate::process::{spawn_io_source, MailboxSink, Message, SubscriberHandle};
@@ -817,7 +819,11 @@ fn tls_server_loop(
                             }
                         }
                         if got > 0 {
-                            sink.emit(tcp_data_msg(id, &buf[..got], binary.load(Ordering::Acquire)));
+                            sink.emit(tcp_data_msg(
+                                id,
+                                &buf[..got],
+                                binary.load(Ordering::Acquire),
+                            ));
                         }
                     }
                     if io.peer_has_closed() {

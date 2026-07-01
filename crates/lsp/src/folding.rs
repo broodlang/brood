@@ -28,9 +28,7 @@ fn collect_containers(node: &Node, text: &str, index: &LineIndex, out: &mut Vec<
         let start = index.position(text, node.span.start).line;
         // The line of the last byte *inside* the node — the closing delimiter's
         // line. `span.end` is exclusive, so step back one to stay on it.
-        let end = index
-            .position(text, node.span.end.saturating_sub(1))
-            .line;
+        let end = index.position(text, node.span.end.saturating_sub(1)).line;
         if end > start {
             out.push(FoldingRange {
                 start_line: start,

@@ -16,7 +16,11 @@ use std::process::Command;
 fn scaffold(dir: &Path) {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(dir.join("project.blsp"), "(project\n  :name demo\n  :main app)\n").unwrap();
+    std::fs::write(
+        dir.join("project.blsp"),
+        "(project\n  :name demo\n  :main app)\n",
+    )
+    .unwrap();
     std::fs::write(
         src.join("app.blsp"),
         "(defmodule app)\n(defn main () (println \"RAN: app/main\"))\n",
@@ -72,8 +76,7 @@ fn nest_check(dir: &Path) -> String {
 /// wins and both call sites are flagged "expects int, got float".
 #[test]
 fn declared_sig_is_authoritative_cross_module() {
-    let dir =
-        std::env::temp_dir().join(format!("brood-nest-check-sig-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("brood-nest-check-sig-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -120,17 +123,29 @@ fn nest_run_main_overrides_the_manifest_entry() {
     // Default: the manifest's `:main app` runs `app/main`.
     let default = nest_run(&dir, &[]);
     assert!(default.contains("RAN: app/main"), "default run:\n{default}");
-    assert!(!default.contains("scratch"), "default leaked scratch:\n{default}");
+    assert!(
+        !default.contains("scratch"),
+        "default leaked scratch:\n{default}"
+    );
 
     // `--main scratch`: module-only spec defaults the fn to `main`.
     let m = nest_run(&dir, &["--main", "scratch"]);
     assert!(m.contains("RAN: scratch/main"), "--main scratch:\n{m}");
-    assert!(!m.contains("app/main"), "--main scratch still ran app:\n{m}");
+    assert!(
+        !m.contains("app/main"),
+        "--main scratch still ran app:\n{m}"
+    );
 
     // `--main scratch/other`: explicit module/fn spec.
     let mf = nest_run(&dir, &["--main", "scratch/other"]);
-    assert!(mf.contains("RAN: scratch/other"), "--main scratch/other:\n{mf}");
-    assert!(!mf.contains("app/main"), "--main scratch/other still ran app:\n{mf}");
+    assert!(
+        mf.contains("RAN: scratch/other"),
+        "--main scratch/other:\n{mf}"
+    );
+    assert!(
+        !mf.contains("app/main"),
+        "--main scratch/other still ran app:\n{mf}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

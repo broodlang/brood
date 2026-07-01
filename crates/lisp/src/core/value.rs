@@ -782,10 +782,27 @@ impl Tag {
     pub fn keyword(self) -> Symbol {
         static KW: LazyLock<[Symbol; 21]> = LazyLock::new(|| {
             const TAGS: [Tag; 21] = [
-                Tag::Nil, Tag::Bool, Tag::Int, Tag::Float, Tag::Sym, Tag::Keyword,
-                Tag::Str, Tag::Pair, Tag::Vector, Tag::Fn, Tag::Macro, Tag::Native,
-                Tag::Map, Tag::Ref, Tag::Pid, Tag::Rope, Tag::Socket, Tag::Subprocess,
-                Tag::Table, Tag::Bytes, Tag::Decimal,
+                Tag::Nil,
+                Tag::Bool,
+                Tag::Int,
+                Tag::Float,
+                Tag::Sym,
+                Tag::Keyword,
+                Tag::Str,
+                Tag::Pair,
+                Tag::Vector,
+                Tag::Fn,
+                Tag::Macro,
+                Tag::Native,
+                Tag::Map,
+                Tag::Ref,
+                Tag::Pid,
+                Tag::Rope,
+                Tag::Socket,
+                Tag::Subprocess,
+                Tag::Table,
+                Tag::Bytes,
+                Tag::Decimal,
             ];
             let mut out = [0u32; 21];
             for t in TAGS {
@@ -1127,7 +1144,10 @@ mod jit_layout_tests {
         // tag-check); a variant reorder breaks it.
         let f = Value::Float(1.5);
         let fbytes = unsafe {
-            std::slice::from_raw_parts(&f as *const Value as *const u8, std::mem::size_of::<Value>())
+            std::slice::from_raw_parts(
+                &f as *const Value as *const u8,
+                std::mem::size_of::<Value>(),
+            )
         };
         assert_eq!(
             fbytes[0],

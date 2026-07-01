@@ -50,7 +50,10 @@ struct Ref {
 /// qualified `target` tokens (exact), plus bare `short` tokens in each file whose
 /// namespace/imports resolve `short` → `target`. Deduped by (file, range).
 fn collect(interp: &mut Interp, docs: &Documents, current: &Uri, name: &str) -> (String, Vec<Ref>) {
-    let cur_text = docs.get(current).map(|d| d.text.clone()).unwrap_or_default();
+    let cur_text = docs
+        .get(current)
+        .map(|d| d.text.clone())
+        .unwrap_or_default();
     let target = introspect::resolve_in_source(interp, &cur_text, name);
     let short = short_name(&target).to_string();
     let target_qualified = target.contains('/');
@@ -74,7 +77,11 @@ fn collect(interp: &mut Interp, docs: &Documents, current: &Uri, name: &str) -> 
         let mut push = |span: brood::error::Span, qualified: bool, out: &mut Vec<Ref>| {
             let range = index.range(&text, span);
             if seen.insert((uri.clone(), range.start, range.end)) {
-                out.push(Ref { uri: uri.clone(), range, qualified });
+                out.push(Ref {
+                    uri: uri.clone(),
+                    range,
+                    qualified,
+                });
             }
         };
         // Qualified `ns/name` tokens that *are* the target (exact identity).
@@ -137,10 +144,10 @@ pub fn rename(
         } else {
             new_name.to_string()
         };
-        changes
-            .entry(r.uri)
-            .or_default()
-            .push(TextEdit { range: r.range, new_text });
+        changes.entry(r.uri).or_default().push(TextEdit {
+            range: r.range,
+            new_text,
+        });
     }
     Some(WorkspaceEdit {
         changes: Some(changes),
@@ -239,7 +246,10 @@ fn project_sources<'a>(interp: &mut Interp, docs: &'a Documents, current: &Uri) 
         if let Some(cur_path) = crate::uri_to_path(current) {
             if seen.insert(cur_path) {
                 if let Some(doc) = docs.get(current) {
-                    out.push(Source::Open { uri: current.clone(), doc });
+                    out.push(Source::Open {
+                        uri: current.clone(),
+                        doc,
+                    });
                 }
             }
         }
@@ -262,7 +272,10 @@ pub(crate) fn all_sources<'a>(interp: &mut Interp, docs: &'a Documents) -> Vec<S
                     continue;
                 }
             }
-            out.push(Source::Open { uri: uri.clone(), doc });
+            out.push(Source::Open {
+                uri: uri.clone(),
+                doc,
+            });
         }
     })
 }
@@ -280,8 +293,16 @@ mod tests {
         let src = dir.join("src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(dir.join("project.blsp"), "(project :name foo)\n").unwrap();
-        std::fs::write(src.join("a.blsp"), "(defmodule a)\n(defn observe (x) x)\n(observe 1)\n").unwrap();
-        std::fs::write(src.join("b.blsp"), "(defmodule b)\n(defn observe (y) y)\n(observe 2)\n").unwrap();
+        std::fs::write(
+            src.join("a.blsp"),
+            "(defmodule a)\n(defn observe (x) x)\n(observe 1)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("b.blsp"),
+            "(defmodule b)\n(defn observe (y) y)\n(observe 2)\n",
+        )
+        .unwrap();
 
         let mut interp = Interp::new();
         introspect::load_tooling_image(&mut interp, &dir.display().to_string()).ok();
@@ -293,7 +314,11 @@ mod tests {
         let mut docs = Documents::new();
         docs.insert(
             uri_a.clone(),
-            Document { text: a_src.clone(), analysis: analyze(&a_src), version: 1 },
+            Document {
+                text: a_src.clone(),
+                analysis: analyze(&a_src),
+                version: 1,
+            },
         );
 
         let edit = rename(&mut interp, &docs, &uri_a, "observe", "watch")

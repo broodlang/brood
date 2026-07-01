@@ -12,7 +12,11 @@ use std::process::Command;
 
 /// Build `[brood][archive][footer]` for a two-module app and return its path,
 /// alongside a separate empty directory to run it from.
-fn write_app(tag: &str, manifest: &str, modules: &[(&str, &str)]) -> (std::path::PathBuf, std::path::PathBuf) {
+fn write_app(
+    tag: &str,
+    manifest: &str,
+    modules: &[(&str, &str)],
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let brood = env!("CARGO_BIN_EXE_brood");
     let base = std::fs::read(brood).expect("read brood binary");
     let owned: Vec<(String, String)> = modules
@@ -41,7 +45,10 @@ fn bundled_brood_boots_embedded_main_with_cross_module_use() {
         &[
             // `main` uses `lib` — proves cross-module `require`/`:use` resolves
             // out of the embedded archive, not the disk load-path.
-            ("main", "(defmodule main (:use lib))\n(defn main () (println (greet)))"),
+            (
+                "main",
+                "(defmodule main (:use lib))\n(defn main () (println (greet)))",
+            ),
             ("lib", "(defmodule lib)\n(defn greet () \"embedded-ok\")"),
         ],
     );
@@ -74,7 +81,11 @@ fn bundled_app_receives_argv() {
         .current_dir(&cwd)
         .output()
         .expect("run bundled app");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         "argv:(alpha beta)"

@@ -3,7 +3,9 @@ use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 use crate::syntax::printer;
 
-use super::numeric::{arg, two, expect_number, expect_string, expect_rope, expect_rope_ref, expect_int};
+use super::numeric::{
+    arg, expect_int, expect_number, expect_rope, expect_rope_ref, expect_string, two,
+};
 use super::realize_seqview;
 use crate::eval::apply;
 macro_rules! expect {
@@ -27,7 +29,11 @@ pub(super) fn cons(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 /// stringifiers/printers, whose `&Heap` printer can't run a transducer. Fast path:
 /// no view ⇒ a plain copy, no eval. Rooting: each `realize_seqview` can collect,
 /// so every input and every already-realised result is kept on the root stack.
-pub(super) fn realize_seqviews(heap: &mut Heap, env: EnvId, args: &[Value]) -> Result<Vec<Value>, LispError> {
+pub(super) fn realize_seqviews(
+    heap: &mut Heap,
+    env: EnvId,
+    args: &[Value],
+) -> Result<Vec<Value>, LispError> {
     if !args.iter().any(|a| matches!(a, Value::SeqView(_))) {
         return Ok(args.to_vec());
     }
@@ -767,7 +773,12 @@ pub(super) fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// return the char index just past it. Char-indexed, like `substring`/`char-at`. The
 /// forward char-class scan a tokenizer runs its inner loops on (skip a whitespace /
 /// digit / delimiter run) — O(run) native instead of O(run) interpreted recursion.
-pub(super) fn string_span_impl(args: &[Value], heap: &mut Heap, who: &str, in_set: bool) -> LispResult {
+pub(super) fn string_span_impl(
+    args: &[Value],
+    heap: &mut Heap,
+    who: &str,
+    in_set: bool,
+) -> LispResult {
     let s = expect_string(heap, who, arg(args, 0))?;
     let start = expect_int(heap, who, arg(args, 1))?;
     let set = expect_string(heap, who, arg(args, 2))?;
@@ -938,7 +949,11 @@ pub(super) fn merge_faces(heap: &mut Heap, a: Value, b: Value) -> Value {
 
 /// Read a `[start end face]` span/range list into `(start, end, face)` tuples (handles
 /// at offsets outside the window are kept; the tilers clip them).
-pub(super) fn read_spans(heap: &Heap, who: &str, v: Value) -> Result<Vec<(i64, i64, Value)>, LispError> {
+pub(super) fn read_spans(
+    heap: &Heap,
+    who: &str,
+    v: Value,
+) -> Result<Vec<(i64, i64, Value)>, LispError> {
     let items = heap.seq_items(v)?;
     let mut out = Vec::with_capacity(items.len());
     for sv in &items {
@@ -1143,9 +1158,13 @@ pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     let s = expect_string(heap, "string-split", arg(args, 0))?;
     let sep = expect_string(heap, "string-split", arg(args, 1))?;
     let out: Vec<Value> = if sep.is_empty() {
-        s.chars().map(|c| heap.alloc_string(&c.to_string())).collect()
+        s.chars()
+            .map(|c| heap.alloc_string(&c.to_string()))
+            .collect()
     } else {
-        s.split(sep.as_str()).map(|part| heap.alloc_string(part)).collect()
+        s.split(sep.as_str())
+            .map(|part| heap.alloc_string(part))
+            .collect()
     };
     Ok(heap.list_from_slice(&out))
 }
@@ -1417,5 +1436,3 @@ pub(super) fn rope_line_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     }
     Ok(Value::int(r.line_to_char(n as usize) as i64))
 }
-
-

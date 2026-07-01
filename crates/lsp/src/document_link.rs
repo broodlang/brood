@@ -109,7 +109,10 @@ mod tests {
 
         let mut interp = Interp::new();
         interp
-            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .eval_str(&format!(
+                "(def *load-path* (cons \"{}\" *load-path*))",
+                dir.display()
+            ))
             .expect("extend load-path");
 
         let root = cst::parse(src);
@@ -144,12 +147,18 @@ mod tests {
 
     #[test]
     fn links_a_require_argument() {
-        assert_eq!(linked_names("require", "(require 'greeter)"), vec!["greeter"]);
+        assert_eq!(
+            linked_names("require", "(require 'greeter)"),
+            vec!["greeter"]
+        );
     }
 
     #[test]
     fn links_a_use_clause_module() {
-        assert_eq!(linked_names("use", "(defmodule app (:use greeter))"), vec!["greeter"]);
+        assert_eq!(
+            linked_names("use", "(defmodule app (:use greeter))"),
+            vec!["greeter"]
+        );
     }
 
     #[test]

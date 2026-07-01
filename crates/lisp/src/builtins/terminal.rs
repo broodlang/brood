@@ -2,8 +2,8 @@ use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 
-use super::numeric::{arg, expect_number, expect_string, expect_int, expect_bigint};
 use super::io::capture_write;
+use super::numeric::{arg, expect_bigint, expect_int, expect_number, expect_string};
 // The thin crossterm seam: enter/leave the alternate screen, read keys, and
 // paint a *frame* — a Brood vector of render ops. The protocol's meaning is
 // data (the ops); these primitives are the in-process frontend that interprets
@@ -378,7 +378,11 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             let col = expect_int(heap, "term-draw", arg(&parts, 2))?;
             let s = expect_string(heap, "term-draw", arg(&parts, 3))?;
             crossterm::queue!(out, MoveTo(clamp_u16(col), clamp_u16(row))).map_err(term_err)?;
-            apply_face(&mut out, heap, parts.get(4).copied().unwrap_or(Value::nil()))?;
+            apply_face(
+                &mut out,
+                heap,
+                parts.get(4).copied().unwrap_or(Value::nil()),
+            )?;
             crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
                 .map_err(term_err)?;
         }
@@ -448,7 +452,11 @@ pub(super) fn term_emit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     for (tag, parts) in parsed {
         if tag == print_t {
             let s = expect_string(heap, "term-emit", arg(&parts, 1))?;
-            apply_face(&mut out, heap, parts.get(2).copied().unwrap_or(Value::nil()))?;
+            apply_face(
+                &mut out,
+                heap,
+                parts.get(2).copied().unwrap_or(Value::nil()),
+            )?;
             crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
                 .map_err(term_err)?;
         } else if tag == cr_t {
@@ -509,7 +517,11 @@ static FACE_KEYS: std::sync::LazyLock<FaceKeys> = std::sync::LazyLock::new(|| Fa
 /// Apply a face map (`{:fg :red :bg :blue :bold true :reverse true}`) as
 /// crossterm style commands. A non-map (or nil) face is a no-op. Unknown colour
 /// names are skipped. Callers reset attributes after the text.
-pub(super) fn apply_face<W: std::io::Write>(out: &mut W, heap: &Heap, face: Value) -> Result<(), LispError> {
+pub(super) fn apply_face<W: std::io::Write>(
+    out: &mut W,
+    heap: &Heap,
+    face: Value,
+) -> Result<(), LispError> {
     use crossterm::style::{Attribute, SetAttribute, SetBackgroundColor, SetForegroundColor};
     let Value::Map(id) = face else { return Ok(()) };
     let k = &*FACE_KEYS;
@@ -895,7 +907,15 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                 _ => 1.0,
             };
             let radius = num(parts.get(7).copied().unwrap_or(Value::nil()));
-            ops.push(crate::gui::Op::FRect { x, y, w, h, face, opacity, radius });
+            ops.push(crate::gui::Op::FRect {
+                x,
+                y,
+                w,
+                h,
+                face,
+                opacity,
+                radius,
+            });
         } else if tag == text_t {
             let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
             let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
@@ -972,10 +992,19 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                     Some(blob) => blob.as_bytes().to_vec(),
                     None => heap.string(id).as_bytes().to_vec(),
                 },
-                v => expect_bigint(heap, "gui-draw", v)?.magnitude().to_bytes_le(),
+                v => expect_bigint(heap, "gui-draw", v)?
+                    .magnitude()
+                    .to_bytes_le(),
             };
             let color = span_color(heap, arg(&parts, 6));
-            ops.push(crate::gui::Op::Cells { row0, col0, w, aspect, bytes, color });
+            ops.push(crate::gui::Op::Cells {
+                row0,
+                col0,
+                w,
+                aspect,
+                bytes,
+                color,
+            });
         } else if tag == cells_rgb_t {
             // [:cells-rgb row0 col0 w aspect bits colors default] — a whole COLOURED board
             // in one op: each live cell takes its colour from `colors` (a map bit-index →
@@ -990,7 +1019,9 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                     Some(blob) => blob.as_bytes().to_vec(),
                     None => heap.string(id).as_bytes().to_vec(),
                 },
-                v => expect_bigint(heap, "gui-draw", v)?.magnitude().to_bytes_le(),
+                v => expect_bigint(heap, "gui-draw", v)?
+                    .magnitude()
+                    .to_bytes_le(),
             };
             // Decode the colour map once: bit-index → rgb (packed as r | g<<12 | b<<24).
             let mut colors = std::collections::HashMap::new();
@@ -1000,13 +1031,25 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                         let bits: u64 = (&p).try_into().unwrap_or(0);
                         colors.insert(
                             idx as u64,
-                            [(bits & 4095) as u8, ((bits >> 12) & 4095) as u8, ((bits >> 24) & 4095) as u8],
+                            [
+                                (bits & 4095) as u8,
+                                ((bits >> 12) & 4095) as u8,
+                                ((bits >> 24) & 4095) as u8,
+                            ],
                         );
                     }
                 }
             }
             let default = span_color(heap, arg(&parts, 7)).unwrap_or([229, 229, 229]);
-            ops.push(crate::gui::Op::CellsRgb { row0, col0, w, aspect, bytes, colors, default });
+            ops.push(crate::gui::Op::CellsRgb {
+                row0,
+                col0,
+                w,
+                aspect,
+                bytes,
+                colors,
+                default,
+            });
         }
     }
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;

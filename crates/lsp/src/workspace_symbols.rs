@@ -141,7 +141,10 @@ mod tests {
     #[test]
     fn extracts_the_file_namespace_from_defmodule() {
         let root = cst::parse("(defmodule parser)\n(defn parse (s) s)");
-        assert_eq!(file_namespace(&root, "(defmodule parser)\n(defn parse (s) s)"), Some("parser"));
+        assert_eq!(
+            file_namespace(&root, "(defmodule parser)\n(defn parse (s) s)"),
+            Some("parser")
+        );
         // No defmodule → no namespace.
         let bare = cst::parse("(defn parse (s) s)");
         assert_eq!(file_namespace(&bare, "(defn parse (s) s)"), None);

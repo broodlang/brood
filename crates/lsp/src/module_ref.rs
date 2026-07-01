@@ -34,9 +34,10 @@ pub fn clause_ref_at<'s>(root: &Node, src: &'s str, offset: u32) -> Option<Claus
     // The innermost enclosing clause list (`(:use …)` etc.) containing the cursor.
     let mut chain = Vec::new();
     chain_to(root, offset, &mut chain);
-    let clause = chain.iter().rev().find_map(|n| {
-        clause_keyword(n, src).map(|kw| (*n, kw))
-    });
+    let clause = chain
+        .iter()
+        .rev()
+        .find_map(|n| clause_keyword(n, src).map(|kw| (*n, kw)));
     let (clause, kw) = clause?;
     // The target is the clause's second form; only navigate when it *is* the
     // symbol under the cursor (not a later `:only`/`:as` operand).
@@ -93,17 +94,26 @@ mod tests {
 
     #[test]
     fn use_target_is_a_module() {
-        assert_eq!(kind_at("(defmodule app (:use greeter))", "greeter"), Some("module"));
+        assert_eq!(
+            kind_at("(defmodule app (:use greeter))", "greeter"),
+            Some("module")
+        );
     }
 
     #[test]
     fn alias_target_is_a_module() {
-        assert_eq!(kind_at("(defmodule app (:alias web/views))", "web/views"), Some("module"));
+        assert_eq!(
+            kind_at("(defmodule app (:alias web/views))", "web/views"),
+            Some("module")
+        );
     }
 
     #[test]
     fn implements_target_is_a_behaviour() {
-        assert_eq!(kind_at("(defmodule app (:implements LiveModule))", "LiveModule"), Some("behaviour"));
+        assert_eq!(
+            kind_at("(defmodule app (:implements LiveModule))", "LiveModule"),
+            Some("behaviour")
+        );
     }
 
     #[test]
@@ -115,7 +125,10 @@ mod tests {
     fn an_only_import_name_is_not_a_clause_target() {
         // `greet` after `:only` is an imported name, not the module — falls through
         // to the normal Free-resolution path, not a module jump.
-        assert_eq!(kind_at("(defmodule app (:use greeter :only [greet]))", "greet]"), None);
+        assert_eq!(
+            kind_at("(defmodule app (:use greeter :only [greet]))", "greet]"),
+            None
+        );
     }
 
     #[test]

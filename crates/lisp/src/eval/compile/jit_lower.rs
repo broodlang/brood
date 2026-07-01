@@ -106,9 +106,18 @@ fn int_carry_eligible(code: &[Inst]) -> bool {
                         ..
                     }
                     | Inst::MakeVector(_)
-                    | Inst::Prim2 { op: PrimOp::Cons, .. }
-                    | Inst::Prim2SlotSlot { op: PrimOp::Cons, .. }
-                    | Inst::Prim2SlotInt { op: PrimOp::Cons, .. }
+                    | Inst::Prim2 {
+                        op: PrimOp::Cons,
+                        ..
+                    }
+                    | Inst::Prim2SlotSlot {
+                        op: PrimOp::Cons,
+                        ..
+                    }
+                    | Inst::Prim2SlotInt {
+                        op: PrimOp::Cons,
+                        ..
+                    }
             )
         })
 }
@@ -121,7 +130,6 @@ fn non_tail_call_count(code: &[Inst]) -> usize {
         .filter(|i| matches!(i, Inst::Call { tail: false, .. }))
         .count()
 }
-
 
 /// True iff every opcode in `code` is in the integer JIT subset — i.e. `jit_lower_arm`
 /// could lower this arm (modulo the handle-spill, which is what the reserve enables).
@@ -401,8 +409,12 @@ pub(crate) fn jit_lower_inlined_arm(
     // Box the spliced body + chunk so their heap addresses (and the `ConstVal`s inside the
     // chunk) are stable once stored in the keepalive below — `jit_lower_arm_inner` bakes
     // those addresses into the native code, so they must not move after lowering.
-    let spliced: Box<Node> =
-        Box::new(rederive_inlined_body(&arm.body, name, arm.nrequired, arm.inline_stride)?);
+    let spliced: Box<Node> = Box::new(rederive_inlined_body(
+        &arm.body,
+        name,
+        arm.nrequired,
+        arm.inline_stride,
+    )?);
     let chunk: Box<Chunk> = Box::new(compile_chunk(&spliced)?);
     let ptr = jit_lower_arm_inner(
         jit,
@@ -485,8 +497,7 @@ fn jit_lower_arm_inner(
                 ..
             } = i
             {
-                if invariant.get(*slot_a).copied().unwrap_or(false)
-                    && !hoist_slots.contains(slot_a)
+                if invariant.get(*slot_a).copied().unwrap_or(false) && !hoist_slots.contains(slot_a)
                 {
                     hoist_slots.push(*slot_a);
                 }
@@ -546,8 +557,7 @@ fn jit_lower_arm_inner(
     // operand) be tagged `Op::Bool` on *every* predecessor edge; without it the merge param
     // is `Op::Int` on the slot edge and a `0` (false) reads as a truthy integer (5770),
     // looping forever on a condition that should exit.
-    let slot_bool: std::cell::RefCell<Vec<bool>> =
-        std::cell::RefCell::new(vec![false; nslots]);
+    let slot_bool: std::cell::RefCell<Vec<bool>> = std::cell::RefCell::new(vec![false; nslots]);
     // Per-slot F64 SSA value cache. When `store_op` writes `Op::Float(v)` to slot `dst`,
     // we stash `v` here. A subsequent `as_f64(Op::Slot(k))` can return `v` directly —
     // no tag-check, no memory load, just the SSA value already in a register. The cache
@@ -605,7 +615,9 @@ fn jit_lower_arm_inner(
     // no regression. Arms with no tail call are unaffected (no round-trip): a tiny `SelfCall`
     // int loop still tiers (~27× win).
     const TAIL_CALL_MIN_WORK: usize = 4;
-    let has_tail_call = code.iter().any(|i| matches!(i, Inst::Call { tail: true, .. }));
+    let has_tail_call = code
+        .iter()
+        .any(|i| matches!(i, Inst::Call { tail: true, .. }));
     let has_self_call = code.iter().any(|i| matches!(i, Inst::SelfCall { .. }));
     // The gate only applies when the arm is self-recursive (SelfCall present). A non-self-
     // recursive arm with a tail call is a pure delegator: it calls out exactly once and never
@@ -699,7 +711,11 @@ fn jit_lower_arm_inner(
                 // and is NOT staged on the operand stack — only the `argc` args are: net `1-argc`.
                 // For a computed head (head=None) the callee IS staged below the args: net `-argc`.
                 Inst::Call { argc, head, .. } => {
-                    cur += if head.is_some() { 1 - *argc as i32 } else { -(*argc as i32) };
+                    cur += if head.is_some() {
+                        1 - *argc as i32
+                    } else {
+                        -(*argc as i32)
+                    };
                 }
                 // Fused prims read their operands from frame slots / a literal, not the
                 // operand stack: net push of 1 (unlike the generic `Prim2`'s pop-2-push-1).
@@ -953,7 +969,13 @@ fn jit_lower_arm_inner(
     let carry_vars: Vec<(Variable, bool)> = {
         let candidate = if int_carry_eligible(code) {
             code.iter()
-                .filter_map(|i| if let Inst::SelfCall { argc } = i { Some(*argc) } else { None })
+                .filter_map(|i| {
+                    if let Inst::SelfCall { argc } = i {
+                        Some(*argc)
+                    } else {
+                        None
+                    }
+                })
                 .max()
                 .unwrap_or(0)
         } else {
@@ -967,8 +989,7 @@ fn jit_lower_arm_inner(
         {
             (0..candidate)
                 .map(|k| {
-                    let is_float =
-                        slot_tags.get(k).copied() == Some(profile_tag_float_carry);
+                    let is_float = slot_tags.get(k).copied() == Some(profile_tag_float_carry);
                     let ty = if is_float { types::F64 } else { types::I64 };
                     (b.declare_var(ty), is_float)
                 })
@@ -1112,9 +1133,16 @@ fn jit_lower_arm_inner(
         let needs = !hoist_globals.is_empty()
             || !hoist_scalar_globals.is_empty()
             || (icall_enabled()
-                && code
-                    .iter()
-                    .any(|i| matches!(i, Inst::Call { tail: false, head: Some(_), .. })));
+                && code.iter().any(|i| {
+                    matches!(
+                        i,
+                        Inst::Call {
+                            tail: false,
+                            head: Some(_),
+                            ..
+                        }
+                    )
+                }));
         if needs {
             let c = b.ins().call(gepochptr_ref, &[heap]);
             Some(b.inst_results(c)[0])
@@ -1149,21 +1177,35 @@ fn jit_lower_arm_inner(
     // hoisted nursery base pointer becomes a dangling pointer into the freed slab.
     let pair_bases: Option<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> = {
         let has_car_cdr = code.iter().any(|i| {
-            matches!(i, Inst::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. })
+            matches!(
+                i,
+                Inst::Prim1 {
+                    op: PrimOp1::First | PrimOp1::Rest,
+                    ..
+                }
+            )
         });
         let has_alloc_safepoint = code.iter().any(|i| {
             matches!(
                 i,
-                Inst::Prim2 { op: PrimOp::Cons, .. }
-                    | Inst::Prim2SlotSlot { op: PrimOp::Cons, .. }
-                    | Inst::Prim2SlotInt { op: PrimOp::Cons, .. }
-                    | Inst::MakeVector(_)
+                Inst::Prim2 {
+                    op: PrimOp::Cons,
+                    ..
+                } | Inst::Prim2SlotSlot {
+                    op: PrimOp::Cons,
+                    ..
+                } | Inst::Prim2SlotInt {
+                    op: PrimOp::Cons,
+                    ..
+                } | Inst::MakeVector(_)
             )
         });
         // A non-tail Call is a GC safepoint: minor_collect replaces `self.local` entirely
         // (std::mem::take), so any pointer to `local.pairs` cached before the call is
         // invalid after it. Only inline when there are no such safepoints.
-        let has_call_safepoint = code.iter().any(|i| matches!(i, Inst::Call { tail: false, .. }));
+        let has_call_safepoint = code
+            .iter()
+            .any(|i| matches!(i, Inst::Call { tail: false, .. }));
         if has_car_cdr && !has_alloc_safepoint && !has_call_safepoint {
             let cn = b.ins().call(pnbase_ref, &[heap]);
             let nursery = b.inst_results(cn)[0];
@@ -1176,11 +1218,8 @@ fn jit_lower_arm_inner(
     };
 
     if !hoist_slots.is_empty() || !hoist_globals.is_empty() || !hoist_scalar_globals.is_empty() {
-        let len_slot = b.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            8,
-            3,
-        ));
+        let len_slot =
+            b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
         for &slot in &hoist_slots {
             let roots_base = b.use_var(rb_var);
@@ -1188,19 +1227,27 @@ fn jit_lower_arm_inner(
             let o = b.ins().imul_imm(i, STRIDE);
             let addr = b.ins().iadd(roots_base, o);
             let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), addr, 0);
-            let w1 = b
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
-            let w2 = b
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32 + 8);
+            let w1 = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                addr,
+                PAYLOAD_OFFSET as i32,
+            );
+            let w2 = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                addr,
+                PAYLOAD_OFFSET as i32 + 8,
+            );
             let c = b.ins().call(vbase_ref, &[heap, w0, w1, w2, len_addr]);
             let ptr = b.inst_results(c)[0];
             // null ptr ⇒ slot isn't a vector ⇒ deopt (VM runs the arm; same result).
             let cont = b.create_block();
             b.ins().brif(ptr, cont, &[], deopt, &[]);
             b.switch_to_block(cont);
-            let vlen = b.ins().load(types::I64, MemFlagsData::trusted(), len_addr, 0);
+            let vlen = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), len_addr, 0);
             hoisted.insert(slot, (ptr, vlen));
         }
         // Resolve each hoisted global once (sorted for deterministic codegen). Unbound ⇒
@@ -1216,14 +1263,20 @@ fn jit_lower_arm_inner(
             b.ins().brif(status, error, &[], okb, &[]);
             b.switch_to_block(okb);
             let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-            let w1 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-            let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            let w1 = b
+                .ins()
+                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            let w2 = b
+                .ins()
+                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
             let c = b.ins().call(vbase_ref, &[heap, w0, w1, w2, len_addr]);
             let ptr = b.inst_results(c)[0];
             let cont = b.create_block();
             b.ins().brif(ptr, cont, &[], deopt, &[]);
             b.switch_to_block(cont);
-            let vlen = b.ins().load(types::I64, MemFlagsData::trusted(), len_addr, 0);
+            let vlen = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), len_addr, 0);
             hoisted_global.insert(sym, (ptr, vlen, w0, w1, w2));
         }
         // Scalar globals (#1): resolve each once at entry into its `Value` words — no vector
@@ -1239,8 +1292,12 @@ fn jit_lower_arm_inner(
             b.ins().brif(status, error, &[], okb, &[]);
             b.switch_to_block(okb);
             let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-            let w1 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-            let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            let w1 = b
+                .ins()
+                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            let w2 = b
+                .ins()
+                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
             hoisted_scalar.insert(sym, (w0, w1, w2));
         }
         if !hoisted_global.is_empty() || !hoisted_scalar.is_empty() {
@@ -1266,7 +1323,12 @@ fn jit_lower_arm_inner(
         let cont = b.create_block();
         b.ins().brif(ok, cont, &[], deopt, &[]);
         b.switch_to_block(cont);
-        let bits = b.ins().load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
+        let bits = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            addr,
+            PAYLOAD_OFFSET as i32,
+        );
         if is_float {
             let f = b.ins().bitcast(types::F64, MemFlagsData::new(), bits);
             b.def_var(var, f);
@@ -1314,8 +1376,12 @@ fn jit_lower_arm_inner(
         let cont = b.create_block();
         b.ins().brif(is_int, cont, &[], deopt, &[]);
         b.switch_to_block(cont);
-        b.ins()
-            .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32)
+        b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            addr,
+            PAYLOAD_OFFSET as i32,
+        )
     };
     // `map` reorders the two operands into the primitive's `(x, y)` argument order —
     // e.g. `>` is `%lt` with `map = [1, 0]` (operands swapped), so the JIT must apply
@@ -1464,7 +1530,10 @@ fn jit_lower_arm_inner(
     // Store an unboxed scalar `Op::Int` value into frame slot `k`, boxing it as `Int` or
     // (for a comparison `i8`) `Bool` via `box_scalar`.
     let store_int = |b: &mut FunctionBuilder, k: i64, v: cranelift_codegen::ir::Value| {
-        debug_assert!((k as usize) < nslots, "[jit-slot] store_int slot {k} >= nslots {nslots}");
+        debug_assert!(
+            (k as usize) < nslots,
+            "[jit-slot] store_int slot {k} >= nslots {nslots}"
+        );
         let (tag_byte, payload) = box_scalar(b, v);
         let roots_base = b.use_var(rb_var);
         let idx = b.ins().iadd_imm(base, k);
@@ -1472,8 +1541,12 @@ fn jit_lower_arm_inner(
         let addr = b.ins().iadd(roots_base, off);
         let tag = b.ins().iconst(types::I8, tag_byte as i64);
         b.ins().store(MemFlagsData::trusted(), tag, addr, 0);
-        b.ins()
-            .store(MemFlagsData::trusted(), payload, addr, PAYLOAD_OFFSET as i32);
+        b.ins().store(
+            MemFlagsData::trusted(),
+            payload,
+            addr,
+            PAYLOAD_OFFSET as i32,
+        );
     };
     // Copy the whole `Value` from frame slot `src` to slot `dst` (handle-safe — moves the
     // bytes verbatim, no interpretation). A `Value` is `STRIDE` bytes (`#[repr(C, u8)]`):
@@ -1481,7 +1554,10 @@ fn jit_lower_arm_inner(
     // (and any future 2-word-payload variant) carries `id` in the third word at offset 16,
     // which a tag+payload-only copy would drop and corrupt.
     let copy_value = |b: &mut FunctionBuilder, src: i64, dst: i64| {
-        debug_assert!((src as usize) < nslots && (dst as usize) < nslots, "[jit-slot] copy_value src {src} dst {dst} vs nslots {nslots}");
+        debug_assert!(
+            (src as usize) < nslots && (dst as usize) < nslots,
+            "[jit-slot] copy_value src {src} dst {dst} vs nslots {nslots}"
+        );
         let roots_base = b.use_var(rb_var);
         let saddr = {
             let i = b.ins().iadd_imm(base, src);
@@ -1495,7 +1571,9 @@ fn jit_lower_arm_inner(
         };
         let mut off = 0i32;
         while (off as i64) < STRIDE {
-            let w = b.ins().load(types::I64, MemFlagsData::trusted(), saddr, off);
+            let w = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), saddr, off);
             b.ins().store(MemFlagsData::trusted(), w, daddr, off);
             off += 8;
         }
@@ -1526,12 +1604,18 @@ fn jit_lower_arm_inner(
                 let o = b.ins().imul_imm(i, STRIDE);
                 let addr = b.ins().iadd(roots_base, o);
                 let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), addr, 0);
-                let w1 = b
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
-                let w2 = b
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32 + 8);
+                let w1 = b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    addr,
+                    PAYLOAD_OFFSET as i32,
+                );
+                let w2 = b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    addr,
+                    PAYLOAD_OFFSET as i32 + 8,
+                );
                 // NOTE: an in-IR validation call here (dbg_check_slot_ref) PERTURBS codegen —
                 // it forces register spills around the call that mask the very register-liveness
                 // bug we're hunting (#2). Validation lives in the Rust-side `brood_rt_push`.
@@ -1562,7 +1646,10 @@ fn jit_lower_arm_inner(
     };
     // Store the three words of a `Value` into frame slot `dst`.
     let store_words = |b: &mut FunctionBuilder, dst: i64, w: [cranelift_codegen::ir::Value; 3]| {
-        debug_assert!((dst as usize) < nslots, "[jit-slot] store_words slot {dst} >= nslots {nslots}");
+        debug_assert!(
+            (dst as usize) < nslots,
+            "[jit-slot] store_words slot {dst} >= nslots {nslots}"
+        );
         let roots_base = b.use_var(rb_var);
         let i = b.ins().iadd_imm(base, dst);
         let o = b.ins().imul_imm(i, STRIDE);
@@ -1570,8 +1657,12 @@ fn jit_lower_arm_inner(
         b.ins().store(MemFlagsData::trusted(), w[0], addr, 0);
         b.ins()
             .store(MemFlagsData::trusted(), w[1], addr, PAYLOAD_OFFSET as i32);
-        b.ins()
-            .store(MemFlagsData::trusted(), w[2], addr, PAYLOAD_OFFSET as i32 + 8);
+        b.ins().store(
+            MemFlagsData::trusted(),
+            w[2],
+            addr,
+            PAYLOAD_OFFSET as i32 + 8,
+        );
     };
     // Materialise an operand to an unboxed `i64`: a register value as-is, a tag-checked
     // load of a frame slot, or a tag-checked extract of a `Handle`'s payload (a `Handle`
@@ -1629,9 +1720,12 @@ fn jit_lower_arm_inner(
                 let i = b.ins().iadd_imm(base, k as i64);
                 let o = b.ins().imul_imm(i, STRIDE);
                 let addr = b.ins().iadd(roots_base, o);
-                let pl = b
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
+                let pl = b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    addr,
+                    PAYLOAD_OFFSET as i32,
+                );
                 return b.ins().band_imm(pl, 0xff);
             }
         }
@@ -1665,9 +1759,7 @@ fn jit_lower_arm_inner(
                 if let Some(&(var, true)) = carry_vars.get(k) {
                     return b.use_var(var);
                 }
-                if let Some(v) =
-                    slot_f64_cache.borrow().get(k).copied().flatten()
-                {
+                if let Some(v) = slot_f64_cache.borrow().get(k).copied().flatten() {
                     return v;
                 }
                 let roots_base = b.use_var(rb_var);
@@ -1679,9 +1771,12 @@ fn jit_lower_arm_inner(
                 let cont = b.create_block();
                 b.ins().brif(is_f, cont, &[], deopt, &[]);
                 b.switch_to_block(cont);
-                let bits = b
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), addr, PAYLOAD_OFFSET as i32);
+                let bits = b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    addr,
+                    PAYLOAD_OFFSET as i32,
+                );
                 b.ins().bitcast(types::F64, MemFlagsData::new(), bits)
             }
             Op::Int(_) | Op::Bool(_) | Op::Handle(..) | Op::HoistedVec { .. } => {
@@ -1934,9 +2029,9 @@ fn jit_lower_arm_inner(
                         let w1 = b
                             .ins()
                             .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                        let w2 = b
-                            .ins()
-                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        let w2 =
+                            b.ins()
+                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
                         stack.push(Op::Handle(w0, w1, w2));
                     }
                 },
@@ -1987,9 +2082,9 @@ fn jit_lower_arm_inner(
                         let w1 = b
                             .ins()
                             .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                        let w2 = b
-                            .ins()
-                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        let w2 =
+                            b.ins()
+                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
                         stack.push(Op::Handle(w0, w1, w2));
                     }
                 }
@@ -2071,9 +2166,9 @@ fn jit_lower_arm_inner(
                         let cw1 = b
                             .ins()
                             .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                        let cw2 = b
-                            .ins()
-                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        let cw2 =
+                            b.ins()
+                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
                         b.ins().call(push_ref, &[heap, cw0, cw1, cw2]);
                     }
                     // Stage `[callee, arg0 .. arg_{argc-1}]` (the VM's `Inst::Call` layout
@@ -2102,21 +2197,28 @@ fn jit_lower_arm_inner(
                     // Read the result `Value` (3 words) back out of `out_slot` and push it.
                     let read_out = |b: &mut FunctionBuilder| {
                         let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-                        let w1 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                        let w2 = b.ins().stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        let w1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let w2 =
+                            b.ins()
+                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
                         (w0, w1, w2)
                     };
                     // The shared slow-dispatch tail: call `brood_rt_call_slow`, re-fetch the
                     // roots base (the callee may have relocated `roots`), and branch to `error`
                     // on a nonzero status or `cont` on success. Used as the only path (icall
                     // off / computed head) and as the miss path of the fast-link.
-                    let emit_call_slow = |b: &mut FunctionBuilder, cont: cranelift_codegen::ir::Block| {
-                        let c = b.ins().call(callslow_ref, &[heap, out_addr, argc_v, site_v, head_v]);
-                        let status = b.inst_results(c)[0];
-                        let rbc = b.ins().call(rb_ref, &[heap]);
-                        b.def_var(rb_var, b.inst_results(rbc)[0]);
-                        b.ins().brif(status, error, &[], cont, &[]);
-                    };
+                    let emit_call_slow =
+                        |b: &mut FunctionBuilder, cont: cranelift_codegen::ir::Block| {
+                            let c = b
+                                .ins()
+                                .call(callslow_ref, &[heap, out_addr, argc_v, site_v, head_v]);
+                            let status = b.inst_results(c)[0];
+                            let rbc = b.ins().call(rb_ref, &[heap]);
+                            b.def_var(rb_var, b.inst_results(rbc)[0]);
+                            b.ins().brif(status, error, &[], cont, &[]);
+                        };
 
                     if icall_enabled() && head.is_some() {
                         // ---- Track B / Technique A: in-IR epoch-guarded fast link ----
@@ -2155,7 +2257,12 @@ fn jit_lower_arm_inner(
                         let stride = b.ins().iconst(types::I64, FL_SIZE);
                         let off = b.ins().imul(site_idx, stride);
                         let slot_ptr = b.ins().iadd(fl_base, off);
-                        let ep = b.ins().load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_epoch_off);
+                        let ep = b.ins().load(
+                            types::I64,
+                            MemFlagsData::trusted(),
+                            slot_ptr,
+                            fl_epoch_off,
+                        );
                         let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when icall is on");
                         let gep = b.ins().load(types::I64, MemFlagsData::trusted(), ep_ptr, 0);
                         let ep_ok = b.ins().icmp(IntCC::Equal, ep, gep);
@@ -2170,21 +2277,42 @@ fn jit_lower_arm_inner(
                         // re-resolves correctly. Without this the fast path would jump into the
                         // wrong native code with the wrong arity (a SIGSEGV in release).
                         b.switch_to_block(chk_ident);
-                        let slot_sym = b.ins().load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_sym_off);
+                        let slot_sym =
+                            b.ins()
+                                .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_sym_off);
                         let sym_ok = b.ins().icmp(IntCC::Equal, slot_sym, head_v);
-                        let slot_argc = b.ins().load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_argc_off);
+                        let slot_argc = b.ins().load(
+                            types::I32,
+                            MemFlagsData::trusted(),
+                            slot_ptr,
+                            fl_argc_off,
+                        );
                         let argc_ok = b.ins().icmp(IntCC::Equal, slot_argc, argc_v);
                         let ident_ok = b.ins().band(sym_ok, argc_ok);
                         b.ins().brif(ident_ok, hit, &[], miss, &[]);
 
                         // hit: read (code, nslots, env) and run the fast frame.
                         b.switch_to_block(hit);
-                        let code_v = b.ins().load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_code_off);
-                        let nslots_v = b.ins().load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_nslots_off);
-                        let env_v = b.ins().load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);
+                        let code_v = b.ins().load(
+                            types::I64,
+                            MemFlagsData::trusted(),
+                            slot_ptr,
+                            fl_code_off,
+                        );
+                        let nslots_v = b.ins().load(
+                            types::I32,
+                            MemFlagsData::trusted(),
+                            slot_ptr,
+                            fl_nslots_off,
+                        );
+                        let env_v =
+                            b.ins()
+                                .load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);
                         let ffc = b.ins().call(
                             fastframe_ref,
-                            &[heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v],
+                            &[
+                                heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v,
+                            ],
                         );
                         let fst = b.inst_results(ffc)[0];
                         // The callee may have relocated `roots`; re-fetch the base.
@@ -2249,18 +2377,15 @@ fn jit_lower_arm_inner(
                                 // Deopt for non-LOCAL (PRELUDE/RUNTIME) — uncommon on hot
                                 // cons-list paths; the VM handles those correctly.
                                 let high2 = b.ins().ushr_imm(w1, 62);
-                                let is_local =
-                                    b.ins().icmp_imm(IntCC::Equal, high2, 0i64);
+                                let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0i64);
                                 let local_cont = b.create_block();
                                 b.ins().brif(is_local, local_cont, &[], deopt, &[]);
                                 b.switch_to_block(local_cont);
                                 // Age bit 61: 0=nursery, 1=old. After the LOCAL check, bits
                                 // 62-63 are 0, so ushr by 61 gives exactly 0 or 1.
                                 let age_shifted = b.ins().ushr_imm(w1, 61);
-                                let is_old =
-                                    b.ins().icmp_imm(IntCC::NotEqual, age_shifted, 0i64);
-                                let base =
-                                    b.ins().select(is_old, old_base, nursery_base);
+                                let is_old = b.ins().icmp_imm(IntCC::NotEqual, age_shifted, 0i64);
+                                let base = b.ins().select(is_old, old_base, nursery_base);
                                 // Index: lower 32 bits. stride = 48 (two 24-byte Values).
                                 let idx = b.ins().band_imm(w1, 0xFFFF_FFFFi64);
                                 let byte_off = b.ins().imul_imm(idx, 48i64);
@@ -2274,7 +2399,8 @@ fn jit_lower_arm_inner(
                                     b.ins().iadd_imm(pair_ptr, field_off)
                                 };
                                 let rw0 =
-                                    b.ins().load(types::I64, MemFlagsData::trusted(), field_ptr, 0);
+                                    b.ins()
+                                        .load(types::I64, MemFlagsData::trusted(), field_ptr, 0);
                                 let rw1 = b.ins().load(
                                     types::I64,
                                     MemFlagsData::trusted(),
@@ -2380,9 +2506,12 @@ fn jit_lower_arm_inner(
                             let off = b.ins().imul_imm(idx, STRIDE);
                             let elem = b.ins().iadd(ptr, off);
                             let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
-                            let w1 =
-                                b.ins()
-                                    .load(types::I64, MemFlagsData::trusted(), elem, PAYLOAD_OFFSET as i32);
+                            let w1 = b.ins().load(
+                                types::I64,
+                                MemFlagsData::trusted(),
+                                elem,
+                                PAYLOAD_OFFSET as i32,
+                            );
                             let w2 = b.ins().load(
                                 types::I64,
                                 MemFlagsData::trusted(),
@@ -2439,8 +2568,7 @@ fn jit_lower_arm_inner(
                             // to int (deopt otherwise); an out-of-range index deopts so the
                             // VM produces `nth`'s exact out-of-range result.
                             let idx = load_slot_int(&mut b, *slot_b as i64);
-                            let oob =
-                                b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, vlen);
+                            let oob = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, vlen);
                             let cont = b.create_block();
                             b.ins().brif(oob, deopt, &[], cont, &[]);
                             b.switch_to_block(cont);
@@ -2522,8 +2650,7 @@ fn jit_lower_arm_inner(
                             &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
                         );
                         stack.push(h);
-                    } else
-                    if op_is_float(Op::Slot(*slot_a)) {
+                    } else if op_is_float(Op::Slot(*slot_a)) {
                         // `(op floatslot int-literal)` — Brood coerces the int to f64
                         // (`(+ 1.5 1)` = 2.5). Promote the literal and do float arith.
                         let sa = as_f64(&mut b, Op::Slot(*slot_a));
@@ -2558,8 +2685,7 @@ fn jit_lower_arm_inner(
                             b.ins().jump(deopt, &[]);
                         }
                     } else {
-                        bool_param[*t] =
-                            Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
+                        bool_param[*t] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
                         let args: Vec<BlockArg> = stack
                             .iter()
                             .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
@@ -2608,7 +2734,12 @@ fn jit_lower_arm_inner(
                                 while (off as i64) < STRIDE {
                                     words.push((
                                         off,
-                                        b.ins().load(types::I64, MemFlagsData::trusted(), addr, off),
+                                        b.ins().load(
+                                            types::I64,
+                                            MemFlagsData::trusted(),
+                                            addr,
+                                            off,
+                                        ),
                                     ));
                                     off += 8;
                                 }
@@ -2758,8 +2889,7 @@ fn jit_lower_arm_inner(
                     let tgt = leader_block[*t]?; // falsy → else
                     let fall = leader_block[j + 1]?; // truthy → fall-through
                     bool_param[*t] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
-                    bool_param[j + 1] =
-                        Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
+                    bool_param[j + 1] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
                     let args: Vec<BlockArg> = stack
                         .iter()
                         .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
@@ -2788,7 +2918,8 @@ fn jit_lower_arm_inner(
                                     let i = b.ins().iadd_imm(base, k as i64);
                                     let o = b.ins().imul_imm(i, STRIDE);
                                     let addr = b.ins().iadd(roots_base, o);
-                                    let t8 = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
+                                    let t8 =
+                                        b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
                                     let tagv = b.ins().uextend(types::I64, t8);
                                     let pl = b.ins().load(
                                         types::I64,
@@ -2913,7 +3044,14 @@ fn jit_lower_arm_inner(
             );
             // Per-Call (site, head) so the CLIF can be correlated to a source arm.
             for i in code.iter() {
-                if let Inst::Call { site, head, argc, tail, .. } = i {
+                if let Inst::Call {
+                    site,
+                    head,
+                    argc,
+                    tail,
+                    ..
+                } = i
+                {
                     let hn = match head {
                         Some(h) => crate::core::value::symbol_name(*h),
                         None => "<computed>".to_string(),
@@ -2969,7 +3107,10 @@ fn jit_lower_arm_inner(
         eprintln!(
             "[dump-code] arm='{name}' inlined={inlined} entry={:#x} len={len} hex={}",
             entry as usize,
-            bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
         );
     }
     Some(entry)

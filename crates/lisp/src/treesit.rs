@@ -44,8 +44,8 @@ pub fn parse(heap: &mut Heap, src: &str, lang: &str) -> LispResult {
     let mut parser = checkout_parser(lang, &language)?;
     let tree = parser.parse(src, None);
     return_parser(lang, parser);
-    let tree = tree
-        .ok_or_else(|| LispError::runtime(format!("tree-sitter-parse: {lang}: parse failed")))?;
+    let tree =
+        tree.ok_or_else(|| LispError::runtime(format!("tree-sitter-parse: {lang}: parse failed")))?;
     let b2c = byte_to_char_offsets(src);
     Ok(node_to_positioned(heap, tree.root_node(), src, &b2c))
 }

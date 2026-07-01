@@ -62,9 +62,7 @@ pub fn definition(
     match tree.resolve_at(root, text, offset) {
         // Bound in this buffer (local or a document-level `def`): jump to the
         // binder token, in this same file.
-        Resolution::Defined { def, .. } => {
-            Some(Location::new(uri.clone(), index.range(text, def)))
-        }
+        Resolution::Defined { def, .. } => Some(Location::new(uri.clone(), index.range(text, def))),
         // Free here — ask the runtime where the name was defined (another
         // module, the prelude). The name is first resolved against this file's
         // namespace + `(:use …)` imports (ADR-065 §4), so a bare imported name
@@ -159,7 +157,8 @@ fn behaviour_in_files(files: &[String], name: &str) -> Option<Location> {
             }
             let mut head = form.forms();
             let is_iface = head.next().is_some_and(|h| {
-                h.kind == NodeKind::Symbol && matches!(h.text(&text), "defbehaviour" | "defprotocol")
+                h.kind == NodeKind::Symbol
+                    && matches!(h.text(&text), "defbehaviour" | "defprotocol")
             });
             let name_node = head.next();
             let matches_name =
@@ -265,11 +264,18 @@ mod tests {
         // `greeter.blsp` on the load-path.
         let dir = std::env::temp_dir().join(format!("brood_ns_def_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("greeter.blsp"), "(defmodule greeter)\n(defn greet (who) who)\n").unwrap();
+        std::fs::write(
+            dir.join("greeter.blsp"),
+            "(defmodule greeter)\n(defn greet (who) who)\n",
+        )
+        .unwrap();
 
         let mut interp = Interp::new();
         interp
-            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .eval_str(&format!(
+                "(def *load-path* (cons \"{}\" *load-path*))",
+                dir.display()
+            ))
             .expect("extend load-path");
 
         let src = "(defmodule app (:use greeter))\n(greet \"world\")";
@@ -299,7 +305,10 @@ mod tests {
 
         let mut interp = Interp::new();
         interp
-            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .eval_str(&format!(
+                "(def *load-path* (cons \"{}\" *load-path*))",
+                dir.display()
+            ))
             .expect("extend load-path");
 
         let src = "(defmodule app (:use greeter))";
@@ -326,7 +335,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("brood_impl_def_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let iface = dir.join("shapes.blsp");
-        std::fs::write(&iface, "(defmodule shapes)\n(defbehaviour Drawable (draw [s]))\n").unwrap();
+        std::fs::write(
+            &iface,
+            "(defmodule shapes)\n(defbehaviour Drawable (draw [s]))\n",
+        )
+        .unwrap();
 
         let files = vec![iface.display().to_string()];
         let loc = behaviour_in_files(&files, "Drawable").expect("found the behaviour");
