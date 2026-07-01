@@ -60,8 +60,15 @@ pub fn install_crash_dump() {
         let thread = std::thread::current();
         let mut body = String::new();
         body.push_str("\n=== brood crash dump ===\n");
-        body.push_str(&format!("version: {} ({})\n", env!("CARGO_PKG_VERSION"), env!("BROOD_GIT_SHA")));
-        body.push_str(&format!("when:    {} ({when} ms since epoch)\n", fmt_utc_ms(when)));
+        body.push_str(&format!(
+            "version: {} ({})\n",
+            env!("CARGO_PKG_VERSION"),
+            env!("BROOD_GIT_SHA")
+        ));
+        body.push_str(&format!(
+            "when:    {} ({when} ms since epoch)\n",
+            fmt_utc_ms(when)
+        ));
         body.push_str(&format!(
             "thread:  {}\n",
             thread.name().unwrap_or("<unnamed>")
@@ -119,17 +126,62 @@ pub fn warn_nondefault_gc_env() {
     }
 }
 
+// ANSI SGR sequences for the colored diagnostic (used only when `use_color()`
+// says stderr is an interactive terminal). Kept as bare `&str` — a diagnostic on
+// the cold error path doesn't warrant pulling `crossterm`'s writer in, and the
+// plain-text output is byte-for-byte unchanged when color is off.
+const C_RESET: &str = "\x1b[0m";
+const C_BOLD: &str = "\x1b[1m";
+const C_DIM: &str = "\x1b[2m";
+const C_ERR: &str = "\x1b[1;31m"; // bold red — the `error:` label and the caret
+const C_HINT: &str = "\x1b[1;36m"; // bold cyan — the `hint:` label
+
+/// Whether to emit ANSI color on stderr: only when stderr is a real terminal and
+/// the caller hasn't opted out via `NO_COLOR` (the cross-tool convention —
+/// https://no-color.org; any value, even empty, disables). Piping stderr to a
+/// file or an LSP/MCP consumer therefore stays plain and editor-parseable.
+fn use_color() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
 /// Print an error as a GNU `FILE:LINE:COL: message` line (editor-parseable),
 /// followed — when the file and position are known — by the offending source
-/// line and a caret under the column. See `docs/tooling.md`.
+/// line and a caret under the column. See `docs/tooling.md`. When stderr is a
+/// terminal (and `NO_COLOR` is unset) the `error:` label and caret are bold red,
+/// the `hint:` label bold cyan, and the version footer dimmed — rustc-style — so
+/// the actionable parts stand out; the `FILE:LINE:COL:` prefix stays uncolored so
+/// it remains copy-pasteable and machine-parseable.
 pub fn report_error(e: &LispError) {
-    eprintln!("{}", e.located());
+    let color = use_color();
+    let located = e.located();
+    if color {
+        // Colorize just the `<kind> error:` label within the located line; the
+        // `FILE:LINE:COL:` prefix and the message keep their plain text. The label
+        // is produced by `Display` (via `ErrorKind::label`) and always precedes the
+        // message, so the first occurrence is the label, never part of the path.
+        let label = e.kind.label();
+        match located.find(label) {
+            Some(idx) => {
+                let (prefix, rest) = located.split_at(idx);
+                let message = &rest[label.len()..];
+                eprintln!("{prefix}{C_ERR}{label}{C_RESET}{C_BOLD}{message}{C_RESET}");
+            }
+            None => eprintln!("{located}"),
+        }
+    } else {
+        eprintln!("{located}");
+    }
     if let (Some(file), Some(pos)) = (&e.file, e.pos) {
         if let Ok(src) = std::fs::read_to_string(file) {
             if let Some(line) = src.lines().nth(pos.line.saturating_sub(1) as usize) {
                 eprintln!("    {}", line);
                 let pad = " ".repeat(pos.col.saturating_sub(1) as usize);
-                eprintln!("    {}^", pad);
+                if color {
+                    eprintln!("    {pad}{C_ERR}^{C_RESET}");
+                } else {
+                    eprintln!("    {pad}^");
+                }
             }
         }
     }
@@ -137,9 +189,22 @@ pub fn report_error(e: &LispError) {
     // …) — it's the actionable half of the error, and the CLI is where a human / LLM
     // most often reads it. Structured consumers (MCP / LSP) get it via `to_value_map`.
     if let Some(hint) = &e.hint {
-        eprintln!("    hint: {hint}");
+        if color {
+            eprintln!("    {C_HINT}hint:{C_RESET} {hint}");
+        } else {
+            eprintln!("    hint: {hint}");
+        }
     }
-    eprintln!("    brood {} ({})", env!("CARGO_PKG_VERSION"), env!("BROOD_GIT_SHA"));
+    let footer = format!(
+        "    brood {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("BROOD_GIT_SHA")
+    );
+    if color {
+        eprintln!("{C_DIM}{footer}{C_RESET}");
+    } else {
+        eprintln!("{footer}");
+    }
 }
 
 /// Split CLI args into file paths and an optional concurrency cap. Accepts

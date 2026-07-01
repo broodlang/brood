@@ -91,6 +91,21 @@ impl ErrorKind {
             ErrorKind::User => "user",
         }
     }
+
+    /// The label that opens a diagnostic line — `"error:"` for a user `throw`,
+    /// `"<kind> error:"` otherwise. The single source of truth for both the
+    /// [`fmt::Display`] impl and the CLI's colored `report_error`, so the two
+    /// can't drift.
+    pub fn label(self) -> &'static str {
+        match self {
+            ErrorKind::User => "error:",
+            ErrorKind::Parse => "parse error:",
+            ErrorKind::Unbound => "unbound error:",
+            ErrorKind::Arity => "arity error:",
+            ErrorKind::Type => "type error:",
+            ErrorKind::Runtime => "runtime error:",
+        }
+    }
 }
 
 /// A non-error **control signal** (ADR-100 §7 migration). It travels on the error
@@ -421,14 +436,7 @@ impl LispError {
 
 impl fmt::Display for LispError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.kind {
-            ErrorKind::User => write!(f, "error: {}", self.message),
-            ErrorKind::Parse => write!(f, "parse error: {}", self.message),
-            ErrorKind::Unbound => write!(f, "unbound error: {}", self.message),
-            ErrorKind::Arity => write!(f, "arity error: {}", self.message),
-            ErrorKind::Type => write!(f, "type error: {}", self.message),
-            ErrorKind::Runtime => write!(f, "runtime error: {}", self.message),
-        }
+        write!(f, "{} {}", self.kind.label(), self.message)
     }
 }
 
