@@ -1,0 +1,78 @@
+name: CI
+
+# Mirrors the local pre-commit gate (`make check`, plus `make fmt --check`):
+#   fmt --check  →  clippy (all targets + all features, warnings fatal)  →  tests.
+# Kept in lockstep with the Makefile so "green locally" and "green in CI" mean the
+# same thing. `--all-features` builds the gui/audio/jit/treesit surface, which needs
+# the system dev libraries installed in the build-test job below.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One in-flight run per ref; a new push cancels the previous run for that ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Formatting is a cheap, dependency-free gate — it needs neither the system
+  # libraries nor a compiled build, so it runs on its own and fails fast.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # Lint + test together: both need the full --all-features build (gui/audio/jit/
+  # treesit), so they share the one toolchain, system-dep install, and cache.
+  build-test:
+    name: clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # System libraries for the --all-features surface: libasound2-dev for the
+      # `audio` feature (rodio→cpal links libasound.so.2), and the windowing /
+      # GL / clipboard stack for `gui`/`gui-gpu` (winit, softbuffer, glutin+glow,
+      # arboard — X11 + Wayland + xkbcommon + OpenGL). A default build needs none
+      # of these; they're only for the all-features lint/test here.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
+      # Same invocation as `make clippy`: all targets, all features, warnings fatal.
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Same as `make test`: nextest process-isolates each case (a green-process
+      # stack overflow can SIGSEGV, so isolation keeps one bad case from taking the
+      # whole run down) and the grammar tests need the vendored tree-sitter parsers.
+      - name: Test (nextest)
+        run: cargo nextest run --no-fail-fast --features brood/treesit-grammars
+
+      # nextest doesn't run doctests; run them separately so future ones are covered.
+      - name: Doctests
+        run: cargo test --doc
