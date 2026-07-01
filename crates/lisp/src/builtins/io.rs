@@ -3,7 +3,7 @@ use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 use crate::syntax::printer;
 
-use super::numeric::{arg, expect_string, expect_int};
+use super::numeric::{arg, expect_int, expect_string};
 use super::sequences::realize_seqviews;
 use super::terminal::restore_terminal_on_exit;
 macro_rules! expect {
@@ -344,7 +344,6 @@ pub(super) fn mem_soft_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult 
     Ok(Value::int(crate::core::alloc::soft_limit() as i64))
 }
 
-
 // ---------- TCP sockets (ADR-062) ----------
 //
 // Thin non-blocking mechanism over `crate::net`; the active-socket / framing /
@@ -496,7 +495,13 @@ pub(super) fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// verbatim. A string is UTF-8 in text mode; in a **binary**-mode socket/child it
 /// is the Latin-1 byte-string form (codepoints 0–255) — kept for back-compat with
 /// callers that build byte-strings, alongside the preferred `bytes` value.
-fn send_payload(heap: &Heap, who: &str, kind: &str, v: Value, binary: bool) -> Result<Vec<u8>, LispError> {
+fn send_payload(
+    heap: &Heap,
+    who: &str,
+    kind: &str,
+    v: Value,
+    binary: bool,
+) -> Result<Vec<u8>, LispError> {
     match v {
         Value::Bytes(b) => Ok(heap.bytes(b).as_bytes().to_vec()),
         Value::Str(_) => {
@@ -523,7 +528,13 @@ fn send_payload(heap: &Heap, who: &str, kind: &str, v: Value, binary: bool) -> R
 
 pub(super) fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_socket(heap, "tcp-send", arg(args, 0))?;
-    let out = send_payload(heap, "tcp-send", "socket", arg(args, 1), crate::net::is_binary(id))?;
+    let out = send_payload(
+        heap,
+        "tcp-send",
+        "socket",
+        arg(args, 1),
+        crate::net::is_binary(id),
+    )?;
     crate::net::send(id, &out).map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
     Ok(Value::nil())
 }
@@ -614,7 +625,13 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-send", arg(args, 0))?;
-    let out = send_payload(heap, "proc-send", "subprocess", arg(args, 1), crate::proc::is_binary(id))?;
+    let out = send_payload(
+        heap,
+        "proc-send",
+        "subprocess",
+        arg(args, 1),
+        crate::proc::is_binary(id),
+    )?;
     crate::proc::send(id, &out).map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
     Ok(Value::nil())
 }
@@ -641,7 +658,6 @@ pub(super) fn proc_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 // it, so a remote/web frontend can implement the identical op vocabulary later.
 // Errors surface as clean `LispError`s (never a crossterm panic), mirroring the
 // rope primitives' discipline.
-
 
 pub(super) fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
@@ -746,7 +762,6 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
     }
 }
 
-
 // ---------- filesystem ----------
 // Mechanism only: existence / directory reflection so the Brood module system and
 // the project test runner can resolve load paths and discover test files. Path
@@ -844,7 +859,14 @@ enum HashAlgo {
 fn hash_algo(name: &'static str, kw: Value, heap: &mut Heap) -> Result<HashAlgo, LispError> {
     let sym = match kw {
         Value::Keyword(s) => s,
-        other => return Err(LispError::wrong_type(heap, name, "algorithm keyword", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                name,
+                "algorithm keyword",
+                other,
+            ))
+        }
     };
     match value::symbol_name(sym).as_str() {
         "md5" => Ok(HashAlgo::Md5),
@@ -938,7 +960,11 @@ pub(super) fn hmac(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 /// Extract raw bytes from a `Value`: a `bytes` value, or (leniently) a vector
 /// or list of byte ints (0–255).
-pub(super) fn collect_bytes(name: &'static str, bv: Value, heap: &mut Heap) -> Result<Vec<u8>, LispError> {
+pub(super) fn collect_bytes(
+    name: &'static str,
+    bv: Value,
+    heap: &mut Heap,
+) -> Result<Vec<u8>, LispError> {
     match bv {
         Value::Bytes(id) => Ok(heap.bytes(id).as_bytes().to_vec()),
         Value::Vector(id) => {
@@ -1440,7 +1466,13 @@ pub(super) fn file_stat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     let (mode, exec, nlink, uid, gid) = {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let m = meta.permissions().mode();
-        (m as i64 & 0o7777, m & 0o111 != 0, meta.nlink() as i64, meta.uid(), meta.gid())
+        (
+            m as i64 & 0o7777,
+            m & 0o111 != 0,
+            meta.nlink() as i64,
+            meta.uid(),
+            meta.gid(),
+        )
     };
     #[cfg(not(unix))]
     let (mode, exec, nlink, uid, gid) = (0_i64, false, 1_i64, 0_u32, 0_u32);
@@ -1481,7 +1513,10 @@ pub(super) fn uid_name(uid: u32) -> Option<String> {
         if pw.is_null() {
             return None;
         }
-        std::ffi::CStr::from_ptr((*pw).pw_name).to_str().ok().map(|s| s.to_string())
+        std::ffi::CStr::from_ptr((*pw).pw_name)
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
     }
 }
 
@@ -1495,7 +1530,10 @@ pub(super) fn gid_name(gid: u32) -> Option<String> {
         if gr.is_null() {
             return None;
         }
-        std::ffi::CStr::from_ptr((*gr).gr_name).to_str().ok().map(|s| s.to_string())
+        std::ffi::CStr::from_ptr((*gr).gr_name)
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
     }
 }
 
@@ -1630,4 +1668,3 @@ pub(super) fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             .with_hint("check that the program is on PATH and the args are well-formed")),
     }
 }
-

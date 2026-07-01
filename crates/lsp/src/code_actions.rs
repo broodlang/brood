@@ -332,7 +332,10 @@ fn line_delete_range(src: &str, span: Span, li: &LineIndex) -> Range {
         .chars()
         .all(|c| c == ' ' || c == '\t' || c == '\n');
     let deleted = if pre_ws && post_ws {
-        Span { start: line_start as u32, end: line_end as u32 }
+        Span {
+            start: line_start as u32,
+            end: line_end as u32,
+        }
     } else {
         span
     };
@@ -517,7 +520,10 @@ mod tests {
 
     #[test]
     fn require_insert_offset_top_vs_after_defmodule() {
-        assert_eq!(require_insert_offset(&brood::syntax::cst::parse("(f 1)"), "(f 1)"), 0);
+        assert_eq!(
+            require_insert_offset(&brood::syntax::cst::parse("(f 1)"), "(f 1)"),
+            0
+        );
         let src = "(defmodule app)\n(f 1)";
         let at = require_insert_offset(&brood::syntax::cst::parse(src), src);
         assert_eq!(at, "(defmodule app)\n".len() as u32); // start of line 2
@@ -532,12 +538,23 @@ mod tests {
 
     /// Build an `unbound symbol: NAME` diagnostic over `needle` in `src`, then run
     /// `code_actions` (with the given interp) and return the action titles.
-    fn unbound_action_titles(interp: &mut Interp, src: &str, name: &str, needle: &str) -> Vec<String> {
+    fn unbound_action_titles(
+        interp: &mut Interp,
+        src: &str,
+        name: &str,
+        needle: &str,
+    ) -> Vec<String> {
         let root = brood::syntax::cst::parse(src);
         let scope = brood::syntax::scope::analyze(&root, src);
         let li = LineIndex::new(src);
         let start = src.find(needle).unwrap() as u32;
-        let range = li.range(src, Span { start, end: start + needle.len() as u32 });
+        let range = li.range(
+            src,
+            Span {
+                start,
+                end: start + needle.len() as u32,
+            },
+        );
         let diag = Diagnostic {
             range,
             message: format!("unbound symbol: {name}"),
@@ -556,7 +573,8 @@ mod tests {
     #[test]
     fn offers_create_function_for_an_unbound_call_head() {
         let mut interp = Interp::new();
-        let titles = unbound_action_titles(&mut interp, "(frobnicate 1 2)", "frobnicate", "frobnicate");
+        let titles =
+            unbound_action_titles(&mut interp, "(frobnicate 1 2)", "frobnicate", "frobnicate");
         assert!(
             titles.iter().any(|t| t == "Create function `frobnicate`"),
             "got: {titles:?}"
@@ -571,10 +589,29 @@ mod tests {
         let scope = brood::syntax::scope::analyze(&root, src);
         let li = LineIndex::new(src);
         let start = src.find("frobnicate").unwrap() as u32;
-        let range = li.range(src, Span { start, end: start + 10 });
-        let diag = Diagnostic { range, message: "unbound symbol: frobnicate".into(), ..Default::default() };
+        let range = li.range(
+            src,
+            Span {
+                start,
+                end: start + 10,
+            },
+        );
+        let diag = Diagnostic {
+            range,
+            message: "unbound symbol: frobnicate".into(),
+            ..Default::default()
+        };
         let offset_of = |r: Range| li.offset(src, r.start);
-        let acts = code_actions(&mut interp, &uri(), &root, src, &scope, &li, offset_of, &[diag]);
+        let acts = code_actions(
+            &mut interp,
+            &uri(),
+            &root,
+            src,
+            &scope,
+            &li,
+            offset_of,
+            &[diag],
+        );
         let edit = acts
             .iter()
             .find_map(|a| match a {
@@ -591,7 +628,12 @@ mod tests {
     fn does_not_offer_create_function_for_an_operand() {
         let mut interp = Interp::new();
         // `frobnicate` here is an argument, not a call head — no stub offered.
-        let titles = unbound_action_titles(&mut interp, "(println frobnicate)", "frobnicate", "frobnicate");
+        let titles = unbound_action_titles(
+            &mut interp,
+            "(println frobnicate)",
+            "frobnicate",
+            "frobnicate",
+        );
         assert!(
             !titles.iter().any(|t| t.contains("Create function")),
             "should not offer create-fn for an operand, got: {titles:?}"
@@ -607,10 +649,18 @@ mod tests {
         std::fs::write(dir.join("greeter.blsp"), "(defmodule greeter)\n").unwrap();
         let mut interp = Interp::new();
         interp
-            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .eval_str(&format!(
+                "(def *load-path* (cons \"{}\" *load-path*))",
+                dir.display()
+            ))
             .unwrap();
 
-        let titles = unbound_action_titles(&mut interp, "(greeter/greet 1)", "greeter/greet", "greeter/greet");
+        let titles = unbound_action_titles(
+            &mut interp,
+            "(greeter/greet 1)",
+            "greeter/greet",
+            "greeter/greet",
+        );
         assert!(
             titles.iter().any(|t| t == "Add `(require 'greeter)`"),
             "got: {titles:?}"
@@ -624,10 +674,17 @@ mod tests {
         // (`editor/keymap`), not just its first segment.
         let dir = std::env::temp_dir().join(format!("brood_nestreq_{}", std::process::id()));
         std::fs::create_dir_all(dir.join("editor")).unwrap();
-        std::fs::write(dir.join("editor/keymap.blsp"), "(defmodule editor/keymap)\n").unwrap();
+        std::fs::write(
+            dir.join("editor/keymap.blsp"),
+            "(defmodule editor/keymap)\n",
+        )
+        .unwrap();
         let mut interp = Interp::new();
         interp
-            .eval_str(&format!("(def *load-path* (cons \"{}\" *load-path*))", dir.display()))
+            .eval_str(&format!(
+                "(def *load-path* (cons \"{}\" *load-path*))",
+                dir.display()
+            ))
             .unwrap();
 
         let titles = unbound_action_titles(

@@ -79,10 +79,9 @@ pub fn vm_enabled() -> bool {
 /// global reference (ADR-096).
 pub const NO_SITE: u32 = u32::MAX;
 
-
 mod ir;
-pub use ir::{PrimOp, PrimOp1, HandleKind, ConstVal, Node, CompiledArm, CompiledClosure, Chunk};
 pub use ir::{rewrite_arm_handles, Inst};
+pub use ir::{Chunk, CompiledArm, CompiledClosure, ConstVal, HandleKind, Node, PrimOp, PrimOp1};
 // pub(super) items from ir: explicitly imported so `use ir::*` (pub-only) doesn't miss them.
 // pub items re-exported above; these are pub(super) items needed internally:
 use ir::{ArmSpec, ChunkExit, Step};
@@ -979,20 +978,36 @@ fn is_elem_read(a: &Node, b: &Node, slot: usize, nelems: usize) -> Option<usize>
 /// EA analyses to avoid repeating structural recursion.
 fn walk_children<F: FnMut(&Node)>(node: &Node, mut f: F) {
     match node {
-        Node::If(a, b, c) => { f(a); f(b); f(c); }
+        Node::If(a, b, c) => {
+            f(a);
+            f(b);
+            f(c);
+        }
         Node::Do(xs) => xs.iter().for_each(&mut f),
         Node::LetBind { binds, body } => {
             binds.iter().for_each(|(_, v)| f(v));
             f(body);
         }
-        Node::Call { callee, args, .. } => { f(callee); args.iter().for_each(&mut f); }
+        Node::Call { callee, args, .. } => {
+            f(callee);
+            args.iter().for_each(&mut f);
+        }
         Node::SelfCall { args, .. } => args.iter().for_each(&mut f),
         Node::MakeClosure { captures, .. } => captures.iter().for_each(|(_, v)| f(v)),
         Node::Vector(xs) => xs.iter().for_each(&mut f),
-        Node::Map(kvs) => kvs.iter().for_each(|(k, v)| { f(k); f(v); }),
-        Node::Prim2 { a, b, .. } => { f(a); f(b); }
+        Node::Map(kvs) => kvs.iter().for_each(|(k, v)| {
+            f(k);
+            f(v);
+        }),
+        Node::Prim2 { a, b, .. } => {
+            f(a);
+            f(b);
+        }
         Node::Prim1 { a, .. } => f(a),
-        Node::TryCatch { body, handler, .. } => { f(body); f(handler); }
+        Node::TryCatch { body, handler, .. } => {
+            f(body);
+            f(handler);
+        }
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
     }
 }
@@ -1000,20 +1015,36 @@ fn walk_children<F: FnMut(&Node)>(node: &Node, mut f: F) {
 /// Mutable variant for tree rewrites.
 fn walk_children_mut<F: FnMut(&mut Node)>(node: &mut Node, mut f: F) {
     match node {
-        Node::If(a, b, c) => { f(a); f(b); f(c); }
+        Node::If(a, b, c) => {
+            f(a);
+            f(b);
+            f(c);
+        }
         Node::Do(xs) => xs.iter_mut().for_each(&mut f),
         Node::LetBind { binds, body } => {
             binds.iter_mut().for_each(|(_, v)| f(v));
             f(body);
         }
-        Node::Call { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
+        Node::Call { callee, args, .. } => {
+            f(callee);
+            args.iter_mut().for_each(&mut f);
+        }
         Node::SelfCall { args, .. } => args.iter_mut().for_each(&mut f),
         Node::MakeClosure { captures, .. } => captures.iter_mut().for_each(|(_, v)| f(v)),
         Node::Vector(xs) => xs.iter_mut().for_each(&mut f),
-        Node::Map(kvs) => kvs.iter_mut().for_each(|(k, v)| { f(k); f(v); }),
-        Node::Prim2 { a, b, .. } => { f(a); f(b); }
+        Node::Map(kvs) => kvs.iter_mut().for_each(|(k, v)| {
+            f(k);
+            f(v);
+        }),
+        Node::Prim2 { a, b, .. } => {
+            f(a);
+            f(b);
+        }
         Node::Prim1 { a, .. } => f(a),
-        Node::TryCatch { body, handler, .. } => { f(body); f(handler); }
+        Node::TryCatch { body, handler, .. } => {
+            f(body);
+            f(handler);
+        }
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
     }
 }
@@ -1024,7 +1055,13 @@ fn walk_children_mut<F: FnMut(&mut Node)>(node: &mut Node, mut f: F) {
 /// code explicitly creates, so any `Local(slot)` outside an element read means it's returned,
 /// passed to a call, captured, or stored — i.e. escapes. Used by EA scalar replacement.
 fn local_escapes(node: &Node, slot: usize, nelems: usize) -> bool {
-    if let Node::Prim2 { op: PrimOp::VectorRef, a, b, .. } = node {
+    if let Node::Prim2 {
+        op: PrimOp::VectorRef,
+        a,
+        b,
+        ..
+    } = node
+    {
         if is_elem_read(a, b, slot, nelems).is_some() {
             return local_escapes(b, slot, nelems); // `a` consumed safely; `b` is the const index
         }
@@ -1033,7 +1070,9 @@ fn local_escapes(node: &Node, slot: usize, nelems: usize) -> bool {
         return *k == slot;
     }
     let mut found = false;
-    walk_children(node, |child| found = found || local_escapes(child, slot, nelems));
+    walk_children(node, |child| {
+        found = found || local_escapes(child, slot, nelems)
+    });
     found
 }
 
@@ -1041,7 +1080,13 @@ fn local_escapes(node: &Node, slot: usize, nelems: usize) -> bool {
 /// read (the scalar-replaced element slots). Paired with `local_escapes` having returned
 /// false, so every `Local(slot)` is exactly such a read.
 fn rewrite_elem_reads(node: &mut Node, slot: usize, base: usize, nelems: usize) {
-    if let Node::Prim2 { op: PrimOp::VectorRef, a, b, .. } = node {
+    if let Node::Prim2 {
+        op: PrimOp::VectorRef,
+        a,
+        b,
+        ..
+    } = node
+    {
         if let Some(k) = is_elem_read(a, b, slot, nelems) {
             *node = Node::Local(base + k);
             return;
@@ -1060,7 +1105,9 @@ fn rewrite_elem_reads(node: &mut Node, slot: usize, base: usize, nelems: usize) 
 fn ea_scalar_replace(node: &mut Node, next_slot: &mut usize) -> bool {
     const MAX_ELEMS: usize = 8;
     let mut changed = false;
-    walk_children_mut(node, |child| { changed |= ea_scalar_replace(child, next_slot); });
+    walk_children_mut(node, |child| {
+        changed |= ea_scalar_replace(child, next_slot);
+    });
     if let Node::LetBind { binds, body } = node {
         if binds.len() == 1 {
             let slot = binds[0].0;
@@ -1171,7 +1218,15 @@ fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
                 && args.iter().all(|a| linmap_linear(a, s, LinSink::No))
         }
         Node::SelfCall { args, .. } => args.iter().enumerate().all(|(i, a)| {
-            linmap_linear(a, s, if i == s { LinSink::SelfArg } else { LinSink::No })
+            linmap_linear(
+                a,
+                s,
+                if i == s {
+                    LinSink::SelfArg
+                } else {
+                    LinSink::No
+                },
+            )
         }),
         Node::If(c, t, e) => {
             linmap_linear(c, s, LinSink::No)
@@ -1180,9 +1235,9 @@ fn linmap_linear(node: &Node, s: usize, sink: LinSink) -> bool {
         }
         Node::Do(xs) => {
             let last = xs.len().saturating_sub(1);
-            xs.iter().enumerate().all(|(i, x)| {
-                linmap_linear(x, s, if i == last { sink } else { LinSink::No })
-            })
+            xs.iter()
+                .enumerate()
+                .all(|(i, x)| linmap_linear(x, s, if i == last { sink } else { LinSink::No }))
         }
         Node::LetBind { binds, body } => {
             binds.iter().all(|(_, v)| linmap_linear(v, s, LinSink::No))
@@ -1284,15 +1339,21 @@ fn node_count(node: &Node) -> usize {
 /// True if `node` (or any descendant) is a `Node::SelfCall`.
 #[cfg(feature = "jit")]
 fn node_has_self_call(node: &Node) -> bool {
-    matches!(node, Node::SelfCall { .. })
-        || { let mut found = false; walk_children(node, |c| found = found || node_has_self_call(c)); found }
+    matches!(node, Node::SelfCall { .. }) || {
+        let mut found = false;
+        walk_children(node, |c| found = found || node_has_self_call(c));
+        found
+    }
 }
 
 /// True if `node` (or any descendant) is a `Node::MakeClosure`.
 #[cfg(feature = "jit")]
 fn node_has_make_closure(node: &Node) -> bool {
-    matches!(node, Node::MakeClosure { .. })
-        || { let mut found = false; walk_children(node, |c| found = found || node_has_make_closure(c)); found }
+    matches!(node, Node::MakeClosure { .. }) || {
+        let mut found = false;
+        walk_children(node, |c| found = found || node_has_make_closure(c));
+        found
+    }
 }
 
 /// Is `node` a non-tail self-recursive call to `defn_name` with exactly `nrequired`
@@ -1429,7 +1490,11 @@ fn shift_slots(node: &Node, delta: usize) -> Node {
             guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
             pos: *pos,
         },
-        Node::TryCatch { body, bind_slot, handler } => Node::TryCatch {
+        Node::TryCatch {
+            body,
+            bind_slot,
+            handler,
+        } => Node::TryCatch {
             body: Box::new(shift_slots(body, delta)),
             bind_slot: bind_slot + delta,
             handler: Box::new(shift_slots(handler, delta)),
@@ -1688,15 +1753,22 @@ fn node_touches_heap(node: &Node) -> bool {
         // Allocating literals: `[..]` (bintree's `make`), `{..}`.
         Node::Vector(_) | Node::Map(_) => true,
         // `cons` and `nth`/`vector-ref`.
-        Node::Prim2 { op: PrimOp::VectorRef | PrimOp::Cons, .. } => true,
+        Node::Prim2 {
+            op: PrimOp::VectorRef | PrimOp::Cons,
+            ..
+        } => true,
         // `first`/`rest` (car/cdr) dereference a pair handle — heap reads.
         // `nil?`/`pair?` are tag-only checks — no heap dereference.
-        Node::Prim1 { op: PrimOp1::First | PrimOp1::Rest, .. } => true,
-        Node::Prim1 { op: PrimOp1::IsNil | PrimOp1::IsPair | PrimOp1::IsEmpty, .. } => false,
+        Node::Prim1 {
+            op: PrimOp1::First | PrimOp1::Rest,
+            ..
+        } => true,
+        Node::Prim1 {
+            op: PrimOp1::IsNil | PrimOp1::IsPair | PrimOp1::IsEmpty,
+            ..
+        } => false,
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
-        Node::If(a, b, c) => {
-            node_touches_heap(a) || node_touches_heap(b) || node_touches_heap(c)
-        }
+        Node::If(a, b, c) => node_touches_heap(a) || node_touches_heap(b) || node_touches_heap(c),
         Node::Do(xs) => xs.iter().any(node_touches_heap),
         Node::Call { callee, args, .. } => {
             node_touches_heap(callee) || args.iter().any(node_touches_heap)
@@ -1705,9 +1777,7 @@ fn node_touches_heap(node: &Node) -> bool {
         Node::LetBind { binds, body } => {
             binds.iter().any(|(_, n)| node_touches_heap(n)) || node_touches_heap(body)
         }
-        Node::MakeClosure { captures, .. } => {
-            captures.iter().any(|(_, n)| node_touches_heap(n))
-        }
+        Node::MakeClosure { captures, .. } => captures.iter().any(|(_, n)| node_touches_heap(n)),
         Node::Prim2 { a, b, .. } => node_touches_heap(a) || node_touches_heap(b),
         Node::TryCatch { body, handler, .. } => {
             node_touches_heap(body) || node_touches_heap(handler)
@@ -1722,7 +1792,9 @@ fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize)
     }
     // Frame-reuse self-calls and nested closures are incompatible with naive slot
     // shifting; skip an oversized body to avoid blow-up.
-    if node_has_self_call(body) || node_has_make_closure(body) || node_count(body) > SELF_INLINE_MAX_BODY
+    if node_has_self_call(body)
+        || node_has_make_closure(body)
+        || node_count(body) > SELF_INLINE_MAX_BODY
     {
         return None;
     }
@@ -1776,17 +1848,36 @@ fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize)
 /// can't happen for an arm whose probe set `inline_name`). The caller compiles it to a
 /// chunk and lowers against `inline_nslots`.
 #[cfg(feature = "jit")]
-fn rederive_inlined_body(body: &Node, defn_name: Symbol, nrequired: usize, m: usize) -> Option<Node> {
+fn rederive_inlined_body(
+    body: &Node,
+    defn_name: Symbol,
+    nrequired: usize,
+    m: usize,
+) -> Option<Node> {
     let mut spliced = shift_slots(body, 0);
     let orig = shift_slots(body, 0);
     let mut next_block = 1usize;
-    let inlined = inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
+    let inlined = inline_self_calls(
+        &mut spliced,
+        &orig,
+        defn_name,
+        nrequired,
+        m,
+        &mut next_block,
+    );
     if inlined == 0 {
         return None;
     }
     // Level-2: must mirror self_inline_probe exactly.
     if node_count(&spliced) <= SELF_INLINE_MAX_BODY {
-        inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
+        inline_self_calls(
+            &mut spliced,
+            &orig,
+            defn_name,
+            nrequired,
+            m,
+            &mut next_block,
+        );
     }
     Some(spliced)
 }
@@ -1996,9 +2087,7 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
             // key (the same key `cache_key` uses), so its JIT'd native code can be
             // shared across all of the runtime's processes instead of being recompiled
             // per process. See `CompiledArm::share_key`.
-            if noptional == 0
-                && !has_rest
-                && matches!(id.region(), value::RUNTIME | value::PRELUDE)
+            if noptional == 0 && !has_rest && matches!(id.region(), value::RUNTIME | value::PRELUDE)
             {
                 arm.share_key = Some((id.0, nrequired as u16));
             }
@@ -2336,7 +2425,6 @@ fn prim2_dispatch_rooted(
     result.map_err(|e| tag_pos(e, pos))
 }
 
-
 /// Execute one node in **value position** — operands, call arguments, literal
 /// elements, binding right-hand sides: the overwhelmingly common case. Returns
 /// the value directly — no [`Step`] is built and no [`force`] unwrap runs. A
@@ -2503,7 +2591,17 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
             file,
             site,
         } => {
-            let step = exec_call(heap, callee, args, *tail, *pos, file.as_deref(), *site, frame_base, genv)?;
+            let step = exec_call(
+                heap,
+                callee,
+                args,
+                *tail,
+                *pos,
+                file.as_deref(),
+                *site,
+                frame_base,
+                genv,
+            )?;
             force(heap, step)
         }
         Node::Prim1 {
@@ -2681,20 +2779,22 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
             heap.truncate_roots(save);
             result.map_err(tag)
         }
-        Node::TryCatch { body, bind_slot, handler } => {
-            match exec_value(heap, body, frame_base, genv) {
-                Ok(v) => Ok(v),
-                Err(e) if e.is_control() => Err(e),
-                Err(e) => {
-                    let caught = match e.payload {
-                        Some(v) => v,
-                        None => e.to_value_map(heap),
-                    };
-                    heap.set_root_at(frame_base + bind_slot, caught);
-                    exec_value(heap, handler, frame_base, genv)
-                }
+        Node::TryCatch {
+            body,
+            bind_slot,
+            handler,
+        } => match exec_value(heap, body, frame_base, genv) {
+            Ok(v) => Ok(v),
+            Err(e) if e.is_control() => Err(e),
+            Err(e) => {
+                let caught = match e.payload {
+                    Some(v) => v,
+                    None => e.to_value_map(heap),
+                };
+                heap.set_root_at(frame_base + bind_slot, caught);
+                exec_value(heap, handler, frame_base, genv)
             }
-        }
+        },
     }
 }
 
@@ -3076,36 +3176,33 @@ fn dispatch(
                             // but fall back gracefully).  GC may have run, so read
                             // fresh args from the frame rather than stale cur_argv.
                             let argc = cur_argv.len();
-                            let fresh_argv: SmallVec<[Value; 4]> =
-                                if arm.rest_slot.is_none() {
-                                    (0..argc).map(|k| heap.root_at(base + k)).collect()
-                                } else {
-                                    // Rest arm: the rest elements were folded into a list at
-                                    // bind time, so they can't be reconstructed per-slot from
-                                    // `roots`; fall back to the pre-call `cur_argv`. Sound ONLY
-                                    // if no GC relocated those handles since capture — i.e. a
-                                    // rest arm never reaches here after a real safepoint (it's
-                                    // outside the JIT int-subset). A stale handle here is the
-                                    // bug #2 class (ADR-114) and would corrupt, so enforce the
-                                    // invariant in debug rather than leaving it as a silent
-                                    // assumption.
-                                    #[cfg(debug_assertions)]
-                                    for v in &cur_argv {
-                                        debug_assert!(
-                                            heap.dbg_value_stale(*v).is_none(),
-                                            "dispatch: stale LOCAL handle in the rest-arm \
+                            let fresh_argv: SmallVec<[Value; 4]> = if arm.rest_slot.is_none() {
+                                (0..argc).map(|k| heap.root_at(base + k)).collect()
+                            } else {
+                                // Rest arm: the rest elements were folded into a list at
+                                // bind time, so they can't be reconstructed per-slot from
+                                // `roots`; fall back to the pre-call `cur_argv`. Sound ONLY
+                                // if no GC relocated those handles since capture — i.e. a
+                                // rest arm never reaches here after a real safepoint (it's
+                                // outside the JIT int-subset). A stale handle here is the
+                                // bug #2 class (ADR-114) and would corrupt, so enforce the
+                                // invariant in debug rather than leaving it as a silent
+                                // assumption.
+                                #[cfg(debug_assertions)]
+                                for v in &cur_argv {
+                                    debug_assert!(
+                                        heap.dbg_value_stale(*v).is_none(),
+                                        "dispatch: stale LOCAL handle in the rest-arm \
                                              cur_argv fallback after a JIT safepoint — the \
                                              'rest arms never JIT post-safepoint' invariant \
                                              broke (ADR-114; re-read from roots instead)"
-                                        );
-                                    }
-                                    cur_argv
-                                };
+                                    );
+                                }
+                                cur_argv
+                            };
                             heap.truncate_roots(base);
                             heap.truncate_env_roots(env_base);
-                            return Ok(Step::Done(
-                                vm_apply(heap, arm, &fresh_argv, callee_env2)?,
-                            ));
+                            return Ok(Step::Done(vm_apply(heap, arm, &fresh_argv, callee_env2)?));
                         }
                         _ => {
                             crate::perf_bump!(jit_fast_deopt);
@@ -3122,36 +3219,33 @@ fn dispatch(
                             // and fall through to cur_argv as an inert dead-code path.
                             let callee_env2 = heap.read_root_env(env_root);
                             let argc = cur_argv.len();
-                            let fresh_argv: SmallVec<[Value; 4]> =
-                                if arm.rest_slot.is_none() {
-                                    (0..argc).map(|k| heap.root_at(base + k)).collect()
-                                } else {
-                                    // Rest arm: the rest elements were folded into a list at
-                                    // bind time, so they can't be reconstructed per-slot from
-                                    // `roots`; fall back to the pre-call `cur_argv`. Sound ONLY
-                                    // if no GC relocated those handles since capture — i.e. a
-                                    // rest arm never reaches here after a real safepoint (it's
-                                    // outside the JIT int-subset). A stale handle here is the
-                                    // bug #2 class (ADR-114) and would corrupt, so enforce the
-                                    // invariant in debug rather than leaving it as a silent
-                                    // assumption.
-                                    #[cfg(debug_assertions)]
-                                    for v in &cur_argv {
-                                        debug_assert!(
-                                            heap.dbg_value_stale(*v).is_none(),
-                                            "dispatch: stale LOCAL handle in the rest-arm \
+                            let fresh_argv: SmallVec<[Value; 4]> = if arm.rest_slot.is_none() {
+                                (0..argc).map(|k| heap.root_at(base + k)).collect()
+                            } else {
+                                // Rest arm: the rest elements were folded into a list at
+                                // bind time, so they can't be reconstructed per-slot from
+                                // `roots`; fall back to the pre-call `cur_argv`. Sound ONLY
+                                // if no GC relocated those handles since capture — i.e. a
+                                // rest arm never reaches here after a real safepoint (it's
+                                // outside the JIT int-subset). A stale handle here is the
+                                // bug #2 class (ADR-114) and would corrupt, so enforce the
+                                // invariant in debug rather than leaving it as a silent
+                                // assumption.
+                                #[cfg(debug_assertions)]
+                                for v in &cur_argv {
+                                    debug_assert!(
+                                        heap.dbg_value_stale(*v).is_none(),
+                                        "dispatch: stale LOCAL handle in the rest-arm \
                                              cur_argv fallback after a JIT safepoint — the \
                                              'rest arms never JIT post-safepoint' invariant \
                                              broke (ADR-114; re-read from roots instead)"
-                                        );
-                                    }
-                                    cur_argv
-                                };
+                                    );
+                                }
+                                cur_argv
+                            };
                             heap.truncate_roots(base);
                             heap.truncate_env_roots(env_base);
-                            return Ok(Step::Done(
-                                vm_apply(heap, arm, &fresh_argv, callee_env2)?,
-                            ));
+                            return Ok(Step::Done(vm_apply(heap, arm, &fresh_argv, callee_env2)?));
                         }
                     }
                 }
@@ -3336,12 +3430,13 @@ pub(crate) fn run_process_body(
                 let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
                 vm_run_bc(heap, arm, &[], cenv, None, true)
             }
-            ValueRef::Fn(_) => crate::eval::apply(heap, body, &[], EnvId::GLOBAL).map(VmOutcome::Done),
+            ValueRef::Fn(_) => {
+                crate::eval::apply(heap, body, &[], EnvId::GLOBAL).map(VmOutcome::Done)
+            }
             _ => Err(LispError::type_err("process body must be a function")),
         },
     }
 }
-
 
 /// Lower a compiled `Node` body to a [`Chunk`], or `None` if it uses any node
 /// outside Stage 1's vocabulary (`Call`/`SelfCall`/`MakeClosure`, or a `Const` with
@@ -3568,7 +3663,11 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 self_name: *self_name,
             });
         }
-        Node::TryCatch { body, bind_slot, handler } => {
+        Node::TryCatch {
+            body,
+            bind_slot,
+            handler,
+        } => {
             code.push(Inst::TryCatch {
                 body: NodePtr(NonNull::from(body.as_ref())),
                 bind_slot: *bind_slot,
@@ -4205,7 +4304,11 @@ fn exec_chunk(
                 }
                 heap.push_root(closure);
             }
-            Inst::TryCatch { body, bind_slot, handler } => {
+            Inst::TryCatch {
+                body,
+                bind_slot,
+                handler,
+            } => {
                 // SAFETY: NodePtrs reference nodes owned by arm.body (same CompiledArm),
                 // which outlives exec_chunk via the Arc<CompiledArm> held by vm_run_bc.
                 let body_node = unsafe { body.0.as_ref() };
@@ -4506,106 +4609,122 @@ fn vm_run_bc(
 
         // Either run the arm natively (if it's flagged for a tier check) or interpret it.
         // Both yield a `Result<ChunkExit, _>` handled uniformly below.
-        let exit = {
-            #[cfg(feature = "jit")]
+        let exit =
             {
-                if try_jit {
-                    try_jit = false;
-                    // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
-                    // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
-                    // *installed* native version is the deferred inlined upgrade does the
-                    // native entry need the larger `inline_nslots` frame (the spliced blocks'
-                    // shifted slot ranges). `inline_installed` is false for every arm that
-                    // doesn't inline (the overwhelming common case — fib is the exception),
-                    // so the hot path pays nothing: it calls `jit_tier` exactly as before.
-                    // Only the inlined arm grows `roots` and restores the small top on a
-                    // non-`Done` outcome (deopt re-runs the ORIGINAL small body from params).
-                    let inlined_active =
-                        cur_arm.inline_installed.load(std::sync::atomic::Ordering::Acquire);
-                    let small_top = cur_base + cur_arm.nslots;
-                    if inlined_active {
-                        heap.extend_roots_to_nil(cur_base + cur_arm.inline_nslots);
-                    }
-                    // Clean frame state `jit_tier` runs against: slots set up, operand
-                    // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
-                    // assumes roots return to exactly here.
-                    let pre_roots = heap.roots_len();
-                    let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
-                    // Restore the small frame top on every non-Done path so the `exec_chunk`
-                    // re-run sees the original layout (Done retires the whole frame anyway).
-                    // The inlined native keeps operands in registers, so it leaves `roots`
-                    // exactly at the frame top it was entered with (`cur_base+inline_nslots`).
-                    // A Some(4) tail outcome stages callee+args ABOVE that top, read by
-                    // `jit_dispatch_tail` relative to `active_nslots` — don't disturb those.
-                    if inlined_active
-                        && matches!(jit_outcome, Some(1) | Some(2) | None)
-                        && heap.roots_len() == cur_base + cur_arm.inline_nslots
-                    {
-                        heap.truncate_roots(small_top);
-                    }
-                    // Work-attribution (perf-stats): native completion (0/4) vs a
-                    // mid-run deopt (1) vs preemption (2). A hot arm with high
-                    // `jit_deopt` vs `jit_native` compiles but keeps falling off the
-                    // native path — the matmul-class signal.
-                    match jit_outcome {
-                        Some(0) | Some(4) => {
-                            crate::perf_bump!(jit_native);
+                #[cfg(feature = "jit")]
+                {
+                    if try_jit {
+                        try_jit = false;
+                        // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
+                        // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
+                        // *installed* native version is the deferred inlined upgrade does the
+                        // native entry need the larger `inline_nslots` frame (the spliced blocks'
+                        // shifted slot ranges). `inline_installed` is false for every arm that
+                        // doesn't inline (the overwhelming common case — fib is the exception),
+                        // so the hot path pays nothing: it calls `jit_tier` exactly as before.
+                        // Only the inlined arm grows `roots` and restores the small top on a
+                        // non-`Done` outcome (deopt re-runs the ORIGINAL small body from params).
+                        let inlined_active = cur_arm
+                            .inline_installed
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        let small_top = cur_base + cur_arm.nslots;
+                        if inlined_active {
+                            heap.extend_roots_to_nil(cur_base + cur_arm.inline_nslots);
                         }
-                        Some(1) => {
-                            crate::perf_bump!(jit_deopt);
+                        // Clean frame state `jit_tier` runs against: slots set up, operand
+                        // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
+                        // assumes roots return to exactly here.
+                        let pre_roots = heap.roots_len();
+                        let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
+                        // Restore the small frame top on every non-Done path so the `exec_chunk`
+                        // re-run sees the original layout (Done retires the whole frame anyway).
+                        // The inlined native keeps operands in registers, so it leaves `roots`
+                        // exactly at the frame top it was entered with (`cur_base+inline_nslots`).
+                        // A Some(4) tail outcome stages callee+args ABOVE that top, read by
+                        // `jit_dispatch_tail` relative to `active_nslots` — don't disturb those.
+                        if inlined_active
+                            && matches!(jit_outcome, Some(1) | Some(2) | None)
+                            && heap.roots_len() == cur_base + cur_arm.inline_nslots
+                        {
+                            heap.truncate_roots(small_top);
                         }
-                        Some(2) => {
-                            crate::perf_bump!(jit_preempt);
+                        // Work-attribution (perf-stats): native completion (0/4) vs a
+                        // mid-run deopt (1) vs preemption (2). A hot arm with high
+                        // `jit_deopt` vs `jit_native` compiles but keeps falling off the
+                        // native path — the matmul-class signal.
+                        match jit_outcome {
+                            Some(0) | Some(4) => {
+                                crate::perf_bump!(jit_native);
+                            }
+                            Some(1) => {
+                                crate::perf_bump!(jit_deopt);
+                            }
+                            Some(2) => {
+                                crate::perf_bump!(jit_preempt);
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    }
-                    // Dirty-stack-on-deopt check: a native arm that deopts (1) or is
-                    // preempted (2) must leave `roots` as `jit_tier` found them; if it
-                    // grew, the `exec_chunk` re-run starts on a corrupt operand stack.
-                    if matches!(jit_outcome, Some(1) | Some(2)) {
-                        let now = heap.roots_len();
-                        if now != pre_roots {
-                            crate::perf_bump!(jit_deopt_dirty);
-                            #[cfg(feature = "perf-stats")]
-                            {
-                                static SHOWN: std::sync::atomic::AtomicBool =
-                                    std::sync::atomic::AtomicBool::new(false);
-                                if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                    eprintln!(
-                                        "[jit-dirty] deopt/preempt left roots_len={now} \
+                        // Dirty-stack-on-deopt check: a native arm that deopts (1) or is
+                        // preempted (2) must leave `roots` as `jit_tier` found them; if it
+                        // grew, the `exec_chunk` re-run starts on a corrupt operand stack.
+                        if matches!(jit_outcome, Some(1) | Some(2)) {
+                            let now = heap.roots_len();
+                            if now != pre_roots {
+                                crate::perf_bump!(jit_deopt_dirty);
+                                #[cfg(feature = "perf-stats")]
+                                {
+                                    static SHOWN: std::sync::atomic::AtomicBool =
+                                        std::sync::atomic::AtomicBool::new(false);
+                                    if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                        eprintln!(
+                                            "[jit-dirty] deopt/preempt left roots_len={now} \
                                          (jit_tier found {pre_roots}) — dirty operand stack \
                                          before the VM re-run"
-                                    );
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
-                    match jit_outcome {
-                        // Done: result in `roots[cur_base]` → the `Done` arm retires it.
-                        Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
-                        // A JIT'd call/global errored — propagate the parked error.
-                        Some(3) => {
-                            Err(jit_take_error(heap)
-                                .expect("JIT error outcome without a parked error"))
+                        match jit_outcome {
+                            // Done: result in `roots[cur_base]` → the `Done` arm retires it.
+                            Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
+                            // A JIT'd call/global errored — propagate the parked error.
+                            Some(3) => Err(jit_take_error(heap)
+                                .expect("JIT error outcome without a parked error")),
+                            // A JIT'd tail call: dispatch the staged callee+args → reuse the
+                            // frame (`Tail`) or a finished native callee (`Done`).
+                            Some(4) => jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env),
+                            // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the
+                            // arm on the VM with the frame intact (`cur_ip` is still 0).
+                            _ => exec_chunk(
+                                heap,
+                                &cur_arm,
+                                &mut cur_ip,
+                                cur_base,
+                                cur_env,
+                                capture,
+                                #[cfg(feature = "jit")]
+                                &mut cur_back_edges,
+                            ),
                         }
-                        // A JIT'd tail call: dispatch the staged callee+args → reuse the
-                        // frame (`Tail`) or a finished native callee (`Done`).
-                        Some(4) => jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env),
-                        // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the
-                        // arm on the VM with the frame intact (`cur_ip` is still 0).
-                        _ => exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture,
-                            #[cfg(feature = "jit")] &mut cur_back_edges),
+                    } else {
+                        exec_chunk(
+                            heap,
+                            &cur_arm,
+                            &mut cur_ip,
+                            cur_base,
+                            cur_env,
+                            capture,
+                            #[cfg(feature = "jit")]
+                            &mut cur_back_edges,
+                        )
                     }
-                } else {
-                    exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture,
-                        #[cfg(feature = "jit")] &mut cur_back_edges)
                 }
-            }
-            #[cfg(not(feature = "jit"))]
-            {
-                exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture)
-            }
-        };
+                #[cfg(not(feature = "jit"))]
+                {
+                    exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture)
+                }
+            };
         match exit {
             Ok(ChunkExit::Done(v)) => {
                 // Retire the current frame, then either finish or hand `v` to the caller.
@@ -4905,7 +5024,6 @@ pub fn apply_engine(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId)
     }
 }
 
-
 #[cfg(feature = "jit")]
 mod jit_lower;
 #[cfg(feature = "jit")]
@@ -4915,7 +5033,6 @@ pub(crate) use jit_lower::{jit_lower_arm, jit_lower_inlined_arm, jit_spill_reser
 fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
 }
-
 
 /// The background JIT compiler (ADR-101 1b). A single dedicated OS thread, lazily spawned,
 /// is the **only** place arms are lowered: it owns the sole mutable access to the JIT
@@ -4957,7 +5074,8 @@ struct JitCompiler {
 /// which are dropped when a closure is rebound or a green process exits, freeing the chunk
 /// out from under still-installed native code (bug #2: a dangling ConstVal → garbage const).
 #[cfg(feature = "jit")]
-static JIT_ARM_KEEPALIVE: std::sync::Mutex<Vec<Arc<CompiledArm>>> = std::sync::Mutex::new(Vec::new());
+static JIT_ARM_KEEPALIVE: std::sync::Mutex<Vec<Arc<CompiledArm>>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[cfg(feature = "jit")]
 static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new(|| {
@@ -4982,7 +5100,11 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
             // `jit_code`; `inlined=true` → the re-derived inlined body, store into
             // `inline_code` (jit_tier swaps it into `jit_code` later, epoch-bumped).
             let mut compile = |arm: &Arc<CompiledArm>, slot_tags: &[u8], inlined: bool| {
-                let slot = if inlined { &arm.inline_code } else { &arm.jit_code };
+                let slot = if inlined {
+                    &arm.inline_code
+                } else {
+                    &arm.jit_code
+                };
                 if codegen_poisoned {
                     slot.store(crate::jit::BAILED, Release);
                     return;
@@ -5217,7 +5339,13 @@ fn jit_run_fast_link(
     #[cfg(debug_assertions)]
     {
         let args: Vec<Value> = (0..argc).map(|k| heap.root_at(stage_base + k)).collect();
-        dbg_check_args(&args, &format!("jit_run_fast_link site={site} loc={}", heap.dbg_site_loc(site)));
+        dbg_check_args(
+            &args,
+            &format!(
+                "jit_run_fast_link site={site} loc={}",
+                heap.dbg_site_loc(site)
+            ),
+        );
     }
     // Runtime BROOD_JIT_VERIFY: the fast-link path bypasses jit_dispatch_call's scan, so
     // scan the staged args here too (works in a plain --release build).
@@ -5265,8 +5393,9 @@ fn jit_run_fast_link(
             if staged_end > staged_start {
                 let staged_callee = heap.root_at(staged_start);
                 let staged_argc = staged_end - staged_start - 1;
-                let staged_args: SmallVec<[Value; 4]> =
-                    (1..=staged_argc).map(|k| heap.root_at(staged_start + k)).collect();
+                let staged_args: SmallVec<[Value; 4]> = (1..=staged_argc)
+                    .map(|k| heap.root_at(staged_start + k))
+                    .collect();
                 heap.truncate_roots(stage_base);
                 return match apply_value(heap, staged_callee, &staged_args, heap.global()) {
                     Ok(v) => FastLinkOutcome::Done(v),
@@ -5356,7 +5485,9 @@ pub(crate) fn jit_dispatch_fast_frame(
             callee_env.0
         );
     }
-    jit_run_fast_link(heap, argc, site, head, epoch, stage_base, code, nslots, callee_env)
+    jit_run_fast_link(
+        heap, argc, site, head, epoch, stage_base, code, nslots, callee_env,
+    )
 }
 
 /// Run a JIT'd arm's **non-tail** Brood→Brood call. The `argc` args are the top operands
@@ -5416,7 +5547,15 @@ pub(crate) fn jit_dispatch_call(
             heap.vm_call_ic_fast_link(site, head, argc as u32, epoch)
         {
             match jit_run_fast_link(
-                heap, argc, site, head, epoch, stage_base, code as usize, nslots, callee_env,
+                heap,
+                argc,
+                site,
+                head,
+                epoch,
+                stage_base,
+                code as usize,
+                nslots,
+                callee_env,
             ) {
                 FastLinkOutcome::Done(v) => return Some(v),
                 FastLinkOutcome::Error => return None,
@@ -5567,10 +5706,16 @@ pub(crate) fn jit_dispatch_call(
                         if staged_end > staged_start {
                             let staged_callee = heap.root_at(staged_start);
                             let staged_argc = staged_end - staged_start - 1;
-                            let staged_args: SmallVec<[Value; 4]> =
-                                (1..=staged_argc).map(|k| heap.root_at(staged_start + k)).collect();
+                            let staged_args: SmallVec<[Value; 4]> = (1..=staged_argc)
+                                .map(|k| heap.root_at(staged_start + k))
+                                .collect();
                             heap.truncate_roots(stage_base);
-                            return match apply_value(heap, staged_callee, &staged_args, heap.global()) {
+                            return match apply_value(
+                                heap,
+                                staged_callee,
+                                &staged_args,
+                                heap.global(),
+                            ) {
                                 Ok(v) => Some(v),
                                 Err(e) => {
                                     heap.jit_pending_error = Some(e);
@@ -5781,7 +5926,16 @@ pub(crate) fn jit_tier(
     }
     if no_jit_computed() {
         if let Some(c) = arm.chunk.as_ref() {
-            if c.code.iter().any(|i| matches!(i, Inst::Call { tail: false, head: None, .. })) {
+            if c.code.iter().any(|i| {
+                matches!(
+                    i,
+                    Inst::Call {
+                        tail: false,
+                        head: None,
+                        ..
+                    }
+                )
+            }) {
                 return None;
             }
         }
@@ -5841,18 +5995,22 @@ pub(crate) fn jit_tier(
             let slot_tags: Vec<u8> = (0..arm.nslots)
                 .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
                 .collect();
-            if JIT_COMPILER.primary.try_send((arm.clone(), slot_tags)).is_err() {
-            // The background compile queue is full (a burst of distinct hot arms — e.g.
-            // thousands of short-lived green processes each tiering their own arm copy,
-            // overwhelming the bounded channel). Reset to untried AND back the hotness
-            // counter all the way off, so the arm runs on the VM for another THRESHOLD
-            // calls before re-attempting — instead of re-validating (`chunk_ops_all_native`,
-            // an `env_get`/`resolve_prim` per op) on *every* call while the queue stays
-            // full. Measured: ~36M redundant re-validations in `spawn` (20 000 procs)
-            // collapse to ~1/THRESHOLD of that. The arm still compiles once the queue
-            // drains (a long-lived process re-reaches the threshold and re-enqueues).
-            arm.jit_code.store(std::ptr::null_mut(), Release);
-            arm.jit_calls.store(0, Relaxed);
+            if JIT_COMPILER
+                .primary
+                .try_send((arm.clone(), slot_tags))
+                .is_err()
+            {
+                // The background compile queue is full (a burst of distinct hot arms — e.g.
+                // thousands of short-lived green processes each tiering their own arm copy,
+                // overwhelming the bounded channel). Reset to untried AND back the hotness
+                // counter all the way off, so the arm runs on the VM for another THRESHOLD
+                // calls before re-attempting — instead of re-validating (`chunk_ops_all_native`,
+                // an `env_get`/`resolve_prim` per op) on *every* call while the queue stays
+                // full. Measured: ~36M redundant re-validations in `spawn` (20 000 procs)
+                // collapse to ~1/THRESHOLD of that. The arm still compiles once the queue
+                // drains (a long-lived process re-reaches the threshold and re-enqueues).
+                arm.jit_code.store(std::ptr::null_mut(), Release);
+                arm.jit_calls.store(0, Relaxed);
             }
         }
         return None;
@@ -5886,47 +6044,46 @@ pub(crate) fn jit_tier(
     //      sizing key), set `inline_installed`, and run the VM this one activation. The next
     //      entry sizes the frame to `active_nslots()` (= `inline_nslots`) and runs the inlined
     //      native. One VM activation on the transition — negligible.
-    if arm.inline_name.is_some()
-        && !arm.inline_installed.load(Acquire) {
-            let ic = arm.inline_code.load(Acquire);
-            if ic.is_null() {
-                // Not yet compiled/enqueued. Elect a single enqueuer via the queued flag.
-                if !arm.inline_queued.swap(true, AcqRel) {
-                    let slot_tags: Vec<u8> = (0..arm.nslots)
-                        .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
-                        .collect();
-                    // Deferred (low-priority). On a full queue, un-set `inline_queued` so a
-                    // later call re-attempts — but DON'T disturb the running small native.
-                    if JIT_COMPILER
-                        .deferred
-                        .try_send((arm.clone(), slot_tags))
-                        .is_err()
-                    {
-                        arm.inline_queued.store(false, Relaxed);
-                    }
+    if arm.inline_name.is_some() && !arm.inline_installed.load(Acquire) {
+        let ic = arm.inline_code.load(Acquire);
+        if ic.is_null() {
+            // Not yet compiled/enqueued. Elect a single enqueuer via the queued flag.
+            if !arm.inline_queued.swap(true, AcqRel) {
+                let slot_tags: Vec<u8> = (0..arm.nslots)
+                    .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
+                    .collect();
+                // Deferred (low-priority). On a full queue, un-set `inline_queued` so a
+                // later call re-attempts — but DON'T disturb the running small native.
+                if JIT_COMPILER
+                    .deferred
+                    .try_send((arm.clone(), slot_tags))
+                    .is_err()
+                {
+                    arm.inline_queued.store(false, Relaxed);
                 }
-            } else if ic != crate::jit::BAILED && ic != crate::jit::QUEUED {
-                // The inlined upgrade is ready — swap it in. Bump the epoch FIRST, then stamp
-                // `compile_epoch` to the new value. Store `inline_installed` BEFORE `jit_code`
-                // so that any reader which Acquire-loads `jit_code = inline_code` is guaranteed
-                // (by the Release-Acquire chain) to also see `inline_installed = true` and
-                // therefore call `active_nslots()` → `inline_nslots`. The reversed order
-                // (jit_code before inline_installed) created a race: a reader could observe the
-                // inline code pointer but still see `inline_installed = false`, sizing the callee
-                // frame to the small `nslots` — the inline code would then raw-read beyond the
-                // frame, picking up stale Vec-capacity data as slot values and passing garbage
-                // through the outcome-4 tail-call staging path.
-                let new_epoch = heap.bump_global_epoch();
-                arm.compile_epoch.store(new_epoch, Release);
-                arm.inline_installed.store(true, Release); // BEFORE jit_code — see comment above
-                arm.jit_code.store(ic, Release);
-                // Run the VM this activation; the next entry sizes the frame to inline_nslots
-                // (the call site reads `active_nslots()`) and runs the inlined native.
-                return None;
             }
-            // `ic == BAILED`: the inlined body fell out of subset — leave the small native
-            // installed forever (it's correct + fast). No retry.
+        } else if ic != crate::jit::BAILED && ic != crate::jit::QUEUED {
+            // The inlined upgrade is ready — swap it in. Bump the epoch FIRST, then stamp
+            // `compile_epoch` to the new value. Store `inline_installed` BEFORE `jit_code`
+            // so that any reader which Acquire-loads `jit_code = inline_code` is guaranteed
+            // (by the Release-Acquire chain) to also see `inline_installed = true` and
+            // therefore call `active_nslots()` → `inline_nslots`. The reversed order
+            // (jit_code before inline_installed) created a race: a reader could observe the
+            // inline code pointer but still see `inline_installed = false`, sizing the callee
+            // frame to the small `nslots` — the inline code would then raw-read beyond the
+            // frame, picking up stale Vec-capacity data as slot values and passing garbage
+            // through the outcome-4 tail-call staging path.
+            let new_epoch = heap.bump_global_epoch();
+            arm.compile_epoch.store(new_epoch, Release);
+            arm.inline_installed.store(true, Release); // BEFORE jit_code — see comment above
+            arm.jit_code.store(ic, Release);
+            // Run the VM this activation; the next entry sizes the frame to inline_nslots
+            // (the call site reads `active_nslots()`) and runs the inlined native.
+            return None;
         }
+        // `ic == BAILED`: the inlined body fell out of subset — leave the small native
+        // installed forever (it's correct + fast). No retry.
+    }
     // Publish freshly-compiled native code to the shared cache so the runtime's other
     // processes install it directly instead of recompiling (the spawn lever). The
     // `swap` guard makes this one lock acquire per arm-instance, not one per call; a
@@ -6083,20 +6240,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
 
         rewrite_arm_handles(&arm, &mut |v| bump(v, 100));
@@ -6205,20 +6362,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         });
 
         // First run: the native suspends, so the driver captures the continuation
@@ -6306,20 +6463,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -6379,20 +6536,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -6462,20 +6619,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -6587,20 +6744,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         let mut jit = crate::jit::Jit::new();
         assert!(
@@ -6651,20 +6808,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(
             jit_lower_arm(&mut jit, &elided_arm, &[]).is_some(),
@@ -6709,20 +6866,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         assert!(
             jit_lower_arm(&mut jit, &thin_arm, &[]).is_none(),
@@ -6776,20 +6933,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         let mut jit = crate::jit::Jit::new();
 
@@ -6846,8 +7003,9 @@ mod tests {
             1,
             1,
         );
-        let g: extern "C" fn(*mut Heap, i64) -> i64 =
-            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &gt, &[]).expect("(> x 5) JITs")) };
+        let g: extern "C" fn(*mut Heap, i64) -> i64 = unsafe {
+            std::mem::transmute(jit_lower_arm(&mut jit, &gt, &[]).expect("(> x 5) JITs"))
+        };
         for (x, want) in [(10i64, 100i64), (3, 200)] {
             let mut heap = Heap::new();
             let base = heap.roots_len();
@@ -6875,8 +7033,9 @@ mod tests {
             1,
             1,
         );
-        let s: extern "C" fn(*mut Heap, i64) -> i64 =
-            unsafe { std::mem::transmute(jit_lower_arm(&mut jit, &sq, &[]).expect("(* x x) JITs")) };
+        let s: extern "C" fn(*mut Heap, i64) -> i64 = unsafe {
+            std::mem::transmute(jit_lower_arm(&mut jit, &sq, &[]).expect("(* x x) JITs"))
+        };
         let mut heap = Heap::new();
         let base = heap.roots_len();
         heap.push_root(Value::int(3));
@@ -6885,7 +7044,10 @@ mod tests {
             0,
             "(* 3 3) is in range"
         );
-        assert!(matches!(heap.root_at(base).unpack(), ValueRef::Int(9)), "(* 3 3) = 9");
+        assert!(
+            matches!(heap.root_at(base).unpack(), ValueRef::Int(9)),
+            "(* 3 3) = 9"
+        );
         let mut heap = Heap::new();
         let base = heap.roots_len();
         heap.push_root(Value::int(4_000_000_000)); // 4e9 * 4e9 = 1.6e19 > i64::MAX
@@ -6926,20 +7088,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         let sumto = Arc::new(mk_arm(
             Chunk {
@@ -7088,20 +7250,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         });
 
         // Warm it past the threshold so jit_tier hands it to the background compiler;
@@ -7194,20 +7356,20 @@ mod tests {
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
             capture_names: Box::new([]),
-                #[cfg(feature = "jit")]
-                inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
-                #[cfg(feature = "jit")]
-                inline_stride: 0,
-                #[cfg(feature = "jit")]
-                inline_nslots: 0,
-                #[cfg(feature = "jit")]
-                inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
-                #[cfg(feature = "jit")]
-                inline_queued: std::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "jit")]
-                inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_name: None,
+            #[cfg(feature = "jit")]
+            dbg_name: None,
+            #[cfg(feature = "jit")]
+            inline_stride: 0,
+            #[cfg(feature = "jit")]
+            inline_nslots: 0,
+            #[cfg(feature = "jit")]
+            inline_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            #[cfg(feature = "jit")]
+            inline_queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            inline_installed: std::sync::atomic::AtomicBool::new(false),
         };
         let n = 100_000i64; // iterations per sumto call
         let reps = 300;

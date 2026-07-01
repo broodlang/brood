@@ -151,9 +151,8 @@ impl Ty {
     pub const ANY: Ty = Ty::flat(UNIVERSE);
     /// `int ∪ float ∪ decimal` — the named union the prelude's `number?` predicate
     /// implies. A `decimal` is a number (but not an integer).
-    pub const NUMBER: Ty = Ty::flat(
-        (1u32 << bit(Tag::Int)) | (1u32 << bit(Tag::Float)) | (1u32 << bit(Tag::Decimal)),
-    );
+    pub const NUMBER: Ty =
+        Ty::flat((1u32 << bit(Tag::Int)) | (1u32 << bit(Tag::Float)) | (1u32 << bit(Tag::Decimal)));
     /// `nil ∪ pair` — the named union the prelude's `list?` predicate implies.
     pub const LIST: Ty = Ty::flat((1u32 << bit(Tag::Nil)) | (1u32 << bit(Tag::Pair)));
 
@@ -1380,7 +1379,10 @@ mod tests {
 
     #[test]
     fn keyword_literal_renders_as_its_value() {
-        assert_eq!(Ty::keyword_lit(value::intern("maximized")).to_string(), ":maximized");
+        assert_eq!(
+            Ty::keyword_lit(value::intern("maximized")).to_string(),
+            ":maximized"
+        );
         // a union keeps both (set-union is exact, not a widening); rendered sorted.
         assert_eq!(kw_union(&["a", "b"]).to_string(), ":a | :b");
         // mixed with another tag: the literals plus the open tag.
@@ -1444,7 +1446,8 @@ mod tests {
         want.insert(value::intern("b"));
         assert_eq!(inter.as_lit(), Some(&want));
         // (:a) ∩ (:b) = never (empty literal set clears the keyword tag).
-        let empty = Ty::keyword_lit(value::intern("a")).intersect(Ty::keyword_lit(value::intern("b")));
+        let empty =
+            Ty::keyword_lit(value::intern("a")).intersect(Ty::keyword_lit(value::intern("b")));
         assert!(empty.is_never());
         // (:a | :b) ∩ keyword(any) = (:a | :b) (narrower wins).
         let narrowed = kw_union(&["a", "b"]).intersect(Ty::of(Tag::Keyword));

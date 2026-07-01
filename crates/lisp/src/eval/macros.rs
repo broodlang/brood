@@ -749,7 +749,10 @@ pub(crate) fn macro_head_id(heap: &Heap, env: EnvId, sym: value::Symbol) -> Opti
                 Some(ns) => resolve_sym(heap, sym, value::symbol_name_ref(ns), &[]),
                 None => heap.import_of(sym).unwrap_or(sym),
             };
-            match (q != sym, heap.env_get(value::EnvId::GLOBAL, q).map(|v| v.unpack())) {
+            match (
+                q != sym,
+                heap.env_get(value::EnvId::GLOBAL, q).map(|v| v.unpack()),
+            ) {
                 (true, Some(ValueRef::Macro(mid))) => Some(mid),
                 _ => None,
             }

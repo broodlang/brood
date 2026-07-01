@@ -965,9 +965,8 @@ impl RpcError {
 /// somehow fails (it can't for this map — every value is a string/int/keyword).
 fn lisp_error_to_json(heap: &mut Heap, e: &brood::error::LispError) -> Json {
     let map = e.to_value_map(heap);
-    value_to_json(heap, map).unwrap_or_else(|_| {
-        json!({ "kind": e.kind.tag_name(), "message": e.message.clone() })
-    })
+    value_to_json(heap, map)
+        .unwrap_or_else(|_| json!({ "kind": e.kind.tag_name(), "message": e.message.clone() }))
 }
 
 // ============================================================================
@@ -998,8 +997,15 @@ mod tests {
         let tmp2 = std::env::temp_dir().join(format!("nest-mcp-fresh-{}", std::process::id()));
         std::fs::write(&tmp2, b"x").unwrap();
         let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
-        let mut g2 = StalenessGuard { started: future, exe: Some(tmp2.clone()), warned: false };
-        assert!(!g2.check(), "a binary older than the start time is not stale");
+        let mut g2 = StalenessGuard {
+            started: future,
+            exe: Some(tmp2.clone()),
+            warned: false,
+        };
+        assert!(
+            !g2.check(),
+            "a binary older than the start time is not stale"
+        );
         let _ = std::fs::remove_file(&tmp2);
 
         // Unresolvable executable → best-effort no-op (never a false alarm).
@@ -1201,7 +1207,11 @@ mod tests {
                         (ms (fn () (bit-count (reduce (fn (b _) (wstep b w h mask board col0 high)) st (range 30))))))"#;
         let mut reqs = vec![
             req(1, "initialize", json!({})),
-            req(2, "tools/call", json!({ "name": "eval", "arguments": { "source": setup } })),
+            req(
+                2,
+                "tools/call",
+                json!({ "name": "eval", "arguments": { "source": setup } }),
+            ),
         ];
         for i in 0..25 {
             reqs.push(req(
@@ -1424,10 +1434,7 @@ mod tests {
             resp[0]
         );
         let content = resp[0]["result"]["content"].as_array().unwrap();
-        let joined: String = content
-            .iter()
-            .filter_map(|c| c["text"].as_str())
-            .collect();
+        let joined: String = content.iter().filter_map(|c| c["text"].as_str()).collect();
         assert!(
             joined.contains("[2J"),
             "rendered escapes should be diverted into the result content (not the raw \
@@ -1884,7 +1891,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("brood-mcp-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         interp
-            .eval_str(&format!("(def *project-root* {:?})", root.to_str().unwrap()))
+            .eval_str(&format!(
+                "(def *project-root* {:?})",
+                root.to_str().unwrap()
+            ))
             .unwrap();
         (interp, root)
     }
@@ -1912,7 +1922,12 @@ mod tests {
     #[test]
     fn std_write_tool_refuses_to_escape_the_project_root() {
         let (mut interp, root) = interp_with_project_root("escape");
-        for bad in ["../escape.blsp", "/etc/passwd", "~/secret", "a/../../b.blsp"] {
+        for bad in [
+            "../escape.blsp",
+            "/etc/passwd",
+            "~/secret",
+            "a/../../b.blsp",
+        ] {
             let (_, body) = invoke_tool(
                 &mut interp,
                 "write",
@@ -2157,11 +2172,7 @@ mod tests {
                 &mut interp,
                 &[
                     // First call panics inside the handler.
-                    req(
-                        1,
-                        "tools/call",
-                        json!({ "name": "boom", "arguments": {} }),
-                    ),
+                    req(1, "tools/call", json!({ "name": "boom", "arguments": {} })),
                     // Second call must still work — proves the server didn't
                     // die and `Interp` is in a usable state.
                     req(

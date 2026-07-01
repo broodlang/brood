@@ -269,7 +269,10 @@ fn sym_appears_in(heap: &Heap, form: Value, sym: Symbol) -> bool {
             let (car, cdr) = heap.pair(pid);
             sym_appears_in(heap, car, sym) || sym_appears_in(heap, cdr, sym)
         }
-        Value::Vector(vid) => heap.vector(vid).iter().any(|&v| sym_appears_in(heap, v, sym)),
+        Value::Vector(vid) => heap
+            .vector(vid)
+            .iter()
+            .any(|&v| sym_appears_in(heap, v, sym)),
         // Map literals (`{:k v …}`) are heap maps, not pairs — scan both keys
         // and values, or a binding used only inside a `{…}` (very common: the
         // editor's minibuffer specs, `{:start s :end e}` edit forms) is falsely
@@ -817,7 +820,9 @@ fn check_fn_seeded(
         if let Some(&ret_form) = items[body_start..].last() {
             let g = gradual_of(heap, ret_form, &scope);
             if !g.consistent_with(s.ret.clone()) {
-                let who = name.map(|n| format!("{}: ", name_of(n))).unwrap_or_default();
+                let who = name
+                    .map(|n| format!("{}: ", name_of(n)))
+                    .unwrap_or_default();
                 out.push((
                     heap.form_pos_only(ret_form),
                     format!(
@@ -1365,10 +1370,11 @@ fn check_let(
                 let nm = name_of(name);
                 if !nm.starts_with('_') {
                     // letrec: also scan preceding elements (mutual recursion).
-                    let preceding_used = letrec
-                        && binds[..j].iter().any(|&f| sym_appears_in(heap, f, name));
-                    let following_used =
-                        binds[j + 2..].iter().any(|&f| sym_appears_in(heap, f, name));
+                    let preceding_used =
+                        letrec && binds[..j].iter().any(|&f| sym_appears_in(heap, f, name));
+                    let following_used = binds[j + 2..]
+                        .iter()
+                        .any(|&f| sym_appears_in(heap, f, name));
                     let body_used = items[2..].iter().any(|&f| sym_appears_in(heap, f, name));
                     if !preceding_used && !following_used && !body_used {
                         // Only warn for user-written `let`s (those the reader
@@ -1377,10 +1383,7 @@ fn check_let(
                         // are exempt: their names are user-chosen but the
                         // "unused" status is an expansion artifact.
                         if let Some(pos) = heap.form_pos_only(form) {
-                            out.push((
-                                Some(pos),
-                                format!("unused let binding: {}", nm),
-                            ));
+                            out.push((Some(pos), format!("unused let binding: {}", nm)));
                         }
                     }
                 }

@@ -138,8 +138,8 @@ impl GlWindow {
             .as_raw();
 
         // EGL works on both Wayland and X11/Mesa — the platforms this runtime targets.
-        let display =
-            unsafe { Display::new(rdh, DisplayApiPreference::Egl) }.map_err(|e| format!("egl display: {e}"))?;
+        let display = unsafe { Display::new(rdh, DisplayApiPreference::Egl) }
+            .map_err(|e| format!("egl display: {e}"))?;
 
         let template = ConfigTemplateBuilder::new()
             .compatible_with_native_window(rwh)
@@ -159,8 +159,11 @@ impl GlWindow {
 
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
-        let surf_attrs = SurfaceAttributesBuilder::<WindowSurface>::new()
-            .build(rwh, NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap());
+        let surf_attrs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
+            rwh,
+            NonZeroU32::new(w).unwrap(),
+            NonZeroU32::new(h).unwrap(),
+        );
         let surface = unsafe { display.create_window_surface(&config, &surf_attrs) }
             .map_err(|e| format!("gl surface: {e}"))?;
 
@@ -216,7 +219,11 @@ impl GlWindow {
     /// then present. `cw`/`ch` are the cell pixel size, `inset` the content margin —
     /// the same coordinate contract the CPU `paint` uses, so positions agree.
     pub(crate) fn paint(&mut self, frame: &[Op], renderer: &mut crate::gui::backend::Renderer) {
-        let (cw, ch, inset) = (renderer.cell_w.max(1), renderer.cell_h.max(1), renderer.inset());
+        let (cw, ch, inset) = (
+            renderer.cell_w.max(1),
+            renderer.cell_h.max(1),
+            renderer.inset(),
+        );
         let size = self.window.inner_size();
         let (fw, fh) = (size.width.max(1), size.height.max(1));
         self.resize(fw, fh);
@@ -240,7 +247,13 @@ impl GlWindow {
 
         for op in frame {
             match op {
-                Op::Rect { row, col, w, h, face } => {
+                Op::Rect {
+                    row,
+                    col,
+                    w,
+                    h,
+                    face,
+                } => {
                     if let Some(bg) = face.bg {
                         push(
                             insetf + *col as f32 * cwf,
@@ -254,15 +267,11 @@ impl GlWindow {
                 // Sub-cell rounded rect. This GPU path (a later increment) has no
                 // AA/alpha/round quad yet, so approximate with a solid opaque quad at
                 // the cell-unit float position; the active CPU painter does it properly.
-                Op::FRect { x, y, w, h, face, .. } => {
+                Op::FRect {
+                    x, y, w, h, face, ..
+                } => {
                     if let Some(bg) = face.bg {
-                        push(
-                            insetf + *x * cwf,
-                            insetf + *y * chf,
-                            *w * cwf,
-                            *h * chf,
-                            bg,
-                        );
+                        push(insetf + *x * cwf, insetf + *y * chf, *w * cwf, *h * chf, bg);
                     }
                 }
                 Op::VSpans { row0, col0, cols } => {
@@ -279,7 +288,14 @@ impl GlWindow {
                         }
                     }
                 }
-                Op::Cells { row0, col0, w, aspect, bytes, color } => {
+                Op::Cells {
+                    row0,
+                    col0,
+                    w,
+                    aspect,
+                    bytes,
+                    color,
+                } => {
                     if let Some(rgb) = color {
                         let asp = (*aspect).max(1) as usize;
                         let cell_w = (asp as f32) * cwf;
@@ -303,7 +319,15 @@ impl GlWindow {
                         }
                     }
                 }
-                Op::CellsRgb { row0, col0, w, aspect, bytes, colors, default } => {
+                Op::CellsRgb {
+                    row0,
+                    col0,
+                    w,
+                    aspect,
+                    bytes,
+                    colors,
+                    default,
+                } => {
                     let asp = (*aspect).max(1) as usize;
                     let cell_w = (asp as f32) * cwf;
                     let wmod = (*w).max(1) as usize;
@@ -330,8 +354,10 @@ impl GlWindow {
                 // + `:bg`), plus a deferred textured quad per non-space cluster (the glyph
                 // coverage — footer letters). Mirrors the CPU `paint` per-cluster walk.
                 Op::Text { row, col, s, face } => {
-                    let (mut fg, mut bg) =
-                        (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG_RGB));
+                    let (mut fg, mut bg) = (
+                        face.fg.unwrap_or(DEFAULT_FG),
+                        face.bg.unwrap_or(DEFAULT_BG_RGB),
+                    );
                     let mut paint_bg = face.bg.is_some();
                     if face.reverse {
                         std::mem::swap(&mut fg, &mut bg);
@@ -391,33 +417,51 @@ impl GlWindow {
         if !glyph_reqs.is_empty() {
             unsafe {
                 self.gl.use_program(Some(self.glyph_program));
-                self.gl.uniform_2_f32(self.gu_viewport.as_ref(), fw as f32, fh as f32);
+                self.gl
+                    .uniform_2_f32(self.gu_viewport.as_ref(), fw as f32, fh as f32);
                 self.gl.bind_vertex_array(Some(self.glyph_vao));
                 self.gl.active_texture(glow::TEXTURE0);
             }
             for req in &glyph_reqs {
                 let key = glyph_key(req);
                 if !self.glyphs.contains_key(&key) {
-                    let cg = renderer.cluster_glyph(&req.g, req.family, req.bold, req.italic, req.scale);
+                    let cg =
+                        renderer.cluster_glyph(&req.g, req.family, req.bold, req.italic, req.scale);
                     if cg.width == 0 || cg.height == 0 {
                         continue;
                     }
-                    let tex = unsafe { upload_rgba(&self.gl, &cg.rgba, cg.width as i32, cg.height as i32) };
-                    self.glyphs
-                        .insert(key, GlGlyph { tex, w: cg.width as i32, h: cg.height as i32, color: cg.color });
+                    let tex = unsafe {
+                        upload_rgba(&self.gl, &cg.rgba, cg.width as i32, cg.height as i32)
+                    };
+                    self.glyphs.insert(
+                        key,
+                        GlGlyph {
+                            tex,
+                            w: cg.width as i32,
+                            h: cg.height as i32,
+                            color: cg.color,
+                        },
+                    );
                 }
                 let Some(gph) = self.glyphs.get(&key).copied() else {
                     continue;
                 };
                 unsafe {
-                    self.gl.uniform_4_f32(self.gu_rect.as_ref(), req.left, req.top, gph.w as f32, gph.h as f32);
+                    self.gl.uniform_4_f32(
+                        self.gu_rect.as_ref(),
+                        req.left,
+                        req.top,
+                        gph.w as f32,
+                        gph.h as f32,
+                    );
                     self.gl.uniform_3_f32(
                         self.gu_tint.as_ref(),
                         req.tint[0] as f32 / 255.0,
                         req.tint[1] as f32 / 255.0,
                         req.tint[2] as f32 / 255.0,
                     );
-                    self.gl.uniform_1_i32(self.gu_mono.as_ref(), if gph.color { 0 } else { 1 });
+                    self.gl
+                        .uniform_1_i32(self.gu_mono.as_ref(), if gph.color { 0 } else { 1 });
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(gph.tex));
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
@@ -438,7 +482,11 @@ fn glyph_key(r: &GlyphReq) -> u64 {
     h.finish()
 }
 
-unsafe fn make_program(gl: &glow::Context, vert: &str, frag: &str) -> Result<glow::Program, String> {
+unsafe fn make_program(
+    gl: &glow::Context,
+    vert: &str,
+    frag: &str,
+) -> Result<glow::Program, String> {
     let program = gl.create_program().map_err(|e| format!("program: {e}"))?;
     for (kind, src) in [(glow::VERTEX_SHADER, vert), (glow::FRAGMENT_SHADER, frag)] {
         let sh = gl.create_shader(kind).map_err(|e| format!("shader: {e}"))?;
@@ -472,7 +520,9 @@ unsafe fn build_glyph_pipeline(
     String,
 > {
     let program = make_program(gl, GVERT_SRC, GFRAG_SRC)?;
-    let vao = gl.create_vertex_array().map_err(|e| format!("glyph vao: {e}"))?;
+    let vao = gl
+        .create_vertex_array()
+        .map_err(|e| format!("glyph vao: {e}"))?;
     gl.bind_vertex_array(Some(vao));
     let quad: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     let vbo = gl.create_buffer().map_err(|e| format!("glyph vbo: {e}"))?;
@@ -491,10 +541,26 @@ unsafe fn build_glyph_pipeline(
 unsafe fn upload_rgba(gl: &glow::Context, rgba: &[u8], w: i32, h: i32) -> glow::Texture {
     let tex = gl.create_texture().unwrap();
     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MIN_FILTER,
+        glow::NEAREST as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MAG_FILTER,
+        glow::NEAREST as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_S,
+        glow::CLAMP_TO_EDGE as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_WRAP_T,
+        glow::CLAMP_TO_EDGE as i32,
+    );
     gl.tex_image_2d(
         glow::TEXTURE_2D,
         0,
@@ -515,7 +581,15 @@ fn as_bytes(v: &[f32]) -> &[u8] {
 
 unsafe fn build_pipeline(
     gl: &glow::Context,
-) -> Result<(glow::Program, glow::VertexArray, glow::Buffer, Option<glow::UniformLocation>), String> {
+) -> Result<
+    (
+        glow::Program,
+        glow::VertexArray,
+        glow::Buffer,
+        Option<glow::UniformLocation>,
+    ),
+    String,
+> {
     let program = make_program(gl, VERT_SRC, FRAG_SRC)?;
 
     let vao = gl.create_vertex_array().map_err(|e| format!("vao: {e}"))?;

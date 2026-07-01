@@ -231,8 +231,7 @@ fn implements_claims(heap: &Heap, forms: &[Value]) -> Vec<(String, Option<Pos>)>
             let Some(citems) = list_items(heap, clause) else {
                 continue;
             };
-            let is_implements =
-                matches!(citems.first(), Some(&Value::Keyword(k)) if value::symbol_is(k, "implements"));
+            let is_implements = matches!(citems.first(), Some(&Value::Keyword(k)) if value::symbol_is(k, "implements"));
             if is_implements {
                 if let Some(name) = citems.get(1).and_then(|&v| sym_name(v)) {
                     out.push((name, pos));
@@ -297,7 +296,10 @@ fn fn_arity(heap: &Heap, v: Value) -> Option<usize> {
     // Multi-arity: the "param list" is really a clause `((a) body…)` whose head is
     // itself a param list/vector → can't pin one arity.
     if let Some(pitems) = list_items(heap, params) {
-        if matches!(pitems.first(), Some(Value::Pair(_)) | Some(Value::Vector(_))) {
+        if matches!(
+            pitems.first(),
+            Some(Value::Pair(_)) | Some(Value::Vector(_))
+        ) {
             return None;
         }
     }

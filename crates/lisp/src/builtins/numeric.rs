@@ -1,8 +1,8 @@
+use super::realize_seqview;
 use crate::core::heap::Heap;
+use crate::core::keywords as kw;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
-use crate::core::keywords as kw;
-use super::realize_seqview;
 
 pub(super) fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).copied().unwrap_or(Value::nil())
@@ -96,7 +96,11 @@ pub(super) fn expect_int(heap: &Heap, who: &str, v: Value) -> Result<i64, LispEr
 /// value). The bignum analogue of [`expect_int`] — `expect_int` rejects a
 /// `BigInt`, but the bitwise / bignum-aware ops accept either, so they route
 /// through here instead of losing the value to a bare `type_err`.
-pub(super) fn expect_bigint(heap: &Heap, who: &str, v: Value) -> Result<num_bigint::BigInt, LispError> {
+pub(super) fn expect_bigint(
+    heap: &Heap,
+    who: &str,
+    v: Value,
+) -> Result<num_bigint::BigInt, LispError> {
     heap.as_bigint(v)
         .ok_or_else(|| LispError::wrong_type(heap, who, "int", v))
 }
@@ -313,9 +317,7 @@ pub(super) fn prim_max(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     for &v in &args[1..] {
         let replace = match (best, v) {
             (Value::Int(a), Value::Int(b)) => b > a,
-            _ if both_exact(best, v) => {
-                heap.value_cmp(best, v) == std::cmp::Ordering::Less
-            }
+            _ if both_exact(best, v) => heap.value_cmp(best, v) == std::cmp::Ordering::Less,
             _ => num_to_f64(heap, "max", v)? > num_to_f64(heap, "max", best)?,
         };
         if replace {
@@ -330,9 +332,7 @@ pub(super) fn prim_min(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     for &v in &args[1..] {
         let replace = match (best, v) {
             (Value::Int(a), Value::Int(b)) => b < a,
-            _ if both_exact(best, v) => {
-                heap.value_cmp(best, v) == std::cmp::Ordering::Greater
-            }
+            _ if both_exact(best, v) => heap.value_cmp(best, v) == std::cmp::Ordering::Greater,
             _ => num_to_f64(heap, "min", v)? < num_to_f64(heap, "min", best)?,
         };
         if replace {
@@ -612,8 +612,6 @@ pub(super) fn bit_shift_right(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     Ok(heap.int_from_bigint(x >> amount))
 }
 
-
-
 // ---------- decimal ----------
 
 /// `(decimal x)` — construct an exact base-10 `Decimal` from a string ("1.50"),
@@ -636,9 +634,8 @@ pub(super) fn prim_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
                 )));
             }
             // Shortest round-trip text (what the printer would show), parsed exactly.
-            bigdecimal::BigDecimal::from_str(&format_decimal_from_float(f)).map_err(|_| {
-                LispError::runtime(format!("decimal: cannot convert float {f}"))
-            })?
+            bigdecimal::BigDecimal::from_str(&format_decimal_from_float(f))
+                .map_err(|_| LispError::runtime(format!("decimal: cannot convert float {f}")))?
         }
         Value::Str(id) => {
             let s = heap.string(id).trim().to_string();
@@ -646,7 +643,14 @@ pub(super) fn prim_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
                 LispError::runtime(format!("decimal: malformed decimal string {s:?}"))
             })?
         }
-        other => return Err(LispError::wrong_type(heap, "decimal", "string or number", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "decimal",
+                "string or number",
+                other,
+            ))
+        }
     };
     Ok(heap.alloc_decimal(d))
 }
@@ -664,7 +668,14 @@ pub(super) fn prim_decimal_to_string(args: &[Value], _: EnvId, heap: &mut Heap) 
     let v = arg(args, 0);
     let s = match v {
         Value::Decimal(id) => heap.decimal(id).to_string(),
-        other => return Err(LispError::wrong_type(heap, "decimal->string", "decimal", other)),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "decimal->string",
+                "decimal",
+                other,
+            ))
+        }
     };
     Ok(heap.alloc_string(&s))
 }
@@ -674,7 +685,14 @@ pub(super) fn prim_decimal_to_float(args: &[Value], _: EnvId, heap: &mut Heap) -
     use bigdecimal::ToPrimitive;
     let v = arg(args, 0);
     match v {
-        Value::Decimal(id) => Ok(Value::float(heap.decimal(id).to_f64().unwrap_or(f64::INFINITY))),
-        other => Err(LispError::wrong_type(heap, "decimal->float", "decimal", other)),
+        Value::Decimal(id) => Ok(Value::float(
+            heap.decimal(id).to_f64().unwrap_or(f64::INFINITY),
+        )),
+        other => Err(LispError::wrong_type(
+            heap,
+            "decimal->float",
+            "decimal",
+            other,
+        )),
     }
 }

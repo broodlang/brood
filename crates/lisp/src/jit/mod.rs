@@ -99,23 +99,38 @@ impl Jit {
         builder.symbol("brood_rt_global", brood_rt_global as *const u8);
         builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
-        builder.symbol("brood_rt_fastlink_base", brood_rt_fastlink_base as *const u8);
+        builder.symbol(
+            "brood_rt_fastlink_base",
+            brood_rt_fastlink_base as *const u8,
+        );
         builder.symbol("brood_rt_fast_frame", brood_rt_fast_frame as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
-        builder.symbol("brood_rt_global_epoch_ptr", brood_rt_global_epoch_ptr as *const u8);
+        builder.symbol(
+            "brood_rt_global_epoch_ptr",
+            brood_rt_global_epoch_ptr as *const u8,
+        );
         #[cfg(debug_assertions)]
-        builder.symbol("brood_rt_dbg_set_staging", brood_rt_dbg_set_staging as *const u8);
+        builder.symbol(
+            "brood_rt_dbg_set_staging",
+            brood_rt_dbg_set_staging as *const u8,
+        );
         #[cfg(debug_assertions)]
-        builder.symbol("brood_rt_dbg_check_slot", brood_rt_dbg_check_slot as *const u8);
+        builder.symbol(
+            "brood_rt_dbg_check_slot",
+            brood_rt_dbg_check_slot as *const u8,
+        );
         builder.symbol("brood_rt_in_capture", brood_rt_in_capture as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
         builder.symbol(
             "brood_rt_pair_nursery_base",
             brood_rt_pair_nursery_base as *const u8,
         );
-        builder.symbol("brood_rt_pair_old_base", brood_rt_pair_old_base as *const u8);
+        builder.symbol(
+            "brood_rt_pair_old_base",
+            brood_rt_pair_old_base as *const u8,
+        );
         builder.symbol("brood_rt_const_load", brood_rt_const_load as *const u8);
         // DEBUG (bug #2): print the callback addresses once, so an offline disasm of a
         // BROOD_DUMP_CODE'd arm can resolve each `movabs/call` target to a name.
@@ -125,7 +140,10 @@ impl Jit {
                 ("roots_base", brood_rt_roots_base as *const () as usize),
                 ("call_slow", brood_rt_call_slow as *const () as usize),
                 ("fast_frame", brood_rt_fast_frame as *const () as usize),
-                ("fastlink_base", brood_rt_fastlink_base as *const () as usize),
+                (
+                    "fastlink_base",
+                    brood_rt_fastlink_base as *const () as usize,
+                ),
                 ("push", brood_rt_push as *const () as usize),
                 ("car", brood_rt_car as *const () as usize),
                 ("cdr", brood_rt_cdr as *const () as usize),
@@ -138,8 +156,14 @@ impl Jit {
                 ("tick", brood_rt_tick as *const () as usize),
                 ("gc_safepoint", brood_rt_gc_safepoint as *const () as usize),
                 ("make_vector2", brood_rt_make_vector2 as *const () as usize),
-                ("global_epoch_ptr", brood_rt_global_epoch_ptr as *const () as usize),
-                ("dbg_set_staging", brood_rt_dbg_set_staging as *const () as usize),
+                (
+                    "global_epoch_ptr",
+                    brood_rt_global_epoch_ptr as *const () as usize,
+                ),
+                (
+                    "dbg_set_staging",
+                    brood_rt_dbg_set_staging as *const () as usize,
+                ),
             ] {
                 eprintln!("[rt-addr] {n} = {a:#x}");
             }
@@ -226,7 +250,9 @@ mod smoke {
 #[no_mangle]
 pub extern "C" fn brood_rt_tick(_heap: *mut Heap) -> u8 {
     #[cfg(debug_assertions)]
-    if jit_cb_trace_enabled() { eprintln!("[jit-cb] brood_rt_tick()"); }
+    if jit_cb_trace_enabled() {
+        eprintln!("[jit-cb] brood_rt_tick()");
+    }
     if crate::process::in_capture_run() {
         crate::process::tick_capture() as u8
     } else {
@@ -258,7 +284,9 @@ pub extern "C" fn brood_rt_in_capture(_heap: *mut Heap) -> u8 {
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_gc_safepoint(heap: *mut Heap) {
     #[cfg(debug_assertions)]
-    if jit_cb_trace_enabled() { eprintln!("[jit-cb] brood_rt_gc_safepoint()"); }
+    if jit_cb_trace_enabled() {
+        eprintln!("[jit-cb] brood_rt_gc_safepoint()");
+    }
     let h = &mut *heap;
     if !crate::process::macro_block_active() && h.gc_due() {
         h.collect(&mut [], &mut []);
@@ -534,7 +562,13 @@ pub unsafe extern "C" fn brood_rt_dbg_set_staging(_heap: *mut Heap, site: u32) {
 /// runtime callback invoked only from JIT'd code, which upholds that.
 #[cfg(debug_assertions)]
 #[no_mangle]
-pub unsafe extern "C" fn brood_rt_dbg_check_slot(heap: *mut Heap, w0: i64, w1: i64, w2: i64, abs_idx: i64) {
+pub unsafe extern "C" fn brood_rt_dbg_check_slot(
+    heap: *mut Heap,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+    abs_idx: i64,
+) {
     let h = &*heap;
     let tag = (w0 as u64 & 0xff) as u8;
     // Invalid tag byte → definitely garbage.
@@ -658,7 +692,10 @@ pub unsafe extern "C" fn brood_rt_global(
 ) -> i64 {
     #[cfg(debug_assertions)]
     if jit_cb_trace_enabled() {
-        eprintln!("[jit-cb] brood_rt_global(sym={})", crate::core::value::symbol_name(sym));
+        eprintln!(
+            "[jit-cb] brood_rt_global(sym={})",
+            crate::core::value::symbol_name(sym)
+        );
     }
     match crate::eval::compile::jit_resolve_global(&mut *heap, sym) {
         Some(v) => {
@@ -689,7 +726,11 @@ pub unsafe extern "C" fn brood_rt_global_ic(
 ) -> i64 {
     #[cfg(debug_assertions)]
     if jit_cb_trace_enabled() {
-        eprintln!("[jit-cb] brood_rt_global_ic(sym={}, site={})", crate::core::value::symbol_name(sym), site);
+        eprintln!(
+            "[jit-cb] brood_rt_global_ic(sym={}, site={})",
+            crate::core::value::symbol_name(sym),
+            site
+        );
     }
     match crate::eval::compile::jit_resolve_global_ic(&mut *heap, sym, site) {
         Some(v) => {
@@ -721,7 +762,9 @@ pub unsafe extern "C" fn brood_rt_call_slow(
     head: u32,
 ) -> i64 {
     #[cfg(debug_assertions)]
-    if jit_cb_trace_enabled() { eprintln!("[jit-cb] brood_rt_call_slow(argc={})", argc); }
+    if jit_cb_trace_enabled() {
+        eprintln!("[jit-cb] brood_rt_call_slow(argc={})", argc);
+    }
     match crate::eval::compile::jit_dispatch_call(&mut *heap, argc as usize, site, head) {
         Some(v) => {
             *out = v;
@@ -740,7 +783,10 @@ pub unsafe extern "C" fn brood_rt_call_slow(
 /// # Safety
 /// `heap`/`out_len` must be live; the returned pointer is valid until the table next grows.
 #[no_mangle]
-pub unsafe extern "C" fn brood_rt_fastlink_base(heap: *mut Heap, out_len: *mut u64) -> *const FastLink {
+pub unsafe extern "C" fn brood_rt_fastlink_base(
+    heap: *mut Heap,
+    out_len: *mut u64,
+) -> *const FastLink {
     let (base, len) = (*heap).vm_fast_links_base();
     *out_len = len as u64;
     base

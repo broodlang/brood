@@ -12,23 +12,23 @@ use crate::error::{LispError, LispResult};
 use crate::eval::apply;
 use crate::types::{Sig, Ty};
 
-mod numeric;
-mod sequences;
 mod bytes;
 mod io;
-mod terminal;
+mod numeric;
+mod sequences;
 mod system;
+mod terminal;
 
-use numeric::*;
-use sequences::*;
 use bytes::*;
 use io::*;
-use terminal::*;
+use numeric::*;
+use sequences::*;
 use system::*;
+use terminal::*;
 
 pub use io::{begin_stdout_capture, take_captured_stdout};
 pub use system::SPECIAL_FORMS;
-pub use terminal::{restore_terminal, restore_raw, restore_terminal_on_exit};
+pub use terminal::{restore_raw, restore_terminal, restore_terminal_on_exit};
 
 pub fn realize_seqview(heap: &mut Heap, env: EnvId, sv: Value) -> LispResult {
     let f = heap
@@ -596,17 +596,59 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         utf8_bytes_to_string,
     );
     // ---- raw bytes (Value::Bytes) ----
-    def(heap, "bytes", Arity::any(), Sig::variadic(any, bytes_ty), bytes_make);
-    def(heap, "byte-length", Arity::exact(1), Sig::new(vec![bytes_ty], int), byte_length);
-    def(heap, "byte-at", Arity::exact(2), Sig::new(vec![bytes_ty, int], int), byte_at);
-    def(heap, "subbytes", Arity::range(2, 3), Sig::variadic(any, bytes_ty), subbytes);
-    def(heap, "bytes-concat", Arity::any(), Sig::variadic(bytes_ty, bytes_ty), bytes_concat);
+    def(
+        heap,
+        "bytes",
+        Arity::any(),
+        Sig::variadic(any, bytes_ty),
+        bytes_make,
+    );
+    def(
+        heap,
+        "byte-length",
+        Arity::exact(1),
+        Sig::new(vec![bytes_ty], int),
+        byte_length,
+    );
+    def(
+        heap,
+        "byte-at",
+        Arity::exact(2),
+        Sig::new(vec![bytes_ty, int], int),
+        byte_at,
+    );
+    def(
+        heap,
+        "subbytes",
+        Arity::range(2, 3),
+        Sig::variadic(any, bytes_ty),
+        subbytes,
+    );
+    def(
+        heap,
+        "bytes-concat",
+        Arity::any(),
+        Sig::variadic(bytes_ty, bytes_ty),
+        bytes_concat,
+    );
     // String<->bytes conversion is UTF-8 (a Brood string is UTF-8, like Rust's),
     // exposed under the explicit `string->utf8-bytes` / `utf8-bytes->string` names
     // (registered above) — the former duplicate `string->bytes` / `bytes->string`
     // prims were removed (they did the identical UTF-8 encode/decode).
-    def(heap, "bytes->list", Arity::exact(1), Sig::new(vec![bytes_ty], pair), bytes_to_list);
-    def(heap, "bytes-index-of", Arity::range(2, 3), Sig::new(vec![bytes_ty, bytes_ty], int), bytes_index_of);
+    def(
+        heap,
+        "bytes->list",
+        Arity::exact(1),
+        Sig::new(vec![bytes_ty], pair),
+        bytes_to_list,
+    );
+    def(
+        heap,
+        "bytes-index-of",
+        Arity::range(2, 3),
+        Sig::new(vec![bytes_ty, bytes_ty], int),
+        bytes_index_of,
+    );
     // string->number returns int *or* float *or* nil (the parse-failed case).
     def(
         heap,
@@ -915,7 +957,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // In-memory shared table — Brood's ETS (ADR-107). A `Value::Table` handle into a
     // global registry of stores holding deep clones (Message form); sendable across
     // processes (every copy shares one store) but local to this runtime.
-    def(heap, "table", Arity::exact(0), Sig::nullary(table_ty), table_new);
+    def(
+        heap,
+        "table",
+        Arity::exact(0),
+        Sig::nullary(table_ty),
+        table_new,
+    );
     def(
         heap,
         "table-put",
@@ -1171,7 +1219,12 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "gui-bg!",
         Arity::exact(1),
         Sig::new(
-            vec![Ty::of_tags(&[Tag::Keyword, Tag::Vector, Tag::Str, Tag::Nil])],
+            vec![Ty::of_tags(&[
+                Tag::Keyword,
+                Tag::Vector,
+                Tag::Str,
+                Tag::Nil,
+            ])],
             nil_ty,
         ),
         gui_bg,
@@ -2561,4 +2614,3 @@ fn primitive_doc(name: &str) -> (&'static [&'static str], &'static str) {
         .map(|&(_, p, d)| (p, d))
         .unwrap_or((&[], ""))
 }
-

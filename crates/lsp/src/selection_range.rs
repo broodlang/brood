@@ -84,7 +84,9 @@ mod tests {
         let root = cst::parse(src);
         let index = LineIndex::new(src);
         let at = src.find(needle).unwrap() as u32;
-        let pos = index.range(src, brood::error::Span { start: at, end: at }).start;
+        let pos = index
+            .range(src, brood::error::Span { start: at, end: at })
+            .start;
         let mut out = Vec::new();
         let mut cur = Some(selection_at(&root, src, &index, at, pos));
         while let Some(sr) = cur {

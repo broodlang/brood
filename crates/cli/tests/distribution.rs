@@ -1953,7 +1953,8 @@ fn cluster_mesh_converges_to_full_mesh_from_a_chain() {
     for n in ["a", "b", "c", "d"] {
         reports.push_str(&format!(
             "{n}: {}\n",
-            std::fs::read_to_string(dir.join(format!("{n}.result"))).unwrap_or_else(|_| "<none>".into())
+            std::fs::read_to_string(dir.join(format!("{n}.result")))
+                .unwrap_or_else(|_| "<none>".into())
         ));
     }
     for ch in [&mut a, &mut b, &mut c, &mut d] {
@@ -2032,7 +2033,8 @@ fn cluster_mesh_simultaneous_joins_converge() {
     for n in &names {
         reports.push_str(&format!(
             "{n}: {}\n",
-            std::fs::read_to_string(dir.join(format!("{n}.result"))).unwrap_or_else(|_| "<none>".into())
+            std::fs::read_to_string(dir.join(format!("{n}.result")))
+                .unwrap_or_else(|_| "<none>".into())
         ));
     }
     let _ = hub.kill();

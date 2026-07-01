@@ -155,7 +155,12 @@ fn start_stdout_reader(
         loop {
             match rd.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => sink.emit(data_msg("proc", id, &buf[..n], binary.load(Ordering::Acquire))),
+                Ok(n) => sink.emit(data_msg(
+                    "proc",
+                    id,
+                    &buf[..n],
+                    binary.load(Ordering::Acquire),
+                )),
                 Err(_) => break,
             }
         }

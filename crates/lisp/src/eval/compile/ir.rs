@@ -533,7 +533,10 @@ impl CompiledArm {
     /// this. Small native → `nslots`; inlined native (post-swap) → `inline_nslots`.
     #[inline]
     pub fn active_nslots(&self) -> usize {
-        if self.inline_installed.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .inline_installed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             self.inline_nslots
         } else {
             self.nslots
@@ -644,7 +647,6 @@ pub(super) enum ChunkExit {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     SelfTail,
 }
-
 
 /// Walk a compiled `Node` tree, rewriting every embedded movable handle
 /// (a `Const` literal or a `MakeClosure` `fn_rest`) in place through `f`. The crux of
@@ -895,28 +897,63 @@ impl Inst {
     #[cfg(debug_assertions)]
     pub(crate) fn trace_name(&self) -> String {
         match self {
-            Inst::Const(cv) => format!("Const({})", match cv.load().unpack() {
-                crate::core::value::ValueRef::Int(n) => format!("int:{n}"),
-                crate::core::value::ValueRef::Bool(b) => format!("bool:{b}"),
-                crate::core::value::ValueRef::Nil => "nil".into(),
-                crate::core::value::ValueRef::Float(f) => format!("float:{f}"),
-                _ => "handle".into(),
-            }),
+            Inst::Const(cv) => format!(
+                "Const({})",
+                match cv.load().unpack() {
+                    crate::core::value::ValueRef::Int(n) => format!("int:{n}"),
+                    crate::core::value::ValueRef::Bool(b) => format!("bool:{b}"),
+                    crate::core::value::ValueRef::Nil => "nil".into(),
+                    crate::core::value::ValueRef::Float(f) => format!("float:{f}"),
+                    _ => "handle".into(),
+                }
+            ),
             Inst::Local(i) => format!("Local({i})"),
             Inst::Global(s) => format!("Global({})", crate::core::value::symbol_name_ref(*s)),
-            Inst::GlobalIc { sym, site } => format!("GlobalIc({}, site={site})", crate::core::value::symbol_name_ref(*sym)),
+            Inst::GlobalIc { sym, site } => format!(
+                "GlobalIc({}, site={site})",
+                crate::core::value::symbol_name_ref(*sym)
+            ),
             Inst::Pop => "Pop".into(),
             Inst::SetLocal(i) => format!("SetLocal({i})"),
             Inst::Jump(t) => format!("Jump({t})"),
             Inst::JumpIfFalse(t) => format!("JumpIfFalse({t})"),
             Inst::MakeVector(n) => format!("MakeVector({n})"),
             Inst::MakeMap(n) => format!("MakeMap({n})"),
-            Inst::Prim1 { op, head, .. } => format!("Prim1({op:?}, {})", crate::core::value::symbol_name_ref(*head)),
-            Inst::Prim2 { op, head, .. } => format!("Prim2({op:?}, {})", crate::core::value::symbol_name_ref(*head)),
-            Inst::Prim2SlotSlot { op, slot_a, slot_b, head, .. } => format!("Prim2SlotSlot({op:?}, s{slot_a},s{slot_b}, {})", crate::core::value::symbol_name_ref(*head)),
-            Inst::Prim2SlotInt { op, slot_a, int_b, head, .. } => format!("Prim2SlotInt({op:?}, s{slot_a},{int_b}, {})", crate::core::value::symbol_name_ref(*head)),
-            Inst::Call { argc, tail, head, .. } => format!("Call(argc={argc}, tail={tail}, head={})",
-                head.map(crate::core::value::symbol_name_ref).unwrap_or("computed")),
+            Inst::Prim1 { op, head, .. } => format!(
+                "Prim1({op:?}, {})",
+                crate::core::value::symbol_name_ref(*head)
+            ),
+            Inst::Prim2 { op, head, .. } => format!(
+                "Prim2({op:?}, {})",
+                crate::core::value::symbol_name_ref(*head)
+            ),
+            Inst::Prim2SlotSlot {
+                op,
+                slot_a,
+                slot_b,
+                head,
+                ..
+            } => format!(
+                "Prim2SlotSlot({op:?}, s{slot_a},s{slot_b}, {})",
+                crate::core::value::symbol_name_ref(*head)
+            ),
+            Inst::Prim2SlotInt {
+                op,
+                slot_a,
+                int_b,
+                head,
+                ..
+            } => format!(
+                "Prim2SlotInt({op:?}, s{slot_a},{int_b}, {})",
+                crate::core::value::symbol_name_ref(*head)
+            ),
+            Inst::Call {
+                argc, tail, head, ..
+            } => format!(
+                "Call(argc={argc}, tail={tail}, head={})",
+                head.map(crate::core::value::symbol_name_ref)
+                    .unwrap_or("computed")
+            ),
             Inst::SelfCall { argc } => format!("SelfCall({argc})"),
             Inst::MakeClosure { names, .. } => format!("MakeClosure(captures={})", names.len()),
             Inst::TryCatch { .. } => "TryCatch".into(),

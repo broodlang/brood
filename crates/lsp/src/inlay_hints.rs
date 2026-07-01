@@ -37,7 +37,9 @@ pub fn inlay_hints(
     let mut out = Vec::new();
     // Memoize `arglist` per name within one request — a hot file repeats heads.
     let mut cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
-    walk(interp, root, text, scope, index, range, &mut cache, &mut out);
+    walk(
+        interp, root, text, scope, index, range, &mut cache, &mut out,
+    );
     out
 }
 
@@ -176,7 +178,11 @@ mod tests {
     fn local_head_is_not_hinted() {
         // `f` is a let-bound local, not the global it might otherwise resolve to.
         let hs = hints("(let (f (fn (x) x)) (f 1))");
-        assert!(labels(&hs).iter().all(|l| l != "x:"), "got: {:?}", labels(&hs));
+        assert!(
+            labels(&hs).iter().all(|l| l != "x:"),
+            "got: {:?}",
+            labels(&hs)
+        );
     }
 
     #[test]

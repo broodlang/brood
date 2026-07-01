@@ -390,7 +390,9 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         // `defmacro` is a macro lowering to `(def name (%make-macro …))`,
                         // so this is the def-side home of what used to live in the
                         // `defmacro` special form.
-                        if matches!(old.unpack(), ValueRef::Macro(_)) && matches!(val.unpack(), ValueRef::Macro(_)) {
+                        if matches!(old.unpack(), ValueRef::Macro(_))
+                            && matches!(val.unpack(), ValueRef::Macro(_))
+                        {
                             eprintln!(
                                 "[reload] macro {} redefined; callers expanded before now keep the old expansion — re-eval them",
                                 value::symbol_name(name)
@@ -671,7 +673,8 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                         // (`(defn hog () (hog))`), not a thin wrapper — fall through to
                         // the normal call path (which re-enters the `'tail:` loop, whose
                         // reduction check can preempt) rather than spinning the redirect.
-                        let self_cycle = matches!(inner.unpack(), ValueRef::Fn(iid) if iid.0 == id.0);
+                        let self_cycle =
+                            matches!(inner.unpack(), ValueRef::Fn(iid) if iid.0 == id.0);
                         if !self_cycle
                             && passthrough_redirect_ok(inner)
                                 .map_err(|e| e.or_form_pos(heap, call_form))?

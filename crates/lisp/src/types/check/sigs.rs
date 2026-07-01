@@ -57,8 +57,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // `count`/`length` accept a string, map, or sequence (the prelude `count`
     // dispatches string?/map?/else-fold) — but not a number/keyword/etc.
     #[allow(non_upper_case_globals)]
-    const countable: Ty =
-        Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector]);
+    const countable: Ty = Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector]);
     #[allow(non_upper_case_globals)]
     const str_ty: Ty = Ty::of(Tag::Str);
     #[allow(non_upper_case_globals)]
@@ -184,7 +183,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     //   string-from-codepoints — (apply str (map int->char cs)).
     put("string->list", Sig::new(vec![str_ty], Ty::LIST));
     put("list->string", Sig::new(vec![seq], str_ty));
-    put("string-codepoints", Sig::new(vec![str_ty], Ty::of(Tag::Vector)));
+    put(
+        "string-codepoints",
+        Sig::new(vec![str_ty], Ty::of(Tag::Vector)),
+    );
     put("string-from-codepoints", Sig::new(vec![seq], str_ty));
     // format: variadic with a required string template arg and a string result.
     put("format", Sig::with_rest(vec![str_ty], any, str_ty));
