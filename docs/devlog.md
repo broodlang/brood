@@ -520,3 +520,45 @@ every other benchmark neutral (a harness `fib` +5.5% was thermal — re-measured
 flat), memory neutral. Likely lifts `bintree` 6th→4th (past Python/Ruby) — pending
 a full 7-language re-run. Follow-ups (low ROI, deferred): inline read at
 variable-index sites; in-arm inline alloc (blocked by make/check safepoints).
+
+## 2026-07-01 — JIT back-edge store-elision for carry loops — prototyped, REJECTED
+
+Investigated the compute-frontier "float lowering" lever (`mandelbrot`). **Reverted,
+NO-GO** — the premise was stale and the win was ~0.
+
+**Finding: the premise was wrong.** `mandelbrot`'s `esc` floats are *already*
+register-carried — the `carry_vars` path in `jit_lower.rs` carries f64 loop params
+in Cranelift block-param phis, with native `fadd`/`fmul` and the reads seeded once
+at entry (verified via `BROOD_JIT_DUMP_IR` CLIF: 6 float tag-checks = one per param
+at entry, 9 native float ops). There is no boxed-read tax to remove. The only
+residual per-iteration cost was the **back-edge stores** (~17 in `esc`) that box the
+carried values into frame slots so a `deopt`/`preempt` can resume on the VM.
+
+**What was built + how it was validated (all reverted).** A disciplined, staged
+change: (1) split `deopt` → a non-materialising `entry_deopt` (hoist/seeding guards)
+vs a materialising `deopt`/`preempt`; (2) materialise carry vars → slots lazily at
+those exits; (3) elide the hot back-edge stores. Correctness was checked by a
+temporary runtime poison flag (`BROOD_JIT_POISON_CARRY=1`) that wrote type-matched
+garbage into the elided slots — any un-materialised resume-from-slots path then made
+the VM read poison and the checksum diverge. Also added JIT-vs-`BROOD_NO_JIT=1`
+differential + deopt-forcing programs (mid-body overflow deopt, spawned-process
+preempt).
+
+**Why NO-GO:**
+1. **Zero gain.** Elided int loops measured flat-to-slightly-worse (best-of-9, high
+   N): `loop` 0.26→0.28 s, `collatz` 0.27→0.28 s, `primes` flat. The back-edge stores
+   are effectively free — the CPU store buffer / L1 absorb them; the store was never
+   the bottleneck.
+2. **Fragile.** The poison caught FOUR separate whole-`Value` slot reads that bypass
+   the carry register and had to be made carry-aware for correctness: `store_op`
+   (`exit_done` returns), `read_words`, the SelfCall passed-through-arg update, and
+   `as_block_arg` (block-crossing). `Op::Slot(carry k)` leaks pervasively — every
+   slot-read site would need carry-awareness, for no reward.
+
+**Takeaway.** Carry loops (`mandelbrot`/`loop`/`collatz`/`reduce`) are near the JIT
+floor; their residual gap vs .NET is the boxed 24-byte `Value` tagging *in the
+arithmetic*, not the frame stores. Don't re-attempt store-elision. Higher-ceiling
+lever is dispatch / env-lookup cost (`nqueens`/`pipeline`: ~325–398K env-hops;
+`pipeline`'s transducer arithmetic runs as indirect closure calls). The
+`BROOD_JIT_POISON_CARRY`-style validation (poison elided state → checksum diverges)
+is a good technique to reuse for any future carry-slot change.
