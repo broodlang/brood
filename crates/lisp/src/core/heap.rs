@@ -896,6 +896,19 @@ pub struct RuntimeCode {
     /// because a raw code pointer isn't `Send`/`Sync`; reconstituted on read. Empty
     /// unless the JIT runs.
     jit_code_cache: RwLock<HashMap<(u64, u16), (usize, u64)>>,
+    /// Companion to `jit_code_cache` for the two-stage-tiering **inlined** upgrade
+    /// (the deferred, self-inlined body). Same `(closure_id, argc)` key and
+    /// `(code_ptr, compile_epoch)` value, but a separate map because a slot holds
+    /// either the small native (that cache) or the inlined native (this one), never
+    /// both. Sharing the inlined native across a runtime's processes — exactly as the
+    /// small native already is — means ONE inlined compile serves every process instead
+    /// of each of N spawned workers compiling (and, for a short fan-out like `pfib`,
+    /// finishing before) its own copy; the inlined win then lands for short parallel
+    /// bursts too. Safe because `inline_nslots` is deterministic for a given bytecode
+    /// (so a peer sizes its own frame correctly on install) and the epoch guard flushes
+    /// it on `def`/compaction just like the small-native cache. See
+    /// [`Heap::jit_inline_lookup`] / [`Heap::jit_inline_publish`].
+    jit_inline_cache: RwLock<HashMap<(u64, u16), (usize, u64)>>,
     /// User-declared `(sig name type)` signatures, keyed by the **module-qualified**
     /// global `Symbol` (the same key `def` produces for `name`) and holding the raw
     /// type-expression as a promoted RUNTIME `Value` (e.g. the `(int -> int)` form).
@@ -928,6 +941,7 @@ impl Default for RuntimeCode {
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
+            jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
         }
     }
@@ -949,6 +963,7 @@ impl RuntimeCode {
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
+            jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
         }
     }
@@ -4601,6 +4616,28 @@ impl Heap {
         }
     }
 
+    /// Shared-JIT lookup for the **inlined** upgrade — the [`Self::jit_shared_lookup`]
+    /// counterpart over `jit_inline_cache`. Lets a process install another process's
+    /// already-compiled inlined native for the same `(closure_id, argc)` instead of
+    /// waiting on its own deferred compile; the caller checks `compile_epoch ==
+    /// global_epoch()` before installing, so a `def`/compaction invalidates it.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_inline_lookup(&self, key: (u64, u16)) -> Option<(*mut u8, u64)> {
+        let cache = self.runtime.jit_inline_cache.read().ok()?;
+        cache.get(&key).map(|&(ptr, epoch)| (ptr as *mut u8, epoch))
+    }
+
+    /// Publish a freshly-installed **inlined** native to the shared inline cache — the
+    /// [`Self::jit_shared_publish`] counterpart over `jit_inline_cache`. Idempotent
+    /// overwrite (last writer wins; all writers store equivalent code for the same
+    /// epoch). See `RuntimeCode::jit_inline_cache`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_inline_publish(&self, key: (u64, u16), code: *mut u8, epoch: u64) {
+        if let Ok(mut cache) = self.runtime.jit_inline_cache.write() {
+            cache.insert(key, (code as usize, epoch));
+        }
+    }
+
     /// Is `sym` bound in the global table (prelude + user `def`s)? An authoritative,
     /// non-racy read of `runtime.globals` (which is seeded with the prelude). Used by
     /// the unbound-symbol diagnostic to tell a *spuriously*-unbound known global (the
@@ -5203,6 +5240,10 @@ impl Heap {
             // already makes every entry epoch-stale (never installed), but clearing
             // reclaims it and prevents a recycled id from lingering.
             if let Ok(c) = rt.jit_code_cache.get_mut() {
+                c.clear();
+            }
+            // Same for the shared inlined-native cache (companion to the above).
+            if let Ok(c) = rt.jit_inline_cache.get_mut() {
                 c.clear();
             }
         }

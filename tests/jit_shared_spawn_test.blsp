@@ -41,3 +41,34 @@
       (defn ss-fan3 (i k x) (if (>= i k) nil (do (spawn (ss-worker me x)) (ss-fan3 (+ i 1) k x))))
       (ss-fan3 0 500 10)
       (assert= (ss-collect 0 500 0) 51000))))    ;; 500 * (10*10+2)
+
+;; The SHARED INLINED-native cache (RuntimeCode::jit_inline_cache): a *recursive*
+;; top-level defn qualifies for the two-stage-tiering inlined upgrade, whose native
+;; code is now shared across a runtime's processes the same way the small native is
+;; — so one inlined compile serves every worker (the short-burst lever) instead of
+;; each racing its own. `calc`/`hr-b` above are non-recursive, so they never inline;
+;; this exercises the inline path specifically, including its hot-reload invalidation.
+;; `:isolated` — redefines a shared global.
+(defn rr (n) (if (< n 1) 0 (+ n (rr (- n 1)))))        ;; sum 1..n  -> rr(10) = 55
+(defn rr-warm (i) (if (= i 0) :done (do (rr 12) (rr-warm (- i 1)))))
+(defn rr-worker (me x) (send me [:r (rr x)]))
+(defn rr-fan (me i k x) (if (>= i k) nil (do (spawn (rr-worker me x)) (rr-fan me (+ i 1) k x))))
+
+(describe "shared INLINED JIT code across spawned processes (regression)" :isolated
+  (test "fan-out over a shared inlined recursive fn returns the correct checksum"
+    ;; Warm rr past the tier threshold in the parent so it inlines and publishes the
+    ;; inlined native to the shared cache; workers then install it (or the small native
+    ;; if the deferred compile hasn't landed) — either way the checksum must hold.
+    (rr-warm 5000)
+    (let (me (self))
+      (rr-fan me 0 500 10)
+      (assert= (ss-collect 0 500 0) 27500)))            ;; 500 * 55
+
+  (test "redefining the shared inlined fn invalidates the shared inline cache"
+    ;; rr -> sum of 2n; the epoch bump must drop the shared INLINE entry, else the
+    ;; second fan-out would still run the old inlined native and compute the old sum.
+    (defn rr (n) (if (< n 1) 0 (+ (* n 2) (rr (- n 1)))))
+    (rr-warm 5000)
+    (let (me (self))
+      (rr-fan me 0 500 10)
+      (assert= (ss-collect 0 500 0) 55000))))           ;; 500 * 110
