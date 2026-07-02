@@ -43,12 +43,12 @@ grammar target."
 
 (defn grammar--escape (s)
   "Backslash-escape regex metacharacters in `s`, so a literal keyword matches itself
-(`let*` → `let\\*`)."
+(a `*` in a keyword name → `\\*`)."
   (fold (fn (acc c) (replace acc c (str "\\" c))) s grammar--meta))
 
 (defn grammar--alternation (keywords)
   "An escaped, longest-first `a|b|c` regex alternation. Longest-first so a prefix
-can't shadow a longer form (`->>` before `->`, `let*` before `let`)."
+can't shadow a longer form (`->>` before `->`)."
   (join "|" (map grammar--escape (sort-by (fn (k) (- (count k))) keywords))))
 
 ;; ---- TextMate grammar (VS Code) ----------------------------------------------

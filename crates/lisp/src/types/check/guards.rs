@@ -365,12 +365,9 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         }
         return Some(expr_ty(heap, last, ctx)?.union(Ty::of(Tag::Nil)));
     }
-    // `(let (bindings) body…)` / `(let* …)` / `(letrec …)` → ty(last body form),
+    // `(let (bindings) body…)` / `(letrec …)` → ty(last body form),
     // typed in a scope with each binding's RHS type threaded in (sequentially).
-    if value::symbol_is(head, kw::LET)
-        || value::symbol_is(head, kw::LET_STAR)
-        || value::symbol_is(head, kw::LETREC)
-    {
+    if value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LETREC) {
         let binds = let_bindings(heap, *items.get(1)?)?;
         if binds.len() % 2 != 0 {
             return None;

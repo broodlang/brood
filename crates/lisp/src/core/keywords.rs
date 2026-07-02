@@ -33,7 +33,6 @@ pub const DEFMODULE: &str = "defmodule";
 pub const FN: &str = "fn";
 pub const LAMBDA: &str = "lambda";
 pub const LET: &str = "let";
-pub const LET_STAR: &str = "let*";
 pub const LETREC: &str = "letrec";
 pub const WHEN: &str = "when";
 pub const UNLESS: &str = "unless";
