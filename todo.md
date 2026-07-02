@@ -83,12 +83,16 @@ shared-inline cache (i64 entry is deterministic → shareable, another tier).
   - NEXT: write `jit_lower_i64_arm` (the ~250-line codegen), wire into `jit_lower_arm` when
     gated+eligible, build/verify, test fib correctness (differential) + `fact(21)`→BigInt +
     measure. Then remove the gate once green + `pfib`/full suite/GC-stress pass.
-- **Increment 2 — NEXT (subset broadening).** Generalize the i64 worker from "fib only" to most
-  fixed-arity monomorphic int recursion: (a) multi-arg (`nrequired > 1`) — worker takes N i64
-  params; the lowering already handles `Local(k)`, just relax the `Local(0)`-only gate and map slot
-  k→param k; (b) `let`/`do` in the body — i64 Cranelift variables for binder slots; (c) more ops —
-  Rem/Quot (÷0 + MIN/-1 guards → deopt), Div (inexact → deopt), bitops. Each additively widens
-  `i64_value_ok`/`lower_i64_value`. Gate/measure as before. Later: f64 sibling for float recursion.
+- **Increment 2 — multi-arg + cliff fix DONE 2026-07-02 (not committed→committed this session).**
+  (a) Multi-arg (`nrequired > 1`): worker `fn(a0..a_{n-1}, depth, ovf) -> i64`, `Local(k)`→param k,
+  wrapper tag-checks every arg. Eligibility decoupled from `inline_name` → `dbg_name` + no-capture +
+  has-self-call (so Ackermann-shaped arms qualify). 2-arg shallow-wide `fib2` 0.88→0.18s (4.9×).
+  (b) **Deep-recursion cliff fixed** (was ~127× on `g(5000)`, present in Inc 1 too): depth-bail →
+  outcome 5 → `jit_tier` marks the fn in `I64_TOO_DEEP` and switches it to the boxed path (drains
+  via `jit_native_depth`); shared-install skips too-deep. Deep now matches boxed exactly.
+  STILL TODO: (c) `let`/`do` in the body — i64 Cranelift variables for binder slots; (d) more ops —
+  Rem/Quot (÷0 + MIN/-1 guards → deopt), Div (inexact → deopt), bitops. Additively widen
+  `i64_value_ok`/`lower_i64_value`/`lower_i64_arith`. Later: f64 sibling for float recursion.
 
 **Measure.** serial 100×fib(31) 32→~15 ms · `fib` 224→~110 ms · `pfib` N=31 847→~450 ms ·
 `fib(100)`→BigInt correct · full suite + differential + GC-stress. Session memory:

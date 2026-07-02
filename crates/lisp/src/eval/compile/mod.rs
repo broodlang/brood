@@ -5986,7 +5986,9 @@ pub(crate) fn jit_tier(
     // and the code is epoch-current, install the shared pointer directly and run it
     // now — so a hot shared function (`fib` under `spawn`) compiles to native ONCE,
     // not once per process. Stale entries (a `def`/compaction bumped the epoch) skip.
-    if code.is_null() {
+    // A fn a depth-bail switched to boxed must not re-install a stale shared i64 wrapper from the
+    // cache — skip the shared install so it recompiles boxed locally (and re-publishes boxed).
+    if code.is_null() && !jit_lower::arm_i64_too_deep(arm) {
         if let Some(key) = arm.share_key {
             if let Some((ptr, epoch)) = heap.jit_shared_lookup(key) {
                 if epoch == heap.global_epoch()
@@ -6202,6 +6204,20 @@ pub(crate) fn jit_tier(
     let outcome = f(heap as *mut Heap, base as i64);
     heap.jit_call_env = saved_env;
     heap.jit_dbg_fn = saved_fn;
+    // Outcome 5 = the unboxed-i64 worker hit its native-recursion depth cap. Register recursion
+    // can't drain to the VM mid-stack, so permanently switch this fn to the boxed path (which
+    // drains deep recursion gracefully via `jit_native_depth`/`jit_force_vm`): mark it too-deep,
+    // drop the installed i64 wrapper, and re-tier promptly (→ boxed). Run this activation on the
+    // VM. Without this a deep non-tail recursion would deopt-and-re-tier per level (~100× thrash).
+    if outcome == 5 {
+        if let Some(sym) = arm.dbg_name {
+            jit_lower::i64_mark_too_deep(sym);
+        }
+        arm.jit_code.store(std::ptr::null_mut(), Release);
+        arm.jit_calls.store(THRESHOLD, Release);
+        arm.shared_published.store(false, Relaxed);
+        return None;
+    }
     Some(outcome)
 }
 

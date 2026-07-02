@@ -709,3 +709,20 @@ of Elixir.** Shipped default-on (`BROOD_NO_I64` opts out). Gates: 643 tests pass
 on; JIT-vs-VM differential clean; `fib`/`fact` correct; `pfib` under debug-assertions +
 `BROOD_JIT_VERIFY` + `BROOD_GC_VERIFY` and under `BROOD_GC_STRESS` clean. First Increment of the
 unboxed lever; next = broaden the subset (multi-arg, `let`, more ops — see todo.md).
+
+**Follow-up (same day): Increment 2 — multi-arg + a deep-recursion cliff fix.** Generalized the i64
+worker from single-arg to **N fixed args** (worker `fn(a0..a_{n-1}: i64, depth: i64, ovf) -> i64`;
+`Local(k)` → param k; the wrapper tag-checks every arg). Decoupled eligibility from `inline_name`
+(which the depth-2 inliner sets — and rejects e.g. Ackermann, whose inlined expansion is too big) →
+now keys on `dbg_name` + no-capture + a has-self-call check. A 2-arg shallow-wide recursion (`fib2`)
+gets **0.88 → 0.18 s (4.9×)**. **The important fix:** register recursion can't drain to the VM
+mid-stack, so a deep *non-tail* recursion (`g(5000)`, depth 5000) hit the worker's depth cap and
+deopt-and-re-tiered **per level — a ~127× thrash** (present in Increment 1 too, for deep single-arg
+recursion — correctness was fine, perf catastrophic). Fixed with a distinct **depth-bail outcome
+(5)**: the worker sets the sentinel to `2` (vs `1` for overflow), the wrapper returns 5, and
+`jit_tier` permanently switches that fn to the **boxed path** (which drains deep recursion via
+`jit_native_depth`/`jit_force_vm`) — marks it in a process-global `I64_TOO_DEEP` set (consulted by
+`arm_i64_eligible` and the shared-JIT install so a stale shared i64 wrapper isn't re-installed),
+drops `jit_code`, re-tiers. `g(5000)` and `f(30000)` now match the boxed path exactly (0.05 s /
+0.21 s, was 6.3 s / 16.3 s); shallow wins unchanged (fib 0.77 s, pfib 0.17 s). 643 tests + differential
++ debug verifiers + GC-stress clean; `fib`/`fib2`/`ack`/`fact`/deep-recursion all correct.
