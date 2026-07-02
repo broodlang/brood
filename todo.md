@@ -90,9 +90,11 @@ shared-inline cache (i64 entry is deterministic → shareable, another tier).
   (b) **Deep-recursion cliff fixed** (was ~127× on `g(5000)`, present in Inc 1 too): depth-bail →
   outcome 5 → `jit_tier` marks the fn in `I64_TOO_DEEP` and switches it to the boxed path (drains
   via `jit_native_depth`); shared-install skips too-deep. Deep now matches boxed exactly.
-  STILL TODO: (c) `let`/`do` in the body — i64 Cranelift variables for binder slots; (d) more ops —
-  Rem/Quot (÷0 + MIN/-1 guards → deopt), Div (inexact → deopt), bitops. Additively widen
-  `i64_value_ok`/`lower_i64_value`/`lower_i64_arith`. Later: f64 sibling for float recursion.
+  (c) DONE: `let`/`do` in the body — `let` binders carried in SSA vars (`I64Ctx::slot_vars`),
+  forward-refs rejected by the checker's scope set; `do` lowers only its last form (pure subset).
+  4.7× on shallow-wide let-using recursion. (d) DONE: Rem/Quot (÷0 + i64::MIN/-1 guards → deopt),
+  BitAnd/BitOr/BitXor. (÷0 raises the exact VM error via deopt.) STILL TODO: Div (inexact → deopt,
+  float semantics), and an f64 sibling worker for non-tail float recursion.
 
 **Measure.** serial 100×fib(31) 32→~15 ms · `fib` 224→~110 ms · `pfib` N=31 847→~450 ms ·
 `fib(100)`→BigInt correct · full suite + differential + GC-stress. Session memory:

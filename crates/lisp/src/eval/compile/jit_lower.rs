@@ -423,7 +423,8 @@ pub(crate) fn arm_i64_eligible(arm: &CompiledArm) -> bool {
     }
     // In the i64 subset, and actually recursive (a leaf int fn shouldn't pay the wrapper→worker
     // call — the existing inline path is already tight for it).
-    i64_value_ok(&arm.body, self_sym, arm.nrequired) && i64_has_self_call(&arm.body)
+    i64_value_ok(&arm.body, self_sym, arm.nrequired, &std::collections::HashSet::new())
+        && i64_has_self_call(&arm.body)
 }
 
 /// Does `node` contain a self-`Call`? In the i64-validated subset every `Node::Call` is a
@@ -434,6 +435,10 @@ fn i64_has_self_call(node: &Node) -> bool {
         Node::Call { .. } => true,
         Node::If(a, b, c) => i64_has_self_call(a) || i64_has_self_call(b) || i64_has_self_call(c),
         Node::Prim2 { a, b, .. } => i64_has_self_call(a) || i64_has_self_call(b),
+        Node::LetBind { binds, body } => {
+            binds.iter().any(|(_, r)| i64_has_self_call(r)) || i64_has_self_call(body)
+        }
+        Node::Do(xs) => xs.iter().any(i64_has_self_call),
         _ => false,
     }
 }
@@ -487,7 +492,16 @@ pub(crate) fn arm_i64_too_deep(arm: &CompiledArm) -> bool {
 fn i64_arith_op(op: PrimOp) -> bool {
     matches!(
         op,
-        PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Min | PrimOp::Max
+        PrimOp::Add
+            | PrimOp::Sub
+            | PrimOp::Mul
+            | PrimOp::Min
+            | PrimOp::Max
+            | PrimOp::Rem
+            | PrimOp::Quot
+            | PrimOp::BitAnd
+            | PrimOp::BitOr
+            | PrimOp::BitXor
     )
 }
 
@@ -502,17 +516,24 @@ fn i64_cmp_op(op: PrimOp) -> bool {
 /// whose cond is a comparison and whose branches are values.) Anything else bails the whole
 /// i64 lowering (the arm then uses the general boxed path).
 #[cfg(feature = "jit")]
-fn i64_value_ok(node: &Node, self_sym: Symbol, nargs: usize) -> bool {
+fn i64_value_ok(
+    node: &Node,
+    self_sym: Symbol,
+    nargs: usize,
+    bound: &std::collections::HashSet<usize>,
+) -> bool {
     match node {
         Node::Const(ConstVal::Atom(v)) => v.as_int().is_some(),
-        Node::Local(k) => *k < nargs, // a param slot (let-binders k >= nargs not yet supported)
+        // A param slot, or a `let` binder already in scope (a forward/unbound read bails —
+        // the worker carries binders in SSA vars that must be def'd before use).
+        Node::Local(k) => *k < nargs || bound.contains(k),
         Node::Prim2 { op, a, b, .. } if i64_arith_op(*op) => {
-            i64_value_ok(a, self_sym, nargs) && i64_value_ok(b, self_sym, nargs)
+            i64_value_ok(a, self_sym, nargs, bound) && i64_value_ok(b, self_sym, nargs, bound)
         }
         Node::If(c, t, e) => {
-            i64_cond_ok(c, self_sym, nargs)
-                && i64_value_ok(t, self_sym, nargs)
-                && i64_value_ok(e, self_sym, nargs)
+            i64_cond_ok(c, self_sym, nargs, bound)
+                && i64_value_ok(t, self_sym, nargs, bound)
+                && i64_value_ok(e, self_sym, nargs, bound)
         }
         Node::Call {
             callee,
@@ -522,17 +543,37 @@ fn i64_value_ok(node: &Node, self_sym: Symbol, nargs: usize) -> bool {
         } => {
             args.len() == nargs
                 && matches!(&**callee, Node::Global(s) | Node::GlobalIc { sym: s, .. } if *s == self_sym)
-                && args.iter().all(|a| i64_value_ok(a, self_sym, nargs))
+                && args.iter().all(|a| i64_value_ok(a, self_sym, nargs, bound))
         }
+        // `let`/`let*`: each rhs must be in-subset in the scope built so far (so a `letrec`
+        // forward-ref bails), then its slot joins the scope for later binds + the body.
+        Node::LetBind { binds, body } => {
+            let mut scope = bound.clone();
+            for (slot, rhs) in binds.iter() {
+                if !i64_value_ok(rhs, self_sym, nargs, &scope) {
+                    return false;
+                }
+                scope.insert(*slot);
+            }
+            i64_value_ok(body, self_sym, nargs, &scope)
+        }
+        // `do`: pure in this subset, so only the last form's value matters (the worker lowers
+        // just that) — but validate every form is in-subset (else the whole arm bails).
+        Node::Do(xs) => !xs.is_empty() && xs.iter().all(|x| i64_value_ok(x, self_sym, nargs, bound)),
         _ => false,
     }
 }
 
 /// Non-mutating check: is `node` a condition (comparison) in the i64 worker's subset?
 #[cfg(feature = "jit")]
-fn i64_cond_ok(node: &Node, self_sym: Symbol, nargs: usize) -> bool {
+fn i64_cond_ok(
+    node: &Node,
+    self_sym: Symbol,
+    nargs: usize,
+    bound: &std::collections::HashSet<usize>,
+) -> bool {
     matches!(node, Node::Prim2 { op, a, b, .. }
-        if i64_cmp_op(*op) && i64_value_ok(a, self_sym, nargs) && i64_value_ok(b, self_sym, nargs))
+        if i64_cmp_op(*op) && i64_value_ok(a, self_sym, nargs, bound) && i64_value_ok(b, self_sym, nargs, bound))
 }
 
 /// Shared context threaded through the i64 worker's recursive lowering.
@@ -541,9 +582,12 @@ struct I64Ctx {
     self_sym: crate::core::value::Symbol,
     self_ref: cranelift_codegen::ir::FuncRef,
     params: Vec<cranelift_codegen::ir::Value>, // the arm's `nargs` i64 params (`Local(k)`)
-    depth: cranelift_codegen::ir::Value,       // this activation's depth
-    ovf: cranelift_codegen::ir::Value,         // *mut u8 overflow sentinel
-    poisoned: cranelift_codegen::ir::Block,    // shared unwind target (returns 0)
+    // `let` binder slots → their SSA variable (index = frame slot; `None` for a param slot).
+    // A `Local(k)` with `k >= nargs` reads `use_var(slot_vars[k])`; a `LetBind` `def_var`s it.
+    slot_vars: Vec<Option<cranelift_frontend::Variable>>,
+    depth: cranelift_codegen::ir::Value,    // this activation's depth
+    ovf: cranelift_codegen::ir::Value,      // *mut u8 overflow sentinel
+    poisoned: cranelift_codegen::ir::Block, // shared unwind target (returns 0)
 }
 
 /// On a signed-overflow flag `ov`: set the overflow sentinel and jump the shared `poisoned`
@@ -603,6 +647,30 @@ fn lower_i64_arith(
             let c = b.ins().icmp(IntCC::SignedLessThanOrEqual, x, y);
             b.ins().select(c, x, y)
         }
+        // `rem`/`quot`: `sdiv`/`srem` TRAP on a zero divisor and on `i64::MIN / -1`, so guard
+        // both → sentinel + unwind (the wrapper deopts; the VM raises the ÷0 error / does the
+        // edge, staying bit-identical). Reuses `i64_guard_overflow` with the bail condition.
+        PrimOp::Rem | PrimOp::Quot => {
+            let zero = b.ins().iconst(cranelift_codegen::ir::types::I64, 0);
+            let div0 = b.ins().icmp(IntCC::Equal, y, zero);
+            i64_guard_overflow(b, cx, div0);
+            let min = b
+                .ins()
+                .iconst(cranelift_codegen::ir::types::I64, i64::MIN);
+            let neg1 = b.ins().iconst(cranelift_codegen::ir::types::I64, -1);
+            let x_min = b.ins().icmp(IntCC::Equal, x, min);
+            let y_m1 = b.ins().icmp(IntCC::Equal, y, neg1);
+            let ov = b.ins().band(x_min, y_m1);
+            i64_guard_overflow(b, cx, ov);
+            match op {
+                PrimOp::Rem => b.ins().srem(x, y),
+                PrimOp::Quot => b.ins().sdiv(x, y),
+                _ => unreachable!(),
+            }
+        }
+        PrimOp::BitAnd => b.ins().band(x, y),
+        PrimOp::BitOr => b.ins().bor(x, y),
+        PrimOp::BitXor => b.ins().bxor(x, y),
         _ => unreachable!("i64 checker restricts arith ops"),
     }
 }
@@ -621,13 +689,28 @@ fn lower_i64_value(
             let k = v.as_int().expect("i64 checker guarantees an int const");
             b.ins().iconst(types::I64, k)
         }
-        Node::Local(k) => cx.params[*k],
+        Node::Local(k) => match cx.slot_vars[*k] {
+            Some(var) => b.use_var(var), // a `let` binder
+            None => cx.params[*k],       // a param
+        },
         Node::Prim2 { op, a, b: bn, map, .. } => {
             let va = lower_i64_value(b, cx, a);
             let vb = lower_i64_value(b, cx, bn);
             let (x, y) = if map[0] == 0 { (va, vb) } else { (vb, va) };
             lower_i64_arith(b, cx, *op, x, y)
         }
+        Node::LetBind { binds, body } => {
+            // Evaluate each rhs in order and write it to its binder's SSA var (sequential
+            // let/let*; forward-refs were rejected by the checker), then lower the body.
+            for (slot, rhs) in binds.iter() {
+                let v = lower_i64_value(b, cx, rhs);
+                b.def_var(cx.slot_vars[*slot].expect("let binder var"), v);
+            }
+            lower_i64_value(b, cx, body)
+        }
+        // `do`: pure here, so the value is just the last form's (the checker validated the rest
+        // are in-subset; skipping them is sound — no side effects, no bindings).
+        Node::Do(xs) => lower_i64_value(b, cx, xs.last().expect("non-empty do")),
         Node::If(c, t, e) => {
             let cond = lower_i64_cond(b, cx, c);
             let then_b = b.create_block();
@@ -791,10 +874,26 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         b.ins().store(MemFlagsData::trusted(), two, ovf, 0);
         b.ins().jump(poisoned, &[]);
         b.switch_to_block(go);
+        // SSA vars for `let` binder slots (>= nargs); param slots (< nargs) read `cx.params`.
+        // Init to 0 as a safety floor (let/let* always overwrite before use — the checker
+        // rejected forward-refs — so this only guards against any undefined-var edge).
+        let mut slot_vars: Vec<Option<cranelift_frontend::Variable>> =
+            Vec::with_capacity(arm.nslots);
+        for k in 0..arm.nslots {
+            if k < nargs {
+                slot_vars.push(None);
+            } else {
+                let v = b.declare_var(types::I64);
+                let z = b.ins().iconst(types::I64, 0);
+                b.def_var(v, z);
+                slot_vars.push(Some(v));
+            }
+        }
         let cx = I64Ctx {
             self_sym,
             self_ref,
             params,
+            slot_vars,
             depth,
             ovf,
             poisoned,
