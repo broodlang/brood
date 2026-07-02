@@ -3,45 +3,50 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
-## Investigate: JIT-native code parallelizes poorly under the green scheduler (2026-07-01)
+## Fix: JIT fast-link degrades under concurrency → native code parallelizes poorly (2026-07-01, ROOT-CAUSED 2026-07-02)
 
-**Symptom.** `pfib` (100 green processes each computing `fib(N)` across cores) gets
-only **~1.9× speedup on 12 cores** for JIT-native `fib`, while the *same* work
-scales fine elsewhere:
+**Symptom.** `pfib` (100 green processes each computing `fib(N)`) gets only
+**~1.9× speedup on 12 cores** for JIT-native `fib`; the interpreted path scales
+fine (4.75×) and 12 independent OS processes running the same native code get 4.4×
+(the machine's all-core throttle + shared-L3 ceiling). So green-native loses ~2.3×
+vs OS-native.
 
-| variant | serial | 12-way | speedup |
-|---|---|---|---|
-| VM / interpreted `fib` (`BROOD_NO_JIT=1`) | 9.36s | 1.97s | **4.75×** |
-| JIT-native `fib`, Brood green processes | 0.79s | 0.42s | **1.9×** |
-| JIT-native `fib`, 12 independent OS processes | — | 1.16s (96 fibs) | **4.4×** |
+**Root cause (perf-stat, `perf_event_paranoid=-1`, 2026-07-02).** It is NOT cache/
+TLB/throttle and NOT interpretation:
+- Green pfib executes **~4× the instructions** of serial-native for the same work
+  (367B vs 92.7B); 12 OS procs match serial (93.8B). `jit_deopt=0`, `tw_defer=1` —
+  so it stays native, not falling to the VM/tree-walker.
+- A **lone** spawned green process runs `fib(32)` fully native (1.29B insns, == root).
+  The inflation appears **only with many concurrent processes**.
+- Per-fib counters, lone vs 100-concurrent: `jit_link_done` (fast in-IR native call)
+  2.44M→3.04M, but **`call_ic_hit` (heavier IC-dispatch path) ~0 → 1.41M**. So under
+  concurrency ~1.4M calls/fib divert from the fast in-IR fast-link to the slower
+  IC-dispatch path → the ~2× instruction inflation. Preemption adds ~18-20% more
+  (`BROOD_REDUCTIONS=1e9`: 367B→~308B insns, 4.23→3.46s).
 
-So the machine caps ALU-bound work at ~4.4× (all-core clock throttle + shared L3),
-and independent OS processes hit it; the interpreted path scales fine (4.75×,
-latency-bound / throttle-tolerant); but **green-process native code loses ~2.3×
-vs OS processes** running the identical native code.
+**Mechanism (hypothesis, strong).** The 100 processes share `fib`'s one RUNTIME
+`CompiledArm`. Two-stage tiering / the shared-install swap `jit_code` (epoch bump),
+which invalidates the in-IR fast-links **across all processes** ("the IC moved" →
+fast-link fallthrough → re-dispatch via the per-process call IC). A lone process
+warms up once and stays fast-linked; concurrent sharers keep getting invalidated.
+Confirm by watching whether the fast-link fallthrough / re-link rate correlates
+with the shared-arm `jit_code`/epoch swaps.
 
-**Ruled out** (measured 2026-07-01): idle cores (CPU ~1130%, 11 busy); locks/futex
-(**System time ≈ 0**); the JIT call-site fast-link (it's per-process,
-`heap.vm_fast_links_base()`, not shared); the `arm.jit_calls` tier counter (bumped
-only pre-compile; `fib` shares one compile via `share_key`); preemption is only
-~18% (`BROOD_REDUCTIONS=1e9`: 4.23→3.46s at N=32). Cost scales with call/reduction
-volume (N=32 scales *worse* than N=28).
+**Fix directions to try.** (a) Don't epoch-invalidate a stable fast-link on the
+deferred inlined-body swap when the callee identity is unchanged; (b) make the
+in-IR fast-link validate against a per-callee generation that only bumps on real
+`def` rebind, not on tiering/inline-upgrade; (c) settle the two-stage tier before
+fan-out, or make the inline-upgrade swap fast-link-compatible.
 
-**Hypotheses to test next** (dense native code across many green processes in one
-address space + the Brood runtime): coroutine-stack / TLB / shared-L3 working-set
-effects; `corosensei` context-switch cost; worker/coroutine memory layout.
+**Levers/tools.** `BROOD_NO_JIT=1`, `BROOD_REDUCTIONS=<n>`; perf-stats build
+(`--features jit,perf-stats`, `BROOD_PERF_STATS=1`) for `jit_link_done` /
+`call_ic_hit` / `jit_fast_deopt`; `perf stat -e instructions,cycles` (paranoid now
+-1 on whklat). Repro: `pfib.blsp` N=32 vs a lone-spawn `fib(32)`.
 
-**Blocker.** Needs hardware perf counters — `perf stat`/`perf record` for
-`cache-misses`, `dTLB-load-misses`, `stalled-cycles` — to compare green-native vs
-OS-process-native. On whklat this is blocked by `perf_event_paranoid=4`; drop it
-(`sudo sysctl kernel.perf_event_paranoid=1`) to profile. `BROOD_NO_JIT=1` and
-`BROOD_REDUCTIONS=<n>` are the software A/B levers.
-
-**Value/priority.** Real, but the VM path (the common editor/server concurrency
-shape) already scales well — this specifically bites dense-native-compute fan-out
-(pfib-like), which may be rare in practice. Medium priority; revisit when perf
-counters are available or native concurrent compute becomes a real workload.
-Full characterization: `pfib.blsp` in brood-benchmarks.
+**Value/priority.** Real ~2× on native concurrent compute (pfib/parallel fan-out).
+The VM path (common editor/server concurrency) already scales fine, so medium
+priority — but now root-caused and a bounded JIT fix, not a fishing expedition.
+Full characterization also in session memory `brood-pfib-parallel-scaling`.
 
 ## Process `kill` primitive + per-test timeout (30s) (2026-05-30)
 
