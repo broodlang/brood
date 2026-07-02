@@ -3,6 +3,57 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
+## Unboxed-i64 register-carry through recursive self-calls (scoped 2026-07-02)
+
+**Goal.** Close the single-thread `fib` gap to Elixir (~3×; Brood ~32 ms vs ~11 ms per
+fib(31), steady-state). This is the *whole* remaining `pfib` gap too — parallel scaling is
+solved (Brood 3.93× vs the machine's 4.20× OS-process ceiling; it even beats Elixir's
+3.30×), so `pfib` is single-thread-bound. Target ~1.3–1.5× → `fib` row ~224→~110 ms,
+`pfib` N=31 ~847→~450 ms.
+
+**Why depth/inlining won't do it.** Inline-depth was measured (2026-07-02 devlog): depth-2
+is the sweet spot, deeper saturates then regresses (i-cache). Call-*protocol* overhead is no
+longer the bottleneck.
+
+**What's already unboxed (don't rebuild).** Arithmetic inside an arm is already unboxed i64
+in SSA registers with overflow-checked ops that deopt→VM→BigInt (`jit_lower.rs` `emit_arith`,
+~1405). Self-*tail* loops already register-carry params (`int_carry_eligible`). The ONLY
+remaining boxing is the **non-tail recursive call boundary**.
+
+**The exact cost.** Per `fib(n-1)` (×4.36M for fib(31), `jit_lower.rs` ~2188): box the arg to
+a 24-byte `Value` → `brood_rt_push` into `roots[]` (may realloc) → fast-link dispatch → read
+the 3-word result `Value` → tag-check + unbox. ~15 of ~22 cyc/call; Elixir passes a 1-word
+immediate in a register.
+
+**Design.** A second, i64-specialized entry for arms proven int-only + recursive:
+`arm_i64(heap, a0..aN: i64) -> (i64, overflow)`.
+- Recursive self-calls → a direct Cranelift `call` to `arm_i64` (register args/return; no
+  push, no roots staging, no box/unbox, no tag-check).
+- The existing boxed entry becomes a thin wrapper: tag-check args are `Int` → call `arm_i64`
+  → box the result; non-int → existing boxed/VM path.
+- Overflow correctness: `arm_i64` returns an overflow flag; callers propagate + unwind to the
+  wrapper → deopt to VM → BigInt. Common case (no overflow) never leaves registers.
+- GC gets *simpler*: i64 args/returns aren't handles, so no roots-spilling across these calls.
+
+**Hard parts (risk order).** (1) Overflow unwinding through the register recursion to a clean
+VM deopt. (2) Preemption/fairness — a tight register recursion has NO safepoints, so the green
+scheduler can't preempt it; needs periodic safepoint checks (the one place this could hurt
+`pfib`). (3) Native-stack depth guard — bypasses `JIT_NATIVE_DEPTH_LIMIT` (which lives in the
+boxed dispatch). (4) Eligibility proof + args-are-Int entry guard. (5) Composes with the
+depth-2 inliner (inlined levels already in-register; leaf calls become i64 calls) and the
+shared-inline cache (i64 entry is deterministic → shareable, another tier).
+
+**Plan (incremental).**
+- **Increment 0 — spike the ceiling FIRST (go/no-go).** Prototype the i64 fib path narrowly
+  and measure serial 100×fib(31). Gate: is it actually ~2×? If not, stop cheap.
+- **Increment 1** — productionize single-arg i64 self-recursion + overflow unwind + safepoint
+  & stack guards; gate with differential + `fib(100)`→BigInt + GC-stress + `pfib` fairness.
+- **Increment 2** — multi-arg + integrate with inliner / shared cache.
+
+**Measure.** serial 100×fib(31) 32→~15 ms · `fib` 224→~110 ms · `pfib` N=31 847→~450 ms ·
+`fib(100)`→BigInt correct · full suite + differential + GC-stress. Session memory:
+`brood-pfib-parallel-scaling` (scaling solved), `brood-perf-next-technique-a`.
+
 ## Process `kill` primitive + per-test timeout (30s) (2026-05-30)
 
 Two linked pieces. The timeout depends on `kill` (without it a timed-out test can
