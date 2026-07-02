@@ -1,0 +1,74 @@
+;;; Regression guard for the unboxed register JIT workers (i64 + f64) — the
+;;; `jit_lower_i64_arm` path: int-/float-only recursive arms lowered to a register
+;;; calling convention (no boxing / roots-staging at the recursive call boundary).
+;;;
+;;; The suite runs every test through BOTH engines (JIT default-on and the VM,
+;;; ADR-076), so each `assert=` below is an automatic JIT-vs-VM differential — it
+;;; pins the worker's behaviour on the edges a plain compute test misses:
+;;;   • the depth cliff (>1400 native frames → sentinel → deopt to the boxed path)
+;;;   • overflow → deopt → VM recompute with BigInt (exact bignum out)
+;;;   • ÷0 / i64::MIN÷-1 guards → the VM's exact error
+;;;   • multi-arg, `let` binders, rem/quot/bitwise, and the f64 sibling (inf, /).
+;;; These edges were fuzzed clean (int+float differential over ~1600 programs);
+;;; this file locks the concrete cases into CI.
+
+(defmodule unbox-torture-test (:use test))
+
+;; ---- integer worker ----
+(defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2)))))
+(defn ut-deep (n) (if (< n 1) 0 (+ 1 (ut-deep (- n 1)))))
+(defn ut-fact (n) (if (< n 1) 1 (* n (ut-fact (- n 1)))))
+(defn ut-ack (m n)
+  (if (< m 1) (+ n 1)
+    (if (< n 1) (ut-ack (- m 1) 1) (ut-ack (- m 1) (ut-ack m (- n 1))))))
+(defn ut-digsum (n) (if (< n 1) 0 (+ (rem n 10) (ut-digsum (quot n 10)))))
+(defn ut-xor (n) (if (< n 1) 0 (bit-xor n (ut-xor (- n 1)))))
+(defn ut-let (n) (if (< n 2) n (let (h (quot n 2)) (+ (ut-let (- n 1)) (ut-let (- n 2)) h))))
+(defn ut-div0 (n) (if (< n 0) 0 (+ (rem 10 n) (ut-div0 (- n 1)))))   ; ÷0 at n=0
+
+(describe "unboxed-i64 register worker"
+  (test "shallow-wide recursion (fib)"
+    (assert= 832040 (ut-fib 30)))
+
+  (test "depth cliff: just under (i64 worker), and over (→ boxed drain) — all correct"
+    (assert= 1399 (ut-deep 1399))     ; under the 1400 cap: stays in the i64 worker
+    (assert= 1401 (ut-deep 1401))     ; crosses the cap: depth-bail → boxed path
+    (assert= 2000 (ut-deep 2000)))    ; deeper: boxed drains via jit_native_depth
+
+  (test "overflow → deopt → VM BigInt (exact)"
+    (assert= 2432902008176640000 (ut-fact 20))          ; 20! still fits i64
+    (assert= 51090942171709440000 (ut-fact 21))          ; 21! first overflow → BigInt
+    (assert= 15511210043330985984000000 (ut-fact 25)))
+
+  (test "multi-arg non-tail recursion (Ackermann)"
+    (assert= 2045 (ut-ack 3 8))
+    (assert= 8189 (ut-ack 3 10)))
+
+  (test "rem/quot + bitwise in the worker"
+    (assert= 15 (ut-digsum 12345))
+    (assert= 1000 (ut-xor 1000)))                        ; XOR 1..1000 (1000 ≡ 0 mod 4)
+
+  (test "let binders carried in SSA vars"
+    (assert= 24465 (ut-let 20)))
+
+  (test "÷0 deep in the worker raises the VM's exact error"
+    (assert-error (ut-div0 5))))
+
+;; ---- float sibling ----
+(defn ut-ffib (n) (if (< n 2.0) n (+ (ut-ffib (- n 1.0)) (ut-ffib (- n 2.0)))))
+(defn ut-fpow (b n) (if (< n 1.0) 1.0 (* b (ut-fpow b (- n 1.0)))))
+(defn ut-fdeep (n) (if (< n 1.0) 0.0 (+ 1.0 (ut-fdeep (- n 1.0)))))
+(defn ut-flet (n) (if (< n 2.0) n (let (h (/ n 2.0)) (+ (ut-flet (- n 1.0)) (ut-flet (- n 2.0)) h))))
+
+(describe "unboxed-f64 register worker"
+  (test "float shallow-wide recursion"
+    (assert= 17711.0 (ut-ffib 22.0)))
+
+  (test "float multi-arg + division"
+    (assert= 1048576.0 (ut-fpow 2.0 20.0)))
+
+  (test "deep float past the cliff → boxed"
+    (assert= 2000.0 (ut-fdeep 2000.0)))
+
+  (test "float let bindings"
+    (assert= 26555.0 (ut-flet 20.0))))
