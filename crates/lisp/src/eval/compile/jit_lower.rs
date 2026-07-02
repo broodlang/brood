@@ -402,21 +402,84 @@ fn jit_i64_enabled() -> bool {
 /// otherwise swap out the i64 small native) is inferior and must not fire.
 #[cfg(feature = "jit")]
 pub(crate) fn arm_i64_eligible(arm: &CompiledArm) -> bool {
-    if !jit_i64_enabled() || arm.nrequired != 1 || arm.noptional != 0 || arm.rest_slot.is_some() {
+    if !jit_i64_enabled()
+        || arm.nrequired < 1
+        || arm.noptional != 0
+        || arm.rest_slot.is_some()
+        || !arm.capture_names.is_empty()
+    {
         return false;
     }
-    match arm.inline_name {
-        Some(self_sym) => i64_value_ok(&arm.body, self_sym),
-        None => false,
+    // Use `dbg_name` (every top-level defn has it) rather than `inline_name` (set only when the
+    // arm ALSO qualifies for the depth-2 inliner — which excludes e.g. Ackermann, whose inlined
+    // expansion is too big). The i64 path needs no inlining; it just needs the self symbol.
+    let self_sym = match arm.dbg_name {
+        Some(s) => s,
+        None => return false,
+    };
+    // A prior depth-bail switched this fn to the boxed path (which drains deep recursion).
+    if i64_too_deep(self_sym) {
+        return false;
+    }
+    // In the i64 subset, and actually recursive (a leaf int fn shouldn't pay the wrapper→worker
+    // call — the existing inline path is already tight for it).
+    i64_value_ok(&arm.body, self_sym, arm.nrequired) && i64_has_self_call(&arm.body)
+}
+
+/// Does `node` contain a self-`Call`? In the i64-validated subset every `Node::Call` is a
+/// single-/multi-arg self-call, so scanning for one is enough to confirm the arm recurses.
+#[cfg(feature = "jit")]
+fn i64_has_self_call(node: &Node) -> bool {
+    match node {
+        Node::Call { .. } => true,
+        Node::If(a, b, c) => i64_has_self_call(a) || i64_has_self_call(b) || i64_has_self_call(c),
+        Node::Prim2 { a, b, .. } => i64_has_self_call(a) || i64_has_self_call(b),
+        _ => false,
     }
 }
 
 /// Native-recursion depth cap for the i64 worker — bounds the native (coroutine) stack the
 /// register recursion runs on (the general path's `JIT_NATIVE_DEPTH_LIMIT` lives in the boxed
-/// dispatch, which this path bypasses). On overflow the worker sets the overflow sentinel and
-/// unwinds → the boxed wrapper deopts to the VM, which drains deep recursion via heap frames.
+/// dispatch, which this path bypasses). On hitting it the worker sets the sentinel to `2`
+/// (depth-bail, vs `1` for overflow) and unwinds; the wrapper returns outcome 5, and `jit_tier`
+/// permanently switches the arm to the boxed path (which drains deep recursion via heap frames
+/// / `jit_force_vm`). Without that switch, a deep non-tail recursion would deopt-and-re-tier
+/// per level — a ~100× thrash.
 #[cfg(feature = "jit")]
 const I64_DEPTH_LIMIT: i64 = 1400;
+
+/// Functions (by defining-`defn` name) that a depth-bail proved are too deeply recursive for the
+/// register worker — they run the boxed path instead (which drains gracefully). Process-global
+/// and monotonic (a name only ever gets added), so `arm_i64_eligible` reads it lock-free-ish and
+/// the switch is stable. Keyed by `dbg_name` since that's the stable identity across an arm's
+/// recompiles / the shared-JIT cache.
+#[cfg(feature = "jit")]
+static I64_TOO_DEEP: std::sync::Mutex<Option<std::collections::HashSet<Symbol>>> =
+    std::sync::Mutex::new(None);
+
+/// Record that `sym`'s recursion overflowed the i64 worker's depth cap — switch it to boxed.
+#[cfg(feature = "jit")]
+pub(crate) fn i64_mark_too_deep(sym: Symbol) {
+    if let Ok(mut g) = I64_TOO_DEEP.lock() {
+        g.get_or_insert_with(std::collections::HashSet::new).insert(sym);
+    }
+}
+
+/// Has `sym` been marked too-deep for the i64 worker?
+#[cfg(feature = "jit")]
+fn i64_too_deep(sym: Symbol) -> bool {
+    match I64_TOO_DEEP.lock() {
+        Ok(g) => g.as_ref().is_some_and(|s| s.contains(&sym)),
+        Err(_) => false,
+    }
+}
+
+/// Is this arm one the i64 worker gave up on (depth-bail)? Consulted by `jit_tier`'s shared-JIT
+/// install so a stale shared i64 wrapper isn't re-installed for a too-deep function.
+#[cfg(feature = "jit")]
+pub(crate) fn arm_i64_too_deep(arm: &CompiledArm) -> bool {
+    arm.dbg_name.is_some_and(i64_too_deep)
+}
 
 /// Is `op` an integer arithmetic op the i64 worker lowers to a value (Increment 1 subset)?
 /// Add/Sub/Mul are overflow-checked (deopt on overflow → VM → BigInt); the rest are exact.
@@ -439,15 +502,17 @@ fn i64_cmp_op(op: PrimOp) -> bool {
 /// whose cond is a comparison and whose branches are values.) Anything else bails the whole
 /// i64 lowering (the arm then uses the general boxed path).
 #[cfg(feature = "jit")]
-fn i64_value_ok(node: &Node, self_sym: Symbol) -> bool {
+fn i64_value_ok(node: &Node, self_sym: Symbol, nargs: usize) -> bool {
     match node {
         Node::Const(ConstVal::Atom(v)) => v.as_int().is_some(),
-        Node::Local(0) => true,
+        Node::Local(k) => *k < nargs, // a param slot (let-binders k >= nargs not yet supported)
         Node::Prim2 { op, a, b, .. } if i64_arith_op(*op) => {
-            i64_value_ok(a, self_sym) && i64_value_ok(b, self_sym)
+            i64_value_ok(a, self_sym, nargs) && i64_value_ok(b, self_sym, nargs)
         }
         Node::If(c, t, e) => {
-            i64_cond_ok(c, self_sym) && i64_value_ok(t, self_sym) && i64_value_ok(e, self_sym)
+            i64_cond_ok(c, self_sym, nargs)
+                && i64_value_ok(t, self_sym, nargs)
+                && i64_value_ok(e, self_sym, nargs)
         }
         Node::Call {
             callee,
@@ -455,9 +520,9 @@ fn i64_value_ok(node: &Node, self_sym: Symbol) -> bool {
             tail: false,
             ..
         } => {
-            args.len() == 1
+            args.len() == nargs
                 && matches!(&**callee, Node::Global(s) | Node::GlobalIc { sym: s, .. } if *s == self_sym)
-                && i64_value_ok(&args[0], self_sym)
+                && args.iter().all(|a| i64_value_ok(a, self_sym, nargs))
         }
         _ => false,
     }
@@ -465,21 +530,20 @@ fn i64_value_ok(node: &Node, self_sym: Symbol) -> bool {
 
 /// Non-mutating check: is `node` a condition (comparison) in the i64 worker's subset?
 #[cfg(feature = "jit")]
-fn i64_cond_ok(node: &Node, self_sym: Symbol) -> bool {
+fn i64_cond_ok(node: &Node, self_sym: Symbol, nargs: usize) -> bool {
     matches!(node, Node::Prim2 { op, a, b, .. }
-        if i64_cmp_op(*op) && i64_value_ok(a, self_sym) && i64_value_ok(b, self_sym))
+        if i64_cmp_op(*op) && i64_value_ok(a, self_sym, nargs) && i64_value_ok(b, self_sym, nargs))
 }
 
-/// Shared, `Copy` context threaded through the i64 worker's recursive lowering.
+/// Shared context threaded through the i64 worker's recursive lowering.
 #[cfg(feature = "jit")]
-#[derive(Clone, Copy)]
 struct I64Ctx {
     self_sym: crate::core::value::Symbol,
     self_ref: cranelift_codegen::ir::FuncRef,
-    param_n: cranelift_codegen::ir::Value, // the `n` (Local 0) argument
-    depth: cranelift_codegen::ir::Value,   // this activation's depth
-    ovf: cranelift_codegen::ir::Value,     // *mut u8 overflow sentinel
-    poisoned: cranelift_codegen::ir::Block, // shared unwind target (returns 0)
+    params: Vec<cranelift_codegen::ir::Value>, // the arm's `nargs` i64 params (`Local(k)`)
+    depth: cranelift_codegen::ir::Value,       // this activation's depth
+    ovf: cranelift_codegen::ir::Value,         // *mut u8 overflow sentinel
+    poisoned: cranelift_codegen::ir::Block,    // shared unwind target (returns 0)
 }
 
 /// On a signed-overflow flag `ov`: set the overflow sentinel and jump the shared `poisoned`
@@ -557,7 +621,7 @@ fn lower_i64_value(
             let k = v.as_int().expect("i64 checker guarantees an int const");
             b.ins().iconst(types::I64, k)
         }
-        Node::Local(0) => cx.param_n,
+        Node::Local(k) => cx.params[*k],
         Node::Prim2 { op, a, b: bn, map, .. } => {
             let va = lower_i64_value(b, cx, a);
             let vb = lower_i64_value(b, cx, bn);
@@ -586,11 +650,15 @@ fn lower_i64_value(
             b.use_var(rv)
         }
         Node::Call { args, .. } => {
-            // A single-arg self-call (checker-verified). Register calling convention: pass the
-            // arg + depth+1 + the sentinel; no boxing / roots-staging / fast-link dispatch.
-            let a = lower_i64_value(b, cx, &args[0]);
-            let d1 = b.ins().iadd_imm(cx.depth, 1);
-            let call = b.ins().call(cx.self_ref, &[a, d1, cx.ovf]);
+            // A self-call (checker-verified: `nargs` args, head == self). Register calling
+            // convention: pass the args + depth+1 + the sentinel; no boxing / roots-staging /
+            // fast-link dispatch. Lower every arg BEFORE the call (they read `params`, which the
+            // call can't disturb — no memory frame).
+            let mut call_args: Vec<cranelift_codegen::ir::Value> =
+                args.iter().map(|a| lower_i64_value(b, cx, a)).collect();
+            call_args.push(b.ins().iadd_imm(cx.depth, 1));
+            call_args.push(cx.ovf);
+            let call = b.ins().call(cx.self_ref, &call_args);
             let r = b.inst_results(call)[0];
             // If the callee (or a deeper level, or a depth-cap bail) set the sentinel, unwind
             // now — bounds the post-overflow unwind to O(depth) instead of O(2^depth).
@@ -653,17 +721,20 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
     if !arm_i64_eligible(arm) {
         return None;
     }
-    let self_sym = arm.inline_name?;
+    let self_sym = arm.dbg_name?;
     let body = &arm.body;
+    let nargs = arm.nrequired;
 
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
     let m = jit.module();
     let ptr_ty = m.target_config().pointer_type();
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
 
-    // Signatures.
+    // Signatures. Worker: (a0..a_{nargs-1}: i64, depth: i64, ovf: *mut u8) -> i64.
     let mut wsig = m.make_signature();
-    wsig.params.push(AbiParam::new(types::I64)); // n
+    for _ in 0..nargs {
+        wsig.params.push(AbiParam::new(types::I64)); // an arg
+    }
     wsig.params.push(AbiParam::new(types::I64)); // depth
     wsig.params.push(AbiParam::new(ptr_ty)); // ovf ptr
     wsig.returns.push(AbiParam::new(types::I64));
@@ -699,9 +770,10 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         b.seal_block(entry);
-        let n = b.block_params(entry)[0];
-        let depth = b.block_params(entry)[1];
-        let ovf = b.block_params(entry)[2];
+        let params: Vec<cranelift_codegen::ir::Value> =
+            (0..nargs).map(|k| b.block_params(entry)[k]).collect();
+        let depth = b.block_params(entry)[nargs];
+        let ovf = b.block_params(entry)[nargs + 1];
         let poisoned = b.create_block();
         // Depth cap → set sentinel + unwind (native-stack guard).
         let deep = b.create_block();
@@ -713,14 +785,16 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         b.seal_block(deep);
         b.seal_block(go);
         b.switch_to_block(deep);
-        let one = b.ins().iconst(types::I8, 1);
-        b.ins().store(MemFlagsData::trusted(), one, ovf, 0);
+        // Sentinel 2 = depth-bail (vs 1 = overflow): the wrapper returns outcome 5 so `jit_tier`
+        // switches this fn to the boxed path instead of re-tiering to i64 per level.
+        let two = b.ins().iconst(types::I8, 2);
+        b.ins().store(MemFlagsData::trusted(), two, ovf, 0);
         b.ins().jump(poisoned, &[]);
         b.switch_to_block(go);
         let cx = I64Ctx {
             self_sym,
             self_ref,
-            param_n: n,
+            params,
             depth,
             ovf,
             poisoned,
@@ -752,43 +826,65 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         b.seal_block(entry);
         let heap = b.block_params(entry)[0];
         let base = b.block_params(entry)[1];
+        // Frame base address: roots + base*STRIDE. Args are at slots base+0..base+nargs-1; the
+        // result goes back to slot base+0 (the VM's Done convention). The worker never touches
+        // roots (it takes no heap), so this address stays valid across the worker call.
         let rbc = b.ins().call(rb_ref, &[heap]);
         let rbase = b.inst_results(rbc)[0];
         let off = b.ins().imul_imm(base, STRIDE);
-        let argaddr = b.ins().iadd(rbase, off);
-        let tag = b.ins().load(types::I8, MemFlagsData::trusted(), argaddr, 0);
-        let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
-        let okb = b.create_block();
+        let argbase = b.ins().iadd(rbase, off);
+        // Every arg must be an Int, else deopt to the VM (which handles the real shapes).
         let deopt = b.create_block();
-        b.ins().brif(is_int, okb, &[], deopt, &[]);
-        b.seal_block(okb);
+        for k in 0..nargs {
+            let slot_off = (k as i64) * STRIDE;
+            let tag = b
+                .ins()
+                .load(types::I8, MemFlagsData::trusted(), argbase, slot_off as i32);
+            let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+            let nxt = b.create_block();
+            b.ins().brif(is_int, nxt, &[], deopt, &[]);
+            b.seal_block(nxt);
+            b.switch_to_block(nxt);
+        }
         b.seal_block(deopt);
-        // Non-Int arg → let the VM run the arm.
-        b.switch_to_block(deopt);
-        let o1 = b.ins().iconst(types::I64, 1);
-        b.ins().return_(&[o1]);
-        // Int arg → unbox, clear sentinel, run the worker.
-        b.switch_to_block(okb);
-        let n = b
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), argaddr, PAYLOAD_OFFSET as i32);
+        // All Int → load the payloads, clear the sentinel, run the worker in registers.
+        let mut wargs: Vec<cranelift_codegen::ir::Value> = (0..nargs)
+            .map(|k| {
+                let slot_off = (k as i64) * STRIDE + PAYLOAD_OFFSET as i64;
+                b.ins()
+                    .load(types::I64, MemFlagsData::trusted(), argbase, slot_off as i32)
+            })
+            .collect();
         let ovc = b.ins().call(ovp_ref, &[heap]);
         let ovf = b.inst_results(ovc)[0];
         let z0 = b.ins().iconst(types::I8, 0);
         b.ins().store(MemFlagsData::trusted(), z0, ovf, 0);
         let d0 = b.ins().iconst(types::I64, 0);
-        let wc = b.ins().call(worker_ref, &[n, d0, ovf]);
+        wargs.push(d0);
+        wargs.push(ovf);
+        let wc = b.ins().call(worker_ref, &wargs);
         let r = b.inst_results(wc)[0];
         let o = b.ins().load(types::I8, MemFlagsData::trusted(), ovf, 0);
         let doneb = b.create_block();
-        let ovb = b.create_block();
-        b.ins().brif(o, ovb, &[], doneb, &[]);
+        let bailb = b.create_block();
+        b.ins().brif(o, bailb, &[], doneb, &[]);
         b.seal_block(doneb);
-        b.seal_block(ovb);
-        // Overflowed / bailed → clear sentinel, deopt to VM (recomputes with BigInt).
-        b.switch_to_block(ovb);
+        b.seal_block(bailb);
+        // Sentinel nonzero → clear it, then split: 2 = depth-bail (outcome 5, `jit_tier` switches
+        // this fn to the boxed path), 1 = overflow (outcome 1, VM recomputes with BigInt).
+        b.switch_to_block(bailb);
         let z1 = b.ins().iconst(types::I8, 0);
         b.ins().store(MemFlagsData::trusted(), z1, ovf, 0);
+        let is_depth = b.ins().icmp_imm(IntCC::Equal, o, 2);
+        let depthb = b.create_block();
+        let ovb = b.create_block();
+        b.ins().brif(is_depth, depthb, &[], ovb, &[]);
+        b.seal_block(depthb);
+        b.seal_block(ovb);
+        b.switch_to_block(depthb);
+        let o5 = b.ins().iconst(types::I64, 5);
+        b.ins().return_(&[o5]);
+        b.switch_to_block(ovb);
         let o1b = b.ins().iconst(types::I64, 1);
         b.ins().return_(&[o1b]);
         // Done → box the i64 result as an Int into roots[base], outcome 0.
@@ -806,6 +902,10 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
             .store(MemFlagsData::trusted(), z2, addr2, PAYLOAD_OFFSET as i32 + 8);
         let d = b.ins().iconst(types::I64, 0);
         b.ins().return_(&[d]);
+        // Any non-Int arg landed here: outcome 1 (the VM runs the arm).
+        b.switch_to_block(deopt);
+        let od = b.ins().iconst(types::I64, 1);
+        b.ins().return_(&[od]);
         b.finalize();
         m.define_function(wrap_id, &mut ctx).ok()?;
         m.clear_context(&mut ctx);
