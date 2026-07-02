@@ -1698,6 +1698,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "spit-bytes",
+        Arity::exact(2),
+        Sig::new(vec![string, any], nil_ty),
+        spit_bytes,
+    );
+    def(
+        heap,
         "file-mtime",
         Arity::exact(1),
         Sig::new(vec![string], int.union(nil_ty)),
@@ -2515,6 +2522,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
     ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
+    ("spit-bytes", &["path", "bytes"], "Write a byte sequence (a bytes value, a vector, or a list of byte ints 0–255) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to slurp-bytes (spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
     ("%digest", &["algo", "bytes"], "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp."),
     ("%hmac", &["algo", "key-bytes", "msg-bytes"], "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp."),
