@@ -682,3 +682,24 @@ arithmetic** (box/unbox + tag-dispatch at every call boundary and every `+`/`-`/
 fix is unboxed-`i64` register-carry through the recursive arm (the f64 carry already exists
 for `mandelbrot`) — a real JIT project, not a surgical change. Default behaviour bit-identical
 (depth=2, 6 blocks); 643 tests + differential clean.
+
+## 2026-07-02 — `spit-bytes`: the byte-faithful file write (write side of `slurp-bytes`)
+
+Added a `(spit-bytes path bytes)` primitive (`builtins/io.rs`) — the binary write-side
+counterpart to `slurp-bytes`, which had no inverse. `spit`/`spit-private` are UTF-8
+string-only (they *reject* a `bytes` value), so there was **no way to write a byte
+sequence to disk** — a real gap surfaced by the brood-chat file-sharing feature (a
+received image's bytes cross the mesh fine — `send` deep-copies a `bytes` value
+faithfully — but couldn't be materialised to a file). Low-level I/O the language can't
+bootstrap, so a Rust builtin is the right layer (mechanism, not policy).
+
+Mirrors the existing shapes exactly: `expect_string` for the path, `collect_bytes` (the
+same coercion `%digest`/`%hmac` use) for the payload — so it accepts a `bytes` value, a
+vector, or a list of byte ints 0–255, rejecting an out-of-range int rather than truncating
+— then `std::fs::write`, `FILE_IO` error code on failure, returns nil. Registered in the
+`def` table (`Sig::new(vec![string, any], nil_ty)`) + `PRIMITIVE_DOCS`. Tests folded into
+`tests/slurp_bytes_test.blsp` (5 new): a bytes-value round-trip (asserting `spit` errors on
+the same value), a direct non-UTF-8 write whose sha256 matches the OS digest (the binary
+test there had used a `printf` subprocess *because* this primitive was missing — now
+unnecessary), the three accepted input shapes, out-of-range rejection, and replace-not-
+append. 9/9 pass. Purely additive — no existing code path touched.

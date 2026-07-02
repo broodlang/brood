@@ -843,6 +843,21 @@ pub(super) fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::nil())
 }
 
+/// `(spit-bytes path bytes)` — write a byte sequence (a `bytes` value, a vector,
+/// or a list of byte ints 0–255) to `path` byte-faithfully, replacing any
+/// existing file. Returns nil. The binary write-side counterpart to `slurp-bytes`:
+/// `spit` is UTF-8 string-only and would reject (or corrupt) raw bytes, so this is
+/// what materialises a received image / archive / any binary asset to disk.
+pub(super) fn spit_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "spit-bytes", arg(args, 0))?;
+    let bytes = collect_bytes("spit-bytes", arg(args, 1), heap)?;
+    std::fs::write(&path, &bytes).map_err(|e| {
+        LispError::runtime(format!("spit-bytes: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(Value::nil())
+}
+
 /// Hash algorithm selector for `%digest` / `%hmac`, decoded from the leading
 /// keyword arg. This is the single place the kernel enumerates digest
 /// algorithms; all string-input and hex-output shaping is Brood policy in
