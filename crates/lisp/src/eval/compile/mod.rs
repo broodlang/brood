@@ -1611,6 +1611,75 @@ fn self_inline_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_INLINE").is_none())
 }
 
+/// How many recursion levels to splice into a self-inlined arm. Each pass inlines one more
+/// level of the recursion (removing that level's call protocol + its call-boundary boxing)
+/// at the cost of a larger arm body / frame. **Default 2** (the shipped two-stage-tiering
+/// behaviour); `BROOD_INLINE_DEPTH` overrides for A/B measurement. Read once (all processes
+/// of a runtime must agree — the inlined native is shared across them and its frame size
+/// must be deterministic). Clamped to ≥1.
+#[cfg(feature = "jit")]
+fn self_inline_depth() -> usize {
+    static D: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("BROOD_INLINE_DEPTH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|d| d.max(1))
+            .unwrap_or(2)
+    })
+}
+
+/// Per-pass body-size ceiling for expansion *beyond the first pass*: an extra level only
+/// splices while the body so far is ≤ this, bounding the compiled-arm blow-up (a larger
+/// arm costs more i-cache + compile time — the thing that can erase the inline win). The
+/// first pass and the initial qualify-gate stay at [`SELF_INLINE_MAX_BODY`] (a large
+/// *original* body never inlines). **Default `SELF_INLINE_MAX_BODY`** (= the shipped
+/// Level-2 gate); `BROOD_INLINE_MAXBODY` overrides for A/B measurement.
+#[cfg(feature = "jit")]
+fn self_inline_expand_cap() -> usize {
+    static C: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *C.get_or_init(|| {
+        std::env::var("BROOD_INLINE_MAXBODY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(SELF_INLINE_MAX_BODY)
+    })
+}
+
+/// Build the inlined body: splice the recursion [`self_inline_depth`] levels deep. The
+/// single source of truth shared by [`self_inline_probe`] (which measures the frame) and
+/// [`rederive_inlined_body`] (which produces the body for lowering) — so the two can never
+/// diverge (a mismatch would size the frame wrong → corruption). Returns the spliced node
+/// plus `next_block` (= 1 + total inlined blocks; `m * next_block` is the slot high-water
+/// mark). `None` when no site inlines.
+#[cfg(feature = "jit")]
+fn build_inlined_body(
+    body: &Node,
+    defn_name: Symbol,
+    nrequired: usize,
+    m: usize,
+) -> Option<(Node, usize)> {
+    let mut spliced = shift_slots(body, 0);
+    let orig = shift_slots(body, 0);
+    let mut next_block = 1usize;
+    // Pass 1 (depth-1): the top-level self-calls become inlined blocks whose bodies still
+    // hold `Node::Call` self-calls.
+    let inlined = inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
+    if inlined == 0 {
+        return None;
+    }
+    // Extra passes (depth-2, -3, …): each re-inlines the calls left in the previously
+    // spliced bodies, one level deeper — while the body stays under the expansion cap.
+    let cap = self_inline_expand_cap();
+    for _ in 1..self_inline_depth() {
+        if node_count(&spliced) > cap {
+            break;
+        }
+        inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
+    }
+    Some((spliced, next_block))
+}
+
 /// Runtime JIT off-switch. **Default OFF** (the JIT runs). `BROOD_NO_JIT=1` makes
 /// [`jit_tier`] never compile or run native code — every arm interprets on the VM,
 /// which is the correct reference engine. Today disabling the JIT otherwise needs a
@@ -1805,20 +1874,9 @@ fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize)
     if node_touches_heap(body) {
         return None;
     }
-    // Clone the body and run the inliner on the copy to count blocks / the new max.
-    let mut clone = shift_slots(body, 0);
-    let orig = shift_slots(body, 0);
-    let mut next_block = 1usize;
-    let inlined = inline_self_calls(&mut clone, &orig, defn_name, nrequired, m, &mut next_block);
-    if inlined == 0 {
-        return None;
-    }
-    // Level-2: if the level-1 result is still compact, inline its external calls too.
-    // Uses the same `orig` template and a continuing `next_block`, so slot ranges stay
-    // disjoint. Must mirror rederive_inlined_body exactly.
-    if node_count(&clone) <= SELF_INLINE_MAX_BODY {
-        inline_self_calls(&mut clone, &orig, defn_name, nrequired, m, &mut next_block);
-    }
+    // Splice the body (shared with `rederive_inlined_body` so they can't diverge) to count
+    // blocks / the new max. Discarded — the VM keeps the original small layout.
+    let (clone, next_block) = build_inlined_body(body, defn_name, nrequired, m)?;
     let inline_max = m * next_block;
     // The inlined frame must also reserve the inlined chunk's call-result spill slots
     // (above `inline_max`) — exactly as `compile_arm` adds `jit_spill_reserve` to the
@@ -1829,11 +1887,12 @@ fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize)
     let inline_nslots = inline_max + jit_spill_reserve(&spliced_chunk.code);
     if std::env::var("BROOD_INLINE_DBG").is_ok() {
         eprintln!(
-            "[inline-dbg] probe {} nrequired={} m={} inlined={} new_max={} inline_nslots={}",
+            "[inline-dbg] probe {} nrequired={} m={} depth={} blocks={} new_max={} inline_nslots={}",
             crate::core::value::symbol_name(defn_name),
             nrequired,
             m,
-            inlined,
+            self_inline_depth(),
+            next_block - 1,
             inline_max,
             inline_nslots
         );
@@ -1854,32 +1913,9 @@ fn rederive_inlined_body(
     nrequired: usize,
     m: usize,
 ) -> Option<Node> {
-    let mut spliced = shift_slots(body, 0);
-    let orig = shift_slots(body, 0);
-    let mut next_block = 1usize;
-    let inlined = inline_self_calls(
-        &mut spliced,
-        &orig,
-        defn_name,
-        nrequired,
-        m,
-        &mut next_block,
-    );
-    if inlined == 0 {
-        return None;
-    }
-    // Level-2: must mirror self_inline_probe exactly.
-    if node_count(&spliced) <= SELF_INLINE_MAX_BODY {
-        inline_self_calls(
-            &mut spliced,
-            &orig,
-            defn_name,
-            nrequired,
-            m,
-            &mut next_block,
-        );
-    }
-    Some(spliced)
+    // Same splice the probe measured (both go through `build_inlined_body`), so the
+    // re-derived body's frame is exactly `inline_nslots`.
+    Some(build_inlined_body(body, defn_name, nrequired, m)?.0)
 }
 
 fn compile_arm(
