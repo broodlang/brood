@@ -444,12 +444,9 @@ fn arm_scalar_kind(arm: &CompiledArm) -> Option<Scalar> {
         return None;
     }
     let empty = std::collections::HashSet::new();
-    for kind in [Scalar::Int, Scalar::Float] {
-        if i64_value_ok(&arm.body, self_sym, arm.nrequired, &empty, kind) {
-            return Some(kind);
-        }
-    }
-    None
+    [Scalar::Int, Scalar::Float]
+        .into_iter()
+        .find(|&kind| i64_value_ok(&arm.body, self_sym, arm.nrequired, &empty, kind))
 }
 
 /// Does this arm take an unboxed register worker? [`jit_tier`] consults this to **skip the
@@ -628,7 +625,6 @@ fn i64_cond_ok(
 #[cfg(feature = "jit")]
 struct I64Ctx {
     kind: Scalar, // Int (i64) or Float (f64) — selects const/arith/cmp/box lowering
-    self_sym: crate::core::value::Symbol,
     self_ref: cranelift_codegen::ir::FuncRef,
     params: Vec<cranelift_codegen::ir::Value>, // the arm's `nargs` params (`Local(k)`)
     // `let` binder slots → their SSA variable (index = frame slot; `None` for a param slot).
@@ -878,7 +874,6 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
     // Eligibility + which scalar (Int/Float) this arm's worker specializes to.
     let kind = arm_scalar_kind(arm)?;
     let sty = kind.clif(); // i64 or f64 — the worker's arg/result register type
-    let self_sym = arm.dbg_name?;
     let body = &arm.body;
     let nargs = arm.nrequired;
 
@@ -968,7 +963,6 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         }
         let cx = I64Ctx {
             kind,
-            self_sym,
             self_ref,
             params,
             slot_vars,
