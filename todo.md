@@ -24,16 +24,28 @@ element via the fast-frame protocol — skip `push_frame` (generic: optionals/re
   `fast_apply(heap, arm, env, args)` that stages the frame like `brood_rt_fast_frame` and jumps the
   native entry, bypassing `push_frame`/`vm_run_bc`. Bounded by the native-depth guard (like the
   unbox worker's cliff). Helps `nqueens` + any Rust HOF.
-- (b) **the JIT'd Brood `reduce`/`eduction` path** (helps `pipeline`): the in-IR `Inst::Call` already
-  has the fast-link — check why the transducer step calls don't hit it (profile showed `dispatch` +
-  `jit_dispatch_call`, so the fast-link is falling through — maybe the transducer closures aren't
-  fast-link-eligible, e.g. capturing closures via `arm.capture_names` — recall `vm_call_ic_fast_link`
-  bails on `!capture_names.is_empty()`). If so, THAT bail is the pipeline blocker, not a new lever.
-**Scope Increment-0 first:** prototype `fast_apply` for `range_reduce` + measure the ceiling vs the
-current `vm_apply` path (how much is `push_frame`/`vm_run_bc`?). And separately confirm the pipeline
-fast-link-fallthrough hypothesis with a targeted trace. Risk: frame-staging correctness (GC roots,
-captures) — gate + differential-fuzz like the unbox lever. Session memory: profiles in this devlog
-entry.
+- (b) **the JIT'd Brood `reduce`/`eduction` path** (helps `pipeline`) — **Increment-0 DONE, GO.**
+  CONFIRMED the hypothesis: `xfilter`/`xmap` (prelude) return `(fn (rf) (fn (acc x) …))` — the inner
+  reducing closure **captures** `rf`/`pred`/`f`, and `vm_call_ic_fast_link` bails on
+  `!arm.capture_names.is_empty()` (`heap.rs:5571`). So pipeline's per-element transducer-step calls
+  bail the in-IR fast-link → the `dispatch`/`jit_dispatch_call` fallthrough the profile showed. CEILING:
+  a non-capturing single-pass fold is **2.3×** faster than the capturing eduction (0.28→0.12s, same
+  checksum); the bail-fix won't reach all of that (eduction still layers 3 transducer closures/elem vs
+  1) but targets a realistic **~1.4–1.5× on pipeline**.
+  **The fix = make capturing closures fast-linkable:** `jit_run_fast_link`/`brood_rt_fast_frame`
+  nil-fill the non-param slots and SKIP captures (that's why the bail exists — comment at the bail).
+  `push_frame` (`mod.rs:3441`) fills captures by index-copy from the flat captured env
+  (`capture_base = nrequired+noptional+rest`, then `capture_names[k] → slot capture_base+k`). Do the
+  same in the fast-frame — BUT the fast-link deliberately carries only `(code, nslots, env)` (Copy
+  flat-table data), NOT the arm, so `capture_base` + capture-count must be threaded into `FastLink` +
+  `vm_call_ic_fast_link`, and the fill must handle the flat-env index-copy (with the env_get-by-name
+  fallback for a chained env, or bail to slow for that case). Then drop the `!capture_names.is_empty()`
+  bail. **RISK: this is the hottest JIT path (every JIT'd call).** Full gate + differential-fuzz +
+  the unbox-style debug verifiers, and A/B that non-capturing calls are unaffected.
+**Front (a) — `fast_apply` for Rust HOF drivers — still unscoped-for-ceiling:** the shipped
+`range_reduce` `vm_apply` cache gave only ~8–19% (the `push_frame`/`vm_run_bc` protocol is the bulk);
+prototype a real `fast_apply` (stage frame like `brood_rt_fast_frame`, jump the native) + measure how
+much of that protocol is removable before building.
 
 ## Unboxed-i64 register-carry through recursive self-calls (scoped 2026-07-02)
 
