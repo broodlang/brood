@@ -277,6 +277,13 @@ pub(super) fn range_reduce_slow(
     heap: &mut Heap,
 ) -> LispResult {
     let prim = crate::eval::compile::reduce_prim_op(heap, f);
+    // HOF fast path (gated): resolve the step closure's arm ONCE so the per-element call skips
+    // arm re-resolution + passthrough/arity matching. Only for a non-prim reducer on the VM path.
+    let hof = if prim.is_none() && use_vm {
+        crate::eval::compile::hof_resolve(heap, f, 2)
+    } else {
+        None
+    };
     heap.root_scope(|heap| {
         let f_r = heap.root(f);
         let mut acc_r = heap.root(init);
@@ -284,18 +291,27 @@ pub(super) fn range_reduce_slow(
         while if step > 0 { i < hi } else { i > hi } {
             let f = heap.read_root(f_r);
             let acc = heap.read_root(acc_r);
+            // Non-prim step: try the cached-arm fast path (falls back if `f` late-rebound or
+            // the gate is off, i.e. `hof` is `None`).
+            let step_call = |heap: &mut Heap, acc: Value| -> LispResult {
+                if let Some(h) = &hof {
+                    if let Some(r) = crate::eval::compile::hof_apply_step(heap, h, f, &[acc, Value::int(i)])
+                    {
+                        return r;
+                    }
+                }
+                if use_vm {
+                    crate::eval::compile::apply_value(heap, f, &[acc, Value::int(i)], env)
+                } else {
+                    apply(heap, f, &[acc, Value::int(i)], env)
+                }
+            };
             let next = match prim {
                 Some(op) => match crate::eval::compile::prim_apply_step(op, acc, Value::int(i))? {
                     Some(v) => v,
-                    None if use_vm => {
-                        crate::eval::compile::apply_value(heap, f, &[acc, Value::int(i)], env)?
-                    }
-                    None => apply(heap, f, &[acc, Value::int(i)], env)?,
+                    None => step_call(heap, acc)?,
                 },
-                None if use_vm => {
-                    crate::eval::compile::apply_value(heap, f, &[acc, Value::int(i)], env)?
-                }
-                None => apply(heap, f, &[acc, Value::int(i)], env)?,
+                None => step_call(heap, acc)?,
             };
             acc_r = heap.advance_root(acc_r, next);
             i += step;

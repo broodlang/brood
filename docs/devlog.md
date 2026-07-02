@@ -811,3 +811,25 @@ mismatches**; boundary torture (exact cliff depths, `i64::MIN/-1`, overflow-at-d
 400-process concurrency + hot-reload chaos; and `BROOD_GC_STRESS` — all clean, under the use-after-GC
 tripwire + `JIT_VERIFY` + `GC_VERIFY`. Remaining deferred: int `Div` (inexact→float→deopt) and the
 scoped unboxed-array lever for `matmul`.
+
+## 2026-07-02 — HOF closure-call fast path in `range_reduce` (modest, and a redirect)
+
+Profiled the next frontier (`nqueens` ~14×, `pipeline` ~7×) before building — and it **redirected off
+allocation**: both are call/dispatch-bound, not alloc-bound (`nqueens` `cons` ~0% in the profile;
+`pipeline`'s `eduction` is fused). The cost is per-element closure dispatch: a `reduce` over N
+elements calls the *same* step closure N times via `apply_value → dispatch`, which re-resolves the
+arm (`vm_cache_arm`) + re-runs passthrough/arity matching each element. A ceiling spike showed a
+user-closure fold is ~60× a primitive one.
+
+Fix (default-on, `BROOD_NO_HOF` opts out): `range_reduce_slow` resolves the step closure's arm ONCE
+(`hof_resolve`) and calls it per element via a cached-arm `vm_apply` (`hof_apply_step`) — re-reading
+only the rooted closure for its captured env (GC-safe) and re-checking its id (late-rebind falls
+back). Measured **nqueens 0.53→0.48 s (~9%)** and a light-closure `range-fold` **1.87→1.52 s (~19%)**;
+643 tests pass with it forced on, reduce differentials clean.
+
+**Honest scope:** this only removes dispatch's *self*-overhead, not the per-call `push_frame`/
+`vm_run_bc` protocol (the bulk — so not the 60× ceiling, which was a *passthrough* artifact), and it
+doesn't touch `pipeline` (whose `eduction` folds through the JIT'd Brood `reduce`'s in-IR call path,
+not the Rust `range_reduce` driver). The real win is the **lean-native-call lever** (call a JIT'd
+closure directly via the fast-frame protocol, skipping the per-element trampoline) — scoped in
+`todo.md`.
