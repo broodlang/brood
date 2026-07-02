@@ -641,3 +641,27 @@ JIT-vs-VM differential clean; `pfib` under debug-assertions + `BROOD_JIT_VERIFY`
 `BROOD_GC_VERIFY` and under `BROOD_GC_STRESS` both clean (the fast-link re-probe sizes
 the callee frame correctly). Note: the published `pfib` benchmark uses N=28, so its
 number is unchanged — the win is for longer-running parallel-native compute.
+
+**Follow-up (same day): share the inlined native across processes.** With the cascade
+gone, the next lever is that the *inlined* upgrade (worth ~1.7× on `fib`) was compiled
+**per-process** — each of N spawned workers raced its own deferred compile, and for a
+short fan-out most finished first, so the inline win never landed. The small native was
+already shared across a runtime's processes (`RuntimeCode::jit_code_cache`, ADR-101);
+the inlined native was explicitly not. That's exactly how the BEAM works (BeamAsm
+compiles a module to native once at load; all processes share it) — Brood already
+matched it for the small native, so sharing the inlined native completes the alignment.
+Added `RuntimeCode::jit_inline_cache` (companion `(id, argc) → (ptr, epoch)` map): the
+first process to land the inlined compile publishes it in the swap block (once per arm),
+and a peer installs it, sizing its frame to its own `inline_nslots` — deterministic for
+the shared bytecode, so the pointer is interchangeable. Safe because the swap is now
+per-process/cheap (above) and the epoch guard flushes the cache on `def`/compaction just
+like the small-native cache. Hardened the hot-reload guard to also null `inline_code` on
+an epoch mismatch (a stale inlined pointer must not survive a redefine and get
+re-published). New regression test (`jit_shared_spawn_test.blsp`): a *recursive*
+(inline-eligible) fn shared+inlined across 500 workers returns the right checksum, and
+redefining it invalidates the shared inline cache — the existing shared-JIT/hot-reload
+tests use non-recursive fns that never inline, so this path was uncovered. Measured
+(100×`fib`): N=30 **0.84s→0.56s** (1.79× vs small-native-only), N=32 **1.6s→1.42s**.
+Still nothing at N=28 — at ~4ms/task the run is warmup/scheduling-bound, below the point
+where any tier past the small native can land in time; the win is for substantial
+parallel bursts (N≥30). 643 tests + differential + debug verifiers + GC-stress clean.

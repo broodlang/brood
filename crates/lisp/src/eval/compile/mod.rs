@@ -6025,6 +6025,12 @@ pub(crate) fn jit_tier(
         arm.shared_published.store(false, Relaxed); // recompiled code must re-publish
         arm.inline_installed.store(false, Relaxed); // re-decide the inline swap at the new epoch
         arm.inline_queued.store(false, Relaxed); // re-enqueue the inlined upgrade if still hot
+        // Drop the stale inlined native too: its inlined operators were validated at the
+        // OLD epoch, so it must not be re-swapped as-is. Nulling forces a clean re-fetch
+        // from the shared inline cache (epoch-checked) or a recompile at the new epoch —
+        // load-bearing now that the inlined native is shared across processes (a stale
+        // pointer left here would otherwise get re-published to the shared cache).
+        arm.inline_code.store(std::ptr::null_mut(), Release);
         return None;
     }
     // ---- Two-stage tiering (devlog 2026-06-17): the deferred inlined upgrade ----
@@ -6047,7 +6053,26 @@ pub(crate) fn jit_tier(
     if arm.inline_name.is_some() && !arm.inline_installed.load(Acquire) {
         let ic = arm.inline_code.load(Acquire);
         if ic.is_null() {
-            // Not yet compiled/enqueued. Elect a single enqueuer via the queued flag.
+            // Shared inlined-native cache (the short-burst lever): before spending our own
+            // deferred compile, check whether another process of this runtime already
+            // compiled the inlined body for this `(id, argc)`. If so and it's epoch-current,
+            // install its pointer into our `inline_code`; the next entry's `ic != null`
+            // branch below swaps it in with OUR (deterministic, identical) `inline_nslots`.
+            // This is what lets a short parallel fan-out (`pfib`) pick up the inlined win —
+            // one compile serves every process instead of each racing its own to completion.
+            if let Some(key) = arm.share_key {
+                if let Some((ptr, epoch)) = heap.jit_inline_lookup(key) {
+                    if epoch == heap.global_epoch()
+                        && !ptr.is_null()
+                        && ptr != crate::jit::BAILED
+                        && ptr != crate::jit::QUEUED
+                    {
+                        arm.inline_code.store(ptr, Release);
+                        return None; // next entry swaps it in
+                    }
+                }
+            }
+            // Not shared yet. Elect a single enqueuer via the queued flag.
             if !arm.inline_queued.swap(true, AcqRel) {
                 let slot_tags: Vec<u8> = (0..arm.nslots)
                     .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
@@ -6087,6 +6112,15 @@ pub(crate) fn jit_tier(
             arm.jit_code.store(ic, Release);
             if let Some(sym) = arm.inline_name {
                 heap.invalidate_fast_links_for(sym);
+            }
+            // Publish the inlined native to the shared cache so peer processes install it
+            // directly instead of each compiling their own (the short-burst lever). This
+            // block runs at most once per arm per epoch (latched by `inline_installed`
+            // above), so no extra guard is needed; a republish of the same `(ptr, epoch)`
+            // by a peer that installed FROM the cache is idempotent. `inline_nslots` is
+            // deterministic for this bytecode, so `ic` is interchangeable across processes.
+            if let Some(key) = arm.share_key {
+                heap.jit_inline_publish(key, ic, arm.compile_epoch.load(Acquire));
             }
             // Run the VM this activation; the next entry sizes the frame to inline_nslots
             // (the call site reads `active_nslots()`) and runs the inlined native.
