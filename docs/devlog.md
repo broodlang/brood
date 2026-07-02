@@ -682,3 +682,30 @@ arithmetic** (box/unbox + tag-dispatch at every call boundary and every `+`/`-`/
 fix is unboxed-`i64` register-carry through the recursive arm (the f64 carry already exists
 for `mandelbrot`) — a real JIT project, not a surgical change. Default behaviour bit-identical
 (depth=2, 6 blocks); 643 tests + differential clean.
+
+## 2026-07-02 — unboxed-i64 register calling convention for int-only recursion (SHIPPED)
+
+**Closed the single-thread `fib` gap to Elixir — and passed it.** The Increment-0 profile showed
+~55% of `fib`'s time was the boxed recursive-call protocol (`jit_run_fast_link` + frame setup +
+`brood_rt_push` staging), not arithmetic (which the JIT already unboxes into SSA registers). So an
+int-only, single-arg, recursive arm (`fib`) now lowers to a **register calling convention**: a
+compact worker `extern "C" fn(n: i64, depth: i64, ovf: *mut u8) -> i64` (in `jit_lower_i64_arm`,
+`jit_lower.rs`) that recurses with args/results in registers — **no boxing, no roots-staging, no
+fast-link dispatch, no GC/spills** (an i64 isn't a handle, so the worker needs no `heap` at all).
+A thin boxed wrapper (`fn(heap, base) -> outcome`, the arm's actual entry) unboxes the arg from
+`roots[base]`, calls the worker, and boxes the result back — or deopts (outcome 1 → VM) if the arg
+isn't an `Int` or the worker overflowed. **Overflow correctness**: Add/Sub/Mul are overflow-checked;
+on overflow (or a depth-cap bail — the native-stack guard, since this bypasses
+`JIT_NATIVE_DEPTH_LIMIT`) the worker sets a per-process sentinel (`Heap::jit_i64_overflow`, via the
+stable `brood_rt_i64_overflow_ptr`) and short-circuits the unwind (O(depth)); the wrapper deopts and
+the VM recomputes with BigInt — so `fact(25)` still yields the exact bignum. i64-eligible arms **skip
+the two-stage inline upgrade** (`arm_i64_eligible`, consulted in `jit_tier`) — the worker already
+recurses to full depth in registers, so the boxed depth-2 upgrade would only swap in inferior code.
+
+**Measured**: serial 100×`fib(31)` **3.28 → 0.77 s (4.26×)**; `fib` benchmark **227 → 53 ms, 5th →
+2nd** (beats Elixir 75 ms & Node 79 ms); `pfib` N=31 **847 → 152 ms, 5th → 2nd (1.3× off .NET)**,
+ahead of Elixir/Node/Clojure. Aggregate single-thread compute **3.5× → 3.0×, 4th → 3rd — now ahead
+of Elixir.** Shipped default-on (`BROOD_NO_I64` opts out). Gates: 643 tests pass with the path forced
+on; JIT-vs-VM differential clean; `fib`/`fact` correct; `pfib` under debug-assertions +
+`BROOD_JIT_VERIFY` + `BROOD_GC_VERIFY` and under `BROOD_GC_STRESS` clean. First Increment of the
+unboxed lever; next = broaden the subset (multi-arg, `let`, more ops — see todo.md).

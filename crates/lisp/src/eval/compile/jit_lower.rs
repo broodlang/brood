@@ -373,7 +373,446 @@ pub(crate) fn jit_lower_arm(
     arm: &CompiledArm,
     slot_tags: &[u8],
 ) -> Option<*const u8> {
+    // Unboxed-i64 fast path: an int-only single-arg recursive arm (`fib`) gets a register
+    // calling convention for its self-recursion — args/results in registers, no boxing /
+    // roots-staging / fast-link dispatch (the Increment-0 profile showed that protocol is
+    // ~55% of `fib`'s time; this path is ~5× on `pfib`, beating Elixir). Falls through to the
+    // general lowering when the arm isn't eligible.
+    if jit_i64_enabled() {
+        if let Some(p) = jit_lower_i64_arm(jit, arm) {
+            return Some(p);
+        }
+    }
     jit_lower_arm_inner(jit, arm, slot_tags, None)
+}
+
+/// Is the unboxed-`i64` fast path enabled? **Default ON** (`BROOD_NO_I64` opts out — the A/B
+/// baseline lever). Read once (all processes of a runtime must agree — the code is shared and
+/// the eligibility/frame decisions must be deterministic).
+#[cfg(feature = "jit")]
+fn jit_i64_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_I64").is_none())
+}
+
+/// Does this arm take the unboxed-`i64` fast path? Gate on + single fixed-arg + inline-eligible
+/// (⇒ top-level no-capture recursive defn, no heap, arithmetic) + the body is in the i64 subset.
+/// [`jit_tier`] consults this to **skip the two-stage inline upgrade** for such arms — the i64
+/// worker already recurses in registers to full depth, so the boxed depth-2 upgrade (which would
+/// otherwise swap out the i64 small native) is inferior and must not fire.
+#[cfg(feature = "jit")]
+pub(crate) fn arm_i64_eligible(arm: &CompiledArm) -> bool {
+    if !jit_i64_enabled() || arm.nrequired != 1 || arm.noptional != 0 || arm.rest_slot.is_some() {
+        return false;
+    }
+    match arm.inline_name {
+        Some(self_sym) => i64_value_ok(&arm.body, self_sym),
+        None => false,
+    }
+}
+
+/// Native-recursion depth cap for the i64 worker — bounds the native (coroutine) stack the
+/// register recursion runs on (the general path's `JIT_NATIVE_DEPTH_LIMIT` lives in the boxed
+/// dispatch, which this path bypasses). On overflow the worker sets the overflow sentinel and
+/// unwinds → the boxed wrapper deopts to the VM, which drains deep recursion via heap frames.
+#[cfg(feature = "jit")]
+const I64_DEPTH_LIMIT: i64 = 1400;
+
+/// Is `op` an integer arithmetic op the i64 worker lowers to a value (Increment 1 subset)?
+/// Add/Sub/Mul are overflow-checked (deopt on overflow → VM → BigInt); the rest are exact.
+#[cfg(feature = "jit")]
+fn i64_arith_op(op: PrimOp) -> bool {
+    matches!(
+        op,
+        PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Min | PrimOp::Max
+    )
+}
+
+/// Is `op` an integer comparison the i64 worker lowers to a 0/1 condition?
+#[cfg(feature = "jit")]
+fn i64_cmp_op(op: PrimOp) -> bool {
+    matches!(op, PrimOp::Lt | PrimOp::Le | PrimOp::Eq)
+}
+
+/// Non-mutating check: is `node` a value-position expression in the i64 worker's subset?
+/// (int `Const`, param `Local(0)`, int arith `Prim2`, a single-arg self-`Call`, or an `If`
+/// whose cond is a comparison and whose branches are values.) Anything else bails the whole
+/// i64 lowering (the arm then uses the general boxed path).
+#[cfg(feature = "jit")]
+fn i64_value_ok(node: &Node, self_sym: Symbol) -> bool {
+    match node {
+        Node::Const(ConstVal::Atom(v)) => v.as_int().is_some(),
+        Node::Local(0) => true,
+        Node::Prim2 { op, a, b, .. } if i64_arith_op(*op) => {
+            i64_value_ok(a, self_sym) && i64_value_ok(b, self_sym)
+        }
+        Node::If(c, t, e) => {
+            i64_cond_ok(c, self_sym) && i64_value_ok(t, self_sym) && i64_value_ok(e, self_sym)
+        }
+        Node::Call {
+            callee,
+            args,
+            tail: false,
+            ..
+        } => {
+            args.len() == 1
+                && matches!(&**callee, Node::Global(s) | Node::GlobalIc { sym: s, .. } if *s == self_sym)
+                && i64_value_ok(&args[0], self_sym)
+        }
+        _ => false,
+    }
+}
+
+/// Non-mutating check: is `node` a condition (comparison) in the i64 worker's subset?
+#[cfg(feature = "jit")]
+fn i64_cond_ok(node: &Node, self_sym: Symbol) -> bool {
+    matches!(node, Node::Prim2 { op, a, b, .. }
+        if i64_cmp_op(*op) && i64_value_ok(a, self_sym) && i64_value_ok(b, self_sym))
+}
+
+/// Shared, `Copy` context threaded through the i64 worker's recursive lowering.
+#[cfg(feature = "jit")]
+#[derive(Clone, Copy)]
+struct I64Ctx {
+    self_sym: crate::core::value::Symbol,
+    self_ref: cranelift_codegen::ir::FuncRef,
+    param_n: cranelift_codegen::ir::Value, // the `n` (Local 0) argument
+    depth: cranelift_codegen::ir::Value,   // this activation's depth
+    ovf: cranelift_codegen::ir::Value,     // *mut u8 overflow sentinel
+    poisoned: cranelift_codegen::ir::Block, // shared unwind target (returns 0)
+}
+
+/// On a signed-overflow flag `ov`: set the overflow sentinel and jump the shared `poisoned`
+/// unwind block; otherwise fall through. Leaves `b` switched to the fall-through block.
+#[cfg(feature = "jit")]
+fn i64_guard_overflow(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    cx: &I64Ctx,
+    ov: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData};
+    let ovset = b.create_block();
+    let cont = b.create_block();
+    b.ins().brif(ov, ovset, &[], cont, &[]);
+    b.seal_block(ovset);
+    b.seal_block(cont);
+    b.switch_to_block(ovset);
+    let one = b.ins().iconst(types::I8, 1);
+    b.ins().store(MemFlagsData::trusted(), one, cx.ovf, 0);
+    b.ins().jump(cx.poisoned, &[]);
+    b.switch_to_block(cont);
+}
+
+/// Lower an integer arithmetic op on two `i64` SSA operands `(x, y)`. Add/Sub/Mul are
+/// overflow-checked (→ set sentinel + unwind, so the wrapper deopts to the VM → BigInt);
+/// Min/Max are exact selects. Leaves `b` at the post-check block; the result is live there.
+#[cfg(feature = "jit")]
+fn lower_i64_arith(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    cx: &I64Ctx,
+    op: PrimOp,
+    x: cranelift_codegen::ir::Value,
+    y: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    match op {
+        PrimOp::Add => {
+            let (r, ov) = b.ins().sadd_overflow(x, y);
+            i64_guard_overflow(b, cx, ov);
+            r
+        }
+        PrimOp::Sub => {
+            let (r, ov) = b.ins().ssub_overflow(x, y);
+            i64_guard_overflow(b, cx, ov);
+            r
+        }
+        PrimOp::Mul => {
+            let (r, ov) = b.ins().smul_overflow(x, y);
+            i64_guard_overflow(b, cx, ov);
+            r
+        }
+        PrimOp::Max => {
+            let c = b.ins().icmp(IntCC::SignedGreaterThanOrEqual, x, y);
+            b.ins().select(c, x, y)
+        }
+        PrimOp::Min => {
+            let c = b.ins().icmp(IntCC::SignedLessThanOrEqual, x, y);
+            b.ins().select(c, x, y)
+        }
+        _ => unreachable!("i64 checker restricts arith ops"),
+    }
+}
+
+/// Lower a value-position node of the i64 subset to an `i64` SSA value. Leaves `b` switched
+/// to the block where the returned value is live. Pre-validated by [`i64_value_ok`].
+#[cfg(feature = "jit")]
+fn lower_i64_value(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    cx: &I64Ctx,
+    node: &Node,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData};
+    match node {
+        Node::Const(ConstVal::Atom(v)) => {
+            let k = v.as_int().expect("i64 checker guarantees an int const");
+            b.ins().iconst(types::I64, k)
+        }
+        Node::Local(0) => cx.param_n,
+        Node::Prim2 { op, a, b: bn, map, .. } => {
+            let va = lower_i64_value(b, cx, a);
+            let vb = lower_i64_value(b, cx, bn);
+            let (x, y) = if map[0] == 0 { (va, vb) } else { (vb, va) };
+            lower_i64_arith(b, cx, *op, x, y)
+        }
+        Node::If(c, t, e) => {
+            let cond = lower_i64_cond(b, cx, c);
+            let then_b = b.create_block();
+            let else_b = b.create_block();
+            let merge = b.create_block();
+            let rv = b.declare_var(types::I64);
+            b.ins().brif(cond, then_b, &[], else_b, &[]);
+            b.seal_block(then_b);
+            b.seal_block(else_b);
+            b.switch_to_block(then_b);
+            let tv = lower_i64_value(b, cx, t);
+            b.def_var(rv, tv);
+            b.ins().jump(merge, &[]);
+            b.switch_to_block(else_b);
+            let ev = lower_i64_value(b, cx, e);
+            b.def_var(rv, ev);
+            b.ins().jump(merge, &[]);
+            b.seal_block(merge);
+            b.switch_to_block(merge);
+            b.use_var(rv)
+        }
+        Node::Call { args, .. } => {
+            // A single-arg self-call (checker-verified). Register calling convention: pass the
+            // arg + depth+1 + the sentinel; no boxing / roots-staging / fast-link dispatch.
+            let a = lower_i64_value(b, cx, &args[0]);
+            let d1 = b.ins().iadd_imm(cx.depth, 1);
+            let call = b.ins().call(cx.self_ref, &[a, d1, cx.ovf]);
+            let r = b.inst_results(call)[0];
+            // If the callee (or a deeper level, or a depth-cap bail) set the sentinel, unwind
+            // now — bounds the post-overflow unwind to O(depth) instead of O(2^depth).
+            let o = b.ins().load(types::I8, MemFlagsData::trusted(), cx.ovf, 0);
+            let cont = b.create_block();
+            b.ins().brif(o, cx.poisoned, &[], cont, &[]);
+            b.seal_block(cont);
+            b.switch_to_block(cont);
+            r
+        }
+        _ => unreachable!("i64 checker guarantees the value subset"),
+    }
+}
+
+/// Lower a condition node (a comparison) to an `i1`. Pre-validated by [`i64_cond_ok`].
+#[cfg(feature = "jit")]
+fn lower_i64_cond(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    cx: &I64Ctx,
+    node: &Node,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    match node {
+        Node::Prim2 { op, a, b: bn, map, .. } => {
+            let va = lower_i64_value(b, cx, a);
+            let vb = lower_i64_value(b, cx, bn);
+            let (x, y) = if map[0] == 0 { (va, vb) } else { (vb, va) };
+            let cc = match op {
+                PrimOp::Lt => IntCC::SignedLessThan,
+                PrimOp::Le => IntCC::SignedLessThanOrEqual,
+                PrimOp::Eq => IntCC::Equal,
+                _ => unreachable!("i64 checker restricts cmp ops"),
+            };
+            b.ins().icmp(cc, x, y)
+        }
+        _ => unreachable!("i64 checker guarantees a comparison cond"),
+    }
+}
+
+/// Lower an int-only single-arg recursive arm (`fib`) to an unboxed-`i64` register worker +
+/// a thin boxed wrapper (the arm's actual entry). Returns the wrapper pointer, or `None` if
+/// the arm isn't eligible / not in the subset (fall back to the general boxed lowering).
+///
+/// The **worker** `fn(n: i64, depth: i64, ovf: *mut u8) -> i64` recurses with register args
+/// (no heap, no roots, no GC — an i64 isn't a handle), overflow-checked; on overflow or the
+/// depth cap it sets `*ovf` and unwinds. The **wrapper** `fn(heap, base) -> outcome` reads the
+/// arg `Value` from `roots[base]`; if it isn't an `Int` → outcome 1 (VM handles); else clears
+/// `*ovf`, calls the worker, and either deopts (outcome 1 → VM recomputes with BigInt) if the
+/// sentinel is set, or boxes the `i64` result into `roots[base]` and returns 0 (Done).
+#[cfg(feature = "jit")]
+fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*const u8> {
+    use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_INT};
+    use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, InstBuilder, MemFlagsData};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_module::{Linkage, Module};
+    use std::sync::atomic::Ordering;
+
+    // Eligibility: single fixed-arg, and inline-eligible (⇒ top-level no-capture recursive
+    // defn, no heap, arithmetic — see `self_inline_probe`), and the body is in the i64 subset.
+    if !arm_i64_eligible(arm) {
+        return None;
+    }
+    let self_sym = arm.inline_name?;
+    let body = &arm.body;
+
+    const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
+    let m = jit.module();
+    let ptr_ty = m.target_config().pointer_type();
+    let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
+
+    // Signatures.
+    let mut wsig = m.make_signature();
+    wsig.params.push(AbiParam::new(types::I64)); // n
+    wsig.params.push(AbiParam::new(types::I64)); // depth
+    wsig.params.push(AbiParam::new(ptr_ty)); // ovf ptr
+    wsig.returns.push(AbiParam::new(types::I64));
+    let worker_id = m
+        .declare_function(&format!("brood_jit_i64w_{seq}"), Linkage::Export, &wsig)
+        .ok()?;
+    let mut xsig = m.make_signature();
+    xsig.params.push(AbiParam::new(ptr_ty)); // heap
+    xsig.params.push(AbiParam::new(types::I64)); // base
+    xsig.returns.push(AbiParam::new(types::I64)); // outcome
+    let wrap_id = m
+        .declare_function(&format!("brood_jit_i64x_{seq}"), Linkage::Export, &xsig)
+        .ok()?;
+    // Wrapper imports.
+    let mut ptr_sig = m.make_signature();
+    ptr_sig.params.push(AbiParam::new(ptr_ty));
+    ptr_sig.returns.push(AbiParam::new(ptr_ty));
+    let rb_id = m
+        .declare_function("brood_rt_roots_base", Linkage::Import, &ptr_sig)
+        .ok()?;
+    let ovp_id = m
+        .declare_function("brood_rt_i64_overflow_ptr", Linkage::Import, &ptr_sig)
+        .ok()?;
+
+    // ---- Worker ----
+    {
+        let mut ctx = m.make_context();
+        ctx.func.signature = wsig;
+        let mut fbctx = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let self_ref = m.declare_func_in_func(worker_id, b.func);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        b.seal_block(entry);
+        let n = b.block_params(entry)[0];
+        let depth = b.block_params(entry)[1];
+        let ovf = b.block_params(entry)[2];
+        let poisoned = b.create_block();
+        // Depth cap → set sentinel + unwind (native-stack guard).
+        let deep = b.create_block();
+        let go = b.create_block();
+        let over = b
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, depth, I64_DEPTH_LIMIT);
+        b.ins().brif(over, deep, &[], go, &[]);
+        b.seal_block(deep);
+        b.seal_block(go);
+        b.switch_to_block(deep);
+        let one = b.ins().iconst(types::I8, 1);
+        b.ins().store(MemFlagsData::trusted(), one, ovf, 0);
+        b.ins().jump(poisoned, &[]);
+        b.switch_to_block(go);
+        let cx = I64Ctx {
+            self_sym,
+            self_ref,
+            param_n: n,
+            depth,
+            ovf,
+            poisoned,
+        };
+        let result = lower_i64_value(&mut b, &cx, body);
+        b.ins().return_(&[result]);
+        // The shared unwind block: returns 0 (garbage — the wrapper deopts on the sentinel).
+        b.switch_to_block(poisoned);
+        let zero = b.ins().iconst(types::I64, 0);
+        b.ins().return_(&[zero]);
+        b.seal_block(poisoned);
+        b.finalize();
+        m.define_function(worker_id, &mut ctx).ok()?;
+        m.clear_context(&mut ctx);
+    }
+
+    // ---- Boxed wrapper (the arm's entry) ----
+    {
+        let mut ctx = m.make_context();
+        ctx.func.signature = xsig;
+        let mut fbctx = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        let worker_ref = m.declare_func_in_func(worker_id, b.func);
+        let rb_ref = m.declare_func_in_func(rb_id, b.func);
+        let ovp_ref = m.declare_func_in_func(ovp_id, b.func);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        b.seal_block(entry);
+        let heap = b.block_params(entry)[0];
+        let base = b.block_params(entry)[1];
+        let rbc = b.ins().call(rb_ref, &[heap]);
+        let rbase = b.inst_results(rbc)[0];
+        let off = b.ins().imul_imm(base, STRIDE);
+        let argaddr = b.ins().iadd(rbase, off);
+        let tag = b.ins().load(types::I8, MemFlagsData::trusted(), argaddr, 0);
+        let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+        let okb = b.create_block();
+        let deopt = b.create_block();
+        b.ins().brif(is_int, okb, &[], deopt, &[]);
+        b.seal_block(okb);
+        b.seal_block(deopt);
+        // Non-Int arg → let the VM run the arm.
+        b.switch_to_block(deopt);
+        let o1 = b.ins().iconst(types::I64, 1);
+        b.ins().return_(&[o1]);
+        // Int arg → unbox, clear sentinel, run the worker.
+        b.switch_to_block(okb);
+        let n = b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), argaddr, PAYLOAD_OFFSET as i32);
+        let ovc = b.ins().call(ovp_ref, &[heap]);
+        let ovf = b.inst_results(ovc)[0];
+        let z0 = b.ins().iconst(types::I8, 0);
+        b.ins().store(MemFlagsData::trusted(), z0, ovf, 0);
+        let d0 = b.ins().iconst(types::I64, 0);
+        let wc = b.ins().call(worker_ref, &[n, d0, ovf]);
+        let r = b.inst_results(wc)[0];
+        let o = b.ins().load(types::I8, MemFlagsData::trusted(), ovf, 0);
+        let doneb = b.create_block();
+        let ovb = b.create_block();
+        b.ins().brif(o, ovb, &[], doneb, &[]);
+        b.seal_block(doneb);
+        b.seal_block(ovb);
+        // Overflowed / bailed → clear sentinel, deopt to VM (recomputes with BigInt).
+        b.switch_to_block(ovb);
+        let z1 = b.ins().iconst(types::I8, 0);
+        b.ins().store(MemFlagsData::trusted(), z1, ovf, 0);
+        let o1b = b.ins().iconst(types::I64, 1);
+        b.ins().return_(&[o1b]);
+        // Done → box the i64 result as an Int into roots[base], outcome 0.
+        b.switch_to_block(doneb);
+        let rbc2 = b.ins().call(rb_ref, &[heap]);
+        let rbase2 = b.inst_results(rbc2)[0];
+        let off2 = b.ins().imul_imm(base, STRIDE);
+        let addr2 = b.ins().iadd(rbase2, off2);
+        let tint = b.ins().iconst(types::I64, TAG_INT as i64);
+        b.ins().store(MemFlagsData::trusted(), tint, addr2, 0);
+        b.ins()
+            .store(MemFlagsData::trusted(), r, addr2, PAYLOAD_OFFSET as i32);
+        let z2 = b.ins().iconst(types::I64, 0);
+        b.ins()
+            .store(MemFlagsData::trusted(), z2, addr2, PAYLOAD_OFFSET as i32 + 8);
+        let d = b.ins().iconst(types::I64, 0);
+        b.ins().return_(&[d]);
+        b.finalize();
+        m.define_function(wrap_id, &mut ctx).ok()?;
+        m.clear_context(&mut ctx);
+    }
+
+    m.finalize_definitions().ok()?;
+    Some(m.get_finalized_function(wrap_id))
 }
 
 /// Keeps the **inlined** body's `Node` + `Chunk` alive for the process lifetime. The

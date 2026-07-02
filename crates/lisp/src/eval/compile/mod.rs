@@ -6086,7 +6086,13 @@ pub(crate) fn jit_tier(
     //      sizing key), set `inline_installed`, and run the VM this one activation. The next
     //      entry sizes the frame to `active_nslots()` (= `inline_nslots`) and runs the inlined
     //      native. One VM activation on the transition — negligible.
-    if arm.inline_name.is_some() && !arm.inline_installed.load(Acquire) {
+    // i64-eligible arms skip the two-stage inline upgrade entirely: their small native IS the
+    // unboxed-i64 register worker (`jit_lower_i64_arm`), which already recurses to full depth in
+    // registers — the boxed depth-2 inlined upgrade would only swap in inferior code.
+    if arm.inline_name.is_some()
+        && !arm.inline_installed.load(Acquire)
+        && !jit_lower::arm_i64_eligible(arm)
+    {
         let ic = arm.inline_code.load(Acquire);
         if ic.is_null() {
             // Shared inlined-native cache (the short-burst lever): before spending our own
