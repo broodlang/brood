@@ -665,3 +665,20 @@ tests use non-recursive fns that never inline, so this path was uncovered. Measu
 Still nothing at N=28 — at ~4ms/task the run is warmup/scheduling-bound, below the point
 where any tier past the small native can land in time; the win is for substantial
 parallel bursts (N≥30). 643 tests + differential + debug verifiers + GC-stress clean.
+
+**Follow-up (same day): inline-depth measured — depth-2 is optimal (NEGATIVE result).**
+Chasing the single-thread `fib` gap to Elixir (Brood ~32 ms vs ~11 ms per fib(31), ~3×),
+tested whether inlining the recursion *deeper* helps. First a **refactor**: the self-inline
+probe and `rederive_inlined_body` had duplicated two-pass logic with "must mirror exactly"
+comments (a footgun — a divergence would size the inlined frame wrong → corruption); deduped
+into one `build_inlined_body`, now the single source of truth for both. Added tunable
+`BROOD_INLINE_DEPTH` (passes, default 2) + `BROOD_INLINE_MAXBODY` (per-pass expansion cap,
+default 64) for A/B. Result (serial 100×fib(31), per-fib): depth-1 41 ms, **depth-2 34 ms
+(default)**, depth-3 32.6 ms (within noise, and needs a global cap bump), depth-4 41 ms,
+depth-5 38 ms. So depth-2 is the sweet spot — deeper saturates then **regresses** (the
+ballooned arm thrashes i-cache in the tight recursion). Confirms the call-protocol overhead
+is no longer the bottleneck; the residual ~3× to Elixir is the **boxed 24-byte `Value`
+arithmetic** (box/unbox + tag-dispatch at every call boundary and every `+`/`-`/`<`), whose
+fix is unboxed-`i64` register-carry through the recursive arm (the f64 carry already exists
+for `mandelbrot`) — a real JIT project, not a surgical change. Default behaviour bit-identical
+(depth=2, 6 blocks); 643 tests + differential clean.
