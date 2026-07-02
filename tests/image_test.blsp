@@ -1,0 +1,37 @@
+;; tests/image_test.blsp — `image-thumb`: decode an encoded image + downscale to a
+;; row-major RGBA8 buffer. The fixture is a hand-built 2×2 PNG (every pixel 10,20,30)
+;; inlined as a byte vector, so the test touches no disk — `image-thumb` accepts a
+;; bytes value, a vector, or a list of byte ints (the `collect_bytes` coercion).
+(defmodule image-test (:use test))
+
+(def *png-2x2*
+  [137 80 78 71 13 10 26 10 0 0 0 13 73 72 68 82 0 0 0 2 0 0 0 2 8 2 0 0 0 253 212
+    154 115 0 0 0 16 73 68 65 84 120 156 99 224 18 145 3 34 6 8 5 0 6 78 0 241 56 99
+    50 129 0 0 0 0 73 69 78 68 174 66 96 130])
+
+(describe "image-thumb: decode + downscale to RGBA"
+  (test "decodes a 2x2 PNG to a {:width :height :rgba} map"
+    (let (t (image-thumb *png-2x2* 8 8))
+      (is (map? t))
+      ; already within 8x8, so the 2x2 source is unchanged
+      (assert= (get t :width) 2)
+      (assert= (get t :height) 2)
+      ; :rgba is a width*height*4 bytes value
+      (is (bytes? (get t :rgba)))
+      (assert= (byte-length (get t :rgba)) 16)
+      ; the first pixel is the fixture colour (10,20,30), fully opaque
+      (let (px (get t :rgba))
+        (assert= [(byte-at px 0) (byte-at px 1) (byte-at px 2) (byte-at px 3)]
+          [10 20 30 255]))))
+
+  (test "downscales to fit the max box, preserving aspect"
+    ;; a 2x2 source capped at 1x1 collapses to 1x1 (one RGBA pixel)
+    (let (t (image-thumb *png-2x2* 1 1))
+      (assert= (get t :width) 1)
+      (assert= (get t :height) 1)
+      (assert= (byte-length (get t :rgba)) 4)))
+
+  (test "non-image bytes and non-positive dims degrade to nil, never throw"
+    (is (nil? (image-thumb (string->utf8-bytes "not an image") 8 8)))
+    (is (nil? (image-thumb *png-2x2* 0 8)))
+    (is (nil? (image-thumb *png-2x2* 8 -1)))))
