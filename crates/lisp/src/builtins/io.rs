@@ -843,6 +843,21 @@ pub(super) fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::nil())
 }
 
+/// `(spit-bytes path bytes)` — write a byte sequence (a `bytes` value, a vector,
+/// or a list of byte ints 0–255) to `path` byte-faithfully, replacing any
+/// existing file. Returns nil. The binary write-side counterpart to `slurp-bytes`:
+/// `spit` is UTF-8 string-only and would reject (or corrupt) raw bytes, so this is
+/// what materialises a received image / archive / any binary asset to disk.
+pub(super) fn spit_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "spit-bytes", arg(args, 0))?;
+    let bytes = collect_bytes("spit-bytes", arg(args, 1), heap)?;
+    std::fs::write(&path, &bytes).map_err(|e| {
+        LispError::runtime(format!("spit-bytes: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(Value::nil())
+}
+
 /// Hash algorithm selector for `%digest` / `%hmac`, decoded from the leading
 /// keyword arg. This is the single place the kernel enumerates digest
 /// algorithms; all string-input and hex-output shaping is Brood policy in
@@ -1414,6 +1429,54 @@ pub(super) fn copy_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             .with_code(crate::error::error_codes::FILE_IO)
     })?;
     Ok(Value::nil())
+}
+
+/// `(image-thumb bytes max-w max-h)` — decode an encoded image (PNG / JPEG / GIF /
+/// WebP / BMP) from a byte sequence and downscale it to fit within `max-w`×`max-h`
+/// pixels (aspect ratio preserved), returning `{:width :height :rgba}` where `:rgba`
+/// is a `width*height*4` bytes value (row-major RGBA8). Returns nil when the bytes
+/// aren't a decodable image or the dims are non-positive — untrusted input degrades
+/// to "not an image" rather than throwing. Per-call decode `Limits` bound a
+/// decompression bomb (≤ 16384² px, ≤ 512 MB alloc). The one image primitive;
+/// rendering (half-block cells, a GUI texture, …) is Brood policy over this buffer.
+pub(super) fn image_thumb(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let bytes = collect_bytes("image-thumb", arg(args, 0), heap)?;
+    let max_w = expect_int(heap, "image-thumb", arg(args, 1))?;
+    let max_h = expect_int(heap, "image-thumb", arg(args, 2))?;
+    if max_w <= 0 || max_h <= 0 {
+        return Ok(Value::nil());
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(512 * 1024 * 1024);
+    let mut reader = match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()
+    {
+        Ok(r) => r,
+        Err(_) => return Ok(Value::nil()),
+    };
+    reader.limits(limits);
+    let Ok(img) = reader.decode() else {
+        return Ok(Value::nil());
+    };
+    // Downscale-only: a source already within the box keeps its native size (never
+    // upscaled — `thumbnail`/`resize` would blow a small image up to fill the box).
+    let thumb = if img.width() <= max_w as u32 && img.height() <= max_h as u32 {
+        img.to_rgba8()
+    } else {
+        img.thumbnail(max_w as u32, max_h as u32).to_rgba8()
+    };
+    let (w, h) = (thumb.width(), thumb.height());
+    // GC-safe: no eval between this alloc and map_from_pairs (a builtin never fires
+    // GC mid-execution), mirroring file_stat holding its string handles.
+    let rgba = bytes_to_value(thumb.as_raw(), heap);
+    let kw = |k: &'static str| Value::keyword(value::intern(k));
+    let pairs = vec![
+        (kw("width"), Value::int(w as i64)),
+        (kw("height"), Value::int(h as i64)),
+        (kw("rgba"), rgba),
+    ];
+    Ok(heap.map_from_pairs(pairs))
 }
 
 /// `(file-mtime path)` — last-modified time of `path` as epoch-milliseconds, or
