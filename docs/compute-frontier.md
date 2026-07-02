@@ -1,6 +1,38 @@
 # Plan — the post-JIT single-threaded compute frontier
 
-> ## ⏯ RESUME HERE (2026-06-20) — current perf state + 5-item work queue
+> ## ⏯ RESUME HERE (2026-07-02) — unboxed-register JIT + HOF fast path shipped
+>
+> The big lever since 2026-06-20 (full play-by-play in `docs/devlog.md`, 2026-07-02): an
+> **unboxed-register JIT calling convention** for int-/float-only recursive arms. A `fib`-class arm
+> lowers to a compact worker `fn(a0..aN: i64|f64, depth, ovf) -> …` (`jit_lower_i64_arm` in
+> `eval/compile/jit_lower.rs`) that recurses with args/results in **registers** — no boxing /
+> roots-staging / fast-link dispatch at the recursive call boundary (the Increment-0 profile showed
+> that protocol is ~55% of `fib`). Overflow-checked int → deopt to BigInt; float has no overflow
+> (IEEE inf/NaN valid); covers multi-arg, `let`/`do`, rem/quot/bitwise (int) and `+ - * /` (float); a
+> native-depth cap deopts deep recursion to the boxed path. Default-on (`BROOD_NO_I64` opts out).
+> Fuzz-hardened: ~1600 chaotic int+float differential programs + boundary torture + concurrency/
+> GC_STRESS, **0 bugs**; regression guard `tests/unbox_torture_test.blsp` + `scripts/fuzz_unbox.py`.
+> - **`fib` 227→~52 ms (5th→2nd, beats Elixir & Node); `pfib` N=31 847→~152 ms (5th→2nd, 1.3× off .NET).**
+> Also shipped: a **HOF closure-call fast path** (`range_reduce` caches the step closure's arm once →
+> `nqueens` ~9%; `BROOD_NO_HOF`), and **`let*` removed** (Brood's `let` is already sequential).
+>
+> - **Standings** (single-thread aggregate compute vs fastest): .NET 1.0× · Node 2.6× ·
+>   **Brood 3.0× (3rd of 7, ahead of Elixir 3.7×)** · Clojure ~8× · Ruby 11.7× · Python 26.9×.
+>   Up from **6.0× / 4th** at 2026-06-20. Also fixed the `pfib` parallel-scaling cascade (per-process
+>   fast-link invalidation + shared inlined native) — green scheduling now ~93% of the machine ceiling.
+>
+> - **Next levers** (profiled; details in `todo.md`):
+>   1. **Capturing-closure fast-link / lean HOF call** — `nqueens`/`pipeline` are per-element
+>      closure-*dispatch* bound (NOT allocation — profiled). Pipeline's blocker CONFIRMED:
+>      `eduction`'s transducer step closures capture → `vm_call_ic_fast_link` bails on
+>      `!capture_names.is_empty()` → dispatch fallthrough. Fix = fill capture slots in the fast-frame
+>      (index-copy from the flat env) + drop the bail. Ceiling ~1.4–1.5× on `pipeline`. **RISK: the
+>      hottest JIT path — full gate+fuzz.** Increment-0 done, GO.
+>   2. **Unboxed arrays** (`matmul` — boxed 24-byte `Value` array reads; profile: `vector_ref` ~14%).
+>      The "monomorphic → unboxed" theme applied to *storage*.
+>   3. Interpreter/dispatch cost still bounds every un-JIT'd row.
+
+> ## ⏯ RESUME HERE (2026-06-20, historical) — current perf state + 5-item work queue
 >
 > The newest work is the **JIT call-dispatch + loop-overhead** round (full play-by-play in
 > `docs/devlog.md`, entries 2026-06-18/19). Status:
