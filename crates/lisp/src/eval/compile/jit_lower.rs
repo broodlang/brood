@@ -517,9 +517,11 @@ pub(crate) fn arm_i64_too_deep(arm: &CompiledArm) -> bool {
 }
 
 /// Is `op` an arithmetic op the worker lowers to a value, for scalar `kind`? Int: Add/Sub/Mul
-/// (overflow-checked → deopt to BigInt), Min/Max, Rem/Quot (guarded), bitops. Float: Add/Sub/Mul
-/// (no overflow — IEEE) and Div; NOT Min/Max (Cranelift `fmin`/`fmax` NaN semantics differ from
-/// the VM's) nor the int-only ops (rem/quot/bitwise are int-domain).
+/// (overflow-checked → deopt to BigInt), Min/Max, Rem/Quot/Div (all guarded — an inexact Div
+/// deopts too, since the VM's `/` returns a Float in that case and the int worker can't produce
+/// one), bitops. Float: Add/Sub/Mul (no overflow — IEEE) and Div; NOT Min/Max (Cranelift
+/// `fmin`/`fmax` NaN semantics differ from the VM's) nor the int-only ops (rem/quot/bitwise are
+/// int-domain).
 #[cfg(feature = "jit")]
 fn i64_arith_op(kind: Scalar, op: PrimOp) -> bool {
     match kind {
@@ -532,6 +534,7 @@ fn i64_arith_op(kind: Scalar, op: PrimOp) -> bool {
                 | PrimOp::Max
                 | PrimOp::Rem
                 | PrimOp::Quot
+                | PrimOp::Div
                 | PrimOp::BitAnd
                 | PrimOp::BitOr
                 | PrimOp::BitXor
@@ -702,10 +705,10 @@ fn lower_i64_arith(
             let c = b.ins().icmp(IntCC::SignedLessThanOrEqual, x, y);
             b.ins().select(c, x, y)
         }
-        // `rem`/`quot`: `sdiv`/`srem` TRAP on a zero divisor and on `i64::MIN / -1`, so guard
+        // `rem`/`quot`/`div`: `sdiv`/`srem` TRAP on a zero divisor and on `i64::MIN / -1`, so guard
         // both → sentinel + unwind (the wrapper deopts; the VM raises the ÷0 error / does the
         // edge, staying bit-identical). Reuses `i64_guard_overflow` with the bail condition.
-        PrimOp::Rem | PrimOp::Quot => {
+        PrimOp::Rem | PrimOp::Quot | PrimOp::Div => {
             let zero = b.ins().iconst(cranelift_codegen::ir::types::I64, 0);
             let div0 = b.ins().icmp(IntCC::Equal, y, zero);
             i64_guard_overflow(b, cx, div0);
@@ -720,6 +723,16 @@ fn lower_i64_arith(
             match op {
                 PrimOp::Rem => b.ins().srem(x, y),
                 PrimOp::Quot => b.ins().sdiv(x, y),
+                // `/` on two ints is an Int result only when it divides evenly (matching
+                // `prim_apply`'s inline fast path, `compile/mod.rs`); a nonzero remainder
+                // means the VM would build a Float, which this worker can't return — guard
+                // it as inexact and deopt (the VM recomputes with full generality).
+                PrimOp::Div => {
+                    let r = b.ins().srem(x, y);
+                    let inexact = b.ins().icmp(IntCC::NotEqual, r, zero);
+                    i64_guard_overflow(b, cx, inexact);
+                    b.ins().sdiv(x, y)
+                }
                 _ => unreachable!(),
             }
         }

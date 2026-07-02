@@ -833,3 +833,33 @@ doesn't touch `pipeline` (whose `eduction` folds through the JIT'd Brood `reduce
 not the Rust `range_reduce` driver). The real win is the **lean-native-call lever** (call a JIT'd
 closure directly via the fast-frame protocol, skipping the per-element trampoline) — scoped in
 `todo.md`.
+
+## 2026-07-02 — `todo.md` triage: int `Div` shipped for the unboxed-i64 worker; two items were already done
+
+Went through `todo.md`'s open items looking for small, well-scoped work. Two turned out to already
+be shipped, just never checked off:
+- **Operand-position unbound lint** (noted as "attempted TWICE, reverted, real checker work needed"):
+  `Ctx::enable_operand_checks()` is unconditionally on in `check_file`, which now macroexpands +
+  pre-loads the whole project image before walking — so both blockers cited (unbound `match`-pattern
+  vars, cross-file globals) no longer apply. `nest check` across the whole repo produces zero
+  `unbound symbol` false positives (checked `pattern_matching_test.blsp` specifically — the file the
+  original false positive was on), and correctly flags a real unbound name on a scratch file.
+- **GoL finding #4** (spawned-process GC threshold vs. the depth-1 path ballooning to ~1.1 GB): already
+  fixed — `gc_floor()` (`core/heap.rs:319`) divides the pre-GC object budget across the live process
+  count, and its own doc comment names this exact scenario ("the fix for the `pfib` 1-GB blowup").
+
+The one real gap was **int `Div` in the unboxed-i64 register worker** (`jit_lower.rs`). Unlike
+`Rem`/`Quot`, `Scalar::Int`'s arith set never included `Div` — so *any* int-recursive arm using `/`
+was ineligible for the worker at all (`arm_scalar_kind` bailed the whole arm to the boxed path, not
+just that one operator). Fixed by adding `Div` to `i64_arith_op`'s `Scalar::Int` case and extending
+`lower_i64_arith`'s `Rem | Quot` guard block to also cover `Div`: the existing ÷0 and `i64::MIN/-1`
+guards apply unchanged, plus one more — a nonzero `srem` remainder ("inexact") — since the VM's `/`
+on two ints only returns an `Int` when it divides evenly (`compile/mod.rs` `prim_apply`'s inline fast
+path); anything else is a deopt to the VM, which builds the `Float` the worker can't represent.
+Mirrors the already-proven `Rem`/`Quot` guard shape exactly.
+
+Added coverage to `tests/unbox_torture_test.blsp`: exact `/` stays in the worker end-to-end
+(`ut-div`), an inexact `/` deopts to the same `Float` the boxed path (`BROOD_NO_I64=1`) produces
+(`ut-div-inexact`), and ÷0 raises the VM's exact error (`ut-div-slash0`). Verified clean under
+`BROOD_JIT_VERIFY=1`+`BROOD_GC_VERIFY=1` (debug-assertions build), `BROOD_GC_STRESS=1`, and the full
+643-test suite (`make test`, incl. the in-language `brood::suite`). Clippy clean.
