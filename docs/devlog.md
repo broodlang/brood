@@ -790,3 +790,24 @@ GUI with zero `gui.rs` changes). Registered in the `def` table
 `tests/image_test.blsp` (3): decode a hand-built 2×2 PNG fixture (inlined as a byte
 vector — no disk) to the right dims + first pixel, downscale-to-fit, and
 nil-on-non-image / non-positive-dims. 3/3 pass.
+
+## 2026-07-02 — unboxed register worker: f64 sibling (float recursion)
+
+Completed the unboxed lever with a **float** worker, by **parameterizing** the whole i64 worker on a
+`Scalar {Int, Float}` kind rather than duplicating it (avoids the "two copies must mirror" footgun):
+`const`/`arith`/`cmp`/`box` switch on the kind; the depth-bail cliff, `let`/multi-arg, poisoned
+unwind, and the boxed wrapper are shared. **Float is simpler than int**: no overflow (IEEE `inf`/`NaN`
+are valid results → it never deopts for arithmetic), ordered `fcmp` (NaN→false, matching the VM's Rust
+`<`). The float arith subset is `+ - * /` only — `min`/`max` are excluded because Cranelift
+`fmin`/`fmax` NaN semantics differ from the VM (those arms fall to boxed). An arm's kind is pinned by
+its base-case threshold const (`(< x 2)` → Int, `(< x 2.0)` → Float); a mixed-int/float body matches
+neither and stays boxed (and the wrapper tag-checks every arg, so a wrong-typed call deopts). Unboxed
+float recursion is a large win (boxed float fib is *very* slow — box/unbox per f64).
+
+Validated hard (the "go chaotic, no crashes" pass): 643 tests on the parameterized code (i64 not
+regressed); a differential fuzzer over ~1600 chaotic terminating programs (int + float; random
+arities/shapes/ops, adversarial consts incl. `i64::MAX/MIN`, `0`, `1e100`) — **0 crashes, 0 JIT-vs-VM
+mismatches**; boundary torture (exact cliff depths, `i64::MIN/-1`, overflow-at-depth, `inf`); a
+400-process concurrency + hot-reload chaos; and `BROOD_GC_STRESS` — all clean, under the use-after-GC
+tripwire + `JIT_VERIFY` + `GC_VERIFY`. Remaining deferred: int `Div` (inexact→float→deopt) and the
+scoped unboxed-array lever for `matmul`.

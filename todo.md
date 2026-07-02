@@ -93,8 +93,16 @@ shared-inline cache (i64 entry is deterministic → shareable, another tier).
   (c) DONE: `let`/`do` in the body — `let` binders carried in SSA vars (`I64Ctx::slot_vars`),
   forward-refs rejected by the checker's scope set; `do` lowers only its last form (pure subset).
   4.7× on shallow-wide let-using recursion. (d) DONE: Rem/Quot (÷0 + i64::MIN/-1 guards → deopt),
-  BitAnd/BitOr/BitXor. (÷0 raises the exact VM error via deopt.) STILL TODO: Div (inexact → deopt,
-  float semantics), and an f64 sibling worker for non-tail float recursion.
+  BitAnd/BitOr/BitXor. (÷0 raises the exact VM error via deopt.)
+- **f64 sibling — DONE 2026-07-02.** Parameterized the whole worker by a `Scalar {Int,Float}` kind
+  (single source, no i64/f64 duplication) — const/arith/cmp/box switch on kind; the depth-bail,
+  let/multi-arg, and wrapper scaffolding are shared. Float is simpler: NO overflow (IEEE inf/NaN are
+  valid → never deopt), ordered `fcmp` (NaN→false, matches the VM's Rust `<`). Float arith = `+ - * /`
+  only (excluded Min/Max — Cranelift fmin/fmax NaN semantics differ; they fall to boxed). Kind is
+  pinned by the base-case threshold const (`(< x 2)` int vs `(< x 2.0)` float); mixed-type bodies
+  match neither → boxed. Validated: 643 suite on parameterized code, float fuzz 300 + i64-regression
+  fuzz 250 (0 bugs), int+float torture + concurrency/GC_STRESS chaos all clean. Remaining deferred:
+  int `Div` (inexact→float→deopt); unboxed arrays for `matmul` (the bigger scoped lever).
 
 **Measure.** serial 100×fib(31) 32→~15 ms · `fib` 224→~110 ms · `pfib` N=31 847→~450 ms ·
 `fib(100)`→BigInt correct · full suite + differential + GC-stress. Session memory:

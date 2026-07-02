@@ -395,36 +395,69 @@ fn jit_i64_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_I64").is_none())
 }
 
-/// Does this arm take the unboxed-`i64` fast path? Gate on + single fixed-arg + inline-eligible
-/// (⇒ top-level no-capture recursive defn, no heap, arithmetic) + the body is in the i64 subset.
-/// [`jit_tier`] consults this to **skip the two-stage inline upgrade** for such arms — the i64
-/// worker already recurses in registers to full depth, so the boxed depth-2 upgrade (which would
-/// otherwise swap out the i64 small native) is inferior and must not fire.
+/// The scalar the unboxed register worker specializes to. `Int` (i64, overflow-checked → deopt
+/// to BigInt) or `Float` (f64, no overflow — IEEE inf/NaN are valid float results).
 #[cfg(feature = "jit")]
-pub(crate) fn arm_i64_eligible(arm: &CompiledArm) -> bool {
+#[derive(Clone, Copy, PartialEq)]
+enum Scalar {
+    Int,
+    Float,
+}
+
+#[cfg(feature = "jit")]
+impl Scalar {
+    fn clif(self) -> cranelift_codegen::ir::Type {
+        match self {
+            Scalar::Int => cranelift_codegen::ir::types::I64,
+            Scalar::Float => cranelift_codegen::ir::types::F64,
+        }
+    }
+    fn tag(self) -> u8 {
+        match self {
+            Scalar::Int => crate::core::value::jit_layout::TAG_INT,
+            Scalar::Float => crate::core::value::jit_layout::TAG_FLOAT,
+        }
+    }
+}
+
+/// Which unboxed scalar (if any) this arm's register worker can specialize to: `Int` if the body
+/// is an int-only recursive subset, `Float` if float-only, else `None` (use the boxed path). The
+/// base-case threshold const (`(< x 2)` vs `(< x 2.0)`) pins the kind, so a terminating recursion
+/// is never ambiguous; a mixed-type body matches neither and stays boxed. Gate + single-or-more
+/// fixed args + no-capture + top-level (`dbg_name`) + recursive + not-previously-too-deep.
+#[cfg(feature = "jit")]
+fn arm_scalar_kind(arm: &CompiledArm) -> Option<Scalar> {
     if !jit_i64_enabled()
         || arm.nrequired < 1
         || arm.noptional != 0
         || arm.rest_slot.is_some()
         || !arm.capture_names.is_empty()
     {
-        return false;
+        return None;
     }
     // Use `dbg_name` (every top-level defn has it) rather than `inline_name` (set only when the
     // arm ALSO qualifies for the depth-2 inliner — which excludes e.g. Ackermann, whose inlined
-    // expansion is too big). The i64 path needs no inlining; it just needs the self symbol.
-    let self_sym = match arm.dbg_name {
-        Some(s) => s,
-        None => return false,
-    };
+    // expansion is too big). The worker needs no inlining; it just needs the self symbol.
+    let self_sym = arm.dbg_name?;
     // A prior depth-bail switched this fn to the boxed path (which drains deep recursion).
-    if i64_too_deep(self_sym) {
-        return false;
+    if i64_too_deep(self_sym) || !i64_has_self_call(&arm.body) {
+        return None;
     }
-    // In the i64 subset, and actually recursive (a leaf int fn shouldn't pay the wrapper→worker
-    // call — the existing inline path is already tight for it).
-    i64_value_ok(&arm.body, self_sym, arm.nrequired, &std::collections::HashSet::new())
-        && i64_has_self_call(&arm.body)
+    let empty = std::collections::HashSet::new();
+    for kind in [Scalar::Int, Scalar::Float] {
+        if i64_value_ok(&arm.body, self_sym, arm.nrequired, &empty, kind) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+/// Does this arm take an unboxed register worker? [`jit_tier`] consults this to **skip the
+/// two-stage inline upgrade** for such arms — the worker already recurses in registers to full
+/// depth, so the boxed depth-2 upgrade (which would swap out the worker) is inferior.
+#[cfg(feature = "jit")]
+pub(crate) fn arm_i64_eligible(arm: &CompiledArm) -> bool {
+    arm_scalar_kind(arm).is_some()
 }
 
 /// Does `node` contain a self-`Call`? In the i64-validated subset every `Node::Call` is a
@@ -486,23 +519,28 @@ pub(crate) fn arm_i64_too_deep(arm: &CompiledArm) -> bool {
     arm.dbg_name.is_some_and(i64_too_deep)
 }
 
-/// Is `op` an integer arithmetic op the i64 worker lowers to a value (Increment 1 subset)?
-/// Add/Sub/Mul are overflow-checked (deopt on overflow → VM → BigInt); the rest are exact.
+/// Is `op` an arithmetic op the worker lowers to a value, for scalar `kind`? Int: Add/Sub/Mul
+/// (overflow-checked → deopt to BigInt), Min/Max, Rem/Quot (guarded), bitops. Float: Add/Sub/Mul
+/// (no overflow — IEEE) and Div; NOT Min/Max (Cranelift `fmin`/`fmax` NaN semantics differ from
+/// the VM's) nor the int-only ops (rem/quot/bitwise are int-domain).
 #[cfg(feature = "jit")]
-fn i64_arith_op(op: PrimOp) -> bool {
-    matches!(
-        op,
-        PrimOp::Add
-            | PrimOp::Sub
-            | PrimOp::Mul
-            | PrimOp::Min
-            | PrimOp::Max
-            | PrimOp::Rem
-            | PrimOp::Quot
-            | PrimOp::BitAnd
-            | PrimOp::BitOr
-            | PrimOp::BitXor
-    )
+fn i64_arith_op(kind: Scalar, op: PrimOp) -> bool {
+    match kind {
+        Scalar::Int => matches!(
+            op,
+            PrimOp::Add
+                | PrimOp::Sub
+                | PrimOp::Mul
+                | PrimOp::Min
+                | PrimOp::Max
+                | PrimOp::Rem
+                | PrimOp::Quot
+                | PrimOp::BitAnd
+                | PrimOp::BitOr
+                | PrimOp::BitXor
+        ),
+        Scalar::Float => matches!(op, PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div),
+    }
 }
 
 /// Is `op` an integer comparison the i64 worker lowers to a 0/1 condition?
@@ -521,19 +559,26 @@ fn i64_value_ok(
     self_sym: Symbol,
     nargs: usize,
     bound: &std::collections::HashSet<usize>,
+    kind: Scalar,
 ) -> bool {
     match node {
-        Node::Const(ConstVal::Atom(v)) => v.as_int().is_some(),
+        // A const must match the worker's scalar (`as_int`/`as_f64` are `Some` only for that
+        // kind), so a mixed-type body matches neither kind and stays boxed.
+        Node::Const(ConstVal::Atom(v)) => match kind {
+            Scalar::Int => v.as_int().is_some(),
+            Scalar::Float => v.as_f64().is_some(),
+        },
         // A param slot, or a `let` binder already in scope (a forward/unbound read bails —
         // the worker carries binders in SSA vars that must be def'd before use).
         Node::Local(k) => *k < nargs || bound.contains(k),
-        Node::Prim2 { op, a, b, .. } if i64_arith_op(*op) => {
-            i64_value_ok(a, self_sym, nargs, bound) && i64_value_ok(b, self_sym, nargs, bound)
+        Node::Prim2 { op, a, b, .. } if i64_arith_op(kind, *op) => {
+            i64_value_ok(a, self_sym, nargs, bound, kind)
+                && i64_value_ok(b, self_sym, nargs, bound, kind)
         }
         Node::If(c, t, e) => {
-            i64_cond_ok(c, self_sym, nargs, bound)
-                && i64_value_ok(t, self_sym, nargs, bound)
-                && i64_value_ok(e, self_sym, nargs, bound)
+            i64_cond_ok(c, self_sym, nargs, bound, kind)
+                && i64_value_ok(t, self_sym, nargs, bound, kind)
+                && i64_value_ok(e, self_sym, nargs, bound, kind)
         }
         Node::Call {
             callee,
@@ -543,45 +588,49 @@ fn i64_value_ok(
         } => {
             args.len() == nargs
                 && matches!(&**callee, Node::Global(s) | Node::GlobalIc { sym: s, .. } if *s == self_sym)
-                && args.iter().all(|a| i64_value_ok(a, self_sym, nargs, bound))
+                && args.iter().all(|a| i64_value_ok(a, self_sym, nargs, bound, kind))
         }
         // `let`/`let*`: each rhs must be in-subset in the scope built so far (so a `letrec`
         // forward-ref bails), then its slot joins the scope for later binds + the body.
         Node::LetBind { binds, body } => {
             let mut scope = bound.clone();
             for (slot, rhs) in binds.iter() {
-                if !i64_value_ok(rhs, self_sym, nargs, &scope) {
+                if !i64_value_ok(rhs, self_sym, nargs, &scope, kind) {
                     return false;
                 }
                 scope.insert(*slot);
             }
-            i64_value_ok(body, self_sym, nargs, &scope)
+            i64_value_ok(body, self_sym, nargs, &scope, kind)
         }
         // `do`: pure in this subset, so only the last form's value matters (the worker lowers
         // just that) — but validate every form is in-subset (else the whole arm bails).
-        Node::Do(xs) => !xs.is_empty() && xs.iter().all(|x| i64_value_ok(x, self_sym, nargs, bound)),
+        Node::Do(xs) => {
+            !xs.is_empty() && xs.iter().all(|x| i64_value_ok(x, self_sym, nargs, bound, kind))
+        }
         _ => false,
     }
 }
 
-/// Non-mutating check: is `node` a condition (comparison) in the i64 worker's subset?
+/// Non-mutating check: is `node` a condition (comparison) in the worker's subset for `kind`?
 #[cfg(feature = "jit")]
 fn i64_cond_ok(
     node: &Node,
     self_sym: Symbol,
     nargs: usize,
     bound: &std::collections::HashSet<usize>,
+    kind: Scalar,
 ) -> bool {
     matches!(node, Node::Prim2 { op, a, b, .. }
-        if i64_cmp_op(*op) && i64_value_ok(a, self_sym, nargs, bound) && i64_value_ok(b, self_sym, nargs, bound))
+        if i64_cmp_op(*op) && i64_value_ok(a, self_sym, nargs, bound, kind) && i64_value_ok(b, self_sym, nargs, bound, kind))
 }
 
 /// Shared context threaded through the i64 worker's recursive lowering.
 #[cfg(feature = "jit")]
 struct I64Ctx {
+    kind: Scalar, // Int (i64) or Float (f64) — selects const/arith/cmp/box lowering
     self_sym: crate::core::value::Symbol,
     self_ref: cranelift_codegen::ir::FuncRef,
-    params: Vec<cranelift_codegen::ir::Value>, // the arm's `nargs` i64 params (`Local(k)`)
+    params: Vec<cranelift_codegen::ir::Value>, // the arm's `nargs` params (`Local(k)`)
     // `let` binder slots → their SSA variable (index = frame slot; `None` for a param slot).
     // A `Local(k)` with `k >= nargs` reads `use_var(slot_vars[k])`; a `LetBind` `def_var`s it.
     slot_vars: Vec<Option<cranelift_frontend::Variable>>,
@@ -623,6 +672,16 @@ fn lower_i64_arith(
     y: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    // Float: plain IEEE ops, no overflow (inf/NaN are valid results) — far simpler than int.
+    if cx.kind == Scalar::Float {
+        return match op {
+            PrimOp::Add => b.ins().fadd(x, y),
+            PrimOp::Sub => b.ins().fsub(x, y),
+            PrimOp::Mul => b.ins().fmul(x, y),
+            PrimOp::Div => b.ins().fdiv(x, y),
+            _ => unreachable!("float checker restricts arith ops to +,-,*,/"),
+        };
+    }
     match op {
         PrimOp::Add => {
             let (r, ov) = b.ins().sadd_overflow(x, y);
@@ -685,10 +744,10 @@ fn lower_i64_value(
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData};
     match node {
-        Node::Const(ConstVal::Atom(v)) => {
-            let k = v.as_int().expect("i64 checker guarantees an int const");
-            b.ins().iconst(types::I64, k)
-        }
+        Node::Const(ConstVal::Atom(v)) => match cx.kind {
+            Scalar::Int => b.ins().iconst(types::I64, v.as_int().expect("int const")),
+            Scalar::Float => b.ins().f64const(v.as_f64().expect("float const")),
+        },
         Node::Local(k) => match cx.slot_vars[*k] {
             Some(var) => b.use_var(var), // a `let` binder
             None => cx.params[*k],       // a param
@@ -716,7 +775,7 @@ fn lower_i64_value(
             let then_b = b.create_block();
             let else_b = b.create_block();
             let merge = b.create_block();
-            let rv = b.declare_var(types::I64);
+            let rv = b.declare_var(cx.kind.clif());
             b.ins().brif(cond, then_b, &[], else_b, &[]);
             b.seal_block(then_b);
             b.seal_block(else_b);
@@ -763,21 +822,38 @@ fn lower_i64_cond(
     cx: &I64Ctx,
     node: &Node,
 ) -> cranelift_codegen::ir::Value {
-    use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
+    use cranelift_codegen::ir::{
+        condcodes::{FloatCC, IntCC},
+        InstBuilder,
+    };
     match node {
         Node::Prim2 { op, a, b: bn, map, .. } => {
             let va = lower_i64_value(b, cx, a);
             let vb = lower_i64_value(b, cx, bn);
             let (x, y) = if map[0] == 0 { (va, vb) } else { (vb, va) };
-            let cc = match op {
-                PrimOp::Lt => IntCC::SignedLessThan,
-                PrimOp::Le => IntCC::SignedLessThanOrEqual,
-                PrimOp::Eq => IntCC::Equal,
-                _ => unreachable!("i64 checker restricts cmp ops"),
-            };
-            b.ins().icmp(cc, x, y)
+            match cx.kind {
+                Scalar::Int => {
+                    let cc = match op {
+                        PrimOp::Lt => IntCC::SignedLessThan,
+                        PrimOp::Le => IntCC::SignedLessThanOrEqual,
+                        PrimOp::Eq => IntCC::Equal,
+                        _ => unreachable!("checker restricts cmp ops"),
+                    };
+                    b.ins().icmp(cc, x, y)
+                }
+                // Ordered float compares (NaN → false), matching the VM's Rust `<`/`<=`/`==`.
+                Scalar::Float => {
+                    let cc = match op {
+                        PrimOp::Lt => FloatCC::LessThan,
+                        PrimOp::Le => FloatCC::LessThanOrEqual,
+                        PrimOp::Eq => FloatCC::Equal,
+                        _ => unreachable!("checker restricts cmp ops"),
+                    };
+                    b.ins().fcmp(cc, x, y)
+                }
+            }
         }
-        _ => unreachable!("i64 checker guarantees a comparison cond"),
+        _ => unreachable!("checker guarantees a comparison cond"),
     }
 }
 
@@ -793,17 +869,15 @@ fn lower_i64_cond(
 /// sentinel is set, or boxes the `i64` result into `roots[base]` and returns 0 (Done).
 #[cfg(feature = "jit")]
 fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*const u8> {
-    use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_INT};
+    use crate::core::value::jit_layout::PAYLOAD_OFFSET;
     use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, InstBuilder, MemFlagsData};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use cranelift_module::{Linkage, Module};
     use std::sync::atomic::Ordering;
 
-    // Eligibility: single fixed-arg, and inline-eligible (⇒ top-level no-capture recursive
-    // defn, no heap, arithmetic — see `self_inline_probe`), and the body is in the i64 subset.
-    if !arm_i64_eligible(arm) {
-        return None;
-    }
+    // Eligibility + which scalar (Int/Float) this arm's worker specializes to.
+    let kind = arm_scalar_kind(arm)?;
+    let sty = kind.clif(); // i64 or f64 — the worker's arg/result register type
     let self_sym = arm.dbg_name?;
     let body = &arm.body;
     let nargs = arm.nrequired;
@@ -813,14 +887,14 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
     let ptr_ty = m.target_config().pointer_type();
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
 
-    // Signatures. Worker: (a0..a_{nargs-1}: i64, depth: i64, ovf: *mut u8) -> i64.
+    // Signatures. Worker: (a0..a_{nargs-1}: sty, depth: i64, ovf: *mut u8) -> sty.
     let mut wsig = m.make_signature();
     for _ in 0..nargs {
-        wsig.params.push(AbiParam::new(types::I64)); // an arg
+        wsig.params.push(AbiParam::new(sty)); // an arg (i64 or f64)
     }
-    wsig.params.push(AbiParam::new(types::I64)); // depth
+    wsig.params.push(AbiParam::new(types::I64)); // depth (always i64)
     wsig.params.push(AbiParam::new(ptr_ty)); // ovf ptr
-    wsig.returns.push(AbiParam::new(types::I64));
+    wsig.returns.push(AbiParam::new(sty));
     let worker_id = m
         .declare_function(&format!("brood_jit_i64w_{seq}"), Linkage::Export, &wsig)
         .ok()?;
@@ -883,13 +957,17 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
             if k < nargs {
                 slot_vars.push(None);
             } else {
-                let v = b.declare_var(types::I64);
-                let z = b.ins().iconst(types::I64, 0);
+                let v = b.declare_var(sty);
+                let z = match kind {
+                    Scalar::Int => b.ins().iconst(types::I64, 0),
+                    Scalar::Float => b.ins().f64const(0.0),
+                };
                 b.def_var(v, z);
                 slot_vars.push(Some(v));
             }
         }
         let cx = I64Ctx {
+            kind,
             self_sym,
             self_ref,
             params,
@@ -900,9 +978,12 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         };
         let result = lower_i64_value(&mut b, &cx, body);
         b.ins().return_(&[result]);
-        // The shared unwind block: returns 0 (garbage — the wrapper deopts on the sentinel).
+        // The shared unwind block: returns a kind-zero (garbage — the wrapper deopts on the sentinel).
         b.switch_to_block(poisoned);
-        let zero = b.ins().iconst(types::I64, 0);
+        let zero = match kind {
+            Scalar::Int => b.ins().iconst(types::I64, 0),
+            Scalar::Float => b.ins().f64const(0.0),
+        };
         b.ins().return_(&[zero]);
         b.seal_block(poisoned);
         b.finalize();
@@ -932,26 +1013,32 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         let rbase = b.inst_results(rbc)[0];
         let off = b.ins().imul_imm(base, STRIDE);
         let argbase = b.ins().iadd(rbase, off);
-        // Every arg must be an Int, else deopt to the VM (which handles the real shapes).
+        // Every arg must match the worker's scalar (Int/Float), else deopt to the VM.
         let deopt = b.create_block();
         for k in 0..nargs {
             let slot_off = (k as i64) * STRIDE;
             let tag = b
                 .ins()
                 .load(types::I8, MemFlagsData::trusted(), argbase, slot_off as i32);
-            let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+            let is_ok = b.ins().icmp_imm(IntCC::Equal, tag, kind.tag() as i64);
             let nxt = b.create_block();
-            b.ins().brif(is_int, nxt, &[], deopt, &[]);
+            b.ins().brif(is_ok, nxt, &[], deopt, &[]);
             b.seal_block(nxt);
             b.switch_to_block(nxt);
         }
         b.seal_block(deopt);
-        // All Int → load the payloads, clear the sentinel, run the worker in registers.
+        // All args match → load the payloads (a float's bits bitcast to f64), clear the sentinel,
+        // run the worker in registers.
         let mut wargs: Vec<cranelift_codegen::ir::Value> = (0..nargs)
             .map(|k| {
                 let slot_off = (k as i64) * STRIDE + PAYLOAD_OFFSET as i64;
-                b.ins()
-                    .load(types::I64, MemFlagsData::trusted(), argbase, slot_off as i32)
+                let bits = b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), argbase, slot_off as i32);
+                match kind {
+                    Scalar::Int => bits,
+                    Scalar::Float => b.ins().bitcast(types::F64, MemFlagsData::new(), bits),
+                }
             })
             .collect();
         let ovc = b.ins().call(ovp_ref, &[heap]);
@@ -992,10 +1079,15 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         let rbase2 = b.inst_results(rbc2)[0];
         let off2 = b.ins().imul_imm(base, STRIDE);
         let addr2 = b.ins().iadd(rbase2, off2);
-        let tint = b.ins().iconst(types::I64, TAG_INT as i64);
-        b.ins().store(MemFlagsData::trusted(), tint, addr2, 0);
+        let tagv = b.ins().iconst(types::I64, kind.tag() as i64);
+        b.ins().store(MemFlagsData::trusted(), tagv, addr2, 0);
+        // Payload: an int as-is; a float's f64 bitcast to its i64 bits ([TAG_FLOAT, bits, 0]).
+        let payload = match kind {
+            Scalar::Int => r,
+            Scalar::Float => b.ins().bitcast(types::I64, MemFlagsData::new(), r),
+        };
         b.ins()
-            .store(MemFlagsData::trusted(), r, addr2, PAYLOAD_OFFSET as i32);
+            .store(MemFlagsData::trusted(), payload, addr2, PAYLOAD_OFFSET as i32);
         let z2 = b.ins().iconst(types::I64, 0);
         b.ins()
             .store(MemFlagsData::trusted(), z2, addr2, PAYLOAD_OFFSET as i32 + 8);
