@@ -108,6 +108,10 @@ impl Jit {
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
         builder.symbol(
+            "brood_rt_i64_overflow_ptr",
+            brood_rt_i64_overflow_ptr as *const u8,
+        );
+        builder.symbol(
             "brood_rt_global_epoch_ptr",
             brood_rt_global_epoch_ptr as *const u8,
         );
@@ -543,6 +547,20 @@ pub unsafe extern "C" fn brood_rt_global_epoch(heap: *mut Heap) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_global_epoch_ptr(heap: *mut Heap) -> *const u64 {
     (*heap).global_epoch_ptr()
+}
+
+/// Address of the unboxed-`i64` fast path's overflow sentinel ([`Heap::jit_i64_overflow`]),
+/// so the register-recursion worker can store `1` on overflow and load it to short-circuit
+/// the unwind — and the boxed wrapper can read it to decide deopt — all with raw loads/stores
+/// (no FFI call per level). Fetched once at arm entry; the address is stable while the arm
+/// runs (the heap doesn't move during native execution). The byte is reset to `0` by the
+/// wrapper after it observes an overflow.
+///
+/// # Safety
+/// `heap` must be live; the returned pointer is valid for the arm's duration.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_i64_overflow_ptr(heap: *mut Heap) -> *mut u8 {
+    &mut (*heap).jit_i64_overflow as *mut bool as *mut u8
 }
 
 /// Base pointer of the operand-stack/`roots` buffer. JIT'd code calls this once at

@@ -52,8 +52,30 @@ shared-inline cache (i64 entry is deterministic → shareable, another tier).
   arithmetic (the arm body `brood_jit_arm_1` is 31.8%, itself part staging). The i64 register
   call replaces `jit_run_fast_link` with a plain Cranelift `call` and drops frame/push/staging
   → **~2.2× projected**: fib 32.6→~14-15 ms (beats Elixir 11), pfib N=31 847→~450 ms.
-- **Increment 1** — productionize single-arg i64 self-recursion + overflow unwind + safepoint
-  & stack guards; gate with differential + `fib(100)`→BigInt + GC-stress + `pfib` fairness.
+- **Increment 1 — IN PROGRESS 2026-07-02.** Foundation landed + compiles (behind gate, no
+  behaviour change): `Heap::jit_i64_overflow` flag + `brood_rt_i64_overflow_ptr` helper
+  (registered). Concrete design worked out (key simplification: **the worker needs no heap**
+  — fib is pure int + self-recursion, no alloc/globals):
+  - **Worker** `extern "C" fn(n: i64, depth: i64, ovf: *mut u8) -> i64` — a fresh COMPACT
+    lowerer over the Node subset {`If`(cond must be a comparison Prim2), `Const(Int)`,
+    `Local(0)`, int `Prim2` (Add/Sub/Mul overflow-checked, Lt/Le/Eq→0/1 i64, Rem/Quot/Min/Max/
+    bitops), self-`Call`}. Self-reference via `declare_func_in_func(own_id, b.func)`. No roots,
+    no GC, no spills (i64 isn't a handle) → far simpler than the general lowerer. Overflow:
+    checked ops store `1` to `ovf` + jump a shared `poisoned` block (returns 0); after each
+    self-call, load `ovf` → if set jump `poisoned` (bounds unwind to O(depth)). Depth passed by
+    value (no heap counter/restore); `depth >= LIMIT` → set `ovf`, return (native-stack guard).
+  - **Boxed wrapper** `fn(heap, base) -> outcome` (replaces the arm entry for eligible arms):
+    read `roots[base]`; tag != Int → outcome 1 (deopt); clear `ovf`; `r = worker(payload,0,ovf)`;
+    if `ovf` set → outcome 1 (deopt → VM recomputes w/ BigInt); else box `r` as Int → `roots[base]`,
+    outcome 0.
+  - **Eligibility**: reuse `inline_name.is_some()` (recursive, top-level, no-capture, no-heap,
+    fixed-arity, arithmetic) + `nrequired == 1` + int-only body (BAIL on float/Local(k>0)/LetBind/
+    non-comparison If-cond in the lowerer). **Preemption is NOT needed** — current fib is already
+    non-preemptive (no self-tail back-edge to poll), so no fairness regression; worker doesn't
+    alloc → no GC safepoint. Gate: `BROOD_JIT_I64` (default OFF until proven).
+  - NEXT: write `jit_lower_i64_arm` (the ~250-line codegen), wire into `jit_lower_arm` when
+    gated+eligible, build/verify, test fib correctness (differential) + `fact(21)`→BigInt +
+    measure. Then remove the gate once green + `pfib`/full suite/GC-stress pass.
 - **Increment 2** — multi-arg + integrate with inliner / shared cache.
 
 **Measure.** serial 100×fib(31) 32→~15 ms · `fib` 224→~110 ms · `pfib` N=31 847→~450 ms ·
