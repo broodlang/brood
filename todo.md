@@ -145,8 +145,18 @@ shared-inline cache (i64 entry is deterministic → shareable, another tier).
   only (excluded Min/Max — Cranelift fmin/fmax NaN semantics differ; they fall to boxed). Kind is
   pinned by the base-case threshold const (`(< x 2)` int vs `(< x 2.0)` float); mixed-type bodies
   match neither → boxed. Validated: 643 suite on parameterized code, float fuzz 300 + i64-regression
-  fuzz 250 (0 bugs), int+float torture + concurrency/GC_STRESS chaos all clean. Remaining deferred:
-  int `Div` (inexact→float→deopt); unboxed arrays for `matmul` (the bigger scoped lever).
+  fuzz 250 (0 bugs), int+float torture + concurrency/GC_STRESS chaos all clean.
+- **int `Div` — DONE 2026-07-02.** `Scalar::Int` now lowers `/` too: same three guards as `Rem`/
+  `Quot` (÷0, `i64::MIN/-1`) plus a fourth — a nonzero `srem` remainder ("inexact") — since the VM's
+  `/` on two ints only returns an `Int` when it divides evenly (`compile/mod.rs` `prim_apply`'s
+  inline fast path); any other case is a deopt to the VM, which builds the `Float`. Previously any
+  int arm using `/` was ineligible for the worker at all (`i64_arith_op` didn't list `Div` for
+  `Scalar::Int`), silently falling back to boxed — now it's fast-pathed when exact and deopts
+  cleanly when not. `jit_lower.rs` `i64_arith_op` + `lower_i64_arith`. Tests: `tests/
+  unbox_torture_test.blsp` (exact division stays in the worker, inexact deopts to the same Float
+  the boxed path gives, ÷0 raises the VM's exact error) — verified against `BROOD_NO_I64=1`, under
+  `BROOD_JIT_VERIFY`+`BROOD_GC_VERIFY`, and `BROOD_GC_STRESS`, all clean.
+- Remaining deferred: unboxed arrays for `matmul` (the bigger scoped lever, unrelated to this).
 
 **Measure.** serial 100×fib(31) 32→~15 ms · `fib` 224→~110 ms · `pfib` N=31 847→~450 ms ·
 `fib(100)`→BigInt correct · full suite + differential + GC-stress. Session memory:
@@ -305,7 +315,22 @@ Bonus: `report_error` (`cli_support.rs`) now renders `hint:` lines, so *every* e
 hint (incl. the existing deep-recursion one) is finally visible in the CLI, not just
 to MCP/LSP. Verified via a file run.
 
-## Operand-position unbound lint — attempted TWICE, reverted: real checker work needed
+## Operand-position unbound lint — ✅ DONE (confirmed shipped, 2026-07-02 re-verification)
+
+Re-checked while triaging this file: contrary to the stale note below, this is
+**already live and false-positive-clean**. `Ctx::enable_operand_checks()` is called
+unconditionally from `check_file` (`check.rs:321`); `check_file` macroexpands +
+pre-loads the whole project image (incl. `require`/`defmodule` headers) before
+walking, so cross-file globals resolve via `heap.global_symbols()` — the
+"check-project checks each file in isolation" premise below no longer holds.
+Verified: `cargo run -p nest -- check` across the whole repo produces zero
+`unbound symbol` warnings (including on `pattern_matching_test.blsp`'s
+pattern-bound `a`/`b`, the exact false-positive case below), and a scratch file
+with a genuinely unbound name is correctly flagged. Matches `CLAUDE.md`'s own
+claim ("false-positive-clean … the one remaining warning class is the intentional
+non-tail-recursion lint"). No further action needed.
+
+<details><summary>original note (stale — kept for history)</summary>
 
 The head-callee gate (`arity_of` Some) is **necessary but NOT sufficient**. After
 also binding the narrowing tests' free vars, a `nest check` on the project surfaced
@@ -327,6 +352,8 @@ globals (e.g. `check-project` pre-loads all sources / accumulates a project-wide
 global set) before flagging an operand. That's a real checker feature, not a quick
 add — defer until someone takes the checker-scope work. (The function-as-value lint
 and the C-style hint shipped; this third one is the genuinely hard one.)
+
+</details>
 
 ## (old) Error message: a value in head position should hint C-style call syntax (2026-05-30)
 
@@ -361,11 +388,12 @@ relates to the function-as-value lint just added to the checker.)
   process/scheduler spawn path) and gate behind a debug flag or remove. **NB:** may
   be the maintainer's *active* debugging (cf. the `BROOD_TRACE_SAFEPOINT` trace in
   `eval/mod.rs`) — confirm before deleting.
-- ⬜ **Spawned-process GC threshold vs the depth-1 path** (their #4) — a render
-  loop under a `spawn`/supervisor shows a bounded ~1.1 GB sawtooth, while the same
-  loop at the depth-1 entry path runs ~flat (~5 MB). Bounded + correct, but the two
-  GC thresholds should probably converge so "move the loop under a supervisor"
-  doesn't silently 200× the high-water.
+- ✅ **Spawned-process GC threshold vs the depth-1 path** (their #4) — already fixed
+  (re-verified 2026-07-02): `gc_floor()` (`core/heap.rs:319`) is process-count-aware
+  — the object-count budget before a process's first GC is divided across the
+  currently-live process count (`FLOOR_MAX / live, clamped [FLOOR_MIN, FLOOR_MAX]`),
+  not a fixed per-process ceiling. The doc comment on it names this exact scenario
+  ("the fix for the `pfib` 1-GB blowup"). No further action needed.
 - ⬜ **Unused-`require` lint** (their #5) — a dead `(require 'x)` (module's symbols
   never referenced) goes unflagged. Cheap checker addition; same advisory channel
   as the function-as-value lint.
