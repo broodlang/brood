@@ -1726,6 +1726,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "image-thumb",
+        Arity::exact(3),
+        Sig::new(vec![any, int, int], map_ty.union(nil_ty)),
+        image_thumb,
+    );
+    def(
+        heap,
         "delete-file",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
@@ -2537,6 +2544,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("delete-dir", &["path"], "Remove a directory and everything under it (recursive). Idempotent (nil if already absent); errors on a real I/O failure."),
     ("rename-file", &["from", "to"], "Rename/move file `from` to `to`. Returns nil; errors on failure."),
     ("copy-file", &["from", "to"], "Copy file `from` to `to` (replacing `to`), preserving contents and permissions. Binary-safe (unlike slurp+spit). Returns nil; errors on failure."),
+    ("image-thumb", &["bytes", "max-w", "max-h"], "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("hostname", &[], "This machine's short hostname (no domain). Used to qualify a node name as name@host."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),

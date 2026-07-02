@@ -104,6 +104,13 @@ tree-sitter-elixir = { version = "0.3", optional = true }
 # bodies lock-free while `def` appends new code (old versions never move/free —
 # in-flight calls keep running them; Erlang-style hot reload). See docs/shared-code.md.
 boxcar = "0.2"
+# Image decoding (PNG/JPEG/GIF/WebP/BMP) for the `image-thumb` primitive — the one
+# thing an image renderer genuinely can't bootstrap in Brood (a decoder + resampler).
+# `default-features = false` pulls only the common web/raster codecs (no TIFF/EXR/…
+# and their heavy transitive deps); per-call decode `Limits` bound a decompression
+# bomb. Rendering (half-block cells, a GUI texture) stays Brood policy over the
+# decoded RGBA buffer this returns.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # (The green-process scheduler ran on stackful `corosensei` coroutines through
 # 2026-06-08; ADR-100 §8 replaced them with heap-captured continuations — state
 # capture — and the dependency was removed. See docs/concurrency-v2.md §8.)
