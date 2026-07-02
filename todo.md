@@ -52,8 +52,15 @@ shared-inline cache (i64 entry is deterministic → shareable, another tier).
   arithmetic (the arm body `brood_jit_arm_1` is 31.8%, itself part staging). The i64 register
   call replaces `jit_run_fast_link` with a plain Cranelift `call` and drops frame/push/staging
   → **~2.2× projected**: fib 32.6→~14-15 ms (beats Elixir 11), pfib N=31 847→~450 ms.
-- **Increment 1 — IN PROGRESS 2026-07-02.** Foundation landed + compiles (behind gate, no
-  behaviour change): `Heap::jit_i64_overflow` flag + `brood_rt_i64_overflow_ptr` helper
+- **Increment 1 — SHIPPED 2026-07-02 (default-on, `BROOD_NO_I64` opts out).** The register
+  calling convention for int-only single-arg recursion (`fib`). serial 100×fib(31) 3.28→0.77s
+  (4.26×); `fib` 227→53 ms (5th→2nd, beats Elixir); `pfib` N=31 847→152 ms (5th→2nd, 1.3× off
+  .NET); aggregate 3.5→3.0×, 4th→3rd (ahead of Elixir). 643 tests forced-on + differential +
+  debug verifiers + GC-stress + `fact(25)`→BigInt all clean. See devlog. Implementation:
+  `jit_lower_i64_arm` / `lower_i64_value` / `lower_i64_cond` in `jit_lower.rs`; `arm_i64_eligible`
+  gates the inline-upgrade skip in `jit_tier`.
+  --- original Increment-1 foundation notes ---
+  `Heap::jit_i64_overflow` flag + `brood_rt_i64_overflow_ptr` helper
   (registered). Concrete design worked out (key simplification: **the worker needs no heap**
   — fib is pure int + self-recursion, no alloc/globals):
   - **Worker** `extern "C" fn(n: i64, depth: i64, ovf: *mut u8) -> i64` — a fresh COMPACT
@@ -76,7 +83,12 @@ shared-inline cache (i64 entry is deterministic → shareable, another tier).
   - NEXT: write `jit_lower_i64_arm` (the ~250-line codegen), wire into `jit_lower_arm` when
     gated+eligible, build/verify, test fib correctness (differential) + `fact(21)`→BigInt +
     measure. Then remove the gate once green + `pfib`/full suite/GC-stress pass.
-- **Increment 2** — multi-arg + integrate with inliner / shared cache.
+- **Increment 2 — NEXT (subset broadening).** Generalize the i64 worker from "fib only" to most
+  fixed-arity monomorphic int recursion: (a) multi-arg (`nrequired > 1`) — worker takes N i64
+  params; the lowering already handles `Local(k)`, just relax the `Local(0)`-only gate and map slot
+  k→param k; (b) `let`/`do` in the body — i64 Cranelift variables for binder slots; (c) more ops —
+  Rem/Quot (÷0 + MIN/-1 guards → deopt), Div (inexact → deopt), bitops. Each additively widens
+  `i64_value_ok`/`lower_i64_value`. Gate/measure as before. Later: f64 sibling for float recursion.
 
 **Measure.** serial 100×fib(31) 32→~15 ms · `fib` 224→~110 ms · `pfib` N=31 847→~450 ms ·
 `fib(100)`→BigInt correct · full suite + differential + GC-stress. Session memory:
