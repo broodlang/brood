@@ -134,3 +134,91 @@ shape `std/observer` draws by hand. Returns one `text` op.
   "Collect render ops into a frame (a vector), dropping any `nil` ops so callers
 can splice in conditional ops inline. Pass the result to a frontend (`term-draw`)."
   (into [] (filter (fn (o) (not (nil? o))) ops)))
+
+;; ---- interaction zones (hover / click hit-testing) --------------------------
+;; `cursor-zone` (above) is a *render op* the frontend hit-tests to choose a pointer
+;; shape. A `zone` is its model-side dual: a plain value the *editor* hit-tests
+;; (`zone-at`) on pointer-move / click, so chrome can react — highlight on hover, pop a
+;; tooltip, run a command. Clickable/hoverable furniture (a mode-line segment, a gutter
+;; marker) is a list of zones laid alongside the render ops that draw it.
+
+(defn zone (rect id &optional (cursor nil))
+  "An interaction zone: the screen-cell rectangle `rect` (`[x y w h]`, 0-based cells)
+tagged with `id` — any value the caller keys off when the pointer hits it (a segment id, a
+command symbol, a payload map). `cursor`, when given, is the pointer shape to request while
+hovered (rendered via `zone-cursor-ops`, as a `cursor-zone`). Pure data."
+  {:rect rect :id id :cursor cursor})
+
+(defn zone-at (zones col row)
+  "The hit `zone` in `zones` containing cell `(col, row)`, or nil. Scans in order and keeps
+the **last** match, so a zone painted later (visually on top) shadows an earlier one it
+overlaps — matching paint order. The model calls this on pointer-move (to find the hovered
+zone) and on click (to find the target)."
+  (fold (fn (hit z)
+          (let ([x y w h] (get z :rect))
+            (if (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))
+              z hit)))
+    nil zones))
+
+(defn zone-cursor-ops (zones)
+  "`cursor-zone` render ops for every zone in `zones` that requests a `:cursor` shape — so
+the one zone list the model hit-tests also drives the frontend's pointer shape. Zones with
+no `:cursor` contribute nothing."
+  (map (fn (z) (let ([x y w h] (get z :rect)) (cursor-zone x y w h (get z :cursor))))
+    (filter (fn (z) (get z :cursor)) zones)))
+
+;; ---- floating cards (popups, menus, tooltips) -------------------------------
+;; The shared shape behind every floating overlay — completion popup, context menu,
+;; marginalia list, tooltip: a rounded raised *surface* (GUI) or a flat filled panel
+;; (terminal), positioned near an anchor and clamped on-screen. Callers draw their own
+;; content (rows, marginalia, tooltip text) on top; only the surface + geometry + the
+;; selection pill live here, so every overlay elevates identically — surfaces + hairlines,
+;; no shadow (dark-UI chrome; see the editor's docs/ui-chrome.md).
+
+(defn card-rect (row col w h cols rows)
+  "The clamped top-left `[mr mc]` of a `w`×`h`-cell card anchored at `(row, col)`: shifted
+so the whole card stays on the `cols`×`rows` screen. Shared by a card's renderer and any
+click/hover hit-test, so a card near a screen edge stays interactive exactly where drawn."
+  [(max 0 (min (- rows h) row)) (max 0 (min (- cols w) col))])
+
+(defn card-surface (row col w h face &optional (gui? false) (opts {}))
+  "Render ops for a floating card's **surface** — the raised panel other overlays sit on:
+`w`×`h` cells at top-left `(row, col)`, filled in `face`. In the GUI (`gui?`) it's a rounded
+`frect` (radius `opts :radius`, default 0.5 cell); a `opts :border` face adds a crisp rounded
+hairline as a slightly larger border-coloured `frect` drawn behind the surface (a rounded
+edge, not a shadow). The terminal falls back to a flat `rect` (no radius, no border). Content
+is drawn by the caller on top."
+  (let (radius (get opts :radius 0.5)
+        border (get opts :border))
+    (if gui?
+      (concat
+        (if border
+          [(frect (- col 0.07) (- row 0.07) (+ w 0.14) (+ h 0.14) border 1.0 (+ radius 0.07))]
+          [])
+        [(frect (* 1.0 col) (* 1.0 row) (* 1.0 w) (* 1.0 h) face 1.0 radius)])
+      (list (rect row col w h face)))))
+
+(defn card-pill (row col w face &optional (opts {}))
+  "A rounded selection **pill** inside a card: a one-row-tall `frect` highlight at
+`(row, col)` spanning `w` cells, inset slightly so it floats within the card's padding.
+GUI-only (the flat/terminal card highlights the selected row with a solid face instead)."
+  (frect (+ 0.2 col) (+ 0.08 row) (- w 0.4) 0.84 face 1.0 (get opts :radius 0.35)))
+
+(defn tooltip (anchor-row anchor-col lines face fg cols rows &optional (gui? false) (opts {}))
+  "Render ops for a tooltip — a small floating card showing `lines` (a vector of strings),
+its **bottom** anchored just above cell `(anchor-row, anchor-col)`: the mature-GUI placement,
+a hint hovering over the thing it describes, clamped on-screen via `card-rect`. Sized to the
+widest line plus one cell of padding each side; `face` fills the surface, `fg` styles the
+text, and `opts` forwards `:border`/`:radius` to `card-surface`. GUI rounds the card; the
+terminal draws a flat panel."
+  (let (n (count lines)
+        w (+ 2 (fold (fn (m s) (max m (string-length s))) 0 lines))
+        [mr mc] (card-rect (- anchor-row n) anchor-col w n cols rows))
+    (concat
+      (card-surface mr mc w n face gui? opts)
+      (map (fn (i)
+             (let (s (nth lines i))
+               (text (+ mr i) mc
+                 (str " " s (string-repeat " " (max 0 (- w 1 (string-length s)))))
+                 fg)))
+        (range n)))))
