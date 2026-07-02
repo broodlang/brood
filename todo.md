@@ -44,8 +44,14 @@ depth-2 inliner (inlined levels already in-register; leaf calls become i64 calls
 shared-inline cache (i64 entry is deterministic → shareable, another tier).
 
 **Plan (incremental).**
-- **Increment 0 — spike the ceiling FIRST (go/no-go).** Prototype the i64 fib path narrowly
-  and measure serial 100×fib(31). Gate: is it actually ~2×? If not, stop cheap.
+- **Increment 0 — DONE 2026-07-02: GO.** Two cheap measurements confirmed the ceiling. (a)
+  Rust `i64` 100×fib(31) = 2.7 ms/fib (vs Brood 32.6, Elixir 11) — the register-recursion
+  floor is 12× below current, so ample room. (b) `perf record` on the real Brood fib(35):
+  `jit_run_fast_link` 35.8% + `brood_rt_fast_frame` 10.5% + `brood_rt_push` 5.2% +
+  roots_base/epoch/env ~6% = **~55%+ of time is the boxed recursive-call protocol**, NOT
+  arithmetic (the arm body `brood_jit_arm_1` is 31.8%, itself part staging). The i64 register
+  call replaces `jit_run_fast_link` with a plain Cranelift `call` and drops frame/push/staging
+  → **~2.2× projected**: fib 32.6→~14-15 ms (beats Elixir 11), pfib N=31 847→~450 ms.
 - **Increment 1** — productionize single-arg i64 self-recursion + overflow unwind + safepoint
   & stack guards; gate with differential + `fib(100)`→BigInt + GC-stress + `pfib` fairness.
 - **Increment 2** — multi-arg + integrate with inliner / shared cache.
