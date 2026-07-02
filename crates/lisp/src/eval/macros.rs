@@ -862,18 +862,13 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
                 if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
                     return Ok(form);
                 }
-                // `lambda` / `let*` are synonyms for `fn` / `let`. Canonicalise the
-                // head now — *after* the quote guard (so quoted data keeps its
-                // spelling) and *before* lowering — so the whole downstream pipeline
-                // (pattern lowering here, the VM compile pass, and the tree-walker's
-                // lowering re-entry) only ever sees `fn` / `let`. `let*` aliases `let`
-                // because Brood's `let` is already sequential.
+                // `lambda` is a synonym for `fn`. Canonicalise the head now — *after* the
+                // quote guard (so quoted data keeps its spelling) and *before* lowering — so
+                // the whole downstream pipeline (pattern lowering here, the VM compile pass,
+                // and the tree-walker's lowering re-entry) only ever sees `fn`.
                 let s = if value::symbol_is(head, kw::LAMBDA) {
                     items[0] = value::sym(kw::FN);
                     value::intern(kw::FN)
-                } else if value::symbol_is(head, kw::LET_STAR) {
-                    items[0] = value::sym(kw::LET);
-                    value::intern(kw::LET)
                 } else {
                     head
                 };

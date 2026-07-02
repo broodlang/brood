@@ -964,12 +964,9 @@ fn gradual_of_compound(heap: &Heap, expr: Value, ctx: &Ctx) -> Option<GradualTy>
         }
         return Some(gradual_of(heap, last, ctx).union(GradualTy::stat(NIL_TY)));
     }
-    // `let`/`let*`/`letrec` → gradual(last body), with each binding's RHS type
+    // `let`/`letrec` → gradual(last body), with each binding's RHS type
     // threaded into the scope (so a precise RHS makes its uses precise).
-    if value::symbol_is(head, kw::LET)
-        || value::symbol_is(head, kw::LET_STAR)
-        || value::symbol_is(head, kw::LETREC)
-    {
+    if value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LETREC) {
         let binds = bindings(heap, *items.get(1)?)?;
         if binds.len() % 2 != 0 || items.len() < 3 {
             return None;

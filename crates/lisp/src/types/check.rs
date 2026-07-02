@@ -2310,12 +2310,6 @@ mod tests {
             w.iter().all(|m| !m.contains("unbound symbol: fac")),
             "self-recursive let closure must not look unbound: {w:?}"
         );
-        let w =
-            file_warnings("(defn t () (let* (fac (lambda (n) (if (= n 0) 1 (fac n)))) (fac 5)))");
-        assert!(
-            w.iter().all(|m| !m.contains("unbound symbol: fac")),
-            "self-recursive let* lambda must not look unbound: {w:?}"
-        );
         // But an *eager* forward reference in a non-closure RHS still surfaces.
         let w = file_warnings("(defn t () (let (a undefined-thing b 1) a))");
         assert!(

@@ -238,7 +238,7 @@ eagerly). They are reserved names.
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
 | `(fn (params) body...)` | A lexical closure. `lambda` is an exact synonym. |
-| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). `let*` is an exact synonym (Brood's `let` is already sequential). |
+| `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). Brood's `let` is already sequential, so there is no separate `let*`. |
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 | `(defmacro name (params) body...)` | Define a macro (see below). |
@@ -762,7 +762,7 @@ design: [type-annotations.md](type-annotations.md) (ADR-082).
 `nest check` / `brood --check` emit several additional warnings beyond type
 misuse — all advisory, zero false positives:
 
-**Unused `let` bindings** — a name bound in `let`/`let*`/`letrec` that never
+**Unused `let` bindings** — a name bound in `let`/`letrec` that never
 appears in its visible scope (subsequent binding RHSs + body). Names prefixed
 with `_` are exempt (intentional don't-care). Compiler-generated `let`s from
 match/pattern expansion are also exempt.

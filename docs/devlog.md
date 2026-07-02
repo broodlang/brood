@@ -725,4 +725,21 @@ recursion — correctness was fine, perf catastrophic). Fixed with a distinct **
 `arm_i64_eligible` and the shared-JIT install so a stale shared i64 wrapper isn't re-installed),
 drops `jit_code`, re-tiers. `g(5000)` and `f(30000)` now match the boxed path exactly (0.05 s /
 0.21 s, was 6.3 s / 16.3 s); shallow wins unchanged (fib 0.77 s, pfib 0.17 s). 643 tests + differential
-+ debug verifiers + GC-stress clean; `fib`/`fib2`/`ack`/`fact`/deep-recursion all correct.
++ debug verifiers + GC-stress clean; `fib`/`fib2`/`ack`/`fact`/deep-recursion all correct. Increment 2
+also added `let`/`do` bindings (binders in SSA vars, forward-refs rejected; `do` = last form, pure
+subset — 4.7× on shallow-wide let recursion) and `rem`/`quot` (÷0 + `i64::MIN/-1` guarded → deopt to
+the VM's exact error) + `bit-and`/`bit-or`/`bit-xor`.
+
+## 2026-07-02 — remove `let*` (breaking): Brood's `let` is already sequential
+
+**`let*` was a pure alias for `let`** — the macroexpand pass canonicalised `let*` → `let` (Brood's
+`let` binds sequentially, so there was never a semantic difference). Having it around implied `let`
+*might* be parallel (why else offer `let*`?), muddying the deliberate "`let` is sequential, full stop"
+design, and it cut against the repo's own "keep the core minimal / no aliases" principle. Removed it:
+dropped the `LET_STAR` keyword, the special-form-table entry, the macroexpand canonicalisation branch
+(kept `lambda`→`fn`), the checker's `let*` recognition (walk/guards), and the `(special-forms)`
+introspection entry. `(let* …)` now reads as a call to the unbound symbol `let*` (a clean "unbound
+symbol: let*" — the teachable nudge to use `let`). Renamed `lambda_let_star_test.blsp` →
+`lambda_test.blsp` (lambda-only); updated `docs/language.md` and the grammar tool's docstring examples.
+643 tests pass; `let`/`lambda` unaffected. Greenfield break (no external users); `let*` had zero uses
+in `std/`.

@@ -1,14 +1,13 @@
-;;; `lambda` / `let*` — exact synonyms for `fn` / `let`.
+;;; `lambda` — an exact synonym for `fn`.
 ;;;
-;;; The macroexpand pass canonicalises `lambda` → `fn` and `let*` → `let` (after
-;;; the quote guard, so quoted data keeps its spelling), and the evaluator's
-;;; special-form table also dispatches them directly for a raw/un-expanded eval
-;;; path. So everything `fn`/`let` can do, these must do identically — on both the
-;;; tree-walker and the compiling VM. `let*` is a plain alias because Brood's `let`
-;;; is already sequential. The `across processes` block additionally proves a
-;;; `lambda`-built closure round-trips through a `send` deep-copy.
+;;; The macroexpand pass canonicalises `lambda` → `fn` (after the quote guard, so
+;;; quoted data keeps its spelling), and the evaluator's special-form table also
+;;; dispatches it directly for a raw/un-expanded eval path. So everything `fn` can
+;;; do, `lambda` must do identically — on both the tree-walker and the compiling VM.
+;;; The `across processes` block additionally proves a `lambda`-built closure
+;;; round-trips through a `send` deep-copy.
 
-(defmodule lambda-let-star-test (:use test))
+(defmodule lambda-test (:use test))
 
 ;; file-local helpers (survive an :isolated rollback)
 (defn lls-make-adder (n) (lambda (x) (+ x n)))
@@ -38,19 +37,6 @@
   (test "quoted (lambda ...) keeps its spelling — it is data, not expanded"
     (assert= 'lambda (first '(lambda (x) x)))))
 
-(describe "let* is a synonym for let"
-  (test "sequential bindings see earlier names"
-    (assert= 2 (let* (a 1 b (+ a 1)) b)))
-
-  (test "vector-destructuring binding"
-    (assert= 15 (let* ([a b] [7 8]) (+ a b))))
-
-  (test "later binding shadows an earlier one"
-    (assert= 3 (let* (x 1 x (+ x 2)) x)))
-
-  (test "quoted (let* ...) keeps its spelling"
-    (assert= 'let* (first '(let* (a 1) a)))))
-
 ;; ---- across processes --------------------------------------------------------
 ;; A `lambda`-built closure is deep-copied on `send` (captured env flattened to
 ;; its free vars, rebuilt on the receiver). Proves to_message/from_message +
@@ -60,7 +46,7 @@
   (receive ([f x] (send parent (f x)))))
 
 (defn lls-build-worker (parent n x)
-  (let* (f (lambda (k) (+ k n)))   ; capture n via a let*-bound lambda
+  (let (f (lambda (k) (+ k n)))   ; capture n via a let-bound lambda
     (send parent (f x))))
 
 (defn lls-spawn-builders (parent ks base)

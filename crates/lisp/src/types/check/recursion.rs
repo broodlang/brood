@@ -12,7 +12,7 @@
 //! `match`/`case`/threading macros — and `when`/`unless`/`cond`/`and`/`or`,
 //! which are all prelude macros lowering to `if`/`do`/`let` — are already gone,
 //! and a `defn` is `(def name (fn …))`. That leaves a small, fixed set of
-//! tail-propagating *special forms* to model — `if` / `do` / `let` / `let*` /
+//! tail-propagating *special forms* to model — `if` / `do` / `let` /
 //! `letrec` — mirroring the evaluator's `'tail:` handling. (`def`/`defmacro`
 //! survive expansion too and are handled as nested-definition cases.)
 //! **Conservative by design:** it descends only into forms
