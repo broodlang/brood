@@ -44,3 +44,50 @@
   (test "a style keyword rides along (:bar / :underline / :block)"
     (assert= (cursor 2 7 :bar) [:cursor 2 7 :bar])
     (assert= (cursor 0 0 :underline) [:cursor 0 0 :underline])))
+
+(describe "zone / zone-at — model-side hit-testing"
+  (test "zone is plain data: rect + id (+ optional cursor)"
+    (assert= (zone [2 3 4 1] :branch) {:rect [2 3 4 1] :id :branch :cursor nil})
+    (assert= (zone [0 0 5 1] :x :hand) {:rect [0 0 5 1] :id :x :cursor :hand}))
+
+  (test "zone-at returns the zone whose rect contains the cell, else nil"
+    (let (zs [(zone [2 5 4 1] :a) (zone [10 5 3 1] :b)])
+      (assert= (zone-at zs 3 5) (zone [2 5 4 1] :a))   ; inside a
+      (assert= (zone-at zs 5 5) (zone [2 5 4 1] :a))   ; right edge of a (x+w-1)
+      (assert= (zone-at zs 6 5) nil)                    ; gap between a and b
+      (assert= (zone-at zs 10 5) (zone [10 5 3 1] :b))  ; inside b
+      (assert= (zone-at zs 3 6) nil)))                  ; wrong row
+
+  (test "zone-at is last-wins so a later (topmost) zone shadows an overlap"
+    (let (zs [(zone [0 0 10 1] :under) (zone [3 0 4 1] :over)])
+      (assert= (get (zone-at zs 4 0) :id) :over)
+      (assert= (get (zone-at zs 1 0) :id) :under)))
+
+  (test "zone-cursor-ops emits cursor-zone only for zones that request a shape"
+    (assert= (zone-cursor-ops [(zone [2 3 4 1] :a) (zone [0 0 5 1] :b :hand)])
+      (list [:cursor-zone 0 0 5 1 :hand]))))
+
+(describe "card — floating overlay surface (surfaces + hairlines, no shadow)"
+  (test "card-rect clamps the top-left so a w×h card stays on screen"
+    (assert= (card-rect 3 5 10 4 80 24) [3 5])          ; fits — unchanged
+    (assert= (card-rect 22 5 10 4 80 24) [20 5])        ; pushed up to fit height
+    (assert= (card-rect 3 78 10 4 80 24) [3 70])        ; pushed left to fit width
+    (assert= (card-rect -2 -2 10 4 80 24) [0 0]))       ; clamped to the origin
+
+  (test "terminal card-surface is a single flat rect (no radius, no border)"
+    (assert= (card-surface 3 5 10 4 {:bg "#313244"})
+      (list [:rect 3 5 10 4 {:bg "#313244"}])))
+
+  (test "GUI card-surface is a rounded frect; a :border adds a larger frect behind it"
+    (assert= (card-surface 3 5 10 4 {:bg :blue} true)
+      (list [:frect 5.0 3.0 10.0 4.0 {:bg :blue} 1.0 0.5]))
+    (assert= (card-surface 3 5 10 4 {:bg :blue} true {:border {:bg :grey} :radius 0.4})
+      (list [:frect 4.93 2.93 10.14 4.14 {:bg :grey} 1.0 (+ 0.4 0.07)]
+            [:frect 5.0 3.0 10.0 4.0 {:bg :blue} 1.0 0.4])))
+
+  (test "tooltip stacks its lines over a card sized to the widest line, anchored above"
+    ;; two lines, widest 5 chars → w = 7, n = 2; anchored above row 10 → top row 8.
+    (assert= (tooltip 10 4 ["main" "clean"] {:bg :blue} {:fg :white} 80 24)
+      (list [:rect 8 4 7 2 {:bg :blue}]
+            [:text 8 4 " main  " {:fg :white}]
+            [:text 9 4 " clean " {:fg :white}]))))
