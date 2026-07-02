@@ -6063,20 +6063,31 @@ pub(crate) fn jit_tier(
                 }
             }
         } else if ic != crate::jit::BAILED && ic != crate::jit::QUEUED {
-            // The inlined upgrade is ready — swap it in. Bump the epoch FIRST, then stamp
-            // `compile_epoch` to the new value. Store `inline_installed` BEFORE `jit_code`
-            // so that any reader which Acquire-loads `jit_code = inline_code` is guaranteed
-            // (by the Release-Acquire chain) to also see `inline_installed = true` and
-            // therefore call `active_nslots()` → `inline_nslots`. The reversed order
+            // The inlined upgrade is ready — swap it in. Store `inline_installed` BEFORE
+            // `jit_code` so that any reader which Acquire-loads `jit_code = inline_code` is
+            // guaranteed (by the Release-Acquire chain) to also see `inline_installed = true`
+            // and therefore call `active_nslots()` → `inline_nslots`. The reversed order
             // (jit_code before inline_installed) created a race: a reader could observe the
             // inline code pointer but still see `inline_installed = false`, sizing the callee
             // frame to the small `nslots` — the inline code would then raw-read beyond the
             // frame, picking up stale Vec-capacity data as slot values and passing garbage
             // through the outcome-4 tail-call staging path.
-            let new_epoch = heap.bump_global_epoch();
-            arm.compile_epoch.store(new_epoch, Release);
+            //
+            // This arm is PER-PROCESS ([`compiled_arm_for`] caches it in the process's own
+            // `vm_cache`), so the upgrade must only re-point THIS process's fast-links to
+            // this callee — NOT bump the shared `global_epoch`. A global bump invalidated
+            // every peer process's `compile_epoch` too, so under `pfib` all 100 processes
+            // cascaded: each peer nuked its installed code, re-tiered, re-upgraded and
+            // re-bumped in turn, permanently diverting calls off the in-IR fast-link onto
+            // the slow IC-dispatch path (~2× instructions; the parallel-scaling gap). We keep
+            // `compile_epoch` at the current epoch (the arm's inlined operators were just
+            // re-validated at compile time) and invalidate only this process's fast-links to
+            // this callee, which then re-probe and pick up `inline_code` + `inline_nslots`.
             arm.inline_installed.store(true, Release); // BEFORE jit_code — see comment above
             arm.jit_code.store(ic, Release);
+            if let Some(sym) = arm.inline_name {
+                heap.invalidate_fast_links_for(sym);
+            }
             // Run the VM this activation; the next entry sizes the frame to inline_nslots
             // (the call site reads `active_nslots()`) and runs the inlined native.
             return None;

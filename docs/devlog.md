@@ -602,3 +602,42 @@ short benchmarks never hit it). Capped so the young buffer is bounded regardless
 old-gen size, well above real build working sets (`sort` needs ~750K, `gen` 2M needs
 ~4M — both under the cap, so the win is unaffected). Handle index is 32-bit, so the
 larger nurseries can't overflow it. 643 tests + differential + GC-stress still green.
+
+## 2026-07-02 — pfib parallel-scaling: kill the inline-upgrade epoch-bump cascade
+
+**Root-caused + fixed the JIT parallel-scaling gap** (native code fanned out over many
+green processes scaled ~1.9× where independent OS processes got ~4.4×). It was **not**
+cache/TLB/scheduler — it was the two-stage-tiering inline-upgrade swap using the
+**shared** `global_epoch` as its signalling channel.
+
+**Mechanism.** Arms are per-process (`compiled_arm_for` caches each in the process's
+own `vm_cache`; `share_key` shares only the small-native *code pointer*). When a
+process's deferred *inlined* upgrade landed, the swap called `bump_global_epoch()` to
+force its own call sites to re-validate and pick up the larger `inline_nslots` frame.
+But `global_epoch` lives in the `Arc<RuntimeCode>` shared by every process, so the bump
+made **every peer's** `arm.compile_epoch` stale → each peer hit the hot-reload guard in
+`jit_tier`, nuked its installed `jit_code`, reset its inline flags, re-tiered,
+re-enqueued its own inlined upgrade, re-swapped and **re-bumped**. With 100 processes
+running `fib` concurrently the bumps cascaded endlessly, so nearly every call fell off
+the in-IR fast-link onto the slow IC-dispatch path (`call_ic_hit`) — ~2–3× the
+instructions.
+
+**Fix** (`core/heap.rs`, `eval/compile/mod.rs`). The inline upgrade is local to one
+process's own arm, so scope its invalidation to match: drop the `bump_global_epoch()`,
+leave `compile_epoch` at the current epoch (the inlined operators were just
+re-validated at compile time), and instead call a new per-process
+`Heap::invalidate_fast_links_for(sym)` that clears just this process's `CallIcEntry::fast`
+memos + their `FastLink` IR mirrors for the swapped callee. The next call re-probes
+`vm_call_ic_fast_link`, picks up `inline_code` + `inline_nslots`, and stays linked.
+Peers are untouched — no cascade. Removed the now-dead `bump_global_epoch`.
+
+**Measured** (100×`fib`, this machine). The cascade only bites once tasks run long
+enough for the inlined upgrade to land *mid-flight*: at `pfib` N=28 (the benchmark
+default) the run finishes first, so old==new (~32B insns, 0.42s). At **N=32** the swap
+lands early and the effect is stark: **337B→120B instructions (2.8×), 4.7s→1.6s wall
+(2.7×)**. As a bonus the fix also stops the shared-JIT small-native cache from going
+stale on every swap (peers no longer redundantly recompile). 643 tests pass;
+JIT-vs-VM differential clean; `pfib` under debug-assertions + `BROOD_JIT_VERIFY` +
+`BROOD_GC_VERIFY` and under `BROOD_GC_STRESS` both clean (the fast-link re-probe sizes
+the callee frame correctly). Note: the published `pfib` benchmark uses N=28, so its
+number is unchanged — the win is for longer-running parallel-native compute.

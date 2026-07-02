@@ -4577,20 +4577,6 @@ impl Heap {
         &self.runtime.version as *const AtomicU64 as *const u64
     }
 
-    /// Bump the global epoch and return the new value — the JIT two-stage tiering swap
-    /// (devlog 2026-06-17) uses this to install a deferred *inlined* native arm in place
-    /// of its small original. Bumping the epoch invalidates every per-process global +
-    /// call inline cache exactly as a `def` would, so the call sites that were fast-linked
-    /// to the small native (with the small frame size) re-validate and pick up the inlined
-    /// code with its larger frame (`CompiledArm::active_nslots`). Fired at most once per
-    /// arm per epoch (latched by `inline_installed`), so the one-time re-tier of unrelated
-    /// arms is negligible — and under a spawn-style storm the inlined upgrade never lands,
-    /// so this never fires there.
-    #[cfg(feature = "jit")]
-    pub(crate) fn bump_global_epoch(&self) -> u64 {
-        self.runtime.version.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
     /// Shared-JIT cache lookup (ADR-101, the spawn lever): the native code published
     /// for a RUNTIME/PRELUDE arm's `(closure_id, argc)` `share_key`, as
     /// `(code_ptr, compile_epoch)`. The caller ([`crate::eval::compile::jit_tier`])
@@ -5605,6 +5591,37 @@ impl Heap {
             // [`Self::vm_call_ic_fast_link`] validates the (now installed) arm.
             if let Some(fl) = self.vm_fast_links.borrow_mut().get_mut(site as usize) {
                 *fl = FastLink::EMPTY;
+            }
+        }
+    }
+
+    /// Invalidate **this process's** cached call-site fast-links to callee `sym` — both the
+    /// [`CallIcEntry::fast`] memo and its IR-readable [`FastLink`] mirror — so the next call
+    /// re-probes [`Self::vm_call_ic_fast_link`] and picks up freshly-installed native code
+    /// (and its frame size). Cheap: one pass over the (small) per-process call-IC table,
+    /// touching only entries for `sym`.
+    ///
+    /// Used by the two-stage-tiering inline-upgrade swap ([`crate::eval::compile::jit_tier`])
+    /// **instead of bumping the shared `global_epoch`**. The swap is local to this process's
+    /// own [`CompiledArm`] (arms are per-process — [`Self::vm_cache_arm`]), so a global bump
+    /// would needlessly invalidate every *other* process's arms: their `compile_epoch` would
+    /// go stale, they'd nuke their installed code, re-tier, re-enqueue their own inline
+    /// upgrade, re-swap and re-bump — a cross-process cascade that under `pfib` diverted
+    /// nearly every call from the in-IR fast-link to the slow IC-dispatch path (~2× the
+    /// instructions). Scoping the invalidation to this process's links to this callee keeps
+    /// the upgrade's effect where it belongs and leaves peers' fast-links intact.
+    #[cfg(feature = "jit")]
+    pub(crate) fn invalidate_fast_links_for(&self, sym: Symbol) {
+        let ics = self.vm_call_ics.borrow();
+        let mut fls = self.vm_fast_links.borrow_mut();
+        for (i, entry) in ics.iter().enumerate() {
+            if let Some(e) = entry {
+                if e.sym == sym {
+                    e.fast.set(None);
+                    if let Some(fl) = fls.get_mut(i) {
+                        *fl = FastLink::EMPTY;
+                    }
+                }
             }
         }
     }
