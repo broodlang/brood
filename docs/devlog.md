@@ -703,3 +703,29 @@ the same value), a direct non-UTF-8 write whose sha256 matches the OS digest (th
 test there had used a `printf` subprocess *because* this primitive was missing — now
 unnecessary), the three accepted input shapes, out-of-range rejection, and replace-not-
 append. 9/9 pass. Purely additive — no existing code path touched.
+
+## 2026-07-02 — `image-thumb`: decode + downscale an image to RGBA (inline previews)
+
+Added `(image-thumb bytes max-w max-h)` (`builtins/io.rs`): decode an encoded image
+(PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit `max-w`×`max-h`
+pixels (aspect preserved), returning `{:width :height :rgba}` — `:rgba` a `w*h*4`
+bytes value (row-major RGBA8), or nil when the bytes aren't a decodable image or the
+dims are non-positive. **Downscale-only**: a source already within the box keeps its
+native size (`thumbnail`/`resize` would *upscale* a small image to fill the box).
+Untrusted input degrades to nil rather than throwing; per-call `image::Limits`
+(≤ 16384² px, ≤ 512 MB alloc) bound a decompression bomb. Map built like `file_stat`
+(`map_from_pairs`; the `rgba` handle isn't held across an eval — a builtin never fires
+GC mid-execution).
+
+New dependency: `image = "0.25"` with `default-features = false` + only the common
+web/raster codecs (`png jpeg gif webp bmp`), so no TIFF/EXR/… and their heavy
+transitive deps. Justified under the "runtime crates that remove real complexity"
+bar — a decoder + resampler is exactly the kind of thing the language can't
+reasonably bootstrap, and it's *mechanism*: rendering stays Brood **policy** over the
+decoded buffer (brood-chat renders received images inline as upper-half-block `▀`
+cells — 2 px/cell via truecolor fg/bg — which works identically in the terminal and
+GUI with zero `gui.rs` changes). Registered in the `def` table
+(`Sig::new(vec![any, int, int], map_ty.union(nil_ty))`) + `PRIMITIVE_DOCS`. New
+`tests/image_test.blsp` (3): decode a hand-built 2×2 PNG fixture (inlined as a byte
+vector — no disk) to the right dims + first pixel, downscale-to-fit, and
+nil-on-non-image / non-positive-dims. 3/3 pass.
