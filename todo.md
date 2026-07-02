@@ -3,6 +3,38 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
+## Lean native-call protocol from HOF drivers (scoped 2026-07-02)
+
+**Goal.** Close the real `nqueens`/`pipeline` gap (~14× / ~7×). Profiling redirected off allocation:
+both are **per-element closure-dispatch** bound (`nqueens` `cons` ~0%; `pipeline` `eduction` is fused).
+A user-closure fold is ~60× a primitive one for identical work.
+
+**What shipped (the modest first step).** `range_reduce_slow` now resolves the step closure's arm
+once + calls the cached arm via `vm_apply` (`hof_resolve`/`hof_apply_step` in `eval/compile/mod.rs`,
+default-on / `BROOD_NO_HOF`). ~9% `nqueens`, ~19% light-closure fold. But `vm_apply` still pays the
+per-call `push_frame` + `vm_run_bc` trampoline — the BULK — so this only removed dispatch's
+self-overhead (arm resolve + matching), not the protocol. And it doesn't touch `pipeline` (its
+`eduction` folds via the JIT'd Brood `reduce`'s in-IR `Inst::Call`, not the Rust `range_reduce`).
+
+**The real lever (NEXT).** For a JIT'd fixed-arity closure, call the native arm **directly** per
+element via the fast-frame protocol — skip `push_frame` (generic: optionals/rest/captures) and the
+`vm_run_bc` trampoline. The machinery exists but is JIT-code-only today: `brood_rt_fast_frame` +
+`vm_call_ic_fast_link`/`jit_run_fast_link` (the in-IR call fast-link). Two fronts:
+- (a) **Rust HOF drivers** (`range_reduce`, `map`, `filter`, `sort` comparator): a Rust-callable
+  `fast_apply(heap, arm, env, args)` that stages the frame like `brood_rt_fast_frame` and jumps the
+  native entry, bypassing `push_frame`/`vm_run_bc`. Bounded by the native-depth guard (like the
+  unbox worker's cliff). Helps `nqueens` + any Rust HOF.
+- (b) **the JIT'd Brood `reduce`/`eduction` path** (helps `pipeline`): the in-IR `Inst::Call` already
+  has the fast-link — check why the transducer step calls don't hit it (profile showed `dispatch` +
+  `jit_dispatch_call`, so the fast-link is falling through — maybe the transducer closures aren't
+  fast-link-eligible, e.g. capturing closures via `arm.capture_names` — recall `vm_call_ic_fast_link`
+  bails on `!capture_names.is_empty()`). If so, THAT bail is the pipeline blocker, not a new lever.
+**Scope Increment-0 first:** prototype `fast_apply` for `range_reduce` + measure the ceiling vs the
+current `vm_apply` path (how much is `push_frame`/`vm_run_bc`?). And separately confirm the pipeline
+fast-link-fallthrough hypothesis with a targeted trace. Risk: frame-staging correctness (GC roots,
+captures) — gate + differential-fuzz like the unbox lever. Session memory: profiles in this devlog
+entry.
+
 ## Unboxed-i64 register-carry through recursive self-calls (scoped 2026-07-02)
 
 **Goal.** Close the single-thread `fib` gap to Elixir (~3×; Brood ~32 ms vs ~11 ms per

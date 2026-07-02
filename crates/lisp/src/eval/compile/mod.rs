@@ -2192,6 +2192,78 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compi
     compiled.and_then(|cc| cc.arm_for(argc).cloned())
 }
 
+/// The higher-order-fn closure-call fast path (gated). A `reduce`/`eduction`/… driver calls
+/// the SAME step closure once per element; the general per-call path (`apply_value` → `dispatch`)
+/// re-resolves the closure's arm (`vm_cache_arm`) and re-runs the passthrough/arity matching every
+/// element — ~40–50% of `pipeline`/`nqueens` per the profile, and a user-closure fold is ~60× a
+/// primitive one for identical work. This resolves the arm ONCE ([`hof_resolve`]); the driver then
+/// calls [`hof_apply_step`] per element, which only re-reads the (rooted, GC-current) closure for
+/// its captured env and calls the cached arm via `vm_apply` — skipping the re-resolution.
+///
+/// **Default ON**; `BROOD_NO_HOF` opts out (the A/B lever). A modest, broad win — ~8% on
+/// `nqueens`, ~19% on a light-closure `range-reduce` — for any Rust HOF driver folding a user
+/// closure. (It removes dispatch's self-overhead, not the per-call `push_frame`/`vm_run_bc`
+/// protocol — that's the separate lean-native-call lever.)
+#[cfg(feature = "jit")]
+fn hof_fast_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_HOF").is_none())
+}
+#[cfg(not(feature = "jit"))]
+fn hof_fast_enabled() -> bool {
+    std::env::var_os("BROOD_NO_HOF").is_none()
+}
+
+/// A step closure resolved once for the HOF fast path: the closure identity (re-checked per call
+/// so a late-rebind falls back) + its compiled arm (GC-stable `Arc`, off the heap graph).
+pub(crate) struct HofArm {
+    id: ClosureId,
+    arm: Arc<CompiledArm>,
+}
+
+/// Resolve `f` to a cached [`HofArm`] if it's a **plain fixed-arity-`argc` VM closure** (not a
+/// thin passthrough wrapper, no optional/rest) — else `None` (the driver uses its general path).
+/// Returns `None` when the gate is off. Call once, before the per-element loop.
+pub(crate) fn hof_resolve(heap: &Heap, f: Value, argc: usize) -> Option<HofArm> {
+    if !hof_fast_enabled() {
+        return None;
+    }
+    let id = match f.unpack() {
+        ValueRef::Fn(id) => id,
+        _ => return None,
+    };
+    // A thin-wrapper passthrough (`>` → `%lt`, …) redirects; leave those to `dispatch`.
+    if crate::eval::passthrough_arm(heap, id, argc).is_some() {
+        return None;
+    }
+    let arm = compiled_arm_for(heap, id, argc)?;
+    if arm.nrequired != argc || arm.noptional != 0 || arm.rest_slot.is_some() {
+        return None;
+    }
+    Some(HofArm { id, arm })
+}
+
+/// Call the cached step closure on `args`. `f` is the *current* (rooted, GC-relocated) closure
+/// value — re-read by the caller each element; if it no longer names the cached closure (a
+/// late-rebind), returns `None` so the caller falls back to its general per-call path. Otherwise
+/// runs the cached arm in the closure's captured env via `vm_apply` (skips the arm re-resolution).
+pub(crate) fn hof_apply_step(
+    heap: &mut Heap,
+    hof: &HofArm,
+    f: Value,
+    args: &[Value],
+) -> Option<LispResult> {
+    let id = match f.unpack() {
+        ValueRef::Fn(id) => id,
+        _ => return None,
+    };
+    if id != hof.id {
+        return None;
+    }
+    let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
+    Some(vm_apply(heap, hof.arm.clone(), args, cenv))
+}
+
 // ===================== executor (Node → value) =====================
 
 /// Resolve a [`Step`] to a value, running a `Tail` to completion. In value
