@@ -3,6 +3,46 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
+## Investigate: JIT-native code parallelizes poorly under the green scheduler (2026-07-01)
+
+**Symptom.** `pfib` (100 green processes each computing `fib(N)` across cores) gets
+only **~1.9× speedup on 12 cores** for JIT-native `fib`, while the *same* work
+scales fine elsewhere:
+
+| variant | serial | 12-way | speedup |
+|---|---|---|---|
+| VM / interpreted `fib` (`BROOD_NO_JIT=1`) | 9.36s | 1.97s | **4.75×** |
+| JIT-native `fib`, Brood green processes | 0.79s | 0.42s | **1.9×** |
+| JIT-native `fib`, 12 independent OS processes | — | 1.16s (96 fibs) | **4.4×** |
+
+So the machine caps ALU-bound work at ~4.4× (all-core clock throttle + shared L3),
+and independent OS processes hit it; the interpreted path scales fine (4.75×,
+latency-bound / throttle-tolerant); but **green-process native code loses ~2.3×
+vs OS processes** running the identical native code.
+
+**Ruled out** (measured 2026-07-01): idle cores (CPU ~1130%, 11 busy); locks/futex
+(**System time ≈ 0**); the JIT call-site fast-link (it's per-process,
+`heap.vm_fast_links_base()`, not shared); the `arm.jit_calls` tier counter (bumped
+only pre-compile; `fib` shares one compile via `share_key`); preemption is only
+~18% (`BROOD_REDUCTIONS=1e9`: 4.23→3.46s at N=32). Cost scales with call/reduction
+volume (N=32 scales *worse* than N=28).
+
+**Hypotheses to test next** (dense native code across many green processes in one
+address space + the Brood runtime): coroutine-stack / TLB / shared-L3 working-set
+effects; `corosensei` context-switch cost; worker/coroutine memory layout.
+
+**Blocker.** Needs hardware perf counters — `perf stat`/`perf record` for
+`cache-misses`, `dTLB-load-misses`, `stalled-cycles` — to compare green-native vs
+OS-process-native. On whklat this is blocked by `perf_event_paranoid=4`; drop it
+(`sudo sysctl kernel.perf_event_paranoid=1`) to profile. `BROOD_NO_JIT=1` and
+`BROOD_REDUCTIONS=<n>` are the software A/B levers.
+
+**Value/priority.** Real, but the VM path (the common editor/server concurrency
+shape) already scales well — this specifically bites dense-native-compute fan-out
+(pfib-like), which may be rare in practice. Medium priority; revisit when perf
+counters are available or native concurrent compute becomes a real workload.
+Full characterization: `pfib.blsp` in brood-benchmarks.
+
 ## Process `kill` primitive + per-test timeout (30s) (2026-05-30)
 
 Two linked pieces. The timeout depends on `kill` (without it a timed-out test can
