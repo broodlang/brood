@@ -3,51 +3,6 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
-## Fix: JIT fast-link degrades under concurrency → native code parallelizes poorly (2026-07-01, ROOT-CAUSED 2026-07-02)
-
-**Symptom.** `pfib` (100 green processes each computing `fib(N)`) gets only
-**~1.9× speedup on 12 cores** for JIT-native `fib`; the interpreted path scales
-fine (4.75×) and 12 independent OS processes running the same native code get 4.4×
-(the machine's all-core throttle + shared-L3 ceiling). So green-native loses ~2.3×
-vs OS-native.
-
-**Root cause (perf-stat, `perf_event_paranoid=-1`, 2026-07-02).** It is NOT cache/
-TLB/throttle and NOT interpretation:
-- Green pfib executes **~4× the instructions** of serial-native for the same work
-  (367B vs 92.7B); 12 OS procs match serial (93.8B). `jit_deopt=0`, `tw_defer=1` —
-  so it stays native, not falling to the VM/tree-walker.
-- A **lone** spawned green process runs `fib(32)` fully native (1.29B insns, == root).
-  The inflation appears **only with many concurrent processes**.
-- Per-fib counters, lone vs 100-concurrent: `jit_link_done` (fast in-IR native call)
-  2.44M→3.04M, but **`call_ic_hit` (heavier IC-dispatch path) ~0 → 1.41M**. So under
-  concurrency ~1.4M calls/fib divert from the fast in-IR fast-link to the slower
-  IC-dispatch path → the ~2× instruction inflation. Preemption adds ~18-20% more
-  (`BROOD_REDUCTIONS=1e9`: 367B→~308B insns, 4.23→3.46s).
-
-**Mechanism (hypothesis, strong).** The 100 processes share `fib`'s one RUNTIME
-`CompiledArm`. Two-stage tiering / the shared-install swap `jit_code` (epoch bump),
-which invalidates the in-IR fast-links **across all processes** ("the IC moved" →
-fast-link fallthrough → re-dispatch via the per-process call IC). A lone process
-warms up once and stays fast-linked; concurrent sharers keep getting invalidated.
-Confirm by watching whether the fast-link fallthrough / re-link rate correlates
-with the shared-arm `jit_code`/epoch swaps.
-
-**Fix directions to try.** (a) Don't epoch-invalidate a stable fast-link on the
-deferred inlined-body swap when the callee identity is unchanged; (b) make the
-in-IR fast-link validate against a per-callee generation that only bumps on real
-`def` rebind, not on tiering/inline-upgrade; (c) settle the two-stage tier before
-fan-out, or make the inline-upgrade swap fast-link-compatible.
-
-**Levers/tools.** `BROOD_NO_JIT=1`, `BROOD_REDUCTIONS=<n>`; perf-stats build
-(`--features jit,perf-stats`, `BROOD_PERF_STATS=1`) for `jit_link_done` /
-`call_ic_hit` / `jit_fast_deopt`; `perf stat -e instructions,cycles` (paranoid now
--1 on whklat). Repro: `pfib.blsp` N=32 vs a lone-spawn `fib(32)`.
-
-**Value/priority.** Real ~2× on native concurrent compute (pfib/parallel fan-out).
-The VM path (common editor/server concurrency) already scales fine, so medium
-priority — but now root-caused and a bounded JIT fix, not a fishing expedition.
-Full characterization also in session memory `brood-pfib-parallel-scaling`.
-
 ## Process `kill` primitive + per-test timeout (30s) (2026-05-30)
 
 Two linked pieces. The timeout depends on `kill` (without it a timed-out test can
