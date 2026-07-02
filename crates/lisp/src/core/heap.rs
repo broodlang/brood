@@ -1281,6 +1281,15 @@ pub struct Heap {
     /// error); the arm returns the error outcome and [`vm_run_bc`] takes this to propagate.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_pending_error: Option<crate::error::LispError>,
+    /// Overflow sentinel for the unboxed-`i64` fast path (the register calling convention for
+    /// int-only recursive arms). That path carries args/results as raw `i64` in registers and
+    /// uses overflow-checked arithmetic; on an overflow (or a non-`Int` at the boxed entry) it
+    /// sets this and unwinds, and the boxed wrapper deopts to the VM — which recomputes with
+    /// BigInt, keeping the JIT bit-identical to the VM. A plain `bool` (per-process heap, only
+    /// this process's native code touches it); the JIT loads/stores it through a stable pointer
+    /// fetched once at arm entry (`brood_rt_i64_overflow_ptr`).
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) jit_i64_overflow: bool,
 }
 
 /// One global-read inline-cache entry (ADR-096): the value a compiled
@@ -1550,6 +1559,7 @@ impl Heap {
             jit_force_vm: false,
             jit_dbg_fn: u32::MAX,
             jit_pending_error: None,
+            jit_i64_overflow: false,
         }
     }
 
@@ -1597,6 +1607,7 @@ impl Heap {
             jit_force_vm: false,
             jit_dbg_fn: u32::MAX,
             jit_pending_error: None,
+            jit_i64_overflow: false,
         }
     }
 
