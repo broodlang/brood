@@ -1047,3 +1047,29 @@ leak returns), and a restore without a snapshot / a double-restore under-release
 Regression test `nested_globals_snapshots_suppress_then_re_enable_compaction` (nested snapshots each
 suppress compaction, LIFO restore, then re-enable). Gate: 648 tests (default + debug-assertions),
 clippy clean, brood-edit 725/725 @ 199 MB.
+
+## 2026-07-03 — Scale-test the test runner (100K+ files): two more O(n²) fixes
+
+Stress-tested the scoped test runner by generating a project with thousands of minimal test files.
+It surfaced quadratic scaling (1K→4.5s, 2K→17.7s, 4K→72s) hiding under the 24-file brood-edit suite.
+Two independent O(n²) causes, both fixed:
+
+- **`drain-files-scoped` result aggregation** used `(fold (fn (acc r) (append acc r)) …)` — `append`
+  recopies the growing accumulator every file → O(files²). Fixed: `cons` each file's result list
+  (O(1)) then flatten once → O(total).
+- **`drain-runner` leaked a monitor `:down` per call.** It `(monitor d)`'d the driver but never
+  demonitored; the driver exits right after sending `:all-results`, firing a `:down` that matches no
+  future `receive` (pinned to an old `mref`/`d`) → it piled up in the one long-lived scoped-runner
+  process's mailbox, and every later `receive` scanned past all of them → O(files²). Fixed with the
+  gen-call idiom (`demonitor` + flush the late `:down`, std/proc/gen.blsp). This is a general bug —
+  any code that repeatedly `monitor`s a short-lived worker and abandons the monitor leaks `:down`s.
+
+**Still open (a deeper interaction):** with both fixed, a residual quadratic remains, and it's
+**JIT-driven** — `BROOD_NO_JIT=1` runs flat (2K & 4K both ~39s) where JIT-on is quadratic (11.5s→42s).
+Root cause: the per-file `%isolate`'s `restore_globals` bumps the global `version` every file →
+invalidates the epoch-guarded JIT code cache → the framework arms (`run-driver`/`drain`/…) re-tier and
+recompile into the never-freed GLOBAL_JIT module every file. So a huge suite re-JITs the runtime per
+file. Fixing it needs the version bump to not invalidate arms whose inlined globals are unchanged (the
+baseline is identical after each rollback) — deferred; scoping the JIT-cache epoch more finely, or not
+bumping version on a no-op restore. Until then a ~100K+-file single suite is impractical (the runtime,
+not the tests, dominates); real suites (tens–hundreds of files) are unaffected and bounded in memory.

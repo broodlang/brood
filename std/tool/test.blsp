@@ -605,7 +605,17 @@ docs/testing.md for the full guide.")
   (let (me (self)
         d (spawn (run-driver (run--steps iso par) me nil))
         mref (monitor d))
-    (receive ([:all-results rs] rs)
+    (receive
+      ([:all-results rs]
+        ;; The driver exits right after sending its results, which fires a monitor
+        ;; `:down`. Drop the monitor and flush that late `:down` (the gen-call idiom,
+        ;; std/proc/gen.blsp) so it can't pile up in this process's mailbox: a scoped
+        ;; run calls `drain-runner` once PER FILE from one long-lived process, and a
+        ;; leaked `:down` per file made every later `receive` scan past them all — O(n²)
+        ;; over a large suite (100K files went from hours to seconds with this fix).
+        (demonitor mref)
+        (receive ([:down ~mref ~d _] :ok) (after 0 :ok))
+        rs)
       ([:down ~mref ~d reason] (error (str "test runner crashed: " reason))))))
 
 ;; Split the currently-registered units into (iso par) and drain them — the shared
@@ -627,9 +637,16 @@ docs/testing.md for the full guide.")
 ;; completion); tests WITHIN a file still parallelise. The shared drain behind both
 ;; `run-tests-scoped` (prints) and `run-tests-scoped-structured` (returns data).
 (defn drain-files-scoped (loaders)
-  (fold (fn (acc loader)
-          (append acc (%isolate (fn () (reset-units!) (loader) (drain-current)))))
-    nil loaders))
+  ;; Accumulate each file's result LIST with `cons` (O(1)) into a reverse-order list of
+  ;; lists, then flatten once — O(total results). (A naive `(append acc file-results)`
+  ;; per file is O(files²): it recopies the growing accumulator every file, which made a
+  ;; 100K-file suite quadratic. `cons` + one flatten keeps it linear.)
+  (let (chunks (fold (fn (acc loader)
+                       (cons (%isolate (fn () (reset-units!) (loader) (drain-current))) acc))
+                 nil loaders))
+    ;; `chunks` is reverse run order; `(append file-results acc)` copies only the small
+    ;; per-file list each step (sharing the tail), rebuilding run order in O(total).
+    (fold (fn (acc file-results) (append file-results acc)) nil chunks)))
 
 ;; Run a suite file-by-file (each file in its own rolled-back scope, via
 ;; `drain-files-scoped`), aggregate, then report once — the memory-bounded analogue of
