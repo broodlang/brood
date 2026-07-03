@@ -229,3 +229,48 @@ fn auto_safepoint_collect_bounds_runtime_region() {
 // `crate::eval::compile::tests` (`const_handle_round_trips`,
 // `rewrite_arm_handles_*`): that `runtime_collect`'s `rewrite_arm_handles` rewrites
 // every movable handle a live arm's node tree embeds.
+
+/// Regression: `%isolate` must be safe against a RUNTIME compaction firing *inside*
+/// the isolated thunk. `%isolate` snapshots the global table — an off-graph
+/// `SymbolMap<Value>` of raw RUNTIME handles — runs a thunk, then restores it. Before
+/// the fix, a compaction while the thunk ran (its `def`s crossing the RT floor)
+/// relocated those handles, so `restore_globals` reinstalled stale handles that now
+/// aliased *other* closures — an unrelated pre-isolate global silently misdispatched
+/// (resolved to a 1-arg closure defined inside the rolled-back isolate → arity error).
+/// The fix suppresses RUNTIME auto-compaction across snapshot→restore
+/// (`Heap::rt_collect_block`). See `docs/devlog.md` (2026-07-03).
+#[test]
+fn isolate_is_safe_against_a_runtime_compaction_inside_the_thunk() {
+    LazyLock::force(&MEM_GUARD);
+    // A low RT floor so the ~500 defs inside the isolate reliably trip a compaction
+    // mid-thunk (the bug's precondition) regardless of build profile. Per-test process
+    // under nextest, so this env set doesn't leak to other tests.
+    std::env::set_var("BROOD_RT_GC_FLOOR", "128");
+    let mut interp = Interp::new();
+    // A 0-arg global defined BEFORE the isolate; its resolution must survive intact.
+    interp
+        .eval_str(
+            "(defn probe () 42) \
+             (defn defmany (i n) \
+               (if (= i n) :done \
+                 (do (eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) 'x))) \
+                     (defmany (+ i 1) n))))",
+        )
+        .expect("setup defs errored");
+    // Isolate a thunk that defs 500 distinct 1-arg globals — enough to cross the floor
+    // and (pre-fix) trigger a compaction that relocated the snapshot's handles.
+    interp
+        .eval_str("(%isolate (fn () (defmany 0 500)))")
+        .expect("isolate thunk errored");
+    // After the isolate, `probe` must still resolve to its own 0-arg body → 42.
+    // Pre-fix this raised an arity error (probe aliased a rolled-back z-* 1-arg fn).
+    let v = interp
+        .eval_str("(probe)")
+        .expect("probe call errored after isolate (global misdispatch)");
+    assert_eq!(
+        interp.print(v),
+        "42",
+        "a pre-isolate global misdispatched after %isolate — a RUNTIME compaction relocated the snapshot's handles",
+    );
+    std::env::remove_var("BROOD_RT_GC_FLOOR");
+}

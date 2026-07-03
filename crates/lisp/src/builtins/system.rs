@@ -1878,6 +1878,15 @@ pub(super) fn list_processes(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 
 pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let thunk = arg(args, 0);
+    // Suppress RUNTIME auto-compaction across the snapshot→restore window. The
+    // snapshot below is an off-graph `SymbolMap<Value>` of raw RUNTIME handles; a
+    // compaction while the thunk runs (its `def`s crossing the RT floor) would
+    // relocate those handles and leave the snapshot stale, so `restore_globals`
+    // would reinstall handles that now alias *other* closures — silent global
+    // misdispatch. Deferring compaction to after the restore (when the isolate's
+    // own `def`s are garbage) is also strictly better for reclamation. See
+    // `Heap::rt_collect_block`.
+    heap.begin_rt_collect_block();
     let saved = heap.snapshot_globals();
     // Pids alive before the run, to tell apart the ones the thunk spawns.
     let before: std::collections::HashSet<u64> =
@@ -1923,6 +1932,7 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
         }
     }
     heap.restore_globals(saved);
+    heap.end_rt_collect_block();
     result
 }
 

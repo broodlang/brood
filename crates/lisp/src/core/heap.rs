@@ -1129,6 +1129,17 @@ pub struct Heap {
     /// prelude `SharedCode` `Arc` is the default (empty) one, since a missing
     /// prelude means a freshly-built builder heap that's about to freeze.
     gc_enabled: bool,
+    /// Re-entrant suppression of RUNTIME-region auto-compaction. `%isolate`
+    /// (`system.rs`) snapshots the global table — a `SymbolMap<Value>` holding raw
+    /// RUNTIME handles — runs a thunk, then restores it. A compaction *during* the
+    /// thunk (its `def`s crossing [`rt_gc_floor`]) would relocate those handles,
+    /// leaving the off-graph snapshot pointing at recycled slots — so the restore
+    /// reinstalls stale handles and unrelated globals silently misdispatch. Bumping
+    /// this over the snapshot→restore window defers auto-compaction ([`rt_gc_due`]
+    /// returns false); the isolate's `def`s become garbage at restore and are
+    /// reclaimed by the *next* safepoint compaction. A counter (not a bool) so
+    /// nested isolates compose. [`rt_gc_due`]: Self::rt_gc_due
+    rt_collect_block: u32,
     /// The LOCAL **generation epoch** — stamped into every LOCAL handle minted
     /// (the `local_gen` in `alloc_*`), and bumped on every arena flip
     /// ([`arena_flip`](Self::arena_flip), shared by `flush`/`collect`) so the
@@ -1539,6 +1550,7 @@ impl Heap {
             gc_threshold: usize::MAX,
             rt_gc_threshold: usize::MAX,
             gc_enabled: false,
+            rt_collect_block: 0,
             local_epoch: 0,
             remembered: Vec::new(),
             old_epoch: 0,
@@ -1587,6 +1599,7 @@ impl Heap {
             gc_threshold: gc_floor(),
             rt_gc_threshold: rt_gc_floor(),
             gc_enabled: true,
+            rt_collect_block: 0,
             local_epoch: 0,
             remembered: Vec::new(),
             old_epoch: 0,
@@ -5271,7 +5284,22 @@ impl Heap {
     /// [`gc_enabled`]: Self::gc_enabled
     #[inline]
     pub fn rt_gc_due(&self) -> bool {
-        self.gc_enabled && self.runtime.code.closures.count() >= self.rt_gc_threshold
+        self.gc_enabled
+            && self.rt_collect_block == 0
+            && self.runtime.code.closures.count() >= self.rt_gc_threshold
+    }
+
+    /// Enter a window in which RUNTIME auto-compaction is suppressed (see
+    /// [`rt_collect_block`](Self::rt_collect_block)) — `%isolate` brackets its
+    /// snapshot→restore with this so a compaction can't relocate the snapshot's
+    /// handles out from under it. Re-entrant; pair with [`Self::end_rt_collect_block`].
+    pub fn begin_rt_collect_block(&mut self) {
+        self.rt_collect_block = self.rt_collect_block.saturating_add(1);
+    }
+
+    /// Leave a [`Self::begin_rt_collect_block`] window.
+    pub fn end_rt_collect_block(&mut self) {
+        self.rt_collect_block = self.rt_collect_block.saturating_sub(1);
     }
 
     /// Test/diagnostic hook: turn the automatic safepoint RUNTIME collection on or

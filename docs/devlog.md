@@ -904,3 +904,43 @@ or tripwire reports. Added a regression test to `tests/sequence_test.blsp`: a `r
 **capturing** step (`bias`) over a 5000-range (well past the tier threshold of 8, so the native path is
 taken) must equal the closed form — a capture-fill bug would read `bias` as nil. Passes with the native
 path on and off.
+
+## 2026-07-03 — `%isolate` made RUNTIME-compaction-safe (silent global-misdispatch bug)
+
+Found while investigating a forwarded report of `nest test` OOMing in the brood-edit suite (a
+separate, still-open leak — see below). `%isolate` (`system.rs`) snapshots the global table — an
+off-graph `SymbolMap<Value>` holding raw RUNTIME handles — runs a thunk, then `restore_globals`. If a
+**RUNTIME compaction fired *during* the thunk** (its `def`s crossing `BROOD_RT_GC_FLOOR`, trivially
+true in a large image), it relocated those handles; the off-graph snapshot wasn't rewritten, so the
+restore reinstalled **stale handles that now aliased other closures** — an unrelated pre-isolate
+global silently misdispatched (e.g. a 0-arg `foo` resolved to a 1-arg `z-*` defined *inside* the
+rolled-back isolate → arity error, or worse a silent wrong value). No GC tripwire fires: the handles
+are valid RUNTIME indices, just semantically wrong.
+
+**Confirmed** by an A/B on the compaction floor (`scratchpad/iso_min.blsp`): `BROOD_RT_GC_FLOOR=1e9`
+(compaction off) → correct; `=128` → misdispatched at ~300 defs. Latent for every `:isolated` test
+(the runner wraps each in `%isolate`) once an image holds >4096 runtime closures.
+
+**Fix:** a re-entrant `Heap::rt_collect_block` counter; `rt_gc_due()` returns false while >0, and
+`%isolate` brackets its snapshot→restore window with `begin/end_rt_collect_block`. Deferring
+compaction to *after* the restore is also strictly better — the isolate's own `def`s are garbage by
+then, so the next safepoint reclaims them (verified: 10k-def isolate → rt-closures 3→10003 during →
+back to 4 after the block lifts + a collect). Sound against concurrency too: `runtime_collect_with`
+only compacts when a heap *uniquely owns* the runtime `Arc`, which during an isolate is either this
+(now-blocked) process or impossible (other live processes ⇒ not unique). Scope: covers the
+auto-compaction path (the real trigger); an explicit `(runtime-collect)` *inside* an `%isolate` is out
+of scope (and semantically dubious).
+
+Regression test: `crates/lisp/tests/runtime_collector.rs`
+`isolate_is_safe_against_a_runtime_compaction_inside_the_thunk` — a low RT floor + a 500-def isolate;
+a pre-isolate `(probe)` must still return 42. Gate: full suite (default + debug-assertions), clippy
+clean.
+
+**Still open (not this commit): the test-runner memory leak.** Loading N diverse files into one
+long-lived image `def`s every top-level form into the shared `RuntimeCode` region + global table;
+those are globally rooted → live, unbounded, JIT-independent, and `runtime-collect` can't reclaim them
+(only same-name redefinition frees the old version). Probe: 20k distinct defs → ~130 MB,
+`:runtime-closures` 3→20003, unchanged by collect (~6.4 KB/distinct def). `%isolate` does NOT bound it
+(code slabs are append-only regardless of binding rollback). The 1 GB OOM in a 725-test suite is this
+accumulation. Fix is architectural (run each file/batch in a reclaimable scope or a fresh child
+runtime) — tracked next.
