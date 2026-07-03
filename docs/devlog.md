@@ -1073,3 +1073,25 @@ file. Fixing it needs the version bump to not invalidate arms whose inlined glob
 baseline is identical after each rollback) — deferred; scoping the JIT-cache epoch more finely, or not
 bumping version on a no-op restore. Until then a ~100K+-file single suite is impractical (the runtime,
 not the tests, dominates); real suites (tens–hundreds of files) are unaffected and bounded in memory.
+
+## 2026-07-03 — Root-caused the scoped-runner quadratic: it was two O(N²) bugs (both fixed)
+
+The earlier "append O(n²)" fix was incomplete (a no-op, in hindsight). Root-caused the real quadratic
+with clean per-count project dirs + per-file instrumentation (lesson: NEVER trim/regen a test dir in
+place — it silently made every cross-count comparison use the same file count and produced a bogus
+"JIT-driven" conclusion). Two independent O(N²) causes in `nest test`'s scoped runner:
+
+1. **The result flatten used the VARIADIC `append`, which copies BOTH args.** `drain-files-scoped`
+   folded `(append file-results acc)` — and `append` (`reverse (fold append--onto nil lists)`) recopies
+   the growing `acc` every file → O(files²). (The earlier commit only reordered the args, still calling
+   variadic `append`, so it never actually fixed this.) Fix: `append-two`, which copies only its first
+   arg and SHARES the accumulator tail → O(total).
+2. **`check-project` bloated the per-file snapshot baseline.** The advisory pre-flight loads every
+   source + test file into the image for cross-file checking, leaving all N test modules bound in the
+   global table. The scoped run then `snapshot-globals`-clones that O(N) table once PER FILE → O(N²).
+   Fix: run `check-project` inside `%isolate` so its bulk loads roll back, keeping the run's baseline
+   small (prelude + src + test framework). Warnings are stderr I/O, unaffected by the rollback.
+
+**Measured (clean per-count dirs):** 4000-file suite 41s → **2.4s** (17×); now linear at ~0.6 ms/file
+(1K→0.57s, 2K→1.3s, 4K→2.4s, 8K→4.9s), memory bounded. A 100K-file suite is now ~60s and a 1M-file
+suite ~10min — the runtime no longer dominates. Gate: 648 tests + brood-edit 725/725.

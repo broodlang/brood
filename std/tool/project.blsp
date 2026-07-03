@@ -676,8 +676,14 @@ resolve in the advisory checker. Returns the project root."
     ; drop any stale registrations from a prior run (long-lived image / hot reload)
     (let (dirs (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
-      (check-project)
-      ; advisory; warnings to stderr
+      ;; Advisory type-check (warnings to stderr). Run it INSIDE `%isolate`: `check-project`
+      ;; loads every source + test file into the image for cross-file checking, which would
+      ;; otherwise leave all N test modules bound in the global table — and the scoped run
+      ;; below `snapshot-globals`-clones that table once PER FILE, so an O(N) baseline makes
+      ;; the run O(N²). Rolling the check's loads back keeps the run's baseline small (just
+      ;; prelude + src + the test framework), so each file's snapshot is O(1) → linear.
+      ;; (Warnings are stderr I/O, unaffected by the global rollback.)
+      (%isolate (fn () (check-project)))
       ;; Run file-by-file, each in its own rolled-back global scope, so a large
       ;; suite's promoted code + top-level defs are reclaimed per file instead of
       ;; accumulating every file's code in one image (the shared-RUNTIME test-runner

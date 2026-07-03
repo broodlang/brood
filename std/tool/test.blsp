@@ -644,9 +644,11 @@ docs/testing.md for the full guide.")
   (let (chunks (fold (fn (acc loader)
                        (cons (%isolate (fn () (reset-units!) (loader) (drain-current))) acc))
                  nil loaders))
-    ;; `chunks` is reverse run order; `(append file-results acc)` copies only the small
-    ;; per-file list each step (sharing the tail), rebuilding run order in O(total).
-    (fold (fn (acc file-results) (append file-results acc)) nil chunks)))
+    ;; `chunks` is reverse run order; fold back to run order with `append-two`, which copies
+    ;; only its FIRST arg (the small per-file result list) and SHARES the accumulator tail —
+    ;; O(total). NB: the variadic `append` copies BOTH args, so `(append c acc)` here would be
+    ;; O(files²) (it recopies the growing accumulator every file); `append-two` is the fix.
+    (fold (fn (acc file-results) (append-two file-results acc)) nil chunks)))
 
 ;; Run a suite file-by-file (each file in its own rolled-back scope, via
 ;; `drain-files-scoped`), aggregate, then report once — the memory-bounded analogue of
