@@ -743,12 +743,14 @@ form (not the comment) is emitted last and the close must NOT break. Only an
     (fold (fn (acc entry)
             (let (p (path-join dir entry))
               (cond
-                (dir? p) (if (format--ignored-dir? entry) acc (append acc (format--collect-blsp p)))
+                ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
+                ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
+                (dir? p) (if (format--ignored-dir? entry) acc (append-two (format--collect-blsp p) acc))
                 ;; Skip generated lock files (`project.lock.blsp`): they're machine-
                 ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
                 ;; every project-setup, so formatting them just fights the resolver.
                 (ends-with? entry ".lock.blsp") acc
-                (ends-with? entry ".blsp") (append acc (list p))
+                (ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil
       (list-dir dir))

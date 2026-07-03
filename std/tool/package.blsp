@@ -43,9 +43,11 @@ land in a later slice."
             acc
             (let (full (path-join dir entry)
                   rel (if (= prefix "") entry (str prefix "/" entry)))
+              ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
+              ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
               (if (dir? full)
-                (append acc (package--tree-files--walk full rel))
-                (append acc (list rel))))))
+                (append-two (package--tree-files--walk full rel) acc)
+                (cons rel acc)))))
     nil
     (list-dir dir)))
 

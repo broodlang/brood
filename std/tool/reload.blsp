@@ -81,8 +81,10 @@ watched until you call `reload-on-change`.
     (fold (fn (acc entry)
             (let (p (path-join dir entry))
               (cond
-                (dir? p) (append acc (reload--collect-blsp p))
-                (ends-with? entry ".blsp") (append acc (list p))
+                ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
+                ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
+                (dir? p) (append-two (reload--collect-blsp p) acc)
+                (ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil
       (list-dir dir))
