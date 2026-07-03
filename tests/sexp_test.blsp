@@ -29,7 +29,16 @@
   (test "positions account for delimiters & reader-macro prefixes"
     ;; "'(a) [b]"  → quoted list [0,4), vector [5,8)
     (assert= (point-forward "'(a) [b]" 0) 4)
-    (assert= (point-forward "'(a) [b]" 4) 8)))
+    (assert= (point-forward "'(a) [b]" 4) 8))
+  (test "a column-0 bracket inside a multi-line docstring doesn't break motion below it"
+    ;; the `(x)` line sits at column 0 INSIDE the docstring; narrow must not treat it as a
+    ;; top-level form start (else it slices mid-string and the CST parse of the fragment fails,
+    ;; leaving forward-sexp stuck). Regression for the reported `(defmodule …"…(…"…)` bug.
+    (let (src "(defmodule m\n\"doc\n(x)\nend\")\n(def y 1)"
+          dp (string-index-of src "(def y"))
+      (let ([base sub] (narrow src dp))
+        (assert= base 0))                                    ; not the in-docstring (x)
+      (assert= (point-forward src dp) (string-length src)))))  ; forward-sexp spans (def y 1)
 
 ;; Structural motion narrows to the forms around point (`sexp/narrow`) so it's
 ;; O(neighbouring forms), not O(buffer). These pin that the narrowed answer equals the
