@@ -3,6 +3,23 @@
 Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
 an ADR once they're committed to. Newest section at the top.
 
+## check-project O(n²) — resolve imports without re-eval/re-compile (scoped 2026-07-03)
+
+**Problem.** `nest check` / `nest test` are O(files²) on a large project (100K `nest test` ≈ 78 min).
+`check_file` runs per file and its DOMINANT cost (~80%) is re-macroexpanding + re-evaling +
+re-**compiling** that file's `(defmodule … (:use …))` header — redundant in a whole-project check,
+where `project--ensure-loaded` already loaded every module up front. (Two lesser O(n)/file terms —
+the `known_ns` and `%refer` all-globals scans — are ~20%; caching them is a dead end: count-key is
+unsound under `%isolate` rollback, epoch-key churns on JIT inline-swaps. See devlog 2026-07-03.)
+
+**Fix direction.** Give `check_file` a path that, when the project image is already loaded, populates
+the file's import table (so bare `(:use)`d names resolve) WITHOUT evaling/compiling the header —
+e.g. parse the `(:use …)`/`(:alias …)` clauses from the header form and resolve imports directly, or
+an incrementally-maintained namespace→exports index that both `%refer` and the checker read in O(1).
+Higher blast radius (checker + loader + import resolution); gate hard on the `namespace_test` `(:use)`
+cases + hot-reload. Test-runner scoping is already fixed + linear (committed).
+
+
 ## Lean native-call protocol from HOF drivers (scoped 2026-07-02)
 
 **Goal.** Close the real `nqueens`/`pipeline` gap (~14× / ~7×). Profiling redirected off allocation:

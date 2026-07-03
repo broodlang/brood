@@ -1095,3 +1095,28 @@ place — it silently made every cross-count comparison use the same file count 
 **Measured (clean per-count dirs):** 4000-file suite 41s → **2.4s** (17×); now linear at ~0.6 ms/file
 (1K→0.57s, 2K→1.3s, 4K→2.4s, 8K→4.9s), memory bounded. A 100K-file suite is now ~60s and a 1M-file
 suite ~10min — the runtime no longer dominates. Gate: 648 tests + brood-edit 725/725.
+
+## 2026-07-03 — check-project O(n²): root-caused, NOT fixed (investigation record)
+
+Stress-testing `nest test`/`nest check` at 1K–100K files (after fixing the test-runner scoping, see
+above) exposed a quadratic in the advisory whole-project checker: `nest check` 1K→1.8s, 2K→6.5s,
+8K→87.6s; 100K `nest test` = ~78 min (check-project dominates; test execution itself is now linear).
+Root cause is DIFFUSE — `check_file` runs once per project file and:
+1. rebuilds `known_ns` by scanning ALL global symbols (`check.rs`), and
+2. `%refer` (from each file's `(:use …)`) scans ALL globals (`system.rs`), and — DOMINANT (~80%) —
+3. re-macroexpands + re-evals + re-**compiles** each file's `(defmodule … (:use …))` header, which
+   grows with the loaded image (N distinct headers compiled into an ever-growing JIT module).
+
+**Attempted + reverted:** caching #1/#2 on the heap. Two keys, both structurally wrong:
+- **count-key** is UNSOUND — `%isolate` rollback removes globals, so a rollback-then-def collides on
+  the same count with a different name-set → stale cache → broke 3 `(:use)` namespace suite tests
+  (the exact hot-reload hazard flagged during review).
+- **epoch/version-key** CHURNS — `global_epoch` is bumped by the JIT's inline-upgrade swaps (which
+  fire during the check), so the cache rebuilds per file → no win (26s→21s, still O(n²)).
+
+Even a perfect scan-cache only removes ~20% (measured); the dominant ~80% is the per-file header
+re-processing, untouched. Reverted clean. **Real fix (deferred):** a `check_file` change that resolves
+each file's imports WITHOUT re-eval/re-compiling already-loaded headers (in a whole-project check the
+image is fully loaded up front) — a checker/loader/import-resolution redesign, higher blast radius,
+best done fresh. Real projects (tens–hundreds of files) check fine; this only bites pathological
+thousands-of-files suites. See `todo.md`.
