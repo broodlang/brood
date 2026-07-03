@@ -362,3 +362,30 @@ fn manual_runtime_collect_inside_isolate_is_a_noop() {
         "an explicit (runtime-collect) inside %isolate stranded the globals snapshot",
     );
 }
+
+/// Hardening for unpaired snapshot/restore (KI-6). The `GlobalsSnapshot` newtype makes
+/// restore-without-snapshot unforgeable and double-restore a move error (both compile-time);
+/// `#[must_use]` flags a dropped snapshot. This exercises the one runtime-checkable part:
+/// nested snapshots each suppress compaction, restore is LIFO (the debug-only depth assert
+/// must not fire on valid nesting), and releasing all of them re-enables compaction.
+#[test]
+fn nested_globals_snapshots_suppress_then_re_enable_compaction() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    let outer = interp.heap.snapshot_globals();
+    let inner = interp.heap.snapshot_globals();
+    assert!(
+        interp.heap.runtime_collect().is_none(),
+        "compaction must be a no-op while globals snapshots are outstanding",
+    );
+    interp.heap.restore_globals(inner); // LIFO: inner first — the depth assert must hold
+    assert!(
+        interp.heap.runtime_collect().is_none(),
+        "still suppressed while the outer snapshot is outstanding",
+    );
+    interp.heap.restore_globals(outer);
+    assert!(
+        interp.heap.runtime_collect().is_some(),
+        "compaction must be re-enabled once every snapshot is restored",
+    );
+}

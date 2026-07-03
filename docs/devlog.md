@@ -1028,3 +1028,22 @@ Also closed the KI-6 caveat: the block is now checked at the `runtime_collect_wi
 through), so an explicit collect *inside* an `%isolate` is a no-op instead of a snapshot-stranding
 corruption. New regression test `manual_runtime_collect_inside_isolate_is_a_noop`. Gate: 647 tests
 (default + debug-assertions), clippy clean, brood-edit 725/725 @ 199 MB.
+
+## 2026-07-03 — Harden snapshot/restore against unpaired calls (KI-6 follow-up)
+
+The KI-6 fix made compaction-safety structural via `snapshot_globals`/`restore_globals`, but the
+protocol was still misusable: a snapshot without a restore leaves compaction suppressed forever (the
+leak returns), and a restore without a snapshot / a double-restore under-releases the suppression
+(re-exposing an outer snapshot to KI-6). Closed all three at the type level:
+
+- `snapshot_globals` now returns a `GlobalsSnapshot` newtype (private fields, constructible only
+  here) — the sole type `restore_globals` accepts. So a restore can't run without a paired snapshot
+  (nothing else can forge one), and it's taken **by value** so the same snapshot can't be restored
+  twice (move error).
+- `#[must_use]` on `GlobalsSnapshot`: an ignored/forgotten snapshot is a compiler warning.
+- A `block_depth` token + a debug-only LIFO assert in `restore_globals` catches out-of-order restores
+  (which would release the wrong scope's suppression).
+
+Regression test `nested_globals_snapshots_suppress_then_re_enable_compaction` (nested snapshots each
+suppress compaction, LIFO restore, then re-enable). Gate: 648 tests (default + debug-assertions),
+clippy clean, brood-edit 725/725 @ 199 MB.

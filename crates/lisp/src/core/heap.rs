@@ -932,6 +932,23 @@ pub struct SourceLoc {
     pub pos: crate::error::Pos,
 }
 
+/// A rolled-back-on-restore snapshot of the runtime globals, plus the RUNTIME-compaction
+/// suppression it holds (KI-6). Constructed **only** by [`Heap::snapshot_globals`] — and
+/// the sole argument type [`Heap::restore_globals`] accepts — so the snapshot↔restore
+/// protocol can't be misused: a restore can't run without a paired snapshot (no way to
+/// forge one), and `restore_globals` takes it *by value* so the same snapshot can't be
+/// restored twice. `#[must_use]`: dropping a snapshot without restoring it leaves the
+/// globals mutated AND compaction suppressed, so the compiler flags an ignored one.
+#[must_use = "a globals snapshot must be handed to heap.restore_globals — dropping it \
+              leaves the globals table mutated and RUNTIME compaction suppressed (KI-6)"]
+pub struct GlobalsSnapshot {
+    saved: SymbolMap<Value>,
+    /// The `rt_collect_block` depth this snapshot established (post-increment). Restore
+    /// asserts the live depth still matches — catching an out-of-order (non-LIFO) restore,
+    /// which would release the wrong scope's suppression.
+    block_depth: u32,
+}
+
 impl Default for RuntimeCode {
     fn default() -> Self {
         RuntimeCode {
@@ -4743,13 +4760,17 @@ impl Heap {
     /// then be rolled back (this is what the `%isolate` primitive does for
     /// `:isolated` tests). Only meaningful when no other process is writing the
     /// table concurrently.
-    pub fn snapshot_globals(&self) -> SymbolMap<Value> {
-        // The returned snapshot holds raw RUNTIME handles off the graph; suppress RUNTIME
-        // compaction until the paired `restore_globals` reinstalls (or discards) it, so a
-        // relocation can't strand those handles (KI-6). Structural — every caller of the
-        // snapshot/restore protocol is covered, not just `%isolate`.
+    pub fn snapshot_globals(&self) -> GlobalsSnapshot {
+        // The snapshot holds raw RUNTIME handles off the graph; suppress RUNTIME compaction
+        // until the paired `restore_globals` reinstalls (or discards) it, so a relocation
+        // can't strand those handles (KI-6). Structural — every caller of the protocol is
+        // covered, not just `%isolate`. The `#[must_use]` guard + by-value restore make
+        // forgetting-to-restore a compiler warning and double-restore impossible.
         self.begin_rt_collect_block();
-        self.runtime.globals_read().clone()
+        GlobalsSnapshot {
+            saved: self.runtime.globals_read().clone(),
+            block_depth: self.rt_collect_block.get(),
+        }
     }
 
     /// Every symbol currently bound in the global table (prelude + user `def`s).
@@ -4795,8 +4816,17 @@ impl Heap {
     /// earlier value. The `def`'d code the bindings referenced is now unreachable and
     /// is reclaimed by the next RUNTIME compaction (which this call re-enables — see
     /// [`rt_collect_block`](Self::rt_collect_block) — after `snapshot_globals` suppressed it).
-    pub fn restore_globals(&self, snapshot: SymbolMap<Value>) {
-        *self.runtime.globals_write() = snapshot;
+    pub fn restore_globals(&self, snapshot: GlobalsSnapshot) {
+        // LIFO check: the live suppression depth must still equal what this snapshot set,
+        // or snapshots were restored out of order and we'd release the wrong scope's
+        // suppression (re-exposing an outer snapshot to KI-6). The newtype already rules
+        // out restore-without-snapshot and double-restore; this catches reordering.
+        debug_assert_eq!(
+            self.rt_collect_block.get(),
+            snapshot.block_depth,
+            "restore_globals out of order — globals snapshots must be restored LIFO"
+        );
+        *self.runtime.globals_write() = snapshot.saved;
         // Wholesale table swap — invalidate every stamped global inline cache.
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
         // Release the compaction suppression `snapshot_globals` took: the snapshot is no
