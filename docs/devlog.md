@@ -999,3 +999,17 @@ Safe (audited, no fix needed): `globals` (already rewritten), `def_sites` (Symbo
 handles), `jit_code_cache`/`jit_inline_cache` (version-guarded — the compaction's `version` bump
 flushes them), and the per-process caches (`vm_cache`/`global_ic`/site ICs, dropped in step 4).
 Gate: 646 tests (default + debug-assertions), clippy clean.
+
+## 2026-07-03 — Complete the test-runner leak fix: the `nest mcp` structured path too
+
+Follow-up sweep on the bug-#1 fix found it incomplete: only `run-project-tests` (nest test) was
+rewired to the per-file scoped run; `run-project-tests-structured` — which backs the `nest mcp`
+run-tests tool — still loaded every file up front. That's the *worst* place for it: `nest mcp` is a
+long-lived hot-reload image, so each run-tests call would re-accumulate every file's promoted code.
+
+Factored `drain-files-scoped` (the per-file `%isolate` reset→load→drain loop) out of `run-tests-scoped`
+and added `run-tests-scoped-structured` (same scoping, returns the `{:total :passed :failed
+:failed-assertions :ms :results}` map instead of printing/raising — the memory-bounded twin of
+`run-tests-structured`). `run-project-tests-structured` now uses it (with the `BROOD_TEST_NO_SCOPE`
+escape hatch, matching `run-project-tests`). brood-edit `nest test` still 725/725 @ 199 MB after the
+refactor; brood repo `make test` 646 pass.

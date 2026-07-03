@@ -710,9 +710,13 @@ resolve in the advisory checker. Returns the project root."
     ; (each `load` re-registers, ADR-013) counts each test once, not N times
     (let (dirs (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
-      (fold (fn (_ f) (load f)) nil files)
-      ; loader-only: tests register themselves
-      (apply test/run-tests-structured opts))))
+      ;; Per-file scoped run (see `run-project-tests`) — matters most here: `nest mcp`
+      ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
+      ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
+      (if (getenv "BROOD_TEST_NO_SCOPE")
+        (do (fold (fn (_ f) (load f)) nil files)
+            (apply test/run-tests-structured opts))
+        (apply test/run-tests-scoped-structured (map (fn (f) (fn () (load f))) files) opts)))))
 
 ;; (run-project args) — find the project from the cwd, set it up (which may
 ;; override *project-main* via the manifest), `require` the entry module, and
