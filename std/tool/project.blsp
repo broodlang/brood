@@ -200,12 +200,16 @@ the `nest new` scaffolder."
 ;; Recursively collect every <name>_test.blsp path under `dir` (skipping nothing
 ;; else). Returns a list of full paths; nil if `dir` isn't a directory.
 (defn project--collect-tests (dir)
+  ;; `cons` a file (O(1)); splice a subdir's list with `append-two` (copies only the small
+  ;; subdir list, SHARES `acc`). A plain `(append acc …)` recopies the growing accumulator
+  ;; per entry — O(files²), which made discovery quadratic on a large project. Order is
+  ;; reversed (prepend), which is fine: the file list feeds order-independent per-file work.
   (if (dir? dir)
     (fold (fn (acc entry)
             (let (p (path-join dir entry))
               (cond
-                (dir? p) (append acc (project--collect-tests p))
-                (ends-with? entry "_test.blsp") (append acc (list p))
+                (dir? p) (append-two (project--collect-tests p) acc)
+                (ends-with? entry "_test.blsp") (cons p acc)
                 else acc)))
       nil
       (list-dir dir))
@@ -214,11 +218,13 @@ the `nest new` scaffolder."
 ;; Recursively collect every .blsp under `dir` (the project's source files).
 (defn project--collect-sources (dir)
   (if (dir? dir)
+    ;; Same O(files²)→O(files) fix as `project--collect-tests`: `cons` files, `append-two`
+    ;; subdir lists (copies the small list, shares `acc`) instead of `(append acc …)`.
     (fold (fn (acc entry)
             (let (p (path-join dir entry))
               (cond
-                (dir? p) (append acc (project--collect-sources p))
-                (ends-with? entry ".blsp") (append acc (list p))
+                (dir? p) (append-two (project--collect-sources p) acc)
+                (ends-with? entry ".blsp") (cons p acc)
                 else acc)))
       nil
       (list-dir dir))
@@ -425,7 +431,9 @@ resolve in the advisory checker. Returns the project root."
     (project--ensure-loaded root)
     (if (= (getenv "BROOD_NO_CHECK") "1")
       nil
-      (fold (fn (acc f) (append acc (check-file-structured f)))
+      ;; `append-two` (copy the small per-file diagnostic list, share `acc`) not
+      ;; `(append acc …)` (recopies the growing accumulator each file → O(files²)).
+      (fold (fn (acc f) (append-two (check-file-structured f) acc))
         nil
         (project--all-files root)))))
 
@@ -595,15 +603,20 @@ resolve in the advisory checker. Returns the project root."
 ;; test reference). `keep` over `files` keeps the warning attributed to its file.
 (defn project--unused-private-warnings (files)
   (let (counts (project--all-sym-counts files))
+    ;; `append-two file-warnings acc` copies only the small per-file list and SHARES the
+    ;; accumulator tail → O(total). (A plain `(append acc file-warnings)` re-copies the
+    ;; growing accumulator every file — the variadic `append` copies BOTH args — making a
+    ;; whole-project check O(files²); see docs/devlog.md 2026-07-03.)
     (fold (fn (acc path)
-            (append acc
+            (append-two
               (keep (fn (pd)
                       (let ([bare qual] pd
                             used (or (>= (map-get counts bare 0) 2)
                                    (and (not (= qual bare)) (>= (map-get counts qual 0) 1))))
                         (when (not used)
                           (str path ": warning: unused private function: " bare))))
-                (project--file-private-defs path))))
+                (project--file-private-defs path))
+              acc))
       '()
       files)))
 

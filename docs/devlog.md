@@ -1200,3 +1200,16 @@ with `seq_items` (vector + list); verified `nest check` now flags a name outside
 **Measured:** `nest check` 4000-file project 26s → 5.8s; 8000 ~350s(extrapolated) → ~18s. Gate: 655
 tests (default + debug-assertions), clippy clean, all `(:use)` namespace + hot_reload + mcp tests pass.
 A residual super-linear term remains (likely `project--check-unused-private`) — chasing next.
+
+## 2026-07-03 — check-project fully LINEAR: the residual was more O(n²) `append`-in-fold sites
+
+After the header-import redesign, a residual super-linear term remained. It was the SAME
+variadic-`append`-in-a-fold O(files²) bug as the test runner, in THREE more places, all in
+`std/tool/project.blsp`: file **discovery** (`project--collect-tests`/`-sources` built the path list
+with `(append acc (list p))` per file), `project--unused-private-warnings`, and the `nest mcp`
+`check-project-structured`. Each recopies the growing accumulator every file. Fixed with `cons` +
+`append-two` (copy the small per-item list, share the accumulator tail).
+
+**Measured:** `nest check` is now LINEAR — 1K→0.43s, 2K→0.80s, 4K→1.86s, 8K→3.12s (~0.4 ms/file);
+8000-file project 87.6s → 3.1s (and ~350s-extrapolated → 3.1s, ~110×). Combined with the earlier
+header-import redesign, the whole check-project quadratic is gone. Gate: 655 tests, brood-edit 725/725.
