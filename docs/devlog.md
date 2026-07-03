@@ -1013,3 +1013,18 @@ and added `run-tests-scoped-structured` (same scoping, returns the `{:total :pas
 `run-tests-structured`). `run-project-tests-structured` now uses it (with the `BROOD_TEST_NO_SCOPE`
 escape hatch, matching `run-project-tests`). brood-edit `nest test` still 725/725 @ 199 MB after the
 refactor; brood repo `make test` 646 pass.
+
+## 2026-07-03 — Harden the KI-6 fix: compaction-safety moves into snapshot/restore itself
+
+The KI-6 fix bracketed the compaction-block in `%isolate` (the one caller). That's fragile — a future
+caller of `snapshot_globals`/`restore_globals` would silently reintroduce the misdispatch. Moved the
+invariant to where it belongs: `snapshot_globals` now increments `Heap::rt_collect_block` (a `Cell<u32>`
+so the `&self` methods can bump it) and `restore_globals` decrements it, so **"no RUNTIME compaction
+while a globals snapshot is outstanding" holds structurally** — every caller of the protocol is
+covered, `%isolate`'s explicit begin/end calls are gone.
+
+Also closed the KI-6 caveat: the block is now checked at the `runtime_collect_with` **choke point**
+(the single path both the auto safepoint — via `rt_gc_due` — and a manual `(runtime-collect)` funnel
+through), so an explicit collect *inside* an `%isolate` is a no-op instead of a snapshot-stranding
+corruption. New regression test `manual_runtime_collect_inside_isolate_is_a_noop`. Gate: 647 tests
+(default + debug-assertions), clippy clean, brood-edit 725/725 @ 199 MB.

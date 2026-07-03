@@ -334,3 +334,31 @@ fn declared_sigs_survive_a_runtime_compaction() {
     let got = interp.heap.declared_sig_value(sym).expect("sig vanished");
     assert_eq!(interp.print(got), "(int -> int)", "declared sig corrupted by RUNTIME compaction");
 }
+
+/// Regression for the KI-6 hardening: a globals snapshot now suppresses RUNTIME
+/// compaction at the `runtime_collect_with` choke point — covering BOTH the auto
+/// safepoint path AND an explicit `(runtime-collect)`. So a manual collect *inside* an
+/// `%isolate` (which the original KI-6 fix left out of scope) is a no-op rather than a
+/// snapshot-stranding corruption. A pre-isolate global must survive it.
+#[test]
+fn manual_runtime_collect_inside_isolate_is_a_noop() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.eval_str("(defn probe () 42)").expect("probe def");
+    interp
+        .eval_str(
+            "(%isolate (fn () \
+               (defn dm (i n) (if (= i n) :done (do (eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) 'x))) (dm (+ i 1) n)))) \
+               (dm 0 300) \
+               (runtime-collect)))",
+        )
+        .expect("isolate thunk");
+    let v = interp
+        .eval_str("(probe)")
+        .expect("probe call after isolate");
+    assert_eq!(
+        interp.print(v),
+        "42",
+        "an explicit (runtime-collect) inside %isolate stranded the globals snapshot",
+    );
+}

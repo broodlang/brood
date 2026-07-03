@@ -1129,17 +1129,21 @@ pub struct Heap {
     /// prelude `SharedCode` `Arc` is the default (empty) one, since a missing
     /// prelude means a freshly-built builder heap that's about to freeze.
     gc_enabled: bool,
-    /// Re-entrant suppression of RUNTIME-region auto-compaction. `%isolate`
-    /// (`system.rs`) snapshots the global table — a `SymbolMap<Value>` holding raw
-    /// RUNTIME handles — runs a thunk, then restores it. A compaction *during* the
-    /// thunk (its `def`s crossing [`rt_gc_floor`]) would relocate those handles,
-    /// leaving the off-graph snapshot pointing at recycled slots — so the restore
-    /// reinstalls stale handles and unrelated globals silently misdispatch. Bumping
-    /// this over the snapshot→restore window defers auto-compaction ([`rt_gc_due`]
-    /// returns false); the isolate's `def`s become garbage at restore and are
-    /// reclaimed by the *next* safepoint compaction. A counter (not a bool) so
-    /// nested isolates compose. [`rt_gc_due`]: Self::rt_gc_due
-    rt_collect_block: u32,
+    /// Re-entrant suppression of RUNTIME-region compaction while a **globals snapshot
+    /// is outstanding**. [`snapshot_globals`] clones the global table — a
+    /// `SymbolMap<Value>` of raw RUNTIME handles — off the graph and hands it back for a
+    /// later [`restore_globals`] (the `%isolate` protocol). A compaction between the two
+    /// would relocate those handles, leaving the snapshot pointing at recycled slots — so
+    /// the restore reinstalls stale handles and unrelated globals silently misdispatch
+    /// (KI-6). `snapshot_globals` increments this and `restore_globals` decrements it, so
+    /// the invariant "no compaction while a snapshot is live" holds *structurally* — any
+    /// caller of the snapshot/restore protocol is covered, not just `%isolate`.
+    /// [`runtime_collect_with`] bails while it's >0 (the choke point for both the auto
+    /// safepoint path — via [`rt_gc_due`] — and a manual `(runtime-collect)`); the
+    /// isolate's `def`s become garbage at restore and are reclaimed by the next safepoint.
+    /// `Cell` so the `&self` snapshot/restore can bump it; a counter (not a bool) so nested
+    /// snapshots compose. [`rt_gc_due`]: Self::rt_gc_due
+    rt_collect_block: std::cell::Cell<u32>,
     /// The LOCAL **generation epoch** — stamped into every LOCAL handle minted
     /// (the `local_gen` in `alloc_*`), and bumped on every arena flip
     /// ([`arena_flip`](Self::arena_flip), shared by `flush`/`collect`) so the
@@ -1550,7 +1554,7 @@ impl Heap {
             gc_threshold: usize::MAX,
             rt_gc_threshold: usize::MAX,
             gc_enabled: false,
-            rt_collect_block: 0,
+            rt_collect_block: std::cell::Cell::new(0),
             local_epoch: 0,
             remembered: Vec::new(),
             old_epoch: 0,
@@ -1599,7 +1603,7 @@ impl Heap {
             gc_threshold: gc_floor(),
             rt_gc_threshold: rt_gc_floor(),
             gc_enabled: true,
-            rt_collect_block: 0,
+            rt_collect_block: std::cell::Cell::new(0),
             local_epoch: 0,
             remembered: Vec::new(),
             old_epoch: 0,
@@ -4740,6 +4744,11 @@ impl Heap {
     /// `:isolated` tests). Only meaningful when no other process is writing the
     /// table concurrently.
     pub fn snapshot_globals(&self) -> SymbolMap<Value> {
+        // The returned snapshot holds raw RUNTIME handles off the graph; suppress RUNTIME
+        // compaction until the paired `restore_globals` reinstalls (or discards) it, so a
+        // relocation can't strand those handles (KI-6). Structural — every caller of the
+        // snapshot/restore protocol is covered, not just `%isolate`.
+        self.begin_rt_collect_block();
         self.runtime.globals_read().clone()
     }
 
@@ -4781,14 +4790,18 @@ impl Heap {
     }
 
     /// Restore the runtime's global bindings from a [`Heap::snapshot_globals`]
-    /// snapshot, discarding every `def` made since it was taken. The
-    /// append-only code slabs are *not* reclaimed (there's no GC yet), but the
-    /// bindings revert — so a name `def`'d since the snapshot becomes unbound
-    /// again, and a rebound name returns to its earlier value.
+    /// snapshot, discarding every `def` made since it was taken — so a name `def`'d
+    /// since the snapshot becomes unbound again, and a rebound name returns to its
+    /// earlier value. The `def`'d code the bindings referenced is now unreachable and
+    /// is reclaimed by the next RUNTIME compaction (which this call re-enables — see
+    /// [`rt_collect_block`](Self::rt_collect_block) — after `snapshot_globals` suppressed it).
     pub fn restore_globals(&self, snapshot: SymbolMap<Value>) {
         *self.runtime.globals_write() = snapshot;
         // Wholesale table swap — invalidate every stamped global inline cache.
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
+        // Release the compaction suppression `snapshot_globals` took: the snapshot is no
+        // longer outstanding, so a relocation can no longer strand it (KI-6).
+        self.end_rt_collect_block();
     }
 
     /// Walk to the global scope at the bottom of the frame chain.
@@ -5177,6 +5190,13 @@ impl Heap {
         extra_roots: &mut [Value],
         extra_envs: &mut [EnvId],
     ) -> Option<(usize, usize)> {
+        // Bail while a globals snapshot is outstanding (KI-6): relocating RUNTIME handles
+        // now would strand the off-graph snapshot `restore_globals` will reinstall. The
+        // single choke point for BOTH the auto safepoint path (via `rt_gc_due`) and a
+        // manual `(runtime-collect)`, so an explicit collect inside `%isolate` is safe too.
+        if self.rt_collect_block.get() > 0 {
+            return None;
+        }
         // Bail unless we uniquely own the runtime region (no concurrent readers).
         Arc::get_mut(&mut self.runtime)?;
         // Stall trace (BROOD_STALL_MS): RUNTIME-region compaction is a prime gameplay-lag
@@ -5314,21 +5334,23 @@ impl Heap {
     #[inline]
     pub fn rt_gc_due(&self) -> bool {
         self.gc_enabled
-            && self.rt_collect_block == 0
+            && self.rt_collect_block.get() == 0
             && self.runtime.code.closures.count() >= self.rt_gc_threshold
     }
 
-    /// Enter a window in which RUNTIME auto-compaction is suppressed (see
-    /// [`rt_collect_block`](Self::rt_collect_block)) — `%isolate` brackets its
-    /// snapshot→restore with this so a compaction can't relocate the snapshot's
-    /// handles out from under it. Re-entrant; pair with [`Self::end_rt_collect_block`].
-    pub fn begin_rt_collect_block(&mut self) {
-        self.rt_collect_block = self.rt_collect_block.saturating_add(1);
+    /// Enter a window in which RUNTIME compaction is suppressed (see
+    /// [`rt_collect_block`](Self::rt_collect_block)). Called by [`Self::snapshot_globals`]
+    /// so an outstanding globals snapshot can't be relocated out from under it; re-entrant,
+    /// paired with [`Self::end_rt_collect_block`] (from [`Self::restore_globals`]).
+    fn begin_rt_collect_block(&self) {
+        self.rt_collect_block
+            .set(self.rt_collect_block.get().saturating_add(1));
     }
 
     /// Leave a [`Self::begin_rt_collect_block`] window.
-    pub fn end_rt_collect_block(&mut self) {
-        self.rt_collect_block = self.rt_collect_block.saturating_sub(1);
+    fn end_rt_collect_block(&self) {
+        self.rt_collect_block
+            .set(self.rt_collect_block.get().saturating_sub(1));
     }
 
     /// Test/diagnostic hook: turn the automatic safepoint RUNTIME collection on or

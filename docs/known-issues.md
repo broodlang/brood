@@ -37,10 +37,15 @@ a thunk, then restores it. A RUNTIME compaction *during* the thunk (its `def`s c
 `BROOD_RT_GC_FLOOR`, trivially met in a large image) relocated those handles; the stale snapshot then
 reinstalled handles aliasing *other* closures → an unrelated pre-isolate global silently misdispatched
 (`foo` → a 1-arg `z-*` defined inside the rolled-back isolate). Latent for every `:isolated` test.
-**Fix:** a re-entrant `Heap::rt_collect_block` counter suppresses RUNTIME auto-compaction across the
-snapshot→restore window (`rt_gc_due` returns false while >0); the isolate's `def`s become garbage at
-restore and are reclaimed by the next safepoint. **Guarded by:**
-`tests/runtime_collector.rs::isolate_is_safe_against_a_runtime_compaction_inside_the_thunk`.
+**Fix:** a re-entrant `Heap::rt_collect_block` counter (a `Cell<u32>`) suppresses RUNTIME compaction
+while a globals snapshot is outstanding — `snapshot_globals` increments it and `restore_globals`
+decrements it, so the invariant holds *structurally* (every caller of the protocol is covered, not
+just `%isolate`). Checked at the `runtime_collect_with` choke point, so BOTH the auto safepoint path
+(via `rt_gc_due`) and a manual `(runtime-collect)` are covered — an explicit collect inside an
+`%isolate` is a no-op, not a corruption. The isolate's `def`s become garbage at restore and are
+reclaimed by the next safepoint. **Guarded by:**
+`tests/runtime_collector.rs::{isolate_is_safe_against_a_runtime_compaction_inside_the_thunk,
+manual_runtime_collect_inside_isolate_is_a_noop}`.
 
 ## KI-5 — `nest test` OOMs: shared RUNTIME region accumulates every test file's code · **fixed 2026-07-03**
 
