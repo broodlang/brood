@@ -858,6 +858,25 @@ pub(super) fn spit_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     Ok(Value::nil())
 }
 
+pub(super) fn append_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::Write;
+    let path = expect_string(heap, "append-bytes", arg(args, 0))?;
+    let bytes = collect_bytes("append-bytes", arg(args, 1), heap)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| {
+            LispError::runtime(format!("append-bytes: {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
+    f.write_all(&bytes).map_err(|e| {
+        LispError::runtime(format!("append-bytes: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(Value::nil())
+}
+
 /// Hash algorithm selector for `%digest` / `%hmac`, decoded from the leading
 /// keyword arg. This is the single place the kernel enumerates digest
 /// algorithms; all string-input and hex-output shaping is Brood policy in
