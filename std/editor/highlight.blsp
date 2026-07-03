@@ -193,24 +193,33 @@ its visible slice yet hand the renderer absolute offsets; `base` 0 is exactly
   "True if offset `i` begins a line — it's the start of `src` or follows a newline."
   (or (= i 0) (= (char-at src (dec i)) "\n")))
 
-(defn hl--restart-scan (src i)
-  "Backward scan for the nearest column-0 open bracket at or before offset `i`; 0 if
-there is none."
+(defn hl--line-end (src i n)
+  "Index just past the next newline at or after `i`, or `n` — skips a `;` comment tail."
+  (cond (>= i n) n (= (char-at src i) "\n") (inc i) :else (hl--line-end src (inc i) n)))
+
+(defn hl--restart-scan (src i n pos best)
+  "Forward from `i`, skipping strings (`hl--string-end`) and `;` comments (`hl--line-end`);
+`best` is the greatest column-0 open bracket seen OUTSIDE any string/comment at an offset
+≤ `pos`. Skipping is what keeps a column-0 bracket inside a multi-line docstring from being
+read as a form start (a backward scan can't tell — it lacks the lexer state a forward pass
+carries)."
   (cond
-    (< i 0) 0
-    (and (hl--open? (char-at src i)) (hl--col0? src i)) i
-    :else (hl--restart-scan src (dec i))))
+    (or (>= i n) (> i pos)) best
+    (= (char-at src i) "\"") (hl--restart-scan src (hl--string-end src (inc i) n) n pos best)
+    (= (char-at src i) ";") (hl--restart-scan src (hl--line-end src (inc i) n) n pos best)
+    (and (hl--open? (char-at src i)) (hl--col0? src i)) (hl--restart-scan src (inc i) n pos i)
+    :else (hl--restart-scan src (inc i) n pos best)))
 
 (defn safe-restart (src pos)
-  "The offset of the nearest *top-level form start* at or before `pos`: an open
-bracket (`(`/`[`/`{`) that begins a line (column 0), or 0 if there is none. A safe
+  "The offset of the nearest *top-level form start* at or before `pos`: a column-0 open
+bracket (`(`/`[`/`{`) that lies OUTSIDE any string or comment, or 0 if there is none. A safe
 point to (re)start lexing `src` from — head-position state is known-false there, so a
-viewport can be highlighted from here without lexing everything above it (the Brood
-analogue of Emacs `beginning-of-defun`). Caveat: a column-0 bracket inside an
-unterminated multi-line string reads as a form start; top-level Brood forms live at
-column 0 and strings are indented, so this is rare in practice."
+viewport can be highlighted from here without lexing everything above it (the Brood analogue
+of Emacs `beginning-of-defun`). String/comment-aware (a forward lex from the top), so a
+column-0 bracket inside a multi-line docstring is correctly skipped — at the cost of an
+O(pos) lexical pre-pass, far cheaper than lexing the whole source."
   (let (n (string-length src))
-    (if (<= n 0) 0 (hl--restart-scan src (min pos (dec n))))))
+    (if (<= n 0) 0 (hl--restart-scan src 0 n (min pos (dec n)) 0))))
 
 ;; ---- the shared span -> runs tiler ------------------------------------------
 ;; `face-at` / `ranges-face` / `fontify-runs` are the renderer-agnostic core: a

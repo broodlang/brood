@@ -59,7 +59,14 @@
     (assert= (safe-restart "   (indented)" 8) 0)
     (assert= (safe-restart "" 0) 0))
   (test "an indented form falls back to the column-0 form above it"
-    (assert= (safe-restart "(let (x 1)\n  (f x))" 15) 0)))
+    (assert= (safe-restart "(let (x 1)\n  (f x))" 15) 0))
+  (test "a column-0 bracket INSIDE a multi-line string is not a restart point"
+    ;; value:  (a / "s / (x  <- col-0 ( but inside the string / ") / (b)
+    ;; the ( at offset 6 opens no form — it's string content, so it must be skipped.
+    (let (src "(a\n\"s\n(x\n\")\n(b)")
+      (assert= (safe-restart src 13) 12)   ; point in (b) → (b), not the in-string (
+      (assert= (safe-restart src 6) 0)     ; the in-string ( itself → the (a form at 0
+      (assert= (safe-restart src 7) 0))))  ; point inside the string → the enclosing (a form
 
 (describe "highlight-chunks — tiling a visible line"
   (test "chunks cover the whole line, coalescing default runs"
