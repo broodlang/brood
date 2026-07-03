@@ -310,3 +310,27 @@ fn per_isolate_scoping_bounds_runtime_region_growth() {
     );
     std::env::remove_var("BROOD_RT_GC_FLOOR");
 }
+
+/// Regression (bug #2 sibling): `declared_sigs` holds promoted RUNTIME type-expression
+/// handles off the graph. Before the fix it was NOT in the set `runtime_collect_with`
+/// rewrites, so a compaction relocated the type-expr out from under the stored handle and
+/// the checker read a garbage form (`(int -> int)` → `(i 1)`). `runtime_collect_with` now
+/// evacuates `declared_sigs` alongside `globals`.
+#[test]
+fn declared_sigs_survive_a_runtime_compaction() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    let sym = brood::core::value::intern("my-fn");
+    let ty = interp.eval_str("'(int -> int)").expect("type expr");
+    interp.heap.set_declared_sig(sym, ty);
+    // Churn distinct defs, then compact the RUNTIME region (relocates handles).
+    interp
+        .eval_str(
+            "(defn redef (i n) (if (= i n) :done (do (eval (list 'def (symbol (str \"z-\" i)) (list 'fn '(x) i))) (redef (+ i 1) n)))) (redef 0 3000)",
+        )
+        .expect("churn");
+    interp.heap.set_rt_auto_collect(true);
+    interp.heap.runtime_collect();
+    let got = interp.heap.declared_sig_value(sym).expect("sig vanished");
+    assert_eq!(interp.print(got), "(int -> int)", "declared sig corrupted by RUNTIME compaction");
+}

@@ -975,3 +975,27 @@ completion); tests **within** a file still parallelise — a modest cost (brood-
   data-heavy; scoping removes the code accumulation on top). brood-life's 5 failures are pre-existing
   and unrelated (its `bitset` builtin is unbound in the current runtime — fails standalone).
 - brood repo `make test`: 644 pass (the runner change is baked into the lib the cargo tests use).
+
+## 2026-07-03 — Audit: two more "off-graph RUNTIME handle across compaction" bugs (declared_sigs, positions)
+
+After fixing the `%isolate` compaction-unsafety (bug #2 above), swept for the same class:
+structures that reference RUNTIME data (by handle or slab index) and persist across a RUNTIME
+compaction but aren't in the set `runtime_collect_with` rewrites. Enumerated every `RuntimeCode`
+field; two gaps, both from a pre-ADR-091 "a RUNTIME pair never moves" premise that compaction
+invalidated:
+
+- **`declared_sigs` (real — corrupts the checker).** The `(sig …)` table holds promoted RUNTIME
+  type-expression `Value`s off the graph. A compaction relocated them out from under the stored
+  handles, so `sig_of` later read a garbage form. **Confirmed** with a test: `(int -> int)` read back
+  as `(i 1)` after churn+compact. Fix: `runtime_collect_with` now `flush_rt_value`s `declared_sigs`
+  alongside `globals`. Regression test `declared_sigs_survive_a_runtime_compaction`.
+- **`positions` (minor — diagnostics only).** The RUNTIME form-position table is keyed by pair slab
+  *index*; a relocation strands its keys on recycled pairs, so `(form-pos …)` / source-location would
+  return a stranger's position (or none) after a compaction. Fix: remap the keys through the same
+  `fwd.pairs` forwarding (dropping entries whose pair didn't survive), right after the evacuation
+  walks populate it.
+
+Safe (audited, no fix needed): `globals` (already rewritten), `def_sites` (Symbol→SourceLoc, no
+handles), `jit_code_cache`/`jit_inline_cache` (version-guarded — the compaction's `version` bump
+flushes them), and the per-process caches (`vm_cache`/`global_ic`/site ICs, dropped in step 4).
+Gate: 646 tests (default + debug-assertions), clippy clean.

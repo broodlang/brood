@@ -5197,6 +5197,18 @@ impl Heap {
                 *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
             }
         }
+        // 1b. Declared `(sig …)` type-expressions — also promoted RUNTIME handles held
+        // off the graph (a `SymbolMap<Value>` beside `globals`). Without this rewrite a
+        // compaction relocates the type-expr out from under the stored handle, so the
+        // checker's `sig_of` later reads a garbage form (e.g. `(int -> int)` → `(i 1)`).
+        // Evacuated exactly like a global. See [`RuntimeCode::declared_sigs`].
+        {
+            let rt = Arc::get_mut(&mut self.runtime).unwrap();
+            let mut s = rt.declared_sigs.write().unwrap_or_else(|e| e.into_inner());
+            for v in s.values_mut() {
+                *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
+            }
+        }
         // 2. This process's roots, env roots, and dynamic bindings.
         for v in self.roots.iter_mut() {
             *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
@@ -5232,6 +5244,23 @@ impl Heap {
             crate::eval::compile::rewrite_arm_handles(arm, &mut |v| {
                 flush_rt_value(&old_code, &new, &mut fwd, v)
             });
+        }
+        // 3c. Remap RUNTIME form-position keys through the same forwarding. `positions`
+        // is keyed by raw pair slab index and lives off the graph, so — like
+        // `declared_sigs` — a relocation strands its keys on recycled pairs; without this
+        // `(form-pos …)` / source-location diagnostics return a stranger's position (or
+        // none) after a compaction. `fwd.pairs` is fully populated by the walks above.
+        // Diagnostics-only, but the same stale-after-relocation class. Entries whose pair
+        // didn't survive are dropped.
+        {
+            let rt = Arc::get_mut(&mut self.runtime).unwrap();
+            let mut p = rt.positions.write().unwrap_or_else(|e| e.into_inner());
+            let old = std::mem::take(&mut *p);
+            for (old_idx, val) in old {
+                if let Some(&new_idx) = fwd.pairs.get(&(old_idx as u32)) {
+                    p.insert(new_idx as usize, val);
+                }
+            }
         }
         // 4. Drop the per-process caches that key on / hold RUNTIME handles. (The live
         // arms above are NOT cleared — they're mid-execution; only the lookup cache is.)
