@@ -8,6 +8,54 @@ rationale is in the cited ADRs / topic docs.
 
 ---
 
+## KI-8 — RUNTIME form-position table (`positions`) stranded by compaction · **fixed 2026-07-03**
+
+The bug-KI-3 class again, in a side table the KI-3 fix didn't cover. `RuntimeCode::positions`
+(source positions of RUNTIME list forms) is keyed by the pair's RUNTIME **slab index**, with a doc
+comment asserting "a RUNTIME pair never moves" — a pre-ADR-091 premise the compactor invalidated. A
+compaction relocated the pairs but not the keys, so `(form-pos …)` / source-location returned a
+stranger's position (or none) afterward. Diagnostics-only. **Fix:** `runtime_collect_with` remaps
+the keys through the same `fwd.pairs` forwarding after the evacuation walks, dropping entries whose
+pair didn't survive (mirroring the LOCAL `form_pos` remap). **Guarded by:** the `declared_sigs`
+regression test exercises the same rewrite pass; the LOCAL analog `form_pos` is remapped in `collect`.
+
+## KI-7 — declared `(sig …)` type-expressions corrupted by RUNTIME compaction · **fixed 2026-07-03**
+
+The bug-KI-3 class in another off-graph holder. `RuntimeCode::declared_sigs` stores each `(sig name
+type)` form's type-expression as a **promoted RUNTIME `Value`**, held in a `SymbolMap<Value>` beside
+`globals` but NOT walked by `runtime_collect_with`. A compaction relocated the type-expr out from
+under the stored handle, so the checker's `sig_of` later read a garbage form (confirmed: `(int ->
+int)` read back as `(i 1)` after churn + compact). Silent wrong-data (no tripwire — the handle is a
+valid RUNTIME index, just the wrong cell). **Fix:** `runtime_collect_with` now `flush_rt_value`s
+`declared_sigs` alongside `globals`. **Guarded by:** `tests/runtime_collector.rs::declared_sigs_survive_a_runtime_compaction`.
+
+## KI-6 — `%isolate` snapshot/restore not RUNTIME-compaction-safe · **fixed 2026-07-03**
+
+A sibling of KI-2 (that fix handled orphan-process reaping; this one the compaction-relocation race).
+`%isolate` snapshots the global table — an off-graph `SymbolMap<Value>` of raw RUNTIME handles — runs
+a thunk, then restores it. A RUNTIME compaction *during* the thunk (its `def`s crossing
+`BROOD_RT_GC_FLOOR`, trivially met in a large image) relocated those handles; the stale snapshot then
+reinstalled handles aliasing *other* closures → an unrelated pre-isolate global silently misdispatched
+(`foo` → a 1-arg `z-*` defined inside the rolled-back isolate). Latent for every `:isolated` test.
+**Fix:** a re-entrant `Heap::rt_collect_block` counter suppresses RUNTIME auto-compaction across the
+snapshot→restore window (`rt_gc_due` returns false while >0); the isolate's `def`s become garbage at
+restore and are reclaimed by the next safepoint. **Guarded by:**
+`tests/runtime_collector.rs::isolate_is_safe_against_a_runtime_compaction_inside_the_thunk`.
+
+## KI-5 — `nest test` OOMs: shared RUNTIME region accumulates every test file's code · **fixed 2026-07-03**
+
+`run-project-tests` loaded every test file into one long-lived driver image before running any, so
+each file's top-level `def`s promoted their compiled closures/chunks into the shared `RuntimeCode`
+region + global table — globally rooted, live, unbounded, unreclaimable (only same-name redefinition
+frees the old version). A 725-test suite crossed the 1 GB soft cap → `memory limit exceeded` on
+whichever workers were allocating (brood-edit: 9 spurious failures, all passing in isolation).
+**Fix:** `test/run-tests-scoped` (+ `-structured`) runs the suite file-by-file, each file inside its
+own `%isolate` (reset → load one file → drain → rollback), so the file's `def`s roll back and the next
+safepoint reclaims the promoted code — bounding memory to ~one file (relies on the KI-6 fix so the
+mid-run rollbacks are compaction-safe). `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all path.
+brood-edit: OOM → 725/725 at 199 MB. **Guarded by:**
+`tests/runtime_collector.rs::per_isolate_scoping_bounds_runtime_region_growth`.
+
 ## KI-4 — bitset stored as a non-UTF-8 `Value::Str` corrupts the GC on promote · **fixed 2026-06-15**
 
 A bitset was a blob-backed `Value::Str` holding raw, non-UTF-8 bytes, but
