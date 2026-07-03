@@ -355,6 +355,18 @@
     (assert= (apply + (lmap inc [1 2 3])) 9)
     (assert= (str (lmap inc [1 2 3])) "(2 3 4)"))
 
+  (test "reduce with a capturing step closure over a large range is exact (HOF JIT fast-frame + capture fill)"
+    ;; Regression guard for the HOF native fast-frame (`hof_apply_native`): a `reduce` step
+    ;; that CAPTURES an enclosing lexical (`bias`), folded over enough elements to JIT-tier the
+    ;; step arm so the per-element call takes the native path (which fills capture slots itself,
+    ;; bypassing `push_frame`). A capture-fill bug would read `bias` as nil → a wrong sum. The
+    ;; value must match the closed form regardless of engine (`BROOD_NO_HOF_JIT` on or off).
+    (let (bias 7
+          n 5000
+          got (reduce (fn (acc i) (+ acc (+ i bias))) 0 (range n)))
+      ;; sum(0..n-1) + n*bias = n*(n-1)/2 + n*bias
+      (assert= got (+ (quot (* n (- n 1)) 2) (* n bias)))))
+
   (test "eager map runs side effects; a lazy view defers them until realised"
     ;; The regression guard. Eager `map` must EXECUTE its fn (the loader and the
     ;; test-runner rely on `(map require-one …)` / `(map run-test …)` for effect).

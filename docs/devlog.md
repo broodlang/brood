@@ -863,3 +863,44 @@ Added coverage to `tests/unbox_torture_test.blsp`: exact `/` stays in the worker
 (`ut-div-inexact`), and ÷0 raises the VM's exact error (`ut-div-slash0`). Verified clean under
 `BROOD_JIT_VERIFY=1`+`BROOD_GC_VERIFY=1` (debug-assertions build), `BROOD_GC_STRESS=1`, and the full
 643-test suite (`make test`, incl. the in-language `brood::suite`). Clippy clean.
+
+## 2026-07-03 — HOF native fast-frame: `hof_apply_step` jumps the step arm's native code (nqueens ~18%)
+
+Picked up the "close the `nqueens`/`pipeline` gap" frontier. **Profiled before building** — and both
+profiles redirected off the two planned levers:
+- **Front (b)** (make capturing closures fast-linkable by dropping the `!capture_names.is_empty()` bail
+  in `vm_call_ic_fast_link`) targets the **elided free-global** in-IR fast-link. `perf` shows that path
+  is **0%** of `pipeline`: its transducer steps are computed-head (captured `rf`/`f`), which never reach
+  the elided fast-link. Dropping the bail would move `pipeline` ~nothing.
+- **Pure computed-head arm-caching** is only ~1–6%: the `vm_cache` map is already FxHash-keyed (one
+  multiply — `SymbolHasher`), so `vm_cache_arm` is mostly the `arm_for` scan + `Arc` clone, and
+  `push_frame` does the same slot+capture work a fast-frame would.
+
+What both profiles actually point at: the per-element step call runs through
+`hof_apply_step` → `vm_apply` → **`vm_run_bc` trampoline + per-call `jit_tier` re-entry**, *even when
+the step arm has installed native code*. On `nqueens` N=12: `push_frame` 13% + `vm_run_bc` 13% +
+`jit_tier` 11% + `vm_apply` 4% — a quarter-plus of runtime is the VM call protocol wrapping a step body
+that's already JIT'd.
+
+**Fix (default-on, `BROOD_NO_HOF_JIT` opts out): `hof_apply_native`.** When the resolved step arm has
+installed, epoch-current native code, `hof_apply_step` stages the args + captures and **jumps the
+native entry directly** — skipping `vm_apply`/`vm_run_bc` (frame save/restore, loop safepoints) and the
+`jit_tier` re-entry. It mirrors the proven computed-head native-link block in `jit_dispatch_call`: same
+frame setup, the same `capture_value` fill (the fast frame bypasses `push_frame`, so captured lexicals
+— `nqueens`' `placed` — are filled here; `capture_base == argc` since `hof_resolve` proved fixed-arity,
+no optionals/rest), the same env-rooting across the call (re-read the live id after `f()` for the deopt
+path), and the same 0/3/4/deopt outcome handling (outcome 4 follows the staged tail chain; a deopt
+re-runs on the VM with the GC-updated args). `hof_apply_native` in `eval/compile/mod.rs`.
+
+**Measured (best-of-3, clean `--release --features jit`):** `nqueens` N=12 **2.45→2.01 s (~18%)** with a
+clean A/B (`BROOD_NO_HOF_JIT=1` = 2.45, default = 2.01), checksum `14200` identical both ways. `fib`
+(no HOF — control) flat; `sort`/`matmul`/`wordcount` flat (no user-closure step). `pipeline` **flat** —
+its dominant path is the VM `dispatch` computed-head branch, not `hof_apply_step`; closing it is a
+separate (riskier) core-dispatch lever, deferred.
+
+**Gate.** All 643 tests pass (`make test`, default). `nqueens` + `pipeline` clean under
+`BROOD_JIT_VERIFY=1`+`BROOD_GC_VERIFY=1`+`BROOD_GC_STRESS=1` (debug-assertions build) — no stale-handle
+or tripwire reports. Added a regression test to `tests/sequence_test.blsp`: a `reduce` with a
+**capturing** step (`bias`) over a 5000-range (well past the tier threshold of 8, so the native path is
+taken) must equal the closed form — a capture-fill bug would read `bias` as nil. Passes with the native
+path on and off.

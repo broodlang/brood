@@ -2246,7 +2246,8 @@ pub(crate) fn hof_resolve(heap: &Heap, f: Value, argc: usize) -> Option<HofArm> 
 /// Call the cached step closure on `args`. `f` is the *current* (rooted, GC-relocated) closure
 /// value — re-read by the caller each element; if it no longer names the cached closure (a
 /// late-rebind), returns `None` so the caller falls back to its general per-call path. Otherwise
-/// runs the cached arm in the closure's captured env via `vm_apply` (skips the arm re-resolution).
+/// runs the cached arm in the closure's captured env — via the **native fast-frame** when the arm
+/// has installed, epoch-current JIT code ([`hof_apply_native`]), else via `vm_apply`.
 pub(crate) fn hof_apply_step(
     heap: &mut Heap,
     hof: &HofArm,
@@ -2261,7 +2262,146 @@ pub(crate) fn hof_apply_step(
         return None;
     }
     let cenv = heap.closure(id).env.unwrap_or_else(|| heap.global());
+    // Fast-frame straight into the step's native code when installed (`nqueens`/`pipeline`:
+    // the per-element step is JIT-eligible, but `vm_apply` re-enters the `vm_run_bc`
+    // trampoline + `jit_tier` every element — ~25%+ of both per the profile). Falls back to
+    // `vm_apply` when the arm isn't natively callable (not tiered yet / over the native cap /
+    // shape) or deopts.
+    #[cfg(feature = "jit")]
+    if hof_native_enabled() {
+        if let Some(r) = hof_apply_native(heap, &hof.arm, args, cenv) {
+            return Some(r);
+        }
+    }
     Some(vm_apply(heap, hof.arm.clone(), args, cenv))
+}
+
+/// Run the HOF step arm via the JIT **fast-frame** protocol — stage the args + captures and jump
+/// the installed native entry directly, skipping the `vm_apply` → `vm_run_bc` trampoline (frame
+/// save/restore, per-loop safepoints) and the per-call `jit_tier` re-entry. Returns `Some(result)`
+/// when it ran the native call (following an outcome-4 tail chain and re-running a deopt on the VM
+/// itself), or `None` when the arm can't be linked (not yet native / over the native-recursion cap
+/// / non-trivial shape) so the caller falls back to `vm_apply`.
+///
+/// Mirrors the computed-head native-link block in [`jit_dispatch_call`]: same frame setup, the same
+/// `capture_value` fill (the fast frame bypasses `push_frame`, so captured lexicals must be filled
+/// here), and the same 0/3/4/deopt outcome handling. `hof_resolve` already proved the arm is
+/// fixed-arity-`argc` with no optionals/rest, so `capture_base == argc`.
+/// Default ON; `BROOD_NO_HOF_JIT` opts out (the A/B / correctness lever for the HOF native
+/// fast-frame, independent of `BROOD_NO_HOF` which disables the whole cached-arm path).
+#[cfg(feature = "jit")]
+fn hof_native_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_HOF_JIT").is_none())
+}
+
+#[cfg(feature = "jit")]
+fn hof_apply_native(
+    heap: &mut Heap,
+    arm: &Arc<CompiledArm>,
+    args: &[Value],
+    cenv: EnvId,
+) -> Option<LispResult> {
+    use std::sync::atomic::Ordering::Acquire;
+    let argc = args.len();
+    let code = arm.jit_code.load(Acquire);
+    if code.is_null() || code == crate::jit::BAILED || code == crate::jit::QUEUED {
+        return None;
+    }
+    // Over the native-recursion cap → don't link (would overflow the native stack); let the VM
+    // drain the recursion. (`hof_resolve` guaranteed nslots>0 / noptional==0 / rest none / the
+    // `argc` arm; re-check the epoch here since a `def` can recompile mid-fold.)
+    if heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT
+        || arm.compile_epoch.load(Acquire) != heap.global_epoch()
+    {
+        return None;
+    }
+    let nslots = arm.active_nslots();
+    // Diagnostic label for the debug staged-stale report / BROOD_JIT_VERIFY (the arm's defining
+    // name if known, else leave the caller's — cosmetic only).
+    let dbg_sym = arm.dbg_name.unwrap_or(heap.jit_dbg_fn);
+    let base = heap.roots_len();
+    for &a in args {
+        heap.push_root(a);
+    }
+    // Runtime BROOD_JIT_VERIFY: scan the staged args for a stale handle (the fast frame bypasses
+    // `jit_dispatch_call`'s scan), matching `jit_run_fast_link`. NO_SITE: no call site (computed).
+    if jit_verify_active() {
+        jit_verify_staged(heap, base, base + argc, dbg_sym, NO_SITE, argc);
+    }
+    heap.extend_roots_to_nil(base + nslots);
+    // Root the callee's captured env so a tenure inside the arm forwards it (the deopt path
+    // below re-reads the live id from this root).
+    let env_base = heap.env_roots_len();
+    let env_root = heap.root_env(cenv);
+    // Fill the capture slots from the captured env — the fast frame placed only params + nil.
+    // `capture_base == argc` (nrequired == argc, no optionals/rest). No alloc → no GC → the
+    // nil-filled body slots stay valid.
+    if !arm.capture_names.is_empty() {
+        let cenv_live = heap.read_root_env(env_root);
+        for (k, &name) in arm.capture_names.iter().enumerate() {
+            let v = heap.capture_value(cenv_live, k, name);
+            heap.set_root_at(base + argc + k, v);
+        }
+    }
+    let depth = heap.jit_native_depth;
+    let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
+    let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, dbg_sym);
+    heap.jit_native_depth = depth + 1;
+    // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from `jit_lower_arm`, kept
+    // for the process in `GLOBAL_JIT`; the frame is at `roots[base..]`; validated current by the
+    // epoch check above.
+    let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code) };
+    let outcome = f(heap as *mut Heap, base as i64);
+    heap.jit_native_depth = depth;
+    heap.jit_call_env = saved;
+    heap.jit_dbg_fn = saved_fn;
+    // `f()` may have collected + relocated the captured env; re-read the live id before dropping
+    // its root (the deopt path hands it to `vm_apply`).
+    let cenv_live = heap.read_root_env(env_root);
+    heap.truncate_env_roots(env_base);
+    match outcome {
+        0 => {
+            crate::perf_bump!(jit_link_done);
+            let result = heap.root_at(base);
+            heap.truncate_roots(base);
+            Some(Ok(result))
+        }
+        3 => {
+            heap.truncate_roots(base);
+            Some(Err(jit_take_error(heap).unwrap_or_else(|| {
+                LispError::type_err("jit step deopt without a parked error")
+            })))
+        }
+        // Tail call (4): the callee JIT'd a tail — [callee, arg0..argN] staged above its frame at
+        // `[base+nslots, roots_len)`. Follow the chain rather than re-running via `vm_apply`.
+        4 => {
+            let staged_start = base + nslots;
+            let staged_end = heap.roots_len();
+            if staged_end > staged_start {
+                let staged_callee = heap.root_at(staged_start);
+                let staged_argc = staged_end - staged_start - 1;
+                let staged_args: SmallVec<[Value; 4]> = (1..=staged_argc)
+                    .map(|k| heap.root_at(staged_start + k))
+                    .collect();
+                heap.truncate_roots(base);
+                return Some(apply_value(heap, staged_callee, &staged_args, heap.global()));
+            }
+            heap.truncate_roots(base);
+            Some(Err(LispError::type_err("jit step tail with no staged call")))
+        }
+        // deopt (1) / preempt (2): re-run the arm on the VM. The args survive in the param slots
+        // `[base, base+argc)` (GC-updated); re-read, drop the frame, and `vm_apply`.
+        _ => {
+            crate::perf_bump!(jit_link_rerun);
+            let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+            for k in 0..argc {
+                argv2.push(heap.root_at(base + k));
+            }
+            heap.truncate_roots(base);
+            Some(vm_apply(heap, arm.clone(), &argv2, cenv_live))
+        }
+    }
 }
 
 // ===================== executor (Node → value) =====================
