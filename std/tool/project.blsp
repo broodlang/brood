@@ -676,11 +676,19 @@ resolve in the advisory checker. Returns the project root."
     ; drop any stale registrations from a prior run (long-lived image / hot reload)
     (let (dirs (project--abs-paths root *project-test-paths*)
           files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
-      (fold (fn (_ f) (load f)) nil files)
-      ; load each: registers its tests
       (check-project)
       ; advisory; warnings to stderr
-      (apply test/run-tests opts))))
+      ;; Run file-by-file, each in its own rolled-back global scope, so a large
+      ;; suite's promoted code + top-level defs are reclaimed per file instead of
+      ;; accumulating every file's code in one image (the shared-RUNTIME test-runner
+      ;; leak, docs/devlog.md 2026-07-03). Each loader `load`s one file (registering
+      ;; its units) inside the `%isolate` that `run-tests-scoped` wraps it in.
+      ;; `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all-then-run-all path (the
+      ;; escape hatch, e.g. for a suite that relies on cross-file top-level defs).
+      (if (getenv "BROOD_TEST_NO_SCOPE")
+        (do (fold (fn (_ f) (load f)) nil files)
+            (apply test/run-tests opts))
+        (apply test/run-tests-scoped (map (fn (f) (fn () (load f))) files) opts)))))
 
 ;; Structured analogue of `run-project-tests` — same bootstrap (discovery,
 ;; load, type-check pre-flight) but `(run-tests-structured)` at the end, so

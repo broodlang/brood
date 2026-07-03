@@ -607,6 +607,54 @@ docs/testing.md for the full guide.")
         mref (monitor d))
     (receive ([:all-results rs] rs)
       ([:down ~mref ~d reason] (error (str "test runner crashed: " reason))))))
+
+;; Split the currently-registered units into (iso par) and drain them — the shared
+;; body of `run-tests` and `run-tests-scoped`.
+(defn drain-current ()
+  (let (units (reverse *units*)
+        par (filter (fn (u) (not= (first u) :isolated)) units)
+        iso (filter (fn (u) (= (first u) :isolated)) units))
+    (drain-runner iso par)))
+
+;; Run each test file in its OWN global scope, aggregate, then report once —
+;; the memory-bounded analogue of loading every file up front and running the
+;; whole registry together. `loaders` is a list of 0-arg thunks, each `load`ing
+;; one test file (which registers its units). Wrapping a file's reset+load+run in
+;; `%isolate` rolls back that file's top-level `def`s (and lets the next safepoint
+;; reclaim the promoted code) once its tests finish — so a large suite's shared
+;; RUNTIME region stays bounded instead of accumulating every file's code at once
+;; (the test-runner leak, docs/devlog.md 2026-07-03). `%isolate` is safe to nest a
+;; file's own `:isolated` units inside, and is RUNTIME-compaction-safe (the
+;; `rt_collect_block` fix). Files run sequentially (each `%isolate` blocks to
+;; completion); tests WITHIN a file still parallelise. Prints the summary + raises
+;; exactly like `run-tests`.
+(defn run-tests-scoped (loaders & opts)
+  "Run a suite file-by-file, each file in its own rolled-back global scope so its top-level defs + promoted code are reclaimed after its tests finish — bounding a large suite's memory. `loaders` is a list of 0-arg thunks that each `load` one test file. Aggregates results, prints the summary, and raises if any failed — like `run-tests`. Backs `nest test`."
+  (def *test-timeout-ms* (opt-val :timeout opts *test-timeout-ms*))
+  (def *test-slow-ms* (opt-val :slow-over opts *test-slow-ms*))
+  (def *test-trace* (opt? :trace opts))
+  (let (start (now)
+        results (fold (fn (acc loader)
+                        (append acc
+                          (%isolate (fn () (reset-units!) (loader) (drain-current)))))
+                  nil loaders))
+    (let (elapsed (- (now) start)
+          total (count results)
+          failed (count-failed results)
+          fails (count-failures results))
+      (report-failures results)
+      (report-slow-over results *test-slow-ms*)
+      (when (opt? :slow opts) (report-slow results))
+      (println "")
+      (println total
+        "tests,"
+        (- total failed)
+        "passed,"
+        failed
+        "failed"
+        (str "(" fails " failed assertions)"))
+      (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
+      (if (> failed 0) (error (str failed " test(s) failed")) :ok))))
 ;; ────────────────────────────────────────────────────────────────────────────
 
 ;; --- reporting ---------------------------------------------------------------

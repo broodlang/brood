@@ -274,3 +274,39 @@ fn isolate_is_safe_against_a_runtime_compaction_inside_the_thunk() {
     );
     std::env::remove_var("BROOD_RT_GC_FLOOR");
 }
+
+/// Regression for the test-runner leak fix (docs/devlog.md 2026-07-03): running each
+/// "file" inside its own `%isolate` (as `test/run-tests-scoped` does) rolls back that
+/// file's top-level `def`s and lets the next safepoint reclaim the promoted code — so a
+/// large suite's shared RUNTIME region stays bounded instead of accumulating every file's
+/// distinct code at once. Without scoping, 300 "files" × 200 distinct defs promote ~60k
+/// closures that stay rooted (the leak); with per-`%isolate` scoping the region collapses
+/// back to a small constant. (Relies on the `%isolate` compaction-safety fix — otherwise a
+/// mid-isolate compaction would corrupt the snapshot.)
+#[test]
+fn per_isolate_scoping_bounds_runtime_region_growth() {
+    LazyLock::force(&MEM_GUARD);
+    std::env::set_var("BROOD_RT_GC_FLOOR", "256");
+    let mut interp = Interp::new();
+    interp
+        .eval_str(
+            "(defn defmany (fi i n) \
+               (if (= i n) :done \
+                 (do (eval (list 'def (symbol (str \"z-\" fi \"-\" i)) (list 'fn '(x) (list '+ 'x i)))) \
+                     (defmany fi (+ i 1) n)))) \
+             (defn loopf (f i n) (if (= i n) :done (do (f i) (loopf f (+ i 1) n))))",
+        )
+        .expect("setup errored");
+    // 300 "files", each defining 200 DISTINCT globals inside its own %isolate.
+    interp
+        .eval_str("(loopf (fn (fi) (%isolate (fn () (defmany fi 0 200)))) 0 300)")
+        .expect("scoped loop errored");
+    interp.eval_str("(runtime-collect)").expect("collect errored");
+    let count = interp.heap.runtime_closure_count();
+    assert!(
+        count < 500,
+        "per-%isolate scoping should bound the RUNTIME region — got {count} promoted closures \
+         after 300×200 distinct defs (unscoped accumulates ~60000, the leak)",
+    );
+    std::env::remove_var("BROOD_RT_GC_FLOOR");
+}

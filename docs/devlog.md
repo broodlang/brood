@@ -944,3 +944,34 @@ those are globally rooted → live, unbounded, JIT-independent, and `runtime-col
 (code slabs are append-only regardless of binding rollback). The 1 GB OOM in a 725-test suite is this
 accumulation. Fix is architectural (run each file/batch in a reclaimable scope or a fresh child
 runtime) — tracked next.
+
+## 2026-07-03 — Test-runner memory leak fixed: run each file in its own rolled-back scope
+
+The shared-RUNTIME accumulation flagged in the previous entry. Root cause (confirmed): `nest test`
+(`run-project-tests`, `project.blsp`) loaded **every** test file into one long-lived driver image
+(`(fold (fn (_ f) (load f)) nil files)`) before running any — so every file's top-level `def`s
+promoted their compiled closures/chunks into the shared `RuntimeCode` region + global table, all
+globally rooted → live, unbounded, JIT-independent, unreclaimable (only same-name redefinition frees
+the old version). A 725-test suite crossed the 1 GB soft cap → `memory limit exceeded` on whichever
+workers were allocating (the brood-edit suite: 9 spurious "failures", all passing in isolation). Probe:
+20k distinct defs → `:runtime-closures` 3→20003, unchanged by `runtime-collect` (~6.4 KB/def).
+
+**Fix:** `test/run-tests-scoped` (new, in `test.blsp`) runs the suite **file-by-file, each file inside
+its own `%isolate`** (reset-units! → load the one file → drain its units → rollback). The rollback
+drops that file's `def`s, and — because `%isolate` is now RUNTIME-compaction-safe (the
+`rt_collect_block` fix earlier today) — the next safepoint reclaims the promoted code. `run-project-tests`
+builds one loader thunk per file and calls it; `BROOD_TEST_NO_SCOPE` reverts to the legacy
+load-all-then-run path (escape hatch for a suite relying on cross-file top-level defs). Tallying was
+already process-local (returns/messages, not shared counters — "SHARE-SAFE TALLYING"), so aggregating
+across per-file scopes needs no shared state. Files run sequentially (each `%isolate` blocks to
+completion); tests **within** a file still parallelise — a modest cost (brood-edit: 24 files).
+
+**Measured / gated:**
+- **brood-edit (the reported OOM): 725/725 pass at 199 MB peak** (was >1 GB / OOM with 9 failures).
+- Probe: 300 files × 200 distinct defs → unscoped `:runtime-closures` 60003 (the leak) vs per-`%isolate`
+  scoped **3** — bounded. Rust regression test `per_isolate_scoping_bounds_runtime_region_growth`.
+- No regression on other projects: pong 103/103, store 19/19. **hatch improved** — 526/526 at a 4 GB
+  cap under scoping, where the legacy load-all path *fails* even at 4 GB (its large-payload tests are
+  data-heavy; scoping removes the code accumulation on top). brood-life's 5 failures are pre-existing
+  and unrelated (its `bitset` builtin is unbound in the current runtime — fails standalone).
+- brood repo `make test`: 644 pass (the runner change is baked into the lib the cargo tests use).
