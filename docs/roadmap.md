@@ -725,8 +725,16 @@ Gaps to parity (⬜ = not started; ✋ = deliberately not pursuing):
   gap; pulls in when overloaded/multi-clause typing has a real consumer.
 - ⬜ **Singleton / literal types** (`:ok` vs `:error`, `5` as a type) — the basis
   for precise `case`/`match` **exhaustiveness** and redundancy checking.
-- ⬜ **Map / record types** — key ⇒ value with `required`/`optional`, open maps,
-  static `KeyError` elimination. Brood has one flat `map` tag today.
+- ✅ **Map key/value types** `(map K V)` — fully shipped (ADR-078's third
+  refinement slice): uniform key/value types flow through `get`/`keys`/`vals`/
+  `assoc`. See [`docs/type-map-kv.md`](type-map-kv.md).
+- ✅ **Record/shape types** `(record :k T …)` — fully shipped (ADR-115):
+  heterogeneous keyword-keyed map shapes with `required`/`optional` fields, open
+  (extra keys allowed); runtime contract enforcement, a full `Ty` field
+  refinement with width/depth subtyping, `get`-by-literal-key sinks, and
+  record-literal type inference. Closed records (static `KeyError` elimination)
+  and `assoc`/`keys`/`vals` field-precise sinks deferred until a real consumer
+  drives them. See [`docs/type-records.md`](type-records.md).
 - ⬜ **Tuple / positional product types** (Brood has no tuple kind; vectors carry
   a single element type, not positional types).
 - ⬜ **Type variables / parametric polymorphism** for user-defined generics

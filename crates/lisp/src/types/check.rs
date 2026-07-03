@@ -186,6 +186,128 @@ fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
     Vec::new()
 }
 
+/// Populate the current file's import table from a `(defmodule … (:use …)/(:alias …))`
+/// header WITHOUT evaling/compiling the header. In a whole-project check every module is
+/// already loaded (`project--ensure-loaded`), so `check_file` can set up imports directly
+/// instead of re-macroexpanding + re-evaling + re-compiling every file's header — the eval
+/// path's per-file `provide`/`require`/`%refer` all-globals scans + `*module-docs*` rebind +
+/// compile made a whole-project check O(files²) (see docs/devlog.md 2026-07-03).
+///
+/// Mirrors `defmodule`'s `(:use)`/`(:alias)` expansion (std/prelude.blsp) + the `%refer`/
+/// `%alias` builtins exactly: `(:use mod)` refers mod's public (non-`--`) names bare;
+/// `(:use mod :only [a b])` / `:refer` refers just those; `(:alias mod [:as short])` adds a
+/// `short/` → `mod` prefix alias. A used module that isn't loaded (a bare-file check outside a
+/// project) is `require`d first — rare, and correctness there beats the O(files²) speed win.
+fn setup_check_imports(heap: &mut Heap, header: Value) {
+    // PASS A — parse the clauses into GC-STABLE data (`Symbol`s are Copy `u32`) with NO
+    // eval, so nothing LOCAL is held across the `require` eval in pass B (which can collect
+    // and relocate handles). Holding a parsed `Value` across that eval was a use-after-GC.
+    enum Clause {
+        Use(Symbol, Option<Vec<Symbol>>), // (module, Some(only-subset) | None = all public)
+        Alias(Symbol, Symbol),            // (short-prefix-name, module)
+    }
+    let mut clauses: Vec<Clause> = Vec::new();
+    {
+        let Some(items) = list_items(heap, header) else {
+            return;
+        };
+        // items = [defmodule, mod-name, doc?, clause...]; clauses follow name + optional doc.
+        let first_clause = if matches!(items.get(2), Some(Value::Str(_))) { 3 } else { 2 };
+        for clause in items.iter().skip(first_clause) {
+            let Some(citems) = list_items(heap, *clause) else {
+                continue;
+            };
+            let Some(Value::Keyword(kw_sym)) = citems.first() else {
+                continue;
+            };
+            if value::symbol_is(*kw_sym, "use") {
+                let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
+                    continue;
+                };
+                // `:only`/`:refer` marker → refer just the listed names; else all public.
+                let subset = match (citems.get(2), citems.get(3)) {
+                    (Some(Value::Keyword(m)), Some(sub))
+                        if value::symbol_is(*m, "only") || value::symbol_is(*m, "refer") =>
+                    {
+                        // `:only [a b]` uses a VECTOR literal (also accepts a list), so read it
+                        // with `seq_items` (vector + list) — NOT `list_items` (cons-only), which
+                        // would miss a vector and silently fall through to "import all". Read-only,
+                        // no alloc → no GC, so holding `items`/`citems` across it is safe.
+                        heap.seq_items(*sub).ok().map(|ns| {
+                            ns.iter()
+                                .filter_map(|n| match n {
+                                    Value::Sym(s) => Some(*s),
+                                    _ => None,
+                                })
+                                .collect()
+                        })
+                    }
+                    _ => None,
+                };
+                clauses.push(Clause::Use(mod_sym, subset));
+            } else if value::symbol_is(*kw_sym, "alias") {
+                let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
+                    continue;
+                };
+                // `(:alias mod [:as short])`; `short` defaults to mod's last `/`-segment.
+                let short = match (citems.get(2), citems.get(3)) {
+                    (Some(Value::Keyword(m)), Some(Value::Sym(s)))
+                        if value::symbol_is(*m, "as") =>
+                    {
+                        *s
+                    }
+                    _ => {
+                        let mn = value::symbol_name(mod_sym);
+                        value::intern(mn.rsplit('/').next().unwrap_or(&mn))
+                    }
+                };
+                clauses.push(Clause::Alias(short, mod_sym));
+            }
+        }
+    }
+    // PASS B — apply. Only `Symbol`s (Copy, GC-stable) are held, so the `require` eval below
+    // (standalone-file path) can safely collect. `module_public_exports` re-reads globals
+    // fresh; `add_import` takes `Symbol`s.
+    for clause in clauses {
+        match clause {
+            Clause::Use(mod_sym, subset) => {
+                let mod_name = value::symbol_name(mod_sym);
+                let prefix = format!("{}/", mod_name);
+                // Load the module if absent (no `mod/*` globals) — the standalone path; in a
+                // whole-project check it's already loaded, so this is skipped.
+                if heap.module_public_exports(&prefix).is_empty() {
+                    let quoted =
+                        heap.list(vec![Value::Sym(value::intern("quote")), Value::Sym(mod_sym)]);
+                    let form = heap.list(vec![Value::Sym(value::intern("require")), quoted]);
+                    let root = heap.global();
+                    let _ = crate::eval::eval(heap, form, root); // advisory: swallow load errors
+                }
+                match subset {
+                    Some(names) => {
+                        for bare in names {
+                            let qual = value::intern(&format!(
+                                "{}/{}",
+                                mod_name,
+                                value::symbol_name(bare)
+                            ));
+                            heap.add_import(bare, qual);
+                        }
+                    }
+                    None => {
+                        for (bare, qual) in heap.module_public_exports(&prefix) {
+                            heap.add_import(bare, qual);
+                        }
+                    }
+                }
+            }
+            Clause::Alias(short, mod_sym) => {
+                let key = value::intern(&format!("{}/", value::symbol_name(short)));
+                heap.add_import(key, mod_sym);
+            }
+        }
+    }
+}
+
 /// Check one form, returning a warning per provable misuse. Empty when nothing is
 /// provably wrong (which includes "not enough static info").
 pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {
@@ -292,11 +414,15 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // here and the next iteration's macroexpand.
         heap.push_root(exp);
         expanded.push(exp);
-        // Evaluate `(require …)` (so a module's macros/globals resolve) and the
-        // `(ns …)`/`(defmodule …)` header (so its `(:use …)` imports populate the
-        // import table). `f` is the un-expanded form — its head still names the
-        // header before macroexpansion lowered it to a `do`.
-        if is_require_form(heap, exp) || is_ns_header(heap, f) {
+        // Make the file's imports + required modules resolvable for the rest of the walk.
+        // For a `(defmodule … (:use …))` header, populate the import table DIRECTLY from its
+        // clauses (`setup_check_imports`) instead of evaling the expanded header — the eval
+        // re-macroexpands + re-compiles it and runs per-file O(globals) `provide`/`require`/
+        // `%refer` scans, which made a whole-project check O(files²). A standalone
+        // `(require …)` form (not a header) is still evaluated so its macros/globals resolve.
+        if is_ns_header(heap, f) {
+            setup_check_imports(heap, f);
+        } else if is_require_form(heap, exp) {
             let _ = crate::eval::eval(heap, exp, root);
         }
     }
@@ -324,14 +450,10 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // qualified reference whose module isn't here can't be proven unbound (it may be
     // defined dynamically or in an unloaded file), so the unbound check stays silent
     // on it; a typo in a *known* module is still flagged. See `Ctx::known_ns`.
-    let mut known_ns = std::collections::HashSet::new();
-    for sym in heap.global_symbols() {
-        let name = crate::core::value::symbol_name(sym);
-        if let Some(slash) = name.rfind('/') {
-            known_ns.insert(name[..=slash].to_string());
-        }
-    }
-    ctx.set_known_ns(known_ns);
+    // Cached + shared (`Heap::known_ns_prefixes`): rebuilding this by scanning all globals
+    // per file was the residual O(files²) after the header-eval redesign — an O(1) `Arc`
+    // clone on all but the first file of a whole-project check.
+    ctx.set_known_ns_arc(heap.known_ns_prefixes());
     for &form in &expanded {
         collect_def_names(heap, form, &mut ctx);
     }
@@ -1118,6 +1240,81 @@ mod tests {
             "(get {:a 1} :a)", // any map get — flat result, no warning
             "(keys {:a 1})",
             "(vals {:a 1})",
+        ] {
+            assert!(
+                warnings(ok).iter().all(|w| !w.contains("expects")),
+                "{ok} should be silent: {:?}",
+                warnings(ok)
+            );
+        }
+    }
+
+    #[test]
+    fn record_type_annotation_parses_and_accepts_valid_calls() {
+        // `(record …)` is accepted as a `(sig …)` annotation and carries a
+        // full field refinement (see docs/type-records.md), so a valid call
+        // produces no spurious warning.
+        let src = "
+(defn f (m) m)
+(sig f ((record :a int :b (optional string)) -> any))
+(f {:a 1 :b \"x\"})
+";
+        let w = file_warnings(src);
+        assert!(w.is_empty(), "expected no warnings, got {w:?}");
+
+        // A malformed record annotation (odd field-list length, or a
+        // non-keyword key) is dropped rather than guessed — the sig source
+        // still parses (it's just not read as an authoritative signature),
+        // so the checker doesn't crash and falls back to no declared sig.
+        for bad in [
+            "(defn f (m) m)\n(sig f ((record :a int :b) -> any))\n(f {:a 1})",
+            "(defn f (m) m)\n(sig f ((record a int) -> any))\n(f {:a 1})",
+        ] {
+            let _ = file_warnings(bad); // must not panic
+        }
+    }
+
+    #[test]
+    fn record_field_refinement_flows_through_checker() {
+        // (sig f ((record :a int) -> int)): `(get m :a)` on a declared record
+        // resolves to the *exact field type* (int | nil), not a flat
+        // fallback — feeding that to string-length should warn.
+        let src = "
+(defn f (m) (get m :a))
+(sig f ((record :a int) -> int))
+(string-length (f {:a 1}))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "expected string-length warning for int|nil arg, got {w:?}"
+        );
+
+        // Getting a field the record doesn't declare stays unknown — records
+        // are open, so this must NOT warn (no false positive on an
+        // undeclared/dynamic key).
+        assert!(
+            warnings("(let (m {:a 1}) (string-length (get m :other)))")
+                .iter()
+                .all(|w| !w.contains("expects")),
+            "undeclared record field should stay unresolved, not warn"
+        );
+
+        // Record-literal type inference: `{:a 1}` infers a record shape
+        // (`:a` required, type int) directly from the literal, no `sig`
+        // needed — feeding the field straight to a sink warns.
+        assert!(
+            warnings("(string-length (get {:a 1} :a))")
+                .iter()
+                .any(|w| w.contains("string-length")),
+            "expected a warning from the inferred record-literal shape"
+        );
+
+        // Correct uses stay silent.
+        for ok in [
+            "(get {:a 1} :a)",
+            "(string-length (get {:a \"x\"} :a))",
+            "(get {:a 1} :b)", // undeclared key — unresolved, not a warning
         ] {
             assert!(
                 warnings(ok).iter().all(|w| !w.contains("expects")),

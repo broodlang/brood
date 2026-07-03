@@ -389,3 +389,36 @@ fn nested_globals_snapshots_suppress_then_re_enable_compaction() {
         "compaction must be re-enabled once every snapshot is restored",
     );
 }
+
+/// Hot-reload soundness for the checker's namespace caches (`module_public_exports` /
+/// `known_ns_prefixes`, count-keyed): adding an export to a module (the hot-reload case)
+/// must be reflected — the cache invalidates because the global COUNT moved. (A rebind
+/// keeps the count AND the name-set, so the cache stays correct then; `%isolate` rollback
+/// restores the exact prior set, so a recurring count means the same set — no stale read.)
+#[test]
+fn checker_ns_caches_reflect_hot_reload_adds() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp
+        .eval_str("(defmodule mlibZ) (defn aaa () 1)")
+        .expect("load module");
+    let bare_names = |v: Vec<(brood::core::value::Symbol, brood::core::value::Symbol)>| {
+        v.into_iter()
+            .map(|(b, _)| brood::core::value::symbol_name(b))
+            .collect::<Vec<_>>()
+    };
+    let before = bare_names(interp.heap.module_public_exports("mlibZ/"));
+    assert!(before.iter().any(|n| n == "aaa"), "aaa should be exported");
+    assert!(!before.iter().any(|n| n == "bbb"), "bbb not defined yet");
+    assert!(interp.heap.known_ns_prefixes().contains("mlibZ/"));
+    // Hot-reload: the module gains a new export → global count moves → caches must rebuild.
+    interp
+        .eval_str("(def mlibZ/bbb 2)")
+        .expect("add export");
+    let after = bare_names(interp.heap.module_public_exports("mlibZ/"));
+    assert!(
+        after.iter().any(|n| n == "bbb"),
+        "hot-reload add not reflected — stale checker cache (got {after:?})",
+    );
+    assert!(after.iter().any(|n| n == "aaa"), "aaa still exported");
+}

@@ -289,6 +289,22 @@ names accept anything, so a contract never throws on a type it can't interpret."
                                          (and (type-matches? ktype (first kv))
                                               (type-matches? vtype (second kv))))
                                        (entries v)))))
+                  (%eq h 'record)
+                    ;; A field's type may be wrapped `(optional T)` — allowed to
+                    ;; be absent/nil. Every other field is required: `(get v k)`
+                    ;; on a missing key is nil, so `type-matches?` on the bare
+                    ;; field type naturally fails unless that type accepts nil —
+                    ;; no separate presence check needed. Extra keys are ignored
+                    ;; (open records).
+                    (and (map? v)
+                         (every? (fn (field)
+                                   (let (k (first field)
+                                         ftype (second field))
+                                     (if (and (pair? ftype) (%eq (first ftype) 'optional))
+                                       (or (nil? (get v k))
+                                           (type-matches? (second ftype) (get v k)))
+                                       (type-matches? ftype (get v k)))))
+                                 (partition 2 (rest t))))
                   else true))          ; arrow param / unknown compound → accept
     (keyword? t) (= t v)               ; a keyword type-expr is a literal: match it exactly
     (%eq t 'any) true

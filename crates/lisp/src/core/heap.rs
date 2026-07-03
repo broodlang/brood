@@ -1109,6 +1109,27 @@ pub struct Heap {
     /// survives a local GC untouched and needs no rooting. `RefCell` because
     /// `env_get` is `&self`; per-process, so never shared across threads.
     global_ic: RefCell<SymbolMap<(u64, Value)>>,
+    /// Cached `mod/` prefix → that module's public exports (`(bare, qualified)` pairs).
+    /// Used ONLY by the advisory whole-project checker's direct import setup
+    /// (`types::check::setup_check_imports`): a whole-project check resolves every file's
+    /// `(:use …)` clauses, and enumerating a module's exports by scanning all globals per
+    /// file was O(files²). Keyed by the global symbol **count**, which is safe here because
+    /// the checker's per-file loop performs NO `def`s (it sets up imports without evaling
+    /// the header) and runs no `%isolate` rollback mid-loop, so the global set — hence the
+    /// count — is stable across the loop. (NOT used by runtime `%refer`, where `%isolate`
+    /// rollback could otherwise collide counts.) Per-process; built once per check.
+    module_exports_cache: RefCell<
+        Option<(
+            usize,
+            std::sync::Arc<std::collections::HashMap<String, Vec<(Symbol, Symbol)>>>,
+        )>,
+    >,
+    /// Cached set of `mod/` namespace prefixes the loaded image knows — the checker's
+    /// `known_ns` (decides whether an unresolved *qualified* name is a real unbound ref or
+    /// one in an unloaded module). Same rationale + count-keying + checker-only soundness as
+    /// [`module_exports_cache`](Self::module_exports_cache): rebuilding it by scanning all
+    /// globals per file was the residual O(files²) after the header-eval redesign.
+    known_ns_cache: RefCell<Option<(usize, std::sync::Arc<std::collections::HashSet<String>>)>>,
     /// Explicit GC root stack — the evaluator's **operand stack** (ADR-061).
     /// Every LOCAL [`Value`] an eval frame still needs *after* a nested `eval`
     /// (its accumulated `argv`, literal accumulators, `callee`, the `call_form`,
@@ -1566,6 +1587,8 @@ impl Heap {
             imports: HashMap::new(),
             dynamics: Vec::new(),
             global_ic: RefCell::new(SymbolMap::default()),
+            module_exports_cache: RefCell::new(None),
+            known_ns_cache: RefCell::new(None),
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: usize::MAX,
@@ -1615,6 +1638,8 @@ impl Heap {
             imports: HashMap::new(),
             dynamics: Vec::new(),
             global_ic: RefCell::new(SymbolMap::default()),
+            module_exports_cache: RefCell::new(None),
+            known_ns_cache: RefCell::new(None),
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
@@ -4779,6 +4804,66 @@ impl Heap {
     /// no `Value`s are cloned.
     pub fn global_symbols(&self) -> Vec<Symbol> {
         self.runtime.globals_read().keys().copied().collect()
+    }
+
+    /// The public exports of module `prefix` (a `mod/` segment, trailing slash included) as
+    /// `(bare, qualified)` symbol pairs — the set `(:use mod)` refers. Public = a *direct*
+    /// `mod/name` global whose bare tail is non-empty and carries no `--` private marker
+    /// (matching `%refer`'s scan). Cached + count-keyed (see
+    /// [`module_exports_cache`](Self::module_exports_cache)) so the checker's per-file
+    /// `(:use …)` resolution builds the index by ONE pass over the globals instead of
+    /// rescanning every global per file (O(files²)). Empty when the module isn't loaded (no
+    /// `mod/*` globals) — the checker then `require`s it first. Checker use only.
+    pub fn module_public_exports(&self, prefix: &str) -> Vec<(Symbol, Symbol)> {
+        let count = self.runtime.globals_read().len();
+        let fresh =
+            matches!(self.module_exports_cache.borrow().as_ref(), Some((c, _)) if *c == count);
+        if !fresh {
+            let mut map: std::collections::HashMap<String, Vec<(Symbol, Symbol)>> =
+                std::collections::HashMap::new();
+            for g in self.global_symbols() {
+                let name = crate::core::value::symbol_name(g);
+                if let Some(slash) = name.rfind('/') {
+                    let bare = &name[slash + 1..];
+                    if !bare.is_empty() && !bare.contains("--") {
+                        let bare_sym = crate::core::value::intern(bare);
+                        map.entry(name[..=slash].to_string())
+                            .or_default()
+                            .push((bare_sym, g));
+                    }
+                }
+            }
+            *self.module_exports_cache.borrow_mut() = Some((count, std::sync::Arc::new(map)));
+        }
+        self.module_exports_cache
+            .borrow()
+            .as_ref()
+            .and_then(|(_, m)| m.get(prefix).cloned())
+            .unwrap_or_default()
+    }
+
+    /// The set of `mod/` namespace prefixes present in the loaded image (the checker's
+    /// `known_ns`), cached + shared as an `Arc` (see [`known_ns_cache`](Self::known_ns_cache)).
+    /// Count-keyed like [`module_public_exports`](Self::module_public_exports) — checker-only,
+    /// sound because a whole-project check does no `def`s per file, so an O(1) `Arc` clone on
+    /// all but the first file (was an O(globals) scan per file → O(files²)).
+    pub fn known_ns_prefixes(&self) -> std::sync::Arc<std::collections::HashSet<String>> {
+        let count = self.runtime.globals_read().len();
+        if let Some((c, arc)) = self.known_ns_cache.borrow().as_ref() {
+            if *c == count {
+                return std::sync::Arc::clone(arc);
+            }
+        }
+        let mut set = std::collections::HashSet::new();
+        for sym in self.global_symbols() {
+            let name = crate::core::value::symbol_name(sym);
+            if let Some(slash) = name.rfind('/') {
+                set.insert(name[..=slash].to_string());
+            }
+        }
+        let arc = std::sync::Arc::new(set);
+        *self.known_ns_cache.borrow_mut() = Some((count, std::sync::Arc::clone(&arc)));
+        arc
     }
 
     /// Register a user-declared `(sig name type)` signature: `sym` is the

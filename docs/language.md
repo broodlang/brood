@@ -738,7 +738,12 @@ provably wrong call against it (both the argument and the result type flow):
 
 The type grammar: base names (`int float number string symbol keyword bool nil
 pair vector list map fn any`), function arrows `(p… -> r)`, element-typed
-sequences `(list E)` / `(vector E)`, and unions `(or A B …)`. An unrecognised
+sequences `(list E)` / `(vector E)`, unions `(or A B …)` and intersections
+`(and A B …)`, keyword-literal (singleton) types (a bare `:foo`), type
+variables (`?A`), key/value-typed maps `(map K V)` (see
+[type-map-kv.md](type-map-kv.md)), and heterogeneous record shapes `(record
+:k1 T1 :k2 T2 …)` with required-by-default fields and an `(optional T)` wrapper
+for optional ones (see [type-records.md](type-records.md)). An unrecognised
 type-expression is ignored, never guessed.
 
 `(sig! name (params… -> ret))` declares the **same** signature *and enforces it at

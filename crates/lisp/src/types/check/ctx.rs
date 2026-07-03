@@ -375,10 +375,11 @@ impl Ctx {
     pub(super) fn is_file_macro(&self, sym: Symbol) -> bool {
         self.file_macros.contains(&sym)
     }
-    /// Record the set of known namespace prefixes (each ends in `/`). See
-    /// [`known_ns`](Ctx::known_ns).
-    pub(super) fn set_known_ns(&mut self, prefixes: HashSet<String>) {
-        self.known_ns = Arc::new(prefixes);
+    /// Adopt the heap's cached, shared prefix set ([`Heap::known_ns_prefixes`]) as `known_ns`
+    /// (each prefix ends in `/`) — an O(1) `Arc` bump, so a whole-project check builds it once
+    /// instead of per file.
+    pub(super) fn set_known_ns_arc(&mut self, prefixes: Arc<HashSet<String>>) {
+        self.known_ns = prefixes;
     }
     /// Is `prefix` (a `mod/` segment, trailing slash included) a namespace the
     /// loaded image knows? Used to decide whether an unresolved *qualified* name is

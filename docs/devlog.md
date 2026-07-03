@@ -1120,3 +1120,83 @@ each file's imports WITHOUT re-eval/re-compiling already-loaded headers (in a wh
 image is fully loaded up front) — a checker/loader/import-resolution redesign, higher blast radius,
 best done fresh. Real projects (tens–hundreds of files) check fine; this only bites pathological
 thousands-of-files suites. See `todo.md`.
+
+## 2026-07-03 — Record/shape types: `(record :k T …)` slice 1 (ADR-115)
+
+Added a heterogeneous, keyword-keyed map-shape type to the `(sig …)` grammar —
+distinct from the already-shipped uniform `(map K V)` (`docs/type-map-kv.md`).
+`(record :name string :age (optional int))`: fields required by default, `(optional
+T)` marks one as allowed to be absent/`nil`; records are open (extra keys allowed).
+Slice 1 only, staged exactly like `(map K V)`'s own slices: `type-matches?`
+(`std/prelude.blsp`) enforces it at the `sig!`/`BROOD_CONTRACTS=1` runtime-contract
+boundary — required fields need no separate presence check, since `(get v k)` on a
+missing key is `nil` and `type-matches?` on the bare field type fails on its own
+unless that type accepts `nil`. `parse_type` (`annot.rs`) accepts the annotation for
+the static checker as flat `Ty::of(Tag::Map)`, validating every field's type so a
+malformed record (odd field count, non-keyword key) is dropped rather than guessed.
+No `Ty` struct change — a full `fields` refinement (real width/depth record
+subtyping, field-wise union/intersect, literal-keyword `get`/`assoc` sinks,
+record-literal type inference — `expr_ty` has no `Value::Map` arm at all today) is
+real algorithm design, not copy-paste from `map_kv`, and stays deferred (ADR-011)
+until a concrete consumer needs it — see `docs/type-records.md`. New `describe`
+block in `tests/contract_test.blsp` + a Rust parse/no-panic test in `check.rs`; 46/46
+`contract_test.blsp` and the full `types::check` Rust suite (168 tests) green.
+
+## 2026-07-03 — Record/shape types: full `fields` refinement (ADR-115, slice 2)
+
+Continued past the initial grammar+runtime slice in the same session: `Ty` gained a
+`fields: Option<Arc<BTreeMap<Symbol, (Ty, bool)>>>` refinement (name → type,
+required?), tagged `MAP_BIT` like `map_kv` — no new `Tag`. Three new pieces:
+**width/depth record subtyping** (`record_fields_is_subtype` in `types/mod.rs`,
+deliberately conservative — a field `self` doesn't declare, even one `other` marks
+optional, makes subtyping return `false` rather than reason about absence; sound,
+not complete, per contract #5); a **`get`-by-literal-key sink** (`check/guards.rs`)
+resolving `(get r :name)` to the exact field type when the key is a literal
+keyword; and **record-literal type inference** — `expr_ty` previously had no
+`Value::Map` arm at all (vectors already infer `vector_of(element_union(…))`, maps
+inferred nothing), so `{:a 1}` now infers a record shape with `:a` required,
+type int, from the literal itself, no `sig` needed. Union/intersect deliberately
+reuse the existing generic `merge_union`/`merge_intersect` helpers rather than a
+fancier field-wise algorithm — the blunt widen-unless-identical rule is already
+sound for every other refinement, so records get it for free. `is_disjoint` stays
+tags-only, untouched.
+
+Verified soundness two ways: targeted unit tests for subtyping/union/disjointness
+(`types/mod.rs`) and the `get`/literal-inference sinks (`types/check.rs`); and, since
+the literal inference touches the type of every `{…}` map literal project-wide, a
+direct diff of `nest check` output across all of `std/` + `tests/` with the new
+`expr_ty` arm disabled vs. enabled — byte-identical, zero new warnings. Full
+`make test` green (649/649) before this slice; `cargo test -p brood --lib types::`
+green after (173/173, up from 168 at slice 1). See `docs/type-records.md` for the
+full design and the remaining deferred items (closed records, `assoc`/`keys`/`vals`
+field-precise sinks).
+
+## 2026-07-03 — check-project O(n²): FIXED via header-import redesign (26s → 5.8s @ 4000 files)
+
+Followed the plan from the earlier investigation. `check_file`'s dominant per-file cost was
+re-macroexpanding + re-evaling + re-**compiling** each file's `(defmodule … (:use …))` header (and
+its per-file O(globals) `provide`/`require`/`%refer` scans + `*module-docs*` rebind). In a
+whole-project check `project--ensure-loaded` already loaded every module, so that re-processing is
+pure waste.
+
+**Fix:** `types::check::setup_check_imports` — when checking a file, populate its import table
+**directly from the header's `(:use)`/`(:alias)` clauses** instead of evaling the header. Mirrors
+`defmodule`'s expansion + `%refer`/`%alias` exactly: `(:use mod)` refers mod's public (non-`--`) names,
+`(:use mod :only [a b])`/`:refer` just those, `(:alias mod [:as short])` a prefix alias; a used module
+that isn't loaded (bare-file check) is `require`d first. A module's public exports come from a new
+count-keyed heap cache (`Heap::module_public_exports`); `known_ns` likewise (`known_ns_prefixes`) —
+built once per check instead of an all-globals scan per file.
+
+**Soundness (the recurring hot-reload concern):** the caches are **checker-only** (runtime `%refer`
+still scans) and **count-keyed** — sound because Brood has no `undef`, so a permanent `def` only
+increases the count (monotonic) and `%isolate` rollback restores the *exact* prior set, so a recurring
+count ⇒ the same name-set; a hot-reload *rebind* keeps the set (cache stays valid) and an *add* bumps
+the count (cache rebuilds). Regression test `checker_ns_caches_reflect_hot_reload_adds`.
+
+**Bug caught in review:** the subset of `(:use mod :only [a b])` is a VECTOR; parsing it with
+`list_items` (cons-only) silently returned nothing → import-all → masked real unbound errors. Fixed
+with `seq_items` (vector + list); verified `nest check` now flags a name outside `:only`.
+
+**Measured:** `nest check` 4000-file project 26s → 5.8s; 8000 ~350s(extrapolated) → ~18s. Gate: 655
+tests (default + debug-assertions), clippy clean, all `(:use)` namespace + hot_reload + mcp tests pass.
+A residual super-linear term remains (likely `project--check-unused-private`) — chasing next.

@@ -24,7 +24,7 @@
 
 pub mod check;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -134,6 +134,14 @@ pub struct Ty {
     /// Refinement of the map member (`map`) — `(key-type, val-type)`, when
     /// statically known.  `None` means "keys and values of any type".
     map_kv: Option<Arc<(Ty, Ty)>>,
+    /// Refinement of the map member (`map`) to a heterogeneous record shape —
+    /// `field name → (declared type, required?)`, when statically known from a
+    /// `(record …)` annotation. `None` means "no declared shape". Mutually
+    /// exclusive with `map_kv` in practice (a `Ty` is built by either
+    /// `map_of` or `record_of`), but the two refinements are independent
+    /// fields so the generic union/intersect machinery treats them exactly
+    /// like every other refinement pair — see `docs/type-records.md`.
+    fields: Option<Arc<BTreeMap<Symbol, (Ty, bool)>>>,
     /// Refinement of the keyword member (`keyword`) to a literal set — the exact
     /// keyword symbols admitted, e.g. `{:maximized, :fullboth}`. `None` means "any
     /// keyword". When `Some`, the `Keyword` bit is in `tags` and the set is
@@ -165,6 +173,7 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: None,
+            fields: None,
             lit: None,
         }
     }
@@ -196,6 +205,7 @@ impl Ty {
             arrow: Some(Arc::new(sig)),
             elem: None,
             map_kv: None,
+            fields: None,
             lit: None,
         }
     }
@@ -215,6 +225,7 @@ impl Ty {
             arrow: None,
             elem: Some(Arc::new(elem)),
             map_kv: None,
+            fields: None,
             lit: None,
         }
     }
@@ -226,8 +237,30 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: Some(Arc::new((key, val))),
+            fields: None,
             lit: None,
         }
+    }
+
+    /// A heterogeneous record shape — `field name → (declared type,
+    /// required?)`. Tagged `map` (a record is still a runtime `map` value;
+    /// this only refines it, the same trick [`Ty::keyword_lit`] uses layering
+    /// onto the `Keyword` tag). See `docs/type-records.md`.
+    pub fn record_of(fields: BTreeMap<Symbol, (Ty, bool)>) -> Ty {
+        Ty {
+            tags: MAP_BIT,
+            arrow: None,
+            elem: None,
+            map_kv: None,
+            fields: Some(Arc::new(fields)),
+            lit: None,
+        }
+    }
+
+    /// The record-shape refinement, if this map type carries one. The bridge
+    /// the checker reads to flow `(get r :name)` to the field's exact type.
+    pub fn record_fields(&self) -> Option<&BTreeMap<Symbol, (Ty, bool)>> {
+        self.fields.as_deref()
     }
 
     /// A keyword-literal (singleton) type — exactly the keyword `sym`. Unions of
@@ -240,6 +273,7 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: None,
+            fields: None,
             lit: Some(Arc::new(set)),
         }
     }
@@ -346,6 +380,12 @@ impl Ty {
             other.tags & MAP_BIT != 0,
             &other.map_kv,
         );
+        let fields = merge_union(
+            self.tags & MAP_BIT != 0,
+            &self.fields,
+            other.tags & MAP_BIT != 0,
+            &other.fields,
+        );
         // Literal sets union *exactly* (not widen) — `:a ∪ :b = {a,b}`. But a side
         // whose keyword member is *open* (keyword tag, no literal set) contributes
         // every keyword, so the result keyword member is open too (`:a ∪ keyword =
@@ -356,6 +396,7 @@ impl Ty {
             arrow,
             elem,
             map_kv,
+            fields,
             lit,
         }
     }
@@ -379,6 +420,11 @@ impl Ty {
         };
         let map_kv = if tags & MAP_BIT != 0 {
             merge_intersect(&self.map_kv, &other.map_kv)
+        } else {
+            None
+        };
+        let fields = if tags & MAP_BIT != 0 {
+            merge_intersect(&self.fields, &other.fields)
         } else {
             None
         };
@@ -408,6 +454,7 @@ impl Ty {
             arrow,
             elem,
             map_kv,
+            fields,
             lit,
         }
     }
@@ -436,7 +483,7 @@ impl Ty {
         if self.elem.is_some() {
             tags |= self.tags & SEQ_BITS;
         }
-        if self.map_kv.is_some() {
+        if self.map_kv.is_some() || self.fields.is_some() {
             tags |= self.tags & MAP_BIT;
         }
         // A literal set omits the *other* keywords, which are in the complement —
@@ -499,6 +546,16 @@ impl Ty {
                     None => return false, // self = "any map" ⊄ a specific map<K,V>
                 }
             }
+            if let Some(b) = &other.fields {
+                match &self.fields {
+                    Some(a) => {
+                        if !record_fields_is_subtype(a, b) {
+                            return false;
+                        }
+                    }
+                    None => return false, // self doesn't provably have `other`'s shape
+                }
+            }
         }
         if self.tags & KEYWORD_BIT != 0 {
             if let Some(b) = &other.lit {
@@ -549,6 +606,37 @@ impl Ty {
     pub const fn is_any(&self) -> bool {
         self.tags == UNIVERSE
     }
+}
+
+/// Record-shape subtyping: is `self`'s field map a subtype of `other`'s?
+/// **Sound but deliberately not complete** (`docs/types.md` contract #5,
+/// `docs/type-records.md`): for every field `other` declares, `self` must
+/// also declare it (required if `other` requires it) with a covariant field
+/// type. A field `other` doesn't declare imposes no constraint (open records
+/// — `self` may carry extra fields freely; this is the width-subtyping
+/// direction). **Conservative on purpose:** if `self` simply doesn't declare
+/// a field `other` does (even one `other` marks optional), this returns
+/// `false` rather than trying to prove the relationship holds anyway — a
+/// missed subtype relation is fine (incomplete), but never claiming one that
+/// doesn't hold (unsound) is not negotiable.
+fn record_fields_is_subtype(
+    self_fields: &BTreeMap<Symbol, (Ty, bool)>,
+    other_fields: &BTreeMap<Symbol, (Ty, bool)>,
+) -> bool {
+    for (name, (other_ty, other_required)) in other_fields {
+        match self_fields.get(name) {
+            None => return false,
+            Some((self_ty, self_required)) => {
+                if *other_required && !*self_required {
+                    return false;
+                }
+                if !self_ty.is_subtype(other_ty) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// The surviving refinement for a **union**: present on just one side → carry it;
@@ -646,6 +734,23 @@ impl fmt::Display for Ty {
         if let Some((k, v)) = self.map_kv() {
             if self.tags == MAP_BIT {
                 return write!(f, "map<{k}, {v}>");
+            }
+        }
+        // A record shape: `{name: string, age?: int}` — `?` marks an
+        // optional field. `fields` is keyed by interned `Symbol` (intern
+        // order, not alphabetical — same trap `lit` avoids below), so sort
+        // by spelling for a stable rendering.
+        if let Some(fields) = self.record_fields() {
+            if self.tags == MAP_BIT {
+                let mut parts: Vec<String> = fields
+                    .iter()
+                    .map(|(name, (ty, required))| {
+                        let mark = if *required { "" } else { "?" };
+                        format!("{}{mark}: {ty}", value::symbol_name_ref(*name))
+                    })
+                    .collect();
+                parts.sort();
+                return write!(f, "{{{}}}", parts.join(", "));
             }
         }
         if let Some(elem) = self.elem_ty() {
@@ -1282,6 +1387,88 @@ mod tests {
                 .to_string(),
             "nil | list<int>"
         );
+    }
+
+    // ---- record/shape types — Step 5+, ADR-115 ----
+
+    fn rec(fields: &[(&str, Ty, bool)]) -> Ty {
+        let mut m = BTreeMap::new();
+        for (name, ty, required) in fields {
+            m.insert(value::intern(name), (ty.clone(), *required));
+        }
+        Ty::record_of(m)
+    }
+
+    #[test]
+    fn record_renders_as_a_field_shape() {
+        let r = rec(&[
+            ("name", Ty::of(Tag::Str), true),
+            ("age", Ty::of(Tag::Int), false),
+        ]);
+        // Sorted by field name, `?` marks the optional field.
+        assert_eq!(r.to_string(), "{age?: int, name: string}");
+        // A bare record with no fields renders as an empty shape.
+        assert_eq!(rec(&[]).to_string(), "{}");
+    }
+
+    #[test]
+    fn record_subtyping_is_width_and_depth_but_conservative() {
+        // Depth: a narrower field type is a subtype when both sides agree the
+        // field is required.
+        let narrow = rec(&[("a", Ty::of(Tag::Int), true)]);
+        let wide = rec(&[("a", Ty::NUMBER, true)]);
+        assert!(narrow.is_subtype(&wide));
+        assert!(!wide.is_subtype(&narrow));
+
+        // Width: extra fields self declares beyond what `other` requires are
+        // fine (open records) — self may have MORE fields than other.
+        let two_fields = rec(&[("a", Ty::of(Tag::Int), true), ("b", Ty::of(Tag::Str), true)]);
+        let one_field = rec(&[("a", Ty::of(Tag::Int), true)]);
+        assert!(two_fields.is_subtype(&one_field));
+        // But not the reverse — `one_field` doesn't declare `b` at all, so it
+        // can't prove it satisfies a shape requiring `b`.
+        assert!(!one_field.is_subtype(&two_fields));
+
+        // A required field in `other` must also be required in `self` — an
+        // optional field isn't guaranteed present, so it can't satisfy a
+        // required one.
+        let a_optional = rec(&[("a", Ty::of(Tag::Int), false)]);
+        let a_required = rec(&[("a", Ty::of(Tag::Int), true)]);
+        assert!(!a_optional.is_subtype(&a_required));
+        // The reverse holds: a required field trivially satisfies "optional".
+        assert!(a_required.is_subtype(&a_optional));
+
+        // Conservative-on-purpose: `self` not declaring a field `other` marks
+        // merely *optional* still isn't provably a subtype (no attempt to
+        // reason about absence) — sound (never claims a false subtype), just
+        // incomplete.
+        let bare = rec(&[]);
+        assert!(!bare.is_subtype(&a_optional));
+    }
+
+    #[test]
+    fn record_union_widens_on_field_mismatch_but_keeps_a_match() {
+        let a = rec(&[("a", Ty::of(Tag::Int), true)]);
+        let a_again = rec(&[("a", Ty::of(Tag::Int), true)]);
+        let b = rec(&[("b", Ty::of(Tag::Str), true)]);
+
+        // Identical field maps survive a union unchanged.
+        assert_eq!(a.clone().union(a_again).record_fields(), a.record_fields());
+        // Distinct field maps widen to "no declared shape" — still sound (a
+        // union is always a supertype, and dropping the refinement only
+        // widens further), just less precise.
+        assert!(a.union(b).record_fields().is_none());
+    }
+
+    #[test]
+    fn record_is_disjoint_only_on_tags_like_every_other_refinement() {
+        // Two records with incompatible required fields are still not
+        // "disjoint" in the checker's tags-only sense — `is_disjoint` never
+        // inspects `fields`, so a mismatch can only be *missed*, never
+        // manufacture a false positive.
+        let a = rec(&[("a", Ty::of(Tag::Int), true)]);
+        let b = rec(&[("a", Ty::of(Tag::Str), true)]);
+        assert!(!a.is_disjoint(&b));
     }
 
     #[test]

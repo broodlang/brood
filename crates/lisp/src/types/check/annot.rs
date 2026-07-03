@@ -126,10 +126,48 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                 let v = parse_type(heap, items[2])?;
                 return Some(Ty::map_of(k, v));
             }
+            // (record :k1 T1 :k2 T2 …) — a keyword-keyed heterogeneous map
+            // shape. A field's type may be wrapped `(optional T)` to allow
+            // the field to be absent/`nil`; every other field is required.
+            // `Ty::record_of` carries the full field map so the checker can
+            // derive `get`'s exact per-field result type (see
+            // docs/type-records.md).
+            if value::symbol_is(head, "record") {
+                let rest = &items[1..];
+                if rest.len() % 2 != 0 {
+                    return None; // malformed — odd field-list length
+                }
+                let mut fields = std::collections::BTreeMap::new();
+                for pair in rest.chunks_exact(2) {
+                    let Value::Keyword(name) = pair[0] else {
+                        return None;
+                    };
+                    let (field_form, required) = match unwrap_optional(heap, pair[1]) {
+                        Some(inner) => (inner, false),
+                        None => (pair[1], true),
+                    };
+                    let field_ty = parse_type(heap, field_form)?;
+                    fields.insert(name, (field_ty, required));
+                }
+                return Some(Ty::record_of(fields));
+            }
             None
         }
         _ => None,
     }
+}
+
+/// If a field type is wrapped `(optional T)`, peel it to `Some(T)`; anything
+/// else (including a malformed `(optional …)` with the wrong arity) is
+/// `None` — a plain, required field type.
+fn unwrap_optional(heap: &Heap, form: Value) -> Option<Value> {
+    let items = list_items(heap, form)?;
+    if let [Value::Sym(h), inner] = items[..] {
+        if value::symbol_is(h, "optional") {
+            return Some(inner);
+        }
+    }
+    None
 }
 
 fn is_arrow_marker(v: Value) -> bool {

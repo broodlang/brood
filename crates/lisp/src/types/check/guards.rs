@@ -255,6 +255,25 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 None => Ty::of(Tag::Vector),
             })
         }
+        // A map literal `{:k v …}` — every keyword-literal key is definitely
+        // present (it's data, evaluated once), so infer a record shape: each
+        // resolvable `:key value` pair becomes a *required* field (Step 5+,
+        // ADR-115). A non-keyword key, or a value whose type is unknown, is
+        // simply omitted from the shape — records are open, so silently
+        // under-declaring a field is sound (widens what the type claims),
+        // never a false positive. `{}` / an all-unknown map infers the empty
+        // record (equivalent to flat `map` for every check that matters here).
+        Value::Map(id) => {
+            let mut fields = std::collections::BTreeMap::new();
+            for (k, v) in heap.map_entries(id) {
+                if let Value::Keyword(name) = k {
+                    if let Some(vty) = expr_ty(heap, v, ctx) {
+                        fields.insert(name, (vty, true));
+                    }
+                }
+            }
+            Some(Ty::record_of(fields))
+        }
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
             match items.first().copied() {
@@ -625,9 +644,20 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // only fire when K/V are known; unknown → fall through to the curated flat result.
     //
     // `(get m k [default])` → `V | nil` (nil = key absent or default not given).
+    // On a record shape (Step 5+, ADR-115) with a *literal keyword* key, the
+    // exact declared field type wins — more specific than the flat `map_kv`
+    // fallback below. An undeclared/dynamic key (or a non-keyword key on a
+    // record) falls through: records are open, so an unknown key's type is
+    // genuinely unknown, not an error.
     if value::symbol_is(head, "get") && items.len() >= 3 {
         let map_arg = *items.get(1)?;
-        if let Some((_, v)) = expr_ty(heap, map_arg, ctx).as_ref().and_then(Ty::map_kv) {
+        let map_ty = expr_ty(heap, map_arg, ctx);
+        if let Value::Keyword(key) = items[2] {
+            if let Some((fty, _required)) = map_ty.as_ref().and_then(Ty::record_fields).and_then(|f| f.get(&key)) {
+                return Some(fty.clone().union(Ty::of(Tag::Nil)));
+            }
+        }
+        if let Some((_, v)) = map_ty.as_ref().and_then(Ty::map_kv) {
             return Some(v.clone().union(Ty::of(Tag::Nil)));
         }
     }

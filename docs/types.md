@@ -430,6 +430,15 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   (`SigWithVars`/`SigTerm` in `ctx.rs`; `parse_sig_decl_with_vars` in
   `annot.rs`; `expr_ty` resolves return types per-call from arg types).
   See [`docs/type-variables.md`](type-variables.md).
+- ✅ **Record/shape types** `(record :k1 T1 :k2 T2 …)` — fully shipped:
+  heterogeneous keyword-keyed map shapes with required-by-default and
+  `(optional T)` fields, distinct from the uniform-K/V `(map K V)` above;
+  `type-matches?` enforces each field's presence/type at the runtime-contract
+  boundary; `Ty` carries a full `fields` refinement with width/depth
+  subtyping; `(get r :k)` on a declared or inferred record resolves to the
+  exact field type; a `{…}` map literal infers its own record shape with no
+  annotation needed. Closed records and `assoc`/`keys`/`vals` field-precise
+  sinks stay deferred. See [`docs/type-records.md`](type-records.md).
 
 ## How it runs — and why it's outside the runtime
 

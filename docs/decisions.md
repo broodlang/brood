@@ -6955,3 +6955,94 @@ safepoints (a reviewable invariant, now debug-checked at the last unguarded site
 and lower-risk than either a stack-map implementation (redundant) or a collector rewrite
 (throughput regression). Supersedes nothing; refines ADR-035/055 (the copying collector stays) and
 ADR-101 (documents that the JIT's GC-root contract is spill-to-roots, *not* stack maps).
+
+## ADR-115 — Record/shape types: `(record :k T …)`, full `fields` refinement
+
+**Status:** accepted; **shipped 2026-07-03** ([`types.md`](types.md) Step 5+,
+[`type-records.md`](type-records.md)). Heterogeneous, keyword-keyed map shapes with
+required-by-default and `(optional T)` fields are a new `(sig …)` type-expression;
+`type-matches?` enforces them at the `sig!`/`BROOD_CONTRACTS=1` runtime-contract
+boundary; `Ty` carries a full `fields` refinement with width/depth subtyping;
+`(get r :k)` resolves to the exact field type on both a declared *and* an inferred
+record; a `{…}` map literal infers its own record shape with zero annotation.
+Advisory throughout — contract #5 holds. Refines the Step 5+ staircase alongside
+ADR-078's arrow/element/map_kv refinements.
+
+**Context.** `(map K V)` ([`type-map-kv.md`](type-map-kv.md)) gives a map *uniform*
+key/value types, but most config/options/record-shaped maps aren't uniform —
+different keys carry different types, and some are optional. Before this, the best
+`(sig …)` could say about such a value was bare `map`: zero field-level checking, so
+`(sig! make-window ((record …)))`-shaped intent had no representation at all.
+
+**Decision.** Add `(record :k1 T1 :k2 T2 …)` to the type grammar, list-headed like
+every other compound type form (`(map K V)`, `(vector E)`, `(and A B)`, `(or A B)`)
+rather than reusing the `{…}` map-literal reader syntax — it slots into
+`parse_type`'s existing head-symbol dispatch instead of adding a new
+`Value::Map`-shaped branch to the parser. Fields are **required by default**; an
+`(optional T)` wrapper marks a field as allowed to be absent/`nil`. Records are
+**open**: extra keys beyond the declared fields are allowed and ignored (the
+permissive direction of structural width subtyping) — the ADR-011-simple choice,
+since a closed-record variant is a pure addition later if a concrete need for it
+shows up.
+
+**Shipped in one pass, not staged — the maintainer chose to build past the initial
+grammar-plus-runtime slice in the same session.** `Ty` gained a `fields:
+Option<Arc<BTreeMap<Symbol, (Ty, bool)>>>` refinement (name → declared type,
+required?), tagged `MAP_BIT` like `map_kv` — no new `Tag` variant, the same trick
+`keyword_lit` uses layering onto the `Keyword` tag. Three genuinely new pieces, none
+copy-paste from the `map_kv` precedent:
+
+1. **Width/depth record subtyping** (`is_subtype`) — for every field `other`
+   declares, `self` must also declare it (required if `other` requires it) with a
+   covariant field type; an undeclared field imposes no constraint (width). Written
+   **conservative on purpose**: if `self` doesn't declare a field `other` marks even
+   merely *optional*, subtyping returns `false` rather than reasoning about absence
+   — sound (never claims a false subtype relation), just incomplete. See
+   `record_fields_is_subtype` in `types/mod.rs`.
+2. **`get`-by-literal-key sink** (`check/guards.rs`) — `(get r :name)` with a
+   *literal* keyword key resolves to the exact declared/inferred field type; every
+   prior `map_kv` sink rule only ever inspected the key's *type*, never its value,
+   so reading the literal off the call form is new code shape.
+3. **Record-literal type inference** (`expr_ty`) — `{…}` map literals previously had
+   **no** typing arm at all (vector literals already got `vector_of(element_union
+   (…))`; maps got nothing). Every resolvable `:key value` pair in a literal becomes
+   a required field (it's data, evaluated once — the key is definitely present); an
+   unresolvable value or non-keyword key is silently omitted from the shape rather
+   than guessed. This is what makes `(get {:a 1} :a)` precise with **zero**
+   annotation.
+
+**Union/intersect deliberately reuse the existing generic merge helpers**
+(`merge_union`/`merge_intersect`) rather than a fancier field-wise algorithm (union
+each shared field, demote a required-on-one-side field to optional). The blunt
+"widen to `None` unless the two refinements are identical" rule is already the
+established sound pattern for *every* refinement in this lattice (`arrow`, `elem`,
+`map_kv`) — records get it for free. Less precise on a union of two distinct record
+shapes, but sound, and ships without inventing new merge logic.
+
+**Required-field check needs no separate presence test.** `(get v k)` on a missing
+key already returns `nil`, and `type-matches?` on the bare field type then fails on
+its own unless that type happens to accept `nil` — reusing the exact mechanism
+`(map K V)`'s own branch relies on for its key/value checks, rather than adding new
+presence-testing logic.
+
+**Soundness, verified two ways.** (1) Every new piece has a targeted unit test
+(`record_subtyping_is_width_and_depth_but_conservative`,
+`record_union_widens_on_field_mismatch_but_keeps_a_match`,
+`record_is_disjoint_only_on_tags_like_every_other_refinement` in `types/mod.rs`;
+`record_field_refinement_flows_through_checker` in `types/check.rs`). (2) The
+record-literal inference is the highest-blast-radius piece — it changes the
+inferred type of *every* `{…}` literal project-wide — so it was diffed directly:
+`nest check` run across the whole `std/` + `tests/` corpus with the new `expr_ty`
+arm disabled vs. enabled produced a **byte-identical warning list**, i.e. zero new
+warnings anywhere in the existing codebase. `is_disjoint` still never inspects
+`fields` (tags-only, unchanged), so a wrong or absent record refinement can only
+ever *miss* a warning, never manufacture a false one (contract #5).
+
+**Deferred** (`type-records.md`): closed records (reject unknown keys);
+`assoc`/`keys`/`vals` field-precise sinks (only `get` was built, the highest-value
+case); a less conservative subtyping algorithm. Each additive, gated on a real
+consumer per ADR-011.
+
+**Trade.** No new `Value`/`Tag` variant. Supersedes nothing; extends the Step 5+
+staircase ADR-078 started and sits alongside `(map K V)` (ADR-078's third slice) as
+a second, heterogeneous map refinement.

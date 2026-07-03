@@ -138,6 +138,33 @@
   (test "(map keyword int) accepts an empty map"
     (assert= (c-lookup {} :x) 0)))
 
+;; --- record/shape types (record :k T …) -----------------------------------------
+;; Heterogeneous, keyword-keyed map shapes — per-key types with required/optional
+;; presence, distinct from the uniform-K/V `(map K V)` above. Slice 1: runtime
+;; contract only (docs/type-records.md); the static checker treats a record-typed
+;; value as flat `map` for now. Records are OPEN — unknown extra keys pass.
+
+(defn c-user (m) m)
+(sig! c-user ((record :name string :age (optional int)) -> any))
+
+(describe "record type checks (record …)"
+  (test "a required field present and correctly typed passes"
+    (assert= (c-user {:name "Ada"}) {:name "Ada"}))
+  (test "a required field missing throws"
+    (assert-error (c-user {:age 30})))
+  (test "a required field with the wrong type throws"
+    (assert-error (c-user {:name 42})))
+  (test "an optional field absent passes"
+    (assert= (c-user {:name "Ada"}) {:name "Ada"}))
+  (test "an optional field present as nil passes"
+    (assert= (c-user {:name "Ada" :age nil}) {:name "Ada" :age nil}))
+  (test "an optional field present with the wrong (non-nil) type throws"
+    (assert-error (c-user {:name "Ada" :age "old"})))
+  (test "extra, undeclared keys are allowed (open records)"
+    (assert= (c-user {:name "Ada" :age 30 :extra :k}) {:name "Ada" :age 30 :extra :k}))
+  (test "a non-map argument throws"
+    (assert-error (c-user (list 1 2)))))
+
 ;; --- type variables (?A) --------------------------------------------------------
 ;; Type variables are static-only constraints — `?A` is unknown to `type-matches?`
 ;; so it accepts any value (correct: the static checker handles the precision).
