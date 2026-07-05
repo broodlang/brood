@@ -23,11 +23,28 @@ because it ships only **data** and calls **global** functions (`run-unit`), whic
 resolve through the shared global table in the worker rather than being deep-copied.
 **Workaround (in place):** `std/tool/project.blsp` ships only a keyword op and
 resolves the operation via a global (`project--pfold-run`) — no closure crosses the
-process boundary. **Fix (TODO):** audit the closure path in the spawn/`to_message`
-deep-copy (the arity field), and add a regression test that spawns many workers each
-invoking a captured-closure argument and asserts none die. Until fixed, **do not
-ship a closure captured in a `spawn` body across processes** — pass data and call a
-global.
+process boundary. Until fixed, **do not ship a closure captured in a `spawn` body
+across processes** — pass data and call a global.
+
+**Investigation 2026-07-05 — could not reproduce; no fix applied.** Attempted
+reproduction across 50+ runs: a minimal captured-closure spawn (200 workers), the
+*exact* old shipped-closure `pfold` + `check-file` chunk-fn (24 and ~470 workers),
+the full multi-level `pfold-files→groups→spawn` capture (with `combine`/`on-death`
+also in scope), and all of the above under `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1`
+on a debug-assertions build — **all clean**, no tripwire, no verifier hit, and a
+deterministic arity-through-`spawn`+`promote` check (0/1/2-arg closures) passes every
+time. Code audit of the promote path (`heap.rs::promote_closure`/`promote_env`) found
+no concrete defect: arms/arity are copied faithfully, slots are reserve-then-filled
+with cycle-breaking, the shared-region append is lock-free/concurrent-safe, and
+RUNTIME compaction can't fire mid-fan-out (it runs only when the runtime `Arc` is
+uniquely owned — no other live process). So the trigger is either extremely rare or
+shifted since the original sighting. **Deliberately not blind-patching** the
+moving-GC / shared-RUNTIME promote path without a reproduction — a subtle,
+load-bearing area where a speculative change risks a real regression to fix a
+phantom. Left OPEN with the (solid) workaround in place; reopen the fix only with a
+reliable repro in hand. (The `:normal` "deaths" seen while reproducing were a *test
+harness* accounting bug — not checking per-group pid membership on `:down`, which the
+shipped `project--pfold-collect` does correctly — not a kernel issue.)
 
 ## KI-8 — RUNTIME form-position table (`positions`) stranded by compaction · **fixed 2026-07-03**
 
