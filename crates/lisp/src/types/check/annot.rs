@@ -50,9 +50,10 @@ fn base_ty(name: &str) -> Option<Ty> {
 
 /// Parse a type-expression form to a [`Ty`]. Handles base names, type
 /// variables (`?A` → `Ty::ANY`), arrows `(p… -> r)`, `(list E)` /
-/// `(vector E)`, `(or A B …)`, `(and A B …)`, and `(map K V)` (flat
-/// `Ty::Map` in slice 1). `None` for anything unrecognised — the annotation
-/// is then dropped, never guessed.
+/// `(vector E)`, `(or A B …)`, `(and A B …)`, `(map K V)` (flat
+/// `Ty::Map` in slice 1), `(record …)`, and `(tuple T1 T2 …)` (ADR-128,
+/// a fixed-arity positional vector shape). `None` for anything unrecognised
+/// — the annotation is then dropped, never guessed.
 pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
     match form {
         Value::Sym(s) => {
@@ -134,6 +135,18 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
                 let k = parse_type(heap, items[1])?;
                 let v = parse_type(heap, items[2])?;
                 return Some(Ty::map_of(k, v));
+            }
+            // (tuple T1 T2 …) — a fixed-arity positional vector shape
+            // (ADR-128). `(tuple)` (zero elements) is a legitimate empty
+            // tuple, so no minimum-length check — unlike `(list E)`/
+            // `(vector E)`, which take exactly one element type, every
+            // remaining item here is its own position's type.
+            if value::symbol_is(head, "tuple") {
+                let mut elems = Vec::with_capacity(items.len() - 1);
+                for &it in &items[1..] {
+                    elems.push(parse_type(heap, it)?);
+                }
+                return Some(Ty::tuple_of(elems));
             }
             // (record :k1 T1 :k2 T2 …) — a keyword-keyed heterogeneous map
             // shape. A field's type may be wrapped `(optional T)` to allow

@@ -464,13 +464,20 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 ctx.declared_value_ty(s)
             }
         }),
-        // A vector literal `[a b c]` — its elements are evaluated, so the element
-        // type is the union of their types (Step 5+, ADR-078). Any unknown element
-        // → unrefined `vector`.
+        // A vector literal `[a b c]` — its elements are evaluated in place, so
+        // (ADR-128) its exact per-position types are known, not just their
+        // union: infer a tuple shape rather than widening to a uniform
+        // `vector<E>`. Sound and strictly more precise (a `tuple` is already a
+        // subtype of the corresponding uniform `vector<E>` — `Ty::is_subtype`
+        // derives that fallback — so every check that passed under the old
+        // widened inference still passes). Any unknown element → the whole
+        // literal falls back to unrefined `vector` (same all-or-nothing
+        // strictness `element_union` already had).
         Value::Vector(id) => {
             let items = heap.vector(id).to_vec();
-            Some(match element_union(heap, &items, ctx) {
-                Some(e) => Ty::vector_of(e),
+            let elems: Option<Vec<Ty>> = items.iter().map(|&it| expr_ty(heap, it, ctx)).collect();
+            Some(match elems {
+                Some(e) => Ty::tuple_of(e),
                 None => Ty::of(Tag::Vector),
             })
         }
@@ -800,7 +807,43 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "third")
     {
         let arg = *items.get(1)?;
-        let elem = expr_ty(heap, arg, ctx)?.elem_ty().cloned()?;
+        let coll_ty = expr_ty(heap, arg, ctx)?;
+        // A statically-known index into a tuple-typed collection resolves to
+        // that *exact* position's type (ADR-128), not just the coarse union
+        // every other element access falls back to — `first` = 0, `second` =
+        // 1, `third` = 2, `last` = the final position, `nth` reads its own
+        // literal-int index argument (a non-literal index can't be resolved
+        // this precisely, so it falls through to the union case below).
+        if let Some(elems) = coll_ty.tuple_elems() {
+            let idx = if value::symbol_is(head, "first") {
+                Some(0)
+            } else if value::symbol_is(head, "second") {
+                Some(1)
+            } else if value::symbol_is(head, "third") {
+                Some(2)
+            } else if value::symbol_is(head, "last") {
+                elems.len().checked_sub(1)
+            } else if value::symbol_is(head, "nth") {
+                match items.get(2) {
+                    Some(Value::Int(n)) if *n >= 0 => Some(*n as usize),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(i) = idx {
+                // In range → exactly that position's type, no `nil` — a
+                // tuple's arity is fixed and known, so an in-range access on a
+                // well-typed value is never absent. A provably out-of-range
+                // literal index → exactly `nil` (matches the runtime, which
+                // returns nil rather than erroring).
+                return Some(match elems.get(i) {
+                    Some(t) => t.clone(),
+                    None => Ty::of(Tag::Nil),
+                });
+            }
+        }
+        let elem = coll_ty.elem_ty()?;
         // first/second/third/last/nth yield `nil` on an empty / out-of-range seq.
         return Some(elem.union(Ty::of(Tag::Nil)));
     }
@@ -809,7 +852,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // results). `None` element → fall through to the flat curated `list`.
     if value::symbol_is(head, "filter") {
         let coll = *items.get(2)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
     }
     // Element-preserving reshapers whose sequence is the *first* argument — the
@@ -822,14 +865,14 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "dedupe")
     {
         let coll = *items.get(1)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
     }
     // `(sort coll)` / `(sort less? coll)` and `(sort-by key-fn coll)` — the
     // sequence is always the last argument; element type is preserved unchanged.
     if value::symbol_is(head, "sort") || value::symbol_is(head, "sort-by") {
         let coll = *items.last()?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
     }
     // Element-preserving slices/filters whose sequence is the *second* argument —
@@ -844,7 +887,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         || value::symbol_is(head, "remove")
     {
         let coll = *items.get(2)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         return list_result(a);
     }
     // `(cons x xs)` — prepend `x` onto `xs`; the result element type is
@@ -853,7 +896,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // a `pair` (not nil), so we return `list<E>` without the `nil` variant.
     if value::symbol_is(head, "cons") && items.len() == 3 {
         let hd_ty = expr_ty(heap, items[1], ctx);
-        let tail_elem = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty().cloned());
+        let tail_elem = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
         return match (hd_ty, tail_elem) {
             (Some(h), Some(e)) => Some(Ty::list_of(h.union(e))),
             _ => Some(Ty::of(Tag::Pair)), // one side unknown → unrefined pair
@@ -868,7 +911,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         }
         let mut acc: Option<Ty> = None;
         for &arg in &items[1..] {
-            let elem = expr_ty(heap, arg, ctx).and_then(|t| t.elem_ty().cloned())?;
+            let elem = expr_ty(heap, arg, ctx).and_then(|t| t.elem_ty())?;
             acc = Some(match acc {
                 Some(a) => a.union(elem),
                 None => elem,
@@ -926,7 +969,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "map") {
         let f = *items.get(1)?;
         let coll = *items.get(2)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[a], ctx);
         return list_result(b);
     }
@@ -936,7 +979,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     if value::symbol_is(head, "keep") {
         let f = *items.get(1)?;
         let coll = *items.get(2)?;
-        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let a = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[a], ctx);
         return list_result(b);
     }
@@ -944,7 +987,7 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // holds both, `nil | list<A | type(sep)>`. Both must be known, else flat.
     if value::symbol_is(head, "interpose") && items.len() == 3 {
         let sep_ty = expr_ty(heap, items[1], ctx);
-        let a = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty().cloned());
+        let a = expr_ty(heap, items[2], ctx).and_then(|t| t.elem_ty());
         return match (sep_ty, a) {
             (Some(s), Some(e)) => list_result(Some(s.union(e))),
             _ => None,
@@ -970,12 +1013,12 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             // (reduce f coll) — initial accumulator is the first element
             3 if value::symbol_is(head, "reduce") => {
                 let coll = items[2];
-                let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+                let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
                 (elem, coll)
             }
             _ => return None,
         };
-        let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty().cloned());
+        let elem = expr_ty(heap, coll, ctx).and_then(|t| t.elem_ty());
         let b = callback_ret(heap, f, &[Some(Ty::ANY), elem], ctx);
         return match (init_ty, b) {
             (Some(i), Some(b)) => Some(i.union(b)),

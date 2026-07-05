@@ -786,8 +786,17 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   record-literal type inference. Closed records (static `KeyError` elimination)
   and `assoc`/`keys`/`vals` field-precise sinks deferred until a real consumer
   drives them. See [`docs/type-records.md`](type-records.md).
-- ⬜ **Tuple / positional product types** (Brood has no tuple kind; vectors carry
-  a single element type, not positional types).
+- ✅ **Tuple / positional product types** — shipped (ADR-128,
+  [`type-tuples.md`](type-tuples.md)): `(tuple T1 T2 …)`, a fifth structural
+  refinement on `Ty` (tagged `Vector`, not a new `Value` kind — a tuple is
+  still a plain `[ ]` vector), following the exact layering pattern records
+  established onto `Map`. A vector *literal* now infers its exact
+  per-position shape instead of widening to a uniform element type (verified
+  strictly safe: a tuple is already a subtype of the corresponding uniform
+  vector, and the full corpus diff came back unchanged). `first`/`second`/
+  `third`/`last`/`nth` with a literal index resolve to the exact position;
+  `sig!`/`BROOD_CONTRACTS=1` enforce it at the runtime boundary. Deferred:
+  nested type variables inside a tuple position (`(tuple ?A ?B)`).
 - ✅ **Type variables / parametric polymorphism** for user-defined generics —
   fully shipped (slices 1–2, [`type-variables.md`](type-variables.md)): `?A`-style
   vars in `(sig …)` grammar, runtime pass-through, and static unification

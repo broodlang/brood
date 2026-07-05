@@ -1019,6 +1019,84 @@ mod tests {
     }
 
     #[test]
+    fn tuple_sig_params_parse_and_check() {
+        // `(tuple T1 T2 …)` — a fixed-arity positional vector shape
+        // (ADR-128). A vector *literal* infers its exact per-position types
+        // (not a widened uniform element type), so a mismatched literal
+        // argument is caught by the ordinary disjointness check — no new
+        // machinery needed at the call site itself.
+        let w = file_warnings(
+            "(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [\"x\" 1])",
+        );
+        assert!(
+            w.iter().any(|m| m.contains("f: argument 1 expects (tuple int, string)")
+                && m.contains("got (tuple string, int)")),
+            "a mismatched tuple-shaped literal argument must warn: {w:?}"
+        );
+        let w = file_warnings(
+            "(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\"])",
+        );
+        assert!(w.is_empty(), "a matching tuple-shaped literal must not warn: {w:?}");
+
+        // Different arity is disjoint too (a vector has one definite length).
+        let w = file_warnings(
+            "(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\" true])",
+        );
+        assert!(
+            w.iter().any(|m| m.contains("f: argument 1")),
+            "a wrong-arity tuple literal must warn: {w:?}"
+        );
+
+        // Position-aware `first`/`second`/`third`/`last`/`nth` on a
+        // tuple-typed param: each resolves to its *exact* position's type
+        // (not the coarse union every other element access falls back to),
+        // so a mismatch on the specific position used is caught.
+        let w = file_warnings(
+            "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (first t)))",
+        );
+        assert!(
+            w.iter().any(|m| m.contains("string-length: argument 1 expects string") && m.contains("int")),
+            "first on a tuple must resolve to position 0's exact type: {w:?}"
+        );
+        let w = file_warnings(
+            "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (second t)))",
+        );
+        assert!(w.is_empty(), "second on this tuple is already a string — no warning: {w:?}");
+        let w = file_warnings(
+            "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 0)))",
+        );
+        assert!(
+            w.iter().any(|m| m.contains("string-length: argument 1 expects string") && m.contains("int")),
+            "a literal-index nth on a tuple must resolve position-exactly: {w:?}"
+        );
+        let w = file_warnings(
+            "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 1)))",
+        );
+        assert!(w.is_empty(), "nth at the string position must not warn: {w:?}");
+
+        // Return-type flow: a tuple-shaped return type is checked against
+        // the body's inferred literal shape, same as any other declared
+        // return type.
+        let w = file_warnings(
+            r#"(sig f (-> (tuple int string)))
+(defn f () ["x" 1])"#,
+        );
+        assert!(
+            w.iter().any(|m| m.contains("f: declared return type (tuple int, string)")),
+            "a mismatched declared tuple return type must warn: {w:?}"
+        );
+
+        // A tuple is a subtype of the corresponding uniform vector type (every
+        // element of a `tuple<int,string>` is an `int | string`) — so passing
+        // a tuple-shaped literal where a plain `(vector …)` is expected must
+        // not warn just because the shapes differ.
+        let w = file_warnings(
+            "(sig g ((vector any) -> any))\n(defn g (v) v)\n(g [1 \"x\"])",
+        );
+        assert!(w.is_empty(), "a tuple literal must satisfy a uniform vector param: {w:?}");
+    }
+
+    #[test]
     fn dead_clause_flagged_for_a_sig_typed_param() {
         // A `match` literal pattern that can't match the parameter's declared type.
         let w = file_warnings(
@@ -3504,7 +3582,7 @@ mod soundness_oracle {
             match v {
                 Value::Vector(id) => {
                     for it in heap.vector(id).to_vec() {
-                        if !value_member_of(heap, it, elem) {
+                        if !value_member_of(heap, it, &elem) {
                             return false;
                         }
                     }
@@ -3513,7 +3591,7 @@ mod soundness_oracle {
                     let mut cur = v;
                     while let Value::Pair(p) = cur {
                         let (h, t) = heap.pair(p);
-                        if !value_member_of(heap, h, elem) {
+                        if !value_member_of(heap, h, &elem) {
                             return false;
                         }
                         cur = t;

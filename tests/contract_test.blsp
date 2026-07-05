@@ -245,3 +245,24 @@
     (assert-error (c-my-first 42)))
   (test "two vars ?A and ?B independently accept any types"
     (assert= (c-const 1 "two") 1)))
+
+;; --- tuple (positional vector) types (ADR-128) ----------------------------------
+
+(defn c-pair (t) t)
+(sig! c-pair ((tuple int string) -> any))
+
+(defn c-empty (t) t)
+(sig! c-empty ((tuple) -> any))
+
+(describe "tuple type contracts"
+  (test "a matching vector passes"
+    (assert= (c-pair [1 "x"]) [1 "x"]))
+  (test "a wrong-position type throws"
+    (assert-error (c-pair ["x" 1])))
+  (test "the wrong arity throws"
+    (assert-error (c-pair [1 "x" true])))
+  (test "a non-vector throws"
+    (assert-error (c-pair (list 1 "x"))))
+  (test "the empty tuple accepts only the empty vector"
+    (assert= (c-empty []) [])
+    (assert-error (c-empty [1]))))

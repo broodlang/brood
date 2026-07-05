@@ -43,6 +43,7 @@ server, and the web frontend come later (see the roadmap).
 | [type-map-kv.md](type-map-kv.md) | Key/value-typed maps `(map KeyType ValType)` — runtime contract + checker refinement. |
 | [type-variables.md](type-variables.md) | Type variables `?A` — parametric signatures for user-defined generic functions. |
 | [type-records.md](type-records.md) | Record/shape types `(record :k1 T1 :k2 T2 …)` — heterogeneous keyword-keyed map shapes. |
+| [type-tuples.md](type-tuples.md) | Tuple/positional product types `(tuple T1 T2 …)` — fixed-arity per-position vector shapes (ADR-128). |
 | [type-arrow-intersection.md](type-arrow-intersection.md) | Intersection of arrows — overloaded/multi-clause return types (ADR-116). |
 | [type-int-literals.md](type-int-literals.md) | Int-literal (singleton) types — `5` as a type (ADR-117). |
 | [type-bool-string-literals.md](type-bool-string-literals.md) | Bool and string literal types — `true`/`"GET"` as types (ADR-120). |

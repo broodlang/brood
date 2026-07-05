@@ -94,6 +94,14 @@ const SEQ_BITS: u32 = (1u32 << bit(Tag::Pair)) | (1u32 << bit(Tag::Vector));
 /// The map tag — the one tag a key/value refinement applies to.
 const MAP_BIT: u32 = 1u32 << bit(Tag::Map);
 
+/// The vector tag alone (not `pair` too) — the one tag a *positional* tuple
+/// refinement applies to. Deliberately narrower than `SEQ_BITS`: a tuple is a
+/// fixed-arity, per-position-typed shape, which only ever makes sense for a
+/// `[ ]` vector (ADR-003 already keeps vectors and cons-list `pair`s
+/// separate) — a `pair`-based list's length isn't part of its type the way a
+/// vector literal's positions are.
+const VECTOR_BIT: u32 = 1u32 << bit(Tag::Vector);
+
 /// The keyword tag — the one tag a literal (singleton) refinement applies to. A
 /// keyword-literal type `:maximized` refines the keyword members to exactly the
 /// listed keyword symbols (set-theoretic literal types, ADR; keyword-only first).
@@ -162,6 +170,13 @@ pub struct Ty {
     /// fields so the generic union/intersect machinery treats them exactly
     /// like every other refinement pair — see `docs/type-records.md`.
     fields: Option<Arc<BTreeMap<Symbol, (Ty, bool)>>>,
+    /// Refinement of the vector member (`vector`) to a **positional** shape —
+    /// one type per index, when statically known from a `(tuple …)`
+    /// annotation (ADR-128). `None` means "no declared positional shape".
+    /// Mutually exclusive with `elem` in practice (a `Ty` is built by either
+    /// `vector_of` or `tuple_of`), same independent-fields story as
+    /// `map_kv`/`fields` above — see `docs/type-tuples.md`.
+    tuple: Option<Arc<Vec<Ty>>>,
     /// Refinement of the keyword member (`keyword`) to a literal set — the exact
     /// keyword symbols admitted, e.g. `{:maximized, :fullboth}`. `None` means "any
     /// keyword". When `Some`, the `Keyword` bit is in `tags` and the set is
@@ -213,6 +228,7 @@ impl Ty {
             map_kv: None,
             overload: None,
             fields: None,
+            tuple: None,
             lit: None,
             lit_int: None,
             lit_bool: None,
@@ -249,6 +265,7 @@ impl Ty {
             map_kv: None,
             overload: None,
             fields: None,
+            tuple: None,
             lit: None,
             lit_int: None,
             lit_bool: None,
@@ -277,6 +294,7 @@ impl Ty {
             elem: None,
             map_kv: None,
             fields: None,
+            tuple: None,
             lit: None,
             lit_int: None,
             lit_bool: None,
@@ -301,6 +319,7 @@ impl Ty {
             map_kv: None,
             overload: None,
             fields: None,
+            tuple: None,
             lit: None,
             lit_int: None,
             lit_bool: None,
@@ -317,6 +336,7 @@ impl Ty {
             map_kv: Some(Arc::new((key, val))),
             overload: None,
             fields: None,
+            tuple: None,
             lit: None,
             lit_int: None,
             lit_bool: None,
@@ -336,6 +356,7 @@ impl Ty {
             map_kv: None,
             overload: None,
             fields: Some(Arc::new(fields)),
+            tuple: None,
             lit: None,
             lit_int: None,
             lit_bool: None,
@@ -347,6 +368,33 @@ impl Ty {
     /// the checker reads to flow `(get r :name)` to the field's exact type.
     pub fn record_fields(&self) -> Option<&BTreeMap<Symbol, (Ty, bool)>> {
         self.fields.as_deref()
+    }
+
+    /// A positional tuple shape — one type per index, fixed arity. Tagged
+    /// `vector` (a tuple is still a runtime `[ ]` vector value; this only
+    /// refines it, the same layering trick `record_of` uses onto `map`). See
+    /// `docs/type-tuples.md` (ADR-128).
+    pub fn tuple_of(elems: Vec<Ty>) -> Ty {
+        Ty {
+            tags: VECTOR_BIT,
+            arrow: None,
+            elem: None,
+            map_kv: None,
+            overload: None,
+            fields: None,
+            tuple: Some(Arc::new(elems)),
+            lit: None,
+            lit_int: None,
+            lit_bool: None,
+            lit_str: None,
+        }
+    }
+
+    /// The tuple-shape refinement, if this vector type carries one. The
+    /// bridge the checker reads to flow `(nth t i)`/`(first t)` to the exact
+    /// per-position type.
+    pub fn tuple_elems(&self) -> Option<&Vec<Ty>> {
+        self.tuple.as_deref()
     }
 
     /// A keyword-literal (singleton) type — exactly the keyword `sym`. Unions of
@@ -361,6 +409,7 @@ impl Ty {
             map_kv: None,
             overload: None,
             fields: None,
+            tuple: None,
             lit: Some(Arc::new(set)),
             lit_int: None,
             lit_bool: None,
@@ -388,6 +437,7 @@ impl Ty {
             map_kv: None,
             overload: None,
             fields: None,
+            tuple: None,
             lit: None,
             lit_int: Some(Arc::new(set)),
             lit_bool: None,
@@ -416,6 +466,7 @@ impl Ty {
             map_kv: None,
             overload: None,
             fields: None,
+            tuple: None,
             lit: None,
             lit_int: None,
             lit_bool: Some(Arc::new(set)),
@@ -443,6 +494,7 @@ impl Ty {
             map_kv: None,
             overload: None,
             fields: None,
+            tuple: None,
             lit: None,
             lit_int: None,
             lit_bool: None,
@@ -474,10 +526,24 @@ impl Ty {
         Ty::seq_of(1u32 << bit(Tag::Pair), elem)
     }
 
-    /// The element-type refinement, if this sequence type carries one. The bridge
-    /// the checker reads to flow `(first xs)` / `(nth xs i)` to the element type.
-    pub fn elem_ty(&self) -> Option<&Ty> {
-        self.elem.as_deref()
+    /// The element-type refinement, if this sequence type carries one (or can
+    /// be derived from one) — the bridge the checker reads to flow `(first
+    /// xs)` / `(nth xs i)` to the element type. A tuple has no plain `elem`,
+    /// but the union of its per-position types is exactly as sound a bound
+    /// (every element of a `tuple<int, string>` is an `int | string`), so
+    /// derive that when `elem` itself is absent (ADR-128) — this is the
+    /// single choke point every `elem_ty` consumer already goes through, so
+    /// `first`/`nth`/`rest`/etc. all pick up a tuple-typed vector for free.
+    /// Owned (not `&Ty`) because the tuple case synthesizes a fresh value;
+    /// every existing caller already immediately `.cloned()`s the borrowed
+    /// case anyway.
+    pub fn elem_ty(&self) -> Option<Ty> {
+        self.elem
+            .as_deref()
+            .cloned()
+            .or_else(|| self.tuple.as_ref().map(|elems| {
+                elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t))
+            }))
     }
 
     /// The type of a concrete value — the bridge from a runtime value to its type.
@@ -573,6 +639,12 @@ impl Ty {
             other.tags & MAP_BIT != 0,
             &other.fields,
         );
+        let tuple = merge_union(
+            self.tags & VECTOR_BIT != 0,
+            &self.tuple,
+            other.tags & VECTOR_BIT != 0,
+            &other.tuple,
+        );
         // Literal sets union *exactly* (not widen) — `:a ∪ :b = {a,b}`. But a side
         // whose keyword member is *open* (keyword tag, no literal set) contributes
         // every keyword, so the result keyword member is open too (`:a ∪ keyword =
@@ -591,6 +663,7 @@ impl Ty {
             elem,
             map_kv,
             fields,
+            tuple,
             lit,
             lit_int,
             lit_bool,
@@ -622,6 +695,11 @@ impl Ty {
         };
         let fields = if tags & MAP_BIT != 0 {
             merge_intersect(&self.fields, &other.fields)
+        } else {
+            None
+        };
+        let tuple = if tags & VECTOR_BIT != 0 {
+            merge_intersect(&self.tuple, &other.tuple)
         } else {
             None
         };
@@ -710,6 +788,7 @@ impl Ty {
             elem,
             map_kv,
             fields,
+            tuple,
             lit,
             lit_int,
             lit_bool,
@@ -743,6 +822,9 @@ impl Ty {
         }
         if self.map_kv.is_some() || self.fields.is_some() {
             tags |= self.tags & MAP_BIT;
+        }
+        if self.tuple.is_some() {
+            tags |= self.tags & VECTOR_BIT;
         }
         // A literal set omits the *other* keywords, which are in the complement —
         // so the keyword tag survives (widened to "any keyword").
@@ -801,13 +883,43 @@ impl Ty {
         }
         if self.tags & SEQ_BITS != 0 {
             if let Some(b) = &other.elem {
-                match &self.elem {
+                // A tuple has no plain `elem`, but its per-position types taken
+                // together are exactly as good a bound: a `tuple<int,int>` IS a
+                // `vector<int>` (every element is an int), so derive an
+                // equivalent uniform element type from `tuple` when `elem`
+                // itself is absent, rather than rejecting outright.
+                let self_elem = self.elem.clone().or_else(|| {
+                    self.tuple.as_ref().map(|elems| {
+                        Arc::new(
+                            elems
+                                .iter()
+                                .cloned()
+                                .fold(Ty::NEVER, |acc, t| acc.union(t)),
+                        )
+                    })
+                });
+                match &self_elem {
                     Some(a) => {
                         if !a.is_subtype(b) {
                             return false;
                         }
                     }
                     None => return false, // self = "any elements" ⊄ a specific elem
+                }
+            }
+        }
+        if self.tags & VECTOR_BIT != 0 {
+            if let Some(b) = &other.tuple {
+                match &self.tuple {
+                    Some(a) => {
+                        if !tuple_is_subtype(a, b) {
+                            return false;
+                        }
+                    }
+                    // self has no specific positional shape (a plain vector, or
+                    // only a uniform `elem`) — can't prove it matches an exact
+                    // per-position shape `other` requires.
+                    None => return false,
                 }
             }
         }
@@ -919,6 +1031,21 @@ impl Ty {
                 return a.is_disjoint(b);
             }
         }
+        // Two tuple shapes are provably disjoint if their arities differ (a
+        // vector value has exactly one length, so it can't be both a 2-tuple
+        // and a 3-tuple) or if any single position's types are disjoint (a
+        // value satisfying both shapes would need every position to satisfy
+        // both at once). Same soundness basis as the literal-set cases above
+        // — this only ever *adds* a genuinely-disjoint verdict, never a false
+        // one.
+        if shared == VECTOR_BIT {
+            if let (Some(a), Some(b)) = (&self.tuple, &other.tuple) {
+                if a.len() != b.len() {
+                    return true;
+                }
+                return a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y));
+            }
+        }
         false
     }
 
@@ -967,6 +1094,19 @@ fn record_fields_is_subtype(
         }
     }
     true
+}
+
+/// `self <: other` for two tuple shapes: exact arity match (unlike a record's
+/// open width-subtyping, a tuple's arity *is* its shape — a 2-tuple isn't a
+/// subtype of a 3-tuple, and vice versa), then covariant per position — sound
+/// because Brood vectors are immutable, same reasoning as element-covariant
+/// sequences.
+fn tuple_is_subtype(self_elems: &[Ty], other_elems: &[Ty]) -> bool {
+    self_elems.len() == other_elems.len()
+        && self_elems
+            .iter()
+            .zip(other_elems)
+            .all(|(s, o)| s.is_subtype(o))
 }
 
 /// The candidate signatures a function-tagged `Ty` carries: `overload`'s list
@@ -1221,6 +1361,14 @@ impl fmt::Display for Ty {
                     .collect();
                 parts.sort();
                 return write!(f, "{{{}}}", parts.join(", "));
+            }
+        }
+        // A tuple shape: `(tuple int, string)` — matches the annotation
+        // grammar directly, unlike a record's `{ }` shorthand.
+        if let Some(elems) = self.tuple_elems() {
+            if self.tags == VECTOR_BIT {
+                let joined = elems.iter().map(Ty::to_string).collect::<Vec<_>>().join(", ");
+                return write!(f, "(tuple {joined})");
             }
         }
         if let Some(elem) = self.elem_ty() {

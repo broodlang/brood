@@ -152,6 +152,7 @@ out to already exist (`nest check` has always exited 1 on any warning).
 | 125 | `nest run --watch` re-checks on reload — ADR-123's live-session trigger |
 | 126 | `defmodule`-declared arrow sigs now seed the body-return-type check |
 | 127 | `&optional` params in `(sig …)` arrow grammar |
+| 128 | Tuple / positional product types |
 
 ---
 
@@ -7821,3 +7822,82 @@ this also stashed the other session's concurrent uncommitted work
 momentarily, restored immediately) that the failure is caused by that
 refactor, not by anything in this ADR. Left untouched — not this ADR's to
 fix mid-flight on someone else's in-progress work.
+
+## ADR-128 — Tuple / positional product types
+
+**Status:** accepted; **shipped 2026-07-05**
+([`type-tuples.md`](type-tuples.md)). Closes the last concrete item on the
+Elixir-parity gap list picked up this session — Brood previously had no way
+to express a fixed-arity, per-position-typed vector shape at all.
+
+**Decision.** A fifth structural refinement on `Ty` — `tuple:
+Option<Arc<Vec<Ty>>>`, tagged to `Vector` alone (not `pair`, per ADR-003's
+vector/list split) — following the exact layering pattern `fields` (ADR-115,
+records-on-`Map`) already established: a tuple is still a plain runtime
+`[ ]` vector, no new `Value` kind, just a refinement the checker reasons
+about. `(tuple T1 T2 …)` in `(sig …)` grammar; `Ty::tuple_of`/`tuple_elems`
+constructor/accessor; wired into `union`/`intersect`/`negate` via the same
+generic `merge_union`/`merge_intersect` helpers every other refinement uses
+(no bespoke merge logic needed — `Vec<Ty>: PartialEq` was already
+sufficient).
+
+**Subtyping needed real thought, not just plumbing.** `Ty::elem_ty()` — the
+single choke point every `first`/`nth`/`is_subtype` consumer already reads —
+now derives a union-of-positions fallback when a type has `tuple` but no
+plain `elem`, which is what makes `tuple<int,string> <: vector<int|string>`
+fall out for free everywhere `elem_ty()` is consulted, no separate
+tuple-awareness needed at most call sites. `is_subtype`'s tuple-vs-tuple case
+needed its own function (`tuple_is_subtype`, mirroring `record_fields_is_subtype`'s
+shape): exact arity match — unlike a record's open width subtyping, a
+tuple's arity *is* its shape — then covariant per position.
+`is_disjoint` (the predicate the "argument N expects X, got Y" warnings
+actually use, not `is_subtype`) gained a genuinely sound tuple-vs-tuple case
+too, the same shape as the existing literal-set special cases: disjoint on
+arity mismatch or any disjoint position — advisory-soundness holds, only
+ever adds a provable verdict.
+
+**The literal-inference change was the real risk, and it came back clean.**
+A vector literal `[a b c]` now infers `tuple_of([...])` (exact per-position
+types) instead of widening to `vector_of(union)` — a behavior change to
+*existing* inference, not just new grammar. Argued it's strictly safe before
+touching it (a tuple is already a subtype of the corresponding uniform
+vector via the `elem_ty()` fallback, so nothing that worked before could
+stop working), then verified: full `nest check` corpus diff across `std/` +
+`tests/` came back byte-identical, 91 warnings before and after.
+
+**Positional sinks** (`first`/`second`/`third`/`last`/`nth` with a literal
+index) resolve to the exact position when statically known, not the coarse
+`elem_ty()` union every other element access still gets — in-range is the
+exact type with no `nil` (a well-typed tuple's arity is fixed and known, so
+an in-range access is never absent); a provably out-of-range literal index
+is exactly `nil`, matching the runtime.
+
+**Runtime contract:** `type-matches?` (`std/prelude.blsp`) gained a `tuple`
+case alongside `record` — vector, exact arity, then per-position check —
+for `sig!`/`BROOD_CONTRACTS=1`.
+
+**A workflow gotcha surfaced and worth recording separately:** the
+incremental `nest check` cache (ADR-119) is stamped with a git-SHA build-id,
+which doesn't change across uncommitted local rebuilds — so iterating on
+checker logic without committing can silently serve stale cached warnings
+through the `nest check` CLI even after a correct rebuild. Cost real time
+mid-session (several "why isn't this working" cycles that were actually
+"why is this cache stale") before being traced and worked around with
+`BROOD_NO_CHECK_CACHE=1` for the rest of verification. Rust-level
+`cargo test` was never affected (`file_warnings()` calls the checker
+in-process, no CLI cache in the loop) — only CLI-level `nest check`
+invocations during dev iteration are at risk.
+
+**Verified two ways**, matching this session's playbook: (1)
+`tuple_sig_params_parse_and_check` covers parsing, call-site argument
+mismatch + arity mismatch, all four positional sinks, declared-return-type
+mismatch, and the tuple-satisfies-uniform-vector subtype case, all in one
+test, all passing on first write. Plus 5 new `sig!` runtime-contract tests
+in `tests/contract_test.blsp`. (2) Full `nest check` corpus diff (cache
+genuinely disabled this time) — unchanged at 91. 362/362 unit tests,
+2605/2605 whole-project test suite.
+
+**Deferred:** nested type variables inside a tuple position (`(tuple ?A
+?B)`) — the `SigWithVars`/`SigTerm` route doesn't have a tuple case yet,
+only the non-variable `parse_type` path does; gated on a real consumer
+(ADR-011).

@@ -1715,3 +1715,72 @@ the first run — call-site type + arity checking, both nil-widening
 directions, `&optional` combined with a trailing rest, and the malformed-
 marker-order case, all in one test. 360/360 unit tests green (the one
 pre-existing unrelated failure aside), `nest check` corpus unchanged (91).
+
+## 2026-07-05 — ADR-128: tuple / positional product types
+
+Picked up the last concrete Elixir-parity item: Brood had no way to type a
+fixed-arity, per-position vector shape at all — only the uniform `(vector
+E)`. Followed records' exact precedent: a fifth structural refinement on
+`Ty` (`tuple: Option<Arc<Vec<Ty>>>`), tagged to `Vector` alone, layered on
+top of the existing runtime value with no new `Value` kind. Mechanical parts
+(struct field, constructors, `parse_type` grammar, `Display`) went fast;
+`union`/`intersect` reused the existing generic `merge_union`/
+`merge_intersect` helpers unchanged, since `Vec<Ty>: PartialEq` was already
+sufficient — no bespoke merge logic needed there.
+
+The two places that needed real thought, not just plumbing:
+
+- **`Ty::elem_ty()` becomes the fallback choke point.** Made it derive a
+  union-of-positions type when a `Ty` has `tuple` but no plain `elem` — this
+  single change is what makes `tuple<int,string> <: vector<int|string>` (and
+  every `first`/`nth`/`rest` consumer of `elem_ty()`) work for free, without
+  hunting down every individual call site. Changed `elem_ty`'s return type
+  from `Option<&Ty>` to owned `Option<Ty>` to make the synthesis possible —
+  turned out to *simplify* most callers, since they were already
+  `.elem_ty().cloned()`.
+- **`is_disjoint` (not `is_subtype`) is what the "argument N expects X, got
+  Y" warnings actually consult**, and it's tags-only except for a few
+  precise special cases (the keyword/int/bool/string literal sets). Added a
+  genuinely sound tuple-vs-tuple case there too — different arity, or any
+  disjoint position, is provably disjoint — mirroring those existing cases.
+  Missing this piece was the reason the first end-to-end probe of a
+  mismatched tuple *argument* silently passed even though the type
+  machinery was otherwise correct.
+
+**The literal-inference change was the real risk in this slice**, and it's
+the part I was most conservative about going in: a `[a b c]` vector literal
+now infers its exact positional shape (`tuple_of`) instead of widening to a
+uniform `vector_of(union)` — a behavior change to inference that's been
+stable for a while, not just new grammar nobody was relying on yet. Reasoned
+through why it should be safe *before* touching it (a tuple is already a
+subtype of the corresponding uniform vector via the `elem_ty()` fallback, so
+nothing that passed before could start failing), then verified: full `nest
+check` corpus diff across `std/` + `tests/`, byte-identical, 91 warnings
+before and after.
+
+Added position-aware `first`/`second`/`third`/`last`/`nth` (a literal index
+resolves to the exact position, not the coarse union every other element
+access still gets) and a `tuple` case in `type-matches?` for `sig!`/
+`BROOD_CONTRACTS=1` runtime enforcement, mirroring `record`'s case exactly.
+
+**A real workflow gotcha, cost real time this round:** the incremental
+`nest check` cache (ADR-119) stamps itself with a git-SHA build-id, which
+doesn't change across uncommitted local rebuilds. Several times mid-session,
+a genuinely-fixed behavior (confirmed correct via `cargo test`'s
+in-process `file_warnings()`, which never touches this cache) still showed
+the *old*, wrong result through the `nest check` CLI after a real rebuild —
+because the cache didn't know the checker's logic had changed, only that the
+file content and build-id hadn't. Traced it by comparing the in-process test
+result against the CLI result for the identical source and noticing they
+disagreed; `BROOD_NO_CHECK_CACHE=1` confirmed the diagnosis and became the
+standard for the rest of this session's CLI-level verification. Worth
+remembering for any future checker-logic iteration: the cache is safe for
+normal use (a real commit changes the build-id), but actively misleading
+while iterating on uncommitted checker changes.
+
+New test `tuple_sig_params_parse_and_check` covers parsing, call-site
+argument + arity mismatch, all four positional sinks, declared-return-type
+mismatch, and the tuple-satisfies-uniform-vector case — passed every
+assertion on the first write. Plus 5 new `sig!` contract tests. 362/362 unit
+tests, 2605/2605 whole-project test suite, `nest check` corpus unchanged
+(91, verified with the cache genuinely disabled).
