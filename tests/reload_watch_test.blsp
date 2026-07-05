@@ -1,0 +1,52 @@
+;; std/tool/reload.blsp's `on-reload` callback (added alongside ADR-123's
+;; live-session trigger for `nest run --watch`, docs/type-soundness-reload.md):
+;; a 1-ary fn invoked after each successful reload/load, with its own errors
+;; caught so a broken callback (e.g. a checker hiccup) can never take the
+;; watcher down. `nest run --watch` wires `project/check-project-sources` in
+;; as this callback inside a project; these tests exercise the callback
+;; contract directly, independent of `nest`/the checker.
+(defmodule reload-watch-test (:use test) (:use reload))
+
+;; Poll `reload-watch-test--wait` (bounded) instead of a selective `receive`:
+;; a test-framework worker process may already carry other pending mailbox
+;; traffic, and this keeps the assertion independent of message ordering.
+(defn reload-watch-test--wait (pred budget-ms)
+  (cond
+    (pred) true
+    (<= budget-ms 0) false
+    else (do (sleep 100) (reload-watch-test--wait pred (- budget-ms 100)))))
+
+(describe "reload-on-change: on-reload callback"
+  (test "fires after a successful reload, with the reloaded path"
+    (let (dir (temp-dir "brood-reload-"))
+      (make-dir dir)
+      (let (f (path-join dir "w.blsp"))
+        (spit f "(def rwt-val 1)\n")
+        (load f)
+        (reload-on-change f (fn (p) (println "[reload-watch-test] on-reload fired" p)))
+        ;; `file-mtime` is millisecond-resolution; without a gap here the two
+        ;; `spit`s can land in the same millisecond and the watcher correctly
+        ;; sees no change at all (not a watcher bug — a race in the test).
+        (sleep 100)
+        (spit f "(def rwt-val 2)\n")
+        (is (reload-watch-test--wait (fn () (= (eval 'rwt-val) 2)) 3000))
+        (assert= (eval 'rwt-val) 2))))
+
+  (test "on-reload's own errors are caught, never propagated to the watcher"
+    (let (dir (temp-dir "brood-reload-"))
+      (make-dir dir)
+      (let (f (path-join dir "w2.blsp"))
+        (spit f "(def rwt-val2 1)\n")
+        (load f)
+        ;; A callback that always throws — the def must still take effect
+        ;; (on-reload runs *after* reload-defs already succeeded) and the
+        ;; watcher must survive to reload again on a later edit.
+        (reload-on-change f (fn (_p) (throw "boom")))
+        (sleep 100)
+        (spit f "(def rwt-val2 2)\n")
+        (is (reload-watch-test--wait (fn () (= (eval 'rwt-val2) 2)) 3000))
+        (assert= (eval 'rwt-val2) 2)
+        (sleep 100)
+        (spit f "(def rwt-val2 3)\n")
+        (is (reload-watch-test--wait (fn () (= (eval 'rwt-val2) 3)) 3000))
+        (assert= (eval 'rwt-val2) 3)))))

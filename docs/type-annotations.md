@@ -206,6 +206,48 @@ needs precise result types — overloaded arithmetic sigs (`(+ int int) : int`) 
 occurrence-typing inference (the historical false-positive source). Gated on a real
 consumer; the overloaded-sig option is the bounded next step.
 
+## Known gap — a `defmodule`-declared arrow sig doesn't seed the body-return check
+
+Discovered 2026-07-05 while building ADR-125's end-to-end `--watch` smoke
+test, unrelated to that feature. `(sig fname (A -> B))` followed by
+`(defn fname …)` **inside a `defmodule` block** does not seed
+`check_def`'s body-vs-declared-return-type check, even though the identical
+pattern at the root namespace (no `defmodule`) works correctly. Repro:
+
+```
+(defmodule m "doc")
+(sig f (-> string))
+(defn f () 42)   ; should warn "f: declared return type string ... yields int" — silent
+```
+
+**Root cause:** Pass 2.5 (`annot::parse_sig_decl`) scans un-expanded forms and
+records the declared sig under the symbol **as literally written** (bare
+`f`), with no `resolve_reference`/qualification step. But `defn f` inside a
+`defmodule` expands to `(def m/f (fn …))` — the qualified symbol. `check_def`'s
+seeding lookup (`ctx.declared_sig(name)`, `walk.rs`) uses `name` from the
+*expanded* form (`m/f`), which never matches the bare-keyed `f` Pass 2.5
+recorded — so the sig is invisible to the seeding path. Call-site checking
+(`sig_of`) doesn't have this problem: it falls back through
+`declared_heap_sig`, which reads the heap-wide store `%register-sig`
+populates *with* qualification (requires the file to have actually been
+`eval`'d — true for `nest check`'s whole-project mode, which loads sources
+first). `check_def`'s body-return seeding has no such fallback.
+
+**Impact:** a real false-negative (misses a provable error), not a false
+positive — doesn't violate the zero-FP contract, but silently drops return-
+type checking for the very common `defmodule` + `sig` + `defn` combination.
+Not yet assessed how many existing `std/`/`tests/` files hit this (a project
+using `sig` for arrows inside a namespaced module would be affected; `nest
+check`'s clean corpus doesn't prove absence, since a missed warning is
+silent by definition).
+
+**Not fixed here** — out of scope for the `--watch` trigger work that
+surfaced it. The fix likely mirrors ADR-124's shape (give `check_def`'s
+seeding path the same `declared_heap_sig`-style heap-wide fallback
+`gradual_of`'s reference branch already got), but needs its own investigation
+and corpus diff before shipping, per this repo's standard practice for
+checker changes.
+
 ## Why this is the right "more sound" move for Brood
 
 Classic type soundness needs gating; we don't gate. Sound *gradual* typing

@@ -21,7 +21,14 @@ watched until you call `reload-on-change`.
     (reload-on-change \"src\")            ; every .blsp under src/, recursively
                                           ; — new files added later are picked
                                           ; up automatically on the next dir
-                                          ; scan.")
+                                          ; scan.
+
+An optional `on-reload` callback (a 1-ary fn of the reloaded path) runs after
+each successful reload/load, its own errors caught and printed the same way a
+broken save is — so a checker/notifier hook can never take the watcher down.
+This module stays project-agnostic (no dependency on `project`); `nest run
+--watch` is what supplies a checking callback (see ADR-123's live-session
+trigger, docs/type-soundness-reload.md).")
 
 ;; How often a per-file watcher polls, in ms. 250 ms feels instantaneous and
 ;; the cost is one stat per quarter-second per watched file — negligible.
@@ -53,25 +60,33 @@ watched until you call `reload-on-change`.
 ;;     file) are caught so a broken save doesn't kill the watcher; we
 ;;     still advance `last` to `now` so we don't busy-retry the same
 ;;     broken state every poll.
-(defn reload--loop (path last)
+;;
+;;     `on-reload`, when given, runs after a *successful* `reload-defs` (not
+;;     after a failed one — the failure is already reported, and its own
+;;     globals didn't change). Its errors are caught separately so a broken
+;;     callback (e.g. a checker hiccup) can't take the watcher down either.
+(defn reload--loop (path last &optional on-reload)
   (let (now (file-mtime path))
     (cond
       (nil? now) (do
                    (println "[reload] missing:" path)
                    (sleep *reload-poll-ms*)
-                   (reload--loop path last))
+                   (reload--loop path last on-reload))
       (= now last) (do
                      (sleep *reload-poll-ms*)
-                     (reload--loop path last))
+                     (reload--loop path last on-reload))
       else (do
              (try
                (do
                  (reload-defs path)
-                 (println "[reload]" path))
+                 (println "[reload]" path)
+                 (when on-reload
+                   (try (on-reload path)
+                     (catch e (println "[reload] on-reload failed:" path "—" e)))))
                (catch e
                  (println "[reload] failed:" path "—" e)))
              (sleep *reload-poll-ms*)
-             (reload--loop path now)))))
+             (reload--loop path now on-reload)))))
 
 ;; Recursive .blsp collector. Returns a flat list of paths (relative to the
 ;; original `dir` argument). Mirrors the walk in std/project.blsp; lives here
@@ -102,19 +117,23 @@ watched until you call `reload-on-change`.
 ;; File *deletions* aren't reaped here — the orphaned per-file watcher just
 ;; logs "[reload] missing:" on its own poll, which is a useful signal during
 ;; rename storms. A periodic prune could come later if it becomes annoying.
-(defn reload--dir-loop (dir known)
+(defn reload--dir-loop (dir known &optional on-reload)
   (let (current (reload--collect-blsp dir))
     (dolist (p current)
       (unless (member? p known)
         (println "[reload] +" p)
         (try
-          (load p)
+          (do
+            (load p)
+            (when on-reload
+              (try (on-reload p)
+                (catch e (println "[reload] on-reload failed:" p "—" e)))))
           (catch e (println "[reload] +load failed:" p "—" e)))
-        (spawn (reload--loop p (file-mtime p)))))
+        (spawn (reload--loop p (file-mtime p) on-reload))))
     (sleep *reload-scan-ms*)
-    (reload--dir-loop dir current)))
+    (reload--dir-loop dir current on-reload)))
 
-(defn reload-on-change (path)
+(defn reload-on-change (path &optional on-reload)
   "Watch `path` for changes and `load` it on every modification. Dispatches:
 
   - **File** — spawn one watcher polling `file-mtime` every
@@ -122,6 +141,12 @@ watched until you call `reload-on-change`.
   - **Directory** — spawn one watcher per `.blsp` under it (recursive), plus
     a directory watcher that re-scans every `*reload-scan-ms*` (1 s) and
     spawns a fresh per-file watcher for any new `.blsp` that appears.
+
+`on-reload`, when given, is a 1-ary fn called with the reloaded path after
+every successful reload/load (not after a failed one). Its own errors are
+caught and printed, never killing the watcher — use it for a checking hook
+(`nest run --watch` wires one in), a notification, or anything else that
+should happen right after new code lands.
 
 Errors during a reload (half-written save, syntax error, …) print and are
 swallowed — the watcher keeps running. Returns nil. To stop watching, kill
@@ -139,7 +164,7 @@ use yet)."
     ;;      `load` + per-file watcher for each.
     (let (initial (reload--collect-blsp path))
       (dolist (p initial)
-        (spawn (reload--loop p (file-mtime p))))
-      (spawn (reload--dir-loop path initial))
+        (spawn (reload--loop p (file-mtime p) on-reload)))
+      (spawn (reload--dir-loop path initial on-reload))
       nil) else
-    (do (spawn (reload--loop path (file-mtime path))) nil)))
+    (do (spawn (reload--loop path (file-mtime path) on-reload)) nil)))

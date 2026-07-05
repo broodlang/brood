@@ -711,32 +711,33 @@ target for Brood too**, including gating on global `def`/`defn` types, not just
 locally-scoped bindings. This list tracks the remaining distance to that goal
 and is the thing we're burning down, not a reference kept at arm's length.
 
-**Full soundness vs. hot reload — resolved on paper (ADR-123, design only, not
-built):** gating globals means a `def` that changes a function's type can
-break a caller the checker previously verified sound. Traced the compiler/JIT
-first: runtime type safety is already fully independent of the static checker
+**Full soundness vs. hot reload — mechanism shipped (ADR-123/124/125):**
+gating globals means a `def` that changes a function's type can break a
+caller the checker previously verified sound. Traced the compiler/JIT first:
+runtime type safety is already fully independent of the static checker
 (every op does a real runtime tag check regardless of what was proved), so a
 broken assumption can never crash or corrupt anything — worst case a clean,
 catchable runtime type error, same as any dynamic-typing mismatch today. That
 means soundness can be **re-asserted per reload rather than proven once
-forever**: globals get a real trackable current type, and every `def` can
-trigger a re-check of whoever depended on it — surfacing fresh warnings for
-anything that broke, but never blocking the reload itself (ADR-013's "code
-always wins" stays true). A hard reject only ever exists for batch/CI tooling
-(`nest check --strict` treating warnings as a failing exit code), never the
-live image. **The planned reverse-dependency index turned out to already
-exist**, built by ADR-119 Phase 2 (the incremental `nest check` cache, landed
-the same day) for an unrelated reason — its `check-file-deps`/`check-deps-fp`
+forever**: globals get a real trackable current type (ADR-124), and every
+`def` triggers a re-check of whoever depended on it (ADR-125) — surfacing
+fresh warnings for anything that broke, but never blocking the reload itself
+(ADR-013's "code always wins" stays true). A hard reject only ever exists for
+batch/CI tooling (a future `nest check --strict` treating warnings as a
+failing exit code — not yet built, nothing depends on it), never the live
+image. **The planned reverse-dependency index turned out to already exist**,
+built by ADR-119 Phase 2 (the incremental `nest check` cache, landed the same
+day) for an unrelated reason — its `check-file-deps`/`check-deps-fp`
 pull-based re-fingerprint check gives the same answer a push-based index
-would, with nothing to build. The only real remaining gap: **a live-session
-trigger** — Phase 2's cache today is consulted only by the batch CLI, with no
-analogue for "a `def` just happened in a running REPL, re-check whoever
-depended on it." Full design in
-[`type-soundness-reload.md`](type-soundness-reload.md).
+would, with nothing to build. **The live-session trigger is shipped
+(ADR-125):** `nest run --watch` now re-runs `check-project-sources` after
+every successful file reload, verified end-to-end (a real project, a live
+edit introducing a type mismatch, the warning appearing without a restart).
+Full design in [`type-soundness-reload.md`](type-soundness-reload.md).
 This also means the "checking never rejects a runnable program" / redefinable-
 globals-as-`dynamic()` invariant stated in `CLAUDE.md` (and compatibility
 contract point #5 in `docs/types.md`) is itself a target for revision — update
-those in lockstep with whichever slice of ADR-123 actually ships, not before.
+those now that the mechanism has shipped.
 
 What we already have on par: set-theoretic core, semantic subtyping, arrows +
 element types (ADR-078), occurrence typing through `if`/`cond`/`match` guards,
@@ -796,20 +797,22 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   inference across a function.
 - ⬜ **Narrowing through non-variable expressions** (`is_integer(p.age)` refining
   `p`), and richer `(sig …)` type-exprs (rest/optional params, nested generics).
-- 🎯 **Pervasive static soundness / gating** — the target: Elixir rejects
-  ill-typed programs and Brood should too, including gating on global
-  `def`/`defn` types. Design resolved (ADR-123,
+- ✅ **Pervasive static soundness / gating, the reload-compatible version** —
+  the mechanism is shipped (ADR-123 design + ADR-124 + ADR-125,
   [`type-soundness-reload.md`](type-soundness-reload.md)): re-check on every
-  `def` against whoever depended on it, rather than a hard reload gate.
-  **First slice shipped (ADR-124):** declared value-type sigs (`(sig x T)`)
-  are now visible cross-module via the heap-wide store, closing the gap that
-  already existed for arrow sigs. **The planned reverse-dependency index
-  turned out to already exist** — ADR-119 Phase 2's incremental-check cache
-  (`check-file-deps`/`check-deps-fp`) gives the same answer via a cheaper
-  pull-based re-fingerprint check, so there's no index left to build. The one
-  real remaining gap: a **live-session trigger** for it (nothing today
-  re-runs Phase 2's check in response to a `def` in a running REPL/eval
-  session — it's currently batch-CLI-only).
+  reload against whoever depended on it, rather than a hard reload gate.
+  Declared value-type sigs (`(sig x T)`) are visible cross-module via the
+  heap-wide store (ADR-124), closing the gap that already existed for arrow
+  sigs. The planned reverse-dependency index turned out to already exist —
+  ADR-119 Phase 2's incremental-check cache (`check-file-deps`/
+  `check-deps-fp`) gives the same answer via a cheaper pull-based
+  re-fingerprint check. `nest run --watch` re-checks on every successful file
+  reload (ADR-125), verified end-to-end in a real project. Still not built,
+  not currently blocking anything: a batch/CI hard-gate flag (`nest check
+  --strict`). Note: a real, separate checker gap surfaced along the way — a
+  `defmodule`-declared arrow sig doesn't seed the body-return-type check
+  (`docs/type-annotations.md`'s "Known gap" section) — unrelated to this
+  slice, not yet fixed.
 - 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** — the
   `GradualTy` foundation already exists; this is the remaining work to wire it
   into actual gating decisions (not just advisory assignment checks), which

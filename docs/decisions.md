@@ -16,9 +16,12 @@ focused on current design — their full text (with retrospectives) lives in
 *(superseded by the tracing/copying GC)*, ADR-035 *(superseded/disabled)*,
 ADR-039 *(reverted → ADR-044)*, ADR-057 *(rejected as scoped)*. They're still
 listed (italicised) in the index below so the numbering stays complete.
-**Still proposed, not built:** ADR-071 *(WASM extensions)*, ADR-119
-*(incremental `nest check` cache)*, ADR-123 *(whole-program soundness under
-hot reload)*.
+**Still proposed, not built:** ADR-071 *(WASM extensions)*. ADR-119
+*(incremental `nest check` cache)* has since shipped in full (Phase 1 + Phase
+2) — stale entry, corrected here rather than left to relitigate. ADR-123
+*(whole-program soundness under hot reload)*'s core mechanism has shipped
+(ADR-124 + ADR-125); only its optional batch/CI hard-gate (`nest check
+--strict`) remains unbuilt.
 
 | ADR | Title |
 |----:|-------|
@@ -146,6 +149,7 @@ hot reload)*.
 | 122 | Match redundancy / unreachable-clause detection |
 | 123 | Whole-program soundness under hot reload — designed, not built |
 | 124 | Cross-module visibility for declared value-type sigs (ADR-123 slice 1) |
+| 125 | `nest run --watch` re-checks on reload — ADR-123's live-session trigger |
 
 ---
 
@@ -7644,3 +7648,79 @@ nothing else would incidentally record it. Verified the test actually catches
 the regression by reverting the fix and confirming it fails (fingerprint
 unchanged after the sig edit), then restoring it. 359/359 unit tests, corpus
 `nest check` unchanged (91 warnings).
+
+## ADR-125 — `nest run --watch` re-checks on reload (ADR-123's live-session trigger)
+
+**Status:** accepted; **shipped 2026-07-05.** Closes ADR-123's one remaining
+open question after the reverse-dependency index turned out to be
+unnecessary (see the ADR-123 update above): where does the live-session
+trigger for re-asserting soundness on `def` actually live.
+
+**Context.** ADR-119 Phase 2 (`check-file-deps`/`check-deps-fp`) is only ever
+consulted by the batch `nest check` CLI. `nest run --watch` already has a
+file-change trigger (`std/tool/reload.blsp`'s poll-based `reload-on-change`,
+which calls `reload-defs` on every detected edit) — but nothing re-ran the
+checker in response.
+
+**Decision.** Gave `reload-on-change` (and its internal `reload--loop`/
+`reload--dir-loop`) an optional `on-reload` callback: a 1-ary fn invoked with
+the reloaded path after every *successful* reload, its own errors caught
+separately so a broken callback can never take the watcher down (same
+contract as a broken save). `reload.blsp` stays project-agnostic — it has no
+idea what the callback does. `nest run --watch`'s generated glue
+(`crates/nest/src/main.rs`) supplies the actual policy: inside a project,
+`(fn (_p) (project/check-project-sources))`; outside one (a bare-file watch),
+`nil` — unchanged behavior. Safe to call from every watched file's own reload
+process concurrently, since ADR-119 Phase 2's dependency recorder is
+per-`Heap` (`Heap::check_dep_rec`, landed the same day — see below), not a
+shared thread-local; a directory watch spawning one reload process per file
+can invoke the checker from all of them at once without corrupting anything.
+
+**A serialization design that turned out unnecessary.** The original plan
+was to route every `on-reload` callback through one dedicated serializing
+process, because `check-file-deps`' dependency recorder was thread-local at
+the time — concurrent green processes migrating across OS threads could
+clobber it (documented in `deps.rs`). While this was being designed, an
+independent, concurrent refactor moved the recorder onto `Heap` itself
+(per-process, not per-OS-thread), making concurrent dep-capture genuinely
+safe and the serializing workaround moot. Paused and waited for that refactor
+to land and compile before finishing this feature, rather than build a
+workaround for a hazard about to be fixed at the source.
+
+**Verified end-to-end**, not just unit-tested: scaffolded a real project via
+`nest new`, started `nest run --watch src` in the background, edited a
+function body to introduce a real call-site type mismatch while the process
+was running, and confirmed the warning appeared live without a restart —
+then fixed it and confirmed the warning cleared on the next reload. Also
+added `tests/reload_watch_test.blsp` (2 tests) covering the `on-reload`
+contract directly (fires with the right path; a throwing callback is caught
+and the watcher keeps reloading on later edits) — independent of `nest`/the
+checker, since `reload.blsp` doesn't depend on either.
+
+**A test-writing pitfall worth recording:** the first draft of these tests
+timed out — not a bug in the feature, but in the test. `file-mtime` is
+millisecond-resolution, and two `spit` writes with no gap between them can
+land in the same millisecond, which `reload--loop` (correctly) reads as "no
+change." A small `(sleep 100)` between the initial write/load and the
+edit that's supposed to trigger a reload fixed it. Separately, an early draft
+also tripped the module-qualification pre-scan: a variable named to look
+like a private, module-owned name (`reload-watch-test--val`, echoing the
+enclosing module's own name) gets auto-qualified if *any* literal `def` for
+it appears in the same `defmodule`-wrapped file — even one added later, deep
+inside a `spawn`/`fn` for debugging. Renamed to a plain, non-`--` name and
+read the dynamically-`load`ed global via `(eval 'sym)` rather than a bare
+reference, so the checker's static unbound-symbol pass — which can't see a
+name a runtime-loaded temp file will define — stays silent without
+introducing a real qualification mismatch. Corpus `nest check` stayed at 91
+warnings throughout (would have gone to 97 without the `eval` fix).
+
+**What's still open.** A genuine hard reject — `nest check --strict` /
+`BROOD_CHECK_STRICT=1` treating any warning as a failing exit code for CI —
+remains unbuilt; nothing in this slice needs it, since the live image still
+never blocks. Also unrelated but discovered along the way: a `(sig name (A ->
+B))` declared inside a `defmodule` block doesn't seed the body-vs-declared-
+return-type check (`check_def`'s seeding path reads the file-local `Ctx`
+under the *bare* name Pass 2.5 recorded, but the expanded `defn` target is
+the *qualified* name) — a real false-negative, logged separately, not fixed
+here (out of scope for this slice; needs its own investigation into how
+widely `defmodule` + `sig` + `defn` co-occur before deciding how to fix it).

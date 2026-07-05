@@ -1,10 +1,12 @@
-# Whole-program soundness under hot reload — designed, not built (ADR-123)
+# Whole-program soundness under hot reload (ADR-123/124/125)
 
-**Status:** design only, no runtime code. Recorded so the hard parts (the
-reload-conflict resolution, the dependency-tracking mechanism, where a hard
-gate can and can't live) are on paper before implementation starts, per
-ADR-011 — gated on this actually being picked up as the next slice of type-
-system work, not built speculatively.
+**Status:** the core mechanism is **shipped**. ADR-124 gave globals a real,
+cross-module-visible current type; the planned reverse-dependency index
+turned out to already exist (ADR-119 Phase 2, built the same day for an
+unrelated reason); ADR-125 shipped the live-session trigger
+(`nest run --watch` re-checks on every successful reload). Only the optional
+batch/CI hard-gate (`nest check --strict`) remains unbuilt, and nothing
+currently depends on it.
 
 ## The problem
 
@@ -130,18 +132,21 @@ surprise: almost none of the mechanism needs to be *built* — it needs to be
   ships the equivalent capability (`check-file-deps`/`check-deps-fp`) via a
   pull-based re-fingerprint check instead of a maintained push-based index.
   Nothing left to build here; see the design section above.
-- **The trigger — the one real remaining question.** Phase 2's cache is only
-  ever consulted by the batch `nest check` CLI. There's no live-session
-  analogue yet: nothing currently re-runs `check-file-deps` in response to a
-  `def` happening in a running REPL/eval session, or pushes the result
-  anywhere. Needs a decision on where this lives (file-save-triggered via
-  `nest run --watch`'s existing file watcher; a REPL-level hook on `def`; or
-  purely LSP-driven, where the editor's own request cadence is the trigger
-  and Phase 2 just makes each request cheap) before there's anything to
-  implement.
-- **Surfacing.** Once triggered, where do fresh warnings show up — LSP push
-  diagnostics, a `nest run --watch` overlay, a REPL message on `def`? Depends
-  on which trigger is chosen above.
+- **The trigger — shipped (ADR-125).** Went with file-save via `nest run
+  --watch`'s existing watcher: `std/tool/reload.blsp`'s `reload-on-change`
+  now takes an optional `on-reload` callback, invoked after every successful
+  reload with its own errors caught (never takes the watcher down). `nest
+  run --watch` supplies `(fn (_p) (project/check-project-sources))` inside a
+  project. A REPL-level hook on bare `def` and a purely LSP-driven trigger
+  are both still open for later, but neither is needed now that the
+  file-save path covers the common `nest run --watch` dev loop. Verified
+  end-to-end: a live edit introducing a real type mismatch surfaced the
+  warning in the running session's output with no restart, and fixing it
+  cleared the warning on the next reload.
+- **Surfacing — resolved for this trigger.** Warnings print to the
+  `nest run --watch` session's own stderr, the same place its startup
+  pre-flight already prints them. LSP push diagnostics and a REPL message on
+  `def` remain open for whoever picks up those triggers.
 - **Invalidation precision, if it turns out to matter.** Phase 2's
   fingerprint is coarse (a referenced global's *defining file's mtime* plus
   its declared-sig hash — file-level, not per-refinement). This is

@@ -1571,3 +1571,57 @@ entire remaining scope — not a data structure to design or build.
 No code changed this round — design/roadmap/ADR-123 docs only, keeping the
 "design only, not built" status accurate before more implementation work
 lands on top of it.
+
+## 2026-07-05 — ADR-125: `nest run --watch` re-checks on reload
+
+Shipped ADR-123's one remaining open question: the live-session trigger.
+Gave `std/tool/reload.blsp`'s `reload-on-change` (and its internal
+`reload--loop`/`reload--dir-loop`) an optional `on-reload` callback, invoked
+after every *successful* reload with its own errors caught separately (a
+broken callback can't take the watcher down, same contract as a broken
+save). `reload.blsp` itself stays project-agnostic; `nest run --watch`'s
+generated glue (`crates/nest/src/main.rs`) supplies the actual policy —
+`(fn (_p) (project/check-project-sources))` inside a project, `nil` outside
+one.
+
+Planned to route every callback through a dedicated serializing process
+first, since ADR-119 Phase 2's dependency recorder was thread-local at the
+time and a directory watch spawns one reload process per file — concurrent
+`check-file-deps` calls could clobber it. Paused mid-design when a concurrent,
+independent refactor (landing in the same session) moved the recorder onto
+`Heap` itself (per-process, not per-OS-thread), making the hazard disappear
+at the source. Waited for that refactor to compile before finishing, rather
+than build a workaround for a problem about to be fixed underneath it —
+confirmed via `project.blsp`'s new `project--pcheck-deps`, which now runs
+`check-file-deps` across the worker pool in parallel.
+
+Verified end-to-end, not just unit-tested: scaffolded a real project via
+`nest new`, ran `nest run --watch src` in the background, edited a function
+body to introduce a real call-site type mismatch while it was running, and
+watched the warning appear live with no restart — then fixed it and watched
+the warning clear on the next reload.
+
+Two detours while building `tests/reload_watch_test.blsp` worth remembering:
+(1) the first draft timed out because two `spit` writes with no gap landed in
+the same millisecond — `file-mtime`'s resolution — which the watcher
+correctly read as "no change"; not a watcher bug, a race in the test, fixed
+with a small `(sleep 100)`. (2) a variable named to echo the enclosing
+module's own name (`reload-watch-test--val`) got auto-qualified the moment
+*any* literal `def` for it existed anywhere in the same `defmodule`-wrapped
+file — even one added temporarily deep inside a debug `spawn` — because the
+qualification pre-scan doesn't care about nesting depth. Renamed away from
+the collision and read the dynamically-`load`ed global via `(eval 'sym)`
+rather than a bare reference, since a bare reference is exactly what the
+static unbound-symbol checker (correctly) can't resolve for a name a runtime-
+loaded temp file will define — fixed both the qualification confusion and 6
+new corpus warnings in one move.
+
+Also surfaced, unrelated to this feature: `(sig fname (A -> B))` declared
+inside a `defmodule` block doesn't seed `check_def`'s body-vs-declared-
+return-type check — Pass 2.5 records the sig under the bare name, but the
+expanded `defn` target is the qualified name, so the two never meet. A real
+false-negative (silent, not over-warning), logged in
+`docs/type-annotations.md`'s new "Known gap" section, not fixed here — out of
+scope for this slice.
+
+359/359 unit tests, corpus `nest check` unchanged (91 warnings).

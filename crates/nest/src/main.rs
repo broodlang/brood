@@ -568,12 +568,36 @@ fn cmd_run(
         .collect::<Vec<_>>()
         .join(" ");
 
+    // Inside a project, `--watch` also re-checks on every successful reload —
+    // the live-session trigger for ADR-123's soundness-under-reload design
+    // (docs/type-soundness-reload.md): re-running `check-project-sources`
+    // reuses ADR-119 Phase 2's incremental cache, so only the changed file and
+    // whatever depended on it actually get re-checked; everything else is a
+    // cheap fingerprint compare. Its own errors are swallowed by
+    // `reload-on-change`'s `on-reload` contract, same as a broken reload. Safe
+    // to call from every watched file's own reload process concurrently — the
+    // dependency recorder is per-`Heap` (`Heap::check_dep_rec`), not a shared
+    // thread-local, so parallel dep-capture across a directory watch's many
+    // reload processes can't clobber it. Outside a project (a bare-file
+    // watch) there's no `project` module loaded, so no callback is passed —
+    // unchanged behavior.
     let watch_setup = if watch.is_empty() {
         String::new()
     } else {
+        let on_reload = if in_project() {
+            "(fn (_p) (project/check-project-sources))"
+        } else {
+            "nil"
+        };
         let calls = watch
             .iter()
-            .map(|p| brood::introspect::call_form("reload/reload-on-change", &[p]))
+            .map(|p| {
+                format!(
+                    "(reload/reload-on-change \"{}\" {})",
+                    brood::introspect::escape_brood_string(p),
+                    on_reload
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
         format!("(require 'reload) {}", calls)
