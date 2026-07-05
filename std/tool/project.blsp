@@ -716,11 +716,17 @@ resolve in the advisory checker. Returns the project root."
 ;; nor a cross-module / test `mod/name` reference. Comments don't count (the CST
 ;; tags them `:comment`, not `:symbol`).
 
-;; Fold every `:symbol` node value in CST `node` into `acc` (name→count, keyed by
-;; the symbol's *string* — node values may be symbols, but qualified names are
-;; built with `str`, so both sides normalise the same way). Recurses through a
-;; node's value, which is one of: raw text (a leaf — nothing to do), a single
-;; child node (a wrapper like `:quote`, whose value is itself a `[:kind …]`
+;; Fold every `:symbol` node value that CONTAINS "--" in CST `node` into `acc`
+;; (name→count, keyed by the symbol's *string* — node values may be symbols, but
+;; qualified names are built with `str`, so both sides normalise the same way).
+;; Only `--` names are counted because that is all the unused-private decision ever
+;; looks up: a private def's bare name is `--` by convention, and its qualified
+;; `mod/name` therefore contains `--` too, so a reference counts toward "used" only
+;; if it is a `--` name. Skipping the rest shrinks the count map from every symbol
+;; in the project to just the private-related ones — far less to build, ship back
+;; from a `:scan` worker, and merge (was O(all symbols) ≈ O(files)). Recurses
+;; through a node's value, which is one of: raw text (a leaf — nothing to do), a
+;; single child node (a wrapper like `:quote`, whose value is itself a `[:kind …]`
 ;; node-vector), or a vector of child nodes (`:list`/`:vector`/`:map`/`:root`).
 ;; A node-vector's first element is itself a node (a vector); a single child
 ;; node's first element is its kind *keyword* — that's how the two are told apart,
@@ -734,7 +740,8 @@ resolve in the advisory checker. Returns the project root."
 
 (defn project--node-syms--acc (node acc)
   (if (= (project--node-kind node) :symbol)
-    (let (nm (str (project--node-val node))) (map-assoc acc nm (inc (map-get acc nm 0))))
+    (let (nm (str (project--node-val node)))
+      (if (string-contains? nm "--") (map-assoc acc nm (inc (map-get acc nm 0))) acc))
     (project--walk-val (project--node-val node) acc)))
 
 ;; Merge symbol-count map `b` into `a` (name→count), summing counts. The reduce
@@ -818,9 +825,13 @@ resolve in the advisory checker. Returns the project root."
     (when (nil? root)
       (error "check-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project--ensure-loaded root)
-    (project--check-duplicate-defs (project--source-files root))
-    (project--check-unused-private (project--all-files root))
-    (project--check-files (project--all-files root))))
+    ;; Walk the tree ONCE and reuse — `project--all-files` recurses the whole
+    ;; source + test tree, which at 100K+ files is a non-trivial serial cost to pay
+    ;; twice.
+    (let (files (project--all-files root))
+      (project--check-duplicate-defs (project--source-files root))
+      (project--check-unused-private files)
+      (project--check-files files))))
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry
 ;; behind `nest check FILE…`. Loads the project image *first* (same
