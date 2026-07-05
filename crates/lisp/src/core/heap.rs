@@ -1037,6 +1037,11 @@ pub(crate) struct CheckDepRec {
     pub(crate) known_ns: std::collections::HashSet<String>,
     /// `mod/` prefixes whose export set the check read (`:use` resolution).
     pub(crate) exports: std::collections::HashSet<String>,
+    /// Globals DEFINED in this file (its own def-names). Excluded from the dep-keys:
+    /// a file's dependency on its own globals is already covered by its own mtime, so
+    /// storing them would just bloat the manifest (a 1000-def file otherwise records
+    /// ~1000 self-names — the 64MB-manifest bug).
+    pub(crate) own: std::collections::HashSet<Symbol>,
     /// Whether the check consulted the `*protocols*` table.
     pub(crate) protocols: bool,
 }
@@ -4933,6 +4938,12 @@ impl Heap {
     pub(crate) fn rec_check_dep_protocols(&self) {
         if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
             d.protocols = true;
+        }
+    }
+    /// Record a global DEFINED in the file being checked (excluded from dep-keys).
+    pub(crate) fn rec_check_dep_own(&self, sym: Symbol) {
+        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+            d.own.insert(sym);
         }
     }
 

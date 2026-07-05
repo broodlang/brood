@@ -998,26 +998,18 @@ resolve in the advisory checker. Returns the project root."
 ;; / per-file), noted as future work (ADR-119). Tunable via `BROOD_CHECK_CACHE_MAX`.
 (defn project--cache-max-files ()
   (let (e (getenv "BROOD_CHECK_CACHE_MAX"))
-    (if (and e (not (= e ""))) (or (string->number e) 2000) 2000)))
+    (if (and e (not (= e ""))) (or (string->number e) 50000) 50000)))
 
-;; Return `{path -> [mtime counts privs def-names]}` for `files`. Uses the on-disk
-;; cache (reuse unchanged files by mtime, reparse the dirty set) for a project below
-;; the file-count ceiling; otherwise parses everything fresh (no cache read/write).
-;; The cached path MERGES fresh entries into the existing cache — so a sources-only
-;; `nest run` pre-flight and an all-files `nest check` sharing one manifest don't
-;; evict each other's entries — and rewrites it only when something changed.
-(defn project--gather-extracts (files root)
-  (if (or (project--cache-off?) (>= (count files) (project--cache-max-files)))
-    (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) {} (project--pscan files))
-    (let (cache (project--read-cache root "extracts")
-          dirty (keep (fn (p)
-                        (let (c (map-get cache p nil))
-                          (when (not (and c (= (nth c 0) (file-mtime p)))) p)))
-                  files)
-          fresh (project--pscan dirty)
-          merged (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) cache fresh))
-      (when (not (empty? dirty)) (project--write-cache root "extracts" merged))
-      (fold (fn (m p) (map-assoc m p (map-get merged p nil))) {} files))))
+;; Return `{path -> [mtime counts privs def-names]}` for `files` by scanning them
+;; all, in parallel. NOT disk-cached: the per-file scan is now native
+;; (`scan-source-extract`, ~2.5ms even on a 1000-line file), so re-scanning is
+;; *cheaper* than reading a per-file extract manifest — that manifest is dominated
+;; by each file's def-names (needed for duplicate-defs), so at scale reading it
+;; (rebuilding millions of Brood values) cost far more than re-scanning (a 63MB
+;; manifest → a 23s read at 3K files, vs ~0.6s to re-scan). The EXPENSIVE pass
+;; (per-file type-check) is what earns a disk cache; this cheap one just re-runs.
+(defn project--gather-extracts (files)
+  (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) {} (project--pscan files)))
 
 ;; Warning strings for private defs unreferenced anywhere in `files`. `used` =
 ;; the bare name appears ≥2× (its own def, plus a same-module call) OR — when a
@@ -1098,19 +1090,15 @@ resolve in the advisory checker. Returns the project root."
     (when (nil? root)
       (error "check-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project--ensure-loaded root)
-    (let (files (project--all-files root))
-      ;; Below the cache ceiling: gather each file's parse extract ONCE (mtime-cached
-      ;; on disk, ADR-119) and feed BOTH pure passes from it — a warm re-check reuses
-      ;; unchanged files. Above it: the aggregated from-scratch passes (compact
-      ;; shipping, no cache) so a huge project isn't regressed by the cache machinery.
-      (if (< (count files) (project--cache-max-files))
-        (let (extracts (project--gather-extracts files root)
-              source-set (fold (fn (m p) (map-assoc m p true)) {} (project--source-files root)))
-          (project--check-duplicate-defs extracts source-set)
-          (project--check-unused-private extracts))
-        (do
-          (project--check-duplicate-defs-seq (project--source-files root))
-          (project--check-unused-private-agg files)))
+    (let (files (project--all-files root)
+          ;; Phase 1 (unused-private + duplicate-defs): native parallel scan every
+          ;; run — cheaper than any disk cache (see `project--gather-extracts`).
+          extracts (project--gather-extracts files)
+          source-set (fold (fn (m p) (map-assoc m p true)) {} (project--source-files root)))
+      (project--check-duplicate-defs extracts source-set)
+      (project--check-unused-private extracts)
+      ;; Phase 2 (per-file type-check): the EXPENSIVE pass — disk-cached per file
+      ;; (dep-fingerprint) so a warm re-check reuses everything unchanged.
       (project--check-files files root))))
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry
@@ -1140,12 +1128,10 @@ resolve in the advisory checker. Returns the project root."
     (when (nil? root)
       (error "check-project-sources: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project--ensure-loaded root)
-    (let (srcs (project--source-files root))
-      (if (< (count srcs) (project--cache-max-files))
-        (let (extracts (project--gather-extracts srcs root)
-              source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
-          (project--check-duplicate-defs extracts source-set))
-        (project--check-duplicate-defs-seq srcs))
+    (let (srcs (project--source-files root)
+          extracts (project--gather-extracts srcs)
+          source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
+      (project--check-duplicate-defs extracts source-set)
       (project--check-files srcs root))))
 
 ;; (run-project-tests & opts) — find the project from the cwd, set it up, load

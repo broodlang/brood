@@ -80,9 +80,17 @@ const K_PROTO: &str = "proto";
 /// stable on-disk form). Empty record → empty lists.
 pub(super) fn take_dep_keys(heap: &mut Heap) -> Value {
     let dep = heap.take_check_dep_record().unwrap_or_default();
+    // Exclude a file's OWN def-name from the dep-keys ONLY when it's fully
+    // self-contained — defined here with no external `(sig …)`. Then its every fact
+    // is this file's (covered by the file's own mtime), and dropping it avoids the
+    // manifest bloat of a def-heavy file recording ~all its own names. But a
+    // def-target whose sig lives in ANOTHER file (ADR-110 value-position check) is a
+    // real cross-file dependency — keep it, or an edit to that sig goes unseen
+    // (regression test: cross_module_value_sig_dependency_is_captured…).
     let mut syms: Vec<String> = dep
         .syms
         .iter()
+        .filter(|&&s| !(dep.own.contains(&s) && heap.declared_sig_value(s).is_none()))
         .map(|&s| value::symbol_name(s).to_string())
         .collect();
     syms.sort_unstable();
