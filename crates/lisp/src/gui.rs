@@ -1082,17 +1082,22 @@ pub(crate) mod backend {
         shape: Option<super::CursorShape>,
         /// EMA of the scroll velocity (signed lines/step) tracked during a trackpad gesture.
         /// On `TouchPhase::Ended` this seeds the kinetic-momentum animation driven by
-        /// `about_to_wait`; reset to 0 on `Started` so each gesture begins fresh.
+        /// `about_to_wait`. On `Started`, any existing momentum velocity is carried forward
+        /// so successive swipes accelerate rather than reset.
         scroll_velocity: f64,
         /// `true` while kinetic momentum is running after a gesture lift-off. Cleared by the
         /// next `Started/Moved/LineDelta` event or when velocity decays below threshold.
         scroll_momentum_active: bool,
         /// The earliest time the next momentum step may fire. `about_to_wait` is called on
         /// every event (including each `UserEvent::Draw` Brood sends back), so without this
-        /// guard it would flood: deliver → Draw → about_to_wait → deliver → Draw → ∞.
+        /// guard it would flood: deliver → Draw → about_to_wait → deliver → ∞.
         /// Set to `Instant::now()` when momentum starts (first step fires immediately), then
         /// advanced by 12 ms after each delivery.
         scroll_next_tick: Instant,
+        /// Time the previous momentum step was delivered, used for time-proportional decay
+        /// (`0.97 ^ (elapsed_ms / 12)`). Keeps the physics correct when `about_to_wait`
+        /// fires late (Brood slow to render) so the coast speed is independent of framerate.
+        scroll_last_tick: Instant,
     }
 
     /// Build a window + softbuffer surface + glyph renderer inside the running event
@@ -1155,6 +1160,7 @@ pub(crate) mod backend {
             scroll_velocity: 0.0,
             scroll_momentum_active: false,
             scroll_next_tick: Instant::now(),
+            scroll_last_tick: Instant::now(),
         })
     }
 
@@ -1699,18 +1705,25 @@ pub(crate) mod backend {
                                         deliver_scroll(w, dy);
                                     }
                                     if w.scroll_velocity.abs() > 0.01 {
+                                        let now = Instant::now();
                                         w.scroll_momentum_active = true;
-                                        w.scroll_next_tick = Instant::now(); // first step fires immediately
+                                        w.scroll_next_tick = now;
+                                        w.scroll_last_tick = now;
                                     } else {
                                         w.scroll_momentum_active = false;
                                         w.scroll_velocity = 0.0;
                                     }
                                 }
                                 TouchPhase::Started => {
-                                    // New gesture: reset velocity so the EMA starts fresh
-                                    // (not contaminated by the previous gesture's decay).
+                                    // New gesture: carry any running momentum forward so
+                                    // successive swipes in the same direction accelerate.
+                                    let carry = if w.scroll_momentum_active {
+                                        w.scroll_velocity
+                                    } else {
+                                        0.0
+                                    };
                                     w.scroll_momentum_active = false;
-                                    w.scroll_velocity = dy;
+                                    w.scroll_velocity = carry + dy;
                                     if dy != 0.0 {
                                         deliver_scroll(w, dy);
                                     }
@@ -1771,13 +1784,20 @@ pub(crate) mod backend {
                     });
                     continue;
                 }
-                // Time for the next momentum step.
-                w.scroll_velocity *= 0.97;
+                // Time for the next momentum step. Decay proportional to actual elapsed
+                // time so physics is correct even when about_to_wait fires late.
+                let elapsed_ms = now
+                    .duration_since(w.scroll_last_tick)
+                    .as_secs_f64()
+                    * 1000.0;
+                let decay = 0.97_f64.powf((elapsed_ms / 12.0).clamp(0.5, 4.0));
+                w.scroll_velocity *= decay;
                 if w.scroll_velocity.abs() < 0.0005 {
                     w.scroll_momentum_active = false;
                     w.scroll_velocity = 0.0;
                     continue;
                 }
+                w.scroll_last_tick = now;
                 w.scroll_next_tick = now + Duration::from_millis(12);
                 deliver_scroll(w, w.scroll_velocity);
                 next_wakeup = Some(match next_wakeup {
