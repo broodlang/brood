@@ -1042,6 +1042,52 @@ pub(super) fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -
     Ok(heap.list(out))
 }
 
+/// `(check-file-deps path)` — the incremental-cache counterpart of `check-file`
+/// (ADR-119 Phase 2). Returns a 3-vector `[warnings dep-keys fingerprint]`:
+///   - `warnings`: the same GNU `path:line:col: warning: …` string list as `check-file`,
+///   - `dep-keys`: the serializable set of global observations the check made
+///     (`{:syms :kns :exp :proto}`) — store it, then re-fingerprint on a later run,
+///   - `fingerprint`: a stamp of those observations against the CURRENT image; a
+///     later run whose `(check-deps-fp dep-keys)` still equals this (and whose file
+///     mtime is unchanged) may reuse `warnings` verbatim.
+pub(super) fn check_file_deps(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "check-file-deps", arg(args, 0))?;
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("check-file-deps: cannot read {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
+    let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
+    // check_file_with_deps may `eval` `(require …)` (a GC safepoint) internally, but
+    // returns before we allocate the result — the allocations below don't hit a
+    // safepoint, so `dep_keys`/`fp_val`/`warns` stay live without extra rooting
+    // (same discipline as `check_file_builtin`).
+    let (warnings, dep_keys) = crate::types::check::check_file_with_deps(heap, &just_forms);
+    let fp = crate::types::check::deps_fingerprint(heap, dep_keys);
+    let fp_val = heap.alloc_string(&fp);
+    let mut warn_vals = Vec::with_capacity(warnings.len());
+    for (pos, msg) in &warnings {
+        let s = match pos {
+            Some(p) => format!("{}:{}:{}: warning: {}", path, p.line, p.col, msg),
+            None => format!("{}: warning: {}", path, msg),
+        };
+        warn_vals.push(heap.alloc_string(&s));
+    }
+    let warns_list = heap.list(warn_vals);
+    Ok(heap.alloc_vector(vec![warns_list, dep_keys, fp_val]))
+}
+
+/// `(check-deps-fp dep-keys)` — recompute the fingerprint of a file's `dep-keys`
+/// (from `check-file-deps`) against the CURRENT global image. The incremental
+/// cache reuses a file's warnings iff this equals the stored fingerprint (and the
+/// file's mtime is unchanged). A pure read of the image — no allocation of Brood
+/// values beyond the returned string.
+pub(super) fn check_deps_fp(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let dep_keys = arg(args, 0);
+    let fp = crate::types::check::deps_fingerprint(heap, dep_keys);
+    Ok(heap.alloc_string(&fp))
+}
+
 /// `(check-file-structured path)` — the data-shaped counterpart of
 /// `check-file`. Returns a list of `{:file :line :col :message}` maps (or
 /// `{:file :message}` for warnings without a position — the advisory

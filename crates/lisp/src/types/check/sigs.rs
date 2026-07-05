@@ -210,7 +210,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
 /// table), but in the prelude-builder / test heap it's a *local* env that
 /// `builtins::register` populated — `env_get` walks both transparently.
 pub(super) fn primitive_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
-    match heap.env_get(heap.global(), sym)? {
+    match super::deps::obs_global(heap, sym)? {
         Value::Native(id) => Some(heap.native(id).sig.clone()),
         _ => None,
     }
@@ -282,7 +282,7 @@ fn unwrap_let_alias(
 ///
 /// Sound because a straight-line use is unconditional — no false positives.
 fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
-    let Value::Fn(cid) = heap.env_get(heap.global(), sym)? else {
+    let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
         return None;
     };
     let closure = heap.closure(cid);
@@ -346,7 +346,7 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// a declared sig authoritative where the file-local ctx misses (a qualified
 /// intra-module call, or a cross-module caller).
 pub(super) fn declared_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
-    let type_value = heap.declared_sig_value(sym)?;
+    let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
     annot::parse_type(heap, type_value)?.as_arrow().cloned()
 }
 
@@ -359,7 +359,7 @@ pub(super) fn declared_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// heap store itself needed no change, it already holds the opaque raw
 /// form). `None` for a plain single-arrow sig or no declaration at all.
 pub(super) fn declared_heap_overload(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
-    let type_value = heap.declared_sig_value(sym)?;
+    let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
     annot::parse_type(heap, type_value)?.overload_sigs().cloned()
 }
 
@@ -387,7 +387,7 @@ pub(super) fn sig_of(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// optional + an optional rest tail (`Symbol`). So min = required, max =
 /// required + optional unless there's a rest (then no max).
 pub(super) fn arity_of(heap: &Heap, sym: Symbol) -> Option<Arity> {
-    match heap.env_get(heap.global(), sym)? {
+    match super::deps::obs_global(heap, sym)? {
         Value::Native(id) => Some(heap.native(id).arity),
         Value::Fn(cid) => {
             // Across arms: smallest min, largest max (unbounded if any has rest).
@@ -420,5 +420,5 @@ pub(super) fn arity_str(a: Arity) -> String {
 /// bound counts as "in scope" for the unbound-symbol check — we don't warn
 /// just because the checker can't say much about the binding's *shape*.
 pub(super) fn is_globally_bound(heap: &Heap, sym: Symbol) -> bool {
-    heap.env_get(heap.global(), sym).is_some()
+    super::deps::obs_global(heap, sym).is_some()
 }

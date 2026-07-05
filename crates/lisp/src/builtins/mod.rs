@@ -1928,6 +1928,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "check-file-deps",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        check_file_deps,
+    );
+    def(
+        heap,
+        "check-deps-fp",
+        Arity::exact(1),
+        Sig::new(vec![any], string),
+        check_deps_fp,
+    );
+    def(
+        heap,
         "check-string-structured",
         Arity::exact(1),
         Sig::new(vec![string], list_ty),
@@ -2500,6 +2514,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
     ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
     ("check-file-structured", &["path"], "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics)."),
+    ("check-file-deps", &["path"], "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged."),
+    ("check-deps-fp", &["dep-keys"], "Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint."),
     ("check-string-structured", &["src"], "Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics."),
     ("str", &["&", "xs"], "Concatenate the display forms of the arguments into one string."),
     ("pr-str", &["x"], "The readable (re-readable) text form of x."),

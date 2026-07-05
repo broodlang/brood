@@ -108,6 +108,7 @@
 
 mod annot;
 mod ctx;
+pub(super) mod deps;
 mod guards;
 mod hygiene;
 mod protocol;
@@ -275,7 +276,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 let prefix = format!("{}/", mod_name);
                 // Load the module if absent (no `mod/*` globals) — the standalone path; in a
                 // whole-project check it's already loaded, so this is skipped.
-                if heap.module_public_exports(&prefix).is_empty() {
+                if deps::obs_module_exports(heap, &prefix).is_empty() {
                     let quoted =
                         heap.list(vec![Value::Sym(value::intern("quote")), Value::Sym(mod_sym)]);
                     let form = heap.list(vec![Value::Sym(value::intern("require")), quoted]);
@@ -294,7 +295,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                         }
                     }
                     None => {
-                        for (bare, qual) in heap.module_public_exports(&prefix) {
+                        for (bare, qual) in deps::obs_module_exports(heap, &prefix) {
                             heap.add_import(bare, qual);
                         }
                     }
@@ -567,6 +568,27 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     heap.set_ns_known_names(prev_known);
     heap.set_imports(prev_imports);
     out
+}
+
+/// [`check_file`] plus the Phase-2 incremental-cache **dep-keys** for the file: the
+/// serializable set of global observations the check made (see [`deps`]). Runs the
+/// same check under a dependency recorder. Returns `(warnings, dep_keys)`; feed
+/// `dep_keys` to [`deps_fingerprint`] to get the stamp a later run compares against.
+pub fn check_file_with_deps(
+    heap: &mut Heap,
+    forms: &[Value],
+) -> (Vec<(Option<Pos>, String)>, Value) {
+    let _rec = deps::begin_record();
+    let warnings = check_file(heap, forms);
+    let dep_keys = deps::take_dep_keys(heap);
+    (warnings, dep_keys)
+}
+
+/// The current-image fingerprint for a file's `dep_keys` (from
+/// [`check_file_with_deps`]). Equal across two runs iff every observed global fact
+/// is unchanged — the soundness core of the incremental check cache (ADR-119).
+pub fn deps_fingerprint(heap: &Heap, dep_keys: Value) -> String {
+    deps::fingerprint(heap, dep_keys)
 }
 
 #[cfg(test)]
