@@ -145,14 +145,14 @@
         (spit fa "(defmodule alpha)\n(defn main () 1)\n")
         (spit fb "(defmodule beta)\n(defn main () 2)\n")
         ;; alpha/main vs beta/main — distinct keys, no warning.
-        (assert= (project/project--duplicate-def-warnings [fa fb]) nil))))
+        (assert= (project/project--duplicate-def-warnings-seq [fa fb]) nil))))
   (test "the same name in the SAME namespace IS flagged (qualified)"
     (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule shared)\n(defn main () 1)\n(defn only-a () 1)\n")
         (spit fb "(defmodule shared)\n(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project/project--duplicate-def-warnings [fa fb]))
+        (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (string-contains? (first warns) "shared/main"))
           (refute (string-contains? (first warns) "only-a"))))))
@@ -162,7 +162,7 @@
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n")
         (spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n")
-        (let (warns (project/project--duplicate-def-warnings [fa fb]))
+        (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (string-contains? (first warns) "*cfg*"))))))
   (test "files with no defmodule share the root namespace — same name still collides"
@@ -171,7 +171,7 @@
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defn main () 1)\n(defn only-a () 1)\n")
         (spit fb "(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project/project--duplicate-def-warnings [fa fb]))
+        (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (string-contains? (first warns) "main"))
           (refute (string-contains? (first warns) "only-a"))))))
@@ -181,7 +181,30 @@
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule alpha)\n(defn alpha-fn () 1)\n")
         (spit fb "(defmodule beta)\n(defn beta-fn () 2)\n")
-        (assert= (project/project--duplicate-def-warnings [fa fb]) nil)))))
+        (assert= (project/project--duplicate-def-warnings-seq [fa fb]) nil))))
+  ;; The cached, extract-based path (ADR-119) must agree with the sequential one.
+  ;; Build extracts by hand (dummy mtime 0) so this needs no disk cache, and compare
+  ;; both the duplicate-defs and unused-private derivations against the -seq/-agg forms.
+  (test "extract-based passes agree with the from-scratch passes"
+    (let (dir (temp-dir "brood-dup-"))
+      (make-dir dir)
+      (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
+        (spit fa "(defmodule shared)\n(defn main () 1)\n(defn shared--helper () 1)\n(defn shared--dead () 1)\n(defn use-it () (shared--helper))\n")
+        (spit fb "(defmodule shared)\n(defn main () 2)\n")
+        (let (files [fa fb]
+              extracts (fold (fn (m p)
+                               (let ([c pr dn] (project/project--scan-file-entry p))
+                                 (map-assoc m p [0 c pr dn])))
+                         {} files)
+              source-set (fold (fn (m p) (map-assoc m p true)) {} files))
+          ;; duplicate-defs: extract path == sequential path
+          (assert= (sort (project/project--duplicate-def-warnings extracts source-set))
+            (sort (project/project--duplicate-def-warnings-seq files)))
+          ;; unused-private: shared--dead is unreferenced (warn), shared--helper is used
+          (let (warns (project/project--unused-private-warnings extracts))
+            (assert= (count warns) 1)
+            (is (string-contains? (first warns) "shared--dead"))
+            (refute (some? (fn (w) (string-contains? w "shared--helper")) warns))))))))
 
 ;; The source loader is load-once *within a walk* (a module another file already
 ;; `require`d isn't loaded a second time when the walk reaches its file) and on

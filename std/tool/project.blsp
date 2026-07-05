@@ -472,6 +472,7 @@ resolve in the advisory checker. Returns the project root."
 (defn project--pfold-run (op chunk)
   (cond
     (= op :check) (project--check-chunk chunk)
+    (= op :scan-entries) (project--scan-entries-chunk chunk)
     (= op :scan) (project--scan-chunk chunk)
     else (error "project--pfold-run: unknown op " op)))
 
@@ -677,7 +678,45 @@ resolve in the advisory checker. Returns the project root."
 ;; namespaces (ADR-065) this fires only on a genuine collision — two files in
 ;; the *same* namespace binding the same name, or an ambient `*earmuff*` / root
 ;; name bound twice — not on a short name reused across distinct namespaces.
-(defn project--duplicate-def-warnings (files)
+;; `extracts` is `{path -> [mtime counts privs def-names]}`; `source-set` is
+;; `{source-path -> true}` (only SOURCE files bind the flat namespace — a test
+;; file's defs don't clash). Aggregates each source file's `def-names` (extract
+;; slot 3) and warns on any qualified name bound in more than one source file.
+(defn project--duplicate-def-warnings (extracts source-set)
+  (let (by-name (fold (fn (acc kv)
+                        (let ([path entry] kv)
+                          (if (map-get source-set path false)
+                            (fold (fn (m nm) (map-assoc m nm (cons path (map-get m nm nil))))
+                              acc
+                              (nth entry 3))
+                            acc)))
+                  {}
+                  extracts))
+    (keep (fn (entry)
+            (let ([nm paths] entry
+                  where (sort (distinct paths)))
+              (when (> (count where) 1)
+                (str "warning: global '"
+                  nm
+                  "' is defined in "
+                  (count where)
+                  " source files ("
+                  (join ", " where)
+                  ") — same namespace; the last loaded wins (ADR-065)"))))
+      by-name)))
+
+;; Print the duplicate-def warnings to stderr and return the count. Advisory
+;; (never raises, never stops a run) and honors `BROOD_NO_CHECK=1` like the
+;; type-check pre-flight. Shared by `check-project` / `check-project-sources`.
+(defn project--check-duplicate-defs (extracts source-set)
+  (if (= (getenv "BROOD_NO_CHECK") "1")
+    0
+    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--duplicate-def-warnings extracts source-set))))
+
+;; SEQUENTIAL duplicate-defs over `files` (over-cap / cache-off path): parse each
+;; source file's def-names directly (no extract map, no cache). The original path;
+;; source-file counts are usually modest, so a plain fold is fine at any scale.
+(defn project--duplicate-def-warnings-seq (files)
   (let (by-name (fold (fn (acc path)
                         (fold (fn (m nm) (map-assoc m nm (cons path (map-get m nm nil))))
                           acc
@@ -696,14 +735,10 @@ resolve in the advisory checker. Returns the project root."
                   (join ", " where)
                   ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
-
-;; Print the duplicate-def warnings to stderr and return the count. Advisory
-;; (never raises, never stops a run) and honors `BROOD_NO_CHECK=1` like the
-;; type-check pre-flight. Shared by `check-project` / `check-project-sources`.
-(defn project--check-duplicate-defs (files)
+(defn project--check-duplicate-defs-seq (files)
   (if (= (getenv "BROOD_NO_CHECK") "1")
     0
-    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--duplicate-def-warnings files))))
+    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--duplicate-def-warnings-seq files))))
 
 ;; --- unused module-private defns (whole-project, ADR-065 `--` convention) -----
 ;; A `--` name is private *by convention*, not enforced: the editor legitimately
@@ -750,13 +785,46 @@ resolve in the advisory checker. Returns the project root."
 (defn project--merge-counts (a b)
   (fold (fn (m entry) (let ([k v] entry) (map-assoc m k (+ (map-get m k 0) v)))) a b))
 
-;; The `:scan` op (runs in a worker): parse each file in `chunk` ONCE and return
-;; `[counts privs]` — `counts` is the chunk's name→count contribution (every
-;; `:symbol` reference, via `project--node-syms--acc`) and `privs` is a list of
-;; `[path [[bare qual]...]]` (each file's `--`-private defs, qualified via its
-;; `defmodule` namespace). One parse per file replaces the old TWO whole-project
-;; passes (a symbol-count parse + a per-file private-def re-parse), each of which
-;; re-read and re-parsed every file.
+;; Parse `path` ONCE and return its extract `[counts privs def-names]`:
+;;   - `counts`   : name→count of every `--`-containing `:symbol` reference (the
+;;                  only names the unused-private verdict looks up).
+;;   - `privs`    : this file's `--`-private defs as `[bare qual]` (qualified via its
+;;                  `defmodule` namespace).
+;;   - `def-names`: every top-level def's qualified global key (for duplicate-defs).
+;; One parse feeds BOTH whole-project passes (unused-private + duplicate-defs) and
+;; is what the on-disk cache stores per file.
+(defn project--scan-file-entry (path)
+  (let (root-nodes (project--node-val (parse-source (slurp path)))
+        counts (fold (fn (a node) (project--node-syms--acc node a)) {} root-nodes)
+        list-nodes (filter (fn (c) (= (project--node-kind c) :list)) root-nodes)
+        ns (first (keep project--module-name list-nodes))
+        privs (keep (fn (node)
+                      (let (nm (project--def-name node))
+                        (when (and (not (nil? nm)) (string-contains? (str nm) "--"))
+                          [(str nm) (str (project--qualify ns nm))])))
+                list-nodes)
+        def-names (map (fn (nm) (project--qualify ns nm)) (keep project--def-name list-nodes)))
+    [counts privs def-names]))
+
+;; The `:scan-entries` op (runs in a worker): return `[path [mtime counts privs
+;; def-names]]` for each file in `chunk` — the cache entry (mtime read AFTER the
+;; parse, so a write racing the scan bumps mtime again and re-scans next run rather
+;; than caching stale content). This is what a `:scan-entries` worker ships back.
+(defn project--scan-entries-chunk (chunk)
+  (map (fn (path)
+         (let ([counts privs def-names] (project--scan-file-entry path))
+           ;; a proper 4-VECTOR [mtime counts privs def-names] — NOT `(cons mtime …)`
+           ;; onto the vector (that makes an improper list); mtime read AFTER the parse.
+           [path [(file-mtime path) counts privs def-names]]))
+     chunk))
+
+;; The `:scan` op (runs in a worker): the AGGREGATED (non-per-file) scan used by
+;; the over-cap / cache-off path (`project--unused-private-warnings-agg`). Returns
+;; `[counts privs]` for the whole chunk — `counts` the merged `--`-symbol counts,
+;; `privs` a flat list of `[path [[bare qual]…]]`. Aggregating in the worker keeps
+;; the message compact (vs `:scan-entries`, which ships one entry per file — right
+;; for the cache but wasteful when there is no cache), so a huge project's
+;; from-scratch check is not regressed by the cache machinery.
 (defn project--scan-chunk (chunk)
   (fold (fn (acc path)
           (let ([counts privs] acc
@@ -773,6 +841,109 @@ resolve in the advisory checker. Returns the project root."
     [{} nil]
     chunk))
 
+;; ── incremental check cache (Phase 1, ADR-119) ───────────────────────────────
+;; The two whole-project CST passes below (unused-private, duplicate-defs) are pure
+;; functions of file text. Cache each file's parse extract on disk keyed by its
+;; mtime, so an unchanged file is neither read nor parsed next run — only stat'd.
+;; Every run still re-aggregates the global counts / def multiset from ALL extracts
+;; and re-derives every verdict (only the PARSE is cached, never a verdict) — so a
+;; change in one file correctly shifts another's verdict via the always-recomputed
+;; aggregate. Sound with mtime alone; the advisory contract (types.md #5, never
+;; rejects a runnable program) makes mtime's rare imprecision harmless. The whole
+;; cache carries a `(build-id)`+version stamp and is dropped on mismatch (the
+;; extract depends on the Rust `parse-source`, so it isn't portable across binaries).
+;; Opt out with `BROOD_NO_CHECK_CACHE=1`.
+(def *check-cache-version* "v1")
+(defn project--cache-stamp () (str (build-id) "|" *check-cache-version*))
+(defn project--cache-off? () (= (getenv "BROOD_NO_CHECK_CACHE") "1"))
+
+;; The cache directory for `root` (created if absent), or nil if no cache base is
+;; available: `$XDG_CACHE_HOME` (or `~/.cache`) `/brood/check/<sha256 of root>`.
+;; Never inside the project tree (mirrors the image-cache convention).
+(defn project--cache-dir (root)
+  (require 'hash)
+  (let (xdg (getenv "XDG_CACHE_HOME")
+        home (getenv "HOME")
+        base (cond
+               (and xdg (not (= xdg ""))) xdg
+               (and home (not (= home ""))) (path-join home ".cache")
+               else nil))
+    (when base
+      (let (dir (path-join (path-join (path-join base "brood") "check") (hash/sha256 root)))
+        (make-dir dir)
+        dir))))
+
+(defn project--cache-file (root)
+  (let (dir (project--cache-dir root)) (when dir (path-join dir "extracts.blsp"))))
+
+;; The cached `{path -> [mtime counts privs def-names]}` map, or `{}` if the cache
+;; is off / missing / stamp-mismatched / unreadable (any failure falls back to a
+;; cold recompute — the cache is an optimization, never a correctness dependency).
+(defn project--read-cache (root)
+  (if (project--cache-off?)
+    {}
+    (let (f (project--cache-file root))
+      (if (and f (file-exists? f))
+        (try
+          (let (data (read-string (slurp f)))
+            (if (= (map-get data :stamp nil) (project--cache-stamp))
+              (map-get data :entries {})
+              {}))
+          (catch e {}))
+        {}))))
+
+;; Write the merged cache. Best-effort — a write failure just means no caching.
+(defn project--write-cache (root entries)
+  (when (not (project--cache-off?))
+    (let (f (project--cache-file root))
+      (when f
+        (try (spit f (pr-str {:stamp (project--cache-stamp) :entries entries}))
+          (catch e nil))))))
+
+;; Parse `files` in parallel (`:scan-entries`), returning a list of
+;; `[path [mtime counts privs def-names]]`. A dead worker's chunk is re-scanned in
+;; the driver so no file is silently dropped. Shared by the cached and uncached paths.
+(defn project--pscan (files)
+  (if (empty? files)
+    nil
+    (project--pfold-files files :scan-entries
+      (fn (acc chunk-results) (append-two chunk-results acc))
+      (fn (acc chunk reason)
+        (eprintln (str "warning: check scan worker died on "
+                    (count chunk) " file(s), re-scanning: " (pr-str reason)))
+        (append-two (project--scan-entries-chunk chunk) acc))
+      nil)))
+
+;; Above this many files the on-disk cache is skipped: the single-file manifest is
+;; parsed with `read-string`, whose cost grows with the entry count, so past this
+;; point reading the manifest would rival re-parsing the sources and the cache stops
+;; paying for itself. Below it (the realistic project range) the cache is a clear
+;; win. Tunable via `BROOD_CHECK_CACHE_MAX` (a future binary manifest could lift the
+;; ceiling — ADR-119); the parallel from-scratch path handles everything above it
+;; with no regression.
+(defn project--cache-max-files ()
+  (let (e (getenv "BROOD_CHECK_CACHE_MAX"))
+    (if (and e (not (= e ""))) (or (string->number e) 25000) 25000)))
+
+;; Return `{path -> [mtime counts privs def-names]}` for `files`. Uses the on-disk
+;; cache (reuse unchanged files by mtime, reparse the dirty set) for a project below
+;; the file-count ceiling; otherwise parses everything fresh (no cache read/write).
+;; The cached path MERGES fresh entries into the existing cache — so a sources-only
+;; `nest run` pre-flight and an all-files `nest check` sharing one manifest don't
+;; evict each other's entries — and rewrites it only when something changed.
+(defn project--gather-extracts (files root)
+  (if (or (project--cache-off?) (>= (count files) (project--cache-max-files)))
+    (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) {} (project--pscan files))
+    (let (cache (project--read-cache root)
+          dirty (keep (fn (p)
+                        (let (c (map-get cache p nil))
+                          (when (not (and c (= (nth c 0) (file-mtime p)))) p)))
+                  files)
+          fresh (project--pscan dirty)
+          merged (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) cache fresh))
+      (when (not (empty? dirty)) (project--write-cache root merged))
+      (fold (fn (m p) (map-assoc m p (map-get merged p nil))) {} files))))
+
 ;; Warning strings for private defs unreferenced anywhere in `files`. `used` =
 ;; the bare name appears ≥2× (its own def, plus a same-module call) OR — when a
 ;; module qualifies it — the qualified `mod/name` appears at all (a cross-module /
@@ -784,7 +955,39 @@ resolve in the advisory checker. Returns the project root."
 ;; worker that dies leaves the counts under-complete for its slice — which could
 ;; only suppress a real warning or add a false one — so it is surfaced rather than
 ;; dropped silently.
-(defn project--unused-private-warnings (files)
+;; `extracts` is `{path -> [mtime counts privs def-names]}` (from
+;; `project--gather-extracts`). The GLOBAL merged counts decide each private def's
+;; fate (so cross-module references are seen), then each file's `privs` are judged.
+(defn project--unused-private-warnings (extracts)
+  (let (counts (fold (fn (m kv) (project--merge-counts m (nth (second kv) 1))) {} extracts))
+    ;; `append-two file-warnings acc` copies only the small per-file list and SHARES
+    ;; the accumulator tail → O(total); a plain `(append acc …)` would be O(files²).
+    (fold (fn (acc kv)
+            (let ([path entry] kv)
+              (append-two
+                (keep (fn (pd)
+                        (let ([bare qual] pd
+                              used (or (>= (map-get counts bare 0) 2)
+                                     (and (not (= qual bare)) (>= (map-get counts qual 0) 1))))
+                          (when (not used)
+                            (str path ": warning: unused private function: " bare))))
+                  (nth entry 2))
+                acc)))
+      '()
+      extracts)))
+
+;; Print the unused-private warnings to stderr and return the count. Advisory;
+;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
+(defn project--check-unused-private (extracts)
+  (if (= (getenv "BROOD_NO_CHECK") "1")
+    0
+    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--unused-private-warnings extracts))))
+
+;; AGGREGATED unused-private (over-cap / cache-off path): the parallel `:scan`
+;; map-reduce — workers merge `--`-counts per chunk and concat privs, the driver
+;; merges the counts, then verdicts. No per-file extract map, no cache — the
+;; compact-shipping path that keeps a huge from-scratch check fast.
+(defn project--unused-private-warnings-agg (files)
   (let (scanned (project--pfold-files files :scan
                   (fn (acc cr)
                     (let ([ac ap] acc [cc cp] cr)
@@ -796,8 +999,6 @@ resolve in the advisory checker. Returns the project root."
                     acc)
                   [{} nil])
         [counts privs] scanned)
-    ;; `append-two file-warnings acc` copies only the small per-file list and SHARES
-    ;; the accumulator tail → O(total); a plain `(append acc …)` would be O(files²).
     (fold (fn (acc entry)
             (let ([path pds] entry)
               (append-two
@@ -811,13 +1012,10 @@ resolve in the advisory checker. Returns the project root."
                 acc)))
       '()
       privs)))
-
-;; Print the unused-private warnings to stderr and return the count. Advisory;
-;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
-(defn project--check-unused-private (files)
+(defn project--check-unused-private-agg (files)
   (if (= (getenv "BROOD_NO_CHECK") "1")
     0
-    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--unused-private-warnings files))))
+    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--unused-private-warnings-agg files))))
 
 (defn check-project ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
@@ -825,12 +1023,19 @@ resolve in the advisory checker. Returns the project root."
     (when (nil? root)
       (error "check-project: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project--ensure-loaded root)
-    ;; Walk the tree ONCE and reuse — `project--all-files` recurses the whole
-    ;; source + test tree, which at 100K+ files is a non-trivial serial cost to pay
-    ;; twice.
     (let (files (project--all-files root))
-      (project--check-duplicate-defs (project--source-files root))
-      (project--check-unused-private files)
+      ;; Below the cache ceiling: gather each file's parse extract ONCE (mtime-cached
+      ;; on disk, ADR-119) and feed BOTH pure passes from it — a warm re-check reuses
+      ;; unchanged files. Above it: the aggregated from-scratch passes (compact
+      ;; shipping, no cache) so a huge project isn't regressed by the cache machinery.
+      (if (< (count files) (project--cache-max-files))
+        (let (extracts (project--gather-extracts files root)
+              source-set (fold (fn (m p) (map-assoc m p true)) {} (project--source-files root)))
+          (project--check-duplicate-defs extracts source-set)
+          (project--check-unused-private extracts))
+        (do
+          (project--check-duplicate-defs-seq (project--source-files root))
+          (project--check-unused-private-agg files)))
       (project--check-files files))))
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry
@@ -861,7 +1066,11 @@ resolve in the advisory checker. Returns the project root."
       (error "check-project-sources: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project--ensure-loaded root)
     (let (srcs (project--source-files root))
-      (project--check-duplicate-defs srcs)
+      (if (< (count srcs) (project--cache-max-files))
+        (let (extracts (project--gather-extracts srcs root)
+              source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
+          (project--check-duplicate-defs extracts source-set))
+        (project--check-duplicate-defs-seq srcs))
       (project--check-files srcs))))
 
 ;; (run-project-tests & opts) — find the project from the cwd, set it up, load

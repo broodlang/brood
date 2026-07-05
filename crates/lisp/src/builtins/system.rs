@@ -1845,6 +1845,20 @@ pub(super) fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult 
     Ok(Value::int(crate::process::worker_threads() as i64))
 }
 
+/// `(build-id)` — this `brood` build's identity, `"<version>+<git-sha>"` (e.g.
+/// `"0.1.0+dcab7ca"`). Stable within a build, changes whenever the binary is
+/// rebuilt from different sources — so it's the correct staleness stamp for an
+/// on-disk cache of anything the kernel computes (the checker's own logic is Rust,
+/// so its results are not portable across binaries). Both halves are baked in at
+/// compile time (`CARGO_PKG_VERSION` / `BROOD_GIT_SHA`).
+pub(super) fn build_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.alloc_string(&format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("BROOD_GIT_SHA")
+    )))
+}
+
 /// `(steal-count)` — how many fresh processes the scheduler work-stole across
 /// worker threads since program start. A diagnostic of how much the pool had to
 /// rebalance; 0 means placement-at-spawn kept it even.

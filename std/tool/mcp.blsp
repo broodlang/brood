@@ -64,9 +64,12 @@ error inside the user expression surfaces here as the `:error` branch."
     (let (root (project/project--find-root (cwd)))
       (if (nil? root)
         nil
-        (let (defined (project--file-def-names file))
+        (let (defined (project--file-def-names file)
+              srcs (project--source-files root)
+              extracts (project--gather-extracts srcs root)
+              source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
           (filter (fn (w) (some? (fn (nm) (string-contains? w (str "'" nm "'"))) defined))
-            (project--duplicate-def-warnings (project--source-files root))))))
+            (project--duplicate-def-warnings extracts source-set)))))
     (catch _ nil)))
 
 (defn mcp--load-checked (file)

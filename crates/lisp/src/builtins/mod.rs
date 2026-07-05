@@ -2259,6 +2259,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "build-id",
+        Arity::exact(0),
+        Sig::nullary(string),
+        build_id,
+    );
+    def(
+        heap,
         "steal-count",
         Arity::exact(0),
         Sig::nullary(int),
@@ -2628,6 +2635,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
+    ("build-id", &[], "This brood build's identity as \"<version>+<git-sha>\" (e.g. \"0.1.0+dcab7ca\") — stable within a build, changes on rebuild. The correct staleness stamp for an on-disk cache of anything the kernel computes."),
     ("steal-count", &[], "How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
     ("whereis", &["name"], "The local pid registered under `name`, or nil. Strictly local — does not query other nodes."),
