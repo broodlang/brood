@@ -8,11 +8,34 @@ O(all files), even when one file changed. Parallelising it across the worker poo
 the *complexity class* of the common edit→recheck cycle to ≈O(changed + dependents),
 which on a no-change re-run is ≈0.
 
-**Status:** design only (ADR-119). Not built. Recorded so we can build with the hard
-parts — invalidation, the late-binding interaction — already on paper, and so the
-build is gated on a concrete large-real-project need rather than the synthetic
-100K–1M-file stress projects that motivated the parallelism work (ADR-011: defer a
-power feature until a need justifies it).
+**Status:** **Phase 1 shipped** (2026-07-05, `std/tool/project.blsp`, commit `3c22158`);
+Phase 2 designed-not-built (below). Phase 1 caches the two pure CST passes; the
+dominant `check-files` type-check stays uncached (that's Phase 2).
+
+### Phase 1 as shipped (vs the design below)
+
+- **Key = mtime**, not a content hash: an unchanged file is skipped without being read
+  (a bare `stat`). The advisory contract makes mtime's rare imprecision harmless.
+- **One parse per file** now produces `[mtime counts privs def-names]`, feeding BOTH
+  pure passes (they used to parse separately). `counts` holds only `--`-containing
+  symbols (all the unused-private verdict looks up), keeping the shipped/merged map tiny.
+- **The cache merges** into the existing manifest (so `nest run`'s sources-only pass and
+  `nest check`'s all-files pass sharing one manifest don't evict each other); stamped
+  with `(build-id)`+version (dropped on binary change — the extract depends on the Rust
+  `parse-source`); stored under `$XDG_CACHE_HOME/brood/check/<sha256 root>/extracts.blsp`;
+  opt out with `BROOD_NO_CHECK_CACHE=1`.
+- **File-count cap** (`BROOD_CHECK_CACHE_MAX`, default 25 000): above it the single-file
+  manifest's `read-string` cost would rival re-parsing the sources, so the cache is
+  skipped and the *aggregated* from-scratch passes run (compact `:scan` shipping +
+  sequential duplicate-defs) — a huge project is never regressed by the cache machinery.
+  A binary manifest could lift this ceiling (future work).
+- **Measured:** brood repo (real files) warm re-check ~35 % faster (≈1.5 s → ≈0.95 s);
+  cached output byte-identical to uncached; verdicts are never cached (always
+  re-aggregated + re-derived), so a change in one file correctly shifts another's. On
+  *trivially small* files the manifest overhead can exceed the near-zero parse saving —
+  a non-issue for real code, bounded by the cap.
+
+The rest of this doc is the original design; Phase 2 (below) is still not built.
 
 ## Why parallelism isn't the end of the story
 
