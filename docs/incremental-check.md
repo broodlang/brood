@@ -1,0 +1,158 @@
+# Incremental check — design for O(changed) `nest check`
+
+Make `nest check` (and the check pre-flight in `nest test` / `nest run`) re-do work
+proportional to **what changed since last time**, not to the whole project. Today it
+re-reads, re-parses, and re-checks every source + test file on every invocation —
+O(all files), even when one file changed. Parallelising it across the worker pool
+(2026-07-05, `std/tool/project.blsp`) cut that by a constant (core count); this cuts
+the *complexity class* of the common edit→recheck cycle to ≈O(changed + dependents),
+which on a no-change re-run is ≈0.
+
+**Status:** design only (ADR-119). Not built. Recorded so we can build with the hard
+parts — invalidation, the late-binding interaction — already on paper, and so the
+build is gated on a concrete large-real-project need rather than the synthetic
+100K–1M-file stress projects that motivated the parallelism work (ADR-011: defer a
+power feature until a need justifies it).
+
+## Why parallelism isn't the end of the story
+
+Measured `nest check`, 100K trivial files, uncontended (2026-07-05, post-parallel):
+
+| Phase | ~time | shape |
+|---|---|---|
+| startup + load + discover | 0.8 s | serial, small |
+| `unused-private` (+ `duplicate-defs`) | ~4.5 s | parallel; **CST-parse-bound** per file |
+| `check-files` (per-file type check) | ~7 s | parallel; genuine per-file type-checking |
+
+Both heavy phases already run on every core. But they still process **every file every
+run**. Twelve cores hiding an O(n) redo is not the same as not redoing it — the right
+fix for scale is to cache per-file results and re-do only the deltas. This design sits
+*on top of* the parallel path: the parallel from-scratch run is still the required cold
+/ cache-miss path.
+
+## Two subsystems, two invalidation shapes
+
+The check has two independent halves that invalidate differently (this is the crux):
+
+1. **Whole-project CST passes** — `unused-private` + `duplicate-defs`
+   (`std/tool/project.blsp`). Each is a **pure function of the files' text**: parse each
+   file's CST, extract its `--`-symbol references + private defs (unused-private) or its
+   top-level def-names (duplicate-defs), then compute a **whole-project aggregate**
+   (global `--`-ref counts / def-name multiset) and derive per-file verdicts from it.
+   No dependency on the loaded global image.
+
+2. **Per-file type check** — `check-file` (the Rust checker,
+   `crates/lisp/src/types/check.rs`). Resolves cross-module names through the **loaded
+   global image**, so a file's result depends on its own text **and** on the signatures
+   of the externally-referenced globals (which come from *other* files' text).
+
+These get two phases, easy first.
+
+## Phase 1 — incremental whole-project CST passes (low risk, no dependency graph)
+
+The pure passes need only **content hashing** to be both sound and complete:
+
+- **Per-file extract cache**, keyed by `hash(file bytes)`: store the file's
+  `(--symbol-ref counts, private-defs)` (for unused-private) and `(top-level def-names)`
+  (for duplicate-defs). These are exactly what the current `:scan` op
+  (`project--scan-chunk`) and `project--file-def-names` already compute.
+- **On recheck**: for each file, if its content hash is unchanged → reuse the cached
+  extract (skip the parse — the dominant cost); else re-parse and refresh its entry.
+- **Re-aggregate every run** from the (mostly cached) per-file extracts:
+  `project--merge-counts` over all files' `--`-counts, the def-name multiset over all
+  files. This is O(files) cheap map ops, **no parse**. Then derive verdicts as today.
+
+Soundness is immediate: the passes are pure functions of file text, so a matching
+content hash guarantees an identical extract, and the aggregate step correctly
+propagates any changed file's effect across the whole project (a changed file shifts the
+global counts, re-deriving every file's verdict from the fresh aggregate). **No
+cross-module dependency tracking is needed** — the aggregate *is* the cross-file
+coupling, and it is always recomputed. This phase alone removes the parse cost (~40 % of
+`nest check`) for every unchanged file.
+
+## Phase 2 — incremental per-file type check (needs a dependency fingerprint)
+
+`check-files` can't use content-hashing alone: a file that didn't change can still need
+re-checking because a *global it references* changed signature in another file. So:
+
+- **Record a dependency set.** Instrument `check-file` to emit, alongside its warnings,
+  the set of **external global symbols it resolved** plus a fingerprint of *what it
+  observed* about each: exists? arity? declared `(sig …)` type? (and, for `(:use m)`
+  headers, the module's export set). This is a forward-dependency list per file.
+- **Cache key** per file = `hash(content) + hash(sorted dependency fingerprints)`. A hit
+  means both the file and everything it depended on are unchanged → reuse warnings.
+- **Reverse-dependency map** `global-symbol → {files depending on it}`, built from the
+  recorded forward deps. When a changed file's defs change a signature, invalidate its
+  dependents through this map and re-check only those.
+- **No fixpoint.** Checking is read-only over the image — re-checking a file never
+  changes any signature — so invalidation is one-shot: `changed source files → their new
+  signatures → dependents to re-check`. It does not cascade further.
+- **The loaded image.** `nest check` first `ensure-loaded`s sources (evals them into
+  globals); Phase 2's fingerprint reads signatures from that live image. Load is cheap
+  (~sub-second) relative to the check; the sibling *evaluated-image* cache
+  ([image-cache-plan.md](image-cache-plan.md)) could later skip even that, but it is an
+  orthogonal artifact.
+
+Phase 2 is where the real complexity lives (dependency capture in the Rust checker,
+reverse-map maintenance), which is why it's deferred behind Phase 1.
+
+## Cache key, storage, staleness (both phases)
+
+Mirror the existing runtime/image cache conventions
+(`release.rs::runtime_cache_path`, [image-cache-plan.md](image-cache-plan.md)):
+
+- **Global staleness stamp** invalidating the *entire* cache on mismatch: the **brood
+  build id** (`BROOD_GIT_SHA` — the checker's *logic* changes between builds, so results
+  are not portable across binaries) + a **`check-cache-format` version int** + a hash of
+  the **checker-relevant prelude/std** (a std change can change name resolution). Any
+  mismatch → cold path (full parallel check, then rewrite the cache).
+- **Per-file entries** keyed by content hash (the existing hashing primitive).
+- **Path**: `$XDG_CACHE_HOME/brood/check/<project-id>/manifest` (+ entries), falling back
+  to `~/.cache`, exactly like the image cache. Never inside the project tree.
+- **Manifest** = `file-path → { content-hash, warnings, cst-extract, dep-fingerprints }`.
+
+## Interaction with hot reload / late binding (the tricky bit)
+
+Brood is late-bound: globals are redefinable at runtime and names resolve through the
+live global table (ADR-013, [shared-code.md](shared-code.md)). Two things keep this from
+poisoning the cache:
+
+- The check cache is a **static, on-disk artifact for the `nest` toolchain operating on
+  source *files***. It is consulted only by the batch checker, never by a running
+  program, and runtime `def` rebinding never touches on-disk files — so runtime hot
+  reload is simply out of scope for it.
+- Source-level late binding *is* captured: if a dependency's **source** changed, its
+  content hash changed → it is re-loaded → its new signature → dependents invalidated via
+  the reverse map (Phase 2). The dependency fingerprint is what makes "file A's check
+  depends on the current signature of a name defined in file B" explicit and
+  invalidatable.
+- **The advisory contract is the safety margin.** The checker never rejects a runnable
+  program (types.md contract #5). So even a stale-cache *miss* (a warning not re-emitted)
+  cannot break a build — worst case is a momentarily-missed advisory diagnostic,
+  corrected on the next content change. This lets Phase 2's invalidation be
+  *conservative* (over-invalidate freely) with **zero correctness stakes** — a rare
+  luxury that makes this far safer than caching a real compiler's output.
+
+## Alternatives considered
+
+- **More parallelism / a faster checker** — constant-factor only; never stops re-doing
+  unchanged work. (Already banked what parallelism buys.)
+- **Persisted compiled bytecode** — that's the sibling [image-cache-plan.md](
+  image-cache-plan.md) (skip *eval* on warm startup), a different axis (program startup,
+  not checking). Complementary, not a substitute; note Brood closures are already
+  AST-as-data, so there's no separate bytecode format to persist.
+- **Whole-project result cache keyed on an all-files hash** — trivially correct, useless:
+  any single edit busts the whole thing.
+- **Per-file cache for `check-files` without dependency tracking** — unsound, because of
+  cross-module name resolution. Hence Phase 1 is restricted to the pure CST passes and
+  Phase 2 adds the dependency fingerprint.
+
+## Staging recommendation
+
+1. **Now:** design only (this doc + ADR-119). Nothing built. The parallel from-scratch
+   path is the baseline and the permanent cold/miss path.
+2. **When a concrete large real project appears:** build **Phase 1** — sound with content
+   hashing alone, captures the parse-bound ~40 %, no dependency graph.
+3. **If Phase 1 is insufficient:** build **Phase 2** — dependency fingerprints + reverse
+   map for `check-files`. This is the hard part; the advisory contract makes conservative
+   invalidation safe.

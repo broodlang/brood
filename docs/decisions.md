@@ -7046,3 +7046,316 @@ consumer per ADR-011.
 **Trade.** No new `Value`/`Tag` variant. Supersedes nothing; extends the Step 5+
 staircase ADR-078 started and sits alongside `(map K V)` (ADR-078's third slice) as
 a second, heterogeneous map refinement.
+
+## ADR-116 — Intersection of arrows: overloaded functions via `(and A B …)`
+
+**Status:** accepted; **shipped 2026-07-05** ([`types.md`](types.md) Step 5+,
+[`type-arrow-intersection.md`](type-arrow-intersection.md)). A function's return
+type can now depend on which arm's domain a call's argument provably matches —
+`(and (int -> int) (bool -> bool))` — instead of the old behavior where two
+distinct known arrows silently widened to "any function", discarding both. No new
+grammar: reuses the already-shipped `(and …)` conjunctive-type syntax. Advisory
+throughout — contract #5 holds. Refines the Step 5+ staircase alongside ADR-078
+(arrow/element/map_kv) and ADR-115 (records); closes the item `docs/roadmap.md`
+flagged as **"the single biggest expressiveness gap"**.
+
+**Context.** ADR-078 explicitly deferred this when it chose `Ty` as a
+single-refinement struct over a replacing enum: "intersections for overloaded
+fns... the bulk of the set-theoretic-algebra complexity ADR-011 says to defer."
+`(and (int -> int) (bool -> bool))` already *parsed* (the existing `(and …)` grammar
+folds pairwise through `Ty::intersect`), but `intersect`'s generic `merge_intersect`
+helper treated two distinct known `Sig`s as an unresolvable conflict and widened to
+`arrow: None` — so a declared overload sig was silently useless.
+
+**Decision — no new syntax; function intersection types already mean overloading.**
+`f : (A→B) ∧ (C→D)` is the standard type-theory encoding of overloading (call `f`
+with an `A`, get a `B`; call it with a `C`, get a `D`) — precisely
+`docs/type-intersections.md`'s already-shipped `(and …)` feature (a value
+satisfying every constituent type at once), just applied to two *distinct* arrows
+instead of one arrow plus a flat tag (that doc's own `(and fn (int -> int))`
+example). So the fix lives entirely in `Ty::intersect`'s arrow handling plus a new
+checker consumer — not a new keyword, and it doesn't touch `(map K V)`/`(vector
+E)`/`elem`/`fields` intersect logic at all.
+
+**Representation.** `Ty` gained `overload: Option<Arc<Vec<Sig>>>` (tagged
+`FN_BITS` like `arrow`), holding only **2+ distinct** signatures — a single one
+always collapses back to `arrow`, so every existing single-arrow consumer (the
+callback-arity check, `Sig::is_subtype`) is untouched for the common case. The new
+`intersect_arrows` extracts each side's candidate list (`overload`'s list, or
+`[arrow]`, or `[]` for "any function"); a zero-candidate side leaves the other's
+candidates untouched (reproducing today's `(and fn (int -> int))` and
+identical-arrow behavior exactly); two sides with candidates dedup-union into a
+combined list, collapsing to `arrow` at length 1 or `overload` at 2+.
+**`Ty::union` needed zero new logic** — the existing generic `merge_union` helper
+already treats `overload` as just another equality-comparable `Option<Arc<T>>`,
+exactly how `map_kv`/`fields` were threaded through in ADR-115. **`is_subtype`**
+generalizes (not parallels) the old single-arrow check: `other`'s candidate list is
+`[the one arrow]` when unrefined-to-an-overload, so the same code path reproduces
+the old behavior unchanged; for a genuine overload, `self` must satisfy every
+signature `other` requires (at least one of `self`'s own candidates `Sig::is_subtype`
+of each) — **sound but not complete** (contract #5), the same conservative shape as
+ADR-115's `record_fields_is_subtype`. **`is_disjoint`** stays untouched, tags-only.
+
+**Call-site resolution** (`check/guards.rs`, `resolve_overload_ret` in `ctx.rs`)
+mirrors the existing `SigWithVars` parallel-declaration-path pattern: a new
+`Ctx::declared_overloads` table (populated by `parse_sig_decl_overload` alongside
+`parse_sig_decl`/`parse_sig_decl_with_vars`) is checked in `expr_ty` at the same
+priority as a user's other declared-sig forms. For each candidate whose arity fits
+(`Sig::param`, already folding a variadic `rest` in), every *known* argument type
+must be a subtype of that position's declared type; a fully-compatible candidate's
+`ret` is unioned into the result — one match gives the exact per-clause return
+type, several gives a sound superset, zero widens to `Ty::ANY` rather than ever
+fabricating a return type for a call fitting no declared arm.
+
+**Deferred:** flagging an argument that fails *every* overload arm — needs a
+second hook in `check/walk.rs`'s separate arity/argument-checking loop (today reads
+only a single `ctx.declared_sig`), materially bigger surface than the return-type
+resolution this shipped. The requested payoff ("input-dependent return types") is
+fully isolated to `expr_ty` and didn't need it.
+
+**Follow-up, same day: cross-module resolution was missing.** The `Ctx`-based path
+above only covers a call in the *same file* as the declaration (`check_file`
+allocates a fresh `Ctx` per file). A plain single-arrow `(sig …)` already works
+cross-module via a separate mechanism — `%register-sig` writes the raw type-
+expression form into a shared heap-level store (`RuntimeCode::declared_sigs`) at
+load time, and `declared_heap_sig` reads it back via `.as_arrow()` — so before this
+follow-up, an *overloaded* sig was **invisible outside its declaring file**, strictly
+worse than a plain single-arrow sig. The fix needed no storage change (the heap
+store already held the opaque raw form regardless of what it represented): a new
+`declared_heap_overload` (mirroring `declared_heap_sig`, extracting
+`.overload_sigs()` instead of `.as_arrow()`) wired into the same fallback positions
+`sig_of`/`declared_heap_sig` already occupy in `expr_ty`'s call-form handling and
+`callback_ret` (HOF callbacks) — not `check/walk.rs`'s argument-checking loop,
+which stays out of scope per the deferred item above. Verified by a Rust test that
+*evaluates* a declaration (so `%register-sig` genuinely fires) before typing a call
+against a fresh, empty `Ctx` — simulating a second module with zero local knowledge
+of the first — and confirmed the test fails without the fix and passes with it.
+Verified end-to-end too: a real two-file `nest new` project (an overloaded `clamp`
+declared in one module, called via `(:use)` from another) correctly flagged a
+genuine mismatch and stayed silent on the correct call.
+
+**Soundness, verified two ways** (the ADR-115 playbook): (1) 9 targeted unit/checker
+tests covering two-distinct-arrows, identical-arrow collapse, any-function
+one-sidedness, three-way accumulation, rendering, conservative subtyping,
+disjointness, the full exact/alternate/mismatch/widen call-resolution matrix, and
+cross-module resolution via the heap store. (2) `nest check` across all of `std/` +
+`tests/` with the new `intersect_arrows` logic and the new `expr_ty` branch disabled
+vs. enabled — byte-identical warning output, zero new warnings (unsurprising, since
+nothing in the corpus declares an overload yet — but the diff proves the change is
+inert everywhere it isn't used).
+
+**Trade.** No new `Value`/`Tag` variant — an overloaded function is still a plain
+runtime closure/native, same as any other `Fn`/`Native`-tagged value; `overload` is
+purely a static refinement. Supersedes nothing; closes the Step 5+ "Gaps to parity"
+item ADR-078 deferred.
+
+## ADR-117 — Int-literal types: `5` as a type, the first slice of ADR-105's deferral
+
+**Status:** accepted; **shipped 2026-07-05** ([`types.md`](types.md) Step 5+,
+[`type-int-literals.md`](type-int-literals.md)). A bare int like `5` in a
+`(sig …)` type position is a literal singleton type, exactly like the already-
+shipped keyword-literal type (ADR-105). Advisory throughout — contract #5 holds.
+Closes the first half of ADR-105's one-line deferral ("bool/int/string literals
+are the same machinery... a deferred follow-on").
+
+**Context.** Taken at face value, ADR-105's deferral note reads like a small
+mechanical extension. It isn't, for two reasons found by actually scoping it:
+(1) `Value` has no `Ord`/`Eq`/`Hash` at all (`Value::Float(f64)` structurally
+can't get them, NaN), so a generic `BTreeSet<Value>` literal set across kinds is
+impossible — each kind needs its own concretely-typed storage; (2) the existing
+`lit: Option<Arc<BTreeSet<Symbol>>>` is hardwired to one tag (`KEYWORD_BIT`) at
+every one of its ~6 call sites, so supporting `(or :ok 5)` — two different
+literal-bearing tags on one `Ty` — isn't free with a single field.
+
+**Decision.** Point 2 resolves via a pattern this repo already established
+twice: `arrow`/`overload` are two independent fields both tagged `FN_BITS`
+(ADR-116), and `map_kv`/`fields` are two independent fields both tagged
+`MAP_BIT` (ADR-115). A third independent field, `lit_int: Option<Arc<BTreeSet
+<i64>>>` tagged a new `INT_BIT`, follows the same precedent: since it's tied to
+a *different* bit than `lit`'s `KEYWORD_BIT`, a `Ty` carries both simultaneously
+with zero special-casing — `(or :ok 5)` just ends up with `lit: Some({:ok})`
+*and* `lit_int: Some({5})`. Every one of the ~6 `lit`/`KEYWORD_BIT` call sites
+(`union`'s `merge_union_lit`, `intersect`, `negate`, `is_subtype`,
+`is_disjoint`, `Display`) got a mechanically parallel `lit_int`/`INT_BIT`
+block, same shape, new tag — no new algorithm, pure duplication of an
+already-proven-sound pattern. Grammar (`annot.rs::parse_type`): one new match
+arm, `Value::Int(n) => Some(Ty::int_lit(n))`, no ambiguity risk (unlike
+keywords, an int literal can't collide with a symbol-spelled base type).
+Runtime (`type-matches?`): one new branch, `(int? t) (= t v)`, next to the
+existing keyword one — before this, a bare int in type position silently fell
+to the `else true` catch-all, accepted but never enforced.
+
+**Scoped to int only, and to declared-sig literal sets only — both
+deliberately.** Bool/string literals are the same pattern again, deferred (bool
+carries an open design question ADR-105 didn't resolve: whether its "`false`
+isn't a literal type" carve-out for keywords still applies once bool literals
+are a real kind). More significantly: **call-site argument literal precision
+was tried and reverted.** Keywords get more than declared-sig precision —
+`Ty::of_value` (the value→type bridge) turns a *literal keyword in code* into
+its singleton too, so `(c-mode :bogus)` is a provable disjointness the static
+checker itself catches, not just the runtime contract. Extending `of_value` to
+do the same for `Value::Int` looked like the obvious symmetric completion, but
+`of_value` feeds *every* literal int expression's inferred type throughout the
+whole checker, not just call arguments — making every int literal a singleton
+changed the *rendered text* of unrelated misuse-warning messages project-wide
+(`"got int"` → `"got 5"`), breaking 7 pre-existing, unrelated tests
+(`eq_against_a_literal_is_a_guard`, `let_binding_propagates_its_rhs_type`,
+`match_literal_pattern_narrows_the_scrutinee`, and four others). Reverted
+cleanly rather than pushed through outside the session's agreed scope — a real
+design pass (deciding whether the wording churn is acceptable, and auditing
+every other `of_value` consumer) is a separate follow-on, not a same-slice
+mechanical addition like the rest of this ADR.
+
+**Soundness, verified two ways** (the ADR-115/116 playbook): (1) unit tests
+mirroring every keyword-literal test exactly (render, union-exact-but-widens,
+subtyping, disjointness-precision, intersection) plus a mixed-kind coexistence
+test (`(or :ok 5)`); a checker-level test proving a declared int-literal-set
+return type flows through `sig_of`/`expr_ty` to callers; a `tests/contract_test.blsp`
+runtime-contract block. (2) `nest check` across all of `std/` + `tests/` with the
+new `Value::Int(n)` parse arm disabled vs. enabled — byte-identical, zero new
+warnings.
+
+**Trade.** No new `Value`/`Tag` variant — an int-literal type is still a plain
+runtime `Int` value; `lit_int` is purely a static refinement, same trick every
+other literal-bearing tag uses. Supersedes nothing; closes half of ADR-105's
+deferred item, leaves the other half (bool/string, and the reverted
+call-site-precision extension) explicitly open.
+
+## ADR-118 — Match exhaustiveness checking over literal-enum types
+
+**Status:** accepted; **shipped 2026-07-05** ([`types.md`](types.md) Step 5+,
+[`type-match-exhaustiveness.md`](type-match-exhaustiveness.md)). A `match` whose
+scrutinee's declared type is a *pure* keyword- or int-literal enum
+(ADR-105/117) is flagged when its clauses don't cover every member, unless a
+catch-all clause makes it trivially exhaustive. `case` doesn't exist in Brood
+(confirmed dead/vestigial — `crates/lisp/src/eval/mod.rs` tells users to use
+`match`/`cond`), so this is `match`-only. Advisory throughout — contract #5
+holds.
+
+**Context.** Keyword-literal (ADR-105) and int-literal (ADR-117) types give
+`Ty` a precise enumerable set, but nothing consumed it for the reason literal
+types are usually introduced: catching a `match` that forgot an arm. Initial
+scoping assumed a new `match`-clause parser was needed — the checker has no
+correct view of `match`'s real clause shape today (`gradual_of_compound` in
+`check/walk.rs` assumes a wrong flat layout, effectively dead for genuine
+`match` forms, a pre-existing bug left as-is) — which would have made this a
+2-3 slice effort.
+
+**Decision — recognize the compiled failure shape instead of parsing clauses.**
+`match` always compiles `(match expr clause…)` to a `let`+`if`+`%eq` chain whose
+innermost failure is `(throw [:match-error 'context target 'patterns])`
+(`match-no-match`, `std/prelude.blsp`). Two properties of this shape make it a
+ready-made signal with **zero new parsing**: (1) the throw is *syntactically
+absent* whenever a catch-all clause exists (an irrefutable clause compiles to
+its body directly, no further `if`) — so finding the shape at all already means
+"no catch-all"; (2) the full list of tried patterns is quoted literal data
+sitting in the throw's 4th vector slot — no clause-boundary reconstruction
+needed, just read it off. And critically: the else-branch of a `(%eq m__N
+lit)` test is `then_only` (`guard_assertion` — being false proves nothing about
+the tag in general), so `check_if` never narrows `m__N` down the chain — its
+ctx type at the final throw is exactly its original declared type, unchanged.
+So the whole check is: recognize the throw shape in the **existing,
+already-macroexpanded** checker walk; read the scrutinee's declared type via
+the existing `expr_ty`; if it's a *pure* literal-enum
+(`is_subtype(Ty::of(Tag::Keyword))`/`…Int`, nothing else mixed in), diff it
+against the tried patterns; report what's missing. New code: one helper
+(`match_exhaustiveness_gap`, `check/guards.rs`) and one check in `check_into`'s
+existing generic call-handling (`check/walk.rs`, the same spot the
+function-as-value lint and callback-arity check already live) — no
+`SPECIAL_HEAD` entry, no new pass, no `Ty` change.
+
+**Conservative by construction.** A non-literal pattern among those tried (a
+destructuring pattern, a guarded bind) bails to `None` rather than
+half-reasoning about coverage; a scrutinee whose type isn't a *pure* one-kind
+literal-enum (mixed keyword+int, or one with a trailing `nil`) bails too —
+sound (never a false positive), incomplete (may miss a real gap), per contract
+#5's usual bar.
+
+**Why this doesn't reopen the ADR-117 `of_value` question.** The scrutinee's
+type comes from its *declared* `(sig …)` type via the same `ctx.declared_sig` →
+`sig_params` → `expr_ty` pipeline every other check uses — nothing about
+literal-in-*code* inference (`of_value`) is touched, so the warning-message
+wording-churn that got that extension reverted doesn't recur: this check only
+ever fires on the one specific compiled `throw` shape, never on an arbitrary
+literal expression elsewhere.
+
+**Deferred:** mixed-kind enums (`(or :ok 5)`) and enums with a trailing
+non-literal tag (`(or :ok :error nil)`) — both declined by the purity check;
+clause redundancy/unreachable-clause detection (a different, simpler problem —
+compares clause patterns to each other, no scrutinee-type knowledge needed).
+
+**Soundness, verified two ways** (the session's established playbook): (1) six
+targeted tests in `crates/lisp/src/types/check.rs` (missing keyword arm,
+full coverage silent, catch-all silent, missing int arm, a destructuring
+clause mixed in stays silent, a non-literal-enum scrutinee stays silent) plus a
+real end-to-end demonstration through the `brood` CLI producing exactly the
+expected warnings. (2) `nest check` across all of `std/` + `tests/` with the
+hook disabled vs. enabled — byte-identical, zero new warnings.
+
+**Trade.** No new `Value`/`Tag`/`Ty` field at all — this is purely a new
+checker consumer of refinements that already existed (ADR-105/117). Supersedes
+nothing; activates the exhaustiveness use case those two ADRs were introduced
+for but hadn't yet wired up.
+
+## ADR-119 — Incremental `nest check` cache: designed, not built (defer per ADR-011)
+
+**Status:** proposed (design only), 2026-07-05. Full design in
+[incremental-check.md](incremental-check.md). No runtime code. Recorded so the hard
+parts are on paper before we commit, and so the build is gated on a concrete
+large-real-project need rather than the synthetic 100K–1M-file stress projects.
+
+**Context.** `nest check` (and the check pre-flight in `nest test`/`nest run`) re-reads,
+re-parses, and re-checks **every** source + test file on every invocation — O(all files),
+even when one file changed. This session parallelised both check passes across the worker
+pool (`std/tool/project.blsp`): 100K 41s→12.5s, 300K 161s→37s, 1M ~9min→2:44. But
+parallelism is a **constant-factor** win (core count) over an operation that is
+fundamentally O(all files, every time). The complexity-class fix for the common
+edit→recheck cycle is to cache per-file results and re-do only the delta — ≈O(changed +
+dependents), ≈0 on a no-change re-run — which would dwarf any parallelism factor. The
+question raised: isn't there now an argument for a proper compilation/caching step?
+
+**Decision — design it now, build it later, in two phases.** Yes, incremental checking is
+the architecturally-correct answer for scale, but (a) today's real Brood projects are tiny
+— the only driver is a synthetic benchmark — and (b) cache invalidation under Brood's
+late-binding model is the genuinely hard part. So ADR-011 applies: **write the design,
+defer the build** until a real large codebase justifies it. The design splits by
+invalidation shape:
+
+- **Phase 1 — the whole-project CST passes** (`unused-private`, `duplicate-defs`) are
+  **pure functions of file text**. Cache each file's extract keyed by `hash(content)`;
+  on recheck reuse the extract for unchanged files (skip the parse — the dominant cost)
+  and re-aggregate the global counts every run (cheap, no parse). **Sound and complete
+  with content hashing alone — no dependency graph** — because the always-recomputed
+  aggregate *is* the cross-file coupling. Captures the parse-bound ~40 % of check time.
+- **Phase 2 — the per-file type check** (`check-file`) resolves cross-module names through
+  the loaded image, so content hashing is insufficient. Instrument `check-file` to record
+  a **dependency fingerprint** (the external globals it resolved + their observed
+  arity/sig/existence); key the cache on `hash(content) + hash(deps)`; maintain a
+  reverse-dependency map to invalidate dependents when a signature changes. One-shot (no
+  fixpoint: checking is read-only over the image). This is where the complexity lives —
+  deferred behind Phase 1.
+
+**Late-binding interaction.** The cache is a static on-disk artifact for the `nest`
+toolchain over source *files*; runtime `def` hot-reload never touches on-disk files, so
+it's out of scope. Source-level late binding is captured by Phase 2's fingerprint. And the
+**advisory contract** (types.md #5 — the checker never rejects a runnable program) is a
+correctness safety margin unavailable to a real compiler: a stale-cache *miss* can only
+drop an advisory warning until the next edit, never break a build — so Phase 2 may
+over-invalidate freely.
+
+**Cache staleness stamp** (mirrors [image-cache-plan.md](image-cache-plan.md) /
+`release.rs::runtime_cache_path`): the whole cache is invalidated on a mismatch of
+`BROOD_GIT_SHA` (the checker's logic changes between builds) + a format-version int + a
+hash of the checker-relevant prelude/std; stored under `$XDG_CACHE_HOME/brood/check/…`,
+never in the project tree.
+
+**Relation to the sibling image cache.** [image-cache-plan.md](image-cache-plan.md) caches
+the *evaluated global image* to skip **eval** on warm startup — a different axis (program
+startup) from this (advisory checking). Complementary; neither substitutes for the other.
+Brood closures are AST-as-data, so neither needs a bytecode format invented.
+
+**Alternatives rejected:** more parallelism / a faster checker (constant-factor only,
+never stops re-doing unchanged work); a whole-project cache keyed on an all-files hash
+(any single edit busts it); a per-file `check-files` cache without dependency tracking
+(unsound under cross-module resolution — the reason Phase 1 is restricted to the pure
+passes).

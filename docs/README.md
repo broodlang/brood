@@ -77,6 +77,7 @@ server, and the web frontend come later (see the roadmap).
 |---|---|
 | [testing.md](testing.md) | The **test framework** (`std/tool/test.blsp`): ExUnit-style `describe`/`test`, assertions, parallel-by-default with `:serial`/`:isolated`, share-safe tallying (ADR-015). |
 | [tooling.md](tooling.md) | The `nest` project tool overview: `new`/`test`/`check`/`run`/`doc`/`format`/`repl`/`observe` and friends (ADR-028). |
+| [incremental-check.md](incremental-check.md) | Design (not built) for an **incremental `nest check` cache** — O(changed + dependents) instead of O(all files); two phases by invalidation shape (ADR-119). |
 | [lsp.md](lsp.md) | The **language server** (`brood-lsp`): Tier 0–2 features — completion, hover, goto/refs/rename, semantic tokens, code actions (ADR-025). |
 | [mcp.md](mcp.md) | The **MCP server** (`nest mcp`): a per-project Model Context Protocol surface over the live image (ADR-036). |
 | [packages.md](packages.md) | The **package manager**: Git URLs as identity, project-local `_deps/`, `project.lock.blsp`, no central registry, the supply-chain argument (ADR-037). |

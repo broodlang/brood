@@ -1344,3 +1344,51 @@ closure's arity — a worker died with a bogus "fn: expected 0 arguments, got 1"
 test runner does (ship only *data* — a keyword op — and resolve the operation
 through the global table in the worker, never a shipped closure). The underlying
 closure-deep-copy-on-spawn race is filed as KI-9 for a kernel fix.
+
+Two follow-on refinements shipped (95eac10): count only `--`-containing symbols in
+the unused-private scan (the only names its verdict looks up — shrinks the shipped/
+merged map from O(all symbols) to O(private refs); validated byte-identical vs a
+full-symbol oracle), and walk the file tree once in `check-project` instead of twice.
+Profiling the *real* (test-loaded, 0-warning) `nest check` then placed the residual
+100K cost at ~0.8s overhead + ~4.5s unused-private (CST-parse-bound) + ~7s check-files
+(genuine per-file type-checking) — both heavy phases already parallel, no serial
+hotspot left. The remaining lever is not a faster from-scratch pass but *not redoing
+unchanged work* → designed **ADR-119** (incremental check cache, `incremental-check.md`):
+Phase 1 caches the pure CST passes by content hash (sound, no dep graph, ~40%); Phase 2
+adds a dependency fingerprint + reverse-dep map for `check-files`. **Design only, not
+built** — deferred per ADR-011 until a concrete large real project justifies it (the
+only current driver is the synthetic 100K–1M stress projects). The advisory contract
+(never rejects a runnable program) makes a stale-cache miss harmless, so Phase 2 may
+over-invalidate freely — a safety margin a real compiler lacks.
+
+## 2026-07-05 — Match exhaustiveness over literal-enum types (ADR-118)
+
+Wired keyword-literal (ADR-105) and int-literal (ADR-117) types into their
+motivating use case: `match` exhaustiveness. Initial scoping assumed this needed
+a new `match`-clause parser (the checker has no correct view of `match`'s real
+clause shape — `gradual_of_compound` assumes a wrong flat layout, dead code for
+genuine `match` forms, left as-is), estimated at 2-3 slices. A much smaller design
+was found by reading the actual compiler: `match` always compiles to a
+`let`+`if`+`%eq` chain whose failure is `(throw [:match-error 'context target
+'patterns])` — and that throw is *syntactically absent* whenever a catch-all
+clause exists (an irrefutable clause skips straight to its body), and the full
+list of tried patterns is quoted data sitting right there in the throw's 4th
+vector slot. Combined with confirming that a `(%eq m lit)` guard's else-branch is
+`then_only` (doesn't narrow `m`'s type — `guard_assertion`), the scrutinee's ctx
+type at the throw is exactly its original declared type, unchanged. So the whole
+feature is one new helper (`match_exhaustiveness_gap`, `check/guards.rs`) plus one
+check in the existing generic `throw`-call path (`check/walk.rs`) — no new parser,
+no new pass, no `Ty` change, and critically no reopening of the ADR-117
+`of_value`/wording-churn question (this never touches literal-in-code inference,
+only the declared scrutinee type).
+
+`case` doesn't exist in Brood (confirmed vestigial in `eval/mod.rs`'s own error
+message), so scope is `match`-only, as flagged before starting. Conservative by
+construction: a non-literal pattern among those tried, or a mixed-kind/impure
+scrutinee type, bails to no-warning rather than half-reasoning.
+
+Verified with 6 new tests (missing keyword/int arm flagged, full coverage silent,
+catch-all silent, destructuring-mixed silent, non-literal-enum-type silent) plus a
+real 4-case demo through the `brood` CLI producing exactly 2 expected warnings, and
+a `nest check` corpus diff (hook disabled vs. enabled) — byte-identical, zero new
+warnings. 195/195 types tests green (up from 189).
