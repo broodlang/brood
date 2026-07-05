@@ -1447,3 +1447,64 @@ investigation above was fully resolved before shipping.
 
 214/214 types tests green (up from 195 at the start of this round). Full corpus
 `nest check` diff clean apart from the one documented true positive.
+
+## 2026-07-05 — Revised direction: pursue full Elixir-parity soundness (ADR-123, design only)
+
+Course-corrected the type-system roadmap: the "map of distance to Elixir" gap
+list (`docs/roadmap.md`) was framed as "reference, not a target" and two items
+— pervasive static soundness/gating, and wiring `dynamic()` into actual gating
+— were marked ✋ deliberately-not-pursuing. That framing was written by a prior
+session, not requested; the actual direction is to burn the whole gap list
+down, soundness included.
+
+The apparent blocker was that gating on global `def`/`defn` types looks
+incompatible with Erlang-style hot reload (ADR-013 — a `def` rebinds a global
+unconditionally, visible to every process sharing the runtime on its next
+lookup). Traced the compiler/JIT to check the actual constraint before
+designing around it: runtime type safety is **already fully independent of the
+static checker** — every operation does a real runtime tag check regardless of
+what was statically proved, confirmed by `types/check.rs` and
+`eval/compile.rs` having zero data flow between them. So a reload that breaks
+a prior proof can't crash anything; worst case is a catchable runtime type
+error, same as any dynamic-typing mismatch today.
+
+That unlocks the design in **ADR-123** / [`type-soundness-reload.md`](type-soundness-reload.md):
+treat soundness as re-asserted per `def` rather than proven once forever —
+globals get a real trackable type, the checker records which call sites depend
+on it, and every reload triggers a targeted re-check of those dependents,
+surfacing fresh warnings without ever blocking the reload. A hard reject stays
+possible only for batch/CI tooling (a future `nest check --strict`), never the
+live image. Design only — no runtime code yet; the dependency index, the
+reload hook, and precise invalidation are the remaining work, deferred per
+ADR-011 until picked up. `docs/roadmap.md`'s framing, the gap-list markers, and
+the `CLAUDE.md`/`docs/types.md` "checking never rejects a runnable program"
+invariant are all flagged as due for revision in lockstep with whichever slice
+of this actually ships.
+
+## 2026-07-05 — ADR-123 slice 1: cross-module value-type sigs (ADR-124)
+
+Picked up the first concrete piece of ADR-123's design: a per-global type is
+only useful for a future dependency index if it's actually *visible*
+wherever the global is referenced, not just within the file that declared it.
+Arrow sigs already had this (`sigs::declared_heap_sig`, reading
+`%register-sig`'s heap-wide store keyed by the module-qualified name); plain
+value-type sigs (`(sig x T)`, non-arrow) didn't — `walk::gradual_of`'s global-
+reference branch only consulted the file-local `Ctx::declared_value_ty`,
+scanned from the current file's own un-expanded forms.
+
+Added `sigs::declared_heap_value_ty` (same heap store `declared_heap_sig`
+reads, non-arrow branch instead of `.as_arrow()`) and wired it as a fallback
+in two places: `gradual_of`'s reference branch, and — found while writing the
+cross-module test, since proving an actual assignment warning needs both
+sides visible — `check_def`'s own "does this def's value match its declared
+type" gate, which had the identical file-local-only gap for the *name being
+defined*, not just the value referenced.
+
+New test mirrors the existing arrow cross-module test's technique (real
+`Interp`, `eval_str` the declarations so `%register-sig` really populates the
+heap, then check a bare form against an empty `Ctx`). Full corpus `nest check`
+diff clean (91 warnings before and after, byte-identical). 216/216 types tests
+green (up from 215).
+
+This is a precondition for ADR-123's dependency index, not the index itself —
+the reload hook and dependency tracking are still fully undesigned-in-code.

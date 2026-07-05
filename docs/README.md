@@ -48,6 +48,7 @@ server, and the web frontend come later (see the roadmap).
 | [type-bool-string-literals.md](type-bool-string-literals.md) | Bool and string literal types — `true`/`"GET"` as types (ADR-120). |
 | [type-match-exhaustiveness.md](type-match-exhaustiveness.md) | `match` exhaustiveness over literal-enum scrutinee types (ADR-118/121). |
 | [type-match-redundancy.md](type-match-redundancy.md) | `match`/`if` clause redundancy — flagging a duplicate literal test as unreachable (ADR-122). |
+| [type-soundness-reload.md](type-soundness-reload.md) | Design (not built) for **whole-program soundness under hot reload** — globals get a real trackable type, re-checked per `def` against recorded dependents, never a hard reload gate (ADR-123). |
 | [parametric-result-types.md](parametric-result-types.md) | How element types flow through parametric HOFs (`map`/`filter`/`reduce`), ADR-078. |
 | [error-codes.md](error-codes.md) | The `E00xx` error-code catalogue and the "errors that teach" philosophy. |
 | [interop.md](interop.md) | Foreign-function / native-extension design: WASM components built on fetch, wrapped in Brood (ADR-071, proposed). |

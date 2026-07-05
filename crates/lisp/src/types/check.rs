@@ -2655,6 +2655,48 @@ mod tests {
     }
 
     #[test]
+    fn value_sig_resolves_cross_module_via_the_heap_store() {
+        // Same technique as `overload_resolves_cross_module_via_the_heap_store`,
+        // for the *value-type* `(sig name T)` declaration instead of an arrow:
+        // `file_warnings`/`warnings` never evaluate, so they only ever exercise
+        // the per-file `Ctx` path (`ctx.declared_value_ty`), never the heap-wide
+        // `declared_sigs` store that makes a plain value sig visible cross-module
+        // (`sigs::declared_heap_value_ty`). Simulate "module A declares `label`
+        // and `count`; module B (fresh `Ctx`, no file-local knowledge of either)
+        // assigns `count`'s value from `label`" by actually *evaluating* the
+        // declarations first, then checking the `(def …)` form against an empty
+        // `Ctx` — module B's starting point.
+        let mut interp = crate::Interp::new();
+        interp
+            .eval_str(r#"(sig label string) (def label "x") (sig count int)"#)
+            .expect("module A loads cleanly");
+
+        let form =
+            reader::read_one(&mut interp.heap, "(def count label)").expect("parse");
+        let w = check_form(&interp.heap, form);
+        assert!(
+            w.iter()
+                .any(|m| m.contains("count: value of type string") && m.contains("int")),
+            "a string-typed global (declared cross-module) assigned to an \
+             int-declared name (declared cross-module) must warn: {w:?}"
+        );
+
+        // And the consistent case: assigning a `string`-declared name from
+        // `label` must stay silent, proving this isn't just an always-warn bug.
+        interp
+            .eval_str("(sig other string)")
+            .expect("module A extension loads cleanly");
+        let form2 =
+            reader::read_one(&mut interp.heap, "(def other label)").expect("parse");
+        let w2 = check_form(&interp.heap, form2);
+        assert!(
+            w2.iter().all(|m| !m.contains("not assignable")),
+            "a string-typed global assigned to a string-declared name must not \
+             warn: {w2:?}"
+        );
+    }
+
+    #[test]
     fn declared_return_type_mismatch_is_flagged() {
         // Body yields an int (the integer-closed `+` rule: `int + int = int`),
         // declared return is string → disjoint → flagged.

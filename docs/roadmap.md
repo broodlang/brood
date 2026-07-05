@@ -701,24 +701,43 @@ Erlang's late binding for globals and module boundaries.** This is the right spl
 a self-editing editor: the editor can tell you about a bad `let` binding locally, but
 must let the live image evolve freely.
 
-#### Map of distance to Elixir (reference, not a target)
+#### Map of distance to Elixir (the active backlog)
 
 Brood's types follow the **Elixir set-theoretic model** (ADR-023/024/078/082) and
 share its *foundation*: types as sets of values, semantic subtyping, union/
 intersection/negation, function arrows, sequence element types, and occurrence
-typing. Elixir's checker is *sound, gating, whole-program*; Brood's targets
-**local gating + global advisory**, with soundness available **on opt-in** via
-`(sig! …)` runtime contracts (the strong arrow done with a runtime check, not
-static casts). This list is a **map of the distance to Elixir**, kept for
-reference — **not a backlog we intend to burn down**. Each item is additive
-and gated on a real consumer (ADR-011); a few we are consciously **not** pursuing.
+typing. Elixir's checker is *sound, gating, whole-program* — **that is the
+target for Brood too**, including gating on global `def`/`defn` types, not just
+locally-scoped bindings. This list tracks the remaining distance to that goal
+and is the thing we're burning down, not a reference kept at arm's length.
+
+**Full soundness vs. hot reload — resolved on paper (ADR-123, design only, not
+built):** gating globals means a `def` that changes a function's type can
+break a caller the checker previously verified sound. Traced the compiler/JIT
+first: runtime type safety is already fully independent of the static checker
+(every op does a real runtime tag check regardless of what was proved), so a
+broken assumption can never crash or corrupt anything — worst case a clean,
+catchable runtime type error, same as any dynamic-typing mismatch today. That
+means soundness can be **re-asserted per reload rather than proven once
+forever**: globals get a real trackable current type, the checker records
+which call sites depend on it, and every `def` triggers a targeted re-check of
+those dependents — surfacing fresh warnings for anything that broke, but never
+blocking the reload itself (ADR-013's "code always wins" stays true). A hard
+reject only ever exists for batch/CI tooling (`nest check --strict` treating
+warnings as a failing exit code), never the live image. Full design + the
+still-open implementation questions (the dependency index, the reload hook,
+invalidation precision) in [`type-soundness-reload.md`](type-soundness-reload.md).
+This also means the "checking never rejects a runnable program" / redefinable-
+globals-as-`dynamic()` invariant stated in `CLAUDE.md` (and compatibility
+contract point #5 in `docs/types.md`) is itself a target for revision — update
+those in lockstep with whichever slice of ADR-123 actually ships, not before.
 
 What we already have on par: set-theoretic core, semantic subtyping, arrows +
 element types (ADR-078), occurrence typing through `if`/`cond`/`match` guards,
 opt-in `(sig …)`/`(sig! …)` annotations + contracts (ADR-082), a sig-gated
 dead-clause lint, and soundness-oracle tests.
 
-Gaps to parity (⬜ = not started; ✋ = deliberately not pursuing):
+Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks starting):
 
 - ✅ **Intersection of arrows** — fully shipped (ADR-116): input-dependent
   return types for overloaded functions (`(and (int->int) (bool->bool))`) —
@@ -771,12 +790,20 @@ Gaps to parity (⬜ = not started; ✋ = deliberately not pursuing):
   inference across a function.
 - ⬜ **Narrowing through non-variable expressions** (`is_integer(p.age)` refining
   `p`), and richer `(sig …)` type-exprs (rest/optional params, nested generics).
-- ✋ **Pervasive static soundness / gating** — Elixir rejects ill-typed programs;
-  Brood **won't** (it would fight hot reload + the never-gate principle). Brood's
-  soundness is opt-in and runtime-backed (`sig!`), not static.
-- ✋ **Wiring `dynamic()` / full gradual consistency into the checker** — kept as
-  a foundation (`GradualTy`); only wire it in if a real gradual-*assignment*
-  consumer appears. The advisory disjointness pass doesn't need it.
+- 🎯 **Pervasive static soundness / gating** — the target: Elixir rejects
+  ill-typed programs and Brood should too, including gating on global
+  `def`/`defn` types. Design resolved (ADR-123,
+  [`type-soundness-reload.md`](type-soundness-reload.md)): re-check on every
+  `def` against recorded dependents rather than a hard reload gate. **First
+  slice shipped (ADR-124):** declared value-type sigs (`(sig x T)`) are now
+  visible cross-module via the heap-wide store, closing the gap that already
+  existed for arrow sigs — a precondition for the dependency index, not the
+  index itself. Still not built: the reverse-dependency index, the `def`-time
+  reload hook, and precise invalidation.
+- 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** — the
+  `GradualTy` foundation already exists; this is the remaining work to wire it
+  into actual gating decisions (not just advisory assignment checks), which
+  full soundness on globals will require.
 - ✅ **`BROOD_CONTRACTS=1`** — shipped: enforces *every* `(sig …)` at run time the
   same way `sig!` does, plus element-level `(list E)` / `(vector E)` contract
   checks (`tests/contract_test.blsp`). See [`type-annotations.md`](type-annotations.md).

@@ -23,7 +23,9 @@ use super::guards::{
     expr_ty, find_redundant_clause, guard_assertion, is_syntactic_keyword, literal_eq_test_raw,
     match_exhaustiveness_gap, render_literal_pattern,
 };
-use super::sigs::{arity_of, arity_str, curated_sig, is_globally_bound, sig_of};
+use super::sigs::{
+    arity_of, arity_str, curated_sig, declared_heap_value_ty, is_globally_bound, sig_of,
+};
 
 /// `symbol_name(s)` is a `String` allocation; we only need the spelling on
 /// the rare *error* paths (unbound / arity / type-disjoint). Wrap as a
@@ -896,7 +898,15 @@ fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
         }
         // Otherwise a (redefinable) global / file-global: dynamic, bounded by its
         // own declared value type when it has one — the bounded-dynamic case.
-        return match ctx.declared_value_ty(s) {
+        // The file-local ctx (a `(sig …)` in *this* file's un-expanded forms)
+        // wins; the heap-wide store (`declared_heap_value_ty`) covers a
+        // same-module reference that got qualified to `mod/name` during
+        // expansion, or a genuine cross-module reference — same fix
+        // `declared_heap_sig` already applies for arrows.
+        return match ctx
+            .declared_value_ty(s)
+            .or_else(|| declared_heap_value_ty(heap, s))
+        {
             Some(t) => GradualTy::dynamic_within(t),
             None => GradualTy::dynamic(),
         };
@@ -1113,7 +1123,10 @@ fn check_def(
         // unknown) defers; a value whose type is provably incompatible with `T`
         // is flagged. Sound: `consistent_with` only rejects a provable mismatch
         // (`bound ∩ T = ⊥`, or a precise literal `⊄ T`), never a widened guess.
-        if let Some(t) = ctx.declared_value_ty(name) {
+        let declared_value_ty = ctx
+            .declared_value_ty(name)
+            .or_else(|| declared_heap_value_ty(heap, name));
+        if let Some(t) = declared_value_ty {
             let g = gradual_of(heap, value_form, ctx);
             if !g.consistent_with(t.clone()) {
                 out.push((

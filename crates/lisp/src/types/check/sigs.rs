@@ -363,6 +363,27 @@ pub(super) fn declared_heap_overload(heap: &Heap, sym: Symbol) -> Option<Vec<Sig
     annot::parse_type(heap, type_value)?.overload_sigs().cloned()
 }
 
+/// The **value-type** counterpart of [`declared_heap_sig`] — a non-arrow
+/// `(sig name T)` declaration read from the heap-wide store instead of the
+/// file-local `Ctx::declared_value_ty` (`walk.rs`'s `parse_value_sig_decl`
+/// only scans the *current file's* un-expanded forms, so it misses a
+/// same-module reference that got qualified to `mod/name` during expansion,
+/// and any genuinely cross-module reference). `%register-sig` already records
+/// *every* `(sig …)` — arrow or not — under the qualified name, so this reads
+/// the same store [`declared_heap_sig`] does; the difference is which shape
+/// of `Ty` it keeps (a plain value type, not an arrow — mirrors how
+/// [`parse_value_sig_decl`](super::annot::parse_value_sig_decl) is
+/// `parse_sig_decl`'s non-arrow counterpart). `None` for an arrow declaration
+/// (that's `declared_heap_sig`'s) or no declaration at all.
+pub(super) fn declared_heap_value_ty(heap: &Heap, sym: Symbol) -> Option<Ty> {
+    let type_value = heap.declared_sig_value(sym)?;
+    let ty = annot::parse_type(heap, type_value)?;
+    if ty.as_arrow().is_some() {
+        return None;
+    }
+    Some(ty)
+}
+
 /// The signature for `sym`, from any of the sources (user-declared → primitive →
 /// curated → inferred). A user `(sig …)` declaration is **authoritative** — read
 /// first so it overrides the body-inferred sig (e.g. a `number`-inferring body the

@@ -16,7 +16,9 @@ focused on current design — their full text (with retrospectives) lives in
 *(superseded by the tracing/copying GC)*, ADR-035 *(superseded/disabled)*,
 ADR-039 *(reverted → ADR-044)*, ADR-057 *(rejected as scoped)*. They're still
 listed (italicised) in the index below so the numbering stays complete.
-**Still proposed, not built:** ADR-071 *(WASM extensions)*.
+**Still proposed, not built:** ADR-071 *(WASM extensions)*, ADR-119
+*(incremental `nest check` cache)*, ADR-123 *(whole-program soundness under
+hot reload)*.
 
 | ADR | Title |
 |----:|-------|
@@ -142,6 +144,8 @@ listed (italicised) in the index below so the numbering stays complete.
 | 120 | Bool and string literal types |
 | 121 | Match exhaustiveness generalized to mixed-kind literal enums |
 | 122 | Match redundancy / unreachable-clause detection |
+| 123 | Whole-program soundness under hot reload — designed, not built |
+| 124 | Cross-module visibility for declared value-type sigs (ADR-123 slice 1) |
 
 ---
 
@@ -7490,3 +7494,118 @@ warranted).
 function every `if` in every program passes through — verified with extra rigor:
 full baseline stayed green after wiring the hook in, and the corpus diff
 surfaced exactly the one true-positive finding above and nothing else.
+
+## ADR-123 — Whole-program soundness under hot reload: designed, not built
+
+**Status:** proposed (design only), 2026-07-05. Full design in
+[type-soundness-reload.md](type-soundness-reload.md). No runtime code — recorded
+so the reload-conflict resolution is on paper before implementation starts, per
+ADR-011 (gated on this being picked up as the next slice of type-system work).
+
+**Context.** `docs/roadmap.md`'s Elixir-parity gap list previously marked
+*pervasive static soundness/gating* as something Brood deliberately won't
+pursue (✋), reasoning that gating on global `def`/`defn` types must conflict
+with Erlang-style hot reload (ADR-013: a `def` rebinds a global unconditionally
+at runtime, visible to every process sharing that runtime's code region on its
+next lookup). That framing is revised: whole-program soundness, including
+globals, is now the target, not a deliberately-skipped item.
+
+**The fact that makes this tractable.** Traced the compiler/JIT to confirm:
+runtime type safety in Brood is **already fully independent of the static
+checker**. Every `Value` carries a runtime `Tag`; every operation — arithmetic,
+calls, even the JIT's unboxed fast paths — does a real runtime tag check
+regardless of what the checker proved (`crates/lisp/src/lib.rs` labels `types`
+"the advisory type lattice + checker — nothing gates on it"; `types/check.rs`
+and `eval/compile.rs` are fully separate pipelines over the same AST, with no
+data flow from proved `Ty`s into codegen). So a reload that breaks a prior
+static proof cannot crash or corrupt anything — worst case is a clean,
+catchable runtime type error at the point of actual misuse, the same class of
+error Brood already has for any dynamic-typing mismatch. Soundness here is a
+claim about the checker's guarantee staying valid, not a memory-safety
+property — which means we're free to choose *when*/*how hard* to enforce it.
+
+**Decision.** Treat soundness as continuously re-asserted against the image's
+*current* state, not proven once forever: give globals a real, trackable
+current type (seeded from curated/inferred/`(sig …)` sources, replacing the
+permanent `dynamic()`); have the checker record a dependency edge whenever a
+call site is gated on a global's type; on every `def` that rebinds a global,
+run a targeted re-check of the new body plus every recorded dependent, and
+surface a fresh advisory warning for any assumption that no longer holds. The
+reload always still happens — this never blocks `def`, preserving ADR-013 and
+the live-image premise. A genuine hard gate only exists for **batch/CI
+tooling** (`nest check`/`nest test`, a future `--strict` switch treating any
+warning — including these — as a failing exit code), never for the
+interactive/live image. `(sig! …)` remains the one opt-in hard runtime gate
+inside a running image.
+
+**Why not a hard reject-on-reload.** Blocking `def` when it breaks a caller's
+prior proof fights the project's reason to exist — routine, deliberately
+inconsistent intermediate states while live-editing. There's also no clean
+implementation point: the shared-code-region model (ADR-013) would need to
+know every live caller across every process sharing the runtime and decide the
+fate of in-flight calls, which the append-only, no-rollback region isn't built
+for.
+
+**What's left before this can ship** (deferred, on paper only):
+per-global current-type store; the reverse-dependency index (shares its
+dependency-fingerprint mechanism with ADR-119's Phase 2 cache — build one,
+get both); the `def`-time reload hook (must stay cheap on a hot loop that
+`def`s internally, likely gated to attached-checker/LSP sessions only);
+precise `is_subtype`-based invalidation that respects refinements, not just
+base tags; and a decision on where the fresh warnings surface (LSP push,
+`nest run --watch`, REPL message on `def` — probably all three off one event).
+
+**Alternatives rejected:** hard-reject the reload (fights the live-image
+premise, no clean implementation point); restrict reloads to widen-only
+changes to keep prior proofs permanently valid (constrains real bugfixes more
+than the cost it avoids, since nothing crashes either way per the load-bearing
+fact above); leave globals `dynamic()` forever (the status quo being revised).
+
+## ADR-124 — Cross-module visibility for declared value-type sigs
+
+**Status:** accepted; **shipped 2026-07-05.** The first concrete slice of
+ADR-123's "per-global current-type store": before a dependency index or a
+reload hook can mean anything, a global's declared type has to actually be
+*visible* wherever it's referenced, not just within the file that declared it.
+
+**Context.** Arrow signatures (`(sig f (int -> int))`) already had this:
+`%register-sig` stores every `(sig …)` under the module-qualified symbol
+(the same key `def` produces), and `sigs::declared_heap_sig` reads it back —
+so a call to `f` resolves its declared arrow whether `f` is called
+intra-module (post-qualification) or cross-module. **Value-type sigs**
+(`(sig x T)`, the non-arrow case the gradual-assignment check consumes) had no
+such counterpart: `walk::gradual_of`'s global-reference branch and
+`walk::check_def`'s assignment check both only consulted `Ctx::declared_value_ty`
+— populated purely by scanning the *current file's own* un-expanded forms
+(`check.rs`'s Pass 2.5). A reference to a value-sig'd global from another
+module, or even a same-module reference that got qualified to `mod/name`
+during expansion, fell through to pure `dynamic()` and lost the bound.
+
+**Decision.** Added `sigs::declared_heap_value_ty` — reads the same
+`heap.declared_sig_value` store `declared_heap_sig` does, but keeps the
+non-arrow branch of the parsed type instead of `.as_arrow()` (mirrors how
+`annot::parse_value_sig_decl` is `parse_sig_decl`'s non-arrow counterpart).
+Wired it as a fallback in both places that previously only checked the
+file-local ctx: `gradual_of`'s bare-global-reference branch, and
+`check_def`'s "does this def's value match its declared type" gate (the
+second one hadn't been in scope for ADR-123's original write-up — found while
+building the test, since a cross-module test needs *both* the reference side
+and the definition side visible to produce a real assignment warning end to
+end).
+
+**Soundness:** a new cross-module test mirroring
+`overload_resolves_cross_module_via_the_heap_store`'s technique (a real
+`Interp`, `eval_str` the declarations so `%register-sig` actually populates
+the heap, then check a bare `(def …)` form against an empty `Ctx` — simulating
+a second module with zero file-local knowledge): both the mismatch case
+(`count: value of type string ... not assignable ... int`) and the consistent
+case (assigning a string-declared name from another string global stays
+silent) pass. Full `nest check` corpus diff against `std/` + `tests/` — byte-
+identical, zero new warnings (91 before, 91 after). 216/216 types tests green.
+
+**Relation to ADR-123.** This makes global value-types real and
+cross-module-visible, which the dependency index (recording "this call site
+relied on global G : T") needs as a precondition — but it's not the
+dependency index itself, and it doesn't touch `def`'s reload path at all. The
+remaining ADR-123 work (the reverse-dependency index, the `def`-time re-check
+hook) is unaffected and still fully undesigned-in-code.
