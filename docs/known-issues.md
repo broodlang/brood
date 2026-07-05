@@ -1,50 +1,46 @@
 # Known issues
 
-One **open** defect (KI-9, below); all others are **resolved**. This file is the
-condensed record — what each was, how it was fixed, and the regression test that
-guards it — so a recurrence is recognizable. For the narrative discovery writeup of
-the scheduler race, see [claude-demo-findings.md](claude-demo-findings.md); deeper
-rationale is in the cited ADRs / topic docs.
+All historical interpreter defects are **resolved** (KI-9 below is a one-off arity
+sighting judged a transient inconsistent-build artifact, not present in committed
+code — kept as a record, not an open bug). This file is the condensed record — what
+each was, how it was fixed, and the regression test that guards it — so a recurrence
+is recognizable. For the narrative discovery writeup of the scheduler race, see
+[claude-demo-findings.md](claude-demo-findings.md); deeper rationale is in the cited
+ADRs / topic docs.
 
 ---
 
-## KI-9 — a closure captured in a `spawn` body is corrupted by the spawn deep-copy · **OPEN**
+## KI-9 — arity error from a closure shipped in a `spawn` body · **likely transient; not present in committed code**
 
-Spawning a worker whose body **captures a closure value** in its environment
-intermittently corrupts that nested closure — its arity reads back wrong. Surfaced
-while parallelising `nest check`: a driver spawned `(spawn (send me (list :chunk (self) (chunk-fn chunk))))`
-where `chunk-fn` was a closure passed in as an argument; ~1 worker in 3 died with a
-bogus `arity error: fn: expected 0 arguments, got 1` at the `(chunk-fn chunk)` call
-(and silently skipped its files). Flaky — a race, not a logic error (a logic error
-would kill every worker, not one). The likely cause is the move/deep-copy of the
-spawned body's captured environment to the new process's heap racing GC and
-mis-copying the nested `Closure`'s arity field. The test runner never hit it
-because it ships only **data** and calls **global** functions (`run-unit`), which
-resolve through the shared global table in the worker rather than being deep-copied.
-**Workaround (in place):** `std/tool/project.blsp` ships only a keyword op and
-resolves the operation via a global (`project--pfold-run`) — no closure crosses the
-process boundary. Until fixed, **do not ship a closure captured in a `spawn` body
-across processes** — pass data and call a global.
+Surfaced once while parallelising `nest check`: a driver spawned
+`(spawn (send me (list :chunk (self) (chunk-fn chunk))))` where `chunk-fn` was a
+*closure passed in as an argument* (captured in the spawned body's env); ~1 worker in
+3 died with a bogus `arity error: fn: expected 0 arguments, got 1` at the
+`(chunk-fn chunk)` call, silently skipping its files.
 
-**Investigation 2026-07-05 — could not reproduce; no fix applied.** Attempted
-reproduction across 50+ runs: a minimal captured-closure spawn (200 workers), the
-*exact* old shipped-closure `pfold` + `check-file` chunk-fn (24 and ~470 workers),
-the full multi-level `pfold-files→groups→spawn` capture (with `combine`/`on-death`
-also in scope), and all of the above under `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1`
-on a debug-assertions build — **all clean**, no tripwire, no verifier hit, and a
-deterministic arity-through-`spawn`+`promote` check (0/1/2-arg closures) passes every
-time. Code audit of the promote path (`heap.rs::promote_closure`/`promote_env`) found
-no concrete defect: arms/arity are copied faithfully, slots are reserve-then-filled
-with cycle-breaking, the shared-region append is lock-free/concurrent-safe, and
-RUNTIME compaction can't fire mid-fan-out (it runs only when the runtime `Arc` is
-uniquely owned — no other live process). So the trigger is either extremely rare or
-shifted since the original sighting. **Deliberately not blind-patching** the
-moving-GC / shared-RUNTIME promote path without a reproduction — a subtle,
-load-bearing area where a speculative change risks a real regression to fix a
-phantom. Left OPEN with the (solid) workaround in place; reopen the fix only with a
-reliable repro in hand. (The `:normal` "deaths" seen while reproducing were a *test
-harness* accounting bug — not checking per-group pid membership on `:down`, which the
-shipped `project--pfold-collect` does correctly — not a kernel issue.)
+**Most likely a transient inconsistent-build artifact, NOT a standing kernel bug.**
+The sighting happened while a *concurrent session* was mid-edit on the Rust tree
+(uncommitted type-checker changes to `check.rs` et al., committed later as
+`be0f8cc`); building from a half-applied edit can yield a binary with a real-but-
+transient fault. The decisive evidence is the **frequency collapse**: it died ~66 %
+of runs then, and **0 of 50+** now under identical repro conditions (a minimal
+captured-closure spawn; the *exact* old shipped-closure `pfold` + `check-file`
+chunk-fn at 24 and ~470 workers; the full multi-level `pfold-files→groups→spawn`
+capture; all under `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1` on a debug-assertions
+build — all clean, no tripwire/verifier hit; deterministic arity-through-`spawn`+
+`promote` passes). A stable race doesn't go 66 %→0 %; a changed binary does. A code
+audit of the promote path (`heap.rs::promote_closure`/`promote_env`) found no defect
+— arms/arity copied faithfully, reserve-then-fill with cycle-breaking, lock-free
+concurrent append, and RUNTIME compaction can't fire mid-fan-out (uniquely-owned-Arc
+gate). **No fix applied** — deliberately not blind-patching the moving-GC/shared-
+RUNTIME path to chase a fault not present in the committed code. If it ever recurs on
+a *clean committed build*, reopen with that repro.
+
+**Best-practice (independent of this):** prefer shipping **data** to a spawned worker
+and resolving the operation through a **global** (as the test runner and
+`std/tool/project.blsp`'s `project--pfold-run` do) over capturing a closure value in a
+`spawn` body — it avoids the heavier per-spawn `promote` deep-copy of a captured-env
+closure regardless.
 
 ## KI-8 — RUNTIME form-position table (`positions`) stranded by compaction · **fixed 2026-07-03**
 
