@@ -1751,8 +1751,8 @@ pub(crate) mod backend {
                 if !w.scroll_momentum_active {
                     continue;
                 }
-                w.scroll_velocity *= 0.93;
-                if w.scroll_velocity.abs() < 0.001 {
+                w.scroll_velocity *= 0.96;
+                if w.scroll_velocity.abs() < 0.0005 {
                     w.scroll_momentum_active = false;
                     w.scroll_velocity = 0.0;
                     continue;
