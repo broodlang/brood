@@ -250,8 +250,11 @@ pub enum MouseAction {
 /// app can bind Ctrl+wheel, Ctrl+drag, etc.). A **press** also carries a `count`
 /// (1 = single, 2 = double, 3 = triple, …) — consecutive presses of the same button
 /// in the same cell within the double-click window — appended as a trailing 7th
-/// element `[… mods count]`; for every other action `count` is 0 and omitted, so the
-/// vector stays 6 elements.
+/// element `[… mods count]`; for every other action `count` is 0 and omitted.
+/// A **scroll** also carries a `scroll_dy` — the delta in *line units* (positive =
+/// scroll-up, i.e. away from the user): 1.0 per wheel notch for `LineDelta`,
+/// `pixel_delta / cell_h` for `PixelDelta` (trackpad). Appended as trailing 7th
+/// element for scroll events. When 0.0 (non-scroll) the field is omitted.
 #[derive(Clone, Copy)]
 pub struct Mouse {
     pub action: MouseAction,
@@ -263,6 +266,8 @@ pub struct Mouse {
     pub shift: bool,
     /// Click chain length for a press (1/2/3/…); 0 for non-press actions (omitted).
     pub count: u8,
+    /// Scroll delta in line units (positive = up); 0.0 for non-scroll actions.
+    pub scroll_dy: f64,
 }
 
 #[cfg(not(feature = "gui"))]
@@ -927,10 +932,13 @@ pub(crate) mod backend {
             Message::Int(m.col as i64),
             Message::Vector(mods),
         ];
-        // A press carries its click-chain count as a trailing 7th element; other
-        // actions (count 0) stay 6-element. Mirrors `builtins::mouse_value`.
+        // A press carries its click-chain count as a trailing 7th element.
+        // A scroll carries the line-unit delta as a trailing 7th element (float).
+        // Mirrors `builtins::mouse_value`.
         if m.count > 0 {
             v.push(Message::Int(m.count as i64));
+        } else if m.scroll_dy != 0.0 {
+            v.push(Message::Float(m.scroll_dy));
         }
         Message::Vector(v)
     }
@@ -948,6 +956,7 @@ pub(crate) mod backend {
             alt: mods.alt_key(),
             shift: mods.shift_key(),
             count: 0,
+            scroll_dy: 0.0,
         }
     }
 
@@ -1532,6 +1541,7 @@ pub(crate) mod backend {
                                 alt: w.mods.alt_key(),
                                 shift: w.mods.shift_key(),
                                 count: 0,
+                                scroll_dy: 0.0,
                             }),
                         );
                         // Hover cursor: show a zone's shape (e.g. a resize cursor on
@@ -1579,6 +1589,7 @@ pub(crate) mod backend {
                                 alt: w.mods.alt_key(),
                                 shift: w.mods.shift_key(),
                                 count,
+                                scroll_dy: 0.0,
                             }),
                         );
                     }
@@ -1602,15 +1613,20 @@ pub(crate) mod backend {
                                 alt: w.mods.alt_key(),
                                 shift: w.mods.shift_key(),
                                 count: 0,
+                                scroll_dy: 0.0,
                             }),
                         );
                     }
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
-                    // Positive y scrolls up (away from the user).
+                    // Positive y scrolls up (away from the user). LineDelta is in discrete
+                    // line units; PixelDelta (trackpad) is in physical pixels — normalized
+                    // here to line units so Brood gets a consistent float in both cases.
+                    // `scroll_dy > 0` = scroll-up action; the absolute value is the magnitude.
+                    let ch = w.renderer.cell_h.max(1);
                     let dy = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y as f64,
-                        MouseScrollDelta::PixelDelta(p) => p.y,
+                        MouseScrollDelta::PixelDelta(p) => p.y / ch as f64,
                     };
                     if dy != 0.0 {
                         let action = if dy > 0.0 {
@@ -1630,6 +1646,7 @@ pub(crate) mod backend {
                                 alt: w.mods.alt_key(),
                                 shift: w.mods.shift_key(),
                                 count: 0,
+                                scroll_dy: dy.abs(),
                             }),
                         );
                     }
@@ -2745,12 +2762,19 @@ pub(crate) mod backend {
         // adds; `px_to_cell` shares them so painted and hit-tested grids coincide. The
         // `clear`/pre-clear already filled the surrounding margin with the background.
         let (ox, oy) = r.grid_origin(fb_w, fb_h);
+        // Pixel shift applied to Text/Rect/Cursor ops by a preceding ScrollOffset op.
+        // Positive = content shifted upward (scrolling down). Resets to 0 on Clear.
+        let mut scroll_dy: isize = 0;
         for op in frame {
             match op {
                 Op::Clear => {
+                    scroll_dy = 0;
                     for p in buf.iter_mut() {
                         *p = bg0;
                     }
+                }
+                Op::ScrollOffset { dy_frac } => {
+                    scroll_dy = (*dy_frac * ch as f32).round() as isize;
                 }
                 Op::Text { row, col, s, face } => {
                     let (mut fg, mut bg) =
@@ -2777,7 +2801,14 @@ pub(crate) mod backend {
                     // cells — a wide glyph (emoji, CJK) takes two.
                     let scale = face.scale.max(1) as usize;
                     let ch_s = ch * scale;
-                    let top = oy + *row as usize * ch;
+                    // Compute the effective top with scroll offset; clip to the grid origin.
+                    let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
+                    let clip_skip = (oy as isize - top_signed).max(0) as usize;
+                    if clip_skip >= ch_s {
+                        continue; // entirely above the grid origin
+                    }
+                    let visible_h = ch_s - clip_skip;
+                    let render_top = top_signed.max(oy as isize) as usize;
                     let mut cx = *col as usize;
                     let bg_packed = pack(bg);
                     for g in s.graphemes(true) {
@@ -2789,26 +2820,29 @@ pub(crate) mod backend {
                         let block_w = cells * cw * scale; // the cluster's pixel span
                         let left = ox + cx * cw;
                         if paint_bg {
-                            fill_cell(&mut buf, fb_w, fb_h, left, top, block_w, ch_s, bg_packed);
+                            fill_cell(&mut buf, fb_w, fb_h, left, render_top, block_w, visible_h, bg_packed);
                         }
                         r.draw_cluster(
                             &mut buf,
                             fb_w,
                             fb_h,
                             left,
-                            top,
+                            render_top,
                             g,
                             face.family,
                             face.bold,
                             face.italic,
                             face.scale,
                             fg,
+                            clip_skip,
                         );
                         if face.underline {
                             // a rule near the block bottom, in the text colour
                             // (scaled with the glyph so it stays proportional).
-                            let uy = top + ch_s.saturating_sub(2 * scale);
-                            fill_cell(&mut buf, fb_w, fb_h, left, uy, block_w, scale, pack(fg));
+                            let uy_signed = top_signed + ch_s as isize - 2 * scale as isize;
+                            if uy_signed >= oy as isize {
+                                fill_cell(&mut buf, fb_w, fb_h, left, uy_signed as usize, block_w, scale, pack(fg));
+                            }
                         }
                         cx += cells * scale;
                     }
@@ -2824,16 +2858,23 @@ pub(crate) mod backend {
                     // (reverse swaps in the fg). No background → nothing to paint.
                     let bg = if face.reverse { face.fg } else { face.bg };
                     if let Some(bg) = bg {
-                        fill_cell(
-                            &mut buf,
-                            fb_w,
-                            fb_h,
-                            ox + *col as usize * cw,
-                            oy + *row as usize * ch,
-                            *w as usize * cw,
-                            *h as usize * ch,
-                            pack(bg),
-                        );
+                        let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
+                        let h_px = *h as isize * ch as isize;
+                        let clip_skip = (oy as isize - top_signed).max(0);
+                        let visible_h = (h_px - clip_skip).max(0) as usize;
+                        if visible_h > 0 {
+                            let render_top = top_signed.max(oy as isize) as usize;
+                            fill_cell(
+                                &mut buf,
+                                fb_w,
+                                fb_h,
+                                ox + *col as usize * cw,
+                                render_top,
+                                *w as usize * cw,
+                                visible_h,
+                                pack(bg),
+                            );
+                        }
                     }
                 }
                 Op::FRect {
@@ -2867,16 +2908,19 @@ pub(crate) mod backend {
                     // Always one base cell — the cursor op carries no face, so it
                     // ignores `:scale`; it draws at the single base cell at (row, col),
                     // shaped by `style` (block / bar / underline).
-                    cursor_cell(
-                        &mut buf,
-                        fb_w,
-                        fb_h,
-                        ox + *col as usize * cw,
-                        oy + *row as usize * ch,
-                        cw,
-                        ch,
-                        *style,
-                    );
+                    let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
+                    if top_signed >= oy as isize {
+                        cursor_cell(
+                            &mut buf,
+                            fb_w,
+                            fb_h,
+                            ox + *col as usize * cw,
+                            top_signed as usize,
+                            cw,
+                            ch,
+                            *style,
+                        );
+                    }
                 }
                 // Not painted — a cursor zone is hover metadata, hit-tested on
                 // pointer-move in the window event handler (ADR-080).

@@ -81,6 +81,13 @@ space-fills each row in the face so the `:bg` shows. Other face attributes (`:fg
 makes it visible; a face with no background paints nothing."
   [:rect row col w h face])
 
+(defn scroll-offset (dy-frac)
+  "A render op that shifts all subsequent `text`, `rect`, and `cursor` ops upward by
+`dy-frac × cell-height` pixels — the primitive for pixel-accurate smooth scrolling.
+`dy-frac` ∈ [0, 1): 0.0 resets the offset (use before mode lines and fixed chrome).
+GUI-only — the terminal ignores it. ADR-114."
+  [:scroll-offset dy-frac])
+
 (defn frect (x y w h face &optional (opacity 1.0) (radius 0.0))
   "A **sub-cell** rounded-rectangle render op: like `rect`, but `x`/`y` (top-left) and
 `w`/`h` (size) are in **cell units as floats**, so the shape isn't snapped to the

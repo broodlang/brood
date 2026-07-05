@@ -861,6 +861,7 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     let vspans_t = value::intern("vspans");
     let cells_t = value::intern("cells");
     let cells_rgb_t = value::intern("cells-rgb");
+    let scroll_offset_t = value::intern("scroll-offset");
     let rect_t = value::intern("rect");
     let frect_t = value::intern("frect");
     let mut ops = Vec::with_capacity(parsed.len());
@@ -1050,6 +1051,18 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                 colors,
                 default,
             });
+        } else if tag == scroll_offset_t {
+            // [:scroll-offset dy-frac] — shift subsequent Text/Rect/Cursor ops upward by
+            // dy_frac × cell_h pixels; 0.0 resets. GUI-only (terminal ignores). ADR-114.
+            let num = |v: Value| -> f32 {
+                match v {
+                    Value::Int(n) => n as f32,
+                    Value::Float(f) => f as f32,
+                    _ => 0.0,
+                }
+            };
+            let dy_frac = num(arg(&parts, 1));
+            ops.push(crate::gui::Op::ScrollOffset { dy_frac });
         }
     }
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;
