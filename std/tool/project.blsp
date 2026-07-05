@@ -401,10 +401,171 @@ resolve in the advisory checker. Returns the project root."
 ;; stderr (GNU FILE:LINE:COL format), return the total count. Honors the
 ;; `BROOD_NO_CHECK=1` opt-out — the same flag the `brood` CLI respects, so
 ;; callers' "exit non-zero on warning" gating gets 0 (no print) under it.
+;; ── bounded parallel fan-out over a file list ────────────────────────────────
+;; `check-file` and the CST parse passes below are embarrassingly parallel: each
+;; only READS the shared globals / parses text — all sources are loaded first, in
+;; the caller (`project--ensure-loaded`), and none of these passes `def`s — so N
+;; worker processes can each handle a slice of the files against the *same* shared
+;; image with no races (the cross-process global visibility that backs hot reload,
+;; docs/shared-code.md). The single-threaded folds these drivers replaced left all
+;; but one core idle, so `nest check` on a large project was wall-clock-bound on a
+;; single core (a 100K-file project: ~17s in `check-files` + ~17s in the
+;; unused-private parse pass, all serial).
+;;
+;; `project--pfold-files` slices `files` into a SMALL number of big chunks —
+;; `cores * *check-oversample*` of them — and runs the chunks across the pool.
+;;
+;; Why few big chunks and not many small ones: `check-file`'s first call on a
+;; fresh heap builds the checker's per-heap caches by scanning ALL globals —
+;; `known_ns_prefixes` / `module_public_exports`, each O(globals) (heap.rs). That
+;; scan is cached (count-keyed) so a *process* pays it once, but every spawned
+;; worker has its OWN heap and so rebuilds it on its first file. With one worker
+;; per handful of files that O(globals) rebuild recurs per chunk → O(files·globals)
+;; ≈ O(files²), which swamped the parallel win entirely (a 100K project got
+;; *slower*). Sizing chunks to the core count caps the rebuild at `~cores` times
+;; total, amortised over `files/cores` files each — so the redundant setup is
+;; negligible against the per-file check.
+;;
+;; Chunks run in `*check-batch*`-sized groups (each group collected before the next
+;; spawns, so peak live worker heaps — hence memory — is bounded by one group, like
+;; the test runner's `*parallel-batch*`); each chunk's result folds into `acc` via
+;; `combine` as it reports. A crashed worker (a check-file / parse that itself
+;; throws) is folded via `on-death` instead of hanging the collector (mirrors the
+;; test runner's KI-2 `monitor` handling). A small file set runs in-process — no
+;; spawn overhead, no pool warm-up, stable (filename-sorted) output order.
+(def *check-min-parallel* 2000)  ; below this many files, check in-process
+(def *check-oversample* 2)       ; chunks per core (load-balancing headroom)
+
+;; The scheduler's worker-pool size (≈ nproc), clamped ≥1. `worker-threads` is 0
+;; until the first spawn, so warm the pool and poll briefly for the threads to spin.
+(defn project--await-pool (tries)
+  (let (n (worker-threads))
+    (if (or (> n 0) (<= tries 0))
+      (max 1 n)
+      (do (sleep 1) (project--await-pool (dec tries))))))
+(defn project--pool-size ()
+  (spawn (fn () nil))
+  (project--await-pool 50))
+
+;; Slice `coll` into ≤`n`-sized chunks, KEEPING a short trailing chunk.
+(defn project--chunk-list (n coll acc)
+  (if (empty? coll)
+    (reverse acc)
+    (project--chunk-list n (drop n coll) (cons (take n coll) acc))))
+
+;; The `(pid chunk)` worker entry for `pid`, or nil if `pid` isn't one of ours.
+(defn project--pfold-entry (pid workers)
+  (cond
+    (empty? workers) nil
+    (= (first (first workers)) pid) (first workers)
+    else (project--pfold-entry pid (rest workers))))
+
+;; The per-chunk operation, dispatched IN THE WORKER by keyword. `op` is a
+;; keyword (plain data) and `project--pfold-run` is a global — so the spawned
+;; worker body ships only data and resolves the operation through the global
+;; table, exactly like the test runner calls the global `run-unit`. It must NOT
+;; take the operation as a passed-in closure: `spawn`'s move of a body whose
+;; captured env holds a closure value deep-copies that nested closure to the new
+;; process, and that path intermittently corrupts the closure's arity (observed:
+;; a worker dying with a bogus "fn: expected 0 arguments" arity error ~1 run in 3;
+;; docs/known-issues.md). Add a case here per parallel pass.
+(defn project--pfold-run (op chunk)
+  (cond
+    (= op :check) (project--check-chunk chunk)
+    (= op :scan) (project--scan-chunk chunk)
+    else (error "project--pfold-run: unknown op " op)))
+
+;; Spawn one MONITORED worker per chunk; each runs `(project--pfold-run op chunk)`
+;; and sends `[:chunk pid value]` tagged with its own pid (so the collector can
+;; correlate a result / a death with its chunk). Returns an assoc list `(pid chunk)`.
+(defn project--pfold-spawn (chunks op me)
+  (fold (fn (acc chunk)
+          (let (pid (spawn (send me (list :chunk (self) (project--pfold-run op chunk)))))
+            (monitor pid)
+            (cons (list pid chunk) acc)))
+    nil chunks))
+
+;; Collect one group: fold each chunk value into `acc` via `combine`; a worker
+;; that DIES before reporting is folded via `(on-death acc chunk reason)`. A
+;; message from a pid not in this group, or already accounted, is ignored without
+;; touching `pending` (a stale `[:down …]` can't corrupt the count).
+(defn project--pfold-collect (pending workers reported acc combine on-death)
+  (if (= pending 0)
+    acc
+    (let (msg (receive (m m)))
+      (cond
+        (= (first msg) :chunk)
+        (let (pid (second msg) entry (project--pfold-entry pid workers))
+          (if (or (member? pid reported) (nil? entry))
+            (project--pfold-collect pending workers reported acc combine on-death)
+            (project--pfold-collect (- pending 1) workers (cons pid reported)
+              (combine acc (third msg)) combine on-death)))
+        (= (first msg) :down)
+        (let (pid (third msg) entry (project--pfold-entry pid workers))
+          (if (or (member? pid reported) (nil? entry))
+            (project--pfold-collect pending workers reported acc combine on-death)
+            (project--pfold-collect (- pending 1) workers (cons pid reported)
+              (on-death acc (second entry) (nth msg 3)) combine on-death)))
+        else (project--pfold-collect pending workers reported acc combine on-death)))))
+
+;; Run every group, one `*check-batch*`-sized batch in flight at a time.
+(defn project--pfold-groups (groups op combine on-death acc me)
+  (if (empty? groups)
+    acc
+    (let (workers (project--pfold-spawn (first groups) op me)
+          acc2 (project--pfold-collect (count workers) workers nil acc combine on-death))
+      (project--pfold-groups (rest groups) op combine on-death acc2 me))))
+
+;; Fan operation `op` (a keyword; see `project--pfold-run`) across the worker pool
+;; over `files`, folding each chunk's value into `init` via `(combine acc value)`;
+;; `(on-death acc chunk reason)` folds in a dead worker. `combine`/`on-death` run
+;; only in this (driver) process, so they may be closures — only `op` crosses to a
+;; worker, and it is data. A small file set runs in-process (no spawn, stable
+;; order); a large one is sliced into `cores * *check-oversample*` chunks.
+(defn project--pfold-files (files op combine on-death init)
+  (let (n (count files))
+    (if (< n *check-min-parallel*)
+      (combine init (project--pfold-run op files))
+      (let (cores (project--pool-size)
+            nchunks (min n (* cores *check-oversample*))
+            csize (quot (+ n nchunks -1) nchunks)          ; ceil(n / nchunks)
+            chunks (project--chunk-list csize files nil))
+        ;; Group size = `cores`: at most `cores` worker heaps live at once (bounds
+        ;; peak memory), and with `*check-oversample*` chunks per core the groups
+        ;; still keep every core fed. All cores busy, live set ≈ one core-wide wave.
+        (project--pfold-groups
+          (project--chunk-list cores chunks nil)
+          op combine on-death init (self))))))
+
+;; Internal: run `check-file` over every file, print each warning to stderr (GNU
+;; FILE:LINE:COL format), return the total count. Fanned across the worker pool
+;; (see `project--pfold-files`). Each worker PRINTS its own chunk's warnings and
+;; ships back only the integer count — NOT the warning list: a list would be
+;; deep-copied across process heaps (message passing), which on a warning-heavy
+;; project costs more than the check itself. `eprintln` writes one line per call,
+;; so lines from concurrent workers interleave only between warnings, never
+;; mid-line (like the test runner's `:trace`); warning *order* is no longer sorted
+;; by filename, which is fine for advisory GNU `FILE:LINE:COL` diagnostics. Honors
+;; the `BROOD_NO_CHECK=1` opt-out — the same flag the `brood` CLI respects, so
+;; callers' "exit non-zero on warning" gating gets 0 (no print) under it.
+;; The `:check` op (runs in a worker): check every file in `chunk`, PRINT each
+;; file's warnings, return the count. A global (not a shipped closure) so the
+;; worker resolves it through the global table — see `project--pfold-run`.
+(defn project--check-chunk (chunk)
+  (fold (fn (k f) (fold (fn (j w) (eprintln w) (+ j 1)) k (check-file f))) 0 chunk))
+
 (defn project--check-files (files)
   (if (= (getenv "BROOD_NO_CHECK") "1")
     0
-    (fold (fn (n f) (fold (fn (k w) (eprintln w) (+ k 1)) n (check-file f))) 0 files)))
+    (project--pfold-files files
+      :check
+      ;; combine (in the driver): sum the per-chunk counts
+      (fn (n c) (+ n c))
+      ;; on-death: a check-file that threw — surface it, count it as one warning
+      (fn (n chunk reason)
+        (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
+        (+ n 1))
+      0)))
 
 ;; Make sure the project is set up and all its sources are loaded — the
 ;; precondition for the checker to resolve cross-file names through the
@@ -576,49 +737,73 @@ resolve in the advisory checker. Returns the project root."
     (let (nm (str (project--node-val node))) (map-assoc acc nm (inc (map-get acc nm 0))))
     (project--walk-val (project--node-val node) acc)))
 
-;; Project-wide symbol reference counts across `files` (a name→count map).
-(defn project--all-sym-counts (files)
-  (fold (fn (acc path)
-          (fold (fn (a node) (project--node-syms--acc node a))
-            acc
-            (project--node-val (parse-source (slurp path)))))
-    {}
-    files))
+;; Merge symbol-count map `b` into `a` (name→count), summing counts. The reduce
+;; step for the parallel `:scan` workers' per-chunk partial counts. Folding a map
+;; yields its `[k v]` entries.
+(defn project--merge-counts (a b)
+  (fold (fn (m entry) (let ([k v] entry) (map-assoc m k (+ (map-get m k 0) v)))) a b))
 
-;; The `--`-private defs in `path`, each as `[bare qualified]` (qualified via the
-;; file's `defmodule` namespace, like `project--file-def-names`).
-(defn project--file-private-defs (path)
-  (let (nodes (filter (fn (c) (= (project--node-kind c) :list))
-                (project--node-val (parse-source (slurp path))))
-        ns (first (keep project--module-name nodes)))
-    (keep (fn (node)
-            (let (nm (project--def-name node))
-              (when (and (not (nil? nm)) (string-contains? (str nm) "--"))
-                [(str nm) (str (project--qualify ns nm))])))
-      nodes)))
+;; The `:scan` op (runs in a worker): parse each file in `chunk` ONCE and return
+;; `[counts privs]` — `counts` is the chunk's name→count contribution (every
+;; `:symbol` reference, via `project--node-syms--acc`) and `privs` is a list of
+;; `[path [[bare qual]...]]` (each file's `--`-private defs, qualified via its
+;; `defmodule` namespace). One parse per file replaces the old TWO whole-project
+;; passes (a symbol-count parse + a per-file private-def re-parse), each of which
+;; re-read and re-parsed every file.
+(defn project--scan-chunk (chunk)
+  (fold (fn (acc path)
+          (let ([counts privs] acc
+                root-nodes (project--node-val (parse-source (slurp path)))
+                counts2 (fold (fn (a node) (project--node-syms--acc node a)) counts root-nodes)
+                list-nodes (filter (fn (c) (= (project--node-kind c) :list)) root-nodes)
+                ns (first (keep project--module-name list-nodes))
+                fprivs (keep (fn (node)
+                               (let (nm (project--def-name node))
+                                 (when (and (not (nil? nm)) (string-contains? (str nm) "--"))
+                                   [(str nm) (str (project--qualify ns nm))])))
+                         list-nodes))
+            [counts2 (if (empty? fprivs) privs (cons [path fprivs] privs))]))
+    [{} nil]
+    chunk))
 
 ;; Warning strings for private defs unreferenced anywhere in `files`. `used` =
 ;; the bare name appears ≥2× (its own def, plus a same-module call) OR — when a
 ;; module qualifies it — the qualified `mod/name` appears at all (a cross-module /
-;; test reference). `keep` over `files` keeps the warning attributed to its file.
+;; test reference). The parse + per-file scan is fanned across the worker pool via
+;; the `:scan` op — a map-reduce: workers each parse a slice and return partial
+;; symbol counts + their files' private defs; the driver `project--merge-counts`s
+;; the counts and concatenates the private defs. The GLOBAL merged counts then
+;; decide each private def's fate (so cross-module references are seen). A scan
+;; worker that dies leaves the counts under-complete for its slice — which could
+;; only suppress a real warning or add a false one — so it is surfaced rather than
+;; dropped silently.
 (defn project--unused-private-warnings (files)
-  (let (counts (project--all-sym-counts files))
-    ;; `append-two file-warnings acc` copies only the small per-file list and SHARES the
-    ;; accumulator tail → O(total). (A plain `(append acc file-warnings)` re-copies the
-    ;; growing accumulator every file — the variadic `append` copies BOTH args — making a
-    ;; whole-project check O(files²); see docs/devlog.md 2026-07-03.)
-    (fold (fn (acc path)
-            (append-two
-              (keep (fn (pd)
-                      (let ([bare qual] pd
-                            used (or (>= (map-get counts bare 0) 2)
-                                   (and (not (= qual bare)) (>= (map-get counts qual 0) 1))))
-                        (when (not used)
-                          (str path ": warning: unused private function: " bare))))
-                (project--file-private-defs path))
-              acc))
+  (let (scanned (project--pfold-files files :scan
+                  (fn (acc cr)
+                    (let ([ac ap] acc [cc cp] cr)
+                      [(project--merge-counts ac cc) (append-two cp ap)]))
+                  (fn (acc chunk reason)
+                    (eprintln (str "warning: unused-private scan worker died on "
+                                (count chunk) " file(s) — results may be incomplete: "
+                                (pr-str reason)))
+                    acc)
+                  [{} nil])
+        [counts privs] scanned)
+    ;; `append-two file-warnings acc` copies only the small per-file list and SHARES
+    ;; the accumulator tail → O(total); a plain `(append acc …)` would be O(files²).
+    (fold (fn (acc entry)
+            (let ([path pds] entry)
+              (append-two
+                (keep (fn (pd)
+                        (let ([bare qual] pd
+                              used (or (>= (map-get counts bare 0) 2)
+                                     (and (not (= qual bare)) (>= (map-get counts qual 0) 1))))
+                          (when (not used)
+                            (str path ": warning: unused private function: " bare))))
+                  pds)
+                acc)))
       '()
-      files)))
+      privs)))
 
 ;; Print the unused-private warnings to stderr and return the count. Advisory;
 ;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.

@@ -1213,3 +1213,134 @@ with `(append acc (list p))` per file), `project--unused-private-warnings`, and 
 **Measured:** `nest check` is now LINEAR — 1K→0.43s, 2K→0.80s, 4K→1.86s, 8K→3.12s (~0.4 ms/file);
 8000-file project 87.6s → 3.1s (and ~350s-extrapolated → 3.1s, ~110×). Combined with the earlier
 header-import redesign, the whole check-project quadratic is gone. Gate: 655 tests, brood-edit 725/725.
+
+## 2026-07-05 — Type-system review (no bugs found) + intersection of arrows (ADR-116)
+
+Reviewed the record/shape-types work (ADR-115) and the broader type-system module on
+request. Adversarial-tested 12 record edge cases (duplicate field keys, nested
+records, records nested in vectors, mixed keyword/non-keyword map keys, malformed
+`(optional …)` wrappers, empty `(record)`, `(and (map K V) (record …))`
+intersection, dynamic keys) — all sound, no crashes, no false positives. Grepped the
+whole `types/` module for `unwrap`/`panic`/`TODO`/`FIXME`/`HACK` — nothing outside
+test helpers. Full suite still green (173/173 types tests) after two days of
+unrelated concurrent check-project O(n²) work. Found no code bugs, but did find and
+fix three **stale roadmap entries** claiming features unshipped when `docs/types.md`
+already documented them as done: type variables (`?A`, fully shipped),
+`BROOD_CONTRACTS=1` (shipped), and singleton/literal types (the keyword half shipped
+as ADR-105, only numeric/bool/string literals still deferred).
+
+Then shipped **intersection of arrows** (ADR-116) — the roadmap's own "single
+biggest expressiveness gap": `(and (int -> int) (bool -> bool))` used to parse fine
+but silently widen to "any function" in `Ty::intersect` (two distinct known `Sig`s
+treated as an unresolvable conflict). No new grammar needed — function intersection
+types are the standard encoding of overloading, the same `(and …)` feature already
+shipped, just applied to two distinct arrows instead of one arrow plus a flat tag.
+`Ty` gained an `overload: Option<Arc<Vec<Sig>>>` refinement (2+ distinct sigs only —
+a single one always collapses back to `arrow`, so every existing consumer is
+untouched for the common case); a new `intersect_arrows` dedup-unions two sides'
+candidate lists; `union` needed zero new code (the existing generic `merge_union`
+already handles it); `is_subtype` generalizes (not parallels) the old single-arrow
+check, conservative-but-sound per contract #5, mirroring ADR-115's
+`record_fields_is_subtype`. New declaration-storage path (`Ctx::declared_overloads`,
+mirroring `SigWithVars`) and call-site resolution (`resolve_overload_ret` in
+`ctx.rs`) pick the matching arm's return type, union on ambiguity, widen to `ANY` on
+no match — never fabricating a return type.
+
+Verified the same two ways as ADR-115: 8 new unit/checker tests (types::mod.rs +
+types::check.rs, 173→181), and a `nest check` diff across all of `std/`+`tests/`
+with the new logic disabled vs. enabled — byte-identical, zero new warnings.
+
+## 2026-07-05 — Intersection of arrows: cross-module resolution was missing (ADR-116 follow-up)
+
+Follow-up to the same-day arrow-intersection work: the maintainer asked whether the
+type checker is cross-file/cross-module, which led to checking whether the new
+overload feature specifically was. It wasn't — `Ctx::declared_overloads` is
+per-file (`check_file` allocates a fresh `Ctx` per file), so an overloaded sig
+declared in one module was invisible when called from another, strictly worse than
+a plain single-arrow `(sig …)` (which already crosses files via a separate
+mechanism: `%register-sig` writes the raw type-expression form into a shared
+heap-level store at load time, read back via `declared_heap_sig`'s `.as_arrow()`).
+Fixed with no storage change — the heap store already held the opaque raw form
+regardless of what it represented — by adding `declared_heap_overload` (mirrors
+`declared_heap_sig`, extracts `.overload_sigs()` instead) and wiring it into the
+same fallback positions `sig_of` already occupies in `expr_ty`'s call-form handling
+and `callback_ret` (HOF callbacks); `check/walk.rs`'s argument-checking loop stays
+untouched (same deferred scope as same-file overloads). Verified with a Rust test
+that actually evaluates a declaration before typing a call against a fresh `Ctx`
+(confirmed it fails without the fix, passes with it), and end-to-end with a real
+two-file `nest new` project (`hello.blsp` declaring an overloaded `clamp`,
+`main.blsp` calling `hello/clamp` via `(:use hello)`) — `nest check` correctly
+flagged the genuine mismatch and stayed silent on the correct call. 182/182 types
+tests green (up from 181).
+
+## 2026-07-05 — Int-literal types: `5` as a type, first slice of ADR-105's deferral (ADR-117)
+
+Continuing type-system work after the ADR-116 cross-module fix. ADR-105's one-line
+deferral ("bool/int/string literals are the same machinery... deferred") undersold
+the actual scope: `Value` has no `Ord`/`Eq`/`Hash` at all (float NaN blocks it
+structurally), so a generic `BTreeSet<Value>` literal set across kinds is
+impossible — and the existing `lit` field is hardwired to one tag (`KEYWORD_BIT`)
+at every one of its ~6 call sites, so `(or :ok 5)` (two literal-bearing tags at
+once) needs more than a drop-in. Resolved cleanly via a pattern already used twice
+in this repo (`arrow`/`overload` on `FN_BITS`, `map_kv`/`fields` on `MAP_BIT`): a
+third independent field, `lit_int: Option<Arc<BTreeSet<i64>>>` tagged a new
+`INT_BIT` — since it's a different bit than `lit`'s, both compose on one `Ty` with
+zero special-casing. Every `lit`/`KEYWORD_BIT` call site got a mechanically
+parallel `lit_int`/`INT_BIT` block (union/intersect/negate/is_subtype/
+is_disjoint/Display); grammar and runtime (`type-matches?`) each got one new
+branch, no ambiguity risk.
+
+Tried extending `Ty::of_value` to also make literal int *expressions* (not just
+declared-sig types) into singletons — matching how keywords already work, so a
+literal keyword argument at a call site gets static disjointness checking, not
+just a runtime contract. Reverted: `of_value` feeds every literal int's inferred
+type throughout the whole checker, so this changed unrelated misuse-warning
+message wording project-wide (`"got int"` → `"got 5"`) and broke 7 pre-existing
+tests. A materially bigger change than this slice's scope — reverted cleanly,
+documented as a deferred follow-on needing its own design pass (`docs/type-int-literals.md`).
+
+Verified the same two ways as records/arrows: unit tests mirroring every
+keyword-literal test (render, union-exact, subtyping, disjointness, intersection,
+plus a `(or :ok 5)` mixed-kind coexistence test), a checker-level test proving a
+declared int-literal-set return type flows to callers, a `contract_test.blsp`
+runtime block (50/50 passing, up from 46), and a `nest check` corpus diff with the
+new parse arm disabled vs. enabled — byte-identical, zero new warnings. 189/189
+types tests green (up from 182 before this session's overload work).
+
+## 2026-07-05 — `nest check` parallelised across the worker pool (3–4× on huge projects)
+
+`check-project` was linear (the earlier O(n²) sweep) but single-threaded: on a
+100K-file project it spent ~17s in `check-files` + ~17s in the unused-private
+parse pass, all on one core (profiled: the time is spread across the VM/GC running
+the per-file Brood driver + the Rust checker, no single hotspot — the ideal shape
+for parallelism, since each green process gets its own heap/GC/VM). Fanned both
+passes across the scheduler pool via a small bounded driver in `std/tool/project.blsp`
+(`project--pfold-files`): the same `monitor`/batch/collect discipline as the test
+runner. `check-files` runs `check-file` per chunk and each worker **prints its own
+warnings** (shipping the warning *list* back deep-copies it across heaps —
+costlier than the check); unused-private is a **map-reduce** — workers parse a
+slice once (killing the old double-parse: `all-sym-counts` + a per-file
+`file-private-defs` re-parse) and return partial symbol-counts + private-defs,
+which the driver merges. End-to-end `nest check`: **100K 41s→12.5s, 300K
+161s→37s** (CPU ~800%). Correctness: parallel unused-private diffed byte-identical
+against a reference sequential reimplementation on a 3000-file project with known
+used/unused privates (1500/1500), and `nest check` on this repo is unchanged
+(0 unused-private, same check-file warnings); 671/671 tests pass.
+
+Two sizing lessons, both measured: (1) chunk to **`cores` big chunks, not many
+small ones** — `check-file`'s first call on a fresh heap rebuilds the checker's
+per-heap caches by scanning ALL globals (`known_ns_prefixes`, O(globals)); one
+worker per handful of files makes that recur per chunk → O(files·globals) ≈
+O(files²), which made a naïve 128-file-chunk version *slower* than sequential.
+Sizing chunks to the core count caps the rebuild at ~cores times. (2) Group size =
+`cores` (not a larger in-flight batch) — bounds peak live worker heaps, cutting
+300K peak RSS from 5.75GB→3.85GB with no time cost.
+
+**Kernel bug found + worked around (see KI-9):** the first cut passed the per-chunk
+operation as a *closure* captured in the spawned worker's body. `spawn`'s move of a
+body whose captured env holds a closure value intermittently corrupts that nested
+closure's arity — a worker died with a bogus "fn: expected 0 arguments, got 1"
+~1 run in 3, silently skipping its chunk's files. Worked around exactly as the
+test runner does (ship only *data* — a keyword op — and resolve the operation
+through the global table in the worker, never a shipped closure). The underlying
+closure-deep-copy-on-spawn race is filed as KI-9 for a kernel fix.

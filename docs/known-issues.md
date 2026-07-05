@@ -1,12 +1,33 @@
 # Known issues
 
-All historical interpreter defects are **resolved**. This file is the condensed
-record — what each was, how it was fixed, and the regression test that guards it —
-so a recurrence is recognizable. For the narrative discovery writeup of the
-scheduler race, see [claude-demo-findings.md](claude-demo-findings.md); deeper
+One **open** defect (KI-9, below); all others are **resolved**. This file is the
+condensed record — what each was, how it was fixed, and the regression test that
+guards it — so a recurrence is recognizable. For the narrative discovery writeup of
+the scheduler race, see [claude-demo-findings.md](claude-demo-findings.md); deeper
 rationale is in the cited ADRs / topic docs.
 
 ---
+
+## KI-9 — a closure captured in a `spawn` body is corrupted by the spawn deep-copy · **OPEN**
+
+Spawning a worker whose body **captures a closure value** in its environment
+intermittently corrupts that nested closure — its arity reads back wrong. Surfaced
+while parallelising `nest check`: a driver spawned `(spawn (send me (list :chunk (self) (chunk-fn chunk))))`
+where `chunk-fn` was a closure passed in as an argument; ~1 worker in 3 died with a
+bogus `arity error: fn: expected 0 arguments, got 1` at the `(chunk-fn chunk)` call
+(and silently skipped its files). Flaky — a race, not a logic error (a logic error
+would kill every worker, not one). The likely cause is the move/deep-copy of the
+spawned body's captured environment to the new process's heap racing GC and
+mis-copying the nested `Closure`'s arity field. The test runner never hit it
+because it ships only **data** and calls **global** functions (`run-unit`), which
+resolve through the shared global table in the worker rather than being deep-copied.
+**Workaround (in place):** `std/tool/project.blsp` ships only a keyword op and
+resolves the operation via a global (`project--pfold-run`) — no closure crosses the
+process boundary. **Fix (TODO):** audit the closure path in the spawn/`to_message`
+deep-copy (the arity field), and add a regression test that spawns many workers each
+invoking a captured-closure argument and asserts none die. Until fixed, **do not
+ship a closure captured in a `spawn` body across processes** — pass data and call a
+global.
 
 ## KI-8 — RUNTIME form-position table (`positions`) stranded by compaction · **fixed 2026-07-03**
 
