@@ -185,37 +185,69 @@ fn is_arrow_marker(v: Value) -> bool {
 
 /// Parse the items of an arrow type-expr (the `->` at index `pos`) to a [`Sig`]:
 /// the items before `->` are parameter types, the single item after is the
-/// result. A `&` marker splits fixed params from a variadic rest type, e.g.
-/// `(int & number -> int)` → `Sig::with_rest([int], number, int)`. `None` if
-/// malformed (no single result, or any part unparseable).
+/// result. `params... [&optional opt...] [& rest] -> ret`, mirroring a
+/// closure's `(req &optional opt & rest)` param shape:
+///   - `(int & number -> int)` → `Sig::with_rest([int], number, int)`
+///   - `(int &optional string -> int)` → `Sig::with_optional([int], [string], int)`
+///   - `(int &optional string & number -> int)` →
+///     `Sig::with_optional_and_rest([int], [string], number, int)`
+/// `&optional` must come before `&` when both are present. `None` if
+/// malformed (no single result, markers out of order, or any part
+/// unparseable).
 fn parse_arrow(heap: &Heap, items: &[Value], pos: usize) -> Option<Sig> {
     if pos + 2 != items.len() {
         return None; // exactly one result type must follow `->`
     }
     let ret = parse_type(heap, items[pos + 1])?;
 
-    // Detect an optional `&` rest marker in the params, e.g. `(int & number -> r)`.
-    let amp = items[..pos]
+    let params_region = &items[..pos];
+    let amp = params_region
         .iter()
         .position(|v| matches!(v, Value::Sym(s) if value::symbol_is(*s, "&")));
+    let amp_opt = params_region
+        .iter()
+        .position(|v| matches!(v, Value::Sym(s) if value::symbol_is(*s, "&optional")));
 
-    if let Some(apos) = amp {
-        // Must be exactly one type after `&` before `->`.
-        if apos + 2 != pos {
+    // `&` before `&optional` is a malformed order (rest must trail everything).
+    if let (Some(a), Some(o)) = (amp, amp_opt) {
+        if a < o {
             return None;
         }
-        let mut params = Vec::with_capacity(apos);
-        for &p in &items[..apos] {
-            params.push(parse_type(heap, p)?);
+    }
+
+    let parse_all = |types: &[Value]| -> Option<Vec<Ty>> {
+        types.iter().map(|&p| parse_type(heap, p)).collect()
+    };
+
+    match (amp_opt, amp) {
+        (Some(opos), Some(apos)) => {
+            // Must be exactly one type after `&` before `->`.
+            if apos + 2 != pos {
+                return None;
+            }
+            let params = parse_all(&params_region[..opos])?;
+            let optional = parse_all(&params_region[opos + 1..apos])?;
+            let rest = parse_type(heap, items[apos + 1])?;
+            Some(Sig::with_optional_and_rest(params, optional, rest, ret))
         }
-        let rest = parse_type(heap, items[apos + 1])?;
-        Some(Sig::with_rest(params, rest, ret))
-    } else {
-        let mut params = Vec::with_capacity(pos);
-        for &p in &items[..pos] {
-            params.push(parse_type(heap, p)?);
+        (Some(opos), None) => {
+            let params = parse_all(&params_region[..opos])?;
+            let optional = parse_all(&params_region[opos + 1..])?;
+            Some(Sig::with_optional(params, optional, ret))
         }
-        Some(Sig::new(params, ret))
+        (None, Some(apos)) => {
+            // Must be exactly one type after `&` before `->`.
+            if apos + 2 != pos {
+                return None;
+            }
+            let params = parse_all(&params_region[..apos])?;
+            let rest = parse_type(heap, items[apos + 1])?;
+            Some(Sig::with_rest(params, rest, ret))
+        }
+        (None, None) => {
+            let params = parse_all(params_region)?;
+            Some(Sig::new(params, ret))
+        }
     }
 }
 

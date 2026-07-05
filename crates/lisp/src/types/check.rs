@@ -944,6 +944,81 @@ mod tests {
     }
 
     #[test]
+    fn optional_sig_params_parse_and_check() {
+        // `&optional` in `(sig …)` grammar — previously unsupported: the whole
+        // arrow silently failed to parse (no marker recognized `&optional`,
+        // so `parse_type` on that symbol returned `None`, propagating out
+        // through `parse_arrow`), meaning the sig vanished with zero warning
+        // at all, not just an unchecked optional slot.
+
+        // Call-site: the optional argument's declared type is checked, same
+        // as a required one.
+        let w = file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 2)");
+        assert!(
+            w.iter().any(|m| m.contains("g: argument 2 expects string") && m.contains("int")),
+            "an optional arg's declared type must be checked: {w:?}"
+        );
+
+        // Arity: calling with just the required arg, or with the optional
+        // one supplied, is fine; one too many is an arity error.
+        let w = file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1)");
+        assert!(
+            w.iter().all(|m| !m.contains("number of arguments")),
+            "omitting an optional arg must not warn: {w:?}"
+        );
+        let w = file_warnings(
+            r#"(sig g (int &optional string -> int))
+(defn g (a &optional b) a)
+(g 1 "x")"#,
+        );
+        assert!(
+            w.iter().all(|m| !m.contains("number of arguments") && !m.contains("expects string")),
+            "supplying the optional arg with the right type must not warn: {w:?}"
+        );
+        let w = file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 \"x\" 2)");
+        assert!(
+            w.iter().any(|m| m.contains("number of arguments")),
+            "one arg beyond required+optional must still be an arity error: {w:?}"
+        );
+
+        // Body seeding: an optional param is widened with `nil` (it may
+        // genuinely be absent), so a defensive `(nil? b)` check is never
+        // mistaken for dead code the way an exact required-param contract
+        // would be — but real misuse (using it unconditionally as if it
+        // can't be nil) is still caught.
+        let w = file_warnings(
+            "(sig g (int &optional string -> int))\n\
+             (defn g (a &optional b) (if (nil? b) a (+ a (string-length b))))",
+        );
+        assert!(w.is_empty(), "a defensive nil-check on an optional param must not warn: {w:?}");
+        let w = file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) (+ a b))");
+        assert!(
+            w.iter().any(|m| m.contains("+: argument 2 expects number") && m.contains("nil | string")),
+            "using an optional param unconditionally as non-nil must still warn: {w:?}"
+        );
+
+        // `&optional` combined with a trailing `&` rest, mirroring a
+        // closure's full `(req &optional opt & rest)` shape.
+        let w = file_warnings(
+            "(sig h (int &optional string & number -> int))\n(defn h (a &optional b & c) a)\n(h 1 \"x\" true)",
+        );
+        assert!(
+            w.iter().any(|m| m.contains("h: argument 3 expects number") && m.contains("bool")),
+            "a rest arg after an optional one must still be checked: {w:?}"
+        );
+
+        // Malformed order (`&` before `&optional`) is rejected by the parser
+        // (dropped, not guessed) rather than misparsed into something
+        // incorrect — the sig is simply absent, so nothing about `k` is
+        // checked, but nothing crashes either.
+        let w = file_warnings("(sig k (int & number &optional string -> int))\n(defn k (a) a)");
+        assert!(
+            w.iter().all(|m| !m.contains("k:")),
+            "a malformed marker order must drop the sig silently, not misparse: {w:?}"
+        );
+    }
+
+    #[test]
     fn dead_clause_flagged_for_a_sig_typed_param() {
         // A `match` literal pattern that can't match the parameter's declared type.
         let w = file_warnings(

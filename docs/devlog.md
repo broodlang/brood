@@ -1644,3 +1644,74 @@ pattern this fixes doesn't occur anywhere in the current committed source,
 so this closes a real gap without any pre-existing bugs to triage.
 
 360/360 unit tests, corpus `nest check` unchanged (91 warnings).
+
+## 2026-07-05 — `nest check --strict` was already built
+
+Went to build the last piece the roadmap listed as unbuilt for ADR-123 — a
+`nest check --strict`/`BROOD_CHECK_STRICT=1` flag gating CI on any warning —
+and checked the actual behavior first rather than assuming the docs were
+current. `cmd_check` in `crates/nest/src/main.rs` already exits 1 on any
+nonzero warning count, unconditionally, with no flag involved — confirmed
+directly (a clean file exits 0, a file with one warning exits 1). This
+predates the whole ADR-123 thread; the design doc's "still unbuilt" framing
+was simply wrong when written. Corrected `type-soundness-reload.md`,
+`roadmap.md`, and the ADR-123 entry in `decisions.md` — ADR-123 is now fully
+shipped with nothing left open. No code changed.
+
+## 2026-07-05 — ADR-127: `&optional` in `(sig …)` arrow grammar
+
+Picked up the roadmap's "richer `(sig …)` type-exprs (rest/optional params,
+nested generics)" item. Probed all three parts before writing any code:
+`&` rest params and nested type variables (`(list ?A)`) both already worked
+— rest via the existing `parse_arrow` marker, nested generics via
+`SigWithVars`/`SigTerm` from an earlier session (type-variables.md slices
+1–2). `&optional` was the actual gap, and probing it found something worse
+than "unchecked" — `(sig g (int &optional string -> int))` silently dropped
+the *entire* sig (zero warning at all, not even for an obviously wrong call),
+because `parse_arrow` had no case for the `&optional` symbol and the whole
+`Option`-chained parser just returned `None`.
+
+Extended `Sig` with an `optional: Vec<Ty>` field, empty in every existing
+constructor (checked: zero behavior change for every current caller).
+Routed everything through the one existing choke point, `Sig::param(i)`
+(params → optional → rest), so call-site checking and subtyping needed no
+separate optional-awareness — just a fallback clause in one function.
+`parse_arrow` now parses `params... &optional opt... & rest -> ret` in any
+combination, mirroring a closure's own param shape.
+
+Generalized `Sig::is_subtype`'s arity gate from an exact equality check to
+an arity-range comparison — worked out the algebra by hand and confirmed it
+reduces to the exact original check when `optional` is empty on both sides,
+so no existing arrow-subtype comparison in the corpus could change. Also had
+to fix `check_fn_seeded` (the same seeding path ADR-126 touched) twice more:
+its filter gated on exact param-count equality (would've silently rejected
+seeding for any optional-having sig), and its per-position loop read
+`s.params.get(i)` directly instead of `s.param(i)` (would've never seeded an
+optional position even once the filter let it through).
+
+The one real design decision, not just plumbing: an optional param seeds the
+body as `T | nil`, not exact `T`, via a plain `bind` rather than
+`bind_sig_param` — because it may genuinely be absent, and seeding it exact
+would make a defensive `(if (nil? b) …)` look like dead code to a lint that
+trusts a sig-typed param's declared type as precise. Verified directly: a
+defensive nil-check stays silent, using the param unconditionally as
+non-nil still warns.
+
+While verifying, hit a stash scare worth recording: ran `git stash` to
+isolate whether a failing test predated this session's changes, without
+first checking that the working tree also held a *different* concurrent
+session's in-progress, uncommitted edits (a `deps.rs` refactor). The stash
+swept both up together. Caught it immediately from the diff shown back and
+`git stash pop`'d right away — nothing lost, but a reminder to check
+`git status` for whose changes are actually sitting there before running
+any stash/reset, not just before the more obviously destructive commands.
+The failing test itself (`cross_module_value_sig_dependency_is_captured_for_incremental_cache`)
+turned out to collide with that other refactor's new `dep.own` exclusion
+filter — confirmed via the stash-and-restore, not fixed, since it's not
+this ADR's code to change.
+
+New test `optional_sig_params_parse_and_check` passed every assertion on
+the first run — call-site type + arity checking, both nil-widening
+directions, `&optional` combined with a trailing rest, and the malformed-
+marker-order case, all in one test. 360/360 unit tests green (the one
+pre-existing unrelated failure aside), `nest check` corpus unchanged (91).

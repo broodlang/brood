@@ -723,9 +723,12 @@ forever**: globals get a real trackable current type (ADR-124), and every
 `def` triggers a re-check of whoever depended on it (ADR-125) — surfacing
 fresh warnings for anything that broke, but never blocking the reload itself
 (ADR-013's "code always wins" stays true). A hard reject only ever exists for
-batch/CI tooling (a future `nest check --strict` treating warnings as a
-failing exit code — not yet built, nothing depends on it), never the live
-image. **The planned reverse-dependency index turned out to already exist**,
+batch/CI tooling, never the live image — and that gate turns out to already
+exist: `nest check` has exited 1 on any nonzero warning count since before
+this design was written, so a CI pipeline running it as a build step already
+gets the hard-reject semantics this section once described as future work;
+there was never a `--strict` flag to add. **The planned reverse-dependency
+index turned out to already exist**,
 built by ADR-119 Phase 2 (the incremental `nest check` cache, landed the same
 day) for an unrelated reason — its `check-file-deps`/`check-deps-fp`
 pull-based re-fingerprint check gives the same answer a push-based index
@@ -796,9 +799,22 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   straight-line bodies + guard narrowing; Elixir does guard-driven + local
   inference across a function.
 - ⬜ **Narrowing through non-variable expressions** (`is_integer(p.age)` refining
-  `p`), and richer `(sig …)` type-exprs (rest/optional params, nested generics).
+  `p`) — still open; occurrence typing today only narrows bare symbols, not a
+  compound path like a record-field access, so this needs new design
+  (recognizing a narrowable path shape in guard analysis, computing a refined
+  record type, and looking it up again later in the branch), not a small slice.
+- ✅ **Richer `(sig …)` type-exprs** — turned out mostly already shipped:
+  `&` rest params (`parse_arrow`) and nested type variables in compound
+  positions (`(list ?A)`, via `SigWithVars`/`SigTerm`, type-variables.md
+  slices 1–2) both already worked. `&optional` was the one genuinely missing
+  piece — and it failed silently in the worst way (the whole sig vanished
+  with zero warning, not just an unchecked slot). Fixed (ADR-127,
+  [`type-annotations.md`](type-annotations.md)): `Sig` gained an `optional`
+  field, `Sig::param(i)`'s single choke point picked it up for every
+  consumer, and an optional param seeds the body as `T | nil` (not exact
+  `T`) so a defensive nil-check is never mistaken for dead code.
 - ✅ **Pervasive static soundness / gating, the reload-compatible version** —
-  the mechanism is shipped (ADR-123 design + ADR-124 + ADR-125,
+  fully shipped (ADR-123 design + ADR-124 + ADR-125 + ADR-126,
   [`type-soundness-reload.md`](type-soundness-reload.md)): re-check on every
   reload against whoever depended on it, rather than a hard reload gate.
   Declared value-type sigs (`(sig x T)`) are visible cross-module via the
@@ -807,12 +823,12 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   ADR-119 Phase 2's incremental-check cache (`check-file-deps`/
   `check-deps-fp`) gives the same answer via a cheaper pull-based
   re-fingerprint check. `nest run --watch` re-checks on every successful file
-  reload (ADR-125), verified end-to-end in a real project. Still not built,
-  not currently blocking anything: a batch/CI hard-gate flag (`nest check
-  --strict`). A real, separate checker gap surfaced along the way — a
-  `defmodule`-declared arrow sig didn't seed the body-return-type check —
-  and was fixed the same day (ADR-126,
-  `docs/type-annotations.md`'s "Fixed gap" section).
+  reload (ADR-125), verified end-to-end in a real project. The planned
+  batch/CI hard-gate flag turned out to already exist too — `nest check` has
+  exited 1 on any nonzero warning count all along, no `--strict` flag needed.
+  A real, separate checker gap surfaced along the way — a `defmodule`-declared
+  arrow sig didn't seed the body-return-type check — and was fixed the same
+  day (ADR-126, `docs/type-annotations.md`'s "Fixed gap" section).
 - 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** — the
   `GradualTy` foundation already exists; this is the remaining work to wire it
   into actual gating decisions (not just advisory assignment checks), which

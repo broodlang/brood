@@ -1352,8 +1352,14 @@ pub struct GradualTy {
 pub struct Sig {
     /// The fixed positional argument types, in order.
     pub params: Vec<Ty>,
-    /// The variadic-tail type — applies to every argument beyond `params`.
-    /// `None` means no rest (extras are an arity error, caught separately).
+    /// Optional positional argument types, following `params` — present iff
+    /// the corresponding argument is supplied (`&optional` in `(sig …)`
+    /// grammar, mirroring a closure's `&optional` params). Empty for a sig
+    /// with no optional params (every pre-existing constructor).
+    pub optional: Vec<Ty>,
+    /// The variadic-tail type — applies to every argument beyond `params` +
+    /// `optional`. `None` means no rest (extras are an arity error, caught
+    /// separately).
     pub rest: Option<Ty>,
     /// The result type.
     pub ret: Ty,
@@ -1364,6 +1370,7 @@ impl Sig {
     pub fn new(params: Vec<Ty>, ret: Ty) -> Sig {
         Sig {
             params,
+            optional: Vec::new(),
             rest: None,
             ret,
         }
@@ -1372,6 +1379,7 @@ impl Sig {
     pub fn nullary(ret: Ty) -> Sig {
         Sig {
             params: Vec::new(),
+            optional: Vec::new(),
             rest: None,
             ret,
         }
@@ -1380,6 +1388,7 @@ impl Sig {
     pub fn variadic(rest: Ty, ret: Ty) -> Sig {
         Sig {
             params: Vec::new(),
+            optional: Vec::new(),
             rest: Some(rest),
             ret,
         }
@@ -1388,6 +1397,28 @@ impl Sig {
     pub fn with_rest(params: Vec<Ty>, rest: Ty, ret: Ty) -> Sig {
         Sig {
             params,
+            optional: Vec::new(),
+            rest: Some(rest),
+            ret,
+        }
+    }
+    /// `params... &optional optional... -> ret` — fixed params then optional
+    /// ones, no rest tail.
+    pub fn with_optional(params: Vec<Ty>, optional: Vec<Ty>, ret: Ty) -> Sig {
+        Sig {
+            params,
+            optional,
+            rest: None,
+            ret,
+        }
+    }
+    /// `params... &optional optional... & rest -> ret` — all three parameter
+    /// kinds together, mirroring a closure's full `(req &optional opt & rest)`
+    /// shape.
+    pub fn with_optional_and_rest(params: Vec<Ty>, optional: Vec<Ty>, rest: Ty, ret: Ty) -> Sig {
+        Sig {
+            params,
+            optional,
             rest: Some(rest),
             ret,
         }
@@ -1399,11 +1430,16 @@ impl Sig {
     pub fn any() -> Sig {
         Sig::variadic(Ty::ANY, Ty::ANY)
     }
-    /// The type expected at argument position `i` — fixed params first, then
-    /// `rest` for anything beyond. `None` when too many args are passed for
-    /// a non-variadic sig (a separate arity check catches that).
+    /// The type expected at argument position `i` — fixed params, then
+    /// `optional` params, then `rest` for anything beyond. `None` when too
+    /// many args are passed for a non-variadic sig (a separate arity check
+    /// catches that).
     pub fn param(&self, i: usize) -> Option<Ty> {
-        self.params.get(i).cloned().or_else(|| self.rest.clone())
+        self.params
+            .get(i)
+            .cloned()
+            .or_else(|| self.optional.get(i - self.params.len()).cloned())
+            .or_else(|| self.rest.clone())
     }
 
     /// Arrow subtyping `self <: other` — a function of type `self` is usable
@@ -1421,7 +1457,19 @@ impl Sig {
         // may pass more (or fewer) arguments than `self` accepts.
         match (self.rest.is_some(), other.rest.is_some()) {
             (false, true) => return false, // other is variadic, self isn't
-            (false, false) if self.params.len() != other.params.len() => return false,
+            (false, false) => {
+                // `other`'s achievable arity range (its required count up to
+                // required+optional) must sit inside `self`'s. With no
+                // `optional` on either side this is exactly the original
+                // `params.len() != params.len()` equality check — verified
+                // equivalent, so pre-existing (optional-free) sigs compare
+                // identically to before.
+                let self_max = self.params.len() + self.optional.len();
+                let other_max = other.params.len() + other.optional.len();
+                if self.params.len() > other.params.len() || self_max < other_max {
+                    return false;
+                }
+            }
             // The remaining cases — `(true, _)`: a variadic `self` — are not
             // rejected here; their arity compatibility is checked positionally by
             // the param loop below, which iterates max(len) positions and uses
@@ -1430,8 +1478,11 @@ impl Sig {
             _ => {}
         }
         // Parameters: contravariant — for every position `other` may supply,
-        // `self` must accept at least as much.
-        let arity = self.params.len().max(other.params.len());
+        // `self` must accept at least as much. The bound includes each side's
+        // `optional` positions too (empty for a sig with none, same bound as
+        // before).
+        let arity = (self.params.len() + self.optional.len())
+            .max(other.params.len() + other.optional.len());
         for i in 0..arity {
             match (other.param(i), self.param(i)) {
                 (Some(o), Some(s)) => {
@@ -1449,8 +1500,9 @@ impl Sig {
 }
 
 impl fmt::Display for Sig {
-    /// `(p1, p2) -> ret`, with a trailing `...rest` for the variadic tail and
-    /// `()` for nullary — the arrow rendering used in diagnostics.
+    /// `(p1, p2) -> ret`, with `&optional o1, o2` for optional params, a
+    /// trailing `...rest` for the variadic tail, and `()` for nullary — the
+    /// arrow rendering used in diagnostics.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(")?;
         let mut first = true;
@@ -1460,6 +1512,21 @@ impl fmt::Display for Sig {
             }
             first = false;
             write!(f, "{p}")?;
+        }
+        if !self.optional.is_empty() {
+            if !first {
+                f.write_str(", ")?;
+            }
+            first = false;
+            write!(f, "&optional ")?;
+            let mut first_opt = true;
+            for p in &self.optional {
+                if !first_opt {
+                    f.write_str(", ")?;
+                }
+                first_opt = false;
+                write!(f, "{p}")?;
+            }
         }
         if let Some(rest) = &self.rest {
             if !first {

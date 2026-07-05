@@ -19,9 +19,9 @@ listed (italicised) in the index below so the numbering stays complete.
 **Still proposed, not built:** ADR-071 *(WASM extensions)*. ADR-119
 *(incremental `nest check` cache)* has since shipped in full (Phase 1 + Phase
 2) — stale entry, corrected here rather than left to relitigate. ADR-123
-*(whole-program soundness under hot reload)*'s core mechanism has shipped
-(ADR-124 + ADR-125); only its optional batch/CI hard-gate (`nest check
---strict`) remains unbuilt.
+*(whole-program soundness under hot reload)* has shipped in full (ADR-124 +
+ADR-125 + ADR-126) — its batch/CI hard-gate was believed unbuilt but turned
+out to already exist (`nest check` has always exited 1 on any warning).
 
 | ADR | Title |
 |----:|-------|
@@ -151,6 +151,7 @@ listed (italicised) in the index below so the numbering stays complete.
 | 124 | Cross-module visibility for declared value-type sigs (ADR-123 slice 1) |
 | 125 | `nest run --watch` re-checks on reload — ADR-123's live-session trigger |
 | 126 | `defmodule`-declared arrow sigs now seed the body-return-type check |
+| 127 | `&optional` params in `(sig …)` arrow grammar |
 
 ---
 
@@ -7715,14 +7716,18 @@ name a runtime-loaded temp file will define — stays silent without
 introducing a real qualification mismatch. Corpus `nest check` stayed at 91
 warnings throughout (would have gone to 97 without the `eval` fix).
 
-**What's still open.** A genuine hard reject — `nest check --strict` /
-`BROOD_CHECK_STRICT=1` treating any warning as a failing exit code for CI —
-remains unbuilt; nothing in this slice needs it, since the live image still
-never blocks. Also unrelated but discovered along the way: a `(sig name (A ->
-B))` declared inside a `defmodule` block doesn't seed the body-vs-declared-
-return-type check (`check_def`'s seeding path reads the file-local `Ctx`
-under the *bare* name Pass 2.5 recorded, but the expanded `defn` target is
-the *qualified* name) — a real false-negative. **Fixed same-day, see ADR-126.**
+**What's still open — nothing.** The genuine hard reject this design flagged
+as unbuilt (`nest check --strict` / `BROOD_CHECK_STRICT=1` treating any
+warning as a failing exit code for CI) turned out to already exist:
+`cmd_check` in `crates/nest/src/main.rs` has exited 1 on any nonzero warning
+count all along, unconditionally — no flag was ever missing. Checked, not
+assumed: confirmed directly (a clean file exits 0, one with a warning exits
+1, no flags involved). Also unrelated but discovered along the way: a `(sig
+name (A -> B))` declared inside a `defmodule` block doesn't seed the
+body-vs-declared-return-type check (`check_def`'s seeding path reads the
+file-local `Ctx` under the *bare* name Pass 2.5 recorded, but the expanded
+`defn` target is the *qualified* name) — a real false-negative. **Fixed
+same-day, see ADR-126.**
 
 ## ADR-126 — `defmodule`-declared arrow sigs now seed the body-return-type check
 
@@ -7750,3 +7755,69 @@ genuinely mismatched `defmodule`-qualified `sig` + `defn` pair) doesn't occur
 anywhere in the current committed source, so the fix closes a real gap
 without surfacing any pre-existing bugs to triage. 360/360 unit tests green
 (up from 359).
+
+## ADR-127 — `&optional` params in `(sig …)` arrow grammar
+
+**Status:** accepted; **shipped 2026-07-05**
+([`type-annotations.md`](type-annotations.md)). Part of the Elixir-parity
+gap list's "richer `(sig …)` type-exprs" item — investigated the other two
+parts first (rest params, nested generics) and found both **already
+shipped**: `&` rest was already parsed (`parse_arrow`); nested type
+variables in compound positions (`(list ?A)`) already unify via the
+`SigWithVars`/`SigTerm` route (type-variables.md slices 1–2). `&optional`
+was the one genuinely missing piece, and it failed in the worst possible
+way: `parse_arrow` had no case for the `&optional` marker symbol, so
+`parse_type` on it returned `None`, which propagated out through the
+`?`-chained parser and dropped the **entire** declaration silently — not
+"optional param unchecked," but "the whole sig vanishes with zero warning."
+
+**Decision.** Extended `Sig` with an `optional: Vec<Ty>` field (empty for
+every pre-existing constructor — verified zero behavior change when unused).
+`Sig::param(i)` now falls through params → optional → rest, the single
+choke point already used by every call-site/subtyping consumer, so adding
+the field there was sufficient for argument-type checking with no other
+call site needing to know about `optional` specifically. `parse_arrow`
+parses `params... [&optional opt...] [& rest] -> ret`, mirroring a
+closure's own `(req &optional opt & rest)` shape; `&optional` before `&` is
+required (the reverse order is dropped, not misparsed). `Sig::is_subtype`'s
+arity-compatibility gate was generalized from an exact `params.len()`
+equality check to a **range** comparison (`self`'s achievable arity range
+must contain `other`'s) — verified algebraically equivalent to the original
+check when `optional` is empty on both sides, so no existing arrow-subtype
+comparison changes. `check_def`'s param-seeding filter/loop (the same
+`check_fn_seeded` path ADR-126 touched) needed two more fixes to actually
+*use* the new field: the filter that gates seeding on `params.len() ==
+<closure's real param count>` now accepts the whole arity range instead of
+exact equality, and per-position seeding switched from raw `s.params.get(i)`
+to `s.param(i)` so optional (and rest) positions get seeded at all.
+
+**A deliberate soundness choice, not just plumbing.** A required param is
+seeded with its exact declared type (`bind_sig_param`, `stat`, checked with
+`⊆`). An optional param is seeded with `T | nil` instead — via a plain
+`bind` (not `bind_sig_param`, so it isn't treated as an exact/authoritative
+contract for the dead-clause lint) — because it may genuinely be absent at
+the call site. Seeding it as exact `T` would make a defensive
+`(if (nil? b) …)` check in the body look like dead code to a lint that
+assumes a sig-typed param's declared type is precise; verified directly with
+a test pair (a defensive nil-check stays silent; using the param
+unconditionally as if it can't be `nil` still warns).
+
+**Verified two ways**, matching this session's playbook: (1)
+`optional_sig_params_parse_and_check` — call-site type + arity checking, the
+nil-widening behavior in both directions, `&optional` combined with a
+trailing `& rest`, and the malformed-marker-order case all covered in one
+test, all passing on first write (a good sign the design was right, not just
+debugged into working). (2) Full `nest check` corpus diff across `std/` +
+`tests/` — byte-identical, 91 warnings before and after. 360/360 unit tests
+green (one pre-existing, unrelated failure aside — see note below).
+
+**Unrelated test collision noted, not fixed.** While verifying, found
+`cross_module_value_sig_dependency_is_captured_for_incremental_cache`
+(ADR-124's regression test) fails against a concurrently in-progress,
+uncommitted `deps.rs` refactor (a new `dep.own` exclusion filter dropping a
+file's own def-names from its recorded dependency set — a legitimate,
+unrelated optimization). Confirmed via `git stash`/`git stash pop` (careful:
+this also stashed the other session's concurrent uncommitted work
+momentarily, restored immediately) that the failure is caused by that
+refactor, not by anything in this ADR. Left untouched — not this ADR's to
+fix mid-flight on someone else's in-progress work.

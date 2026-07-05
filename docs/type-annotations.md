@@ -48,6 +48,8 @@ literal ::= <keyword>                          ; a bare keyword, e.g. :maximized
 typevar ::= ? <name>                           ; e.g. ?A, ?el — static only
 arrow  ::= ( type* -> type )                   ; fixed arity
          | ( type* & type -> type )            ; fixed leading params + variadic rest
+         | ( type* &optional type* -> type )   ; fixed params + optional (ADR-127)
+         | ( type* &optional type* & type -> type ) ; + a trailing rest too
 seq    ::= (list type) | (vector type)         ; element type checked at runtime
 map-kv ::= (map key-type val-type)             ; key/val checked at runtime
 union  ::= (or type type+)
@@ -83,6 +85,21 @@ member (unless a catch-all is present); a clause whose literal duplicates one
 already tried is flagged as unreachable, whether or not it came from `match`.
 See [type-match-exhaustiveness.md](type-match-exhaustiveness.md) and
 [type-match-redundancy.md](type-match-redundancy.md).
+
+**`&optional` params (ADR-127).** `(sig f (int &optional string -> int))`
+declares `f`'s second argument as optional, mirroring a closure's own
+`(a &optional b)` shape; combine with a trailing `& rest` for all three
+kinds together (`(int &optional string & number -> int)`), matching a
+closure's full `(req &optional opt & rest)` param list. Both the call-site
+argument-type check and arity checking treat the declared range correctly
+(omitting an optional arg is fine; supplying it is type-checked; one
+argument beyond required+optional is still an arity error). Inside the
+body, an optional param is seeded as `T | nil` rather than the exact `T` a
+required param gets — it may genuinely be absent — so a defensive
+`(nil? b)` check is never mistaken for dead code, while using it
+unconditionally as if it can't be `nil` is still caught. `&optional` before
+`&` in a sig is required (mirroring reader order); the reverse order is
+dropped by the parser rather than misparsed.
 
 Base names map to the same lattice points the predicates imply (`number` =
 `int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …). Deferred: map K/V

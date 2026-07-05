@@ -418,6 +418,9 @@ pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
             } else {
                 ctx.add_file_global(name);
             }
+            // This file defines `name`, so it's not an external dependency — mark it
+            // own so the Phase-2 dep-keys exclude it (self-deps ride the file's mtime).
+            heap.rec_check_dep_own(name);
             // If the value is a variadic `fn` (a `&` rest param), record it so a
             // later fixed-arity `(sig …)` declaration isn't misread as an exact
             // arity for a variadic callee (a false positive). A sig that itself
@@ -580,7 +583,8 @@ pub(super) fn check_into(
         // The real callable's arity is authoritative when known (a `sig!` wrapper
         // preserves the wrapped fn's arity); fall back to the declared param count
         // for a file-local defn the read-only checker can't inspect. A declared
-        // sig with a `&` rest type uses `Arity::at_least`; a fixed-arity sig that
+        // sig with a `&` rest type uses `Arity::at_least`; `&optional` params widen
+        // a fixed sig to a range instead of an exact count; a fixed-arity sig that
         // applies to a known-variadic global is suppressed (the sig's fixed count
         // is an undercount, so using it as an exact arity would be a false positive).
         let arity = arity_of(heap, s).or_else(|| {
@@ -589,8 +593,10 @@ pub(super) fn check_into(
                 .map(|sg| {
                     if sg.rest.is_some() {
                         Arity::at_least(sg.params.len())
-                    } else {
+                    } else if sg.optional.is_empty() {
                         Arity::exact(sg.params.len())
+                    } else {
+                        Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
                     }
                 })
         });
@@ -816,11 +822,27 @@ fn check_fn_seeded(
         return;
     };
     let params = fn_params(heap, params_form);
-    let sig = sig.filter(|s| s.rest.is_none() && s.params.len() == params.len());
+    // The closure's actual param count must fall inside the declared sig's
+    // arity range for seeding to make sense: at least `params.len()`
+    // required, at most `params.len() + optional.len()` unless it has a
+    // rest tail (any count at or above `params.len()` is then fine).
+    let sig = sig.filter(|s| {
+        params.len() >= s.params.len()
+            && (s.rest.is_some() || params.len() <= s.params.len() + s.optional.len())
+    });
     let mut scope = ctx.clone();
     for (i, &p) in params.iter().enumerate() {
-        match sig.and_then(|s| s.params.get(i)) {
-            Some(ty) => scope = scope.bind_sig_param(p, ty.clone()),
+        // An `&optional` position may genuinely be absent at the call site
+        // (bound to `nil`, same as an unsupplied optional with no default) —
+        // widen with `nil` and seed it as a plain (not sig-authoritative)
+        // type, so a defensive `(nil? p)` in the body is never mistaken for
+        // dead code the way an exact required-param contract would be.
+        let is_optional_pos = sig.is_some_and(|s| i >= s.params.len() && i < s.params.len() + s.optional.len());
+        match sig.and_then(|s| s.param(i)) {
+            Some(ty) if is_optional_pos => {
+                scope = scope.bind(p, Some(ty.union(Ty::of(crate::core::value::Tag::Nil))));
+            }
+            Some(ty) => scope = scope.bind_sig_param(p, ty),
             None => scope = scope.bind(p, None),
         }
     }

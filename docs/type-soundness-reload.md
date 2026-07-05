@@ -1,12 +1,17 @@
-# Whole-program soundness under hot reload (ADR-123/124/125)
+# Whole-program soundness under hot reload (ADR-123/124/125/126)
 
-**Status:** the core mechanism is **shipped**. ADR-124 gave globals a real,
-cross-module-visible current type; the planned reverse-dependency index
-turned out to already exist (ADR-119 Phase 2, built the same day for an
-unrelated reason); ADR-125 shipped the live-session trigger
-(`nest run --watch` re-checks on every successful reload). Only the optional
-batch/CI hard-gate (`nest check --strict`) remains unbuilt, and nothing
-currently depends on it.
+**Status:** fully shipped, including the batch/CI hard gate. ADR-124 gave
+globals a real, cross-module-visible current type; the planned reverse-
+dependency index turned out to already exist (ADR-119 Phase 2, built the same
+day for an unrelated reason); ADR-125 shipped the live-session trigger
+(`nest run --watch` re-checks on every successful reload); ADR-126 fixed a
+related checker gap found along the way. **The batch/CI hard gate this design
+called out as "still unbuilt" turned out to already exist**: `nest check`
+(`crates/nest/src/main.rs::cmd_check`) has exited 1 on any nonzero warning
+count since before this design was written — there was never a `--strict`
+flag to add, because the un-flagged default already gates. A CI pipeline
+running `nest check` as a build step already gets exactly the hard-reject
+behavior this section was describing as future work.
 
 ## The problem
 
@@ -103,13 +108,14 @@ Instead of a permanent whole-program proof, treat soundness as a claim about
    entire remaining scope of ADR-123's "hard part."
 
 4. **Where a real hard gate does make sense: batch/CI tooling, not the live
-   image.** `nest check`/`nest test` (and a future `nest check --strict` or
-   `BROOD_CHECK_STRICT=1`) can treat a nonzero warning count as a failing exit
-   code. That gives genuine "reject if it doesn't typecheck" semantics for an
-   automated pipeline, exactly where a build has always been allowed to fail,
-   without changing a single thing about how the interactive/live image
-   behaves. `(sig! …)` remains the opt-in hard runtime gate for anyone who
-   wants an actual enforced boundary inside the running image.
+   image.** `nest check` already treats a nonzero warning count as a failing
+   exit code (`cmd_check` in `crates/nest/src/main.rs` — checked, not
+   assumed: confirmed unconditional, no flag needed). That gives genuine
+   "reject if it doesn't typecheck" semantics for an automated pipeline,
+   exactly where a build has always been allowed to fail, without changing a
+   single thing about how the interactive/live image behaves. `(sig! …)`
+   remains the opt-in hard runtime gate for anyone who wants an actual
+   enforced boundary inside the running image.
 
 This keeps the two failure modes cleanly separated: the **live image never
 rejects** (ADR-013 + the "never gates" invariant stay true for anything
