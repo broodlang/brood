@@ -1660,39 +1660,56 @@ pub(crate) mod backend {
                 }
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     // Positive y scrolls up (away from the user). LineDelta is in discrete
-                    // line units; PixelDelta (trackpad) is in physical pixels — normalized
+                    // line units; PixelDelta (trackpad) is in physical pixels — normalised
                     // here to line units so Brood gets a consistent float in both cases.
                     // `scroll_dy > 0` = scroll-up action; the absolute value is the magnitude.
+                    //
+                    // On Wayland, TouchPhase::Ended fires for both mouse-wheel clicks and
+                    // trackpad gestures, so we gate momentum solely on PixelDelta (trackpad).
+                    // LineDelta (mouse wheel) is always delivered as-is with no momentum.
                     let ch = w.renderer.cell_h.max(1);
-                    let dy = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y as f64,
-                        MouseScrollDelta::PixelDelta(p) => p.y / ch as f64,
-                    };
-                    match phase {
-                        TouchPhase::Cancelled => {
+                    match delta {
+                        MouseScrollDelta::LineDelta(_, y) => {
+                            // Discrete wheel: simple delivery, cancel any active momentum so
+                            // a mouse scroll during kinetic coast stops it immediately.
+                            let dy = y as f64;
                             w.scroll_velocity = 0.0;
                             w.scroll_momentum_t = None;
-                        }
-                        TouchPhase::Ended => {
-                            // The gesture ended: kick off momentum from the tracked EMA velocity.
-                            // Apply the final delta normally first (it may be non-zero on some
-                            // platforms), then let the RedrawRequested handler synthesise the
-                            // decaying tail.
                             if dy != 0.0 {
                                 deliver_scroll(w, dy);
                             }
-                            if w.scroll_velocity.abs() > 0.01 {
-                                w.scroll_momentum_t = Some(Instant::now());
-                                w.window.request_redraw();
-                            }
                         }
-                        _ => {
-                            // Started or Moved: update the EMA velocity, deliver the event, and
-                            // cancel any active momentum so the user regains direct control.
-                            w.scroll_velocity = 0.7 * w.scroll_velocity + 0.3 * dy;
-                            w.scroll_momentum_t = None;
-                            if dy != 0.0 {
-                                deliver_scroll(w, dy);
+                        MouseScrollDelta::PixelDelta(p) => {
+                            // Smooth trackpad: phase-based momentum.
+                            let dy = p.y / ch as f64;
+                            match phase {
+                                TouchPhase::Cancelled => {
+                                    w.scroll_velocity = 0.0;
+                                    w.scroll_momentum_t = None;
+                                }
+                                TouchPhase::Ended => {
+                                    // Gesture lift-off: apply the final delta (may be non-zero on
+                                    // some platforms) and kick off the momentum animation if the
+                                    // tracked EMA velocity is significant.
+                                    if dy != 0.0 {
+                                        deliver_scroll(w, dy);
+                                    }
+                                    if w.scroll_velocity.abs() > 0.01 {
+                                        w.scroll_momentum_t = Some(Instant::now());
+                                        w.window.request_redraw();
+                                    } else {
+                                        w.scroll_velocity = 0.0;
+                                    }
+                                }
+                                _ => {
+                                    // Started/Moved: track velocity via EMA, deliver event, and
+                                    // cancel any active momentum so the user regains direct control.
+                                    w.scroll_velocity = 0.6 * w.scroll_velocity + 0.4 * dy;
+                                    w.scroll_momentum_t = None;
+                                    if dy != 0.0 {
+                                        deliver_scroll(w, dy);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1728,6 +1745,8 @@ pub(crate) mod backend {
                         } else {
                             deliver_scroll(w, w.scroll_velocity);
                             w.scroll_momentum_t = Some(Instant::now());
+                            // Keep animating even if Brood doesn't change state (e.g. buffer end).
+                            w.window.request_redraw();
                         }
                     }
                 }
