@@ -59,7 +59,8 @@
 
 ;; `nil` is the "off" alternative — the lattice and type-matches? both already
 ;; handle the nil literal, so an enumerated keyword set mixes cleanly with it.
-;; (Bool/int/string literals are a deferred slice; `false` is NOT a literal type.)
+;; (Bool/string literals are still a deferred slice; `false` is NOT a literal
+;; type. Int literals shipped — see the next section below.)
 (defn c-mode (m) m)
 (sig! c-mode ((or :maximized :fullboth :fullscreen nil) -> any))
 
@@ -78,6 +79,30 @@
   (test "a single keyword literal matches only that exact value"
     (assert= (c-exact :ok) :ok)
     (assert-error (c-exact :nope))))
+
+;; --- int-literal (singleton) types (ADR-117) ------------------------------------
+;; A bare int in a sig is likewise a *literal* type — the value must be exactly
+;; that int. `(or 200 404 500)` enumerates the allowed values, same machinery as
+;; the keyword-literal case above (an independent tag, so the two compose freely
+;; — e.g. `(or :ok 5)` — though that's not exercised by a dedicated contract here).
+
+(defn c-status (s) s)
+(sig! c-status ((or 200 404 500) -> any))
+
+(defn c-exact-int (n) n)
+(sig! c-exact-int (5 -> 5))
+
+(describe "int-literal type contracts"
+  (test "an enumerated value passes"
+    (assert= (c-status 200) 200)
+    (assert= (c-status 404) 404))
+  (test "an int outside the set throws"
+    (assert-error (c-status 999)))
+  (test "a non-int outside the set throws"
+    (assert-error (c-status "200")))
+  (test "a single int literal matches only that exact value"
+    (assert= (c-exact-int 5) 5)
+    (assert-error (c-exact-int 6))))
 
 ;; --- rest params in sig! -------------------------------------------------------
 

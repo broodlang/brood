@@ -439,6 +439,33 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   exact field type; a `{…}` map literal infers its own record shape with no
   annotation needed. Closed records and `assoc`/`keys`/`vals` field-precise
   sinks stay deferred. See [`docs/type-records.md`](type-records.md).
+- ✅ **Intersection of arrows** `(and (int -> int) (bool -> bool))` — fully
+  shipped: an overloaded function's return type depends on which arm's domain
+  the call's argument provably matches, instead of the old "two distinct
+  arrows widen to any function" total information loss. No new grammar — the
+  already-shipped `(and …)` conjunctive-type syntax builds a real overload
+  when both sides are distinct arrows; `Ty` carries an `overload` refinement
+  alongside `arrow`, with width-conservative subtyping and a per-call
+  resolution rule (`resolve_overload_ret`). See
+  [`docs/type-arrow-intersection.md`](type-arrow-intersection.md).
+- 🟡 **Int-literal types** `5` — the first slice of ADR-105's deferred "bool/
+  int/string literals are the same machinery" item: a bare int in type
+  position is a literal singleton (`Ty::int_lit`, a `lit_int` refinement
+  independent of keyword's `lit` — the two compose freely, `(or :ok 5)`).
+  `type-matches?` enforces it at the runtime-contract boundary; a declared
+  int-literal-set return/param type flows to callers correctly. Bool/string
+  literals and call-site argument literal precision (matching a literal int
+  *argument* the way a literal keyword argument already is) stay deferred.
+  See [`docs/type-int-literals.md`](type-int-literals.md).
+- ✅ **Match exhaustiveness over literal-enum types** (ADR-118) — a `match`
+  whose scrutinee's declared type is a *pure* keyword- or int-literal enum is
+  flagged when its clauses don't cover every member (unless a catch-all
+  clause is present). No new parser or pass — recognizes the exact compiled
+  shape `match`'s no-catch-all failure already takes
+  (`(throw [:match-error …])`) in the existing macroexpanded walk. `case`
+  doesn't exist in Brood, so this is `match`-only. Mixed-kind enums and clause
+  redundancy detection are deferred. See
+  [`docs/type-match-exhaustiveness.md`](type-match-exhaustiveness.md).
 
 ## How it runs — and why it's outside the runtime
 

@@ -111,6 +111,38 @@ impl SigWithVars {
     }
 }
 
+/// Resolve a call's return type against a **declared overload** (ADR-116) —
+/// the per-clause counterpart of [`SigWithVars::resolve_ret`]. A candidate
+/// `sig` matches when every argument whose type is *known* is a subtype of
+/// `sig`'s parameter at that position (`Sig::param`, which already folds a
+/// variadic `rest` in); an unknown arg never rules a candidate out. Every
+/// matching candidate's `ret` is unioned — exactly one match gives the exact
+/// per-clause return type, several gives a sound (if less precise) superset,
+/// and **zero matches widens to `Ty::ANY`** rather than ever fabricating a
+/// return type for a call that fits no declared arm. See
+/// `docs/type-arrow-intersection.md`.
+pub(super) fn resolve_overload_ret(sigs: &[Sig], arg_tys: &[Option<Ty>]) -> Ty {
+    let mut matched: Option<Ty> = None;
+    for sig in sigs {
+        let compatible = arg_tys.iter().enumerate().all(|(i, arg_ty)| {
+            let Some(arg_ty) = arg_ty else {
+                return true; // unknown arg type never rules a candidate out
+            };
+            match sig.param(i) {
+                Some(param_ty) => arg_ty.is_subtype(&param_ty),
+                None => false, // more args than this candidate (non-variadic) accepts
+            }
+        });
+        if compatible {
+            matched = Some(match matched {
+                Some(acc) => acc.union(sig.ret.clone()),
+                None => sig.ret.clone(),
+            });
+        }
+    }
+    matched.unwrap_or(Ty::ANY)
+}
+
 /// Unify a single `SigTerm` against a known concrete `ty`, extending `subst`.
 /// One level deep — no recursive types.
 pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
@@ -203,6 +235,14 @@ pub(super) struct Ctx {
     /// `declared` always carries the flattened version (`?A` → `Ty::ANY`) so
     /// the arity-fallback path is unchanged; this table carries the richer form.
     declared_vars: HashMap<Symbol, SigWithVars>,
+    /// User-declared sigs whose type-expr is an **overload** — `(and (int ->
+    /// int) (bool -> bool))`, 2+ distinct arrows (ADR-116). Populated
+    /// alongside [`declared`] instead of it (an overloaded sig has no single
+    /// `Sig` — [`annot::parse_sig_decl`] can't produce one, since `Ty::as_arrow()`
+    /// is `None` for a genuine overload). Read by [`resolve_overload_ret`] to
+    /// give a call site the *matching arm's* return type instead of a flat
+    /// fallback. See `docs/type-arrow-intersection.md`.
+    declared_overloads: HashMap<Symbol, Vec<Sig>>,
     /// Parameters whose type was **seeded from the enclosing function's `(sig …)`
     /// declaration** — the subset of `types` we trust enough to flag a *dead
     /// clause* on. A guard that narrows one of these to the empty type means a
@@ -422,6 +462,14 @@ impl Ctx {
     /// Record the type-variable-bearing sig alongside the flattened one.
     pub(super) fn add_declared_sig_with_vars(&mut self, sym: Symbol, sig: SigWithVars) {
         self.declared_vars.insert(sym, sig);
+    }
+    /// The declared overload (2+ distinct arrow sigs) for `sym`, if any.
+    pub(super) fn declared_overload(&self, sym: Symbol) -> Option<&Vec<Sig>> {
+        self.declared_overloads.get(&sym)
+    }
+    /// Record a `(sig name (and (A -> B) (C -> D) …))` overload declaration.
+    pub(super) fn add_declared_overload(&mut self, sym: Symbol, sigs: Vec<Sig>) {
+        self.declared_overloads.insert(sym, sigs);
     }
     /// Seed parameter `sym` with the type `ty` its enclosing function's `(sig …)`
     /// declared for it, and remember it as a sig-typed param (so a guard that

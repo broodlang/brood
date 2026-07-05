@@ -99,6 +99,13 @@ const MAP_BIT: u32 = 1u32 << bit(Tag::Map);
 /// listed keyword symbols (set-theoretic literal types, ADR; keyword-only first).
 const KEYWORD_BIT: u32 = 1u32 << bit(Tag::Keyword);
 
+/// The int tag — a second, independent literal-bearing tag (ADR-117), the same
+/// pattern `KEYWORD_BIT` established: `5` in type position refines the int
+/// members to exactly the listed integers. Independent of `KEYWORD_BIT` (a
+/// different bit), so `(or :ok 5)` carries both refinements at once with no
+/// special-casing — see `docs/type-int-literals.md`.
+const INT_BIT: u32 = 1u32 << bit(Tag::Int);
+
 /// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
 /// *structured refinements* on its function and sequence members (Step 5+,
 /// ADR-078).
@@ -128,6 +135,14 @@ pub struct Ty {
     /// Refinement of the function members (`Fn`/`Native`), when statically known.
     /// `None` means "any function" (the permissive default).
     arrow: Option<Arc<Sig>>,
+    /// Refinement of the function members to a **set of alternative
+    /// signatures** — an overload, e.g. `(int -> int) and (bool -> bool)`.
+    /// Only ever holds 2+ *distinct* `Sig`s; a single one always collapses
+    /// back to `arrow` (so every existing single-arrow consumer is untouched
+    /// for the common case). `None` alongside `arrow: None` means "any
+    /// function"; `None` alongside `arrow: Some(_)` means "exactly one known
+    /// signature" — see `docs/type-arrow-intersection.md`.
+    overload: Option<Arc<Vec<Sig>>>,
     /// Refinement of the sequence members (`pair`/`vector`) — the element type,
     /// when statically known. `None` means "elements of any type".
     elem: Option<Arc<Ty>>,
@@ -150,6 +165,13 @@ pub struct Ty {
     /// `nil`). Unlike the other refinements, union of two literal sets is *exact*
     /// (the set-union), not a widening — so `(or :a :b)` keeps both.
     lit: Option<Arc<BTreeSet<Symbol>>>,
+    /// Refinement of the int member (`int`) to a literal set — the exact
+    /// integers admitted, e.g. `{5, 6}` (ADR-117). Independent of `lit`
+    /// (a different tag, `INT_BIT` not `KEYWORD_BIT`), so both can be `Some`
+    /// at once (`(or :ok 5)`). Same semantics as `lit` throughout: union is
+    /// exact, not a widening; every other tag stays open. `BigInt`-range
+    /// literals aren't representable here — see `docs/type-int-literals.md`.
+    lit_int: Option<Arc<BTreeSet<i64>>>,
 }
 
 impl Ty {
@@ -173,8 +195,10 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: None,
+            overload: None,
             fields: None,
             lit: None,
+            lit_int: None,
         }
     }
 
@@ -205,8 +229,10 @@ impl Ty {
             arrow: Some(Arc::new(sig)),
             elem: None,
             map_kv: None,
+            overload: None,
             fields: None,
             lit: None,
+            lit_int: None,
         }
     }
 
@@ -217,6 +243,32 @@ impl Ty {
         self.arrow.as_deref()
     }
 
+    /// An overloaded function type — `sigs[0] and sigs[1] and …` (an
+    /// intersection of 2+ distinct arrows), e.g. `(int -> int) and (bool ->
+    /// bool)`. Tagged `Fn|Native` like a plain arrow. `sigs` must have at
+    /// least 2 elements; a single signature belongs in [`Ty::arrow`] instead
+    /// — [`Ty::intersect`] enforces this collapse automatically, so this
+    /// constructor is for tests/direct construction only.
+    pub fn overload_of(sigs: Vec<Sig>) -> Ty {
+        Ty {
+            tags: FN_BITS,
+            arrow: None,
+            overload: Some(Arc::new(sigs)),
+            elem: None,
+            map_kv: None,
+            fields: None,
+            lit: None,
+            lit_int: None,
+        }
+    }
+
+    /// The overload refinement, if this type carries one — the bridge the
+    /// checker reads to resolve a call's return type per matching arm. `None`
+    /// when this type carries at most a single [`Ty::arrow`].
+    pub fn overload_sigs(&self) -> Option<&Vec<Sig>> {
+        self.overload.as_deref()
+    }
+
     /// A sequence type over `tags` (some subset of `pair`/`vector`) whose elements
     /// have type `elem` — the general element-refinement constructor.
     pub fn seq_of(tags: u32, elem: Ty) -> Ty {
@@ -225,8 +277,10 @@ impl Ty {
             arrow: None,
             elem: Some(Arc::new(elem)),
             map_kv: None,
+            overload: None,
             fields: None,
             lit: None,
+            lit_int: None,
         }
     }
 
@@ -237,8 +291,10 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: Some(Arc::new((key, val))),
+            overload: None,
             fields: None,
             lit: None,
+            lit_int: None,
         }
     }
 
@@ -252,8 +308,10 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: None,
+            overload: None,
             fields: Some(Arc::new(fields)),
             lit: None,
+            lit_int: None,
         }
     }
 
@@ -273,8 +331,10 @@ impl Ty {
             arrow: None,
             elem: None,
             map_kv: None,
+            overload: None,
             fields: None,
             lit: Some(Arc::new(set)),
+            lit_int: None,
         }
     }
 
@@ -282,6 +342,31 @@ impl Ty {
     /// symbols admitted). `None` means "any keyword" (or no keyword member).
     pub fn as_lit(&self) -> Option<&BTreeSet<Symbol>> {
         self.lit.as_deref()
+    }
+
+    /// An int-literal (singleton) type — exactly the integer `n` (ADR-117).
+    /// Unions of these build an enumerated int type, e.g. `(or 200 404 500)`.
+    /// Independent of [`Ty::keyword_lit`] (a different tag), so the two
+    /// compose freely — `(or :ok 5)` carries both refinements at once.
+    pub fn int_lit(n: i64) -> Ty {
+        let mut set = BTreeSet::new();
+        set.insert(n);
+        Ty {
+            tags: INT_BIT,
+            arrow: None,
+            elem: None,
+            map_kv: None,
+            overload: None,
+            fields: None,
+            lit: None,
+            lit_int: Some(Arc::new(set)),
+        }
+    }
+
+    /// The int-literal refinement, if this type carries one (the exact
+    /// integers admitted). `None` means "any int" (or no int member).
+    pub fn as_lit_int(&self) -> Option<&BTreeSet<i64>> {
+        self.lit_int.as_deref()
     }
 
     /// The key/value refinement, if this map type carries one. The bridge the
@@ -311,6 +396,12 @@ impl Ty {
     /// The type of a concrete value — the bridge from a runtime value to its type.
     /// A keyword becomes its **literal singleton** (`:foo`, not the whole `keyword`
     /// tag), so a literal in code is checked against an enumerated keyword sig.
+    /// Ints deliberately stay flat here (unlike keywords) — see
+    /// `docs/type-int-literals.md`'s "Deferred" section: making every int
+    /// literal in code a singleton cascades into every misuse-warning message
+    /// that happens to mention a literal int (7 existing tests broke on exact
+    /// wording, e.g. "got int" → "got 5"), a materially bigger and riskier
+    /// change than this slice's scope (declared-sig literal sets).
     pub fn of_value(v: Value) -> Ty {
         match v {
             Value::Keyword(s) => Ty::keyword_lit(s),
@@ -368,6 +459,15 @@ impl Ty {
             other.tags & FN_BITS != 0,
             &other.arrow,
         );
+        // Same "widen unless identical" rule as every other refinement — an
+        // overload set is just another `Option<Arc<T: PartialEq>>` as far as
+        // `merge_union` is concerned.
+        let overload = merge_union(
+            self.tags & FN_BITS != 0,
+            &self.overload,
+            other.tags & FN_BITS != 0,
+            &other.overload,
+        );
         let elem = merge_union(
             self.tags & SEQ_BITS != 0,
             &self.elem,
@@ -391,13 +491,19 @@ impl Ty {
         // every keyword, so the result keyword member is open too (`:a ∪ keyword =
         // keyword`).
         let lit = merge_union_lit(&self, &other);
+        // Same exact-union rule for int literals — an independent tag/field, so
+        // this composes with `lit` (a keyword-literal side and an int-literal
+        // side) with no special-casing at all.
+        let lit_int = merge_union_lit_int(&self, &other);
         Ty {
             tags,
             arrow,
+            overload,
             elem,
             map_kv,
             fields,
             lit,
+            lit_int,
         }
     }
 
@@ -408,10 +514,10 @@ impl Ty {
     /// refined `T` keeps its refinement through the narrow.)
     pub fn intersect(self, other: Ty) -> Ty {
         let mut tags = self.tags & other.tags;
-        let arrow = if tags & FN_BITS != 0 {
-            merge_intersect(&self.arrow, &other.arrow)
+        let (arrow, overload) = if tags & FN_BITS != 0 {
+            intersect_arrows(&self, &other)
         } else {
-            None
+            (None, None)
         };
         let elem = if tags & SEQ_BITS != 0 {
             merge_intersect(&self.elem, &other.elem)
@@ -449,13 +555,35 @@ impl Ty {
         } else {
             None
         };
+        // Same intersection logic, independent tag — an int-literal set
+        // narrows exactly like a keyword-literal one.
+        let lit_int = if tags & INT_BIT != 0 {
+            match (&self.lit_int, &other.lit_int) {
+                (Some(a), Some(b)) => {
+                    let s: BTreeSet<i64> = a.intersection(b).copied().collect();
+                    if s.is_empty() {
+                        tags &= !INT_BIT;
+                        None
+                    } else {
+                        Some(Arc::new(s))
+                    }
+                }
+                (Some(a), None) => Some(a.clone()),
+                (None, Some(b)) => Some(b.clone()),
+                (None, None) => None,
+            }
+        } else {
+            None
+        };
         Ty {
             tags,
             arrow,
+            overload,
             elem,
             map_kv,
             fields,
             lit,
+            lit_int,
         }
     }
 
@@ -477,7 +605,7 @@ impl Ty {
         let mut tags = !self.tags & UNIVERSE;
         // A refinement means `self` omits some values of its refined tag(s);
         // those omitted values are in the complement, so the tag must survive.
-        if self.arrow.is_some() {
+        if self.arrow.is_some() || self.overload.is_some() {
             tags |= self.tags & FN_BITS;
         }
         if self.elem.is_some() {
@@ -490,6 +618,11 @@ impl Ty {
         // so the keyword tag survives (widened to "any keyword").
         if self.lit.is_some() {
             tags |= KEYWORD_BIT;
+        }
+        // Same reasoning, independent tag — an int-literal set omits the
+        // other ints, so the int tag survives (widened to "any int").
+        if self.lit_int.is_some() {
+            tags |= INT_BIT;
         }
         Ty::flat(tags)
     }
@@ -511,14 +644,22 @@ impl Ty {
             return false;
         }
         if self.tags & FN_BITS != 0 {
-            if let Some(b) = &other.arrow {
-                match &self.arrow {
-                    Some(a) => {
-                        if !a.is_subtype(b) {
-                            return false;
-                        }
+            // Generalizes the single-arrow case: `other`'s candidate list is
+            // `[the one arrow]` when it's unrefined-to-an-overload, so this
+            // reproduces the old exact-Sig check unchanged. For a genuine
+            // overload, `self` must satisfy *every* signature `other`
+            // requires — for each, at least one of `self`'s candidates must
+            // be a `Sig::is_subtype` of it (self may carry extra arms beyond
+            // what's required — sound, not complete, same conservative shape
+            // as `record_fields_is_subtype`). See
+            // `docs/type-arrow-intersection.md`.
+            let other_candidates = candidate_sigs(other);
+            if !other_candidates.is_empty() {
+                let self_candidates = candidate_sigs(self);
+                for req in &other_candidates {
+                    if !self_candidates.iter().any(|s| s.is_subtype(req)) {
+                        return false;
                     }
-                    None => return false, // self = "any function" ⊄ a specific arrow
                 }
             }
         }
@@ -570,15 +711,29 @@ impl Ty {
                 }
             }
         }
+        if self.tags & INT_BIT != 0 {
+            if let Some(b) = &other.lit_int {
+                match &self.lit_int {
+                    // every int self admits must be one `other` admits
+                    Some(a) => {
+                        if !a.is_subset(b) {
+                            return false;
+                        }
+                    }
+                    None => return false, // self = "any int" ⊄ a literal set
+                }
+            }
+        }
         true
     }
 
     /// Do `self` and `other` share no values? (`self ∩ other = ⊥`.) Tag overlap
-    /// decides it, with one *precise* exception: when the only shared tag is
-    /// `keyword` and both sides pin disjoint literal sets, no keyword satisfies
-    /// both. This only ever *adds* genuinely-disjoint cases (a literal set is an
-    /// exact enumeration, not an approximation), so it can't raise a false warning
-    /// — advisory-soundness holds.
+    /// decides it, with two *precise* exceptions: when the only shared tag is
+    /// `keyword` (or, independently, `int`) and both sides pin disjoint literal
+    /// sets, no value of that tag satisfies both. This only ever *adds*
+    /// genuinely-disjoint cases (a literal set is an exact enumeration, not an
+    /// approximation), so it can't raise a false warning — advisory-soundness
+    /// holds.
     pub fn is_disjoint(&self, other: &Ty) -> bool {
         let shared = self.tags & other.tags;
         if shared == 0 {
@@ -586,6 +741,11 @@ impl Ty {
         }
         if shared == KEYWORD_BIT {
             if let (Some(a), Some(b)) = (&self.lit, &other.lit) {
+                return a.is_disjoint(b);
+            }
+        }
+        if shared == INT_BIT {
+            if let (Some(a), Some(b)) = (&self.lit_int, &other.lit_int) {
                 return a.is_disjoint(b);
             }
         }
@@ -637,6 +797,56 @@ fn record_fields_is_subtype(
         }
     }
     true
+}
+
+/// The candidate signatures a function-tagged `Ty` carries: `overload`'s list
+/// if present (2+ sigs), else `arrow` as a one-element list, else empty ("any
+/// function" — no info). The shared extraction [`intersect_arrows`] and
+/// [`Ty::is_subtype`] both build on.
+fn candidate_sigs(ty: &Ty) -> Vec<Sig> {
+    if let Some(sigs) = &ty.overload {
+        sigs.as_ref().clone()
+    } else if let Some(sig) = &ty.arrow {
+        vec![sig.as_ref().clone()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// `self`'s and `other`'s arrow refinements, intersected — the composition
+/// rule for intersection *types*: a value satisfying both `self` and `other`
+/// must satisfy every signature contributed by *either* side (`f : (A→B) ∧
+/// (C→D)` means both arrows apply to `f`), so the result is the deduplicated
+/// union of the two candidate lists. A side with **no** candidates ("any
+/// function") leaves the other's candidates untouched — this reproduces
+/// today's exact behaviour for `(and fn (int -> int))` and for two identical
+/// arrows. Collapses to `(Some(sig), None)` when exactly one distinct
+/// signature survives (the common case — every existing single-arrow
+/// consumer is unaffected), else `(None, Some(overload_list))`. See
+/// `docs/type-arrow-intersection.md`.
+fn intersect_arrows(a: &Ty, b: &Ty) -> (Option<Arc<Sig>>, Option<Arc<Vec<Sig>>>) {
+    let sa = candidate_sigs(a);
+    let sb = candidate_sigs(b);
+    if sa.is_empty() {
+        return (b.arrow.clone(), b.overload.clone());
+    }
+    if sb.is_empty() {
+        return (a.arrow.clone(), a.overload.clone());
+    }
+    let mut combined = sa;
+    for sig in sb {
+        if !combined.contains(&sig) {
+            combined.push(sig);
+        }
+    }
+    if combined.len() == 1 {
+        (
+            Some(Arc::new(combined.into_iter().next().expect("len == 1"))),
+            None,
+        )
+    } else {
+        (None, Some(Arc::new(combined)))
+    }
 }
 
 /// The surviving refinement for a **union**: present on just one side → carry it;
@@ -700,6 +910,32 @@ fn merge_union_lit(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<Symbol>>> {
     }
 }
 
+/// The int-literal counterpart of [`merge_union_lit`] — same exact-union,
+/// open-widens rule, independent tag (`INT_BIT`, not `KEYWORD_BIT`).
+fn merge_union_lit_int(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<i64>>> {
+    let open = |t: &Ty| t.tags & INT_BIT != 0 && t.lit_int.is_none();
+    if open(a) || open(b) {
+        return None;
+    }
+    match (&a.lit_int, &b.lit_int) {
+        (None, None) => None,
+        (x, y) => {
+            let mut set = BTreeSet::new();
+            if let Some(x) = x {
+                set.extend(x.iter().copied());
+            }
+            if let Some(y) = y {
+                set.extend(y.iter().copied());
+            }
+            if set.is_empty() {
+                None
+            } else {
+                Some(Arc::new(set))
+            }
+        }
+    }
+}
+
 impl fmt::Display for Ty {
     /// A readable rendering for diagnostics: the named lattice points where they
     /// apply (`never`, `any`, `number`, `list`), a single tag by its `type-of`
@@ -720,10 +956,20 @@ impl fmt::Display for Ty {
         if *self == Ty::LIST {
             return f.write_str("list");
         }
-        // A purely-function type with a known signature: show the arrow.
+        // A purely-function type with a known signature: show the arrow, or
+        // every arm of an overload joined with ` and ` (matching the `(and
+        // …)` annotation syntax that produces it).
         if self.tags & !FN_BITS == 0 {
             if let Some(sig) = self.as_arrow() {
                 return write!(f, "{sig}");
+            }
+            if let Some(sigs) = self.overload_sigs() {
+                let joined = sigs
+                    .iter()
+                    .map(Sig::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                return f.write_str(&joined);
             }
         }
         // A pure sequence type with a known element type: `vector<E>` / `list<E>`
@@ -773,17 +1019,32 @@ impl fmt::Display for Ty {
                 }
             }
         }
-        // A keyword-literal type: the enumerated keywords (`:a | :b`), plus any
-        // other tags this type also admits (`:a | :b | nil`). Sorted by name so the
-        // rendering is stable regardless of intern order.
-        if let Some(set) = &self.lit {
-            let mut parts: Vec<String> = set
+        // A literal type: the enumerated keywords (`:a | :b`) and/or ints
+        // (`5 | 6`) — both may be present at once (`(or :ok 5)`, independent
+        // tags/fields) — plus any other tag this type also admits (`:a | nil`).
+        // Keywords sorted by name (stable regardless of intern order); ints
+        // sorted numerically, listed after the keywords.
+        if self.lit.is_some() || self.lit_int.is_some() {
+            let mut kw_parts: Vec<String> = self
+                .lit
                 .iter()
+                .flat_map(|set| set.iter())
                 .map(|s| format!(":{}", value::symbol_name_ref(*s)))
                 .collect();
-            parts.sort();
+            kw_parts.sort();
+            let mut int_parts: Vec<String> = self
+                .lit_int
+                .iter()
+                .flat_map(|set| set.iter())
+                .map(|n| n.to_string())
+                .collect();
+            int_parts.sort_by_key(|s| s.parse::<i64>().unwrap());
+            let mut parts = kw_parts;
+            parts.extend(int_parts);
             for tag in ALL_TAGS {
-                if tag as u8 as u32 != bit(Tag::Keyword) && self.contains_tag(tag) {
+                let is_literal_tag = (tag as u8 as u32 == bit(Tag::Keyword) && self.lit.is_some())
+                    || (tag as u8 as u32 == bit(Tag::Int) && self.lit_int.is_some());
+                if !is_literal_tag && self.contains_tag(tag) {
                     parts.push(tag.name().to_string());
                 }
             }
@@ -1367,6 +1628,103 @@ mod tests {
         assert!(f.is_disjoint(&Ty::of(Tag::Int)));
     }
 
+    // ---- overloaded arrows (intersection of arrows) — ADR-116 ----
+
+    #[test]
+    fn intersect_of_two_distinct_arrows_builds_an_overload() {
+        let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        let g = arr(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool));
+        // (int -> int) and (bool -> bool): two distinct sigs → a real overload,
+        // not the old "widen to any function" behavior.
+        let overloaded = f.clone().intersect(g.clone());
+        assert_eq!(overloaded.as_arrow(), None);
+        let sigs = overloaded.overload_sigs().expect("expected an overload");
+        assert_eq!(sigs.len(), 2);
+        assert!(sigs.contains(f.as_arrow().unwrap()));
+        assert!(sigs.contains(g.as_arrow().unwrap()));
+    }
+
+    #[test]
+    fn intersect_of_identical_arrows_collapses_to_a_single_arrow() {
+        let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        let f_again = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        // Same backward-compatible collapse `merge_intersect` already gave —
+        // two equal sigs are just one, no overload needed.
+        let same = f.clone().intersect(f_again);
+        assert_eq!(same.as_arrow(), f.as_arrow());
+        assert_eq!(same.overload_sigs(), None);
+    }
+
+    #[test]
+    fn intersect_with_any_function_keeps_the_others_candidates_unchanged() {
+        let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        let g = arr(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool));
+        let overloaded = f.clone().intersect(g.clone());
+        let any_fn = Ty::of_tags(&[Tag::Fn, Tag::Native]); // unrefined
+        // any_fn ∩ overloaded and overloaded ∩ any_fn both keep the overload
+        // untouched (one side contributes zero candidates).
+        assert_eq!(
+            any_fn.clone().intersect(overloaded.clone()).overload_sigs(),
+            overloaded.overload_sigs()
+        );
+        assert_eq!(
+            overloaded.clone().intersect(any_fn).overload_sigs(),
+            overloaded.overload_sigs()
+        );
+    }
+
+    #[test]
+    fn intersect_accumulates_three_distinct_arrows() {
+        // (and (int->int) (bool->bool) (string->string)) — folding the
+        // pairwise `intersect` the `(and A B C)` grammar already does.
+        let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        let g = arr(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool));
+        let h = arr(vec![Ty::of(Tag::Str)], Ty::of(Tag::Str));
+        let acc = f.clone().intersect(g.clone()).intersect(h.clone());
+        let sigs = acc.overload_sigs().expect("expected an overload");
+        assert_eq!(sigs.len(), 3);
+        for expected in [f, g, h] {
+            assert!(sigs.contains(expected.as_arrow().unwrap()));
+        }
+    }
+
+    #[test]
+    fn overload_renders_each_arm_joined_by_and() {
+        let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        let g = arr(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool));
+        assert_eq!(
+            f.intersect(g).to_string(),
+            "(int) -> int and (bool) -> bool"
+        );
+    }
+
+    #[test]
+    fn overload_subtyping_is_conservative_but_sound() {
+        let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        let g = arr(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool));
+        let overloaded = f.clone().intersect(g.clone());
+        // A value satisfying the overload also satisfies each arm on its own.
+        assert!(overloaded.is_subtype(&f));
+        assert!(overloaded.is_subtype(&g));
+        // A single arrow is NOT a subtype of an overload requiring a second,
+        // unrelated arm it doesn't carry.
+        assert!(!f.is_subtype(&overloaded));
+        // The overload is (trivially) a subtype of itself and of "any function".
+        assert!(overloaded.is_subtype(&overloaded));
+        let any_fn = Ty::of_tags(&[Tag::Fn, Tag::Native]);
+        assert!(overloaded.is_subtype(&any_fn));
+    }
+
+    #[test]
+    fn overload_is_disjoint_only_on_tags_like_every_other_refinement() {
+        let f = arr(vec![Ty::of(Tag::Int)], Ty::of(Tag::Int));
+        let g = arr(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool));
+        let h = arr(vec![Ty::of(Tag::Str)], Ty::of(Tag::Str));
+        let overloaded = f.intersect(g);
+        // Still both functions — never disjoint off a refinement mismatch.
+        assert!(!overloaded.is_disjoint(&h));
+    }
+
     // ---- structured (element) types — Step 5+, ADR-078 slice 2 ----
 
     #[test]
@@ -1639,6 +1997,109 @@ mod tests {
         // (:a | :b) ∩ keyword(any) = (:a | :b) (narrower wins).
         let narrowed = kw_union(&["a", "b"]).intersect(Ty::of(Tag::Keyword));
         assert_eq!(narrowed.as_lit(), kw_union(&["a", "b"]).as_lit());
+    }
+
+    // ---- int-literal (singleton) types — ADR-117 ----
+
+    /// `(or 1 2)` as a `Ty` — the union of two int singletons.
+    fn int_union(ns: &[i64]) -> Ty {
+        ns.iter()
+            .map(|&n| Ty::int_lit(n))
+            .reduce(|a, b| a.union(b))
+            .unwrap()
+    }
+
+    #[test]
+    fn int_literal_renders_as_its_value() {
+        assert_eq!(Ty::int_lit(5).to_string(), "5");
+        // a union keeps both (set-union is exact, not a widening); rendered sorted.
+        assert_eq!(int_union(&[404, 200]).to_string(), "200 | 404");
+        // mixed with another tag: the literals plus the open tag.
+        assert_eq!(
+            int_union(&[404, 200]).union(Ty::of(Tag::Nil)).to_string(),
+            "200 | 404 | nil"
+        );
+    }
+
+    #[test]
+    fn int_literal_union_is_exact_but_open_int_widens() {
+        // {5} ∪ {6} = {5, 6} — exact, both kept.
+        let u = int_union(&[5, 6]);
+        let mut want = BTreeSet::new();
+        want.insert(5);
+        want.insert(6);
+        assert_eq!(u.as_lit_int(), Some(&want));
+        // {5} ∪ int(any) → any int (open side wins).
+        let widened = Ty::int_lit(5).union(Ty::of(Tag::Int));
+        assert!(widened.contains_tag(Tag::Int));
+        assert_eq!(widened.as_lit_int(), None);
+    }
+
+    #[test]
+    fn int_literal_subtyping() {
+        let ab = int_union(&[5, 6]);
+        // 5 <: (5 | 6)
+        assert!(Ty::int_lit(5).is_subtype(&ab));
+        // (5 | 6) <: int(any)
+        assert!(ab.is_subtype(&Ty::of(Tag::Int)));
+        // 7 ⊄ (5 | 6)
+        assert!(!Ty::int_lit(7).is_subtype(&ab));
+        // any int ⊄ a specific literal set
+        assert!(!Ty::of(Tag::Int).is_subtype(&ab));
+    }
+
+    #[test]
+    fn int_literal_disjointness_is_precise() {
+        let ab = int_union(&[5, 6]);
+        // 7 is provably not one of (5 | 6) → disjoint → the checker can warn.
+        assert!(Ty::int_lit(7).is_disjoint(&ab));
+        // 5 overlaps → not disjoint.
+        assert!(!Ty::int_lit(5).is_disjoint(&ab));
+        // any int could be 5 → NOT provably disjoint (no false positive).
+        assert!(!Ty::of(Tag::Int).is_disjoint(&ab));
+        // a non-int is disjoint by tags as before.
+        assert!(ab.is_disjoint(&Ty::of(Tag::Keyword)));
+        // sharing another tag (nil) means not disjoint even if ints differ.
+        let seven_or_nil = Ty::int_lit(7).union(Ty::of(Tag::Nil));
+        let ab_or_nil = ab.clone().union(Ty::of(Tag::Nil));
+        assert!(!seven_or_nil.is_disjoint(&ab_or_nil));
+    }
+
+    #[test]
+    fn int_literal_intersection() {
+        // (5 | 6) ∩ (6 | 7) = {6}
+        let inter = int_union(&[5, 6]).intersect(int_union(&[6, 7]));
+        let mut want = BTreeSet::new();
+        want.insert(6);
+        assert_eq!(inter.as_lit_int(), Some(&want));
+        // (5) ∩ (6) = never (empty literal set clears the int tag).
+        let empty = Ty::int_lit(5).intersect(Ty::int_lit(6));
+        assert!(empty.is_never());
+        // (5 | 6) ∩ int(any) = (5 | 6) (narrower wins).
+        let narrowed = int_union(&[5, 6]).intersect(Ty::of(Tag::Int));
+        assert_eq!(narrowed.as_lit_int(), int_union(&[5, 6]).as_lit_int());
+    }
+
+    #[test]
+    fn keyword_and_int_literals_coexist_on_one_ty() {
+        // (or :ok 5) — two independent literal-bearing tags on the same Ty,
+        // with zero special-casing needed (different tag bits / fields).
+        let mixed = Ty::keyword_lit(value::intern("ok")).union(Ty::int_lit(5));
+        assert!(mixed.contains_tag(Tag::Keyword));
+        assert!(mixed.contains_tag(Tag::Int));
+        let mut want_kw = BTreeSet::new();
+        want_kw.insert(value::intern("ok"));
+        assert_eq!(mixed.as_lit(), Some(&want_kw));
+        let mut want_int = BTreeSet::new();
+        want_int.insert(5);
+        assert_eq!(mixed.as_lit_int(), Some(&want_int));
+        assert_eq!(mixed.to_string(), ":ok | 5");
+        // Subtyping: :ok <: (or :ok 5), and 5 <: (or :ok 5).
+        assert!(Ty::keyword_lit(value::intern("ok")).is_subtype(&mixed));
+        assert!(Ty::int_lit(5).is_subtype(&mixed));
+        // A different keyword or int is not a subtype.
+        assert!(!Ty::keyword_lit(value::intern("no")).is_subtype(&mixed));
+        assert!(!Ty::int_lit(6).is_subtype(&mixed));
     }
 
     #[test]

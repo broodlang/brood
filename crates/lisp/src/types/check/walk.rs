@@ -19,7 +19,7 @@ use crate::error::Pos;
 use crate::types::{GradualTy, Ty};
 
 use super::ctx::Ctx;
-use super::guards::{expr_ty, guard_assertion, is_syntactic_keyword};
+use super::guards::{expr_ty, guard_assertion, is_syntactic_keyword, match_exhaustiveness_gap};
 use super::sigs::{arity_of, arity_str, curated_sig, is_globally_bound, sig_of};
 
 /// `symbol_name(s)` is a `String` allocation; we only need the spelling on
@@ -656,6 +656,19 @@ pub(super) fn check_into(
                         ));
                     }
                 }
+            }
+        }
+
+        // **Match-exhaustiveness lint** (ADR-118). `match` compiles a no-catch-
+        // all form's failure to `(throw [:match-error 'context target
+        // 'patterns])` — recognising that exact shape here (the generic
+        // `throw` call path, not a dedicated `match`/`SPECIAL_HEAD` entry,
+        // since by now `match` has already macroexpanded to this) is enough
+        // to flag a literal-enum scrutinee whose clauses don't cover every
+        // member. See `match_exhaustiveness_gap`.
+        if value::symbol_is(s, "throw") && items.len() == 2 {
+            if let Some(msg) = match_exhaustiveness_gap(heap, items[1], ctx) {
+                out.push((heap.form_pos_only(form), msg));
             }
         }
 

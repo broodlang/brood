@@ -720,11 +720,31 @@ dead-clause lint, and soundness-oracle tests.
 
 Gaps to parity (⬜ = not started; ✋ = deliberately not pursuing):
 
-- ⬜ **Intersection of arrows** — input-dependent return types for multi-clause
-  functions (`(int->int) and (bool->bool)`). The single biggest expressiveness
-  gap; pulls in when overloaded/multi-clause typing has a real consumer.
-- ⬜ **Singleton / literal types** (`:ok` vs `:error`, `5` as a type) — the basis
-  for precise `case`/`match` **exhaustiveness** and redundancy checking.
+- ✅ **Intersection of arrows** — fully shipped (ADR-116): input-dependent
+  return types for overloaded functions (`(and (int->int) (bool->bool))`) —
+  no new grammar, the already-shipped `(and …)` syntax now builds a real
+  overload instead of widening two distinct arrows to "any function"; a call
+  site resolves the matching arm's return type. Flagging an argument that
+  fails *every* arm stays deferred (needs a second hook in the separate
+  arity/argument-checking loop). See
+  [`docs/type-arrow-intersection.md`](type-arrow-intersection.md).
+- 🟡 **Singleton / literal types** — **keyword** (ADR-105) and **int** (ADR-117)
+  shipped: a bare `:ok`/`5` in type position is a literal singleton, enumerable
+  via `(or :ok :error)`/`(or 200 404 500)`, and the two compose freely
+  (`(or :ok 5)` — independent tags/fields, no special-casing needed). **Bool/
+  string literal types** are the same machinery, still deferred; so is
+  call-site *argument* literal precision for int (a literal int argument isn't
+  yet recognized as a singleton the way a literal keyword argument already is
+  via `Ty::of_value` — tried, reverted, see
+  [`type-int-literals.md`](type-int-literals.md)'s Deferred section: it
+  cascaded into unrelated warning-message wording across 7 pre-existing
+  tests, a bigger change than this slice's scope). **`match` exhaustiveness**
+  over a *pure* keyword- or int-literal enum is shipped (ADR-118,
+  [`type-match-exhaustiveness.md`](type-match-exhaustiveness.md)) — `case`
+  doesn't exist in Brood, so this is `match`-only. Mixed-kind enums
+  (`(or :ok 5)`), enums with a trailing non-literal tag (`(or :ok :error
+  nil)`), and clause **redundancy**/unreachable-clause detection all stay
+  deferred.
 - ✅ **Map key/value types** `(map K V)` — fully shipped (ADR-078's third
   refinement slice): uniform key/value types flow through `get`/`keys`/`vals`/
   `assoc`. See [`docs/type-map-kv.md`](type-map-kv.md).
@@ -737,8 +757,13 @@ Gaps to parity (⬜ = not started; ✋ = deliberately not pursuing):
   drives them. See [`docs/type-records.md`](type-records.md).
 - ⬜ **Tuple / positional product types** (Brood has no tuple kind; vectors carry
   a single element type, not positional types).
-- ⬜ **Type variables / parametric polymorphism** for user-defined generics
-  (the curated HOFs use per-rule result types, not type variables).
+- ✅ **Type variables / parametric polymorphism** for user-defined generics —
+  fully shipped (slices 1–2, [`type-variables.md`](type-variables.md)): `?A`-style
+  vars in `(sig …)` grammar, runtime pass-through, and static unification
+  (`SigWithVars`/`parse_sig_decl_with_vars`) resolve a call's return type from its
+  argument types, e.g. `(sig identity (?A -> ?A))`. The curated *built-in* HOFs
+  (`map`/`filter`/…) still use per-rule result types rather than internally
+  migrating to type variables (slice 3, deferred — Option B was sufficient).
 - ⬜ **Full type inference / reconstruction** — Brood infers only one-step
   straight-line bodies + guard narrowing; Elixir does guard-driven + local
   inference across a function.
@@ -750,9 +775,10 @@ Gaps to parity (⬜ = not started; ✋ = deliberately not pursuing):
 - ✋ **Wiring `dynamic()` / full gradual consistency into the checker** — kept as
   a foundation (`GradualTy`); only wire it in if a real gradual-*assignment*
   consumer appears. The advisory disjointness pass doesn't need it.
-- ⬜ **Fast-follows on what's shipped:** a `BROOD_CONTRACTS=1` switch to enforce
-  *every* `(sig …)` at run time; element-level `(list E)` / `(vector E)` contract
-  checks; broadening the dead-clause lint beyond sig-typed params (needs the
+- ✅ **`BROOD_CONTRACTS=1`** — shipped: enforces *every* `(sig …)` at run time the
+  same way `sig!` does, plus element-level `(list E)` / `(vector E)` contract
+  checks (`tests/contract_test.blsp`). See [`type-annotations.md`](type-annotations.md).
+- ⬜ **Broaden the dead-clause lint beyond sig-typed params** (needs the
   surface-vs-generated scoping noted in `docs/type-annotations.md`).
 
 The deeper rationale (why advisory + editor-serving rather than Elixir's sound

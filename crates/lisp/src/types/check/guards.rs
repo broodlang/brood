@@ -16,8 +16,8 @@ use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
 use crate::types::Ty;
 
-use super::ctx::Ctx;
-use super::sigs::sig_of;
+use super::ctx::{resolve_overload_ret, Ctx};
+use super::sigs::{declared_heap_overload, sig_of};
 use super::walk::{is_fn_head, list_items};
 
 /// Names that have *syntactic* meaning but aren't bound values — never flag
@@ -224,6 +224,115 @@ fn literal_eq_guard(a: Value, b: Value) -> Option<(Symbol, Ty)> {
     }
 }
 
+/// Match-exhaustiveness check over literal-enum scrutinees (ADR-118).
+///
+/// `match` compiles `(match expr clause…)` to a `let`+`if`+`%eq` chain whose
+/// innermost failure is `(throw [:match-error 'context target 'patterns])`
+/// (`match-no-match`, `std/prelude.blsp`) — and that exact shape is only
+/// present in the compiled tree when the match has **no catch-all clause**
+/// (an irrefutable wildcard/bind clause compiles to its body directly, no
+/// further `if`, so the throw never gets generated). So finding this shape
+/// at all already means "this match isn't covered by a catch-all"; the
+/// `patterns` slot is the full list of every clause's raw pattern, quoted
+/// literal data sitting right there — no clause-boundary reconstruction
+/// needed.
+///
+/// `target`'s ctx type here is its *original* declared type, unnarrowed: the
+/// else-branch of a `(%eq target lit)` test is `then_only` (`guard_assertion`),
+/// so `check_if` never narrows it going down the chain. If that type is a
+/// **pure** literal-enum (every member is a keyword-literal or an
+/// int-literal, nothing else mixed in), and the tried patterns don't cover
+/// every member, this returns a message naming what's missing.
+///
+/// Conservative by construction: a non-literal pattern among those tried
+/// (a destructuring pattern, a guarded bind) bails to `None` rather than
+/// half-reasoning about coverage; a scrutinee whose type isn't a pure
+/// literal-enum bails too. Never a false positive, may miss a real gap.
+pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx) -> Option<String> {
+    let Value::Vector(vid) = throw_arg else {
+        return None;
+    };
+    let elems = heap.vector(vid).to_vec();
+    if elems.len() != 4 {
+        return None;
+    }
+    let Value::Keyword(tag) = elems[0] else {
+        return None;
+    };
+    if value::symbol_name_ref(tag) != "match-error" {
+        return None;
+    }
+    let Value::Sym(target) = elems[2] else {
+        return None;
+    };
+    let target_ty = expr_ty(heap, Value::Sym(target), ctx)?;
+
+    // Unwrap `(quote patterns-list)` to the raw pattern list.
+    let quote_items = list_items(heap, elems[3])?;
+    if quote_items.len() != 2 {
+        return None;
+    }
+    let Value::Sym(q) = quote_items[0] else {
+        return None;
+    };
+    if !value::symbol_is(q, "quote") {
+        return None;
+    }
+    let patterns = list_items(heap, quote_items[1])?;
+
+    if target_ty.is_subtype(&Ty::of(Tag::Keyword)) {
+        let declared = target_ty.as_lit()?;
+        let mut tested = std::collections::BTreeSet::new();
+        for &p in &patterns {
+            match p {
+                Value::Keyword(s) => {
+                    tested.insert(s);
+                }
+                _ => return None, // a non-literal pattern — decline to reason about it
+            }
+        }
+        let mut missing: Vec<&str> = declared
+            .difference(&tested)
+            .map(|&s| value::symbol_name_ref(s))
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        missing.sort();
+        let joined = missing
+            .iter()
+            .map(|s| format!(":{s}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!("match: not exhaustive — missing {joined}"));
+    }
+
+    if target_ty.is_subtype(&Ty::of(Tag::Int)) {
+        let declared = target_ty.as_lit_int()?;
+        let mut tested = std::collections::BTreeSet::new();
+        for &p in &patterns {
+            match p {
+                Value::Int(n) => {
+                    tested.insert(n);
+                }
+                _ => return None,
+            }
+        }
+        let missing: Vec<i64> = declared.difference(&tested).copied().collect();
+        if missing.is_empty() {
+            return None;
+        }
+        let joined = missing
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!("match: not exhaustive — missing {joined}"));
+    }
+
+    None
+}
+
 /// The static type of an expression form *in `ctx`*, or `None` when it can't
 /// be pinned. `None` is "unknown" and is never flagged. Self-evaluating
 /// literals get their exact tag; a `quote`d datum gets the datum's tag; a call
@@ -305,6 +414,14 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                                 items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
                             return Some(sv.resolve_ret(&arg_tys));
                         }
+                        // An overloaded sig (ADR-116) — `(and (int -> int)
+                        // (bool -> bool))` — resolves per matching arm instead
+                        // of a single flat `ret`.
+                        if let Some(sigs) = ctx.declared_overload(s) {
+                            let arg_tys: Vec<Option<Ty>> =
+                                items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+                            return Some(resolve_overload_ret(sigs, &arg_tys));
+                        }
                         if let Some(sg) = ctx.declared_sig(s) {
                             return Some(sg.ret);
                         }
@@ -320,6 +437,16 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         if let Some(t) = seq_aware_call_ty(heap, s, &items, ctx) {
                             return Some(t);
                         }
+                    }
+                    // The heap-recorded counterpart of the `ctx.declared_overload`
+                    // check above (ADR-116) — makes an overload declared in
+                    // *another* module visible here too, the same way
+                    // `sig_of`/`declared_heap_sig` already does for a plain
+                    // single-arrow sig.
+                    if let Some(sigs) = declared_heap_overload(heap, s) {
+                        let arg_tys: Vec<Option<Ty>> =
+                            items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+                        return Some(resolve_overload_ret(&sigs, &arg_tys));
                     }
                     sig_of(heap, s).map(|sig| sig.ret)
                 }
@@ -771,7 +898,14 @@ fn callback_ret(heap: &Heap, f: Value, inputs: &[Option<Ty>], ctx: &Ctx) -> Opti
     match f {
         // A local binding shadows the global table — its return type isn't known.
         Value::Sym(s) if ctx.is_local(s) => None,
-        Value::Sym(s) => sig_of(heap, s).map(|sig| sig.ret),
+        Value::Sym(s) => {
+            // An overloaded callback (ADR-116) — resolve per matching arm from
+            // `inputs` instead of a single flat `ret`, same as the call-form case.
+            if let Some(sigs) = declared_heap_overload(heap, s) {
+                return Some(resolve_overload_ret(&sigs, inputs));
+            }
+            sig_of(heap, s).map(|sig| sig.ret)
+        }
         Value::Pair(_) => lambda_ret(heap, f, inputs, ctx),
         _ => None,
     }

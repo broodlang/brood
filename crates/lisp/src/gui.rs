@@ -195,6 +195,13 @@ pub enum Op {
         colors: std::collections::HashMap<u64, [u8; 3]>,
         default: [u8; 3],
     },
+    /// Shift every subsequent `Text`, `Rect`, and `Cursor` op upward by `dy_frac × cell_h`
+    /// pixels — sub-cell vertical offset for pixel-accurate smooth scrolling. A frame emits
+    /// this before the scrollable text area and resets it (dy_frac = 0.0) before fixed UI
+    /// chrome (mode line, scrollbar). GUI-only: the terminal ignores it. ADR-114.
+    ScrollOffset {
+        dy_frac: f32,
+    },
 }
 
 /// A keystroke, in a backend-neutral shape the Brood side turns into the same
@@ -2240,6 +2247,7 @@ pub(crate) mod backend {
             italic: bool,
             scale: u16,
             fg: [u8; 3],
+            clip_skip: usize,
         ) {
             if g == " " {
                 return;
@@ -2257,8 +2265,10 @@ pub(crate) mod backend {
                 self.cache.insert(key.clone(), baked);
             }
             let cg = &self.cache[&key];
-            for ry in 0..cg.height {
-                let py = top + ry;
+            // `clip_skip` glyph rows from the top are above the clip boundary (the grid
+            // origin); they're skipped and the remaining rows land at `top` onward.
+            for ry in clip_skip..cg.height {
+                let py = top + (ry - clip_skip);
                 if py >= fb_h {
                     break;
                 }

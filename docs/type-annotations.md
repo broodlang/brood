@@ -61,7 +61,16 @@ with `(or …)`: `(or :maximized :fullboth :fullscreen nil)`. Write keywords bar
 what the runtime `(sig! …)` contract matches by equality. A keyword outside the set
 is flagged by the checker/LSP and throws under a runtime contract; the diagnostic
 names the exact value (`got :bogus`). `false` is *not* a literal type — use `nil`
-for an "off" arm. (Bool/int/string literals are the same machinery, deferred.)
+for an "off" arm. (Bool/string literals are the same machinery, still deferred.)
+
+**Int-literal (singleton) types (ADR-117).** A *bare* int in type position is
+likewise a literal type — `(or 200 404 500)` enumerates the allowed values,
+same runtime-contract behavior as the keyword case (`(sig! …)` matches by
+equality; an int outside the set throws). See
+[type-int-literals.md](type-int-literals.md) for what this slice covers (a
+declared sig's literal set) vs. what's still deferred (a literal int
+*argument* at a call site isn't yet recognized as a singleton the way a
+literal keyword argument already is).
 
 Base names map to the same lattice points the predicates imply (`number` =
 `int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …). Deferred: map K/V

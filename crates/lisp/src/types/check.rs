@@ -468,6 +468,12 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         if let Some((name, sv)) = annot::parse_sig_decl_with_vars(heap, form) {
             ctx.add_declared_sig_with_vars(name, sv);
         }
+        // An overloaded sig — `(and (int -> int) (bool -> bool))` — has no
+        // single `Sig`, so `parse_sig_decl` above yields nothing for it;
+        // record it separately (ADR-116).
+        if let Some((name, sigs)) = annot::parse_sig_decl_overload(heap, form) {
+            ctx.add_declared_overload(name, sigs);
+        }
         // Non-arrow `(sig x T)` value-type declarations — consumed by the
         // gradual-assignment check on `(def x …)` (the first `GradualTy` consumer).
         if let Some((name, ty)) = annot::parse_value_sig_decl(heap, form) {
@@ -1322,6 +1328,239 @@ mod tests {
                 warnings(ok)
             );
         }
+    }
+
+    #[test]
+    fn overload_refinement_flows_through_checker() {
+        // (sig f (and (int -> int) (string -> string))): `f`'s return type
+        // depends on which arm matched the call's argument (ADR-116).
+        let src = "
+(defn f (x) x)
+(sig f (and (int -> int) (string -> string)))
+(string-length (f 1))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "an int arg should resolve to the int arm's return type, got {w:?}"
+        );
+
+        // The string arm's return type feeds `string-length` cleanly.
+        let src2 = "
+(defn f (x) x)
+(sig f (and (int -> int) (string -> string)))
+(string-length (f \"hi\"))
+";
+        assert!(
+            file_warnings(src2).is_empty(),
+            "a string arg should resolve to the string arm's return type, got {:?}",
+            file_warnings(src2)
+        );
+
+        // The string arm's return type is NOT a number — feeding it to `+` warns.
+        let src3 = "
+(defn f (x) x)
+(sig f (and (int -> int) (string -> string)))
+(+ 1 (f \"hi\"))
+";
+        assert!(
+            file_warnings(src3).iter().any(|s| s.contains('+')),
+            "a string return type fed to + should warn, got {:?}",
+            file_warnings(src3)
+        );
+
+        // An argument of unknown type widens to the union of every matching
+        // arm's return — `int | string` — which is NOT disjoint from
+        // `string`, so no false positive (sound, just less precise).
+        let src4 = "
+(defn f (x) x)
+(sig f (and (int -> int) (string -> string)))
+(defn g (y) (string-length (f y)))
+";
+        assert!(
+            file_warnings(src4).is_empty(),
+            "an unknown-typed arg should widen, not warn, got {:?}",
+            file_warnings(src4)
+        );
+    }
+
+    #[test]
+    fn overload_resolves_cross_module_via_the_heap_store() {
+        // `file_warnings`/`warnings` never *evaluate* — `%register-sig` only
+        // runs at load time, so those helpers only ever exercise the
+        // per-file `Ctx` path (`ctx.declared_overload`), never the
+        // heap-level `runtime.declared_sigs` store that makes a plain
+        // single-arrow sig visible cross-module. Simulate "module A defines
+        // and declares f; module B (a fresh Ctx — no file-local knowledge of
+        // f at all) calls it" by actually *evaluating* the declaration first
+        // (`eval_str`, so `%register-sig` really populates the heap), then
+        // typing a call form against an empty `Ctx` — exactly module B's
+        // starting point.
+        use super::guards::expr_ty;
+
+        let mut interp = crate::Interp::new();
+        interp
+            .eval_str(
+                "
+(defn f (x) x)
+(sig f (and (int -> int) (string -> string)))
+",
+            )
+            .expect("module A loads cleanly");
+
+        // An int-typed argument resolves to the int arm's return type.
+        let call_int = reader::read_one(&mut interp.heap, "(f 1)").expect("parse");
+        let t = expr_ty(&interp.heap, call_int, &Ctx::default())
+            .expect("cross-module overload should resolve, not come back unknown");
+        assert!(
+            t.is_subtype(&Ty::of(Tag::Int)),
+            "expected int for an int arg, got {t}"
+        );
+
+        // A string-typed argument resolves to the string arm's return type.
+        let call_str = reader::read_one(&mut interp.heap, "(f \"hi\")").expect("parse");
+        let t2 = expr_ty(&interp.heap, call_str, &Ctx::default())
+            .expect("cross-module overload should resolve, not come back unknown");
+        assert!(
+            t2.is_subtype(&Ty::of(Tag::Str)),
+            "expected string for a string arg, got {t2}"
+        );
+    }
+
+    #[test]
+    fn int_literal_return_type_flows_through_checker() {
+        // (sig f ((or 200 404 500) -> …)): f's declared return type is an
+        // int-literal set (ADR-117), not flat `int` — feeding a call to
+        // `string-length` should warn (disjoint tags: string vs. int), the
+        // same as it would for a flat `int` return, proving the literal-set
+        // Ty flows through `sig_of`/`declared_sig` like any other arrow.
+        let src = "
+(defn f (x) x)
+(sig f ((or 200 404 500) -> (or 200 404 500)))
+(string-length (f 200))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "expected string-length warning for an int-literal return, got {w:?}"
+        );
+
+        // A correct use (an int sink) stays silent.
+        let src2 = "
+(defn f (x) x)
+(sig f ((or 200 404 500) -> (or 200 404 500)))
+(+ 1 (f 200))
+";
+        assert!(
+            file_warnings(src2).is_empty(),
+            "an int-literal return fed to + should be silent, got {:?}",
+            file_warnings(src2)
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_flags_a_missing_keyword_arm() {
+        let src = "
+(defn f (status)
+  (match status
+    (:ok \"good\")
+    (:error \"bad\")))
+(sig f ((or :ok :error :pending) -> string))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("not exhaustive") && s.contains(":pending")),
+            "expected a missing-:pending warning, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_is_silent_when_every_arm_is_covered() {
+        let src = "
+(defn f (status)
+  (match status
+    (:ok \"good\")
+    (:error \"bad\")
+    (:pending \"waiting\")))
+(sig f ((or :ok :error :pending) -> string))
+";
+        assert!(
+            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            "a fully-covered match should be silent, got {:?}",
+            file_warnings(src)
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_is_silent_with_a_catch_all_clause() {
+        // A catch-all makes the throw disappear from the compiled tree
+        // entirely — trivially exhaustive regardless of how few literal arms
+        // are listed.
+        let src = "
+(defn f (status)
+  (match status
+    (:ok \"good\")
+    (_ \"anything else\")))
+(sig f ((or :ok :error :pending) -> string))
+";
+        assert!(
+            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            "a catch-all match should be silent, got {:?}",
+            file_warnings(src)
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_flags_a_missing_int_arm() {
+        let src = "
+(defn f (code)
+  (match code
+    (200 \"ok\")
+    (404 \"missing\")))
+(sig f ((or 200 404 500) -> string))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("not exhaustive") && s.contains("500")),
+            "expected a missing-500 warning, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_declines_a_destructuring_clause_mixed_in() {
+        // A non-literal pattern among those tried (here, a vector destructure)
+        // means the check can't reason about coverage — bail rather than
+        // guess.
+        let src = "
+(defn f (x)
+  (match x
+    (:ok \"good\")
+    ([a b] \"pair\")))
+(sig f ((or :ok :error) -> string))
+";
+        assert!(
+            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            "a match mixing a literal with a destructuring pattern should stay silent, got {:?}",
+            file_warnings(src)
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_is_silent_for_a_non_literal_scrutinee_type() {
+        // status's declared type is bare `keyword` — not a bounded literal
+        // enum — so there's nothing to enumerate against.
+        let src = "
+(defn f (status)
+  (match status
+    (:ok \"good\")
+    (:error \"bad\")))
+(sig f (keyword -> string))
+";
+        assert!(
+            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            "a non-literal-enum scrutinee should stay silent, got {:?}",
+            file_warnings(src)
+        );
     }
 
     #[test]

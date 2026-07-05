@@ -73,6 +73,12 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
         // that value. Unambiguous (base types are bare *symbols*), and the form
         // `(or :maximized :fullboth nil)` composes via the `(or …)` union above.
         Value::Keyword(s) => Some(Ty::keyword_lit(s)),
+        // A bare int literal in type position, likewise (ADR-117) — no
+        // ambiguity with a symbol-spelled base type either. `(or 200 404 500)`
+        // composes the same way via the `(or …)` union. A `BigInt` (outside
+        // `i64` range) isn't handled — falls through to `_ => None` below,
+        // dropped rather than guessed.
+        Value::Int(n) => Some(Ty::int_lit(n)),
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
             // An arrow: a list containing the `->` marker. Detect it first, so
@@ -336,6 +342,30 @@ pub(super) fn parse_sig_decl(heap: &Heap, form: Value) -> Option<(Symbol, Sig)> 
     // Only an arrow type-expr is a callable signature worth recording.
     let sig = parse_type(heap, items[2])?.as_arrow()?.clone();
     Some((name, sig))
+}
+
+/// If `form` is a `(sig name (… -> …))` declaration whose type-expr is an
+/// **overload** — an `(and …)` of 2+ distinct arrows, e.g. `(sig f (and (int
+/// -> int) (bool -> bool)))` — return `(name, sigs)`. `None` for anything
+/// [`parse_sig_decl`] already handles (a single arrow, or no arrow at all);
+/// mirrors [`parse_sig_decl_with_vars`]'s parallel-path pattern. See
+/// `docs/type-arrow-intersection.md`.
+pub(super) fn parse_sig_decl_overload(heap: &Heap, form: Value) -> Option<(Symbol, Vec<Sig>)> {
+    let items = list_items(heap, form)?;
+    if items.len() != 3 {
+        return None;
+    }
+    let Value::Sym(head) = items[0] else {
+        return None;
+    };
+    if !value::symbol_is(head, "sig") && !value::symbol_is(head, "sig!") {
+        return None;
+    }
+    let Value::Sym(name) = items[1] else {
+        return None;
+    };
+    let sigs = parse_type(heap, items[2])?.overload_sigs()?.clone();
+    Some((name, sigs))
 }
 
 /// If `form` is a `(sig name T)` declaration whose type-expr `T` is a **value

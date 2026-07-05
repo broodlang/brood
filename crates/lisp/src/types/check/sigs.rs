@@ -350,6 +350,19 @@ pub(super) fn declared_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     annot::parse_type(heap, type_value)?.as_arrow().cloned()
 }
 
+/// The **overload** counterpart of [`declared_heap_sig`] (ADR-116) — the
+/// cross-module/intra-module path for an `(and (int -> int) (bool -> bool))`
+/// declaration. Reads the same heap-recorded raw type-expression
+/// [`declared_heap_sig`] does, but extracts `.overload_sigs()` instead of
+/// `.as_arrow()`: a genuine 2+-arm overload has `arrow: None`, so
+/// `declared_heap_sig` alone silently discards it (this is the fix — the
+/// heap store itself needed no change, it already holds the opaque raw
+/// form). `None` for a plain single-arrow sig or no declaration at all.
+pub(super) fn declared_heap_overload(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
+    let type_value = heap.declared_sig_value(sym)?;
+    annot::parse_type(heap, type_value)?.overload_sigs().cloned()
+}
+
 /// The signature for `sym`, from any of the sources (user-declared → primitive →
 /// curated → inferred). A user `(sig …)` declaration is **authoritative** — read
 /// first so it overrides the body-inferred sig (e.g. a `number`-inferring body the
