@@ -1087,6 +1087,12 @@ pub(crate) mod backend {
         /// `true` while kinetic momentum is running after a gesture lift-off. Cleared by the
         /// next `Started/Moved/LineDelta` event or when velocity decays below threshold.
         scroll_momentum_active: bool,
+        /// The earliest time the next momentum step may fire. `about_to_wait` is called on
+        /// every event (including each `UserEvent::Draw` Brood sends back), so without this
+        /// guard it would flood: deliver → Draw → about_to_wait → deliver → Draw → ∞.
+        /// Set to `Instant::now()` when momentum starts (first step fires immediately), then
+        /// advanced by 12 ms after each delivery.
+        scroll_next_tick: Instant,
     }
 
     /// Build a window + softbuffer surface + glyph renderer inside the running event
@@ -1148,6 +1154,7 @@ pub(crate) mod backend {
             shape: None,
             scroll_velocity: 0.0,
             scroll_momentum_active: false,
+            scroll_next_tick: Instant::now(),
         })
     }
 
@@ -1693,6 +1700,7 @@ pub(crate) mod backend {
                                     }
                                     if w.scroll_velocity.abs() > 0.01 {
                                         w.scroll_momentum_active = true;
+                                        w.scroll_next_tick = Instant::now(); // first step fires immediately
                                     } else {
                                         w.scroll_momentum_active = false;
                                         w.scroll_velocity = 0.0;
@@ -1741,29 +1749,45 @@ pub(crate) mod backend {
         }
 
         // `about_to_wait` fires after the event queue is fully drained and before
-        // winit sleeps. This is where we drive kinetic momentum: one scroll step per
-        // wakeup, paced at ~83 fps via `WaitUntil(12ms)`. Because we deliver AFTER
-        // the queue is empty, Brood has already processed the previous step's event
-        // and re-rendered — no flooding, no backlog, no background threads.
+        // winit sleeps. This drives kinetic momentum. IMPORTANT: `about_to_wait` is
+        // called on *every* event cycle, including each `UserEvent::Draw` that Brood
+        // sends back after rendering a scroll step. Without a time guard this would
+        // flood: deliver → Draw → about_to_wait → deliver → Draw → ∞. We gate each
+        // delivery on `scroll_next_tick` (set to `now` when momentum starts, then
+        // advanced by 12 ms after each step) so at most one step fires per 12 ms
+        // regardless of how many times `about_to_wait` is called.
         fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-            let mut any_active = false;
+            let now = Instant::now();
+            let mut next_wakeup: Option<Instant> = None;
             for w in self.wins.values_mut() {
                 if !w.scroll_momentum_active {
                     continue;
                 }
+                if now < w.scroll_next_tick {
+                    // Not time yet — preserve the scheduled wakeup, do not deliver.
+                    next_wakeup = Some(match next_wakeup {
+                        Some(t) => t.min(w.scroll_next_tick),
+                        None => w.scroll_next_tick,
+                    });
+                    continue;
+                }
+                // Time for the next momentum step.
                 w.scroll_velocity *= 0.97;
                 if w.scroll_velocity.abs() < 0.0005 {
                     w.scroll_momentum_active = false;
                     w.scroll_velocity = 0.0;
                     continue;
                 }
-                any_active = true;
+                w.scroll_next_tick = now + Duration::from_millis(12);
                 deliver_scroll(w, w.scroll_velocity);
+                next_wakeup = Some(match next_wakeup {
+                    Some(t) => t.min(w.scroll_next_tick),
+                    None => w.scroll_next_tick,
+                });
             }
-            event_loop.set_control_flow(if any_active {
-                ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(12))
-            } else {
-                ControlFlow::Wait
+            event_loop.set_control_flow(match next_wakeup {
+                Some(t) => ControlFlow::WaitUntil(t),
+                None => ControlFlow::Wait,
             });
         }
     }
