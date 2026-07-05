@@ -1088,16 +1088,18 @@ pub(crate) mod backend {
         /// `true` while kinetic momentum is running after a gesture lift-off. Cleared by the
         /// next `Started/Moved/LineDelta` event or when velocity decays below threshold.
         scroll_momentum_active: bool,
-        /// The earliest time the next momentum step may fire. `about_to_wait` is called on
-        /// every event (including each `UserEvent::Draw` Brood sends back), so without this
-        /// guard it would flood: deliver → Draw → about_to_wait → deliver → ∞.
-        /// Set to `Instant::now()` when momentum starts (first step fires immediately), then
-        /// advanced by 12 ms after each delivery.
+        /// The earliest wall-clock time the next momentum step may fire. Guards against
+        /// about_to_wait being called too frequently (e.g. on every UserEvent::Draw).
         scroll_next_tick: Instant,
         /// Time the previous momentum step was delivered, used for time-proportional decay
-        /// (`0.97 ^ (elapsed_ms / 12)`). Keeps the physics correct when `about_to_wait`
-        /// fires late (Brood slow to render) so the coast speed is independent of framerate.
+        /// (`0.97 ^ (elapsed_ms / 12)`). Keeps the physics correct when about_to_wait
+        /// fires late so the coast speed is render-throughput independent.
         scroll_last_tick: Instant,
+        /// `true` while a momentum scroll event is in-flight — i.e. delivered to Brood
+        /// but the corresponding UserEvent::Draw has not yet arrived. A new step is never
+        /// delivered while this is set, so the queue never grows beyond one pending event
+        /// even when Brood's render pipeline is slower than the 12 ms tick rate.
+        scroll_pending: bool,
     }
 
     /// Build a window + softbuffer surface + glyph renderer inside the running event
@@ -1161,6 +1163,7 @@ pub(crate) mod backend {
             scroll_momentum_active: false,
             scroll_next_tick: Instant::now(),
             scroll_last_tick: Instant::now(),
+            scroll_pending: false,
         })
     }
 
@@ -1306,6 +1309,7 @@ pub(crate) mod backend {
                             })
                             .collect();
                         w.frame = ops;
+                        w.scroll_pending = false; // Brood finished rendering; next momentum step may fire
                         w.window.request_redraw();
                     }
                 }
@@ -1686,6 +1690,7 @@ pub(crate) mod backend {
                         MouseScrollDelta::LineDelta(_, y) => {
                             let dy = y as f64;
                             w.scroll_momentum_active = false;
+                            w.scroll_pending = false;
                             w.scroll_velocity = 0.0;
                             if dy != 0.0 {
                                 deliver_scroll(w, dy);
@@ -1696,6 +1701,7 @@ pub(crate) mod backend {
                             match phase {
                                 TouchPhase::Cancelled => {
                                     w.scroll_momentum_active = false;
+                                    w.scroll_pending = false;
                                     w.scroll_velocity = 0.0;
                                 }
                                 TouchPhase::Ended => {
@@ -1723,6 +1729,7 @@ pub(crate) mod backend {
                                         0.0
                                     };
                                     w.scroll_momentum_active = false;
+                                    w.scroll_pending = false; // new gesture takes over; any in-flight event is superseded
                                     w.scroll_velocity = carry + dy;
                                     if dy != 0.0 {
                                         deliver_scroll(w, dy);
@@ -1776,16 +1783,18 @@ pub(crate) mod backend {
                 if !w.scroll_momentum_active {
                     continue;
                 }
-                if now < w.scroll_next_tick {
-                    // Not time yet — preserve the scheduled wakeup, do not deliver.
+                // Skip until the minimum interval AND until Brood has finished
+                // rendering the previous step. scroll_pending is cleared by the
+                // UserEvent::Draw handler when Brood's pipeline completes.
+                if now < w.scroll_next_tick || w.scroll_pending {
                     next_wakeup = Some(match next_wakeup {
                         Some(t) => t.min(w.scroll_next_tick),
                         None => w.scroll_next_tick,
                     });
                     continue;
                 }
-                // Time for the next momentum step. Decay proportional to actual elapsed
-                // time so physics is correct even when about_to_wait fires late.
+                // Time-proportional decay: 0.97 per 12 ms nominal, scaled by actual
+                // elapsed so the coast curve is independent of render throughput.
                 let elapsed_ms = now
                     .duration_since(w.scroll_last_tick)
                     .as_secs_f64()
@@ -1799,6 +1808,7 @@ pub(crate) mod backend {
                 }
                 w.scroll_last_tick = now;
                 w.scroll_next_tick = now + Duration::from_millis(12);
+                w.scroll_pending = true;
                 deliver_scroll(w, w.scroll_velocity);
                 next_wakeup = Some(match next_wakeup {
                     Some(t) => t.min(w.scroll_next_tick),
