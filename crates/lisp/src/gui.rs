@@ -358,7 +358,7 @@ pub(crate) mod backend {
     use std::collections::HashMap;
     use std::num::NonZeroU32;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc::{self, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Instant;
@@ -468,6 +468,10 @@ pub(crate) mod backend {
         },
         /// Replace window `id`'s frame and repaint it.
         Draw { id: u64, ops: Vec<Op> },
+        /// A single kinetic-momentum step from the background thread: deliver `dy` to the
+        /// subscriber of window `id`. The `session` must match the window's current momentum
+        /// session; stale events from a cancelled gesture are silently dropped.
+        MomentumScroll { id: u64, dy: f64, session: u64 },
         /// Destroy window `id`.
         Close { id: u64 },
         /// Set window `id`'s OS title-bar text at runtime. Behind `gui-title!`.
@@ -976,6 +980,45 @@ pub(crate) mod backend {
         ])
     }
 
+    /// Stop any running momentum thread for `w` and advance the session counter so any
+    /// in-flight `MomentumScroll` events from the old thread are silently dropped.
+    fn cancel_momentum(w: &mut Win) {
+        if let Some(stop) = w.scroll_momentum_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        w.scroll_momentum_session = w.scroll_momentum_session.wrapping_add(1);
+    }
+
+    /// Spawn a background thread that delivers decaying scroll events at ~60 fps via the
+    /// global GUI event-loop proxy. Returns the cancel flag; set it to `true` to stop.
+    fn start_momentum(win_id: u64, initial_velocity: f64, session: u64) -> Arc<AtomicBool> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        std::thread::spawn(move || {
+            let mut v = initial_velocity;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                if stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                v *= 0.88;
+                if v.abs() < 0.002 {
+                    break;
+                }
+                if let Ok(g) = gui() {
+                    let _ = g.lock().unwrap().send_event(UserEvent::MomentumScroll {
+                        id: win_id,
+                        dy: v,
+                        session,
+                    });
+                } else {
+                    break;
+                }
+            }
+        });
+        stop
+    }
+
     /// Deliver a scroll event to a window's subscriber. `dy > 0` is scroll-up, `dy < 0` is
     /// scroll-down. Modifiers come from the window's current modifier state. Used both for
     /// live gesture events and the kinetic-momentum synthetic events fired after gesture end.
@@ -1079,14 +1122,15 @@ pub(crate) mod backend {
         /// The shape currently applied to the window, so we only call `set_cursor`
         /// when the hit-test result changes (not on every pointer move).
         shape: Option<super::CursorShape>,
-        /// Kinetic-scroll momentum: the signed velocity (lines/frame at 60 fps) left over
-        /// from the last trackpad gesture. Zero means no momentum is active. Updated via an
-        /// EMA during the gesture; on `TouchPhase::Ended` the GUI synthesises decaying scroll
-        /// events until the magnitude drops below the stop threshold.
+        /// EMA of the scroll velocity (signed lines/frame at ~60 fps) tracked during a
+        /// trackpad gesture; on `TouchPhase::Ended` this seeds the momentum animation.
         scroll_velocity: f64,
-        /// The `Instant` of the last momentum frame, used for time-based decay so the physics
-        /// is consistent regardless of actual frame rate. `None` when no momentum is active.
-        scroll_momentum_t: Option<Instant>,
+        /// Monotonically increasing counter, incremented each time momentum starts or is
+        /// cancelled. `MomentumScroll` events carry the session they were sent for; a stale
+        /// event from a previous session is silently dropped.
+        scroll_momentum_session: u64,
+        /// Cancel flag for the active momentum thread (`true` = stop). `None` when idle.
+        scroll_momentum_stop: Option<Arc<AtomicBool>>,
     }
 
     /// Build a window + softbuffer surface + glyph renderer inside the running event
@@ -1147,7 +1191,8 @@ pub(crate) mod backend {
             zones: Vec::new(),
             shape: None,
             scroll_velocity: 0.0,
-            scroll_momentum_t: None,
+            scroll_momentum_session: 0,
+            scroll_momentum_stop: None,
         })
     }
 
@@ -1294,6 +1339,13 @@ pub(crate) mod backend {
                             .collect();
                         w.frame = ops;
                         w.window.request_redraw();
+                    }
+                }
+                UserEvent::MomentumScroll { id, dy, session } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        if w.scroll_momentum_session == session {
+                            deliver_scroll(w, dy);
+                        }
                     }
                 }
                 UserEvent::Close { id } => {
@@ -1664,48 +1716,52 @@ pub(crate) mod backend {
                     // here to line units so Brood gets a consistent float in both cases.
                     // `scroll_dy > 0` = scroll-up action; the absolute value is the magnitude.
                     //
-                    // On Wayland, TouchPhase::Ended fires for both mouse-wheel clicks and
-                    // trackpad gestures, so we gate momentum solely on PixelDelta (trackpad).
-                    // LineDelta (mouse wheel) is always delivered as-is with no momentum.
+                    // Momentum is only for PixelDelta (smooth trackpad). On Wayland,
+                    // TouchPhase::Ended fires for mouse-wheel clicks too; LineDelta events are
+                    // always delivered as-is and cancel any running momentum immediately.
                     let ch = w.renderer.cell_h.max(1);
                     match delta {
                         MouseScrollDelta::LineDelta(_, y) => {
-                            // Discrete wheel: simple delivery, cancel any active momentum so
-                            // a mouse scroll during kinetic coast stops it immediately.
                             let dy = y as f64;
+                            cancel_momentum(w);
                             w.scroll_velocity = 0.0;
-                            w.scroll_momentum_t = None;
                             if dy != 0.0 {
                                 deliver_scroll(w, dy);
                             }
                         }
                         MouseScrollDelta::PixelDelta(p) => {
-                            // Smooth trackpad: phase-based momentum.
                             let dy = p.y / ch as f64;
                             match phase {
                                 TouchPhase::Cancelled => {
+                                    cancel_momentum(w);
                                     w.scroll_velocity = 0.0;
-                                    w.scroll_momentum_t = None;
                                 }
                                 TouchPhase::Ended => {
-                                    // Gesture lift-off: apply the final delta (may be non-zero on
-                                    // some platforms) and kick off the momentum animation if the
-                                    // tracked EMA velocity is significant.
+                                    // Gesture lift-off: apply the final delta (may be non-zero
+                                    // on some platforms), then spawn a background thread that
+                                    // sends decaying scroll events at ~60 fps until velocity
+                                    // drops below threshold or a new gesture starts.
                                     if dy != 0.0 {
                                         deliver_scroll(w, dy);
                                     }
+                                    cancel_momentum(w);
                                     if w.scroll_velocity.abs() > 0.01 {
-                                        w.scroll_momentum_t = Some(Instant::now());
-                                        w.window.request_redraw();
+                                        let session = w.scroll_momentum_session;
+                                        let id = *self.ids.iter()
+                                            .find(|(_, wid)| **wid == window_id)
+                                            .map(|(id, _)| id)
+                                            .unwrap_or(&0);
+                                        let stop = start_momentum(id, w.scroll_velocity, session);
+                                        w.scroll_momentum_stop = Some(stop);
                                     } else {
                                         w.scroll_velocity = 0.0;
                                     }
                                 }
                                 _ => {
-                                    // Started/Moved: track velocity via EMA, deliver event, and
-                                    // cancel any active momentum so the user regains direct control.
+                                    // Started/Moved: cancel any active momentum so the user
+                                    // regains direct control, track velocity via EMA, deliver.
+                                    cancel_momentum(w);
                                     w.scroll_velocity = 0.6 * w.scroll_velocity + 0.4 * dy;
-                                    w.scroll_momentum_t = None;
                                     if dy != 0.0 {
                                         deliver_scroll(w, dy);
                                     }
@@ -1727,26 +1783,6 @@ pub(crate) mod backend {
                         #[cfg(feature = "gui-gpu")]
                         Backend::Gpu(gl) => {
                             gl.paint(&w.frame, &mut w.renderer);
-                        }
-                    }
-                    // Kinetic scroll: after painting, apply a decaying synthetic scroll event
-                    // if momentum is active. Time-based decay keeps the physics consistent at
-                    // any frame rate (normalised to 60 fps). The delivery wakes the Brood loop,
-                    // which re-renders and calls gui-draw, which triggers the next redraw —
-                    // the animation runs until |velocity| drops below the stop threshold.
-                    if let Some(last_t) = w.scroll_momentum_t {
-                        let elapsed = last_t.elapsed().as_secs_f64();
-                        // 0.88 per frame at 60 fps → half-life ≈ 200 ms, fully stopped ≈ 600 ms
-                        let decay = 0.88f64.powf(elapsed * 60.0);
-                        w.scroll_velocity *= decay;
-                        if w.scroll_velocity.abs() < 0.002 {
-                            w.scroll_velocity = 0.0;
-                            w.scroll_momentum_t = None;
-                        } else {
-                            deliver_scroll(w, w.scroll_velocity);
-                            w.scroll_momentum_t = Some(Instant::now());
-                            // Keep animating even if Brood doesn't change state (e.g. buffer end).
-                            w.window.request_redraw();
                         }
                     }
                 }
@@ -2931,19 +2967,20 @@ pub(crate) mod backend {
                     }
                 }
                 Op::Cursor { row, col, style } => {
-                    // Only render the cursor when the entire cell is within the viewport
-                    // (top_signed >= oy). A partially-clipped cell at the top of a smooth-
-                    // scroll region shows a sliver of caret at the border — suppress it.
+                    // Clip the cursor at the grid origin `oy`: only the pixels below `oy`
+                    // are rendered. This keeps the cursor visible even when the scroll region
+                    // shifts it slightly above the grid top (it appears shorter but not gone).
                     let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
-                    if top_signed >= oy as isize {
+                    let clip_top = (oy as isize - top_signed).max(0) as usize;
+                    if clip_top < ch {
                         cursor_cell(
                             buf,
                             fb_w,
                             fb_h,
                             ox + *col as usize * cw,
-                            top_signed as usize,
+                            top_signed.max(oy as isize) as usize,
                             cw,
-                            ch,
+                            ch - clip_top,
                             *style,
                         );
                     }
