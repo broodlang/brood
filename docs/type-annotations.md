@@ -206,47 +206,43 @@ needs precise result types — overloaded arithmetic sigs (`(+ int int) : int`) 
 occurrence-typing inference (the historical false-positive source). Gated on a real
 consumer; the overloaded-sig option is the bounded next step.
 
-## Known gap — a `defmodule`-declared arrow sig doesn't seed the body-return check
+## Fixed gap — a `defmodule`-declared arrow sig didn't seed the body-return check (ADR-126)
 
 Discovered 2026-07-05 while building ADR-125's end-to-end `--watch` smoke
-test, unrelated to that feature. `(sig fname (A -> B))` followed by
-`(defn fname …)` **inside a `defmodule` block** does not seed
+test, unrelated to that feature; fixed the same day. `(sig fname (A -> B))`
+followed by `(defn fname …)` **inside a `defmodule` block** didn't seed
 `check_def`'s body-vs-declared-return-type check, even though the identical
-pattern at the root namespace (no `defmodule`) works correctly. Repro:
+pattern at the root namespace (no `defmodule`) worked correctly. Repro:
 
 ```
 (defmodule m "doc")
 (sig f (-> string))
-(defn f () 42)   ; should warn "f: declared return type string ... yields int" — silent
+(defn f () 42)   ; now warns "f: declared return type string ... yields int"
 ```
 
 **Root cause:** Pass 2.5 (`annot::parse_sig_decl`) scans un-expanded forms and
 records the declared sig under the symbol **as literally written** (bare
 `f`), with no `resolve_reference`/qualification step. But `defn f` inside a
 `defmodule` expands to `(def m/f (fn …))` — the qualified symbol. `check_def`'s
-seeding lookup (`ctx.declared_sig(name)`, `walk.rs`) uses `name` from the
-*expanded* form (`m/f`), which never matches the bare-keyed `f` Pass 2.5
-recorded — so the sig is invisible to the seeding path. Call-site checking
-(`sig_of`) doesn't have this problem: it falls back through
+seeding lookup (`ctx.declared_sig(name)`, `walk.rs`) used `name` from the
+*expanded* form (`m/f`), which never matched the bare-keyed `f` Pass 2.5
+recorded — so the sig was invisible to the seeding path. Call-site checking
+(`sig_of`) never had this problem: it falls back through
 `declared_heap_sig`, which reads the heap-wide store `%register-sig`
 populates *with* qualification (requires the file to have actually been
 `eval`'d — true for `nest check`'s whole-project mode, which loads sources
-first). `check_def`'s body-return seeding has no such fallback.
+first). `check_def`'s body-return seeding had no such fallback.
 
-**Impact:** a real false-negative (misses a provable error), not a false
-positive — doesn't violate the zero-FP contract, but silently drops return-
-type checking for the very common `defmodule` + `sig` + `defn` combination.
-Not yet assessed how many existing `std/`/`tests/` files hit this (a project
-using `sig` for arrows inside a namespaced module would be affected; `nest
-check`'s clean corpus doesn't prove absence, since a missed warning is
-silent by definition).
-
-**Not fixed here** — out of scope for the `--watch` trigger work that
-surfaced it. The fix likely mirrors ADR-124's shape (give `check_def`'s
-seeding path the same `declared_heap_sig`-style heap-wide fallback
-`gradual_of`'s reference branch already got), but needs its own investigation
-and corpus diff before shipping, per this repo's standard practice for
-checker changes.
+**Fix:** gave `check_def`'s seeding lookup the same `declared_heap_sig`
+heap-wide fallback ADR-124 gave the value-sig path:
+`ctx.declared_sig(name).or_else(|| declared_heap_sig(heap, name))`. Verified
+with the revert-then-confirm technique used throughout this session's
+checker changes (`defmodule_declared_arrow_sig_seeds_return_type_check`
+fails with the fix reverted, passes restored). `nest check`'s whole corpus
+(`std/` + `tests/`) stayed at 91 warnings before and after — the pattern
+this fixes (a genuinely mismatched `defmodule`-qualified `sig`+`defn` pair)
+doesn't currently occur anywhere in the committed source, so the fix closes
+the gap without surfacing any pre-existing bugs. See ADR-126.
 
 ## Why this is the right "more sound" move for Brood
 

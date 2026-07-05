@@ -1625,3 +1625,22 @@ false-negative (silent, not over-warning), logged in
 scope for this slice.
 
 359/359 unit tests, corpus `nest check` unchanged (91 warnings).
+
+## 2026-07-05 — ADR-126: fixed the defmodule arrow-sig seeding gap
+
+Came back and fixed the gap ADR-125 surfaced. Same shape as ADR-124's fix,
+one namespace over: `check_def`'s seeding lookup (`ctx.declared_sig(name)`)
+now falls back to the heap-wide `declared_heap_sig(heap, name)` when the
+file-local `Ctx` (keyed by the bare name Pass 2.5 recorded from un-expanded
+source) misses — exactly what call-site checking (`sig_of`) already had.
+
+Verified with the revert-then-confirm technique this session settled on for
+every checker change: added `defmodule_declared_arrow_sig_seeds_return_type_check`,
+confirmed it fails with the fix reverted (proving it actually isolates the
+bug, not just exercises an already-working path), then restored the fix and
+confirmed green. Full `nest check` corpus across `std/` + `tests/` stayed at
+91 warnings before and after — the mismatched `defmodule` + `sig` + `defn`
+pattern this fixes doesn't occur anywhere in the current committed source,
+so this closes a real gap without any pre-existing bugs to triage.
+
+360/360 unit tests, corpus `nest check` unchanged (91 warnings).

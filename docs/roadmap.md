@@ -809,10 +809,10 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   re-fingerprint check. `nest run --watch` re-checks on every successful file
   reload (ADR-125), verified end-to-end in a real project. Still not built,
   not currently blocking anything: a batch/CI hard-gate flag (`nest check
-  --strict`). Note: a real, separate checker gap surfaced along the way — a
-  `defmodule`-declared arrow sig doesn't seed the body-return-type check
-  (`docs/type-annotations.md`'s "Known gap" section) — unrelated to this
-  slice, not yet fixed.
+  --strict`). A real, separate checker gap surfaced along the way — a
+  `defmodule`-declared arrow sig didn't seed the body-return-type check —
+  and was fixed the same day (ADR-126,
+  `docs/type-annotations.md`'s "Fixed gap" section).
 - 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** — the
   `GradualTy` foundation already exists; this is the remaining work to wire it
   into actual gating decisions (not just advisory assignment checks), which

@@ -150,6 +150,7 @@ listed (italicised) in the index below so the numbering stays complete.
 | 123 | Whole-program soundness under hot reload — designed, not built |
 | 124 | Cross-module visibility for declared value-type sigs (ADR-123 slice 1) |
 | 125 | `nest run --watch` re-checks on reload — ADR-123's live-session trigger |
+| 126 | `defmodule`-declared arrow sigs now seed the body-return-type check |
 
 ---
 
@@ -7721,6 +7722,31 @@ never blocks. Also unrelated but discovered along the way: a `(sig name (A ->
 B))` declared inside a `defmodule` block doesn't seed the body-vs-declared-
 return-type check (`check_def`'s seeding path reads the file-local `Ctx`
 under the *bare* name Pass 2.5 recorded, but the expanded `defn` target is
-the *qualified* name) — a real false-negative, logged separately, not fixed
-here (out of scope for this slice; needs its own investigation into how
-widely `defmodule` + `sig` + `defn` co-occur before deciding how to fix it).
+the *qualified* name) — a real false-negative. **Fixed same-day, see ADR-126.**
+
+## ADR-126 — `defmodule`-declared arrow sigs now seed the body-return-type check
+
+**Status:** accepted; **shipped 2026-07-05.** Fixes the gap ADR-125 surfaced
+(logged in `docs/type-annotations.md`'s "Known gap" section, now updated to
+"Fixed gap").
+
+**Decision.** Same shape as ADR-124's fix, applied to the arrow-sig seeding
+path instead of the value-sig one: `check_def`'s lookup of the declared sig
+for the closure it's about to check-seed now falls back from the file-local
+`ctx.declared_sig(name)` to the heap-wide `declared_heap_sig(heap, name)` —
+`sigs::declared_heap_sig`, already used by call-site checking (`sig_of`),
+reads the qualified-key store `%register-sig` populates. `ctx.declared_sig`
+is keyed by the *bare* name Pass 2.5 recorded from un-expanded source text;
+`name` at the `check_def` call site is `defn`'s *expanded* def head, which is
+module-qualified inside a `defmodule` block — the two only coincided at the
+root namespace, which is why the gap went unnoticed.
+
+**Verified two ways**, matching this session's established playbook: (1) a
+new unit test, `defmodule_declared_arrow_sig_seeds_return_type_check` —
+verified its bite by reverting the fix and confirming the test fails, then
+restoring it. (2) A full `nest check` corpus diff across `std/` + `tests/` —
+byte-identical, 91 warnings before and after. The pattern this fixes (a
+genuinely mismatched `defmodule`-qualified `sig` + `defn` pair) doesn't occur
+anywhere in the current committed source, so the fix closes a real gap
+without surfacing any pre-existing bugs to triage. 360/360 unit tests green
+(up from 359).
