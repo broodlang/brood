@@ -107,7 +107,41 @@ listed (italicised) in the index below so the numbering stays complete.
 | 085 | `std/` is the basic-language core; frameworks are packages; hierarchical names |
 | 086 | GUI keys are press/release transitions, not an OS-repeat flood |
 | 087 | Expose O(1) kernel facts (`map-count`) as primitives |
+| 088 | Nodes form a transitive cluster mesh (connect to one, join all) |
+| 089 | Node-link channel encryption: a Noise-style X25519 + ChaCha20-Poly1305 session over the Stream seam |
+| 090 | Serving a `ui-run` app to remote frontends: app-on-daemon, thin client over the display seam |
+| 091 | RUNTIME-region collection: single-process compaction now; multi-process via a cooperative rolling quiesce later |
+| 092 | Editor syntax grammars are generated from the language's own introspection |
+| 093 | Native char-class scanners + `scan-tokens`: lexing mechanism in Rust, faces in Brood |
+| 094 | `overlay-route`: the modal-overlay dispatch fallthrough lives in `editor/ui` |
+| 095 | OS clipboard: `clipboard-get` / `clipboard-set!` builtins (the `clipboard` feature) |
+| 096 | VM perf as the JIT runway: one road, not two |
+| 097 | Batteries-included default install; split + rename the process framework |
+| 098 | Shrink the core: drop the `lambda`/`let*` aliases; demote `defmacro` to a macro |
+| 099 | `proc/gen` is a real gen_server: `info`/`init`/`terminate` + a call timeout |
+| 100 | Full process migration is a stepping-VM change, not a corosensei swap; fresh-only stealing is the migration-free partial |
 | 101 | JIT compilation: three-layer assembly model, Cranelift backend, calling convention |
+| 102 | Named timers for the `ui-run` loop |
+| 103 | Foreign-language parsing: one `tree-sitter-parse` builtin into the existing node shape, not an opaque tree resource |
+| 104 | Persistent child processes: a `Value::Subprocess` over the mailbox seam, not a richer `%os-cmd` |
+| 105 | Keyword-literal (singleton) types: a literal-set refinement on `Ty` |
+| 106 | Telemetry: handlers run in an isolated listener process (never the emitter) |
+| 107 | `table`: an in-memory shared store (Brood's ETS) as a Rust-backed handle of deep clones |
+| 108 | `lambda`/`let*` are exact synonyms for `fn`/`let` (canonicalised at macroexpand) |
+| 109 | `string-split` is a native builtin (not pure Brood) |
+| 110 | Gradual typing earns its place: `GradualTy`'s first consumers (assignment / return / value-position checks) |
+| 111 | Lazy seq-views: fusing pipelines as an opt-in combinator, `map`/`filter` stay eager |
+| 112 | Brood data is immutable, absolutely: remove user-facing transients; `Table` is the only mutable structure |
+| 113 | mimalloc as the allocator backend (spend memory for speed; Brood targets long-running apps) |
+| 114 | Keep the moving collector; the JIT already sidesteps stack maps, so harden the spill-to-roots discipline instead of switching to mark-sweep |
+| 115 | Record/shape types: `(record :k T …)`, full `fields` refinement |
+| 116 | Intersection of arrows: overloaded functions via `(and A B …)` |
+| 117 | Int-literal types: `5` as a type, the first slice of ADR-105's deferral |
+| 118 | Match exhaustiveness checking over literal-enum types |
+| 119 | Incremental `nest check` cache: designed, not built (defer per ADR-011) |
+| 120 | Bool and string literal types |
+| 121 | Match exhaustiveness generalized to mixed-kind literal enums |
+| 122 | Match redundancy / unreachable-clause detection |
 
 ---
 
@@ -7359,3 +7393,100 @@ never stops re-doing unchanged work); a whole-project cache keyed on an all-file
 (any single edit busts it); a per-file `check-files` cache without dependency tracking
 (unsound under cross-module resolution — the reason Phase 1 is restricted to the pure
 passes).
+
+## ADR-120 — Bool and string literal types
+
+**Status:** accepted; **shipped 2026-07-05** ([`types.md`](types.md) Step 5+,
+[`type-bool-string-literals.md`](type-bool-string-literals.md)). `true`/`false`/
+`"GET"` in a `(sig …)` type position are literal singleton types, exactly like the
+already-shipped keyword (ADR-105) and int (ADR-117) literals — closing ADR-105's
+deferred item in full.
+
+**Decision.** Mechanical repetition of ADR-117's `lit_int` pattern, twice more:
+`lit_bool: Option<Arc<BTreeSet<bool>>>` (bool is natively `Ord`/`Eq`/`Hash`/`Copy`,
+a straight copy across all ~6 call sites) and `lit_str: Option<Arc<BTreeSet<String>>>`.
+String has one real wrinkle: `Value::Str` is a heap handle (`StrId`), not inline
+data, so two textually identical string literals can have different underlying ids
+— storing `StrId` would break equality. `lit_str` stores the actual `String`
+content (`heap.string(id)`); `Ty::str_lit(s: &str)` takes the string slice, not a
+`Value`/`Heap` pair, so `Ty` stays heap-independent like every other constructor.
+Independent tags/fields (as established twice already by ADR-115/116/117), so any
+combination composes on one `Ty` with zero special-casing.
+
+**`false` is now a legitimate literal type.** ADR-105's "`false` is not a literal
+type — use `nil`" guidance was scoped to avoiding `false`/`nil` confusion in an
+*enumerated keyword* set specifically, never a technical restriction (booleans and
+keywords are different `Value` variants — there was no ambiguity to resolve). Now
+that bool-literal types are their own real kind, both values are legitimate
+singletons.
+
+**No revisit of the `of_value` call-site-argument question** — the same boundary
+ADR-117 settled (extending it for int cascaded into unrelated warning-message
+wording across 7 pre-existing tests, reverted). Bool/string literals stay
+declared-sig-only.
+
+**Soundness:** unit tests mirroring every `int_literal_*` test exactly, plus a
+`tests/contract_test.blsp` runtime block; `nest check` corpus diff (new parse arms
+disabled vs. enabled) — byte-identical, zero new warnings.
+
+## ADR-121 — Match exhaustiveness generalized to mixed-kind literal enums
+
+**Status:** accepted; **shipped 2026-07-05** ([`type-match-exhaustiveness.md`](type-match-exhaustiveness.md)).
+`match_exhaustiveness_gap` (ADR-118) required the scrutinee's type to be *entirely*
+one bit (pure `Keyword` or pure `Int`). Generalized to any combination of the now-5
+enumerable tags (keyword/int/bool/string literals, plus `nil` — a natural
+one-inhabitant singleton).
+
+**Decision.** The purity check becomes one tag-subset test: build `coverable =
+Ty::of(Keyword).union(Int).union(Bool).union(Str).union(Nil)` once;
+`target_ty.is_subtype(&coverable)` — since `coverable` carries no refinements,
+`is_subtype`'s per-bit refinement checks never fire, so this is exactly "is every
+tag in `target_ty` one of these five." The declared/tested-set construction moves
+to **string labels** (`BTreeSet<String>`) rather than two separately-typed sets —
+sidesteps needing a combined Rust sum-type across 4 different literal payload
+types, and composes cleanly with `nil` (no payload at all). A new
+`render_literal_pattern` renders any of the five kinds to the same canonical label
+used for both the declared type's members and the tried patterns.
+
+**Soundness:** five new tests (`(or :ok 5)` mixed keyword+int, `(or :ok :error
+nil)` trailing-nil, a bool-literal match, a string-literal match, a fully-covered
+mixed-kind match staying silent); `nest check` corpus diff — still zero new
+warnings (`not exhaustive` count unchanged).
+
+## ADR-122 — Match redundancy / unreachable-clause detection
+
+**Status:** accepted; **shipped 2026-07-05** ([`type-match-redundancy.md`](type-match-redundancy.md)).
+A `match` clause (or a hand-written `if`/`%eq` chain) whose literal test
+duplicates one already tried earlier in the same chain is flagged as unreachable.
+
+**Decision.** A different, independent problem from exhaustiveness — needs no
+scrutinee `Ty` at all, purely structural on the compiled `if`/`%eq` chain. Reuses
+the exact point `check_if` (`check/walk.rs`) already recognizes a literal `%eq`
+guard (`guard_assertion`/`literal_eq_guard`), but extracts the **raw literal
+`Value`** instead (a new `literal_eq_test_raw`, since redundancy needs exact value
+equality, not a tag `guard_assertion` already collapsed away) and scans *forward*
+into the `else`-chain (`find_redundant_clause`) for another test of the same
+symbol against the same literal. Stops silently the moment the chain isn't itself
+another same-symbol `%eq`-if (a catch-all body, a `match-no-match` throw, or a
+divergent hand-written `if`).
+
+**Genuinely general, not `match`-specific** — fires on a hand-written same-symbol
+`%eq`-if chain too, the same way ADR-118's exhaustiveness check is really about
+the `(throw [:match-error …])` shape rather than `match` itself. **No
+double-reporting**: each level's scan only looks *downstream* of itself, so a
+chain testing `p1, p2, p1, p2` produces exactly two warnings, not zero or four.
+
+**A real corpus finding, not a bug.** Verifying against the whole `std/` +
+`tests/` corpus surfaced exactly one new warning:
+`tests/pattern_matching_test.blsp`'s test **"first matching clause wins"**
+deliberately writes `(match 1 (1 :first) (1 :second) (_ :z))` to verify runtime
+clause-priority semantics — a **true positive**, correctly identifying the
+`:second` clause as genuinely unreachable. Left as-is (advisory, never gating;
+rewriting a working pre-existing test to dodge a *correct* warning isn't
+warranted).
+
+**Soundness:** four targeted tests, including one confirming the hand-written
+(non-`match`) case. Given this touches `check_if` — a very hot, heavily-shared
+function every `if` in every program passes through — verified with extra rigor:
+full baseline stayed green after wiring the hook in, and the corpus diff
+surfaced exactly the one true-positive finding above and nothing else.

@@ -106,6 +106,11 @@ const KEYWORD_BIT: u32 = 1u32 << bit(Tag::Keyword);
 /// special-casing — see `docs/type-int-literals.md`.
 const INT_BIT: u32 = 1u32 << bit(Tag::Int);
 
+/// A third and fourth independent literal-bearing tag (ADR-120), same pattern
+/// as `KEYWORD_BIT`/`INT_BIT`.
+const BOOL_BIT: u32 = 1u32 << bit(Tag::Bool);
+const STR_BIT: u32 = 1u32 << bit(Tag::Str);
+
 /// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
 /// *structured refinements* on its function and sequence members (Step 5+,
 /// ADR-078).
@@ -172,6 +177,17 @@ pub struct Ty {
     /// exact, not a widening; every other tag stays open. `BigInt`-range
     /// literals aren't representable here — see `docs/type-int-literals.md`.
     lit_int: Option<Arc<BTreeSet<i64>>>,
+    /// Refinement of the bool member (`bool`) to a literal set (ADR-120) —
+    /// `{true}`, `{false}`, or (equivalent to unrefined) `{true, false}`.
+    /// Independent tag/field, same semantics as `lit`/`lit_int` throughout.
+    lit_bool: Option<Arc<BTreeSet<bool>>>,
+    /// Refinement of the string member (`string`) to a literal set (ADR-120).
+    /// Stores owned `String` content, not a heap `StrId` — two textually
+    /// identical string literals can have different underlying heap handles,
+    /// so comparing/ordering by content (not handle identity) is what makes
+    /// set operations correct. Independent tag/field, same semantics as
+    /// `lit`/`lit_int` throughout.
+    lit_str: Option<Arc<BTreeSet<String>>>,
 }
 
 impl Ty {
@@ -199,6 +215,8 @@ impl Ty {
             fields: None,
             lit: None,
             lit_int: None,
+            lit_bool: None,
+            lit_str: None,
         }
     }
 
@@ -233,6 +251,8 @@ impl Ty {
             fields: None,
             lit: None,
             lit_int: None,
+            lit_bool: None,
+            lit_str: None,
         }
     }
 
@@ -259,6 +279,8 @@ impl Ty {
             fields: None,
             lit: None,
             lit_int: None,
+            lit_bool: None,
+            lit_str: None,
         }
     }
 
@@ -281,6 +303,8 @@ impl Ty {
             fields: None,
             lit: None,
             lit_int: None,
+            lit_bool: None,
+            lit_str: None,
         }
     }
 
@@ -295,6 +319,8 @@ impl Ty {
             fields: None,
             lit: None,
             lit_int: None,
+            lit_bool: None,
+            lit_str: None,
         }
     }
 
@@ -312,6 +338,8 @@ impl Ty {
             fields: Some(Arc::new(fields)),
             lit: None,
             lit_int: None,
+            lit_bool: None,
+            lit_str: None,
         }
     }
 
@@ -335,6 +363,8 @@ impl Ty {
             fields: None,
             lit: Some(Arc::new(set)),
             lit_int: None,
+            lit_bool: None,
+            lit_str: None,
         }
     }
 
@@ -360,6 +390,8 @@ impl Ty {
             fields: None,
             lit: None,
             lit_int: Some(Arc::new(set)),
+            lit_bool: None,
+            lit_str: None,
         }
     }
 
@@ -367,6 +399,61 @@ impl Ty {
     /// integers admitted). `None` means "any int" (or no int member).
     pub fn as_lit_int(&self) -> Option<&BTreeSet<i64>> {
         self.lit_int.as_deref()
+    }
+
+    /// A bool-literal (singleton) type — exactly `true` or `false` (ADR-120).
+    /// Unlike the keyword-literal era's guidance ("`false` isn't a literal
+    /// type"), that restriction was specific to avoiding `false`/`nil`
+    /// confusion in an *enumerated keyword* set — now that bool-literal types
+    /// are their own real kind, both values are legitimate singletons.
+    pub fn bool_lit(b: bool) -> Ty {
+        let mut set = BTreeSet::new();
+        set.insert(b);
+        Ty {
+            tags: BOOL_BIT,
+            arrow: None,
+            elem: None,
+            map_kv: None,
+            overload: None,
+            fields: None,
+            lit: None,
+            lit_int: None,
+            lit_bool: Some(Arc::new(set)),
+            lit_str: None,
+        }
+    }
+
+    /// The bool-literal refinement, if this type carries one. `None` means
+    /// "any bool" (or no bool member).
+    pub fn as_lit_bool(&self) -> Option<&BTreeSet<bool>> {
+        self.lit_bool.as_deref()
+    }
+
+    /// A string-literal (singleton) type — exactly the string `s` (ADR-120).
+    /// Takes `&str` rather than a `Value`/`Heap` pair — the caller reads the
+    /// content out of its `Value::Str` heap handle first (`heap.string(id)`),
+    /// so `Ty` itself stays heap-independent like every other constructor.
+    pub fn str_lit(s: &str) -> Ty {
+        let mut set = BTreeSet::new();
+        set.insert(s.to_string());
+        Ty {
+            tags: STR_BIT,
+            arrow: None,
+            elem: None,
+            map_kv: None,
+            overload: None,
+            fields: None,
+            lit: None,
+            lit_int: None,
+            lit_bool: None,
+            lit_str: Some(Arc::new(set)),
+        }
+    }
+
+    /// The string-literal refinement, if this type carries one. `None` means
+    /// "any string" (or no string member).
+    pub fn as_lit_str(&self) -> Option<&BTreeSet<String>> {
+        self.lit_str.as_deref()
     }
 
     /// The key/value refinement, if this map type carries one. The bridge the
@@ -495,6 +582,8 @@ impl Ty {
         // this composes with `lit` (a keyword-literal side and an int-literal
         // side) with no special-casing at all.
         let lit_int = merge_union_lit_int(&self, &other);
+        let lit_bool = merge_union_lit_bool(&self, &other);
+        let lit_str = merge_union_lit_str(&self, &other);
         Ty {
             tags,
             arrow,
@@ -504,6 +593,8 @@ impl Ty {
             fields,
             lit,
             lit_int,
+            lit_bool,
+            lit_str,
         }
     }
 
@@ -575,6 +666,43 @@ impl Ty {
         } else {
             None
         };
+        // Same intersection logic again, independent tags.
+        let lit_bool = if tags & BOOL_BIT != 0 {
+            match (&self.lit_bool, &other.lit_bool) {
+                (Some(a), Some(b)) => {
+                    let s: BTreeSet<bool> = a.intersection(b).copied().collect();
+                    if s.is_empty() {
+                        tags &= !BOOL_BIT;
+                        None
+                    } else {
+                        Some(Arc::new(s))
+                    }
+                }
+                (Some(a), None) => Some(a.clone()),
+                (None, Some(b)) => Some(b.clone()),
+                (None, None) => None,
+            }
+        } else {
+            None
+        };
+        let lit_str = if tags & STR_BIT != 0 {
+            match (&self.lit_str, &other.lit_str) {
+                (Some(a), Some(b)) => {
+                    let s: BTreeSet<String> = a.intersection(b).cloned().collect();
+                    if s.is_empty() {
+                        tags &= !STR_BIT;
+                        None
+                    } else {
+                        Some(Arc::new(s))
+                    }
+                }
+                (Some(a), None) => Some(a.clone()),
+                (None, Some(b)) => Some(b.clone()),
+                (None, None) => None,
+            }
+        } else {
+            None
+        };
         Ty {
             tags,
             arrow,
@@ -584,6 +712,8 @@ impl Ty {
             fields,
             lit,
             lit_int,
+            lit_bool,
+            lit_str,
         }
     }
 
@@ -623,6 +753,12 @@ impl Ty {
         // other ints, so the int tag survives (widened to "any int").
         if self.lit_int.is_some() {
             tags |= INT_BIT;
+        }
+        if self.lit_bool.is_some() {
+            tags |= BOOL_BIT;
+        }
+        if self.lit_str.is_some() {
+            tags |= STR_BIT;
         }
         Ty::flat(tags)
     }
@@ -724,6 +860,30 @@ impl Ty {
                 }
             }
         }
+        if self.tags & BOOL_BIT != 0 {
+            if let Some(b) = &other.lit_bool {
+                match &self.lit_bool {
+                    Some(a) => {
+                        if !a.is_subset(b) {
+                            return false;
+                        }
+                    }
+                    None => return false,
+                }
+            }
+        }
+        if self.tags & STR_BIT != 0 {
+            if let Some(b) = &other.lit_str {
+                match &self.lit_str {
+                    Some(a) => {
+                        if !a.is_subset(b) {
+                            return false;
+                        }
+                    }
+                    None => return false,
+                }
+            }
+        }
         true
     }
 
@@ -746,6 +906,16 @@ impl Ty {
         }
         if shared == INT_BIT {
             if let (Some(a), Some(b)) = (&self.lit_int, &other.lit_int) {
+                return a.is_disjoint(b);
+            }
+        }
+        if shared == BOOL_BIT {
+            if let (Some(a), Some(b)) = (&self.lit_bool, &other.lit_bool) {
+                return a.is_disjoint(b);
+            }
+        }
+        if shared == STR_BIT {
+            if let (Some(a), Some(b)) = (&self.lit_str, &other.lit_str) {
                 return a.is_disjoint(b);
             }
         }
@@ -936,6 +1106,60 @@ fn merge_union_lit_int(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<i64>>> {
     }
 }
 
+/// The bool-literal counterpart of [`merge_union_lit`] (ADR-120) — same
+/// exact-union, open-widens rule, independent tag (`BOOL_BIT`).
+fn merge_union_lit_bool(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<bool>>> {
+    let open = |t: &Ty| t.tags & BOOL_BIT != 0 && t.lit_bool.is_none();
+    if open(a) || open(b) {
+        return None;
+    }
+    match (&a.lit_bool, &b.lit_bool) {
+        (None, None) => None,
+        (x, y) => {
+            let mut set = BTreeSet::new();
+            if let Some(x) = x {
+                set.extend(x.iter().copied());
+            }
+            if let Some(y) = y {
+                set.extend(y.iter().copied());
+            }
+            if set.is_empty() {
+                None
+            } else {
+                Some(Arc::new(set))
+            }
+        }
+    }
+}
+
+/// The string-literal counterpart of [`merge_union_lit`] (ADR-120) — same
+/// exact-union, open-widens rule, independent tag (`STR_BIT`). Stores owned
+/// `String` content (not a heap `StrId`) so identical literals compare equal
+/// regardless of heap allocation identity.
+fn merge_union_lit_str(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<String>>> {
+    let open = |t: &Ty| t.tags & STR_BIT != 0 && t.lit_str.is_none();
+    if open(a) || open(b) {
+        return None;
+    }
+    match (&a.lit_str, &b.lit_str) {
+        (None, None) => None,
+        (x, y) => {
+            let mut set = BTreeSet::new();
+            if let Some(x) = x {
+                set.extend(x.iter().cloned());
+            }
+            if let Some(y) = y {
+                set.extend(y.iter().cloned());
+            }
+            if set.is_empty() {
+                None
+            } else {
+                Some(Arc::new(set))
+            }
+        }
+    }
+}
+
 impl fmt::Display for Ty {
     /// A readable rendering for diagnostics: the named lattice points where they
     /// apply (`never`, `any`, `number`, `list`), a single tag by its `type-of`
@@ -1019,12 +1243,13 @@ impl fmt::Display for Ty {
                 }
             }
         }
-        // A literal type: the enumerated keywords (`:a | :b`) and/or ints
-        // (`5 | 6`) — both may be present at once (`(or :ok 5)`, independent
-        // tags/fields) — plus any other tag this type also admits (`:a | nil`).
-        // Keywords sorted by name (stable regardless of intern order); ints
-        // sorted numerically, listed after the keywords.
-        if self.lit.is_some() || self.lit_int.is_some() {
+        // A literal type: the enumerated keywords (`:a | :b`), ints (`5 | 6`),
+        // bools (`true`), and/or strings (`"a" | "b"`) — any combination may
+        // be present at once (`(or :ok 5)`, independent tags/fields) — plus
+        // any other tag this type also admits (`:a | nil`). Keywords sorted
+        // by name (stable regardless of intern order); ints numerically;
+        // bools/strings lexicographically.
+        if self.lit.is_some() || self.lit_int.is_some() || self.lit_bool.is_some() || self.lit_str.is_some() {
             let mut kw_parts: Vec<String> = self
                 .lit
                 .iter()
@@ -1039,11 +1264,29 @@ impl fmt::Display for Ty {
                 .map(|n| n.to_string())
                 .collect();
             int_parts.sort_by_key(|s| s.parse::<i64>().unwrap());
+            let mut bool_parts: Vec<String> = self
+                .lit_bool
+                .iter()
+                .flat_map(|set| set.iter())
+                .map(|b| b.to_string())
+                .collect();
+            bool_parts.sort();
+            let mut str_parts: Vec<String> = self
+                .lit_str
+                .iter()
+                .flat_map(|set| set.iter())
+                .map(|s| format!("{s:?}"))
+                .collect();
+            str_parts.sort();
             let mut parts = kw_parts;
             parts.extend(int_parts);
+            parts.extend(bool_parts);
+            parts.extend(str_parts);
             for tag in ALL_TAGS {
                 let is_literal_tag = (tag as u8 as u32 == bit(Tag::Keyword) && self.lit.is_some())
-                    || (tag as u8 as u32 == bit(Tag::Int) && self.lit_int.is_some());
+                    || (tag as u8 as u32 == bit(Tag::Int) && self.lit_int.is_some())
+                    || (tag as u8 as u32 == bit(Tag::Bool) && self.lit_bool.is_some())
+                    || (tag as u8 as u32 == bit(Tag::Str) && self.lit_str.is_some());
                 if !is_literal_tag && self.contains_tag(tag) {
                     parts.push(tag.name().to_string());
                 }
@@ -2100,6 +2343,117 @@ mod tests {
         // A different keyword or int is not a subtype.
         assert!(!Ty::keyword_lit(value::intern("no")).is_subtype(&mixed));
         assert!(!Ty::int_lit(6).is_subtype(&mixed));
+    }
+
+    // ---- bool-literal (singleton) types — ADR-120 ----
+
+    fn bool_union(bs: &[bool]) -> Ty {
+        bs.iter()
+            .map(|&b| Ty::bool_lit(b))
+            .reduce(|a, b| a.union(b))
+            .unwrap()
+    }
+
+    #[test]
+    fn bool_literal_renders_as_its_value() {
+        assert_eq!(Ty::bool_lit(true).to_string(), "true");
+        assert_eq!(Ty::bool_lit(false).to_string(), "false");
+        assert_eq!(bool_union(&[true, false]).to_string(), "false | true");
+    }
+
+    #[test]
+    fn bool_literal_union_is_exact_but_open_bool_widens() {
+        let u = bool_union(&[true, false]);
+        let mut want = BTreeSet::new();
+        want.insert(true);
+        want.insert(false);
+        assert_eq!(u.as_lit_bool(), Some(&want));
+        let widened = Ty::bool_lit(true).union(Ty::of(Tag::Bool));
+        assert!(widened.contains_tag(Tag::Bool));
+        assert_eq!(widened.as_lit_bool(), None);
+    }
+
+    #[test]
+    fn bool_literal_subtyping() {
+        let t = Ty::bool_lit(true);
+        let both = bool_union(&[true, false]);
+        assert!(t.is_subtype(&both));
+        assert!(both.is_subtype(&Ty::of(Tag::Bool)));
+        assert!(!Ty::bool_lit(false).is_subtype(&t));
+        assert!(!Ty::of(Tag::Bool).is_subtype(&t));
+    }
+
+    #[test]
+    fn bool_literal_disjointness_is_precise() {
+        let t = Ty::bool_lit(true);
+        let f = Ty::bool_lit(false);
+        assert!(t.is_disjoint(&f));
+        assert!(!Ty::of(Tag::Bool).is_disjoint(&t));
+        assert!(t.is_disjoint(&Ty::of(Tag::Int)));
+    }
+
+    #[test]
+    fn bool_literal_intersection() {
+        let both = bool_union(&[true, false]);
+        let inter = both.clone().intersect(Ty::bool_lit(true));
+        assert_eq!(inter.as_lit_bool(), Ty::bool_lit(true).as_lit_bool());
+        let empty = Ty::bool_lit(true).intersect(Ty::bool_lit(false));
+        assert!(empty.is_never());
+    }
+
+    // ---- string-literal (singleton) types — ADR-120 ----
+
+    fn str_union(ss: &[&str]) -> Ty {
+        ss.iter()
+            .map(|&s| Ty::str_lit(s))
+            .reduce(|a, b| a.union(b))
+            .unwrap()
+    }
+
+    #[test]
+    fn str_literal_renders_as_its_value() {
+        assert_eq!(Ty::str_lit("hi").to_string(), "\"hi\"");
+        assert_eq!(str_union(&["b", "a"]).to_string(), "\"a\" | \"b\"");
+    }
+
+    #[test]
+    fn str_literal_union_is_exact_but_open_str_widens() {
+        let u = str_union(&["a", "b"]);
+        let mut want = BTreeSet::new();
+        want.insert("a".to_string());
+        want.insert("b".to_string());
+        assert_eq!(u.as_lit_str(), Some(&want));
+        let widened = Ty::str_lit("a").union(Ty::of(Tag::Str));
+        assert!(widened.contains_tag(Tag::Str));
+        assert_eq!(widened.as_lit_str(), None);
+    }
+
+    #[test]
+    fn str_literal_subtyping() {
+        let ab = str_union(&["a", "b"]);
+        assert!(Ty::str_lit("a").is_subtype(&ab));
+        assert!(ab.is_subtype(&Ty::of(Tag::Str)));
+        assert!(!Ty::str_lit("c").is_subtype(&ab));
+        assert!(!Ty::of(Tag::Str).is_subtype(&ab));
+    }
+
+    #[test]
+    fn str_literal_disjointness_is_precise() {
+        let ab = str_union(&["a", "b"]);
+        assert!(Ty::str_lit("c").is_disjoint(&ab));
+        assert!(!Ty::str_lit("a").is_disjoint(&ab));
+        assert!(!Ty::of(Tag::Str).is_disjoint(&ab));
+        assert!(ab.is_disjoint(&Ty::of(Tag::Int)));
+    }
+
+    #[test]
+    fn str_literal_intersection() {
+        let inter = str_union(&["a", "b"]).intersect(str_union(&["b", "c"]));
+        let mut want = BTreeSet::new();
+        want.insert("b".to_string());
+        assert_eq!(inter.as_lit_str(), Some(&want));
+        let empty = Ty::str_lit("a").intersect(Ty::str_lit("b"));
+        assert!(empty.is_never());
     }
 
     #[test]

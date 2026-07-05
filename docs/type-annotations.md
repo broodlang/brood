@@ -60,17 +60,29 @@ with `(or …)`: `(or :maximized :fullboth :fullscreen nil)`. Write keywords bar
 `'`-quoted — they're self-evaluating and unambiguous in type position, and bare is
 what the runtime `(sig! …)` contract matches by equality. A keyword outside the set
 is flagged by the checker/LSP and throws under a runtime contract; the diagnostic
-names the exact value (`got :bogus`). `false` is *not* a literal type — use `nil`
-for an "off" arm. (Bool/string literals are the same machinery, still deferred.)
+names the exact value (`got :bogus`).
 
-**Int-literal (singleton) types (ADR-117).** A *bare* int in type position is
-likewise a literal type — `(or 200 404 500)` enumerates the allowed values,
-same runtime-contract behavior as the keyword case (`(sig! …)` matches by
-equality; an int outside the set throws). See
-[type-int-literals.md](type-int-literals.md) for what this slice covers (a
-declared sig's literal set) vs. what's still deferred (a literal int
-*argument* at a call site isn't yet recognized as a singleton the way a
-literal keyword argument already is).
+**Int/bool/string-literal (singleton) types (ADR-117/119).** The same
+machinery, three more kinds — `(or 200 404 500)`, `(or true false)`,
+`(or "GET" "POST")` — same runtime-contract behavior as the keyword case, and
+any combination composes freely on one declared type (`(or :ok 5)`). `false`
+**is** a legitimate literal type now — the earlier "`false` is not a literal
+type, use `nil`" guidance was scoped to the keyword-only era (avoiding
+`false`/`nil` confusion in an *enumerated keyword* set specifically), not a
+technical restriction; now that bool-literal types are their own real kind,
+`(sig f (false -> any))` means exactly what it looks like. See
+[type-int-literals.md](type-int-literals.md)/[type-bool-string-literals.md](type-bool-string-literals.md)
+for what's still deferred (a literal int/bool/string *argument* at a call
+site isn't recognized as a singleton the way a literal keyword argument
+already is — tried for int, reverted).
+
+**Match exhaustiveness and redundancy (ADR-118/120/121).** A `match` over a
+scrutinee whose declared type is a pure enumerable literal type (any mix of
+the kinds above, plus `nil`) is flagged when its clauses don't cover every
+member (unless a catch-all is present); a clause whose literal duplicates one
+already tried is flagged as unreachable, whether or not it came from `match`.
+See [type-match-exhaustiveness.md](type-match-exhaustiveness.md) and
+[type-match-redundancy.md](type-match-redundancy.md).
 
 Base names map to the same lattice points the predicates imply (`number` =
 `int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …). Deferred: map K/V

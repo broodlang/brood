@@ -39,6 +39,15 @@ server, and the web frontend come later (see the roadmap).
 | [namespaces.md](namespaces.md) | Modules & namespaces: `defmodule`, `require`, `(:use …)`, expand-time resolution over the flat table, soft privacy, collision policy (ADR-065/070/085). |
 | [types.md](types.md) | The **set-theoretic, gradual, advisory** type system: the `Ty`/`GradualTy` lattice, subtyping as set inclusion, and the **compatibility contract** to check before adding a `Value`/primitive/form (ADR-023/024/078). |
 | [type-annotations.md](type-annotations.md) | Opt-in `(sig …)` / `(sig! …)` annotations & runtime contracts (ADR-082). |
+| [type-intersections.md](type-intersections.md) | Type intersections `(and TypeA TypeB …)` in the type grammar. |
+| [type-map-kv.md](type-map-kv.md) | Key/value-typed maps `(map KeyType ValType)` — runtime contract + checker refinement. |
+| [type-variables.md](type-variables.md) | Type variables `?A` — parametric signatures for user-defined generic functions. |
+| [type-records.md](type-records.md) | Record/shape types `(record :k1 T1 :k2 T2 …)` — heterogeneous keyword-keyed map shapes. |
+| [type-arrow-intersection.md](type-arrow-intersection.md) | Intersection of arrows — overloaded/multi-clause return types (ADR-116). |
+| [type-int-literals.md](type-int-literals.md) | Int-literal (singleton) types — `5` as a type (ADR-117). |
+| [type-bool-string-literals.md](type-bool-string-literals.md) | Bool and string literal types — `true`/`"GET"` as types (ADR-120). |
+| [type-match-exhaustiveness.md](type-match-exhaustiveness.md) | `match` exhaustiveness over literal-enum scrutinee types (ADR-118/121). |
+| [type-match-redundancy.md](type-match-redundancy.md) | `match`/`if` clause redundancy — flagging a duplicate literal test as unreachable (ADR-122). |
 | [parametric-result-types.md](parametric-result-types.md) | How element types flow through parametric HOFs (`map`/`filter`/`reduce`), ADR-078. |
 | [error-codes.md](error-codes.md) | The `E00xx` error-code catalogue and the "errors that teach" philosophy. |
 | [interop.md](interop.md) | Foreign-function / native-extension design: WASM components built on fetch, wrapped in Brood (ADR-071, proposed). |

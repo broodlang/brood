@@ -280,57 +280,167 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
     }
     let patterns = list_items(heap, quote_items[1])?;
 
-    if target_ty.is_subtype(&Ty::of(Tag::Keyword)) {
-        let declared = target_ty.as_lit()?;
-        let mut tested = std::collections::BTreeSet::new();
-        for &p in &patterns {
-            match p {
-                Value::Keyword(s) => {
-                    tested.insert(s);
-                }
-                _ => return None, // a non-literal pattern — decline to reason about it
-            }
-        }
-        let mut missing: Vec<&str> = declared
-            .difference(&tested)
-            .map(|&s| value::symbol_name_ref(s))
-            .collect();
-        if missing.is_empty() {
-            return None;
-        }
-        missing.sort();
-        let joined = missing
-            .iter()
-            .map(|s| format!(":{s}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Some(format!("match: not exhaustive — missing {joined}"));
+    // **Purity check, generalized (ADR-121):** every tag `target_ty` admits
+    // must be one of the five enumerable kinds — `coverable` carries no
+    // refinements itself, so `is_subtype`'s per-bit refinement checks never
+    // fire; this reduces to a plain tag-subset check ("is every tag in
+    // `target_ty` one of these five"). Any other tag (a vector, a map, an
+    // unrefined open tag among these five, …) bails — can't enumerate an
+    // open set.
+    let coverable = Ty::of(Tag::Keyword)
+        .union(Ty::of(Tag::Int))
+        .union(Ty::of(Tag::Bool))
+        .union(Ty::of(Tag::Str))
+        .union(Ty::of(Tag::Nil));
+    if !target_ty.is_subtype(&coverable) {
+        return None;
     }
 
-    if target_ty.is_subtype(&Ty::of(Tag::Int)) {
-        let declared = target_ty.as_lit_int()?;
-        let mut tested = std::collections::BTreeSet::new();
-        for &p in &patterns {
-            match p {
-                Value::Int(n) => {
-                    tested.insert(n);
-                }
-                _ => return None,
-            }
+    // Render every declared member to a canonical label, one tag at a time.
+    // An unrefined occurrence of any of these tags (the literal-set accessor
+    // is `None` while the tag is still present) bails the whole check — an
+    // open int/keyword/bool/string mixed into an otherwise-enumerable type
+    // isn't itself enumerable.
+    let mut declared: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if target_ty.contains_tag(Tag::Nil) {
+        declared.insert("nil".to_string());
+    }
+    if target_ty.contains_tag(Tag::Keyword) {
+        for &s in target_ty.as_lit()? {
+            declared.insert(format!(":{}", value::symbol_name_ref(s)));
         }
-        let missing: Vec<i64> = declared.difference(&tested).copied().collect();
-        if missing.is_empty() {
-            return None;
+    }
+    if target_ty.contains_tag(Tag::Int) {
+        for &n in target_ty.as_lit_int()? {
+            declared.insert(n.to_string());
         }
-        let joined = missing
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Some(format!("match: not exhaustive — missing {joined}"));
+    }
+    if target_ty.contains_tag(Tag::Bool) {
+        for &b in target_ty.as_lit_bool()? {
+            declared.insert(b.to_string());
+        }
+    }
+    if target_ty.contains_tag(Tag::Str) {
+        for s in target_ty.as_lit_str()? {
+            declared.insert(format!("{s:?}"));
+        }
     }
 
-    None
+    // Render every tried pattern the same way; any non-literal pattern
+    // (destructuring, a guarded bind, a pin) bails — no coverage reasoning
+    // attempted for those (sound: misses a real gap rather than guessing).
+    let mut tested: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for &p in &patterns {
+        tested.insert(render_literal_pattern(heap, p)?);
+    }
+
+    let mut missing: Vec<&String> = declared.difference(&tested).collect();
+    if missing.is_empty() {
+        return None;
+    }
+    missing.sort();
+    let joined = missing
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("match: not exhaustive — missing {joined}"))
+}
+
+/// Render a raw literal pattern `Value` to the same canonical label
+/// [`match_exhaustiveness_gap`] uses for a declared type's enumerated
+/// members — `:name` / bare digits / `true`/`false` / a quoted string /
+/// `nil`. `None` for anything else (a destructuring pattern, a guarded bind,
+/// a pin) — the caller declines to reason about coverage in that case.
+pub(super) fn render_literal_pattern(heap: &Heap, v: Value) -> Option<String> {
+    match v {
+        Value::Keyword(s) => Some(format!(":{}", value::symbol_name_ref(s))),
+        Value::Int(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Str(id) => Some(format!("{:?}", heap.string(id))),
+        Value::Nil => Some("nil".to_string()),
+        // Not one of `Ty`'s enumerable literal kinds (no `lit_float`), but a
+        // legitimate literal pattern nonetheless — only [`find_redundant_clause`]
+        // (ADR-122, no `Ty` involved) ever needs to render one.
+        Value::Float(f) => Some(f.to_string()),
+        _ => None,
+    }
+}
+
+/// Match-redundancy detection (ADR-122) — a different, independent problem
+/// from exhaustiveness: purely structural on the compiled `if`/`%eq` chain,
+/// no scrutinee `Ty` involved at all. Fires on *any* same-symbol `%eq`-literal
+/// `if`-chain, whether it came from `match`/`cond` or was hand-written.
+///
+/// If `test` is itself `(%eq sym lit)`, return `(sym, lit)` — the raw literal
+/// `Value`, not a `Ty` (redundancy needs exact value equality, not a tag).
+/// Mirrors [`literal_eq_guard`]'s recognition of `(%eq sym lit)` /
+/// `(%eq lit sym)`, independently (that function only returns the guard's
+/// `Ty`, having already discarded the concrete value).
+pub(super) fn literal_eq_test_raw(heap: &Heap, test: Value) -> Option<(Symbol, Value)> {
+    let items = list_items(heap, test)?;
+    let Value::Sym(head) = *items.first()? else {
+        return None;
+    };
+    if items.len() != 3 || !value::symbol_is(head, kw::EQ_PRIM) {
+        return None;
+    }
+    literal_eq_raw(items[1], items[2]).or_else(|| literal_eq_raw(items[2], items[1]))
+}
+
+/// Like [`literal_eq_guard`], but returns the raw literal `Value` instead of
+/// converting it to a `Ty` — `literal_eq_test_raw`'s single-pair-order half.
+fn literal_eq_raw(a: Value, b: Value) -> Option<(Symbol, Value)> {
+    let Value::Sym(s) = a else { return None };
+    match b {
+        Value::Sym(_) | Value::Pair(_) | Value::Vector(_) | Value::Map(_) => None,
+        other => Some((s, other)),
+    }
+}
+
+/// Exact syntactic equality between two literal patterns — used to detect a
+/// duplicate clause, not to build a type's value set (unlike the `BTreeSet`-
+/// based literal types, `Value::Float` is included here: comparing two
+/// literal tokens for "did the source write the same thing twice" has none of
+/// `Ord`/`Hash`'s NaN trouble).
+fn literal_values_equal(heap: &Heap, a: Value, b: Value) -> bool {
+    match (a, b) {
+        (Value::Keyword(x), Value::Keyword(y)) => x == y,
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => heap.string(x) == heap.string(y),
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Nil, Value::Nil) => true,
+        _ => false,
+    }
+}
+
+/// Scan forward through a same-symbol `%eq`-literal `if`-chain starting at
+/// `form` (an `else`-branch continuation), looking for another test of `sym`
+/// against `lit` — which would make that clause unreachable (an earlier
+/// occurrence in the chain always wins). Returns the duplicate `if` form, if
+/// found. Stops silently as soon as `form` isn't itself another same-symbol
+/// `%eq`-guarded `if` (a catch-all body, a `match-no-match` throw, or a
+/// divergent hand-written `if`) — nothing more to reason about.
+pub(super) fn find_redundant_clause(heap: &Heap, form: Value, sym: Symbol, lit: Value) -> Option<Value> {
+    let items = list_items(heap, form)?;
+    if items.len() != 4 {
+        return None;
+    }
+    let Value::Sym(head) = items[0] else {
+        return None;
+    };
+    if !value::symbol_is(head, kw::IF) {
+        return None;
+    }
+    let (test_sym, test_lit) = literal_eq_test_raw(heap, items[1])?;
+    if test_sym != sym {
+        return None;
+    }
+    if literal_values_equal(heap, test_lit, lit) {
+        return Some(form);
+    }
+    find_redundant_clause(heap, items[3], sym, lit)
 }
 
 /// The static type of an expression form *in `ctx`*, or `None` when it can't

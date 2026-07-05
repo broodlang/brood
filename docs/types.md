@@ -72,12 +72,15 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   and a **sequence element type** `vector<int>` (the `elem` refinement), with
   `map`/`filter`/`reduce`/`fold` results derived from their arguments. The flat
   tag bitset remains the coarse set under any refinement.
-- **Keyword-literal (singleton) types** (the `lit` refinement, ADR-105): a sig can
-  enumerate exact keyword values — `(or :maximized :fullboth nil)` — and the checker
-  flags a keyword outside the set. Unlike the other refinements, union is *exact*
-  (the set-union, since `(or :a :b)` is precisely both), and `is_disjoint` gains a
-  precise keyword case so `:c` is provably-not-`(or :a :b)` — still sound (a literal
-  set is an enumeration, never an over-approximation). Keyword-only so far.
+- **Literal (singleton) types** (`lit`/`lit_int`/`lit_bool`/`lit_str` refinements,
+  ADR-105/117/120): a sig can enumerate exact keyword, int, bool, or string
+  values — `(or :maximized :fullboth nil)`, `(or 200 404 500)`, `(or true
+  false)`, `(or "GET" "POST")` — and any combination composes on one `Ty`
+  (`(or :ok 5)`), and the checker flags a value outside the set. Unlike the
+  other refinements, union is *exact* (the set-union, since `(or :a :b)` is
+  precisely both), and `is_disjoint` gains a precise case per kind so `:c` is
+  provably-not-`(or :a :b)` — still sound (a literal set is an enumeration,
+  never an over-approximation).
 
 ## The staircase — tackle one at a time
 
@@ -448,24 +451,33 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   alongside `arrow`, with width-conservative subtyping and a per-call
   resolution rule (`resolve_overload_ret`). See
   [`docs/type-arrow-intersection.md`](type-arrow-intersection.md).
-- 🟡 **Int-literal types** `5` — the first slice of ADR-105's deferred "bool/
-  int/string literals are the same machinery" item: a bare int in type
-  position is a literal singleton (`Ty::int_lit`, a `lit_int` refinement
-  independent of keyword's `lit` — the two compose freely, `(or :ok 5)`).
-  `type-matches?` enforces it at the runtime-contract boundary; a declared
-  int-literal-set return/param type flows to callers correctly. Bool/string
-  literals and call-site argument literal precision (matching a literal int
-  *argument* the way a literal keyword argument already is) stay deferred.
-  See [`docs/type-int-literals.md`](type-int-literals.md).
-- ✅ **Match exhaustiveness over literal-enum types** (ADR-118) — a `match`
-  whose scrutinee's declared type is a *pure* keyword- or int-literal enum is
-  flagged when its clauses don't cover every member (unless a catch-all
-  clause is present). No new parser or pass — recognizes the exact compiled
-  shape `match`'s no-catch-all failure already takes
+- ✅ **Literal types: keyword, int, bool, string** (ADR-105/117/119) — a bare
+  `:ok`/`5`/`true`/`"GET"` in type position is a literal singleton
+  (independent `lit`/`lit_int`/`lit_bool`/`lit_str` refinements, each its own
+  tag — any combination composes on one `Ty` with zero special-casing, e.g.
+  `(or :ok 5)`). `type-matches?` enforces every kind at the runtime-contract
+  boundary; a declared literal-set return/param type flows to callers
+  correctly. Call-site argument literal precision (matching a literal
+  int/bool/string *argument* the way a literal keyword argument already is,
+  via `Ty::of_value`) stays deferred for int/bool/string — tried for int,
+  reverted (cascades into unrelated warning-message wording project-wide).
+  See [`docs/type-int-literals.md`](type-int-literals.md) and
+  [`docs/type-bool-string-literals.md`](type-bool-string-literals.md).
+- ✅ **Match exhaustiveness over literal-enum types** (ADR-118, generalized in
+  ADR-121) — a `match` whose scrutinee's declared type is a *pure* enumerable
+  literal type (any combination of keyword/int/bool/string literals plus
+  `nil`) is flagged when its clauses don't cover every member (unless a
+  catch-all clause is present). No new parser or pass — recognizes the exact
+  compiled shape `match`'s no-catch-all failure already takes
   (`(throw [:match-error …])`) in the existing macroexpanded walk. `case`
-  doesn't exist in Brood, so this is `match`-only. Mixed-kind enums and clause
-  redundancy detection are deferred. See
+  doesn't exist in Brood, so this is `match`-only. See
   [`docs/type-match-exhaustiveness.md`](type-match-exhaustiveness.md).
+- ✅ **Match redundancy / unreachable-clause detection** (ADR-122) — a clause
+  whose literal test duplicates one already tried earlier in the same
+  `if`/`%eq` chain is flagged as dead code. Purely structural (no scrutinee
+  `Ty` involved), so it fires on any same-symbol `%eq`-literal chain, not just
+  ones `match` generated. See
+  [`docs/type-match-redundancy.md`](type-match-redundancy.md).
 
 ## How it runs — and why it's outside the runtime
 

@@ -104,6 +104,32 @@
     (assert= (c-exact-int 5) 5)
     (assert-error (c-exact-int 6))))
 
+;; --- bool/string-literal (singleton) types (ADR-120) ----------------------------
+;; Same machinery again, two more kinds. `false` is a legitimate literal type now
+;; (the keyword-era "false isn't a literal type" guidance was scoped to avoiding
+;; `false`/`nil` confusion in an *enumerated keyword* set, not a blanket rule).
+
+(defn c-flag (b) b)
+(sig! c-flag (false -> any))
+
+(defn c-method (m) m)
+(sig! c-method ((or "GET" "POST") -> any))
+
+(describe "bool/string-literal type contracts"
+  (test "the exact bool literal passes"
+    (assert= (c-flag false) false))
+  (test "the other bool value throws"
+    (assert-error (c-flag true)))
+  (test "a non-bool throws"
+    (assert-error (c-flag 1)))
+  (test "an enumerated string value passes"
+    (assert= (c-method "GET") "GET")
+    (assert= (c-method "POST") "POST"))
+  (test "a string outside the set throws"
+    (assert-error (c-method "DELETE")))
+  (test "a non-string throws"
+    (assert-error (c-method :get))))
+
 ;; --- rest params in sig! -------------------------------------------------------
 
 (defn c-sum (& xs) (reduce + 0 xs))

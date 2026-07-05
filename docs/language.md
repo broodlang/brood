@@ -739,12 +739,26 @@ provably wrong call against it (both the argument and the result type flow):
 The type grammar: base names (`int float number string symbol keyword bool nil
 pair vector list map fn any`), function arrows `(p… -> r)`, element-typed
 sequences `(list E)` / `(vector E)`, unions `(or A B …)` and intersections
-`(and A B …)`, keyword-literal (singleton) types (a bare `:foo`), type
+`(and A B …)`, literal (singleton) types — a bare keyword/int/bool/string
+(`:foo`/`5`/`true`/`"GET"`) — any combination composing freely in one `(or …)`
+(see [type-int-literals.md](type-int-literals.md) and
+[type-bool-string-literals.md](type-bool-string-literals.md)), type
 variables (`?A`), key/value-typed maps `(map K V)` (see
 [type-map-kv.md](type-map-kv.md)), and heterogeneous record shapes `(record
 :k1 T1 :k2 T2 …)` with required-by-default fields and an `(optional T)` wrapper
 for optional ones (see [type-records.md](type-records.md)). An unrecognised
 type-expression is ignored, never guessed.
+
+A `match` whose scrutinee's declared type is a *pure* enumerable literal type
+(any combination of the literal kinds above, plus `nil`) gets two more checks
+for free: **exhaustiveness** — a missing arm is flagged unless a catch-all
+clause is present (see
+[type-match-exhaustiveness.md](type-match-exhaustiveness.md)) — and
+**redundancy** — a clause whose literal duplicates one already handled earlier
+is flagged as unreachable dead code (this one is purely structural, so it
+fires on any hand-written same-symbol `%eq`-literal `if`-chain too, not just
+`match`-generated ones; see
+[type-match-redundancy.md](type-match-redundancy.md)).
 
 `(sig! name (params… -> ret))` declares the **same** signature *and enforces it at
 run time*: it wraps `name` so each argument and the result are checked on every

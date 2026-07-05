@@ -19,7 +19,10 @@ use crate::error::Pos;
 use crate::types::{GradualTy, Ty};
 
 use super::ctx::Ctx;
-use super::guards::{expr_ty, guard_assertion, is_syntactic_keyword, match_exhaustiveness_gap};
+use super::guards::{
+    expr_ty, find_redundant_clause, guard_assertion, is_syntactic_keyword, literal_eq_test_raw,
+    match_exhaustiveness_gap, render_literal_pattern,
+};
 use super::sigs::{arity_of, arity_str, curated_sig, is_globally_bound, sig_of};
 
 /// `symbol_name(s)` is a `String` allocation; we only need the spelling on
@@ -1222,6 +1225,23 @@ fn check_if(
     // matching how they're walked.
     check_value_leaf(heap, test, form, ctx, out);
     check_into(heap, test, ctx, out);
+
+    // **Match-redundancy lint** (ADR-122). If this `if`'s test is itself a
+    // literal `%eq` guard, scan forward through the `else`-chain for another
+    // test of the same symbol against the same literal — the shape
+    // `match`/`cond` compile duplicate clauses into (whichever occurs first
+    // always wins, so a later one is dead code). Purely structural — no
+    // scrutinee `Ty` involved, so this fires on any hand-written same-symbol
+    // `%eq`-if chain too, not just `match`-generated ones.
+    if let Some((sym, lit)) = literal_eq_test_raw(heap, test) {
+        if let Some(dup) = find_redundant_clause(heap, else_form, sym, lit) {
+            let label = render_literal_pattern(heap, lit).unwrap_or_else(|| "this value".to_string());
+            out.push((
+                heap.form_pos_only(dup),
+                format!("match: unreachable clause — {label} is already handled above"),
+            ));
+        }
+    }
 
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
         Some(g) => {

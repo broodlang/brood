@@ -1,11 +1,14 @@
-# Match exhaustiveness checking over literal-enum types (ADR-118)
+# Match exhaustiveness checking over literal-enum types (ADR-118, generalized in ADR-121)
 
-> Status: **shipped**. A `match` over a scrutinee whose declared type is a
-> pure keyword-literal or int-literal enum (`(or :ok :error :pending)`,
-> `(or 200 404 500)`) is flagged when its clauses don't cover every member —
-> unless a catch-all clause (`_`/bare bind) is present, which makes it
-> trivially exhaustive. `case` doesn't exist in Brood (confirmed dead/vestigial
-> — see Problem), so the scope is `match` only.
+> Status: **shipped, generalized to mixed-kind enums** (ADR-121). A `match`
+> over a scrutinee whose declared type is a *pure* enumerable literal type —
+> any combination of keyword/int/bool/string literals plus `nil`
+> (`(or :ok :error :pending)`, `(or 200 404 500)`, `(or :ok 5)`,
+> `(or :ok :error nil)`, `(or true false)`, `(or "GET" "POST")`) — is flagged
+> when its clauses don't cover every member, unless a catch-all clause
+> (`_`/bare bind) is present, which makes it trivially exhaustive. `case`
+> doesn't exist in Brood (confirmed dead/vestigial — see Problem), so the
+> scope is `match` only.
 
 ## Problem
 
@@ -97,18 +100,29 @@ report whatever's missing.
    target, (quote patterns)]` (checked structurally — element 0 is the
    keyword `:match-error`).
 2. `target` must be a bare symbol; get its type via `expr_ty`.
-3. **Purity check** — the type must be *entirely* one literal kind:
-   `target_ty.is_subtype(&Ty::of(Tag::Keyword))` → use `.as_lit()`; else
-   `target_ty.is_subtype(&Ty::of(Tag::Int))` → use `.as_lit_int()`; else
-   `None` (not a literal-enum type at all — nothing to check). This
-   deliberately declines a mixed-kind enum (`(or :ok 5)`) or one with a
-   trailing non-literal tag (`(or :ok :error nil)`) — see Deferred.
-4. Unwrap `(quote patterns-list)` and walk the raw pattern list. Every element
-   must be the matching literal kind (`Value::Keyword`/`Value::Int`); **any
-   other pattern kind (destructuring, guarded bind, pin) bails to `None`**
+3. **Purity check, generalized (ADR-121)** — the type must be *entirely*
+   covered by the five enumerable kinds (keyword/int/bool/string literals,
+   plus `nil` — a natural one-inhabitant singleton, no literal-set field
+   needed for it): build `coverable = Ty::of(Keyword).union(Int).union(Bool)
+   .union(Str).union(Nil)` once; `target_ty.is_subtype(&coverable)` — since
+   `coverable` carries no refinements, `is_subtype`'s per-bit refinement
+   checks never fire, so this reduces to a plain tag-subset check ("is every
+   tag in `target_ty` one of these five"). This is what lets a *mixed-kind*
+   enum (`(or :ok 5)`) or one with a trailing `nil` (`(or :ok :error nil)`)
+   through — the original ADR-118 version required exactly one bit.
+4. **Declared-set construction, over string labels** (sidesteps needing a
+   combined Rust sum-type across 4 different payload types): for each of the
+   five tags `target_ty` contains, render its members to canonical labels
+   (`:name` / bare digits / `true`/`false` / `"content"` / `nil`) into one
+   `BTreeSet<String>`. An unrefined occurrence of any of these tags (the
+   literal-set accessor is `None` while the tag is present) still bails —
+   can't enumerate an open set.
+5. Unwrap `(quote patterns-list)` and walk the raw pattern list, rendering
+   each with `render_literal_pattern` (the same label format). **Any
+   non-literal pattern (destructuring, guarded bind, pin) bails to `None`**
    rather than half-reasoning about coverage.
-5. `missing = declared - tested`. Non-empty → `"match: not exhaustive —
-   missing {sorted, comma-joined literals}"`.
+6. `missing = declared_labels - tested_labels`. Non-empty → `"match: not
+   exhaustive — missing {sorted, comma-joined labels}"`.
 
 **Hook** — `check_into`'s existing generic call-handling in `check/walk.rs`
 (the same spot the function-as-value lint and callback-arity check already
@@ -129,14 +143,8 @@ all — this check only ever fires on the one specific compiled `throw` shape.
 
 ## Deferred
 
-- **Mixed-kind enums** (`(or :ok 5)`) and **enums with a trailing non-literal
-  tag** (`(or :ok :error nil)`) — the purity check declines both. Extending to
-  "declared type is a union of literal sets plus a handful of naturally-
-  singleton tags (`nil`)" is a real but bounded follow-on.
-- **Redundancy/unreachable-clause detection** (a duplicate literal across two
-  clauses, e.g. two `:ok` clauses) — a simpler, different problem (compares
-  clause patterns to each other, needs no scrutinee-type knowledge at all).
-  Still open.
+- **Redundancy/unreachable-clause detection** — shipped separately, see
+  [`type-match-redundancy.md`](type-match-redundancy.md) (ADR-122).
 - **Matches mixing a literal pattern with a destructuring/guarded pattern** —
   bailed to `None` entirely; no coverage reasoning attempted.
 - **`gradual_of_compound`'s pre-existing wrong-shape assumption** — noted, not
@@ -159,7 +167,14 @@ Verified the same two ways as every literal/arrow slice this session:
    enabled — byte-identical, zero new warnings (no non-exhaustive
    literal-enum matches exist in the corpus today).
 
+ADR-121 (the mixed-kind generalization) added five more:
+`match_exhaustiveness_flags_a_missing_arm_in_a_mixed_kind_enum` (`(or :ok 5)`),
+`..._flags_a_missing_arm_with_a_trailing_nil` (`(or :ok :error nil)`),
+`..._flags_a_missing_bool_arm`, `..._flags_a_missing_string_arm`, and
+`..._is_silent_when_a_mixed_kind_enum_is_fully_covered` — plus the same
+`nest check` corpus diff, again byte-identical.
+
 ## Tests
 
-`crates/lisp/src/types/check.rs`: the six tests listed above, right after
+`crates/lisp/src/types/check.rs`: the eleven tests listed above, right after
 `int_literal_return_type_flows_through_checker`.

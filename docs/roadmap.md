@@ -728,23 +728,25 @@ Gaps to parity (⬜ = not started; ✋ = deliberately not pursuing):
   fails *every* arm stays deferred (needs a second hook in the separate
   arity/argument-checking loop). See
   [`docs/type-arrow-intersection.md`](type-arrow-intersection.md).
-- 🟡 **Singleton / literal types** — **keyword** (ADR-105) and **int** (ADR-117)
-  shipped: a bare `:ok`/`5` in type position is a literal singleton, enumerable
-  via `(or :ok :error)`/`(or 200 404 500)`, and the two compose freely
-  (`(or :ok 5)` — independent tags/fields, no special-casing needed). **Bool/
-  string literal types** are the same machinery, still deferred; so is
-  call-site *argument* literal precision for int (a literal int argument isn't
-  yet recognized as a singleton the way a literal keyword argument already is
-  via `Ty::of_value` — tried, reverted, see
+- ✅ **Singleton / literal types** — **keyword** (ADR-105), **int** (ADR-117),
+  and **bool/string** (ADR-120) all shipped: a bare `:ok`/`5`/`true`/`"GET"`
+  in type position is a literal singleton, enumerable via `(or …)`, and any
+  combination composes freely on one `Ty` (`(or :ok 5)` — independent
+  tags/fields, no special-casing needed). Call-site *argument* literal
+  precision (a literal int/bool/string argument recognized as a singleton the
+  way a literal keyword argument already is, via `Ty::of_value`) stays
+  deferred — tried for int, reverted (see
   [`type-int-literals.md`](type-int-literals.md)'s Deferred section: it
   cascaded into unrelated warning-message wording across 7 pre-existing
-  tests, a bigger change than this slice's scope). **`match` exhaustiveness**
-  over a *pure* keyword- or int-literal enum is shipped (ADR-118,
+  tests, a bigger change than that slice's scope). **`match` exhaustiveness**
+  over any *pure* enumerable literal type (any mix of keyword/int/bool/string
+  plus `nil`) is shipped (ADR-118, generalized in ADR-121,
   [`type-match-exhaustiveness.md`](type-match-exhaustiveness.md)) — `case`
-  doesn't exist in Brood, so this is `match`-only. Mixed-kind enums
-  (`(or :ok 5)`), enums with a trailing non-literal tag (`(or :ok :error
-  nil)`), and clause **redundancy**/unreachable-clause detection all stay
-  deferred.
+  doesn't exist in Brood, so this is `match`-only. **Match redundancy**/
+  unreachable-clause detection is shipped too (ADR-122,
+  [`type-match-redundancy.md`](type-match-redundancy.md)) — purely
+  structural, fires on any same-symbol `%eq`-literal chain, not just ones
+  `match` generated.
 - ✅ **Map key/value types** `(map K V)` — fully shipped (ADR-078's third
   refinement slice): uniform key/value types flow through `get`/`keys`/`vals`/
   `assoc`. See [`docs/type-map-kv.md`](type-map-kv.md).

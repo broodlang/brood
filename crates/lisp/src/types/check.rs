@@ -1527,6 +1527,87 @@ mod tests {
     }
 
     #[test]
+    fn match_exhaustiveness_flags_a_missing_arm_in_a_mixed_kind_enum() {
+        // (or :ok 5) — a keyword literal and an int literal on the same
+        // declared type (ADR-121 generalizes the old pure-one-kind check).
+        let src = "
+(defn f (x)
+  (match x
+    (:ok \"good\")))
+(sig f ((or :ok 5) -> string))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("not exhaustive") && s.contains('5')),
+            "expected a missing-5 warning, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_flags_a_missing_arm_with_a_trailing_nil() {
+        let src = "
+(defn f (x)
+  (match x
+    (:ok \"good\")
+    (:error \"bad\")))
+(sig f ((or :ok :error nil) -> string))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("not exhaustive") && s.contains("nil")),
+            "expected a missing-nil warning, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_flags_a_missing_bool_arm() {
+        // Note: bare `bool` in a sig is the *unrefined* flat tag (no
+        // `lit_bool` set) — `(or true false)` is what actually declares the
+        // enumerable 2-value literal type this check needs.
+        let src = "
+(defn f (x) (match x (true \"yes\")))
+(sig f ((or true false) -> string))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("not exhaustive") && s.contains("false")),
+            "expected a missing-false warning, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_flags_a_missing_string_arm() {
+        let src = "
+(defn f (m)
+  (match m
+    (\"GET\" 1)))
+(sig f ((or \"GET\" \"POST\") -> int))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("not exhaustive") && s.contains("POST")),
+            "expected a missing-POST warning, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn match_exhaustiveness_is_silent_when_a_mixed_kind_enum_is_fully_covered() {
+        let src = "
+(defn f (x)
+  (match x
+    (:ok \"good\")
+    (5 \"five\")
+    (nil \"nothing\")))
+(sig f ((or :ok 5 nil) -> string))
+";
+        assert!(
+            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            "a fully-covered mixed-kind match should be silent, got {:?}",
+            file_warnings(src)
+        );
+    }
+
+    #[test]
     fn match_exhaustiveness_declines_a_destructuring_clause_mixed_in() {
         // A non-literal pattern among those tried (here, a vector destructure)
         // means the check can't reason about coverage — bail rather than
@@ -1560,6 +1641,72 @@ mod tests {
             file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
             "a non-literal-enum scrutinee should stay silent, got {:?}",
             file_warnings(src)
+        );
+    }
+
+    #[test]
+    fn match_redundancy_flags_an_adjacent_duplicate_clause() {
+        let src = "
+(defn f (x)
+  (match x
+    (:ok 1)
+    (:ok 2)))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("unreachable clause") && s.contains(":ok")),
+            "expected an unreachable-clause warning, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn match_redundancy_flags_a_non_adjacent_duplicate_clause() {
+        let src = "
+(defn f (x)
+  (match x
+    (:ok 1)
+    (:error 2)
+    (:ok 3)))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("unreachable clause") && s.contains(":ok")),
+            "expected an unreachable-clause warning for the non-adjacent duplicate, got {w:?}"
+        );
+    }
+
+    #[test]
+    fn match_redundancy_is_silent_with_no_duplicates() {
+        let src = "
+(defn f (x)
+  (match x
+    (:ok 1)
+    (:error 2)
+    (_ 3)))
+";
+        assert!(
+            file_warnings(src).iter().all(|w| !w.contains("unreachable clause")),
+            "no duplicate clauses should be silent, got {:?}",
+            file_warnings(src)
+        );
+    }
+
+    #[test]
+    fn match_redundancy_fires_on_a_hand_written_eq_chain_too() {
+        // Purely structural — not `match`-specific. A hand-written same-symbol
+        // `%eq`-if chain with a duplicate literal is unreachable the same way.
+        let src = "
+(defn f (x)
+  (if (%eq x 5)
+    :a
+    (if (%eq x 5)
+      :b
+      :c)))
+";
+        let w = file_warnings(src);
+        assert!(
+            w.iter().any(|s| s.contains("unreachable clause") && s.contains('5')),
+            "expected an unreachable-clause warning for the hand-written chain, got {w:?}"
         );
     }
 

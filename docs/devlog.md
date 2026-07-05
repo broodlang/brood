@@ -1392,3 +1392,58 @@ catch-all silent, destructuring-mixed silent, non-literal-enum-type silent) plus
 real 4-case demo through the `brood` CLI producing exactly 2 expected warnings, and
 a `nest check` corpus diff (hook disabled vs. enabled) — byte-identical, zero new
 warnings. 195/195 types tests green (up from 189).
+
+## 2026-07-05 — Bool/string literals, generalized exhaustiveness, match redundancy (ADR-120/121/122)
+
+Continuing type-system work: shipped all three follow-ons flagged as deferred after
+the int-literal + exhaustiveness sessions. Note: these landed as ADR-120/121/122,
+not 119/120/121 as originally planned — ADR-119 got taken by concurrent work
+(the incremental `nest check` cache design) partway through this session; caught
+and fixed via a careful ordered renumber across every file touched, double-checking
+each shared doc (`roadmap.md`/`types.md`/`devlog.md`) didn't already carry the
+*other* ADR-119's legitimate references before touching it.
+
+**ADR-120 (bool/string literals):** mechanical repetition of the int-literal
+pattern twice more (`lit_bool`/`lit_str`, `BOOL_BIT`/`STR_BIT`). String has one
+real wrinkle — `Value::Str` is a heap handle, not inline data, so `lit_str` stores
+owned `String` content (read via `heap.string(id)`) rather than the handle, or
+two textually-identical literals wouldn't compare equal. Also revisited ADR-105's
+"`false` isn't a literal type" guidance — that was scoped to avoiding `false`/`nil`
+confusion in an *enumerated keyword* set specifically, not a technical limit; now
+that bool literals are their own kind, both values are legitimate singletons.
+
+**ADR-121 (generalized exhaustiveness):** the ADR-118 purity check required
+*exactly* one bit (pure keyword or pure int); generalized to any combination of
+the now-5 enumerable tags via one tag-subset test (`is_subtype` against the union
+of all five, which — since that union carries no refinements — reduces to a plain
+tag check). Declared/tested-set construction moved to string labels rather than
+per-kind typed sets, sidestepping a combined Rust sum-type across 4 payload types.
+
+**ADR-122 (match redundancy):** a different, independent problem — purely
+structural on the compiled `if`/`%eq` chain, no scrutinee `Ty` needed. Reuses
+`check_if`'s existing literal-guard recognition point, extracting the raw literal
+value (not just its `Ty`) and scanning forward for a duplicate test on the same
+symbol. Genuinely general — fires on a hand-written same-symbol `%eq`-chain too,
+not just `match`-generated ones.
+
+Verifying the redundancy check against the whole corpus surfaced one real finding,
+not a bug: `tests/pattern_matching_test.blsp`'s test **"first matching clause
+wins"** deliberately writes `(match 1 (1 :first) (1 :second) (_ :z))` to prove
+runtime clause-priority — a true positive, correctly flagged, left as-is (the test
+still passes; advisory warnings never gate). Took real digging to confirm this
+wasn't a bug in the new check: bisecting a 367-line test file by raw line-count
+cuts gave misleading results (truncating mid-form corrupts parens and changes
+what's even parseable) — the reliable technique was removing whole top-level
+`describe` blocks from the *full* file and re-checking, which correctly isolated
+the single deliberately-duplicated-literal test.
+
+Also answered two side questions during this session: whether recursive/self-
+referential map or record types could infinite-loop the checker (no — `Ty` values
+are immutable and built compositionally from finite source text with no named
+type-alias resolution mechanism, so no cycle can ever be constructed; a 3-level
+nested `(map string (map string (map string int)))` checks and runs instantly),
+and confirmed via `nest check`/`nest test` bisection that the false-positive
+investigation above was fully resolved before shipping.
+
+214/214 types tests green (up from 195 at the start of this round). Full corpus
+`nest check` diff clean apart from the one documented true positive.

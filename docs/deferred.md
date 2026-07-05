@@ -223,3 +223,45 @@ formatter-behaviour issue.
   nest format {}` (one liner; works fine, just not built in).
 - Stash unrelated formatter changes (`git stash --keep-index`, then
   `nest format`, then `git stash pop` — fiddly).
+
+## 6. Call-site argument literal precision for int/bool/string
+
+**Why deferred.** A literal *keyword* argument at a call site already gets
+static disjointness checking: `Ty::of_value` (the runtime-value → static-type
+bridge) turns a literal keyword appearing in code into its singleton type, so
+`(c-mode :bogus)` against a declared `(or :maximized :fullboth :fullscreen
+nil)` is a provable disjointness the checker catches, not just the runtime
+contract (`sig!`). Int/bool/string literal *types* are fully shipped
+(ADR-117/120) — but only for **declared sigs**; a literal int/bool/string
+*argument* doesn't get the same `of_value` treatment keyword arguments do.
+Extending `of_value` for int was tried and reverted during the ADR-117 work:
+`of_value` feeds *every* literal expression's inferred type throughout the
+checker, not just call arguments, so making every int literal a singleton
+changed the rendered text of unrelated misuse-warning messages project-wide
+(`"got int"` → `"got 5"`), breaking 7 pre-existing, unrelated tests on exact
+wording. Bool/string weren't attempted at all, on the same expectation.
+
+**Design sketch.** The wording-churn problem is `of_value`'s blast radius, not
+the underlying idea — it's a single, deeply-shared function, so widening its
+output type touches every call site that renders a type in a message, not
+just the disjointness check this is actually for. A narrower approach: instead
+of changing what `of_value` returns everywhere, add a **call-site-only** path
+— a small helper that inspects a literal *argument expression* specifically
+(int/bool/string, mirroring the existing keyword recognition) and feeds that
+singleton type into the disjointness check alone, leaving every other
+consumer of inferred literal types (rendered messages, guard narrowing,
+`let`-binding types) on the current, coarser flat-tag inference. This sidesteps
+the wording-churn risk because it's additive at one call site rather than a
+change to a shared primitive. Needs care that the two paths (the new
+call-site-only inference and `of_value`'s general one) can't disagree in a way
+that produces an inconsistent warning.
+
+**Trigger to pick this back up.** A concrete case where a literal
+int/bool/string argument slips past the checker that a literal keyword
+argument in the identical shape would have caught — i.e., real evidence the
+asymmetry between keyword and the other three kinds costs something, not just
+that it's there.
+
+**Workaround today.** `sig!` still catches the mismatch at runtime (the
+enforcement path doesn't depend on `of_value` at all); the gap is purely in
+the *static* checker's precision for this one case shape.

@@ -4,9 +4,10 @@
 > string literals are the same machinery... a deferred follow-on"). A bare
 > int like `5` in a `(sig …)` type position is now a literal singleton type,
 > exactly like the already-shipped keyword-literal type (`:ok`). Bool and
-> string literals are the same pattern again, deferred — see
-> [Deferred](#deferred). Call-site argument literal precision (matching a
-> literal int *argument* against a declared literal set) is also deferred —
+> string literals followed as the same pattern again (ADR-120,
+> [type-bool-string-literals.md](type-bool-string-literals.md)) — that
+> deferral is now closed. Call-site argument literal precision (matching a
+> literal int *argument* against a declared literal set) is still deferred —
 > see [Deferred](#deferred) — this slice covers declared-sig literal sets only.
 
 ## Problem
@@ -92,14 +93,14 @@ actually check it.
 
 ## Deferred
 
-- **Bool and string literals** — same `lit_bool`/`lit_str` pattern, each its
-  own field/tag/6-call-site duplication. Bool has an open design question
-  ADR-105 didn't resolve: it already carved out "`false` is not a literal
-  type — use `nil` for an off arm" for the *keyword* slice; whether that
-  restriction still makes sense once bool literals are a real `Ty` kind (does
-  `true`/`false` become legitimately expressible as its own singleton type,
-  or does the keyword-era guidance carry forward as "just use plain `bool`")
-  isn't resolved here.
+- **Bool and string literals** — shipped, see ADR-120
+  ([type-bool-string-literals.md](type-bool-string-literals.md)). The open
+  bool design question this doc originally left unresolved (whether `false`
+  stays a legitimate singleton once bool literals are a real `Ty` kind, or
+  the keyword-era "use `nil` instead" guidance carries forward) was
+  resolved there: `false` is now a legitimate literal type — that guidance
+  was scoped to avoiding `false`/`nil` confusion in an *enumerated keyword*
+  set specifically, not a technical restriction.
 - **`BigInt` literals** — out of `i64` range; would need `lit_int`'s storage
   widened to a `BigInt`-aware representation. Not needed for the common case.
 - **Call-site argument literal precision — tried, reverted, explicitly
