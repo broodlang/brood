@@ -211,7 +211,7 @@ fn evaluates_args(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     if ctx.is_lexical_local(s) {
         return true;
     }
-    match heap.env_get(heap.global(), s) {
+    match super::deps::obs_global(heap, s) {
         Some(Value::Native(_)) | Some(Value::Fn(_)) => true,
         // A `Value::Macro` does NOT evaluate its args; any other bound non-callable
         // isn't a call we should reason about either.
@@ -235,7 +235,7 @@ fn resolves_to_macro(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     if ctx.is_lexical_local(s) {
         return false;
     }
-    ctx.is_file_macro(s) || matches!(heap.env_get(heap.global(), s), Some(Value::Macro(_)))
+    ctx.is_file_macro(s) || matches!(super::deps::obs_global(heap, s), Some(Value::Macro(_)))
 }
 
 /// Flag a bare-symbol form sitting in an evaluated *value* position when it's

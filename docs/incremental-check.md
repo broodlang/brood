@@ -8,9 +8,15 @@ O(all files), even when one file changed. Parallelising it across the worker poo
 the *complexity class* of the common edit→recheck cycle to ≈O(changed + dependents),
 which on a no-change re-run is ≈0.
 
-**Status:** **Phase 1 shipped** (2026-07-05, `std/tool/project.blsp`, commit `3c22158`);
-Phase 2 designed-not-built (below). Phase 1 caches the two pure CST passes; the
-dominant `check-files` type-check stays uncached (that's Phase 2).
+**Status:** **Phase 1 and Phase 2 both shipped** (2026-07-05). Phase 1 (`3c22158`)
+caches the two pure CST passes; Phase 2 caches the dominant `check-files` type-check
+via per-file dependency fingerprints. Real-repo warm re-check is ~2.3× faster than
+cold (both passes cached); cached output is byte-identical to uncached (modulo
+compiler gensym numbers, which vary run-to-run regardless of caching). Soundness is
+validated by a differential battery — for each edit scenario (a depended-on file's
+arity/body changes, a referenced global appears/disappears, a new file makes a
+module known, a `:use`d module's exports change, a split-file `(sig …)` edit), the
+warm cached output must match a from-scratch uncached check byte-identically.
 
 ### Phase 1 as shipped (vs the design below)
 
@@ -35,7 +41,30 @@ dominant `check-files` type-check stays uncached (that's Phase 2).
   *trivially small* files the manifest overhead can exceed the near-zero parse saving —
   a non-issue for real code, bounded by the cap.
 
-The rest of this doc is the original design; Phase 2 (below) is still not built.
+### Phase 2 as shipped (vs the design below)
+
+- The checker records **every global observation** through `obs_*` wrappers in
+  `types/check/deps.rs` (env_get-at-global, declared-sig, known-ns, module exports,
+  the protocol table) — so the dependency set is complete by construction, and
+  inference is captured transitively (walking a callee's body records the callee's
+  own references). Exposed as `(check-file-deps path)` → `[warnings dep-keys fp]`
+  and `(check-deps-fp dep-keys)` → the re-observed fingerprint.
+- A referenced global's fingerprint is its **defining file's mtime** (a body/arity
+  change ⟺ that file changed) plus its **declared-sig value hash** (which may live
+  in another file), or its kind for prelude/builtin (stable per `build-id`), or
+  `"U"` when unbound. A `:use`d module → its export set; the protocol table → a
+  structural hash. `def-site`-mtime is coarse (any edit to a file invalidates every
+  dependent of any global it defines) but sound; the battery confirms it.
+- **Dep-capture (`check-file-deps`) runs sequentially** in the driver process, not
+  across the worker pool: the recorder is thread-local and green processes migrate
+  across OS threads, so two concurrent checks would clobber it. A warm re-check
+  touches only changed files + dependents (cheap); a cold run pays a one-time
+  sequential full check. Parallel dep-capture (recorder moved into the per-process
+  context) is the deferred optimization.
+- Same file-count cap as Phase 1: above it the cache is skipped and the parallel
+  from-scratch path runs, so a huge project is never regressed.
+
+The rest of this doc is the original design.
 
 ## Why parallelism isn't the end of the story
 

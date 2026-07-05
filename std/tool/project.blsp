@@ -555,18 +555,64 @@ resolve in the advisory checker. Returns the project root."
 (defn project--check-chunk (chunk)
   (fold (fn (k f) (fold (fn (j w) (eprintln w) (+ j 1)) k (check-file f))) 0 chunk))
 
-(defn project--check-files (files)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
-    0
-    (project--pfold-files files
-      :check
-      ;; combine (in the driver): sum the per-chunk counts
-      (fn (n c) (+ n c))
-      ;; on-death: a check-file that threw — surface it, count it as one warning
-      (fn (n chunk reason)
-        (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
-        (+ n 1))
-      0)))
+;; The from-scratch parallel path: fan `check-file` (print-in-worker) across the
+;; pool. Used when the cache is off, absent, or the project is over the file cap.
+(defn project--check-files-fresh (files)
+  (project--pfold-files files
+    :check
+    (fn (n c) (+ n c))
+    (fn (n chunk reason)
+      (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
+      (+ n 1))
+    0))
+
+;; ── incremental check-result cache (Phase 2, ADR-119) ────────────────────────
+;; Cache each file's `check-file` warnings on disk, keyed by (file mtime + a
+;; dependency fingerprint). A file's warnings are reused iff BOTH are unchanged, so
+;; a change to any global the check observed — directly, or transitively through
+;; inference (which walks a callee's body and thereby records the callee's own
+;; references) — flips the fingerprint (`check-deps-fp`) and forces a re-check of
+;; exactly that file. `check-file-deps` uses a thread-local dependency recorder, so
+;; the RE-CHECK runs SEQUENTIALLY in this process (never across the green-process
+;; pool — two concurrent checks would clobber the shared recorder). A warm re-check
+;; touches only changed files + their dependents, so the sequential cost is small; a
+;; cold run pays a one-time full sequential check (parallel dep-capture is deferred —
+;; it needs the recorder moved into the per-process context). Manifest = `{path ->
+;; [mtime warnings dep-keys fp]}`, merged like the extract cache (anti-thrash).
+(defn project--check-files-cached (files root)
+  (let (cache (project--read-cache root "checks")
+        parts (fold (fn (acc p)
+                      (let ([reuse recheck] acc
+                            c (map-get cache p nil))
+                        (if (and c
+                              (= (nth c 0) (file-mtime p))
+                              (= (check-deps-fp (nth c 2)) (nth c 3)))
+                          [(map-assoc reuse p c) recheck]      ; unchanged file + deps → reuse
+                          [reuse (cons p recheck)])))          ; else re-check
+                [{} nil] files)
+        [reuse recheck] parts
+        ;; re-check the dirty set SEQUENTIALLY (recorder safety); each entry is
+        ;; [mtime warnings dep-keys fp].
+        fresh (fold (fn (m p)
+                      (let (r (check-file-deps p))
+                        (map-assoc m p [(file-mtime p) (nth r 0) (nth r 1) (nth r 2)])))
+                {} recheck)
+        entries (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) reuse fresh)
+        ;; print every file's warnings (reused + fresh) and count them
+        n (fold (fn (n kv) (let ([_ e] kv) (fold (fn (k w) (eprintln w) (+ k 1)) n (nth e 1)))) 0 entries))
+    (when (not (empty? recheck))
+      (project--write-cache root "checks"
+        (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) cache entries)))
+    n))
+
+(defn project--check-files (files root)
+  (cond
+    (= (getenv "BROOD_NO_CHECK") "1") 0
+    ;; No cache when it's disabled, there's no project root, or the project is over
+    ;; the file cap (the manifest read would rival re-checking) — parallel fresh path.
+    (or (project--cache-off?) (nil? root) (>= (count files) (project--cache-max-files)))
+    (project--check-files-fresh files)
+    else (project--check-files-cached files root)))
 
 ;; Make sure the project is set up and all its sources are loaded — the
 ;; precondition for the checker to resolve cross-file names through the
@@ -873,16 +919,19 @@ resolve in the advisory checker. Returns the project root."
         (make-dir dir)
         dir))))
 
-(defn project--cache-file (root)
-  (let (dir (project--cache-dir root)) (when dir (path-join dir "extracts.blsp"))))
+;; `name` selects which on-disk manifest under the project's cache dir — Phase 1's
+;; parse extracts (`"extracts"`) and Phase 2's check results (`"checks"`) are
+;; separate files keyed by the same paths.
+(defn project--cache-file (root name)
+  (let (dir (project--cache-dir root)) (when dir (path-join dir (str name ".blsp")))))
 
-;; The cached `{path -> [mtime counts privs def-names]}` map, or `{}` if the cache
-;; is off / missing / stamp-mismatched / unreadable (any failure falls back to a
-;; cold recompute — the cache is an optimization, never a correctness dependency).
-(defn project--read-cache (root)
+;; The cached `{path -> entry}` map for manifest `name`, or `{}` if the cache is off
+;; / missing / stamp-mismatched / unreadable (any failure falls back to a cold
+;; recompute — the cache is an optimization, never a correctness dependency).
+(defn project--read-cache (root name)
   (if (project--cache-off?)
     {}
-    (let (f (project--cache-file root))
+    (let (f (project--cache-file root name))
       (if (and f (file-exists? f))
         (try
           (let (data (read-string (slurp f)))
@@ -892,10 +941,11 @@ resolve in the advisory checker. Returns the project root."
           (catch e {}))
         {}))))
 
-;; Write the merged cache. Best-effort — a write failure just means no caching.
-(defn project--write-cache (root entries)
+;; Write the merged cache for manifest `name`. Best-effort — a write failure just
+;; means no caching.
+(defn project--write-cache (root name entries)
   (when (not (project--cache-off?))
-    (let (f (project--cache-file root))
+    (let (f (project--cache-file root name))
       (when f
         (try (spit f (pr-str {:stamp (project--cache-stamp) :entries entries}))
           (catch e nil))))))
@@ -934,14 +984,14 @@ resolve in the advisory checker. Returns the project root."
 (defn project--gather-extracts (files root)
   (if (or (project--cache-off?) (>= (count files) (project--cache-max-files)))
     (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) {} (project--pscan files))
-    (let (cache (project--read-cache root)
+    (let (cache (project--read-cache root "extracts")
           dirty (keep (fn (p)
                         (let (c (map-get cache p nil))
                           (when (not (and c (= (nth c 0) (file-mtime p)))) p)))
                   files)
           fresh (project--pscan dirty)
           merged (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) cache fresh))
-      (when (not (empty? dirty)) (project--write-cache root merged))
+      (when (not (empty? dirty)) (project--write-cache root "extracts" merged))
       (fold (fn (m p) (map-assoc m p (map-get merged p nil))) {} files))))
 
 ;; Warning strings for private defs unreferenced anywhere in `files`. `used` =
@@ -1036,7 +1086,7 @@ resolve in the advisory checker. Returns the project root."
         (do
           (project--check-duplicate-defs-seq (project--source-files root))
           (project--check-unused-private-agg files)))
-      (project--check-files files))))
+      (project--check-files files root))))
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry
 ;; behind `nest check FILE…`. Loads the project image *first* (same
@@ -1052,7 +1102,7 @@ resolve in the advisory checker. Returns the project root."
   "Advisory type-check the listed files with the project image loaded first (so cross-module/namespace imports resolve), printing GNU `FILE:LINE:COL:` warnings to stderr and returning the total count. The entry behind `nest check FILE…`; shares its loader and per-file walk with `check-project`. Outside a project, checks against the prelude alone."
   (let (root (project--find-root (cwd)))
     (when root (project--ensure-loaded root))
-    (project--check-files paths)))
+    (project--check-files paths root)))
 
 ;; Sources-only variant for `run-project`'s auto pre-flight: skip `tests/`,
 ;; because test files depend on the test-framework macros (`describe`/`test`/
@@ -1071,7 +1121,7 @@ resolve in the advisory checker. Returns the project root."
               source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
           (project--check-duplicate-defs extracts source-set))
         (project--check-duplicate-defs-seq srcs))
-      (project--check-files srcs))))
+      (project--check-files srcs root))))
 
 ;; (run-project-tests & opts) — find the project from the cwd, set it up, load
 ;; every <name>_test.blsp under its test paths (which only REGISTER tests via the

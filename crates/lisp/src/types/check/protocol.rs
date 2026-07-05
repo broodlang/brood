@@ -49,6 +49,11 @@ pub(super) fn collect(heap: &Heap, forms: &[Value]) -> HashMap<String, Protocol>
 /// `defprotocol`/`defbehaviour` populate). Empty when the registry isn't loaded.
 fn from_registry(heap: &Heap) -> HashMap<String, Protocol> {
     let mut out = HashMap::new();
+    // Record the dependency: this file's warnings depend on the whole `*protocols*`
+    // table (it accumulates `defprotocol`/`extend` across files, so its def-site
+    // alone can't capture a later extension — the Phase-2 fingerprint hashes its
+    // full content instead).
+    super::deps::obs_protocols();
     let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern("*protocols*")) else {
         return out;
     };

@@ -206,6 +206,28 @@
             (is (string-contains? (first warns) "shared--dead"))
             (refute (some? (fn (w) (string-contains? w "shared--helper")) warns))))))))
 
+;; The Phase-2 check-result cache primitives (ADR-119): `check-file-deps` returns
+;; `[warnings dep-keys fingerprint]`, and `check-deps-fp` recomputed on those
+;; dep-keys reproduces the fingerprint (deterministic + stable against the current
+;; image). The whole-project soundness — that a cached warning is reused iff every
+;; observed global fact is unchanged — is covered by the differential battery.
+(describe "project: incremental check-cache primitives (ADR-119 Phase 2)"
+  (test "check-file-deps returns [warnings dep-keys fp]; check-deps-fp is stable"
+    (let (dir (temp-dir "brood-p2-"))
+      (make-dir dir)
+      (let (f (path-join dir "m.blsp"))
+        (spit f "(defmodule p2m)\n(defn p2m-g (x) (p2m-h x))\n(defn p2m-h (a b) (+ a b))\n")
+        (let (r (check-file-deps f))
+          (assert= (count r) 3)
+          (is (vector? r))
+          ;; dep-keys is the observations map; fp is a non-empty string
+          (is (map? (nth r 1)))
+          (is (string? (nth r 2)))
+          ;; recomputing the fingerprint of the same dep-keys against the unchanged
+          ;; image reproduces it exactly (the reuse test the cache relies on)
+          (assert= (check-deps-fp (nth r 1)) (nth r 2))
+          (assert= (check-deps-fp (nth r 1)) (check-deps-fp (nth r 1))))))))
+
 ;; The source loader is load-once *within a walk* (a module another file already
 ;; `require`d isn't loaded a second time when the walk reaches its file) and on
 ;; `:skip-loaded` (the check pre-flight skips anything already provided). Both guard
