@@ -330,8 +330,12 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     let text_t = value::intern("text");
     let cursor_t = value::intern("cursor");
     let rect_t = value::intern("rect");
+    let scroll_region_t = value::intern("scroll-region");
+    // Use a deque so scroll-region inner ops can be prepended and processed in order.
+    let mut queue: std::collections::VecDeque<(value::Symbol, Vec<Value>)> = parsed.into();
     let mut out: Vec<u8> = Vec::new();
-    for (tag, parts) in parsed {
+    while let Some((tag, parts)) = queue.pop_front() {
+        let (tag, parts) = (tag, parts);
         if tag == clear_t {
             crossterm::queue!(out, Clear(ClearType::All)).map_err(term_err)?;
         } else if tag == rect_t {
@@ -385,6 +389,14 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             )?;
             crossterm::queue!(out, Print(s), SetAttribute(Attribute::Reset), ResetColor)
                 .map_err(term_err)?;
+        } else if tag == scroll_region_t {
+            // terminal can't do sub-pixel offsets; flatten by prepending inner ops to the queue.
+            let inner_val = arg(&parts, 2);
+            if let Ok(inner_parsed) = frame_ops(heap, inner_val, "term-draw", "scroll-region ops") {
+                for item in inner_parsed.into_iter().rev() {
+                    queue.push_front(item);
+                }
+            }
         }
     }
     write_term_bytes(&out).map_err(term_err)?;
@@ -849,55 +861,74 @@ pub(super) fn gui_held_key(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// `(gui-draw id frame)` — paint a frame (the same op vector `term-draw` takes) to
 /// window `id`. Parses the ops into plain `gui::Op`s (it has heap access) and ships
 /// them to the GUI thread. Unknown ops are skipped (forward-compatible).
-pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let win = gui_window_id(heap, "gui-draw", arg(args, 0))?;
-    let parsed = frame_ops(heap, arg(args, 1), "gui-draw", "vector (a frame)")?;
-    let clear_t = value::intern("clear");
-    let text_t = value::intern("text");
-    let cursor_t = value::intern("cursor");
-    let cursor_zone_t = value::intern("cursor-zone");
-    let col_resize_t = value::intern("col-resize");
-    let row_resize_t = value::intern("row-resize");
-    let vspans_t = value::intern("vspans");
-    let cells_t = value::intern("cells");
-    let cells_rgb_t = value::intern("cells-rgb");
-    let scroll_offset_t = value::intern("scroll-offset");
-    let rect_t = value::intern("rect");
-    let frect_t = value::intern("frect");
+/// Interned tag symbols shared between `gui_draw` and `parse_gui_ops`.
+struct GuiOpTags {
+    clear_t: value::Symbol,
+    text_t: value::Symbol,
+    cursor_t: value::Symbol,
+    cursor_zone_t: value::Symbol,
+    col_resize_t: value::Symbol,
+    row_resize_t: value::Symbol,
+    vspans_t: value::Symbol,
+    cells_t: value::Symbol,
+    cells_rgb_t: value::Symbol,
+    scroll_region_t: value::Symbol,
+    rect_t: value::Symbol,
+    frect_t: value::Symbol,
+}
+impl GuiOpTags {
+    fn new() -> Self {
+        Self {
+            clear_t: value::intern("clear"),
+            text_t: value::intern("text"),
+            cursor_t: value::intern("cursor"),
+            cursor_zone_t: value::intern("cursor-zone"),
+            col_resize_t: value::intern("col-resize"),
+            row_resize_t: value::intern("row-resize"),
+            vspans_t: value::intern("vspans"),
+            cells_t: value::intern("cells"),
+            cells_rgb_t: value::intern("cells-rgb"),
+            scroll_region_t: value::intern("scroll-region"),
+            rect_t: value::intern("rect"),
+            frect_t: value::intern("frect"),
+        }
+    }
+}
+
+/// Parse a sequence of already-tagged op tuples into `gui::Op`s. Called recursively
+/// for the inner ops of a `ScrollRegion`. Malformed or unknown ops are skipped.
+fn parse_gui_ops(
+    heap: &Heap,
+    parsed: Vec<(value::Symbol, Vec<Value>)>,
+    tags: &GuiOpTags,
+) -> Vec<crate::gui::Op> {
+    let num = |v: Value| -> f32 {
+        match v {
+            Value::Int(n) => n as f32,
+            Value::Float(f) => f as f32,
+            _ => 0.0,
+        }
+    };
     let mut ops = Vec::with_capacity(parsed.len());
     for (tag, parts) in parsed {
-        if tag == clear_t {
+        if tag == tags.clear_t {
             ops.push(crate::gui::Op::Clear);
-        } else if tag == cursor_t {
-            let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
-            let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+        } else if tag == tags.cursor_t {
+            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
+            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
             let style = cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil()));
-            ops.push(crate::gui::Op::Cursor { row, col, style });
-        } else if tag == rect_t {
-            // [:rect row col w h face] — fill a w×h cell block with the face background.
-            let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
-            let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
-            let w = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 3))?);
-            let h = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?);
+            ops.push(crate::gui::Op::Cursor { row: clamp_u16(row_i), col: clamp_u16(col_i), style });
+        } else if tag == tags.rect_t {
+            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
+            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
+            let Ok(w_i)   = expect_int(heap, "gui-draw", arg(&parts, 3)) else { continue };
+            let Ok(h_i)   = expect_int(heap, "gui-draw", arg(&parts, 4)) else { continue };
             let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::nil()));
             ops.push(crate::gui::Op::Rect {
-                row,
-                col,
-                w,
-                h,
-                face,
+                row: clamp_u16(row_i), col: clamp_u16(col_i),
+                w: clamp_u16(w_i), h: clamp_u16(h_i), face,
             });
-        } else if tag == frect_t {
-            // [:frect x y w h face opacity radius] — a sub-cell rounded rect. x/y/w/h
-            // are cell-unit floats; opacity (default 1.0) and radius (cell units,
-            // default 0.0) are optional. GUI-only.
-            let num = |v: Value| -> f32 {
-                match v {
-                    Value::Int(n) => n as f32,
-                    Value::Float(f) => f as f32,
-                    _ => 0.0,
-                }
-            };
+        } else if tag == tags.frect_t {
             let x = num(arg(&parts, 1));
             let y = num(arg(&parts, 2));
             let w = num(arg(&parts, 3));
@@ -908,48 +939,36 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                 _ => 1.0,
             };
             let radius = num(parts.get(7).copied().unwrap_or(Value::nil()));
-            ops.push(crate::gui::Op::FRect {
-                x,
-                y,
-                w,
-                h,
-                face,
-                opacity,
-                radius,
-            });
-        } else if tag == text_t {
-            let row = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
-            let col = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
-            let s = expect_string(heap, "gui-draw", arg(&parts, 3))?;
+            ops.push(crate::gui::Op::FRect { x, y, w, h, face, opacity, radius });
+        } else if tag == tags.text_t {
+            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
+            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
+            let Ok(s) = expect_string(heap, "gui-draw", arg(&parts, 3)) else { continue };
             let face = gui_face(heap, parts.get(4).copied().unwrap_or(Value::nil()));
-            ops.push(crate::gui::Op::Text { row, col, s, face });
-        } else if tag == cursor_zone_t {
-            // [:cursor-zone x y w h shape] — a hover hot-zone. Unknown shape: skip.
-            let x = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
-            let y = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
-            let w = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 3))?);
-            let h = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?);
+            ops.push(crate::gui::Op::Text { row: clamp_u16(row_i), col: clamp_u16(col_i), s, face });
+        } else if tag == tags.cursor_zone_t {
+            let Ok(x_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
+            let Ok(y_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
+            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else { continue };
+            let Ok(h_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else { continue };
             let shape = match parts.get(5) {
-                Some(Value::Keyword(s)) if *s == col_resize_t => {
+                Some(Value::Keyword(s)) if *s == tags.col_resize_t => {
                     Some(crate::gui::CursorShape::ColResize)
                 }
-                Some(Value::Keyword(s)) if *s == row_resize_t => {
+                Some(Value::Keyword(s)) if *s == tags.row_resize_t => {
                     Some(crate::gui::CursorShape::RowResize)
                 }
                 _ => None,
             };
             if let Some(shape) = shape {
-                ops.push(crate::gui::Op::CursorZone { x, y, w, h, shape });
+                ops.push(crate::gui::Op::CursorZone {
+                    x: clamp_u16(x_i), y: clamp_u16(y_i),
+                    w: clamp_u16(w_i), h: clamp_u16(h_i), shape,
+                });
             }
-        } else if tag == vspans_t {
-            // [:vspans row0 col0 cols] — a batch of vertical column-spans. `cols`
-            // is a vector (one per cell-column) of `[height color]` segments; the
-            // per-cell fill happens in `gui::paint`, so the Brood side builds only
-            // O(columns) data instead of an op-per-cell frame. `color` is a face
-            // colour keyword (`:red`), an `[r g b]` triple (0..255), or nil (the
-            // background shows through).
-            let row0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
-            let col0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
+        } else if tag == tags.vspans_t {
+            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
+            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
             let col_vals: Vec<Value> = match arg(&parts, 3) {
                 Value::Vector(id) => heap.vector(id).to_vec(),
                 _ => Vec::new(),
@@ -967,108 +986,89 @@ pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                         _ => continue,
                     };
                     if s.len() >= 2 {
-                        let h = clamp_u16(expect_int(heap, "gui-draw", s[0])?);
-                        segs.push((h, span_color(heap, s[1])));
+                        let Ok(h) = expect_int(heap, "gui-draw", s[0]) else { continue };
+                        segs.push((clamp_u16(h), span_color(heap, s[1])));
                     }
                 }
                 cols.push(segs);
             }
-            ops.push(crate::gui::Op::VSpans { row0, col0, cols });
-        } else if tag == cells_t {
-            // [:cells row0 col0 w aspect bits color] — blit a whole BITBOARD in one op.
-            // `bits` is an arbitrary-precision integer (set bit `y*w + x` = cell `(x,y)`
-            // live); each live cell fills an `aspect`×1 screen-cell block in `color`,
-            // anchored at screen cell `(row0, col0)`. The set-bit enumeration + rect
-            // expansion run natively in `gui::paint` (O(live)), so a frame of thousands
-            // of cells is ONE op for the Brood side. `color` is a face keyword / [r g b]
-            // / nil (as `:vspans`). GUI-only; the terminal has no arm, so it's skipped.
-            let row0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
-            let col0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
-            let w = expect_int(heap, "gui-draw", arg(&parts, 3))?.max(1) as u32;
-            let aspect = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?).max(1);
-            // The board may be a bignum OR a byte string (a refc-shared `Str` of raw bytes) —
-            // decode either to little-endian set-bit bytes for the representation-agnostic paint.
+            ops.push(crate::gui::Op::VSpans { row0: clamp_u16(row0_i), col0: clamp_u16(col0_i), cols });
+        } else if tag == tags.cells_t {
+            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
+            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
+            let Ok(w_i)    = expect_int(heap, "gui-draw", arg(&parts, 3)) else { continue };
+            let Ok(asp_i)  = expect_int(heap, "gui-draw", arg(&parts, 4)) else { continue };
             let bytes = match arg(&parts, 5) {
                 Value::Str(id) => match heap.local_shared_blob(id) {
                     Some(blob) => blob.as_bytes().to_vec(),
                     None => heap.string(id).as_bytes().to_vec(),
                 },
-                v => expect_bigint(heap, "gui-draw", v)?
-                    .magnitude()
-                    .to_bytes_le(),
+                v => match expect_bigint(heap, "gui-draw", v) {
+                    Ok(b) => b.magnitude().to_bytes_le(),
+                    Err(_) => continue,
+                },
             };
             let color = span_color(heap, arg(&parts, 6));
             ops.push(crate::gui::Op::Cells {
-                row0,
-                col0,
-                w,
-                aspect,
-                bytes,
-                color,
+                row0: clamp_u16(row0_i), col0: clamp_u16(col0_i),
+                w: w_i.max(1) as u32, aspect: clamp_u16(asp_i).max(1), bytes, color,
             });
-        } else if tag == cells_rgb_t {
-            // [:cells-rgb row0 col0 w aspect bits colors default] — a whole COLOURED board
-            // in one op: each live cell takes its colour from `colors` (a map bit-index →
-            // packed colour, the spawn-colour layer), falling back to `default`. Replaces
-            // the per-cell [:text] builder (the per-frame op-build was the coloured wall).
-            let row0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 1))?);
-            let col0 = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 2))?);
-            let w = expect_int(heap, "gui-draw", arg(&parts, 3))?.max(1) as u32;
-            let aspect = clamp_u16(expect_int(heap, "gui-draw", arg(&parts, 4))?).max(1);
+        } else if tag == tags.cells_rgb_t {
+            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
+            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
+            let Ok(w_i)    = expect_int(heap, "gui-draw", arg(&parts, 3)) else { continue };
+            let Ok(asp_i)  = expect_int(heap, "gui-draw", arg(&parts, 4)) else { continue };
             let bytes = match arg(&parts, 5) {
                 Value::Str(id) => match heap.local_shared_blob(id) {
                     Some(blob) => blob.as_bytes().to_vec(),
                     None => heap.string(id).as_bytes().to_vec(),
                 },
-                v => expect_bigint(heap, "gui-draw", v)?
-                    .magnitude()
-                    .to_bytes_le(),
+                v => match expect_bigint(heap, "gui-draw", v) {
+                    Ok(b) => b.magnitude().to_bytes_le(),
+                    Err(_) => continue,
+                },
             };
-            // Decode the colour map once: bit-index → rgb (packed as r | g<<12 | b<<24).
             let mut colors = std::collections::HashMap::new();
             if let Value::Map(mid) = arg(&parts, 6) {
                 for (k, v) in heap.map_entries(mid) {
                     if let (Value::Int(idx), Some(p)) = (k, heap.as_bigint(v)) {
                         let bits: u64 = (&p).try_into().unwrap_or(0);
-                        colors.insert(
-                            idx as u64,
-                            [
-                                (bits & 4095) as u8,
-                                ((bits >> 12) & 4095) as u8,
-                                ((bits >> 24) & 4095) as u8,
-                            ],
-                        );
+                        colors.insert(idx as u64, [
+                            (bits & 4095) as u8,
+                            ((bits >> 12) & 4095) as u8,
+                            ((bits >> 24) & 4095) as u8,
+                        ]);
                     }
                 }
             }
             let default = span_color(heap, arg(&parts, 7)).unwrap_or([229, 229, 229]);
             ops.push(crate::gui::Op::CellsRgb {
-                row0,
-                col0,
-                w,
-                aspect,
-                bytes,
-                colors,
-                default,
+                row0: clamp_u16(row0_i), col0: clamp_u16(col0_i),
+                w: w_i.max(1) as u32, aspect: clamp_u16(asp_i).max(1),
+                bytes, colors, default,
             });
-        } else if tag == scroll_offset_t {
-            // [:scroll-offset dy-frac] — shift subsequent Text/Rect/Cursor ops upward by
-            // dy_frac × cell_h pixels; 0.0 resets. GUI-only (terminal ignores). ADR-114.
-            let num = |v: Value| -> f32 {
-                match v {
-                    Value::Int(n) => n as f32,
-                    Value::Float(f) => f as f32,
-                    _ => 0.0,
-                }
-            };
+        } else if tag == tags.scroll_region_t {
+            // [:scroll-region dy-frac inner-ops] — shift inner ops upward by dy_frac ×
+            // cell_h pixels. Self-resetting block; ops outside are unaffected. ADR-114.
             let dy_frac = num(arg(&parts, 1));
-            ops.push(crate::gui::Op::ScrollOffset { dy_frac });
+            let inner_val = arg(&parts, 2);
+            if let Ok(inner_parsed) = frame_ops(heap, inner_val, "gui-draw", "scroll-region ops") {
+                let inner_ops = parse_gui_ops(heap, inner_parsed, tags);
+                ops.push(crate::gui::Op::ScrollRegion { dy_frac, ops: inner_ops });
+            }
         }
     }
+    ops
+}
+
+pub(super) fn gui_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let win = gui_window_id(heap, "gui-draw", arg(args, 0))?;
+    let parsed = frame_ops(heap, arg(args, 1), "gui-draw", "vector (a frame)")?;
+    let tags = GuiOpTags::new();
+    let ops = parse_gui_ops(heap, parsed, &tags);
     crate::gui::draw(win, ops).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
-
 /// A `:vspans` segment colour: a face colour keyword (`:red` → the GUI palette),
 /// an explicit `[r g b]` triple, or a `"#rrggbb"` hex string (all via the shared
 /// `face_rgb`); anything else is `None` — "transparent", leaving the background

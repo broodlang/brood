@@ -195,12 +195,15 @@ pub enum Op {
         colors: std::collections::HashMap<u64, [u8; 3]>,
         default: [u8; 3],
     },
-    /// Shift every subsequent `Text`, `Rect`, and `Cursor` op upward by `dy_frac × cell_h`
-    /// pixels — sub-cell vertical offset for pixel-accurate smooth scrolling. A frame emits
-    /// this before the scrollable text area and resets it (dy_frac = 0.0) before fixed UI
-    /// chrome (mode line, scrollbar). GUI-only: the terminal ignores it. ADR-114.
-    ScrollOffset {
+    /// Draw `ops` with every `Text`, `Rect`, and `Cursor` op shifted upward by
+    /// `dy_frac × cell_h` pixels — the scoped, self-resetting primitive for pixel-accurate
+    /// smooth scrolling. Unlike the old `ScrollOffset` sentinel pair, the offset is
+    /// automatically contained to this block: ops outside the region are never affected.
+    /// Regions may be nested (inner overrides outer). GUI-only: the terminal flattens inner
+    /// ops and ignores the offset. ADR-114.
+    ScrollRegion {
         dy_frac: f32,
+        ops: Vec<Op>,
     },
 }
 
@@ -2706,6 +2709,233 @@ pub(crate) mod backend {
     /// safely cover with a damage union (typical double/triple buffering is ≤ 3).
     const DAMAGE_HISTORY: usize = 8;
 
+    /// Render `ops` into `buf` with the given `scroll_dy` pixel shift (positive = content
+    /// shifted upward). Called recursively for `ScrollRegion` — each region overrides the
+    /// parent's `scroll_dy` with its own, then automatically restores on return.
+    fn render_ops(
+        ops: &[Op],
+        buf: &mut [u32],
+        fb_w: usize,
+        fb_h: usize,
+        r: &mut Renderer,
+        ox: usize,
+        oy: usize,
+        cw: usize,
+        ch: usize,
+        bg0: u32,
+        scroll_dy: isize,
+    ) {
+        for op in ops {
+            match op {
+                Op::Clear => {
+                    for p in buf.iter_mut() {
+                        *p = bg0;
+                    }
+                }
+                Op::ScrollRegion { dy_frac, ops } => {
+                    let inner_dy = (*dy_frac * ch as f32).round() as isize;
+                    render_ops(ops, buf, fb_w, fb_h, r, ox, oy, cw, ch, bg0, inner_dy);
+                }
+                Op::Text { row, col, s, face } => {
+                    let (mut fg, mut bg) =
+                        (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG));
+                    // Only paint a cell background when the face specifies one (or is
+                    // reversed). A face with no `:bg` is TRANSPARENT — the glyph composites
+                    // over whatever's already there (the frame clear, or an hl-line /
+                    // selection `rect` band drawn under the text), so the current-line
+                    // highlight shows behind the text too, exactly like Emacs. (Before,
+                    // every glyph filled its cell with DEFAULT_BG, painting over the band so
+                    // hl-line only showed in the line's trailing empty space.) For an
+                    // un-banded line the pixel beneath is already DEFAULT_BG, so this is
+                    // visually identical there — only banded lines change.
+                    let mut paint_bg = face.bg.is_some();
+                    if face.reverse {
+                        std::mem::swap(&mut fg, &mut bg);
+                        paint_bg = true;
+                    }
+                    // `:scale n` draws each glyph n× larger, occupying an n×n block
+                    // of base cells anchored at this op's (row, col); positions stay
+                    // in base-cell units, so a scaled cell advances `scale` columns.
+                    // We walk *grapheme clusters* (not codepoints), so a ZWJ emoji /
+                    // flag / accented char is one unit, advancing its `display-width`
+                    // cells — a wide glyph (emoji, CJK) takes two.
+                    let scale = face.scale.max(1) as usize;
+                    let ch_s = ch * scale;
+                    // Compute the effective top with scroll offset; clip to the grid origin.
+                    let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
+                    let clip_skip = (oy as isize - top_signed).max(0) as usize;
+                    if clip_skip >= ch_s {
+                        continue; // entirely above the grid origin
+                    }
+                    let visible_h = ch_s - clip_skip;
+                    let render_top = top_signed.max(oy as isize) as usize;
+                    let mut cx = *col as usize;
+                    let bg_packed = pack(bg);
+                    for g in s.graphemes(true) {
+                        let cells = cluster_cells(g);
+                        if cells == 0 {
+                            // zero-width (a lone combining mark): nothing to advance.
+                            continue;
+                        }
+                        let block_w = cells * cw * scale; // the cluster's pixel span
+                        let left = ox + cx * cw;
+                        if paint_bg {
+                            fill_cell(buf, fb_w, fb_h, left, render_top, block_w, visible_h, bg_packed);
+                        }
+                        r.draw_cluster(
+                            buf,
+                            fb_w,
+                            fb_h,
+                            left,
+                            render_top,
+                            g,
+                            face.family,
+                            face.bold,
+                            face.italic,
+                            face.scale,
+                            fg,
+                            clip_skip,
+                        );
+                        if face.underline {
+                            // a rule near the block bottom, in the text colour
+                            // (scaled with the glyph so it stays proportional).
+                            let uy_signed = top_signed + ch_s as isize - 2 * scale as isize;
+                            if uy_signed >= oy as isize {
+                                fill_cell(buf, fb_w, fb_h, left, uy_signed as usize, block_w, scale, pack(fg));
+                            }
+                        }
+                        cx += cells * scale;
+                    }
+                }
+                Op::Rect { row, col, w, h, face } => {
+                    // A solid panel: fill the w×h cell block with the face background
+                    // (reverse swaps in the fg). No background → nothing to paint.
+                    let bg = if face.reverse { face.fg } else { face.bg };
+                    if let Some(bg) = bg {
+                        let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
+                        let h_px = *h as isize * ch as isize;
+                        let clip_skip = (oy as isize - top_signed).max(0);
+                        let visible_h = (h_px - clip_skip).max(0) as usize;
+                        if visible_h > 0 {
+                            let render_top = top_signed.max(oy as isize) as usize;
+                            fill_cell(
+                                buf,
+                                fb_w,
+                                fb_h,
+                                ox + *col as usize * cw,
+                                render_top,
+                                *w as usize * cw,
+                                visible_h,
+                                pack(bg),
+                            );
+                        }
+                    }
+                }
+                Op::FRect { x, y, w, h, face, opacity, radius } => {
+                    // Sub-cell rounded rect: cell-unit floats → px via the same origin +
+                    // cell metrics every op shares, then an AA, alpha-blended fill.
+                    let bg = if face.reverse { face.fg } else { face.bg };
+                    if let Some(bg) = bg {
+                        fill_rrect(
+                            buf,
+                            fb_w,
+                            fb_h,
+                            ox as f32 + *x * cw as f32,
+                            oy as f32 + *y * ch as f32,
+                            *w * cw as f32,
+                            *h * ch as f32,
+                            *radius * cw as f32,
+                            bg,
+                            *opacity,
+                        );
+                    }
+                }
+                Op::Cursor { row, col, style } => {
+                    // Always one base cell. When a scroll offset clips the top of the
+                    // row, the cursor is rendered starting at the grid origin (oy) with
+                    // a reduced height so it doesn't spill above — visually a partial
+                    // block. Fully above the grid (clip_skip >= ch) → skip.
+                    let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
+                    let clip_skip = (oy as isize - top_signed).max(0) as usize;
+                    if clip_skip < ch {
+                        let render_top = top_signed.max(oy as isize) as usize;
+                        let visible_h = ch - clip_skip;
+                        cursor_cell(
+                            buf,
+                            fb_w,
+                            fb_h,
+                            ox + *col as usize * cw,
+                            render_top,
+                            cw,
+                            visible_h,
+                            *style,
+                        );
+                    }
+                }
+                // Not painted — a cursor zone is hover metadata, hit-tested on
+                // pointer-move in the window event handler (ADR-080).
+                Op::CursorZone { .. } => {}
+                Op::VSpans { row0, col0, cols } => {
+                    let top0 = oy + *row0 as usize * ch;
+                    for (i, segs) in cols.iter().enumerate() {
+                        let left = ox + (*col0 as usize + i) * cw;
+                        let mut y = top0;
+                        for (h, color) in segs {
+                            let span_h = *h as usize * ch;
+                            if let Some(rgb) = color {
+                                fill_cell(buf, fb_w, fb_h, left, y, cw, span_h, pack(*rgb));
+                            }
+                            y += span_h;
+                        }
+                    }
+                }
+                Op::Cells { row0, col0, w, aspect, bytes, color } => {
+                    // Enumerate set bits by a single byte scan — O(bytes + live), and the
+                    // same code whether the board came in as a bignum or a byte string.
+                    // Each cell is an `aspect`-wide × 1-tall block of screen cells.
+                    if let Some(rgb) = color {
+                        let packed = pack(*rgb);
+                        let asp = (*aspect).max(1) as usize;
+                        let cell_w = asp * cw; // a board cell spans `aspect` screen cells
+                        let wmod = (*w).max(1) as usize;
+                        for (bi, &byte) in bytes.iter().enumerate() {
+                            let mut b = byte;
+                            let base = bi * 8;
+                            while b != 0 {
+                                let bit = base + b.trailing_zeros() as usize;
+                                let x = bit % wmod;
+                                let y = bit / wmod;
+                                let left = ox + (*col0 as usize + x * asp) * cw;
+                                let top = oy + (*row0 as usize + y) * ch;
+                                fill_cell(buf, fb_w, fb_h, left, top, cell_w, ch, packed);
+                                b &= b - 1;
+                            }
+                        }
+                    }
+                }
+                Op::CellsRgb { row0, col0, w, aspect, bytes, colors, default } => {
+                    let asp = (*aspect).max(1) as usize;
+                    let cell_w = asp * cw;
+                    let wmod = (*w).max(1) as usize;
+                    for (bi, &byte) in bytes.iter().enumerate() {
+                        let mut b = byte;
+                        let base = bi * 8;
+                        while b != 0 {
+                            let bit = base + b.trailing_zeros() as usize;
+                            let rgb = colors.get(&(bit as u64)).copied().unwrap_or(*default);
+                            let x = bit % wmod;
+                            let y = bit / wmod;
+                            let left = ox + (*col0 as usize + x * asp) * cw;
+                            let top = oy + (*row0 as usize + y) * ch;
+                            fill_cell(buf, fb_w, fb_h, left, top, cell_w, ch, pack(rgb));
+                            b &= b - 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn paint(
         surface: &mut softbuffer::Surface<Rc<winit::window::Window>, Rc<winit::window::Window>>,
         window: &winit::window::Window,
@@ -2762,243 +2992,7 @@ pub(crate) mod backend {
         // adds; `px_to_cell` shares them so painted and hit-tested grids coincide. The
         // `clear`/pre-clear already filled the surrounding margin with the background.
         let (ox, oy) = r.grid_origin(fb_w, fb_h);
-        // Pixel shift applied to Text/Rect/Cursor ops by a preceding ScrollOffset op.
-        // Positive = content shifted upward (scrolling down). Resets to 0 on Clear.
-        let mut scroll_dy: isize = 0;
-        for op in frame {
-            match op {
-                Op::Clear => {
-                    scroll_dy = 0;
-                    for p in buf.iter_mut() {
-                        *p = bg0;
-                    }
-                }
-                Op::ScrollOffset { dy_frac } => {
-                    scroll_dy = (*dy_frac * ch as f32).round() as isize;
-                }
-                Op::Text { row, col, s, face } => {
-                    let (mut fg, mut bg) =
-                        (face.fg.unwrap_or(DEFAULT_FG), face.bg.unwrap_or(DEFAULT_BG));
-                    // Only paint a cell background when the face specifies one (or is
-                    // reversed). A face with no `:bg` is TRANSPARENT — the glyph composites
-                    // over whatever's already there (the frame clear, or an hl-line /
-                    // selection `rect` band drawn under the text), so the current-line
-                    // highlight shows behind the text too, exactly like Emacs. (Before,
-                    // every glyph filled its cell with DEFAULT_BG, painting over the band so
-                    // hl-line only showed in the line's trailing empty space.) For an
-                    // un-banded line the pixel beneath is already DEFAULT_BG, so this is
-                    // visually identical there — only banded lines change.
-                    let mut paint_bg = face.bg.is_some();
-                    if face.reverse {
-                        std::mem::swap(&mut fg, &mut bg);
-                        paint_bg = true;
-                    }
-                    // `:scale n` draws each glyph n× larger, occupying an n×n block
-                    // of base cells anchored at this op's (row, col); positions stay
-                    // in base-cell units, so a scaled cell advances `scale` columns.
-                    // We walk *grapheme clusters* (not codepoints), so a ZWJ emoji /
-                    // flag / accented char is one unit, advancing its `display-width`
-                    // cells — a wide glyph (emoji, CJK) takes two.
-                    let scale = face.scale.max(1) as usize;
-                    let ch_s = ch * scale;
-                    // Compute the effective top with scroll offset; clip to the grid origin.
-                    let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
-                    let clip_skip = (oy as isize - top_signed).max(0) as usize;
-                    if clip_skip >= ch_s {
-                        continue; // entirely above the grid origin
-                    }
-                    let visible_h = ch_s - clip_skip;
-                    let render_top = top_signed.max(oy as isize) as usize;
-                    let mut cx = *col as usize;
-                    let bg_packed = pack(bg);
-                    for g in s.graphemes(true) {
-                        let cells = cluster_cells(g);
-                        if cells == 0 {
-                            // zero-width (a lone combining mark): nothing to advance.
-                            continue;
-                        }
-                        let block_w = cells * cw * scale; // the cluster's pixel span
-                        let left = ox + cx * cw;
-                        if paint_bg {
-                            fill_cell(&mut buf, fb_w, fb_h, left, render_top, block_w, visible_h, bg_packed);
-                        }
-                        r.draw_cluster(
-                            &mut buf,
-                            fb_w,
-                            fb_h,
-                            left,
-                            render_top,
-                            g,
-                            face.family,
-                            face.bold,
-                            face.italic,
-                            face.scale,
-                            fg,
-                            clip_skip,
-                        );
-                        if face.underline {
-                            // a rule near the block bottom, in the text colour
-                            // (scaled with the glyph so it stays proportional).
-                            let uy_signed = top_signed + ch_s as isize - 2 * scale as isize;
-                            if uy_signed >= oy as isize {
-                                fill_cell(&mut buf, fb_w, fb_h, left, uy_signed as usize, block_w, scale, pack(fg));
-                            }
-                        }
-                        cx += cells * scale;
-                    }
-                }
-                Op::Rect {
-                    row,
-                    col,
-                    w,
-                    h,
-                    face,
-                } => {
-                    // A solid panel: fill the w×h cell block with the face background
-                    // (reverse swaps in the fg). No background → nothing to paint.
-                    let bg = if face.reverse { face.fg } else { face.bg };
-                    if let Some(bg) = bg {
-                        let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
-                        let h_px = *h as isize * ch as isize;
-                        let clip_skip = (oy as isize - top_signed).max(0);
-                        let visible_h = (h_px - clip_skip).max(0) as usize;
-                        if visible_h > 0 {
-                            let render_top = top_signed.max(oy as isize) as usize;
-                            fill_cell(
-                                &mut buf,
-                                fb_w,
-                                fb_h,
-                                ox + *col as usize * cw,
-                                render_top,
-                                *w as usize * cw,
-                                visible_h,
-                                pack(bg),
-                            );
-                        }
-                    }
-                }
-                Op::FRect {
-                    x,
-                    y,
-                    w,
-                    h,
-                    face,
-                    opacity,
-                    radius,
-                } => {
-                    // Sub-cell rounded rect: cell-unit floats → px via the same origin +
-                    // cell metrics every op shares, then an AA, alpha-blended fill.
-                    let bg = if face.reverse { face.fg } else { face.bg };
-                    if let Some(bg) = bg {
-                        fill_rrect(
-                            &mut buf,
-                            fb_w,
-                            fb_h,
-                            ox as f32 + *x * cw as f32,
-                            oy as f32 + *y * ch as f32,
-                            *w * cw as f32,
-                            *h * ch as f32,
-                            *radius * cw as f32,
-                            bg,
-                            *opacity,
-                        );
-                    }
-                }
-                Op::Cursor { row, col, style } => {
-                    // Always one base cell — the cursor op carries no face, so it
-                    // ignores `:scale`; it draws at the single base cell at (row, col),
-                    // shaped by `style` (block / bar / underline).
-                    let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
-                    if top_signed >= oy as isize {
-                        cursor_cell(
-                            &mut buf,
-                            fb_w,
-                            fb_h,
-                            ox + *col as usize * cw,
-                            top_signed as usize,
-                            cw,
-                            ch,
-                            *style,
-                        );
-                    }
-                }
-                // Not painted — a cursor zone is hover metadata, hit-tested on
-                // pointer-move in the window event handler (ADR-080).
-                Op::CursorZone { .. } => {}
-                Op::VSpans { row0, col0, cols } => {
-                    let top0 = oy + *row0 as usize * ch;
-                    for (i, segs) in cols.iter().enumerate() {
-                        let left = ox + (*col0 as usize + i) * cw;
-                        let mut y = top0;
-                        for (h, color) in segs {
-                            let span_h = *h as usize * ch;
-                            if let Some(rgb) = color {
-                                fill_cell(&mut buf, fb_w, fb_h, left, y, cw, span_h, pack(*rgb));
-                            }
-                            y += span_h;
-                        }
-                    }
-                }
-                Op::Cells {
-                    row0,
-                    col0,
-                    w,
-                    aspect,
-                    bytes,
-                    color,
-                } => {
-                    // Enumerate set bits by a single byte scan — O(bytes + live), and the
-                    // same code whether the board came in as a bignum or a byte string.
-                    // Each cell is an `aspect`-wide × 1-tall block of screen cells.
-                    if let Some(rgb) = color {
-                        let packed = pack(*rgb);
-                        let asp = (*aspect).max(1) as usize;
-                        let cell_w = asp * cw; // a board cell spans `aspect` screen cells
-                        let wmod = (*w).max(1) as usize;
-                        for (bi, &byte) in bytes.iter().enumerate() {
-                            let mut b = byte;
-                            let base = bi * 8;
-                            while b != 0 {
-                                let bit = base + b.trailing_zeros() as usize;
-                                let x = bit % wmod;
-                                let y = bit / wmod;
-                                let left = ox + (*col0 as usize + x * asp) * cw;
-                                let top = oy + (*row0 as usize + y) * ch;
-                                fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, packed);
-                                b &= b - 1;
-                            }
-                        }
-                    }
-                }
-                Op::CellsRgb {
-                    row0,
-                    col0,
-                    w,
-                    aspect,
-                    bytes,
-                    colors,
-                    default,
-                } => {
-                    let asp = (*aspect).max(1) as usize;
-                    let cell_w = asp * cw;
-                    let wmod = (*w).max(1) as usize;
-                    for (bi, &byte) in bytes.iter().enumerate() {
-                        let mut b = byte;
-                        let base = bi * 8;
-                        while b != 0 {
-                            let bit = base + b.trailing_zeros() as usize;
-                            let rgb = colors.get(&(bit as u64)).copied().unwrap_or(*default);
-                            let x = bit % wmod;
-                            let y = bit / wmod;
-                            let left = ox + (*col0 as usize + x * asp) * cw;
-                            let top = oy + (*row0 as usize + y) * ch;
-                            fill_cell(&mut buf, fb_w, fb_h, left, top, cell_w, ch, pack(rgb));
-                            b &= b - 1;
-                        }
-                    }
-                }
-            }
-        }
+        render_ops(frame, &mut buf, fb_w, fb_h, r, ox, oy, cw, ch, bg0, 0);
         let t_body = Instant::now();
         // Present. Whenever we can't be *certain* a narrower damage is safe we blit
         // the whole buffer — no corruption risk. By default we declare only the

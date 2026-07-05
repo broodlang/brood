@@ -81,12 +81,13 @@ space-fills each row in the face so the `:bg` shows. Other face attributes (`:fg
 makes it visible; a face with no background paints nothing."
   [:rect row col w h face])
 
-(defn scroll-offset (dy-frac)
-  "A render op that shifts all subsequent `text`, `rect`, and `cursor` ops upward by
-`dy-frac × cell-height` pixels — the primitive for pixel-accurate smooth scrolling.
-`dy-frac` ∈ [0, 1): 0.0 resets the offset (use before mode lines and fixed chrome).
-GUI-only — the terminal ignores it. ADR-114."
-  [:scroll-offset dy-frac])
+(defn scroll-region (dy-frac ops)
+  "A self-contained render block that draws `ops` with all `text`, `rect`, and `cursor`
+ops shifted upward by `dy-frac × cell-height` pixels. The offset is scoped: ops outside
+this region are not affected and no reset sentinel is needed. `ops` is a flat vector of
+render ops (built with `into []`). Regions may be nested (inner overrides outer). GUI-only —
+the terminal frontend flattens the inner ops and ignores the offset. ADR-114."
+  [:scroll-region dy-frac ops])
 
 (defn frect (x y w h face &optional (opacity 1.0) (radius 0.0))
   "A **sub-cell** rounded-rectangle render op: like `rect`, but `x`/`y` (top-left) and
