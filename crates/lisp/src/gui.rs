@@ -997,12 +997,12 @@ pub(crate) mod backend {
         std::thread::spawn(move || {
             let mut v = initial_velocity;
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(16));
+                std::thread::sleep(std::time::Duration::from_millis(12));
                 if stop_clone.load(Ordering::Relaxed) {
                     break;
                 }
-                v *= 0.88;
-                if v.abs() < 0.002 {
+                v *= 0.93;
+                if v.abs() < 0.001 {
                     break;
                 }
                 if let Ok(g) = gui() {
@@ -1761,7 +1761,7 @@ pub(crate) mod backend {
                                     // Started/Moved: cancel any active momentum so the user
                                     // regains direct control, track velocity via EMA, deliver.
                                     cancel_momentum(w);
-                                    w.scroll_velocity = 0.6 * w.scroll_velocity + 0.4 * dy;
+                                    w.scroll_velocity = 0.75 * w.scroll_velocity + 0.25 * dy;
                                     if dy != 0.0 {
                                         deliver_scroll(w, dy);
                                     }
@@ -2967,20 +2967,22 @@ pub(crate) mod backend {
                     }
                 }
                 Op::Cursor { row, col, style } => {
-                    // Clip the cursor at the grid origin `oy`: only the pixels below `oy`
-                    // are rendered. This keeps the cursor visible even when the scroll region
-                    // shifts it slightly above the grid top (it appears shorter but not gone).
+                    // Only render when the full cursor cell is below the grid origin `oy`.
+                    // A partially-clipped cursor (top_signed < oy) appears as a shrinking
+                    // sliver at the pane border during smooth scroll — suppress it cleanly
+                    // instead. The "stays missing" issue when scrolling past the cursor is
+                    // expected behaviour (viewport scrolled above the cursor line); the
+                    // momentum fix ensures it doesn't overscroll.
                     let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
-                    let clip_top = (oy as isize - top_signed).max(0) as usize;
-                    if clip_top < ch {
+                    if top_signed >= oy as isize {
                         cursor_cell(
                             buf,
                             fb_w,
                             fb_h,
                             ox + *col as usize * cw,
-                            top_signed.max(oy as isize) as usize,
+                            top_signed as usize,
                             cw,
-                            ch - clip_top,
+                            ch,
                             *style,
                         );
                     }
