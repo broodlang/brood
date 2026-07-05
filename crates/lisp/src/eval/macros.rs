@@ -230,7 +230,83 @@ fn tagged(heap: &Heap, v: Value, name: &str) -> Option<Value> {
 /// reference. At root (`compile_ns == None`) the resolve step is a no-op.
 pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     let expanded = macroexpand_all(heap, form, env)?;
-    Ok(resolve(heap, expanded))
+    let resolved = resolve(heap, expanded);
+    // Final step: expand auto-gensym-FREE `quasiquote`s into builder code so the VM
+    // can compile arms that use them (a raw `quasiquote` special form otherwise
+    // defers the WHOLE arm to the tree-walker — the dominant cost of macro-heavy
+    // work, e.g. the advisory checker expanding every `defn`, ADR-119). Runs after
+    // `resolve`, so a namespaced template's free refs are already qualified; produces
+    // exactly what the runtime `expand_quasiquote` would, so behaviour is unchanged —
+    // only the timing moves (once, at compile) for a template whose expansion is
+    // deterministic. A `#`-autogensym template is LEFT for the runtime path (its
+    // gensyms must be fresh per invocation, which a once-at-compile expansion freezes).
+    Ok(expand_static_quasiquotes(heap, resolved))
+}
+
+/// Does `form` contain a `#`-suffixed (auto-gensym) symbol anywhere?
+fn has_autogensym(heap: &Heap, form: Value) -> bool {
+    match form.unpack() {
+        ValueRef::Sym(s) => {
+            let n = value::symbol_name_ref(s);
+            n.len() > 1 && n.ends_with('#')
+        }
+        ValueRef::Pair(p) => {
+            let (car, cdr) = heap.pair(p);
+            has_autogensym(heap, car) || has_autogensym(heap, cdr)
+        }
+        ValueRef::Vector(id) => heap.vector(id).to_vec().iter().any(|&it| has_autogensym(heap, it)),
+        ValueRef::Map(id) => heap
+            .map_entries(id)
+            .iter()
+            .any(|(k, v)| has_autogensym(heap, *k) || has_autogensym(heap, *v)),
+        _ => false,
+    }
+}
+
+/// See [`compile`]: rewrite every auto-gensym-free `quasiquote` into builder code.
+fn expand_static_quasiquotes(heap: &mut Heap, form: Value) -> Value {
+    expand_qq_rec(heap, form).0
+}
+
+/// Returns `(rewritten, changed)` — `changed` avoids rebuilding an unchanged list
+/// (Value has no cheap identity compare), so a quasiquote-free tree is returned as-is.
+fn expand_qq_rec(heap: &mut Heap, form: Value) -> (Value, bool) {
+    let items = match heap.list_to_vec(form) {
+        Ok(i) => i,
+        Err(_) => return (form, false), // atom / improper list — nothing to walk
+    };
+    if items.is_empty() {
+        return (form, false);
+    }
+    if let ValueRef::Sym(h) = items[0].unpack() {
+        if value::symbol_is(h, kw::QUOTE) {
+            return (form, false); // pure data — never touch
+        }
+        if value::symbol_is(h, kw::QUASIQUOTE) {
+            let template = items.get(1).copied().unwrap_or(Value::nil());
+            if has_autogensym(heap, template) {
+                return (form, false); // runtime-only: fresh gensyms per invocation
+            }
+            return match expand_quasiquote(heap, template) {
+                // Recurse into the builder code so a quasiquote in an unquoted
+                // sub-form is expanded too; on expander error keep the runtime form.
+                Ok(builder) => (expand_static_quasiquotes(heap, builder), true),
+                Err(_) => (form, false),
+            };
+        }
+    }
+    let mut out = Vec::with_capacity(items.len());
+    let mut changed = false;
+    for it in items {
+        let (e, c) = expand_qq_rec(heap, it);
+        changed |= c;
+        out.push(e);
+    }
+    if changed {
+        (heap.list(out), true)
+    } else {
+        (form, false)
+    }
 }
 
 /// Does any top-level form open a namespace (head `ns`)? Cheap gate so the
@@ -767,7 +843,14 @@ pub fn macroexpand_1(heap: &mut Heap, form: Value, env: EnvId) -> Result<(Value,
         if let ValueRef::Sym(s) = head.unpack() {
             if let Some(mid) = macro_head_id(heap, env, s) {
                 let args = heap.list_to_vec(tail)?;
-                let expanded = eval::apply_closure(heap, mid, &args)?;
+                // Run the expander through the ACTIVE ENGINE (VM when enabled), not the
+                // tree-walker. Paired with the compile pass expanding a macro's
+                // autogensym-free `quasiquote` body to builder code (see `compile`), a
+                // hot macro (`defn`, …) now compiles once and expands as bytecode/native
+                // — macro expansion dominated the advisory checker (ADR-119). Same result
+                // as `apply_closure`; the VM is the default engine for all other calls.
+                let expanded =
+                    crate::eval::compile::apply_engine(heap, Value::Fn(mid), &args, env)?;
                 return Ok((expanded, true));
             }
         }
