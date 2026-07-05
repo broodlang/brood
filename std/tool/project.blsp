@@ -474,6 +474,7 @@ resolve in the advisory checker. Returns the project root."
     (= op :check) (project--check-chunk chunk)
     (= op :scan-entries) (project--scan-entries-chunk chunk)
     (= op :scan) (project--scan-chunk chunk)
+    (= op :check-deps) (project--check-deps-chunk chunk)
     else (error "project--pfold-run: unknown op " op)))
 
 ;; Spawn one MONITORED worker per chunk; each runs `(project--pfold-run op chunk)`
@@ -591,12 +592,10 @@ resolve in the advisory checker. Returns the project root."
                           [reuse (cons p recheck)])))          ; else re-check
                 [{} nil] files)
         [reuse recheck] parts
-        ;; re-check the dirty set SEQUENTIALLY (recorder safety); each entry is
+        ;; re-check the dirty set in PARALLEL across the worker pool — safe now that
+        ;; the dependency recorder is per-process (Heap::check_dep_rec). Each entry is
         ;; [mtime warnings dep-keys fp].
-        fresh (fold (fn (m p)
-                      (let (r (check-file-deps p))
-                        (map-assoc m p [(file-mtime p) (nth r 0) (nth r 1) (nth r 2)])))
-                {} recheck)
+        fresh (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) {} (project--pcheck-deps recheck))
         entries (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) reuse fresh)
         ;; print every file's warnings (reused + fresh) and count them
         n (fold (fn (n kv) (let ([_ e] kv) (fold (fn (k w) (eprintln w) (+ k 1)) n (nth e 1)))) 0 entries))
@@ -838,30 +837,37 @@ resolve in the advisory checker. Returns the project root."
 ;;                  `defmodule` namespace).
 ;;   - `def-names`: every top-level def's qualified global key (for duplicate-defs).
 ;; One parse feeds BOTH whole-project passes (unused-private + duplicate-defs) and
-;; is what the on-disk cache stores per file.
+;; is what the on-disk cache stores per file. Delegates to the native
+;; `scan-source-extract` — the interpreted-Brood CST walk this replaced was ~120ms
+;; on a 1000-line file (the dominant cost of a cold whole-project check), vs a few
+;; ms in Rust. `project--node-syms--acc`/`--def-name`/`--qualify` (below) remain the
+;; reference the native path mirrors, and still back `mcp--shadows-for`.
 (defn project--scan-file-entry (path)
-  (let (root-nodes (project--node-val (parse-source (slurp path)))
-        counts (fold (fn (a node) (project--node-syms--acc node a)) {} root-nodes)
-        list-nodes (filter (fn (c) (= (project--node-kind c) :list)) root-nodes)
-        ns (first (keep project--module-name list-nodes))
-        privs (keep (fn (node)
-                      (let (nm (project--def-name node))
-                        (when (and (not (nil? nm)) (string-contains? (str nm) "--"))
-                          [(str nm) (str (project--qualify ns nm))])))
-                list-nodes)
-        def-names (map (fn (nm) (project--qualify ns nm)) (keep project--def-name list-nodes)))
-    [counts privs def-names]))
+  (scan-source-extract (slurp path)))
 
 ;; The `:scan-entries` op (runs in a worker): return `[path [mtime counts privs
-;; def-names]]` for each file in `chunk` — the cache entry (mtime read AFTER the
-;; parse, so a write racing the scan bumps mtime again and re-scans next run rather
-;; than caching stale content). This is what a `:scan-entries` worker ships back.
+;; def-names]]` for each file in `chunk` — the cache entry. mtime is read BEFORE the
+;; parse, so if a write races the read the stored mtime is the pre-write one and the
+;; next run (seeing the newer mtime) re-scans rather than trusting a stale extract.
 (defn project--scan-entries-chunk (chunk)
   (map (fn (path)
-         (let ([counts privs def-names] (project--scan-file-entry path))
-           ;; a proper 4-VECTOR [mtime counts privs def-names] — NOT `(cons mtime …)`
-           ;; onto the vector (that makes an improper list); mtime read AFTER the parse.
-           [path [(file-mtime path) counts privs def-names]]))
+         ;; a proper 4-VECTOR [mtime counts privs def-names] — NOT `(cons mtime …)`
+         ;; onto the vector (that would make an improper list).
+         (let (mt (file-mtime path)
+               [counts privs def-names] (project--scan-file-entry path))
+           [path [mt counts privs def-names]]))
+     chunk))
+
+;; The `:check-deps` op (runs in a worker): for each file, run `check-file-deps` and
+;; return `[path [mtime warnings dep-keys fp]]` — the Phase-2 check-result cache
+;; entry. Safe in a worker now that the dependency recorder is per-process
+;; (`Heap::check_dep_rec`), so dep-capture parallelises across the pool. mtime read
+;; BEFORE the check (same race-safety as `:scan-entries`).
+(defn project--check-deps-chunk (chunk)
+  (map (fn (p)
+         (let (mt (file-mtime p)
+               r (check-file-deps p))
+           [p [mt (nth r 0) (nth r 1) (nth r 2)]]))
      chunk))
 
 ;; The `:scan` op (runs in a worker): the AGGREGATED (non-per-file) scan used by
@@ -962,6 +968,22 @@ resolve in the advisory checker. Returns the project root."
         (eprintln (str "warning: check scan worker died on "
                     (count chunk) " file(s), re-scanning: " (pr-str reason)))
         (append-two (project--scan-entries-chunk chunk) acc))
+      nil)))
+
+;; Run `check-file-deps` over `files` in PARALLEL (`:check-deps`), returning a list
+;; of `[path [mtime warnings dep-keys fp]]`. The dependency recorder is per-process
+;; (`Heap::check_dep_rec`), so concurrent dep-capture is race-free — this is what
+;; makes a cold cache-build at scale fast instead of a sequential grind. A dead
+;; worker's chunk is re-checked in the driver so no file is silently dropped.
+(defn project--pcheck-deps (files)
+  (if (empty? files)
+    nil
+    (project--pfold-files files :check-deps
+      (fn (acc chunk-results) (append-two chunk-results acc))
+      (fn (acc chunk reason)
+        (eprintln (str "warning: check worker died on "
+                    (count chunk) " file(s), re-checking: " (pr-str reason)))
+        (append-two (project--check-deps-chunk chunk) acc))
       nil)))
 
 ;; Above this many files the on-disk cache is skipped: the single-file manifest is

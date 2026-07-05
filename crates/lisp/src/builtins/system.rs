@@ -67,6 +67,118 @@ pub(super) fn read_all(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 ///
 /// Roundtrip property: concatenating every leaf's text in tree order reproduces
 /// the input — this is what makes the CST a faithful basis for formatting.
+// ── native per-file scan extract (ADR-119 whole-project check) ───────────────
+// `scan-source-extract` replaces the interpreted-Brood CST walk that was the
+// dominant cost of a cold whole-project check (~120ms on a 1000-line file vs
+// ~2.6ms to parse it natively). Same three outputs as the old
+// `project--scan-file-entry`, computed in one Rust pass over the reader's forms.
+
+const SCAN_DEF_HEADS: &[&str] = &["def", "defn", "defmacro", "defdyn", "defonce"];
+
+/// An `*earmuff*` name — ambient/root regardless of the enclosing namespace.
+fn scan_is_ambient(name: &str) -> bool {
+    name.len() > 2 && name.starts_with('*') && name.ends_with('*')
+}
+
+/// Mirror `project--qualify`: `ns/name`, unless the name is ambient, already
+/// qualified, or there's no module namespace.
+fn scan_qualify(ns: Option<&str>, name: &str) -> String {
+    match ns {
+        Some(n) if !scan_is_ambient(name) && !name.contains('/') => format!("{n}/{name}"),
+        _ => name.to_string(),
+    }
+}
+
+fn scan_sym_name(v: Value) -> Option<&'static str> {
+    match v {
+        Value::Sym(s) => crate::core::value::symbol_name_opt(s),
+        _ => None,
+    }
+}
+
+/// The head and second element of a list form (nil if it isn't a ≥2-element list).
+fn scan_head2(heap: &Heap, f: Value) -> Option<(Value, Value)> {
+    if let Value::Pair(id) = f {
+        let (car, cdr) = heap.pair(id);
+        if let Value::Pair(id2) = cdr {
+            return Some((car, heap.pair(id2).0));
+        }
+    }
+    None
+}
+
+/// Count every `--`-containing symbol occurrence anywhere in `v` (recursively).
+fn scan_count_dd(heap: &Heap, v: Value, counts: &mut std::collections::HashMap<String, i64>) {
+    match v {
+        Value::Sym(s) => {
+            if let Some(n) = crate::core::value::symbol_name_opt(s) {
+                if n.contains("--") {
+                    *counts.entry(n.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+        Value::Pair(id) => {
+            let (car, cdr) = heap.pair(id);
+            scan_count_dd(heap, car, counts);
+            scan_count_dd(heap, cdr, counts);
+        }
+        Value::Vector(vid) => {
+            for it in heap.vector(vid).to_vec() {
+                scan_count_dd(heap, it, counts);
+            }
+        }
+        Value::Map(mid) => {
+            for (k, val) in heap.map_entries(mid) {
+                scan_count_dd(heap, k, counts);
+                scan_count_dd(heap, val, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `(scan-source-extract src)` → `[counts privs def-names]` for the whole-project
+/// check's per-file scan (ADR-119): `counts` a map of each `--`-containing symbol
+/// name → occurrence count, `privs` this file's `--`-private top-level defs as
+/// `[bare qual]`, `def-names` every top-level def's qualified global key. Malformed
+/// input yields an empty extract (parse-tolerant — advisory).
+pub(super) fn scan_source_extract(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "scan-source-extract", arg(args, 0))?;
+    let forms = reader::read_all(heap, &src).unwrap_or_default();
+    // First `(defmodule NAME …)`'s NAME is the file's namespace.
+    let ns: Option<String> = forms.iter().find_map(|&f| {
+        let (h, n) = scan_head2(heap, f)?;
+        (scan_sym_name(h)? == "defmodule").then(|| scan_sym_name(n).map(str::to_string))?
+    });
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut def_names: Vec<Value> = Vec::new();
+    let mut privs: Vec<Value> = Vec::new();
+    for &f in &forms {
+        scan_count_dd(heap, f, &mut counts);
+        if let Some((h, n)) = scan_head2(heap, f) {
+            if let (Some(head), Some(name)) = (scan_sym_name(h), scan_sym_name(n)) {
+                if SCAN_DEF_HEADS.contains(&head) {
+                    let qual = scan_qualify(ns.as_deref(), name);
+                    let qv = heap.alloc_string(&qual);
+                    def_names.push(qv);
+                    if name.contains("--") {
+                        let bv = heap.alloc_string(name);
+                        privs.push(heap.alloc_vector(vec![bv, qv]));
+                    }
+                }
+            }
+        }
+    }
+    let count_pairs: Vec<(Value, Value)> = counts
+        .iter()
+        .map(|(k, &c)| (heap.alloc_string(k), Value::int(c)))
+        .collect();
+    let counts_v = heap.map_from_pairs(count_pairs);
+    let privs_v = heap.list(privs);
+    let defn_v = heap.list(def_names);
+    Ok(heap.alloc_vector(vec![counts_v, privs_v, defn_v]))
+}
+
 pub(super) fn parse_source(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "parse-source", arg(args, 0))?;
     let root = cst::parse(&s);

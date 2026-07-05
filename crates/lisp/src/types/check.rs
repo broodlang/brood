@@ -578,7 +578,7 @@ pub fn check_file_with_deps(
     heap: &mut Heap,
     forms: &[Value],
 ) -> (Vec<(Option<Pos>, String)>, Value) {
-    let _rec = deps::begin_record();
+    deps::begin_record(heap);
     let warnings = check_file(heap, forms);
     let dep_keys = deps::take_dep_keys(heap);
     (warnings, dep_keys)

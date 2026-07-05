@@ -425,9 +425,6 @@ impl Ctx {
     /// loaded image knows? Used to decide whether an unresolved *qualified* name is
     /// a real unbound reference or a dynamically/elsewhere-defined one.
     pub(super) fn module_is_known(&self, prefix: &str) -> bool {
-        // Record the query for the Phase-2 incremental cache: the file's warnings
-        // depend on whether this prefix is currently a known namespace.
-        super::deps::obs_known_ns(prefix);
         self.known_ns.contains(prefix)
     }
     /// Record that file-local `sym`'s value is a **variadic** `fn` (has a `&`

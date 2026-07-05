@@ -189,6 +189,9 @@ fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
     // check didn't load. Stay silent. A typo in a *known* module (some `mod/*`
     // loaded) still falls through to the warning, so real qualified typos are kept.
     if let Some(slash) = nm.rfind('/') {
+        // Record the known-ns query for the Phase-2 cache (heap-resident recorder):
+        // this file's unbound verdict depends on whether the prefix is known.
+        super::deps::obs_known_ns(heap, &nm[..=slash]);
         if !ctx.module_is_known(&nm[..=slash]) {
             return false;
         }

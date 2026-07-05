@@ -25,101 +25,47 @@
 //! The def-site-mtime assumption (every mutable user global has a def-site) is
 //! verified by the differential battery, not by trust.
 
-use std::cell::RefCell;
-use std::collections::HashSet;
-
 use crate::core::heap::Heap;
 use crate::core::value::{self, Symbol, Value};
 
-#[derive(Default)]
-struct DepRec {
-    syms: HashSet<Symbol>,
-    known_ns: HashSet<String>,
-    exports: HashSet<String>,
-    protocols: bool,
-}
+// The recorder itself lives on the **heap** (`Heap::check_dep_rec` +
+// `rec_check_dep_*`), so it's per-process and safe under parallel dep-capture and
+// green-process migration — see the field's doc. This module only wraps the
+// checker's global reads to feed it, and turns the record into keys + a fingerprint.
 
-thread_local! {
-    static REC: RefCell<Option<DepRec>> = const { RefCell::new(None) };
-}
-
-/// RAII scope: while held, the `obs_*` wrappers record into a fresh [`DepRec`].
-/// Dropping clears the recorder (so a non-recording check has zero effect).
-pub(super) struct RecordGuard(());
-
-/// Start recording global observations. Pair with [`take_dep_keys`] before the
-/// returned guard drops.
-pub(super) fn begin_record() -> RecordGuard {
-    REC.with(|r| *r.borrow_mut() = Some(DepRec::default()));
-    RecordGuard(())
-}
-impl Drop for RecordGuard {
-    fn drop(&mut self) {
-        REC.with(|r| *r.borrow_mut() = None);
-    }
-}
-
-fn rec_sym(sym: Symbol) {
-    REC.with(|r| {
-        if let Some(d) = r.borrow_mut().as_mut() {
-            d.syms.insert(sym);
-        }
-    });
-}
-fn rec_ns(prefix: &str) {
-    REC.with(|r| {
-        if let Some(d) = r.borrow_mut().as_mut() {
-            if !d.known_ns.contains(prefix) {
-                d.known_ns.insert(prefix.to_string());
-            }
-        }
-    });
-}
-fn rec_exports(prefix: &str) {
-    REC.with(|r| {
-        if let Some(d) = r.borrow_mut().as_mut() {
-            if !d.exports.contains(prefix) {
-                d.exports.insert(prefix.to_string());
-            }
-        }
-    });
-}
-fn rec_protocols() {
-    REC.with(|r| {
-        if let Some(d) = r.borrow_mut().as_mut() {
-            d.protocols = true;
-        }
-    });
+/// Start recording global observations on `heap`. Pair with [`take_dep_keys`].
+pub(super) fn begin_record(heap: &Heap) {
+    heap.begin_check_dep_record();
 }
 
 // ── observation wrappers — the ONLY sanctioned reads of global state in check/ ──
 
 /// Record + read a global binding (`heap.env_get(global, sym)`).
 pub(super) fn obs_global(heap: &Heap, sym: Symbol) -> Option<Value> {
-    rec_sym(sym);
+    heap.rec_check_dep_sym(sym);
     heap.env_get(heap.global(), sym)
 }
 
 /// Record + read a global's declared `(sig …)` type-expression value.
 pub(super) fn obs_declared_sig_value(heap: &Heap, sym: Symbol) -> Option<Value> {
-    rec_sym(sym);
+    heap.rec_check_dep_sym(sym);
     heap.declared_sig_value(sym)
 }
 
 /// Record + read a module's public exports (for `(:use m)` resolution).
 pub(super) fn obs_module_exports(heap: &Heap, prefix: &str) -> Vec<(Symbol, Symbol)> {
-    rec_exports(prefix);
+    heap.rec_check_dep_exports(prefix);
     heap.module_public_exports(prefix)
 }
 
 /// Record a known-namespace query (the caller computes the answer from its cached set).
-pub(super) fn obs_known_ns(prefix: &str) {
-    rec_ns(prefix);
+pub(super) fn obs_known_ns(heap: &Heap, prefix: &str) {
+    heap.rec_check_dep_ns(prefix);
 }
 
 /// Record that the `*protocols*` table was consulted.
-pub(super) fn obs_protocols() {
-    rec_protocols();
+pub(super) fn obs_protocols(heap: &Heap) {
+    heap.rec_check_dep_protocols();
 }
 
 // ── dep-keys value + fingerprint ──────────────────────────────────────────────
@@ -133,7 +79,7 @@ const K_PROTO: &str = "proto";
 /// `{:syms [names] :kns [prefixes] :exp [prefixes] :proto bool}` (sorted for a
 /// stable on-disk form). Empty record → empty lists.
 pub(super) fn take_dep_keys(heap: &mut Heap) -> Value {
-    let dep = REC.with(|r| r.borrow_mut().take()).unwrap_or_default();
+    let dep = heap.take_check_dep_record().unwrap_or_default();
     let mut syms: Vec<String> = dep
         .syms
         .iter()

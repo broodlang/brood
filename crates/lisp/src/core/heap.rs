@@ -1024,6 +1024,23 @@ impl RuntimeCode {
     }
 }
 
+/// The set of global observations one `check-file-deps` made (ADR-119 Phase 2),
+/// accumulated in [`Heap::check_dep_rec`] while the check runs. The checker's
+/// `obs_*` wrappers push into it; `types::check::deps` turns it into the file's
+/// serializable dep-keys and fingerprint. Plain data — no layering dependency on
+/// the checker.
+#[derive(Default)]
+pub(crate) struct CheckDepRec {
+    /// Global symbols whose binding/arity/sig the check observed.
+    pub(crate) syms: std::collections::HashSet<Symbol>,
+    /// `mod/` prefixes whose known-ness the check queried.
+    pub(crate) known_ns: std::collections::HashSet<String>,
+    /// `mod/` prefixes whose export set the check read (`:use` resolution).
+    pub(crate) exports: std::collections::HashSet<String>,
+    /// Whether the check consulted the `*protocols*` table.
+    pub(crate) protocols: bool,
+}
+
 pub struct Heap {
     /// The **nursery** (young generation): every `alloc_*` bumps into here, so it
     /// holds the freshly-allocated, mostly-short-lived objects. A *minor*
@@ -1130,6 +1147,15 @@ pub struct Heap {
     /// [`module_exports_cache`](Self::module_exports_cache): rebuilding it by scanning all
     /// globals per file was the residual O(files²) after the header-eval redesign.
     known_ns_cache: RefCell<Option<(usize, std::sync::Arc<std::collections::HashSet<String>>)>>,
+    /// Phase-2 incremental-check dependency recorder (ADR-119). `Some` only while a
+    /// `check-file-deps` runs *on this process*; the advisory checker's `obs_*`
+    /// wrappers record every global observation into it. Living on the **heap** (not
+    /// a thread-local) makes it per-process — a green process owns its heap and it
+    /// migrates *with* the process — so dep-capture can run in parallel across the
+    /// worker pool without two concurrent checks (or a mid-check migration/preempt)
+    /// clobbering each other's record. Off (`None`) for all normal eval; the record
+    /// borrow on the hot per-symbol observation path is a single `RefCell` check.
+    check_dep_rec: RefCell<Option<CheckDepRec>>,
     /// Explicit GC root stack — the evaluator's **operand stack** (ADR-061).
     /// Every LOCAL [`Value`] an eval frame still needs *after* a nested `eval`
     /// (its accumulated `argv`, literal accumulators, `callee`, the `call_form`,
@@ -1589,6 +1615,7 @@ impl Heap {
             global_ic: RefCell::new(SymbolMap::default()),
             module_exports_cache: RefCell::new(None),
             known_ns_cache: RefCell::new(None),
+            check_dep_rec: RefCell::new(None),
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: usize::MAX,
@@ -1640,6 +1667,7 @@ impl Heap {
             global_ic: RefCell::new(SymbolMap::default()),
             module_exports_cache: RefCell::new(None),
             known_ns_cache: RefCell::new(None),
+            check_dep_rec: RefCell::new(None),
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
@@ -4864,6 +4892,48 @@ impl Heap {
         let arc = std::sync::Arc::new(set);
         *self.known_ns_cache.borrow_mut() = Some((count, std::sync::Arc::clone(&arc)));
         arc
+    }
+
+    // ── Phase-2 incremental-check dependency recorder (ADR-119) ───────────────
+    // Per-process (this heap travels with the green process), so `check-file-deps`
+    // can run concurrently across the worker pool without clobbering. See the
+    // `check_dep_rec` field and `types::check::deps`.
+
+    /// Start recording global observations into a fresh record on this heap.
+    pub(crate) fn begin_check_dep_record(&self) {
+        *self.check_dep_rec.borrow_mut() = Some(CheckDepRec::default());
+    }
+    /// Drain and return the recorded observations (clearing the recorder).
+    pub(crate) fn take_check_dep_record(&self) -> Option<CheckDepRec> {
+        self.check_dep_rec.borrow_mut().take()
+    }
+    /// Record an observed global symbol (binding/arity/sig).
+    pub(crate) fn rec_check_dep_sym(&self, sym: Symbol) {
+        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+            d.syms.insert(sym);
+        }
+    }
+    /// Record a queried `mod/` known-namespace prefix.
+    pub(crate) fn rec_check_dep_ns(&self, prefix: &str) {
+        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+            if !d.known_ns.contains(prefix) {
+                d.known_ns.insert(prefix.to_string());
+            }
+        }
+    }
+    /// Record a `mod/` prefix whose export set was read.
+    pub(crate) fn rec_check_dep_exports(&self, prefix: &str) {
+        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+            if !d.exports.contains(prefix) {
+                d.exports.insert(prefix.to_string());
+            }
+        }
+    }
+    /// Record that the `*protocols*` table was consulted.
+    pub(crate) fn rec_check_dep_protocols(&self) {
+        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+            d.protocols = true;
+        }
     }
 
     /// Register a user-declared `(sig name type)` signature: `sym` is the

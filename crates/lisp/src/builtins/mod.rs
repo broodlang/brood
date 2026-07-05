@@ -1491,6 +1491,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "scan-source-extract",
+        Arity::exact(1),
+        Sig::new(vec![string], vec_ty),
+        scan_source_extract,
+    );
+    def(
+        heap,
         "scan-tokens",
         Arity::exact(1),
         Sig::new(vec![string], vec_ty),
@@ -2542,6 +2549,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("read-all", &["s"], "Parse every form in string s and return them as a list (the all-forms sibling of read-string)."),
     ("read-first", &["s"], "Parse and return the first form in string s, ignoring any trailing forms (the lenient sibling of read-string — for peeking a multi-form source's leading form, e.g. a file's (defmodule …) header)."),
     ("parse-source", &["s"], "Parse s into a lossless CST tree as nested vectors (mechanism for std/format.blsp)."),
+    ("scan-source-extract", &["src"], "Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of --containing symbol counts, this file's --private defs as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk."),
     ("scan-tokens", &["s"], "Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. The lossless token stream a fontifier / structural tool walks — the per-char scan runs natively, leaving policy (faces, head-position) to the consumer over O(tokens)."),
     ("span-runs", &["text", "base", "spans", "ranges"], "Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. With optional overlay ranges ([lo hi face], may overlap/be unordered) each char's face is its span face with every covering range face merged on top (later wins). Adjacent equal-face runs coalesce. The highlight span->runs tiler (fontify-runs), in Rust. Faces are opaque maps."),
     ("clipboard-get", &[], "The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature)."),

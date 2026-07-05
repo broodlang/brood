@@ -53,7 +53,7 @@ fn from_registry(heap: &Heap) -> HashMap<String, Protocol> {
     // table (it accumulates `defprotocol`/`extend` across files, so its def-site
     // alone can't capture a later extension — the Phase-2 fingerprint hashes its
     // full content instead).
-    super::deps::obs_protocols();
+    super::deps::obs_protocols(heap);
     let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern("*protocols*")) else {
         return out;
     };
