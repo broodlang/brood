@@ -358,7 +358,8 @@ pub(crate) mod backend {
     use std::collections::HashMap;
     use std::num::NonZeroU32;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
     use std::sync::mpsc::{self, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Instant;
@@ -468,10 +469,6 @@ pub(crate) mod backend {
         },
         /// Replace window `id`'s frame and repaint it.
         Draw { id: u64, ops: Vec<Op> },
-        /// A single kinetic-momentum step from the background thread: deliver `dy` to the
-        /// subscriber of window `id`. The `session` must match the window's current momentum
-        /// session; stale events from a cancelled gesture are silently dropped.
-        MomentumScroll { id: u64, dy: f64, session: u64 },
         /// Destroy window `id`.
         Close { id: u64 },
         /// Set window `id`'s OS title-bar text at runtime. Behind `gui-title!`.
@@ -980,45 +977,6 @@ pub(crate) mod backend {
         ])
     }
 
-    /// Stop any running momentum thread for `w` and advance the session counter so any
-    /// in-flight `MomentumScroll` events from the old thread are silently dropped.
-    fn cancel_momentum(w: &mut Win) {
-        if let Some(stop) = w.scroll_momentum_stop.take() {
-            stop.store(true, Ordering::Relaxed);
-        }
-        w.scroll_momentum_session = w.scroll_momentum_session.wrapping_add(1);
-    }
-
-    /// Spawn a background thread that delivers decaying scroll events at ~60 fps via the
-    /// global GUI event-loop proxy. Returns the cancel flag; set it to `true` to stop.
-    fn start_momentum(win_id: u64, initial_velocity: f64, session: u64) -> Arc<AtomicBool> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
-        std::thread::spawn(move || {
-            let mut v = initial_velocity;
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(12));
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                v *= 0.93;
-                if v.abs() < 0.001 {
-                    break;
-                }
-                if let Ok(g) = gui() {
-                    let _ = g.lock().unwrap().send_event(UserEvent::MomentumScroll {
-                        id: win_id,
-                        dy: v,
-                        session,
-                    });
-                } else {
-                    break;
-                }
-            }
-        });
-        stop
-    }
-
     /// Deliver a scroll event to a window's subscriber. `dy > 0` is scroll-up, `dy < 0` is
     /// scroll-down. Modifiers come from the window's current modifier state. Used both for
     /// live gesture events and the kinetic-momentum synthetic events fired after gesture end.
@@ -1122,15 +1080,13 @@ pub(crate) mod backend {
         /// The shape currently applied to the window, so we only call `set_cursor`
         /// when the hit-test result changes (not on every pointer move).
         shape: Option<super::CursorShape>,
-        /// EMA of the scroll velocity (signed lines/frame at ~60 fps) tracked during a
-        /// trackpad gesture; on `TouchPhase::Ended` this seeds the momentum animation.
+        /// EMA of the scroll velocity (signed lines/step) tracked during a trackpad gesture.
+        /// On `TouchPhase::Ended` this seeds the kinetic-momentum animation driven by
+        /// `about_to_wait`; reset to 0 on `Started` so each gesture begins fresh.
         scroll_velocity: f64,
-        /// Monotonically increasing counter, incremented each time momentum starts or is
-        /// cancelled. `MomentumScroll` events carry the session they were sent for; a stale
-        /// event from a previous session is silently dropped.
-        scroll_momentum_session: u64,
-        /// Cancel flag for the active momentum thread (`true` = stop). `None` when idle.
-        scroll_momentum_stop: Option<Arc<AtomicBool>>,
+        /// `true` while kinetic momentum is running after a gesture lift-off. Cleared by the
+        /// next `Started/Moved/LineDelta` event or when velocity decays below threshold.
+        scroll_momentum_active: bool,
     }
 
     /// Build a window + softbuffer surface + glyph renderer inside the running event
@@ -1191,8 +1147,7 @@ pub(crate) mod backend {
             zones: Vec::new(),
             shape: None,
             scroll_velocity: 0.0,
-            scroll_momentum_session: 0,
-            scroll_momentum_stop: None,
+            scroll_momentum_active: false,
         })
     }
 
@@ -1339,13 +1294,6 @@ pub(crate) mod backend {
                             .collect();
                         w.frame = ops;
                         w.window.request_redraw();
-                    }
-                }
-                UserEvent::MomentumScroll { id, dy, session } => {
-                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
-                        if w.scroll_momentum_session == session {
-                            deliver_scroll(w, dy);
-                        }
                     }
                 }
                 UserEvent::Close { id } => {
@@ -1714,16 +1662,17 @@ pub(crate) mod backend {
                     // Positive y scrolls up (away from the user). LineDelta is in discrete
                     // line units; PixelDelta (trackpad) is in physical pixels — normalised
                     // here to line units so Brood gets a consistent float in both cases.
-                    // `scroll_dy > 0` = scroll-up action; the absolute value is the magnitude.
                     //
-                    // Momentum is only for PixelDelta (smooth trackpad). On Wayland,
-                    // TouchPhase::Ended fires for mouse-wheel clicks too; LineDelta events are
-                    // always delivered as-is and cancel any running momentum immediately.
+                    // Momentum is only for PixelDelta (smooth trackpad). LineDelta (mouse
+                    // wheel clicks) always delivers immediately and stops any running momentum.
+                    // Momentum itself is driven by `about_to_wait` with `WaitUntil(12ms)` so
+                    // it fires once per event-loop cycle after the queue is drained — no
+                    // flooding, no background thread.
                     let ch = w.renderer.cell_h.max(1);
                     match delta {
                         MouseScrollDelta::LineDelta(_, y) => {
                             let dy = y as f64;
-                            cancel_momentum(w);
+                            w.scroll_momentum_active = false;
                             w.scroll_velocity = 0.0;
                             if dy != 0.0 {
                                 deliver_scroll(w, dy);
@@ -1733,35 +1682,36 @@ pub(crate) mod backend {
                             let dy = p.y / ch as f64;
                             match phase {
                                 TouchPhase::Cancelled => {
-                                    cancel_momentum(w);
+                                    w.scroll_momentum_active = false;
                                     w.scroll_velocity = 0.0;
                                 }
                                 TouchPhase::Ended => {
-                                    // Gesture lift-off: apply the final delta (may be non-zero
-                                    // on some platforms), then spawn a background thread that
-                                    // sends decaying scroll events at ~60 fps until velocity
-                                    // drops below threshold or a new gesture starts.
+                                    // Gesture lift-off. Apply the final delta (non-zero on
+                                    // some platforms), then let `about_to_wait` run the coast.
                                     if dy != 0.0 {
                                         deliver_scroll(w, dy);
                                     }
-                                    cancel_momentum(w);
                                     if w.scroll_velocity.abs() > 0.01 {
-                                        let session = w.scroll_momentum_session;
-                                        let id = *self.ids.iter()
-                                            .find(|(_, wid)| **wid == window_id)
-                                            .map(|(id, _)| id)
-                                            .unwrap_or(&0);
-                                        let stop = start_momentum(id, w.scroll_velocity, session);
-                                        w.scroll_momentum_stop = Some(stop);
+                                        w.scroll_momentum_active = true;
                                     } else {
+                                        w.scroll_momentum_active = false;
                                         w.scroll_velocity = 0.0;
                                     }
                                 }
+                                TouchPhase::Started => {
+                                    // New gesture: reset velocity so the EMA starts fresh
+                                    // (not contaminated by the previous gesture's decay).
+                                    w.scroll_momentum_active = false;
+                                    w.scroll_velocity = dy;
+                                    if dy != 0.0 {
+                                        deliver_scroll(w, dy);
+                                    }
+                                }
                                 _ => {
-                                    // Started/Moved: cancel any active momentum so the user
-                                    // regains direct control, track velocity via EMA, deliver.
-                                    cancel_momentum(w);
-                                    w.scroll_velocity = 0.75 * w.scroll_velocity + 0.25 * dy;
+                                    // Moved: user has direct control; stop any running
+                                    // momentum and continue the EMA for this gesture.
+                                    w.scroll_momentum_active = false;
+                                    w.scroll_velocity = 0.8 * w.scroll_velocity + 0.2 * dy;
                                     if dy != 0.0 {
                                         deliver_scroll(w, dy);
                                     }
@@ -1788,6 +1738,33 @@ pub(crate) mod backend {
                 }
                 _ => {}
             }
+        }
+
+        // `about_to_wait` fires after the event queue is fully drained and before
+        // winit sleeps. This is where we drive kinetic momentum: one scroll step per
+        // wakeup, paced at ~83 fps via `WaitUntil(12ms)`. Because we deliver AFTER
+        // the queue is empty, Brood has already processed the previous step's event
+        // and re-rendered — no flooding, no backlog, no background threads.
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            let mut any_active = false;
+            for w in self.wins.values_mut() {
+                if !w.scroll_momentum_active {
+                    continue;
+                }
+                w.scroll_velocity *= 0.93;
+                if w.scroll_velocity.abs() < 0.001 {
+                    w.scroll_momentum_active = false;
+                    w.scroll_velocity = 0.0;
+                    continue;
+                }
+                any_active = true;
+                deliver_scroll(w, w.scroll_velocity);
+            }
+            event_loop.set_control_flow(if any_active {
+                ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(12))
+            } else {
+                ControlFlow::Wait
+            });
         }
     }
 
