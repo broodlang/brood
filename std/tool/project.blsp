@@ -986,16 +986,19 @@ resolve in the advisory checker. Returns the project root."
         (append-two (project--check-deps-chunk chunk) acc))
       nil)))
 
-;; Above this many files the on-disk cache is skipped: the single-file manifest is
-;; parsed with `read-string`, whose cost grows with the entry count, so past this
-;; point reading the manifest would rival re-parsing the sources and the cache stops
-;; paying for itself. Below it (the realistic project range) the cache is a clear
-;; win. Tunable via `BROOD_CHECK_CACHE_MAX` (a future binary manifest could lift the
-;; ceiling — ADR-119); the parallel from-scratch path handles everything above it
-;; with no regression.
+;; Above this many files the on-disk cache is SKIPPED and the fast from-scratch
+;; parallel path runs instead. The single manifest is a `pr-str`/`read-string`
+;; s-expression whose read+write cost (and the per-entry dep-keys it holds) grows
+;; with the file count; measured on 1000-line files a ~10K-entry manifest turned
+;; the cache into a net loss (cold slower + multi-GB RSS + a pathologically slow
+;; warm read). So the ceiling is deliberately low — the cache is for the common
+;; small-project edit→recheck loop, where its manifest stays tiny; large projects
+;; ride the from-scratch path (fast now that the per-file scan is native —
+;; `scan-source-extract`). Lifting this needs a scalable manifest (binary / sharded
+;; / per-file), noted as future work (ADR-119). Tunable via `BROOD_CHECK_CACHE_MAX`.
 (defn project--cache-max-files ()
   (let (e (getenv "BROOD_CHECK_CACHE_MAX"))
-    (if (and e (not (= e ""))) (or (string->number e) 25000) 25000)))
+    (if (and e (not (= e ""))) (or (string->number e) 2000) 2000)))
 
 ;; Return `{path -> [mtime counts privs def-names]}` for `files`. Uses the on-disk
 ;; cache (reuse unchanged files by mtime, reparse the dirty set) for a project below

@@ -2719,6 +2719,42 @@ mod tests {
     }
 
     #[test]
+    fn defmodule_declared_arrow_sig_seeds_return_type_check() {
+        // Regression: `(sig f (-> B))` declared inside a `defmodule` block
+        // didn't seed `check_def`'s body-vs-declared-return-type check.
+        // Pass 2.5 (`annot::parse_sig_decl`) records a declared sig under the
+        // symbol exactly as written in the un-expanded `(sig …)` form — bare
+        // `f`. But `defn f` inside a `defmodule` expands to
+        // `(def mod/f (fn …))`, so `check_def`'s seeding lookup
+        // (`ctx.declared_sig(name)`) looks up the *qualified* `mod/f`, which
+        // never matches the bare-keyed entry — the sig silently never seeds.
+        // Needs `%register-sig` to have actually run (real `eval`, not just
+        // parse+check) for the heap-wide fallback to have anything to read,
+        // so this uses the same real-`Interp` + `eval_str` technique as the
+        // cross-module tests, then re-checks the same source as a whole file
+        // (mirrors what `nest check` does on an already-loaded project).
+        let src = r#"
+(defmodule gap-check-test-mod "doc")
+(sig gap-check-test-f (-> string))
+(defn gap-check-test-f ()
+  "doc"
+  42)
+"#;
+        let mut interp = crate::Interp::new();
+        interp.eval_str(src).expect("module loads cleanly");
+
+        let forms = reader::read_all(&mut interp.heap, src).expect("parse");
+        let w = check_file(&mut interp.heap, &forms);
+        assert!(
+            w.iter().any(|(_, m)| m.contains("gap-check-test-mod/gap-check-test-f")
+                && m.contains("declared return type string")
+                && m.contains("yields int")),
+            "a defmodule-qualified defn's body vs its declared return type \
+             must warn, same as at the root namespace: {w:?}"
+        );
+    }
+
+    #[test]
     fn cross_module_value_sig_dependency_is_captured_for_incremental_cache() {
         // Regression for a gap the ADR-119 Phase 2 merge surfaced: `sigs::
         // declared_heap_value_ty` (ADR-124) originally read `heap.

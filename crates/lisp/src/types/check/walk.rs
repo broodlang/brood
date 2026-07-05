@@ -24,7 +24,8 @@ use super::guards::{
     match_exhaustiveness_gap, render_literal_pattern,
 };
 use super::sigs::{
-    arity_of, arity_str, curated_sig, declared_heap_value_ty, is_globally_bound, sig_of,
+    arity_of, arity_str, curated_sig, declared_heap_sig, declared_heap_value_ty,
+    is_globally_bound, sig_of,
 };
 
 /// `symbol_name(s)` is a `String` allocation; we only need the spelling on
@@ -1114,7 +1115,16 @@ fn check_def(
     // expands to. Seed the fn's params with the declared types so the body knows
     // them (and a guard narrowing a param to `never` becomes a dead clause).
     if let Some(&Value::Sym(name)) = items.get(1) {
-        if let Some(sig) = ctx.declared_sig(name) {
+        // `ctx.declared_sig` is keyed by the *bare* name Pass 2.5 recorded from
+        // the file's un-expanded `(sig …)` text; `name` here is `defn`'s
+        // *expanded* def head, which is module-qualified inside a `defmodule`
+        // block. The two only match at the root namespace — so a
+        // `defmodule`-wrapped `(sig f …)` + `(defn f …)` pair needs the same
+        // heap-wide fallback `gradual_of`'s reference branch already has
+        // (ADR-124): `declared_heap_sig` reads the qualified store
+        // `%register-sig` populates, so it matches regardless of namespace.
+        let declared = ctx.declared_sig(name).or_else(|| declared_heap_sig(heap, name));
+        if let Some(sig) = declared {
             if let Some(fn_items) = fn_form_items(heap, value_form) {
                 check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig), Some(name));
                 return;
