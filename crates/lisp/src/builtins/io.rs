@@ -1709,6 +1709,47 @@ pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     ]))
 }
 
+/// `(%os-cmd-stdin prog args stdin-str)` — like `%os-cmd` but writes `stdin-str` to the
+/// child's stdin (pipe closed after writing → EOF). Safe for inputs well under 64 KiB
+/// (the OS pipe buffer); used by the git porcelain to pipe patch text to `git apply -`
+/// instead of writing a temp file.
+pub(super) fn os_cmd_stdin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::Write;
+    let prog = expect_string(heap, "%os-cmd-stdin", arg(args, 0))?;
+    let mut cmd = std::process::Command::new(&prog);
+    if args.len() > 1 {
+        let raw = heap.seq_items(arg(args, 1))?;
+        for a in &raw {
+            cmd.arg(expect_string(heap, "%os-cmd-stdin", *a)?);
+        }
+    }
+    let stdin_str = expect_string(heap, "%os-cmd-stdin", arg(args, 2))?.to_string();
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| {
+        LispError::runtime(format!("%os-cmd-stdin: {prog}: {e}"))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+    })?;
+    if let Some(mut stdin_pipe) = child.stdin.take() {
+        let _ = stdin_pipe.write_all(stdin_str.as_bytes());
+        // stdin_pipe dropped here → EOF sent to child
+    }
+    let output = child.wait_with_output().map_err(|e| {
+        LispError::runtime(format!("%os-cmd-stdin: {prog}: {e}"))
+            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+    })?;
+    let stdout = heap.alloc_string(&String::from_utf8_lossy(&output.stdout));
+    let stderr = heap.alloc_string(&String::from_utf8_lossy(&output.stderr));
+    let exit_code = output.status.code().unwrap_or(-1) as i64;
+    let kw = |k: &'static str| Value::keyword(value::intern(k));
+    Ok(heap.map_from_pairs(vec![
+        (kw("stdout"), stdout),
+        (kw("stderr"), stderr),
+        (kw("exit"), Value::int(exit_code)),
+    ]))
+}
+
 /// `(%halt code)` — terminate the process immediately with `code`.
 pub(super) fn halt_builtin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let code = expect_int(heap, "%halt", arg(args, 0))?;

@@ -1867,6 +1867,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%os-cmd-stdin",
+        Arity::at_least(3),
+        Sig::new(vec![string, seq, string], map_ty),
+        os_cmd_stdin,
+    );
+    def(
+        heap,
         "%halt",
         Arity::exact(1),
         Sig::new(vec![int], nil_ty),
