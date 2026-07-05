@@ -63,82 +63,104 @@ Instead of a permanent whole-program proof, treat soundness as a claim about
 1. **Globals get a real, trackable current type**, not a permanent `dynamic()`.
    Seed it from the existing curated/inferred/`(sig …)` sources. Store it
    keyed by the same module-qualified global name `%register-sig` already
-   uses.
+   uses. **Shipped (ADR-124):** declared value-type sigs are now visible
+   cross-module via the heap-wide store, matching what arrow sigs already had.
 
-2. **The checker records a dependency edge whenever a call site is gated using
-   a global's type** — `(call-site file:line, global name, the Ty relied
-   upon)`. This is new: today's checker only *consumes* global types
-   (falling back to `dynamic()`); it needs to also *emit* this edge as a
-   by-product of the existing gating passes (`check_if`/`check_call` and
-   friends already compute the type they're gating on — this is recording
-   that computation, not a new inference). Aggregate into a reverse-dependency
-   index: global name → set of dependent call sites.
+2. ~~The checker records a dependency edge whenever a call site is gated using
+   a global's type, aggregated into a reverse-dependency index: global name →
+   set of dependent call sites.~~ **Superseded — this infrastructure already
+   exists, built for an unrelated reason.** ADR-119 Phase 2 (the incremental
+   `nest check` cache, shipped the same day as this doc) instruments every
+   sanctioned read of global state (`types/check/deps.rs`'s `obs_*` wrappers)
+   to record, per file, exactly the set of external facts its check depended
+   on (`check-file-deps` → `[warnings dep-keys fingerprint]`). Critically, it
+   does this **without ever building a persisted reverse index** — invalidation
+   is *pull*, not *push*: each cached file's fingerprint is cheaply
+   *re-observed* against the current image (`check-deps-fp`) and compared to
+   what was stored; a mismatch means "something this file depended on
+   changed," with no need to know *what* changed or maintain a `global →
+   dependents` map at all. That's a strictly simpler solution to the same
+   problem Step 2 was designed to solve — so there is no separate index left
+   to build here.
 
-3. **On every `def` that rebinds a global**, run a **targeted re-check**:
-   check the new definition's body as usual, then look up the redefined
-   global's dependents and re-verify each recorded assumption against the
-   *new* type (an `is_subtype` check — the same machinery narrowing already
-   uses). Anything that no longer holds gets a fresh advisory warning. The
-   reload still happens unconditionally — this never blocks `def`, it only
-   updates what's currently known to be sound.
+3. **On every `def` that rebinds a global, re-run the existing cheap
+   check.** Instead of a bespoke reload hook that walks a dependency index,
+   the re-check is just: invoke the same `check-file-deps`/`check-deps-fp`
+   pair Phase 2 already ships, on whichever files are in scope for the
+   current session. The reload still happens unconditionally regardless of
+   the result — this never blocks `def`, it only updates what's currently
+   known to be sound. **What's actually still open** is not a data structure
+   but a *trigger*: Phase 2's cache today is consulted only by the batch
+   `nest check` CLI tool, never by a running REPL/eval session, so there's no
+   live analogue of "a `def` just happened, re-check whoever depended on it"
+   yet. The open design question is where that trigger lives — on file save
+   (`nest run --watch` already watches files), on every `def` in a REPL
+   session (finer-grained, more expensive), or purely LSP-driven (the editor
+   asks for fresh diagnostics on its own schedule, and the answer happens to
+   already be fast because of Phase 2). No decision made yet; this is now the
+   entire remaining scope of ADR-123's "hard part."
 
 4. **Where a real hard gate does make sense: batch/CI tooling, not the live
    image.** `nest check`/`nest test` (and a future `nest check --strict` or
-   `BROOD_CHECK_STRICT=1`) can treat a nonzero warning count — including these
-   reload-dependency warnings — as a failing exit code. That gives genuine
-   "reject if it doesn't typecheck" semantics for an automated pipeline,
-   exactly where a build has always been allowed to fail, without changing a
-   single thing about how the interactive/live image behaves. `(sig! …)`
-   remains the opt-in hard runtime gate for anyone who wants an actual
-   enforced boundary inside the running image.
+   `BROOD_CHECK_STRICT=1`) can treat a nonzero warning count as a failing exit
+   code. That gives genuine "reject if it doesn't typecheck" semantics for an
+   automated pipeline, exactly where a build has always been allowed to fail,
+   without changing a single thing about how the interactive/live image
+   behaves. `(sig! …)` remains the opt-in hard runtime gate for anyone who
+   wants an actual enforced boundary inside the running image.
 
 This keeps the two failure modes cleanly separated: the **live image never
 rejects** (ADR-013 + the "never gates" invariant stay true for anything
 running), while **whole-program soundness becomes a real, continuously
 tracked, and batch-enforceable property** — which is the part that was
-actually missing, not a new kind of runtime restriction.
+actually missing, not a new kind of runtime restriction. The pleasant
+surprise: almost none of the mechanism needs to be *built* — it needs to be
+*triggered* at the right moment, reusing what ADR-119 Phase 2 already ships.
 
-## What needs building (the hard parts, deferred until picked up)
+## What needs building (revised — much smaller than originally scoped)
 
 - **Per-global current-type store.** Promote globals from a hardcoded
-  `dynamic()` to a real `Ty`, invalidated and replaced on each `def`. Needs a
-  clear answer for what a redefined global's type is *before* its first
-  `(sig …)`/curated entry exists (falls back to inferred-from-body, same as
-  today's local inference). **Slice shipped (ADR-124):** a declared `(sig x T)`
-  value type is now visible cross-module (not just within its own file),
-  matching what arrow sigs already had — the precondition for a dependency
-  index to mean anything, not the store or the index itself. Still missing:
-  an inferred type for a global with *no* declared sig at all.
-- **The reverse-dependency index.** Built as a by-product of the existing
-  check passes; needs to not regress `check-file`'s cost — this is exactly the
-  kind of fingerprinting ADR-119's Phase 2 cache already has to solve
-  (`hash(content) + hash(deps)`), so the two designs should share the
-  dependency-fingerprint mechanism rather than inventing two.
-- **The reload hook.** Where `def` currently promotes + rebinds
-  (`crates/lisp/src/eval/mod.rs`/wherever the special form lives), fire the
-  targeted re-check. Must be cheap enough not to penalize a hot loop that
-  `def`s internally at runtime outside of live-editing (rare, but exists) —
-  likely gated to only run when a checker/LSP session is actually attached,
-  not unconditionally on every `def` call.
-- **Invalidation rule precision.** Reuse `is_subtype` for "does the new type
-  still satisfy the old assumption" — needs care around narrowed/refined types
-  (a dependent might have relied on a *refinement*, e.g. a literal singleton,
-  not just the base tag).
-- **Surfacing.** Where do the fresh warnings show up — LSP push diagnostics,
-  a `nest run --watch` overlay, a REPL message on `def`? Needs a decision
-  before implementation; likely all three consume the same underlying event.
-- **Interaction with ADR-013's per-runtime scope.** Re-check fires once per
-  `def` on the shared runtime image, not once per process sharing it —
-  dependency data is a property of the runtime's code region, not any one
-  process.
+  `dynamic()` to a real `Ty`, invalidated and replaced on each `def`. **Slice
+  shipped (ADR-124):** a declared `(sig x T)` value type is now visible
+  cross-module (not just within its own file), matching what arrow sigs
+  already had. Still missing: an inferred type for a global with *no*
+  declared sig at all (a separate, harder problem — see the Elixir-parity
+  gap list's "full type inference" item; not blocking this design).
+- ~~The reverse-dependency index~~ — **not needed.** ADR-119 Phase 2 already
+  ships the equivalent capability (`check-file-deps`/`check-deps-fp`) via a
+  pull-based re-fingerprint check instead of a maintained push-based index.
+  Nothing left to build here; see the design section above.
+- **The trigger — the one real remaining question.** Phase 2's cache is only
+  ever consulted by the batch `nest check` CLI. There's no live-session
+  analogue yet: nothing currently re-runs `check-file-deps` in response to a
+  `def` happening in a running REPL/eval session, or pushes the result
+  anywhere. Needs a decision on where this lives (file-save-triggered via
+  `nest run --watch`'s existing file watcher; a REPL-level hook on `def`; or
+  purely LSP-driven, where the editor's own request cadence is the trigger
+  and Phase 2 just makes each request cheap) before there's anything to
+  implement.
+- **Surfacing.** Once triggered, where do fresh warnings show up — LSP push
+  diagnostics, a `nest run --watch` overlay, a REPL message on `def`? Depends
+  on which trigger is chosen above.
+- **Invalidation precision, if it turns out to matter.** Phase 2's
+  fingerprint is coarse (a referenced global's *defining file's mtime* plus
+  its declared-sig hash — file-level, not per-refinement). This is
+  sufficient for "should this file be re-checked at all," which is all a
+  trigger needs; it does not distinguish *which* refinement of a global's
+  type a given call site relied on. Not a gap unless a future consumer needs
+  finer-than-file granularity.
 
 ## Relation to sibling designs
 
-[`incremental-check.md`](incremental-check.md) (ADR-119) already needs a
-dependency fingerprint for its Phase 2 cache invalidation, for an unrelated
-reason (skipping re-check of unchanged files). That fingerprint and this
-design's reverse-dependency index are the same underlying data — building one
-should build both, whichever comes first.
+[`incremental-check.md`](incremental-check.md) (ADR-119) isn't just a sibling
+design that happens to share a fingerprint mechanism — it **is** the
+mechanism this design needs. ADR-123's originally-planned "reverse-dependency
+index" (Step 2, above) is fully superseded by Phase 2's `check-file-deps`/
+`check-deps-fp` pair, built for an unrelated reason (skipping re-check of
+unchanged files in the batch CLI) but structurally identical to what
+reload-soundness needs. There is nothing independent left to design or build
+on that front; the only open work is choosing and wiring a trigger for a live
+session, per above.
 
 ## Alternatives rejected
 

@@ -7561,6 +7561,22 @@ changes to keep prior proofs permanently valid (constrains real bugfixes more
 than the cost it avoids, since nothing crashes either way per the load-bearing
 fact above); leave globals `dynamic()` forever (the status quo being revised).
 
+**Update (same day, before any Step-2/3 code was written).** The planned
+reverse-dependency index is **superseded, not built**: ADR-119 Phase 2 (the
+incremental `nest check` cache) landed the same day and, for an unrelated
+reason (skipping re-check of unchanged files in the batch CLI), already ships
+the equivalent capability — `check-file-deps`/`check-deps-fp` — via a
+**pull-based** re-fingerprint check rather than a maintained push-based
+`global → dependents` map. Re-observing a file's already-recorded facts
+against the current image is cheap and needs no index at all; a mismatch
+means "something this file depended on changed," full stop. So Step 2 as
+originally written (build a reverse index) is dropped entirely — there is
+nothing independent left to design there. The real remaining gap narrows to
+just **Step 3's trigger**: Phase 2's cache is consulted only by the batch CLI
+today, with no live-session analogue (nothing re-runs it on a `def` in a
+running REPL/eval session, or pushes a result anywhere). Full revision in
+[type-soundness-reload.md](type-soundness-reload.md).
+
 ## ADR-124 — Cross-module visibility for declared value-type sigs
 
 **Status:** accepted; **shipped 2026-07-05.** The first concrete slice of

@@ -719,14 +719,20 @@ first: runtime type safety is already fully independent of the static checker
 broken assumption can never crash or corrupt anything — worst case a clean,
 catchable runtime type error, same as any dynamic-typing mismatch today. That
 means soundness can be **re-asserted per reload rather than proven once
-forever**: globals get a real trackable current type, the checker records
-which call sites depend on it, and every `def` triggers a targeted re-check of
-those dependents — surfacing fresh warnings for anything that broke, but never
-blocking the reload itself (ADR-013's "code always wins" stays true). A hard
-reject only ever exists for batch/CI tooling (`nest check --strict` treating
-warnings as a failing exit code), never the live image. Full design + the
-still-open implementation questions (the dependency index, the reload hook,
-invalidation precision) in [`type-soundness-reload.md`](type-soundness-reload.md).
+forever**: globals get a real trackable current type, and every `def` can
+trigger a re-check of whoever depended on it — surfacing fresh warnings for
+anything that broke, but never blocking the reload itself (ADR-013's "code
+always wins" stays true). A hard reject only ever exists for batch/CI tooling
+(`nest check --strict` treating warnings as a failing exit code), never the
+live image. **The planned reverse-dependency index turned out to already
+exist**, built by ADR-119 Phase 2 (the incremental `nest check` cache, landed
+the same day) for an unrelated reason — its `check-file-deps`/`check-deps-fp`
+pull-based re-fingerprint check gives the same answer a push-based index
+would, with nothing to build. The only real remaining gap: **a live-session
+trigger** — Phase 2's cache today is consulted only by the batch CLI, with no
+analogue for "a `def` just happened in a running REPL, re-check whoever
+depended on it." Full design in
+[`type-soundness-reload.md`](type-soundness-reload.md).
 This also means the "checking never rejects a runnable program" / redefinable-
 globals-as-`dynamic()` invariant stated in `CLAUDE.md` (and compatibility
 contract point #5 in `docs/types.md`) is itself a target for revision — update
@@ -794,12 +800,16 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   ill-typed programs and Brood should too, including gating on global
   `def`/`defn` types. Design resolved (ADR-123,
   [`type-soundness-reload.md`](type-soundness-reload.md)): re-check on every
-  `def` against recorded dependents rather than a hard reload gate. **First
-  slice shipped (ADR-124):** declared value-type sigs (`(sig x T)`) are now
-  visible cross-module via the heap-wide store, closing the gap that already
-  existed for arrow sigs — a precondition for the dependency index, not the
-  index itself. Still not built: the reverse-dependency index, the `def`-time
-  reload hook, and precise invalidation.
+  `def` against whoever depended on it, rather than a hard reload gate.
+  **First slice shipped (ADR-124):** declared value-type sigs (`(sig x T)`)
+  are now visible cross-module via the heap-wide store, closing the gap that
+  already existed for arrow sigs. **The planned reverse-dependency index
+  turned out to already exist** — ADR-119 Phase 2's incremental-check cache
+  (`check-file-deps`/`check-deps-fp`) gives the same answer via a cheaper
+  pull-based re-fingerprint check, so there's no index left to build. The one
+  real remaining gap: a **live-session trigger** for it (nothing today
+  re-runs Phase 2's check in response to a `def` in a running REPL/eval
+  session — it's currently batch-CLI-only).
 - 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** — the
   `GradualTy` foundation already exists; this is the remaining work to wire it
   into actual gating decisions (not just advisory assignment checks), which

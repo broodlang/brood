@@ -1541,3 +1541,33 @@ a dependency-tracking regression test needs a dependency that's *invisible to
 every other path*, or it doesn't actually isolate the one you're fixing.
 
 359/359 unit tests, corpus `nest check` unchanged (91 warnings).
+
+## 2026-07-05 — ADR-123's Step 2 turned out to already exist
+
+Went looking to build ADR-123's next slice — the reverse-dependency index
+(`global → dependent call sites`) the design called for — and, before writing
+any code, read what ADR-119 Phase 2 (merged into `main` the same day, right
+before this) actually shipped in `check/deps.rs` and `docs/incremental-check.md`.
+It solves the identical underlying problem — "did anything this file's check
+depended on change?" — for a different stated reason (skipping re-check of
+unchanged files in the batch `nest check` CLI), but via a strictly simpler
+mechanism than the one this design proposed: no reverse index is ever built or
+maintained. Instead each file's dependency facts are recorded once
+(`check-file-deps`), and on a later run the fingerprint of those *same*
+recorded facts is cheaply *re-observed* against the current image
+(`check-deps-fp`) and compared — a mismatch means something changed, with no
+need to know what, or to have ever built a `global → dependents` map at all.
+
+Rewrote `type-soundness-reload.md` and the ADR-123/roadmap references before
+writing any Step-2 code against the now-stale plan: the reverse-dependency
+index is struck from the design as unnecessary, not deferred. What's actually
+left of ADR-123's "hard part" shrank to one real question — Phase 2's cache is
+consulted only by the batch CLI today; there's no live-session trigger that
+re-runs it in response to a `def` happening in a running REPL/eval session.
+Deciding *where that trigger lives* (file-save via `nest run --watch`'s
+existing watcher, a REPL-level hook, or purely LSP-request-driven) is the
+entire remaining scope — not a data structure to design or build.
+
+No code changed this round — design/roadmap/ADR-123 docs only, keeping the
+"design only, not built" status accurate before more implementation work
+lands on top of it.
