@@ -153,6 +153,7 @@ out to already exist (`nest check` has always exited 1 on any warning).
 | 126 | `defmodule`-declared arrow sigs now seed the body-return-type check |
 | 127 | `&optional` params in `(sig …)` arrow grammar |
 | 128 | Tuple / positional product types |
+| 129 | `build-id` keys off the running binary's own mtime, not just git-sha |
 
 ---
 
@@ -7901,3 +7902,90 @@ genuinely disabled this time) — unchanged at 91. 362/362 unit tests,
 ?B)`) — the `SigWithVars`/`SigTerm` route doesn't have a tuple case yet,
 only the non-variable `parse_type` path does; gated on a real consumer
 (ADR-011).
+
+**Correction (same day, discovered while building ADR-129).** This entry's
+"91 warnings before and after" corpus-diff claim was itself measured through
+the check-cache staleness bug ADR-129 fixes, and turned out to be
+comparing against a **stale cached count**, not a genuinely fresh one. The
+true, cache-independent baseline (verified via a clean worktree at this
+commit's parent, and again with `~/.cache/brood/check` deleted entirely) is
+**93**, not 91 — but the 2-warning difference is **not** a tuple regression:
+it's `tests/bytes_test.blsp`'s pre-existing "expects bytes, got `vector<int>`"
+mismatch (`byte-length`/`byte-at` given a `[a b rest]`-shaped `match` result),
+confirmed present *before* this ADR with that exact wording. This ADR's
+literal-inference change only *reworded* it to `(tuple int, int, int)` —
+same warning, more precise text, not a new one. No action needed on the
+bytes finding itself; recorded here so the "91" figure in this entry and in
+`docs/devlog.md`'s matching entry isn't taken as ground truth going forward.
+
+## ADR-129 — `build-id` keys off the running binary's own mtime, not just git-sha
+
+**Status:** accepted; **shipped 2026-07-05**. Fixes the real workflow
+gotcha flagged when ADR-128 shipped: the incremental `nest check` cache
+(ADR-119) could silently serve stale results during active, uncommitted
+checker-logic iteration.
+
+**Root cause.** `(build-id)` — the cache's staleness stamp — was
+`"<version>+<git-sha>"`, with `BROOD_GIT_SHA` baked in at compile time via
+`crates/lisp/build.rs` running `git rev-parse --short HEAD`. Two compounding
+problems: (1) that command is insensitive to a dirty working tree — the same
+commit, rebuilt with different uncommitted source changes, produces the
+identical SHA; (2) `build.rs`'s own `cargo:rerun-if-changed` directives only
+watch `.git/HEAD` and `.git/refs/heads`, so a plain source edit + `cargo
+build` doesn't even re-run the script to recompute the (unchanged) SHA. Net
+effect: an uncommitted local rebuild of the checker never produces a new
+`build-id`, so `nest check`'s cache-stamp comparison
+(`project--cache-stamp`/`project--read-cache`) never detects that the
+binary's actual behavior changed — it keeps serving warnings computed by the
+*previous* binary.
+
+**Decision.** Added a second stamp component, `binary_stamp()`
+(`crates/lisp/src/builtins/system.rs`): this executable's own last-modified
+time, read at **runtime** via `std::env::current_exe()` +
+`std::fs::metadata(..).modified()`, cached once per process (`OnceLock`,
+since it can't change mid-run). `(build-id)` is now
+`"<version>+<git-sha>+<binary-mtime-hex>"`. This is correct by construction
+rather than by tracking which source files matter to which cache: the
+binary's own file mtime changes on literally any rebuild, for any reason,
+committed or not — no `build.rs` changes needed, no risk of missing a
+relevant source path. `build-id` has exactly one consumer in the codebase
+(`project--cache-stamp`), so the change is low-risk.
+
+**Trade-off, accepted deliberately.** A rebuild for a totally unrelated
+reason (e.g. touching `crates/lisp/src/gui.rs`) also bumps the binary's
+mtime and invalidates the *whole* check-cache, even though checker behavior
+didn't change. This is strictly the safe direction to be wrong in — the
+cache's own design already establishes that over-invalidating (a spurious
+cache miss, paying the cost of a superfluous fresh check) is free of
+correctness risk, per the "advisory contract" (`docs/types.md` #5): the
+checker never rejects a runnable program, so a stale-cache *miss* can only
+ever drop a warning that gets caught on the next real check, never fabricate
+a false one. Only local `brood`/`nest` developers (rebuilding constantly)
+pay this cost; an installed release binary changes rarely, so normal users
+get full incremental benefit as before.
+
+**Verified end-to-end**, not just by inspection: confirmed `(build-id)`
+changes on a bare `touch` of a source file with zero content change (proving
+it's genuinely tied to the rebuilt binary, not file content); then did a
+real round-trip against `nest check`'s cache — populated the cache with a
+genuine warning, temporarily disabled the check that produces it (`false &&
+…`, a real behavior change, not the no-op `if false { } else if …` first
+attempted, which is equivalent to no change at all and briefly gave a false
+"still broken" reading), rebuilt without committing, and confirmed `nest
+check` (no `BROOD_NO_CHECK_CACHE` needed) correctly showed the warning gone;
+reverted, rebuilt again, confirmed the warning correctly came back. Both
+directions verified before trusting the fix.
+
+**A concrete case where "verify, don't assume" caught a real mistake mid-
+session:** the first attempt to prove the bug used `if false { .. } else if
+let Some(s) = sig { .. }`, believing it disabled the branch — it doesn't
+(`if false {A} else if COND {B}` reduces to exactly `if COND {B}`). The
+warning still appearing was correctly read as "the test methodology is
+broken," not "the fix doesn't work," precisely because the *fix* had
+already been independently confirmed via the plain `touch` test — isolating
+which of the two moving parts (the fix vs. the verification harness) was at
+fault before concluding either way.
+
+362/362 unit tests unaffected (this bug and its fix are entirely CLI/cache-
+layer; `cargo test`'s in-process `file_warnings()` never touched this cache
+and was never at risk).

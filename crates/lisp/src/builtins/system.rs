@@ -2003,18 +2003,48 @@ pub(super) fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult 
     Ok(Value::int(crate::process::worker_threads() as i64))
 }
 
-/// `(build-id)` — this `brood` build's identity, `"<version>+<git-sha>"` (e.g.
-/// `"0.1.0+dcab7ca"`). Stable within a build, changes whenever the binary is
-/// rebuilt from different sources — so it's the correct staleness stamp for an
-/// on-disk cache of anything the kernel computes (the checker's own logic is Rust,
-/// so its results are not portable across binaries). Both halves are baked in at
-/// compile time (`CARGO_PKG_VERSION` / `BROOD_GIT_SHA`).
+/// `(build-id)` — this `brood` build's identity, `"<version>+<git-sha>+<binary-
+/// stamp>"` (e.g. `"0.1.0+dcab7ca+18f2e1a9b3c4d5e6"`). The correct staleness
+/// stamp for an on-disk cache of anything the kernel computes (the checker's
+/// own logic is Rust, so its results are not portable across binaries).
+///
+/// The git-sha half is baked in at compile time (`BROOD_GIT_SHA`) and is
+/// **not** by itself a reliable staleness stamp: it's `git rev-parse --short
+/// HEAD`, which doesn't change across an uncommitted rebuild on the same
+/// commit (exactly the case during active development on the checker
+/// itself), and `build.rs`'s `rerun-if-changed` only watches `.git/HEAD`/
+/// `.git/refs/heads` — a plain source edit + rebuild doesn't even re-run it.
+/// The `binary-stamp` half (this executable's own mtime, read at *runtime*
+/// via [`binary_stamp`]) closes that gap: it changes on literally any
+/// rebuild, committed or not, for any reason, with no `build.rs` changes
+/// needed — correct by construction rather than by tracking which source
+/// files matter to which cache.
 pub(super) fn build_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(heap.alloc_string(&format!(
-        "{}+{}",
+        "{}+{}+{}",
         env!("CARGO_PKG_VERSION"),
-        env!("BROOD_GIT_SHA")
+        env!("BROOD_GIT_SHA"),
+        binary_stamp()
     )))
+}
+
+/// This running executable's own last-modified time, as a hex nanosecond
+/// stamp — computed once per process (`OnceLock`) since it never changes
+/// mid-run. `"unknown"` if the executable path or its metadata can't be read
+/// (e.g. a sandboxed environment with no `/proc/self/exe`-equivalent) — a
+/// stable-but-uninformative fallback, not a crash; the git-sha half of
+/// `build_id` still carries some staleness signal in that case.
+fn binary_stamp() -> &'static str {
+    static STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STAMP.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| format!("{:x}", d.as_nanos()))
+            .unwrap_or_else(|| "unknown".to_string())
+    })
 }
 
 /// `(steal-count)` — how many fresh processes the scheduler work-stole across

@@ -1784,3 +1784,51 @@ mismatch, and the tuple-satisfies-uniform-vector case — passed every
 assertion on the first write. Plus 5 new `sig!` contract tests. 362/362 unit
 tests, 2605/2605 whole-project test suite, `nest check` corpus unchanged
 (91, verified with the cache genuinely disabled).
+
+## 2026-07-05 — ADR-129: fixed the check-cache staleness bug for real
+
+Came back and fixed the workflow gotcha flagged when ADR-128 shipped: `(build-id)`
+— the incremental check-cache's staleness stamp — was purely git-sha-based,
+baked in at compile time via a `build.rs` that only reruns on `.git/HEAD`/
+`.git/refs/heads` changes. An uncommitted local rebuild never produces a new
+stamp at all, so the cache kept serving warnings from the *previous* binary.
+Added a second component, `binary_stamp()`: the running executable's own
+mtime, read at runtime via `std::env::current_exe()`, cached once per
+process. Correct by construction — changes on literally any rebuild, for any
+reason — rather than trying to track which source paths matter to which
+cache. One consumer in the whole codebase (`project--cache-stamp`), so low
+risk.
+
+Verified properly, in two stages. First, confirmed the fix itself: touched a
+file with zero content change, rebuilt, confirmed `(build-id)` changed
+anyway (proving it's tied to the rebuilt binary, not file content). Then did
+a real round-trip against `nest check`'s actual cache: populated it with a
+genuine warning, disabled the check that produces it, rebuilt without
+committing, confirmed `nest check` (no env var) correctly showed it gone;
+restored, rebuilt, confirmed it correctly came back.
+
+Caught my own mistake mid-verification, worth recording: the first attempt
+to "disable" the check used `if false { } else if let Some(s) = sig { … }`
+— which is a no-op (`if false {A} else if COND {B}` is just `if COND {B}`).
+When the warning still appeared, the fix I'd *already independently
+confirmed* via the plain touch-test told me the bug was in my test
+methodology, not the fix — so I went looking for what I'd gotten wrong
+instead of doubting a change I'd already verified a different way. Fixed it
+to a genuine `false && …` disable and the round-trip worked correctly both
+directions.
+
+While re-establishing the corpus baseline with the cache now genuinely
+reliable, found that ADR-128's "91 warnings, unchanged" claim was itself
+measured through the very staleness bug this ADR fixes — the true,
+cache-independent count (confirmed via a clean worktree at the pre-ADR-128
+commit, and again with the cache directory deleted entirely) is 93, not 91.
+The 2-warning gap is not a tuple regression, though: `tests/bytes_test.blsp`
+already had that exact "expects bytes, got vector<int>" warning before
+ADR-128 (confirmed present at the parent commit with that wording) — the
+literal-inference change only reworded it to `(tuple int, int, int)`, same
+warning, more precise text. Corrected the record in ADR-128's entry rather
+than leaving a wrong number to be taken at face value later.
+
+362/362 unit tests unaffected throughout — this bug and its fix live
+entirely in the CLI/cache layer; `cargo test`'s in-process checking never
+touched it.
