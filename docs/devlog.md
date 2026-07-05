@@ -1508,3 +1508,36 @@ green (up from 215).
 
 This is a precondition for ADR-123's dependency index, not the index itself —
 the reload hook and dependency tracking are still fully undesigned-in-code.
+
+## 2026-07-05 — Merge fallout: ADR-124's new heap read bypassed Phase 2's recorder
+
+Pushing ADR-124 collided with a separately-developed branch landing at the
+same time: **ADR-119 Phase 2** (the incremental `nest check` cache), which
+introduces a strict new rule for everything under `types/check/` — every read
+of global state must go through a `deps::obs_*` wrapper, or the cache's
+dependency fingerprint can't see what a file's check actually depended on and
+may serve stale (wrong) warnings after an unrelated edit. The merge was
+textually clean (git's 3-way auto-merge, no conflict markers), but Phase 2's
+branch had updated the two *pre-existing* heap-read functions
+(`declared_heap_sig`/`declared_heap_overload`) to route through
+`deps::obs_declared_sig_value` — my *new* one, `declared_heap_value_ty`, was
+written independently on the other side of the fork and still read
+`heap.declared_sig_value` directly. Caught it by reading `check/deps.rs`'s own
+doc comment ("the ONLY sanctioned reads of global state") right after the
+merge and grepping for what still called the heap directly.
+
+Fixed the read, then built a regression test proving it actually matters:
+`cross_module_value_sig_dependency_is_captured_for_incremental_cache` isolates
+`check_def`'s def-target gate specifically (a global's value-sig declared only
+on the heap, never referenced anywhere in the checked file except as the def
+target — so nothing else, like the unbound-symbol check, would incidentally
+record it via a different `obs_*` call). Verified the test's bite by reverting
+the fix and confirming it failed (unchanged fingerprint after editing the
+sig), then restoring it and confirming green. An earlier version of this test
+(editing a *referenced* global's sig, not a pure def-target's) passed with the
+bug still present — a false sense of coverage, since that symbol got recorded
+via the ordinary unbound-symbol check regardless of my fix. Worth remembering:
+a dependency-tracking regression test needs a dependency that's *invisible to
+every other path*, or it doesn't actually isolate the one you're fixing.
+
+359/359 unit tests, corpus `nest check` unchanged (91 warnings).

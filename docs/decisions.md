@@ -7609,3 +7609,22 @@ relied on global G : T") needs as a precondition — but it's not the
 dependency index itself, and it doesn't touch `def`'s reload path at all. The
 remaining ADR-123 work (the reverse-dependency index, the `def`-time re-check
 hook) is unaffected and still fully undesigned-in-code.
+
+**Post-merge addendum (same day).** This ADR landed alongside a separately
+developed, independent branch — **ADR-119 Phase 2** (the incremental
+`nest check` cache) — which merged cleanly at the Rust level but introduced a
+new invariant `declared_heap_value_ty` (this ADR) predates: every read of
+global state in `types/check/` must route through a `deps::obs_*` wrapper, or
+Phase 2's dependency-fingerprint cache can't see what a file's check actually
+depended on and may keep serving stale warnings after an edit. `sigs::
+declared_heap_sig`/`declared_heap_overload` were updated by that branch to
+comply; this ADR's new `declared_heap_value_ty` (added independently, on the
+other side of the fork) still read `heap.declared_sig_value` directly. Fixed
+to route through `deps::obs_declared_sig_value`, with a targeted regression
+test (`cross_module_value_sig_dependency_is_captured_for_incremental_cache`)
+that isolates `check_def`'s def-target gate specifically — a pure def target
+with no local `(sig …)` and no other reference anywhere in the file, so
+nothing else would incidentally record it. Verified the test actually catches
+the regression by reverting the fix and confirming it fails (fingerprint
+unchanged after the sig edit), then restoring it. 359/359 unit tests, corpus
+`nest check` unchanged (91 warnings).

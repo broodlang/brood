@@ -376,7 +376,7 @@ pub(super) fn declared_heap_overload(heap: &Heap, sym: Symbol) -> Option<Vec<Sig
 /// `parse_sig_decl`'s non-arrow counterpart). `None` for an arrow declaration
 /// (that's `declared_heap_sig`'s) or no declaration at all.
 pub(super) fn declared_heap_value_ty(heap: &Heap, sym: Symbol) -> Option<Ty> {
-    let type_value = heap.declared_sig_value(sym)?;
+    let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
     let ty = annot::parse_type(heap, type_value)?;
     if ty.as_arrow().is_some() {
         return None;

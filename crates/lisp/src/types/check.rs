@@ -2719,6 +2719,58 @@ mod tests {
     }
 
     #[test]
+    fn cross_module_value_sig_dependency_is_captured_for_incremental_cache() {
+        // Regression for a gap the ADR-119 Phase 2 merge surfaced: `sigs::
+        // declared_heap_value_ty` (ADR-124) originally read `heap.
+        // declared_sig_value` directly instead of through `deps::
+        // obs_declared_sig_value` — the *only* sanctioned read of global state
+        // Phase 2's incremental-cache dependency capture relies on.
+        //
+        // Specifically isolates `check_def`'s own gate (the *name being
+        // defined*, not the value referenced): `other`'s sig lives only on
+        // the heap (module A), never in this file's own text, so
+        // `ctx.declared_value_ty("other")` is `None` and `check_def` must
+        // fall through to `declared_heap_value_ty` to know `other`'s type at
+        // all. `other` never appears as a *value reference* anywhere in this
+        // file (it's purely a def target), so — unlike a referenced global —
+        // nothing else (the unbound-symbol check, arity lookups, …) would
+        // incidentally record it via `deps::obs_global` either. If
+        // `declared_heap_value_ty` bypasses the recorder, `other` never
+        // enters this file's dep-keys at all, and a later edit to its sig is
+        // invisible to the fingerprint — exactly the bug this guards.
+        let mut interp = crate::Interp::new();
+        interp
+            .eval_str(r#"(sig label string) (def label "x") (sig other int)"#)
+            .expect("module A loads cleanly");
+
+        let forms = reader::read_all(&mut interp.heap, "(def other label)").expect("parse");
+        let (warnings, dep_keys) = check_file_with_deps(&mut interp.heap, &forms);
+        assert!(
+            warnings
+                .iter()
+                .any(|(_, m)| m.contains("other: value of type string") && m.contains("int")),
+            "int-declared `other` assigned a string must warn even with no \
+             local (sig other …): {warnings:?}"
+        );
+        let fp1 = deps_fingerprint(&interp.heap, dep_keys.clone());
+
+        // Module A is "edited": other's declared type widens to accept a
+        // string. This file's fingerprint must change — `other` is never
+        // referenced here, only defined, so this changed fact can only reach
+        // the fingerprint through check_def's own heap-wide lookup.
+        interp
+            .eval_str("(sig other string)")
+            .expect("module A edit loads cleanly");
+        let fp2 = deps_fingerprint(&interp.heap, dep_keys);
+        assert_ne!(
+            fp1, fp2,
+            "a cross-module value-sig change on a pure def-target global must \
+             flip the dependent file's fingerprint, or the incremental cache \
+             would go stale"
+        );
+    }
+
+    #[test]
     fn declared_return_type_mismatch_is_flagged() {
         // Body yields an int (the integer-closed `+` rule: `int + int = int`),
         // declared return is string → disjoint → flagged.
