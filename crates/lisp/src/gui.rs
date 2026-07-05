@@ -1721,9 +1721,12 @@ pub(crate) mod backend {
                                     }
                                 }
                                 TouchPhase::Started => {
-                                    // New gesture: carry any running momentum forward so
-                                    // successive swipes in the same direction accelerate.
-                                    let carry = if w.scroll_momentum_active {
+                                    // Carry momentum only when the new gesture is in the
+                                    // same direction. Opposite-direction gestures reset so
+                                    // carried velocity can't briefly scroll the wrong way.
+                                    let carry = if w.scroll_momentum_active
+                                        && w.scroll_velocity * dy > 0.0
+                                    {
                                         w.scroll_velocity
                                     } else {
                                         0.0
@@ -2739,19 +2742,28 @@ pub(crate) mod backend {
     /// The bar/underline thickness scales with the cell so it stays proportional on
     /// HiDPI (≥2 physical px). They paint solid `CURSOR_FG` rather than a blend, so a
     /// 2px caret reads crisply.
+    /// `draw_top`/`draw_bottom` are already clamped to the visible region `[oy, fb_h)`.
+    /// `cell_top` is the logical (unclipped) top of the cursor cell in framebuffer pixels;
+    /// it may be negative or above `oy` when the cursor is partially scrolled off the top.
+    /// Used only for `Underline` to locate the baseline inside the cell.
     fn cursor_cell(
         buf: &mut [u32],
         fb_w: usize,
         fb_h: usize,
         left: usize,
-        top: usize,
+        draw_top: usize,
+        draw_bottom: usize,
         w: usize,
         h: usize,
+        cell_top: isize,
         style: super::CursorStyle,
     ) {
+        if draw_top >= draw_bottom {
+            return;
+        }
         match style {
             super::CursorStyle::Block => {
-                for y in top..(top + h).min(fb_h) {
+                for y in draw_top..draw_bottom {
                     let row = y * fb_w;
                     for x in left..(left + w).min(fb_w) {
                         buf[row + x] = blend(buf[row + x], [0xff, 0xff, 0xff], 128);
@@ -2760,12 +2772,22 @@ pub(crate) mod backend {
             }
             super::CursorStyle::Bar => {
                 let thickness = (w / 8).max(2);
-                fill_cell(buf, fb_w, fb_h, left, top, thickness, h, pack(CURSOR_FG));
+                fill_cell(
+                    buf, fb_w, fb_h, left, draw_top, thickness,
+                    draw_bottom - draw_top, pack(CURSOR_FG),
+                );
             }
             super::CursorStyle::Underline => {
                 let thickness = (h / 10).max(2);
-                let uy = top + h.saturating_sub(thickness);
-                fill_cell(buf, fb_w, fb_h, left, uy, w, thickness, pack(CURSOR_FG));
+                // Underline sits at the bottom of the logical cell regardless of clipping.
+                let uy = (cell_top + h as isize).saturating_sub(thickness as isize);
+                if uy >= 0 {
+                    let uy = uy as usize;
+                    if uy >= draw_top && uy < draw_bottom {
+                        let visible = thickness.min(draw_bottom - uy);
+                        fill_cell(buf, fb_w, fb_h, left, uy, w, visible, pack(CURSOR_FG));
+                    }
+                }
             }
         }
     }
@@ -2998,22 +3020,25 @@ pub(crate) mod backend {
                     }
                 }
                 Op::Cursor { row, col, style } => {
-                    // Only render when the full cursor cell is below the grid origin `oy`.
-                    // A partially-clipped cursor (top_signed < oy) appears as a shrinking
-                    // sliver at the pane border during smooth scroll — suppress it cleanly
-                    // instead. The "stays missing" issue when scrolling past the cursor is
-                    // expected behaviour (viewport scrolled above the cursor line); the
-                    // momentum fix ensures it doesn't overscroll.
-                    let top_signed = oy as isize + *row as isize * ch as isize - scroll_dy;
-                    if top_signed >= oy as isize {
+                    // Compute the logical cell bounds in framebuffer pixels. `cell_top`
+                    // may be < oy (partially scrolled off the viewport top) — clip the
+                    // draw range to [oy, fb_h) rather than suppressing the cursor entirely,
+                    // so it tracks the text through the full smooth-scroll animation.
+                    let cell_top = oy as isize + *row as isize * ch as isize - scroll_dy;
+                    let cell_bottom = cell_top + ch as isize;
+                    let draw_top = cell_top.max(oy as isize);
+                    let draw_bottom = cell_bottom.min(fb_h as isize);
+                    if draw_top < draw_bottom {
                         cursor_cell(
                             buf,
                             fb_w,
                             fb_h,
                             ox + *col as usize * cw,
-                            top_signed as usize,
+                            draw_top as usize,
+                            draw_bottom as usize,
                             cw,
                             ch,
+                            cell_top,
                             *style,
                         );
                     }
