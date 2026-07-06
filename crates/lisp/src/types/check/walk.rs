@@ -1441,11 +1441,11 @@ fn check_if(
     // in the then-branch (and `¬int` in the else, for a biconditional predicate).
     let (then_ctx, else_ctx) = match path_guard_assertion(heap, test) {
         Some(pg) => {
-            let t = then_ctx.narrow_path(pg.base, pg.key, pg.ty.clone());
+            let t = then_ctx.narrow_path(pg.base, pg.keys.clone(), pg.ty.clone());
             let e = if pg.then_only {
                 else_ctx
             } else {
-                else_ctx.narrow_path(pg.base, pg.key, pg.ty.negate())
+                else_ctx.narrow_path(pg.base, pg.keys, pg.ty.negate())
             };
             (t, e)
         }

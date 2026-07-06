@@ -3164,6 +3164,17 @@ mod tests {
                 .any(|m| m.contains("string-length") && m.contains("got int")),
             "an int-narrowed path fed to string-length must warn: {w:?}"
         );
+        // A **nested** path narrows too: `(get (get cfg :db) :port)`.
+        let nested = file_warnings(
+            "(defn n (cfg) (if (int? (get (get cfg :db) :port)) \
+             (string-length (get (get cfg :db) :port)) 0))",
+        );
+        assert!(
+            nested
+                .iter()
+                .any(|m| m.contains("string-length") && m.contains("got int")),
+            "an int-narrowed nested path must warn: {nested:?}"
+        );
         // Uses consistent with the narrowed type — and an unguarded access (wide
         // type) — must NOT warn.
         for src in [
@@ -3172,6 +3183,8 @@ mod tests {
             "(defn m (r) (string-length (get r :age)))",
             // else-branch use of a `¬string`-narrowed path must not misfire.
             "(defn k (r) (if (string? (get r :x)) :s (get r :x)))",
+            // a *different* nested path than the one narrowed must not warn.
+            "(defn p (c) (if (int? (get (get c :db) :port)) (string-length (get (get c :web) :h)) 0))",
         ] {
             let w = file_warnings(src);
             assert!(

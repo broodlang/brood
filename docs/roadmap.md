@@ -818,17 +818,19 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
 - ⬜ **Full type inference / reconstruction** — Brood infers only one-step
   straight-line bodies + guard narrowing; Elixir does guard-driven + local
   inference across a function.
-- 🟡 **Narrowing through non-variable expressions** — first slice **shipped**:
-  a `(get base :key)` **path** is narrowed by a type-predicate guard, so
-  `(if (int? (get r :age)) (string-length (get r :age)) …)` types the path as
-  `int` in the then-branch and catches the `string-length` misuse (`¬` narrows
-  the else-branch too). Sound under immutability (`base` and the pure `get`
-  can't change between guard and use); keyed by `(base, key)` in `Ctx`
-  (`narrow_path`/`path_ty`), recognised by `path_guard_assertion`, consulted by
-  `expr_ty`'s `get` rule; invalidated when `base` is rebound. Still ⬜: the
-  general form — an arbitrary narrowable path shape (nested `get`, computed key)
-  and *refining the record type of `base` itself* (rather than just the field
-  path), which is the deeper design.
+- 🟡 **Narrowing through non-variable expressions** — **shipped** for
+  keyword-`get` paths of **arbitrary depth**: a type-predicate guard narrows the
+  path, so `(if (int? (get r :age)) (string-length (get r :age)) …)` and the
+  nested `(if (int? (get (get cfg :db) :port)) (string-length (get (get cfg :db)
+  :port)) …)` both catch the `string-length` misuse (`¬` narrows the else-branch
+  too, and a *different* path isn't affected). Sound under immutability (the base
+  and the pure `get` chain can't change between guard and use); keyed by
+  `(base, [keys…])` in `Ctx` (`narrow_path`/`path_ty`), the chain peeled by
+  `get_path`, recognised by `path_guard_assertion`, consulted by `expr_ty`'s
+  `get` rule; invalidated when `base` is rebound. Still ⬜: a *computed*
+  (non-keyword) key or `nth`/tuple-index path, and *refining the record type of
+  `base` itself* (rather than just the field path) so the narrowing flows to a
+  function call — the deeper design.
 - ✅ **Richer `(sig …)` type-exprs** — turned out mostly already shipped:
   `&` rest params (`parse_arrow`) and nested type variables in compound
   positions (`(list ?A)`, via `SigWithVars`/`SigTerm`, type-variables.md

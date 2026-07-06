@@ -201,11 +201,12 @@ never a false positive.
   `(get r :age)` as `int` in the then-branch, catching the `string-length`
   misuse (`¬int` in the else-branch, for a biconditional predicate). Sound under
   immutability — `r` and the pure `get` can't change between the guard and the
-  use. `Ctx` carries `path_types: (base, key) → Ty` (`narrow_path`/`path_ty`),
-  recognised by `path_guard_assertion` and consulted by `expr_ty`'s `get` rule;
-  a rebind of `base` invalidates its path narrowings. Scoped to a keyword key
-  and a bare-symbol base (the record case) — a computed base / nested path is
-  the deferred general form.
+  use. `Ctx` carries `path_types: (base, [keys…]) → Ty` (`narrow_path`/`path_ty`),
+  the chain peeled by `get_path`, recognised by `path_guard_assertion` and
+  consulted by `expr_ty`'s `get` rule; a rebind of `base` invalidates its path
+  narrowings. Handles **nested** keyword paths of arbitrary depth
+  (`(get (get cfg :db) :port)`); a computed (non-keyword) key and refining
+  `base`'s own record type are the deferred general form.
 - ✅ **Let-bound guard aliases.** `(let (cond (int? x)) (if cond …))` now
   narrows `x` (not the bool `cond`) inside the if. The `Ctx` carries a second
   table `guards: sym → (var, asserted-ty)`; a `let` records the alias when

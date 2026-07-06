@@ -1987,3 +1987,23 @@ a computed base / nested path is the deferred general form.
 string-length catch + four consistent/unguarded/else-branch no-warn cases);
 `types::` 223/223; clippy clean; **`nest check` still 0 warnings** across
 `std/` + `tests/`.
+
+## 2026-07-06 — Path narrowing, general form: nested keyword-`get` chains
+
+Generalized the path-narrowing slice from a single `(base, :key)` to a base plus
+an **arbitrary-depth chain of keyword keys**, so a nested access narrows too:
+`(if (int? (get (get cfg :db) :port)) (string-length (get (get cfg :db) :port)) …)`
+now catches the misuse, exactly like the single-level case. A new `get_path`
+(`guards.rs`) peels a `(get (get … :k1) … :kn)` chain to `(base, [:k1 … :kn])`
+base-outward (a bare symbol → empty path, so `path_guard_assertion` still defers a
+plain variable to `guard_assertion`). `Ctx::path_types` is rekeyed
+`(Symbol, Vec<Symbol>)`; `narrow_path`/`path_ty` and the `expr_ty` `get` rule take
+the full chain (the use site peels `map_arg` and appends its own key). A
+*different* path than the one narrowed is unaffected (path-specific, verified).
+
+Still deferred: a computed (non-keyword) key or `nth`/tuple-index path, and
+refining `base`'s own record type so the narrowing flows into a function call.
+
+**Verified.** Extended `path_narrowing_through_a_record_field_guard` (a nested
+warn case + a different-nested-path no-warn case); `types::` 223/223; clippy
+clean; **`nest check` still 0 warnings**.

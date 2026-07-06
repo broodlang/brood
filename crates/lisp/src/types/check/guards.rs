@@ -95,17 +95,41 @@ pub(super) struct Guard {
 /// biconditional, so the else-branch narrows to `¬ty`).
 pub(super) struct PathGuard {
     pub(super) base: Symbol,
-    pub(super) key: Symbol,
+    pub(super) keys: Vec<Symbol>,
     pub(super) ty: Ty,
     pub(super) then_only: bool,
 }
 
-/// If `test` is a type predicate applied to a `(get base :key)` path — or its
-/// `(not …)` — return the [`PathGuard`] it asserts. Scoped to the record-field
-/// case (a keyword key and a bare-symbol base), the common and highest-value
-/// shape; a computed base or non-keyword key is left alone (no narrowing, no
-/// false positive). Mirrors [`guard_assertion`]'s structure for the bare-variable
-/// case.
+/// Peel a (possibly nested) keyword-`get` chain down to its base symbol and the
+/// ordered keyword keys, base-outward: `(get r :age)` → `(r, [:age])`,
+/// `(get (get cfg :db) :port)` → `(cfg, [:db :port])`. A bare symbol yields
+/// `(s, [])` (the recursion base — an empty-key "path" is just the variable, so
+/// callers that require a real path check for that). `None` for a non-`get`
+/// form or a non-keyword (computed) key — those aren't narrowable paths.
+pub(super) fn get_path(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<Symbol>)> {
+    if let Value::Sym(s) = expr {
+        return Some((s, Vec::new()));
+    }
+    let items = list_items(heap, expr)?;
+    if items.len() != 3
+        || !matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "get"))
+    {
+        return None;
+    }
+    let Value::Keyword(key) = items[2] else {
+        return None;
+    };
+    let (base, mut keys) = get_path(heap, items[1])?;
+    keys.push(key);
+    Some((base, keys))
+}
+
+/// If `test` is a type predicate applied to a keyword-`get` path — or its
+/// `(not …)` — return the [`PathGuard`] it asserts. Handles arbitrary nesting
+/// (`(get (get cfg :db) :port)`) via [`get_path`]; a computed base / non-keyword
+/// key is left alone (no narrowing, no false positive), and a bare variable
+/// (empty path) is deferred to the plain [`guard_assertion`]. Mirrors that
+/// function's structure for the path case.
 pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard> {
     let items = list_items(heap, test)?;
     let Value::Sym(head) = *items.first()? else {
@@ -123,25 +147,18 @@ pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard
             ..inner
         });
     }
-    // `(pred? (get base :key))` — a type predicate over a record-field path.
+    // `(pred? <get-path>)` — a type predicate over a (possibly nested) field path.
     if items.len() != 2 {
         return None;
     }
     let ty = Ty::tested_by(&head_name)?;
-    let inner = list_items(heap, items[1])?;
-    if inner.len() != 3
-        || !matches!(inner.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "get"))
-    {
-        return None;
+    let (base, keys) = get_path(heap, items[1])?;
+    if keys.is_empty() {
+        return None; // a bare variable — `guard_assertion` handles that
     }
-    let (Value::Sym(base), Value::Keyword(key)) = (inner[1], inner[2]) else {
-        return None;
-    };
-    // A `get` whose base is locally shadowed is still a plain variable path here;
-    // narrowing keys off the base symbol either way, so no extra gating is needed.
     Some(PathGuard {
         base,
-        key,
+        keys,
         ty,
         then_only: false,
     })
@@ -1034,13 +1051,17 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // genuinely unknown, not an error.
     if value::symbol_is(head, "get") && items.len() >= 3 {
         let map_arg = *items.get(1)?;
-        // A guard-narrowed path `(get base :key)` wins over the declared field
-        // type — it's the *more specific* type an enclosing `(if (pred? (get base
-        // :key)) …)` proved for this branch (occurrence typing, sound under
-        // immutability). See `Ctx::path_ty` / `path_guard_assertion`.
-        if let (Value::Sym(base), Value::Keyword(key)) = (map_arg, items[2]) {
-            if let Some(t) = ctx.path_ty(base, key) {
-                return Some(t);
+        // A guard-narrowed path wins over the declared field type — it's the
+        // *more specific* type an enclosing `(if (pred? <this-path>) …)` proved
+        // for this branch (occurrence typing, sound under immutability). The path
+        // is this whole `(get … :key)` chain: peel `map_arg` to `(base, prefix)`
+        // and append this key. See `Ctx::path_ty` / `path_guard_assertion`.
+        if let Value::Keyword(key) = items[2] {
+            if let Some((base, mut keys)) = get_path(heap, map_arg) {
+                keys.push(key);
+                if let Some(t) = ctx.path_ty(base, &keys) {
+                    return Some(t);
+                }
             }
         }
         let map_ty = expr_ty(heap, map_arg, ctx);

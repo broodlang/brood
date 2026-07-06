@@ -192,14 +192,16 @@ pub(super) struct Ctx {
     /// scope, ORed as we descend). `0` = nothing suppressed (the common case).
     suppressed: u8,
     types: HashMap<Symbol, Ty>,
-    /// **Path narrowings** — the type of a *compound path* `(get base :key)`
-    /// asserted by an enclosing guard, keyed by `(base, key)`. Occurrence typing
-    /// through a record-field access: `(if (int? (get r :age)) …)` records
-    /// `(r, :age) → int` for the then-branch. Sound because Brood is immutable —
-    /// neither `r` nor the pure `(get r :age)` can change between the guard and a
-    /// use, so the assertion still holds. Consulted by `guards::expr_ty`'s `get`
-    /// rule; empty in the common (no-guard) case.
-    path_types: HashMap<(Symbol, Symbol), Ty>,
+    /// **Path narrowings** — the type of a *compound path* asserted by an
+    /// enclosing guard, keyed by a base symbol plus a chain of keyword keys.
+    /// Occurrence typing through (possibly nested) record-field access:
+    /// `(if (int? (get r :age)) …)` records `(r, [:age]) → int`, and
+    /// `(if (int? (get (get cfg :db) :port)) …)` records `(cfg, [:db :port]) → int`,
+    /// for the then-branch. Sound because Brood is immutable — neither the base
+    /// nor the pure `get` chain can change between the guard and a use, so the
+    /// assertion holds. Consulted by `guards::expr_ty`'s `get` rule; empty in the
+    /// common (no-guard) case.
+    path_types: HashMap<(Symbol, Vec<Symbol>), Ty>,
     /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
     guards: HashMap<Symbol, (Symbol, Ty)>,
     /// **Let-binding aliases.** `(let (a b) …)` aliases `a` and `b` — they
@@ -356,19 +358,24 @@ impl Ctx {
         c.narrow_chain(sym, ty);
         c
     }
-    /// Narrow the compound path `(get base key)` to `prior ∩ ty` for the returned
-    /// scope — occurrence typing on a record-field access under a guard. Keyed by
-    /// `(base, key)`; intersects with any prior narrowing so nested guards
-    /// compose. Sound only because Brood values are immutable (see `path_types`).
-    pub(super) fn narrow_path(&self, base: Symbol, key: Symbol, ty: Ty) -> Ctx {
+    /// Narrow the compound path `base.keys…` (a `get` chain) to `prior ∩ ty` for
+    /// the returned scope — occurrence typing on a (possibly nested) record-field
+    /// access under a guard. Keyed by `(base, keys)`; intersects with any prior
+    /// narrowing so nested guards compose. Sound only because Brood values are
+    /// immutable (see `path_types`).
+    pub(super) fn narrow_path(&self, base: Symbol, keys: Vec<Symbol>, ty: Ty) -> Ctx {
         let mut c = self.clone();
-        let prior = c.path_types.get(&(base, key)).cloned().unwrap_or(Ty::ANY);
-        c.path_types.insert((base, key), prior.intersect(ty));
+        let prior = c
+            .path_types
+            .get(&(base, keys.clone()))
+            .cloned()
+            .unwrap_or(Ty::ANY);
+        c.path_types.insert((base, keys), prior.intersect(ty));
         c
     }
-    /// The narrowed type of the path `(get base key)`, if a guard asserted one.
-    pub(super) fn path_ty(&self, base: Symbol, key: Symbol) -> Option<Ty> {
-        self.path_types.get(&(base, key)).cloned()
+    /// The narrowed type of the path `base.keys…`, if a guard asserted one.
+    pub(super) fn path_ty(&self, base: Symbol, keys: &[Symbol]) -> Option<Ty> {
+        self.path_types.get(&(base, keys.to_vec())).cloned()
     }
     /// In-place narrow over the equivalence class of `sym` — BFS through the
     /// alias graph, intersecting `ty` into each visited name's type. A
