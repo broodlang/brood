@@ -92,7 +92,7 @@
 
   (test "a byte-vector StoredKey round-trips through a worker unchanged"
     (let (me (self)
-          w  (spawn (scram-test--worker me 1)))
+          _w  (spawn (scram-test--worker me 1)))
       (assert= [1 scram-test--expected-stored] (receive))))
 
   (test "fan-out / fan-in: many workers independently derive the same StoredKey"

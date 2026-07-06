@@ -68,7 +68,7 @@
   (test "a face defined here resolves in spawned workers, fanned back in"
     (def-face :t/shared {:fg :cyan :bold true})
     (let (me (self)
-          workers (map (fn (i)
+          _workers (map (fn (i)
                          (spawn (send me [:face i (face :t/shared)])))
                     (range 8)))
       ;; collect each worker's resolution of the shared face

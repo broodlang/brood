@@ -77,7 +77,7 @@
 
   (test "(after 0 …) returns the timeout body when nothing matches"
     (defn poll-empty (parent) (send parent (receive ([:x] :got) (after 0 :nothing))))
-    (let (me (self) w (spawn (poll-empty me))) (assert= (receive) :nothing)))
+    (let (me (self) _w (spawn (poll-empty me))) (assert= (receive) :nothing)))
 
   (test "(after 0 …) takes an already-queued match before timing out"
     (send (self) :x)
@@ -90,7 +90,7 @@
 
   (test "(after N …) fires in a green process via the receive timer"
     (defn timed-worker (parent) (send parent (receive (:never x) (after 50 :timed))))
-    (let (me (self) w (spawn (timed-worker me))) (assert= (receive) :timed)))
+    (let (me (self) _w (spawn (timed-worker me))) (assert= (receive) :timed)))
 
   (test "a message arriving before the deadline wins over the timeout"
     (defn race-worker (parent) (send parent (receive (:go :got) (after 1000 :timed))))
@@ -107,7 +107,7 @@
   (test "a throwing (after …) body is catchable via try/catch (green)"
     (defn catch-worker (parent)
       (send parent (try (receive (:never x) (after 30 (throw [:timeout]))) (catch e e))))
-    (let (me (self) w (spawn (catch-worker me))) (assert= (receive) [:timeout])))
+    (let (me (self) _w (spawn (catch-worker me))) (assert= (receive) [:timeout])))
 
   (test "a throwing matched-clause body is catchable, and its message is consumed"
     (send (self) :boom)
@@ -264,7 +264,7 @@
   (test "a worker building a closure sends it back to be run by the parent"
     ;; fan-in direction: the child constructs the mobile code, the parent runs it.
     (defn cl-maker (parent) (let (base 1000) (send parent (fn (x) (+ base x)))))
-    (let (me (self) w (spawn (cl-maker me))) (let (f (receive)) (assert= (f 24) 1024)))))
+    (let (me (self) _w (spawn (cl-maker me))) (let (f (receive)) (assert= (f 24) 1024)))))
 
 ;; `sleep` is a prelude function (no `require` needed). It must park on the
 ;; scheduler timer WITHOUT touching the mailbox — a regression guard against the

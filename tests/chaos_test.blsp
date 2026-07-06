@@ -31,23 +31,23 @@
       (is (pid? w))))
 
   (test "a spawned-nil process exits with :normal"
-    (let (w (spawn nil) ref (monitor w))
+    (let (w (spawn nil) _ref (monitor w))
       (assert= :normal (receive ([:down _ _ reason] reason) (after 5000 :timeout)))))
 
   (test "a spawned-integer process exits with :normal"
-    (let (w (spawn 42) ref (monitor w))
+    (let (w (spawn 42) _ref (monitor w))
       (assert= :normal (receive ([:down _ _ reason] reason) (after 5000 :timeout)))))
 
   (test "a crashing spawned process propagates its error as the monitor down reason"
     ;; Post-1a63eb7 `(spawn (fn () body))` runs `body` (no longer the silent
     ;; no-op footgun), so a crash here surfaces — its monitor sees the error
     ;; reason, not :normal.
-    (let (w (spawn (fn () (/ 1 0))) ref (monitor w))
+    (let (w (spawn (fn () (/ 1 0))) _ref (monitor w))
       (assert= (receive ([:down _ _ reason] reason) (after 5000 :timeout))
                [:error "runtime error: division by zero"])))
 
   (test "parent process is unaffected when a child crashes without a monitor"
-    (let (w (spawn (fn () (/ 1 0))))
+    (let (_w (spawn (fn () (/ 1 0))))
       (assert= :survived (receive (after 100 :survived))))))
 
 ;; ── 2. send and monitor type errors ──────────────────────────────────────────
@@ -224,7 +224,7 @@
     (assert= 5050 (chaos-fan-in 0 100 0)))
 
   (test "spawning 50 processes that each crash does not affect parent"
-    (let (me (self))
+    (let (_me (self))
       (dotimes (i 50)
         (spawn (fn () (/ 1 0))))
       (assert= :alive (receive (after 200 :alive)))))

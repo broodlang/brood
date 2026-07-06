@@ -209,7 +209,7 @@
     (assert= (mth-sum 0 10 0) 2046))
 
   (test "an int result survives the round-trip across heaps (deep copy on send)"
-    (let (me (self) w (spawn (mth-emit me 7)))
+    (let (me (self) _w (spawn (mth-emit me 7)))
       (assert= (receive ([:r n sq cu] [n sq cu])) [7 49 343]))))
 
 ;; ---- transcendental math and constants ---------------------------------------

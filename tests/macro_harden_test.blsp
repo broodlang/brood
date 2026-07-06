@@ -91,7 +91,7 @@
 
 (describe "dotimes — wrong syntax"
   (test "correct dotimes works"
-    (let (acc (ref))
+    (let (_acc (ref))
       (dotimes (i 3) i)  ; side-effect-only, just check no error
       :ok))
 
@@ -110,7 +110,7 @@
       (is (string-contains? msg "dotimes"))))
 
   (test "correct (i n) bind does NOT raise"
-    (let (result (ref))
+    (let (_result (ref))
       (dotimes (i 3) i)
       :ok)))
 

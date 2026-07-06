@@ -95,7 +95,7 @@
   ;; (Message::Subprocess round-trip) and `proc-send` works from a non-owner — but
   ;; the child's output still lands in the *owner's* (here, the test's) mailbox.
   (test "a worker process writes to a child this process owns"
-    (let (me (self)
+    (let (_me (self)
           p (proc-spawn "cat" []))
       (spawn (proc-send p "from a worker"))
       (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))

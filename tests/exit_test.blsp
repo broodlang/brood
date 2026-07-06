@@ -54,7 +54,7 @@
 (defn ex-spawn-parked (n acc)
   (if (= n 0)
     acc
-    (let (p (spawn (ex-park)) m (monitor p)) (ex-spawn-parked (- n 1) (cons p acc)))))
+    (let (p (spawn (ex-park)) _m (monitor p)) (ex-spawn-parked (- n 1) (cons p acc)))))
 (defn ex-kill-all (ps)
   (if (empty? ps) nil (do (exit (first ps) :bye) (ex-kill-all (rest ps)))))
 (defn ex-collect-downs (k)

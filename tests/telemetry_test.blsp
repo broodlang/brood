@@ -131,7 +131,7 @@
           (is (not (member? :bad ids)))))))
 
   (test "a handler that HARD-KILLS the listener never crashes the emitter"
-    (let (lpid (start-telemetry) me (self))
+    (let (lpid (start-telemetry) _me (self))
       (detach-all)
       (monitor lpid)
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))

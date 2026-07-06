@@ -294,7 +294,7 @@
   :isolated
 
   (test "a sorted list round-trips through a worker unchanged (deep copy)"
-    (let (me (self) w (spawn (seq-emit me 5))) (assert= (receive ([:r n xs] xs)) (list 1 2 3 4 5))))
+    (let (me (self) _w (spawn (seq-emit me 5))) (assert= (receive ([:r n xs] xs)) (list 1 2 3 4 5))))
 
   (test "fan-out / fan-in: each worker builds+sorts a list, parent folds a map"
     (seq-spawn (self) (range 1 16))

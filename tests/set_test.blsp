@@ -81,7 +81,7 @@
 (describe "sets across processes"
   :isolated
   (test "a set round-trips through a worker unchanged"
-    (let (me (self) w (spawn (st-build-echo me [:x :y [1 2]])))
+    (let (me (self) _w (spawn (st-build-echo me [:x :y [1 2]])))
       (assert= (receive) (set [:x :y [1 2]]))))
   (test "sets built in many workers fan in and union correctly"
     (let (me (self))

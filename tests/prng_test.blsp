@@ -120,5 +120,5 @@
       (assert= (get m 10) (prng-draws 10 5 nil))))
 
   (test "a single random draw round-trips intact across heaps"
-    (let (me (self) w (spawn (prng-emit me 42)))
+    (let (me (self) _w (spawn (prng-emit me 42)))
       (assert= (receive ([:r seed draws] draws)) (prng-draws 42 5 nil)))))

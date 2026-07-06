@@ -64,7 +64,7 @@
   :isolated
 
   (test "consistency survives send: a worker's (a# a#) round-trips equal"
-    (let (me (self) w (spawn (ag-pair-worker me)))
+    (let (me (self) _w (spawn (ag-pair-worker me)))
       (let (l (receive))
         (is (symbol? (first l)))
         (is (= (first l) (second l))))))

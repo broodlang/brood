@@ -229,7 +229,7 @@
 (describe "stream-from-socket / stream-to-socket"
   :isolated
   (test "loopback: write chunks to a socket, read them back as a stream"
-    (let (me   (self)
+    (let (_me   (self)
           ls   (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       ;; Writer spawns, connects, sends two chunks, closes.

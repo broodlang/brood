@@ -229,7 +229,7 @@
     ;; `adv-redef-target` 100k times should finish even if the parent
     ;; redefines `adv-redef-target` mid-flight.
     (let (me (self)
-          w (spawn (adv-redef-caller me 100000)))
+          _w (spawn (adv-redef-caller me 100000)))
       ;; Redefine adv-redef-target while the worker runs.
       (adv-set-redef-v2)
       (assert= :done (receive (v v))))))
