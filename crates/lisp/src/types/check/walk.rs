@@ -1446,7 +1446,17 @@ fn check_let(
         while j < binds.len() {
             if let Value::Sym(name) = binds[j] {
                 let nm = name_of(name);
-                if !nm.starts_with('_') {
+                // Exempt gensym temporaries (`<prefix>__<n>`, value::gensym): a
+                // macro expansion (match / pattern lowering) can attach its
+                // call-site position to the generated `let`, so the position
+                // check below doesn't catch them — but the name does. Warning on
+                // a compiler-introduced binding the user can't rename is noise.
+                // (Suppressing a rare hand-written `x__1` is only a missed
+                // warning — this lint already errs toward false negatives.)
+                let is_gensym = nm
+                    .rsplit_once("__")
+                    .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                if !nm.starts_with('_') && !is_gensym {
                     // letrec: also scan preceding elements (mutual recursion).
                     let preceding_used =
                         letrec && binds[..j].iter().any(|&f| sym_appears_in(heap, f, name));

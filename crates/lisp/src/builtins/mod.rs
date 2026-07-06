@@ -83,7 +83,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const pid_ty: Ty = Ty::of(Tag::Pid);
     const ref_ty: Ty = Ty::of(Tag::Ref);
     const list_ty: Ty = Ty::LIST;
-    const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector]);
+    // `bytes` is seqable too: `first`/`rest`/`nth` iterate its octets at runtime.
+    const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Bytes]);
     const callable: Ty = Ty::of_tags(&[Tag::Fn, Tag::Native]);
 
     // numeric primitives — `%add`..`%div` accept and return the wider NUMBER
@@ -937,7 +938,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "proc-send",
         Arity::exact(2),
-        Sig::new(vec![subprocess_ty, string], nil_ty),
+        // data may be a string (UTF-8 / codepoints) or a bytes value (verbatim).
+        Sig::new(vec![subprocess_ty, Ty::of_tags(&[Tag::Str, Tag::Bytes])], nil_ty),
         proc_send,
     );
     def(

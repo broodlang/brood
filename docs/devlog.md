@@ -1832,3 +1832,44 @@ than leaving a wrong number to be taken at face value later.
 362/362 unit tests unaffected throughout — this bug and its fix live
 entirely in the CLI/cache layer; `cargo test`'s in-process checking never
 touched it.
+
+## 2026-07-06 — checker false-positive sweep (bytes seqable, gensym lint exemption, proc-send)
+
+Ran `nest check` across the whole tree and fixed three genuine checker
+false-positive classes (the full suite was already green — 2605/2605, and
+`docs/known-issues.md` has no open items; KI-9 did not reproduce):
+
+- **`bytes` is seqable/countable.** `count`/`length`/`first`/`rest`/`every?`/
+  `map`/… all iterate a `bytes` value's octets at runtime, but the checker's
+  `seq`/`countable` domains omitted `Tag::Bytes`, so every such call on bytes
+  warned. Added `Tag::Bytes` to the two curated `seq`/`countable` consts in
+  `types/check/sigs.rs` and to the builtin `seq` const in `builtins/mod.rs`
+  (the domain for first/rest/nth). ~21 warnings gone.
+- **Gensym temporaries no longer linted "unused."** A macro expansion
+  (match / pattern lowering) can attach its call-site position to the `let` it
+  generates, so the unused-binding lint's position-based "compiler-generated"
+  exemption missed them and flagged names like `m__1380`. Added a name-based
+  exemption in `check_let` (`walk.rs`): a `<prefix>__<digits>` gensym name is
+  skipped (consistent with the existing `_`-prefix exemption; the lint already
+  errs toward false negatives).
+- **`proc-send` accepts bytes.** Its own doc says data may be a string *or* a
+  bytes value, but the checker sig typed arg 2 as `string`. Widened to
+  `str | bytes`.
+
+Also removed a dead `use crate::eval;` in `eval/macros.rs` (the code uses the
+fully-qualified path). Added regression coverage in `types/check.rs`
+(bytes-seqable stays silent; gensym-named binding exempt but a hand-written
+`my__thing` still flagged). 219/219 checker unit tests pass; full in-language
+suite 2605/2605.
+
+Residual `nest check` warnings are all intentional or build-artifact, not
+bugs: the documented non-tail-recursion lint (torture/`pm-fac` tests);
+deliberate shadowing tests (`(let (= …) …)`, `(let (list … map …) …)`);
+adversarial negatives (a bytes pattern matched against a non-bytes value emits
+guarded `byte-at`/`byte-length` the checker can't see past — the standing
+`bytes_test.blsp` "(tuple int,int,int)" warning); a `bound?`-guarded reference
+to the debug-only `%blob-ptr`/`%blob-strong-count` primitives, which surfaces
+**only in a release build** (they're `#[cfg(debug_assertions)]`, so the dev
+build the invariant is validated against sees 0); and ~26 genuinely-unused
+leftover test bindings (`(let (w (spawn …)) …)` handles bound for effect) —
+correct advisory lints, fixable by `_`-prefixing, left as-is for now.

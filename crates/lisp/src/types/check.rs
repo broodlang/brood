@@ -1171,6 +1171,11 @@ mod tests {
             "(abs -3)",
             "(count [1 2 3])",
             "(count \"hi\")",
+            // `bytes` is seqable/countable: these iterate its octets at runtime.
+            "(count (bytes 1 2 3))",
+            "(first (bytes 1 2 3))",
+            "(rest (bytes 1 2 3))",
+            "(every? odd? (bytes 1 3 5))",
             "(not x)",
             "(zero? n)",
         ] {
@@ -1252,6 +1257,21 @@ mod tests {
         assert!(
             file_warnings("(let (_x 1) 2)").is_empty(),
             "_x should be exempt from unused-binding lint"
+        );
+        // Gensym temporaries (`<prefix>__<n>`) are exempt: a macro expansion can
+        // attach its call-site position to the generated `let`, so the name — not
+        // the position — is the reliable "compiler-generated" signal.
+        assert!(
+            file_warnings("(let (m__1380 1) 2)").is_empty(),
+            "gensym-named binding should be exempt from unused-binding lint"
+        );
+        // …but a hand-written name that merely contains `__` (no trailing digits)
+        // is still linted.
+        assert!(
+            file_warnings("(let (my__thing 1) 2)")
+                .iter()
+                .any(|s| s.contains("unused let binding")),
+            "a non-gensym `__` name should still be flagged"
         );
         // match pattern variables (compiler-generated let, no source position)
         // must be exempt — a common pattern: match on shape, ignore values.

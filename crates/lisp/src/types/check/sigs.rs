@@ -49,15 +49,19 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     const nil_ty: Ty = Ty::of(Tag::Nil);
     // Maps are seqable in the stdlib (`seq`/`fold` coerce them via `map-pairs`),
     // so the higher-order combinators accept maps too — without this the
-    // checker would warn on `(map f some-map)` even though it runs fine.
+    // checker would warn on `(map f some-map)` even though it runs fine. `bytes`
+    // is likewise seqable — `count`/`first`/`rest`/`map`/`every?` all iterate its
+    // octets at runtime — so it belongs in the domain too.
     #[allow(non_upper_case_globals)]
-    const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Map]);
+    const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Map, Tag::Bytes]);
     #[allow(non_upper_case_globals)]
     const bool_ty: Ty = Ty::of(Tag::Bool);
-    // `count`/`length` accept a string, map, or sequence (the prelude `count`
-    // dispatches string?/map?/else-fold) — but not a number/keyword/etc.
+    // `count`/`length` accept a string, map, bytes, or sequence (the prelude
+    // `count` dispatches string?/map?/else-fold, and bytes counts its octets) —
+    // but not a number/keyword/etc.
     #[allow(non_upper_case_globals)]
-    const countable: Ty = Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector]);
+    const countable: Ty =
+        Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector, Tag::Bytes]);
     #[allow(non_upper_case_globals)]
     const str_ty: Ty = Ty::of(Tag::Str);
     #[allow(non_upper_case_globals)]

@@ -17,7 +17,6 @@ use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, ClosureId, EnvId, Symbol, Value, ValueRef};
 use crate::error::{LispError, LispResult};
-use crate::eval;
 use std::collections::{HashMap, HashSet};
 
 /// Bound on recursion depth for the quasiquote walker and the compile pass.
