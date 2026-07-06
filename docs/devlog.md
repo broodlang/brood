@@ -2007,3 +2007,29 @@ refining `base`'s own record type so the narrowing flows into a function call.
 **Verified.** Extended `path_narrowing_through_a_record_field_guard` (a nested
 warn case + a different-nested-path no-warn case); `types::` 223/223; clippy
 clean; **`nest check` still 0 warnings**.
+
+## 2026-07-06 — Path narrowing flows into calls: base record refinement + record disjointness
+
+The deeper half of path narrowing: a guard now refines `base`'s **own type**, not
+just the exact field path, so the narrowing flows when `base` is passed to a
+function. `(if (int? (get r :age)) (f r) …)` refines `r` to the open record
+`{age: int}` in the then-branch (built inner-out for a nested path), so calling
+`f` — declared `((record :age string) -> …)` — is flagged. Sound: a true guard
+proves the whole `get` chain is present and typed, so `base` is a record with that
+(nested) field; refinement is then-branch only (the else-branch can't prove the
+field is present).
+
+This surfaced the missing link — `Ty::is_disjoint` compared only tags for records
+(both `Map`-tagged → never disjoint), so a record type never flagged at a call.
+Added a sound **record-disjointness** rule (mirrors the existing tuple rule): two
+records are disjoint when they both constrain a field, it's *required* on at least
+one side, and the field types are disjoint. Optional-on-both or single-side fields
+never manufacture disjointness (open records). Updated the old
+`record_is_disjoint_only_on_tags…` test — which pinned the previous tags-only
+behavior — to `record_disjointness_needs_a_required_conflicting_field`.
+
+**Verified.** New test `path_narrowing_refines_base_record_type_into_calls`
+(the `{age:int}`-vs-`{age:string}` call catch + matching/unguarded no-warn);
+`record_disjointness_needs_a_required_conflicting_field` (4 cases); Rust lib
+**366/366**; clippy clean; **`nest check` still 0 warnings** (the new record
+disjointness added no corpus false positives).

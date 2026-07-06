@@ -1441,7 +1441,18 @@ fn check_if(
     // in the then-branch (and `¬int` in the else, for a biconditional predicate).
     let (then_ctx, else_ctx) = match path_guard_assertion(heap, test) {
         Some(pg) => {
+            // Precise field-access narrowing for the exact path (both branches).
             let t = then_ctx.narrow_path(pg.base, pg.keys.clone(), pg.ty.clone());
+            // Refine the *base*'s record type in the then-branch so the narrowing
+            // flows when `base` is passed to a function (or otherwise used as a
+            // value). Sound only in the then-branch: the guard being true proves
+            // the whole `get` chain is present and typed, so `base` is an open
+            // record `{k1: {… {kn: ty}}}` (built inner-out). In the else-branch the
+            // field may simply be absent, so `base` can't be refined to a record.
+            let base_record = pg.keys.iter().rev().fold(pg.ty.clone(), |acc, &k| {
+                Ty::record_of(std::iter::once((k, (acc, true))).collect())
+            });
+            let t = t.narrow(pg.base, base_record);
             let e = if pg.then_only {
                 else_ctx
             } else {

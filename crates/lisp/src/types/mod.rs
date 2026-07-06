@@ -1041,6 +1041,23 @@ impl Ty {
                 return a.iter().zip(b.iter()).any(|(x, y)| x.is_disjoint(y));
             }
         }
+        // Two record shapes are provably disjoint if they both constrain some
+        // field, that field is **required** on at least one side (so any value
+        // must carry it — an optional-on-both field could just be absent), and
+        // the two field types are disjoint (no single value can be both). Same
+        // soundness basis as the tuple case: only ever *adds* a genuine disjoint
+        // verdict. Open records mean a field only one side mentions never yields
+        // disjointness (the other side permits the extra field freely). This is
+        // what lets a guard-refined base — `(record :age int)` from
+        // `(if (int? (get r :age)) …)` — flag a call wanting `(record :age string)`.
+        if shared == MAP_BIT {
+            if let (Some(a), Some(b)) = (&self.fields, &other.fields) {
+                return a.iter().any(|(name, (aty, areq))| {
+                    b.get(name)
+                        .is_some_and(|(bty, breq)| (*areq || *breq) && aty.is_disjoint(bty))
+                });
+            }
+        }
         false
     }
 
@@ -2280,14 +2297,27 @@ mod tests {
     }
 
     #[test]
-    fn record_is_disjoint_only_on_tags_like_every_other_refinement() {
-        // Two records with incompatible required fields are still not
-        // "disjoint" in the checker's tags-only sense — `is_disjoint` never
-        // inspects `fields`, so a mismatch can only be *missed*, never
-        // manufacture a false positive.
+    fn record_disjointness_needs_a_required_conflicting_field() {
+        // Two records are disjoint when they both constrain a field, it's
+        // *required* on at least one side (so any value must carry it), and the
+        // field types are disjoint — no value can be `a: int` and `a: string`
+        // at once. Sound, mirroring the tuple case (only ever adds a genuine
+        // disjoint verdict).
         let a = rec(&[("a", Ty::of(Tag::Int), true)]);
         let b = rec(&[("a", Ty::of(Tag::Str), true)]);
-        assert!(!a.is_disjoint(&b));
+        assert!(a.is_disjoint(&b));
+        // NOT disjoint when the conflicting field is optional on *both* sides —
+        // a value omitting `a` satisfies both open records.
+        let ao = rec(&[("a", Ty::of(Tag::Int), false)]);
+        let bo = rec(&[("a", Ty::of(Tag::Str), false)]);
+        assert!(!ao.is_disjoint(&bo));
+        // NOT disjoint when only one side mentions the field (open records let
+        // the other carry the extra field freely).
+        let just_b = rec(&[("b", Ty::of(Tag::Str), true)]);
+        assert!(!a.is_disjoint(&just_b));
+        // NOT disjoint when the shared field's types overlap (`int ⊆ number`).
+        let anum = rec(&[("a", Ty::NUMBER, true)]);
+        assert!(!a.is_disjoint(&anum));
     }
 
     #[test]

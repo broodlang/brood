@@ -3195,6 +3195,34 @@ mod tests {
     }
 
     #[test]
+    fn path_narrowing_refines_base_record_type_into_calls() {
+        // A path guard refines `base`'s *record type* in the then-branch, so it
+        // flows into a call: `r` proven `{age: int}` passed where `{age: string}`
+        // is wanted is caught (record disjointness on a conflicting required field).
+        let decl = "(sig f ((record :age string) -> int)) (defn f (r) 0)";
+        let bad = file_warnings(&format!(
+            "{decl} (defn g (r) (if (int? (get r :age)) (f r) 0))"
+        ));
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("f: argument 1 expects") && m.contains("got")),
+            "a base refined to a conflicting record must warn at the call: {bad:?}"
+        );
+        // Matching field type, and an unguarded pass, must NOT warn.
+        let okdecl = "(sig h ((record :age int) -> int)) (defn h (r) 0)";
+        for src in [
+            format!("{okdecl} (defn g (r) (if (int? (get r :age)) (h r) 0))"),
+            format!("{okdecl} (defn g (r) (h r))"),
+        ] {
+            let w = file_warnings(&src);
+            assert!(
+                w.iter().all(|m| !m.contains("argument 1 expects")),
+                "a matching/unguarded record arg must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
     fn overload_call_matching_no_arm_is_flagged() {
         // (sig f (and (int -> int) (bool -> bool))): a call whose argument is
         // disjoint from *every* arm's domain is flagged (ADR-116 completion).

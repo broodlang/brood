@@ -827,10 +827,15 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   and the pure `get` chain can't change between guard and use); keyed by
   `(base, [keys…])` in `Ctx` (`narrow_path`/`path_ty`), the chain peeled by
   `get_path`, recognised by `path_guard_assertion`, consulted by `expr_ty`'s
-  `get` rule; invalidated when `base` is rebound. Still ⬜: a *computed*
-  (non-keyword) key or `nth`/tuple-index path, and *refining the record type of
-  `base` itself* (rather than just the field path) so the narrowing flows to a
-  function call — the deeper design.
+  `get` rule; invalidated when `base` is rebound. ✅ **Base refinement flows into
+  calls**: the then-branch also refines `base`'s own type to the open record
+  `{k1: {… {kn: ty}}}` the guard proves, so passing `base` to a function whose
+  parameter requires a conflicting field type is caught — e.g. `r` proven
+  `{age: int}` passed where `{age: string}` is wanted. This needed a sound
+  **record-disjointness** rule in `Ty::is_disjoint` (two records are disjoint
+  when a shared field is required on some side and its types are disjoint —
+  mirrors the tuple rule). Still ⬜: a *computed* (non-keyword) key or
+  `nth`/tuple-index path.
 - ✅ **Richer `(sig …)` type-exprs** — turned out mostly already shipped:
   `&` rest params (`parse_arrow`) and nested type variables in compound
   positions (`(list ?A)`, via `SigWithVars`/`SigTerm`, type-variables.md
