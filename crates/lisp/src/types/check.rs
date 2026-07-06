@@ -3153,6 +3153,32 @@ mod tests {
     }
 
     #[test]
+    fn overload_call_matching_no_arm_is_flagged() {
+        // (sig f (and (int -> int) (bool -> bool))): a call whose argument is
+        // disjoint from *every* arm's domain is flagged (ADR-116 completion).
+        let decl = "(sig f (and (int -> int) (bool -> bool))) \
+                    (defn f (x) (if (int? x) (+ x 1) (not x)))";
+        let bad = file_warnings(&format!(r#"{decl} (def c (f "hello"))"#));
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("f: no overload clause accepts")),
+            "an arg matching no arm must warn: {bad:?}"
+        );
+        // An arg that matches *some* arm, and an unknown arg, must NOT warn.
+        for src in [
+            "(def a (f 5))",      // int → arm 1
+            "(def b (f true))",   // bool → arm 2
+            "(defn g (y) (f y))", // unknown arg → defer
+        ] {
+            let w = file_warnings(&format!("{decl} {src}"));
+            assert!(
+                w.iter().all(|m| !m.contains("no overload clause")),
+                "a matching/unknown arg must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
     fn check_allow_suppresses_targeted_lints() {
         // A `(check-allow :non-tail-recursion …)` wrapper silences the non-tail
         // lint for the wrapped defn — but only that category, and only inside it.

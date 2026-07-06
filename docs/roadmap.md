@@ -761,9 +761,12 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   return types for overloaded functions (`(and (int->int) (bool->bool))`) —
   no new grammar, the already-shipped `(and …)` syntax now builds a real
   overload instead of widening two distinct arrows to "any function"; a call
-  site resolves the matching arm's return type. Flagging an argument that
-  fails *every* arm stays deferred (needs a second hook in the separate
-  arity/argument-checking loop). See
+  site resolves the matching arm's return type. ✅ **Argument check now shipped
+  too**: a call whose arguments match *no* arm of the overload is flagged
+  (`(f "x")` on `(and (int -> int) (bool -> bool))`) — sound via disjointness
+  (rule an arm out only when a known arg is disjoint from its param; flag only
+  when every arity-relevant arm is ruled out; unknown/`NEVER` args and pure
+  arity mismatches defer). See
   [`docs/type-arrow-intersection.md`](type-arrow-intersection.md).
 - ✅ **Singleton / literal types** — **keyword** (ADR-105), **int** (ADR-117),
   and **bool/string** (ADR-120) all shipped: a bare `:ok`/`5`/`true`/`"GET"`

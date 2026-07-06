@@ -1940,3 +1940,26 @@ blanket opt-out). Applied to the 5 torture/redundancy test sites.
 mismatched one, for both lints). Gates: Rust lib 364/364, `types::` 221/221, the
 full in-language suite **2605/2605**, every touched test file green (the `check-allow`
 wrapper preserves `defn`/`match` runtime semantics — confirmed by the passing tests).
+
+## 2026-07-06 — Arrow-intersection argument check (ADR-116 completion)
+
+Finished the one piece ADR-116 explicitly deferred: flagging a call whose
+arguments match **no** arm of a declared overload. ADR-116 shipped the
+input-dependent *return* type (`resolve_overload_ret` in `expr_ty`); the argument
+side needed "a second hook in the separate arity/argument-checking loop," which
+`check_into` now has. When a callee has no single `sig` but a declared overload
+(`ctx.declared_overload` / `declared_heap_overload`), `overload_arg_mismatch`
+(`walk.rs`) flags the call — but only when *every arity-relevant arm is ruled
+out*, an arm being ruled out only when a *known* argument is provably **disjoint**
+from its parameter. False-positive-free by the same discipline as the single-sig
+loop: unknown/`NEVER` args never rule an arm out, disjointness (not subtyping) is
+the test, and a pure arity mismatch (no arm with a fitting arity) defers to the
+arity check instead of double-reporting.
+
+`(f "hello")` / `(f :nope)` against `(and (int -> int) (bool -> bool))` now warn
+"f: no overload clause accepts these arguments"; `(f 5)`, `(f true)`, and an
+unknown-typed `(f y)` stay silent.
+
+**Verified.** New test `overload_call_matching_no_arm_is_flagged`; `types::`
+222/222; clippy clean; **`nest check` still 0 warnings** across `std/` + `tests/`
+(no new false positives).

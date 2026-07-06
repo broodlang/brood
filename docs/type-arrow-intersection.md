@@ -206,15 +206,28 @@ declaring an overloaded `clamp`, `main.blsp` calling `hello/clamp` via
 (`(string-length (clamp 0 10 5))`) and stayed silent on the correct call
 (`(+ 1 (clamp 0 10 5))`).
 
-## Deferred
+## Argument check (shipped — the second hook)
 
 **Flagging an argument that fails every overload arm** — e.g. `(f "oops")`
-against `(and (int -> int) (bool -> bool))` — was explicitly left out. It
-needs a second hook in `check/walk.rs`'s separate arity/argument-checking
-loop, which today only ever reads a single `ctx.declared_sig`; a materially
-bigger, separate piece of surface than the return-type resolution this slice
-built. The return-type precision is the requested payoff ("input-dependent
-return types") and is fully isolated to `expr_ty`.
+against `(and (int -> int) (bool -> bool))` — is now implemented, the second
+hook in `check/walk.rs`'s `check_into` the original slice deferred. When a
+callee has no single `sig` but *does* have a declared overload
+(`ctx.declared_overload` or `declared_heap_overload`), `overload_arg_mismatch`
+runs: it flags the call only when **every arity-relevant arm is ruled out**,
+where an arm is ruled out only if some *known* argument is provably **disjoint**
+from that arm's parameter. This mirrors the single-`sig` loop's discipline, so
+it's false-positive-free by construction:
+
+- an **unknown** argument type (or a `NEVER` unreachable-branch type) never rules
+  an arm out — matching the single-sig loop's `is_never` skip;
+- **disjointness**, not subtyping, is the test (an arg merely *wider* than a
+  param never triggers a warning);
+- an arm whose **arity** can't accept the call is skipped, so a pure arity
+  mismatch is left to the dedicated arity check rather than double-reported; if
+  *no* arm has a fitting arity the whole check defers.
+
+Message: `f: no overload clause accepts these arguments`. Verified zero new
+warnings across the whole `std/` + `tests/` corpus.
 
 ## Soundness
 

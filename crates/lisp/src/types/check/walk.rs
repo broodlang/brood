@@ -24,8 +24,8 @@ use super::guards::{
     match_exhaustiveness_gap, render_literal_pattern,
 };
 use super::sigs::{
-    arity_of, arity_str, curated_sig, declared_heap_sig, declared_heap_value_ty, is_globally_bound,
-    sig_of,
+    arity_of, arity_str, curated_sig, declared_heap_overload, declared_heap_sig,
+    declared_heap_value_ty, is_globally_bound, sig_of,
 };
 
 /// `symbol_name(s)` is a `String` allocation; we only need the spelling on
@@ -179,6 +179,44 @@ fn unbound_msg(nm: &str) -> String {
 /// the honest fix for the "release-only phantom unbound" build artifact.
 fn is_debug_only_primitive(nm: &str) -> bool {
     matches!(nm, "%blob-ptr" | "%blob-strong-count" | "%force-panic")
+}
+
+/// Does `sig`'s arity accept exactly `argc` arguments — its fixed params, plus
+/// any `&optional` slots, plus an unbounded `&rest` tail?
+fn sig_accepts_argc(sig: &crate::types::Sig, argc: usize) -> bool {
+    let min = sig.params.len();
+    if argc < min {
+        return false;
+    }
+    sig.rest.is_some() || argc <= min + sig.optional.len()
+}
+
+/// ADR-116 completion: does a call with these argument types match **no** arm of
+/// a declared overload? False-positive-free by construction — it rules an arm
+/// out only when a *known* argument is provably **disjoint** from that arm's
+/// parameter (an unknown or `NEVER` arg never rules an arm out), and flags only
+/// when *every* arity-relevant arm is ruled out. Arms whose arity can't accept
+/// `argc` are left to the separate arity check (so a pure arity mismatch isn't
+/// double-reported); if no arm even has a fitting arity we defer entirely.
+fn overload_arg_mismatch(sigs: &[crate::types::Sig], arg_tys: &[Option<Ty>]) -> bool {
+    let argc = arg_tys.len();
+    let mut any_arity_ok = false;
+    for sig in sigs {
+        if !sig_accepts_argc(sig, argc) {
+            continue;
+        }
+        any_arity_ok = true;
+        let possible = arg_tys.iter().enumerate().all(|(i, arg_ty)| match arg_ty {
+            // An unknown arg, or a `NEVER` (unreachable-branch) arg, never rules
+            // an arm out — matches the single-sig loop's `is_never` skip.
+            Some(a) if !a.is_never() => sig.param(i).is_none_or(|p| !a.is_disjoint(&p)),
+            _ => true,
+        });
+        if possible {
+            return false; // some arity-relevant arm could accept the call
+        }
+    }
+    any_arity_ok // ≥1 arm had a fitting arity, and every such arm was ruled out
 }
 
 /// The suppression bitmask a `(check-allow :category …)` marker's category
@@ -791,6 +829,29 @@ pub(super) fn check_into(
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // **Overload argument check** (ADR-116 completion). A callee with a
+        // declared overload (`(sig f (and (int -> int) (bool -> bool)))`) has no
+        // single `sig` — its arms live in `declared_overload` — so the per-arg
+        // loop above skipped it. Flag a call whose arguments match *no* arm.
+        // Sound by construction (see `overload_arg_mismatch`): disjointness, not
+        // subtyping, and only when every arity-relevant arm is ruled out.
+        if !ctx.is_lexical_local(s) {
+            if let Some(arms) = ctx
+                .declared_overload(s)
+                .cloned()
+                .or_else(|| declared_heap_overload(heap, s))
+            {
+                let arg_tys: Vec<Option<Ty>> =
+                    items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();
+                if overload_arg_mismatch(&arms, &arg_tys) {
+                    out.push((
+                        heap.form_pos_only(form),
+                        format!("{}: no overload clause accepts these arguments", name_of(s)),
+                    ));
                 }
             }
         }
