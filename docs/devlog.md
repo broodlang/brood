@@ -1873,3 +1873,70 @@ to the debug-only `%blob-ptr`/`%blob-strong-count` primitives, which surfaces
 build the invariant is validated against sees 0); and ~26 genuinely-unused
 leftover test bindings (`(let (w (spawn …)) …)` handles bound for effect) —
 correct advisory lints, fixable by `_`-prefixing, left as-is for now.
+
+## 2026-07-06 — Checker: float-contagion arithmetic (the last precise-body-inference slice)
+
+Closed the remaining catchable half of "precise body inference" (roadmap Step 5+;
+the int-closed half shipped 2026-06-30). `numeric_call_ty` (`types/check/guards.rs`)
+gained a **float-contagion** rule alongside the existing int-closed one: `+ - * /`
+with any operand *provably* `⊆ float` yields `float` (IEEE/tower contagion —
+`(+ 1 2.0)` → `3.0`), and `sqrt`/`sin`/`cos`/`tan` are always-float even for a
+whole-number argument (`(sqrt 4)` → `2.0`). Both results stay `⊆ number`, so they
+can only sharpen — never widen — a type. Because `float` is disjoint from `int`,
+the sharpened result flows straight into the *existing* return-type disjointness
+warning with no new logic: `(sig f (int -> int)) (defn f (x) (+ x 1.5))` now warns
+"declared return type int but the body yields float".
+
+The complementary *merely-wider* case stays deferred, correctly: `(/ x 2)` on two
+ints is genuinely `number` (`(/ 6 2)` → `3`, `(/ 5 2)` → `2.5`), so `/` is in the
+contagion group but NOT the int-closed group, and an all-int `/` pins to neither →
+defers to `number`. Pinning it to `int` would be a lie; warning would false-positive
+on the int-valued runs. That residue needs occurrence/range analysis and stays out
+(ADR-011).
+
+**Verified.** New regression test `precise_body_inference_float_contagion` (4 warn
+cases + 4 sound-defer cases); the four `precise_body_inference_*` tests pass. Gate:
+a full-corpus `nest check` diff against a HEAD worktree baseline came back
+**identical** — zero new or removed warnings across all of `std/` + `tests/`.
+
+## 2026-07-06 — `nest check` to zero: checker false-positive sweep + `check-allow` directive
+
+Drove `nest check` from 54 warnings to **0**. The 54 split into checker imprecision
+(fixed properly) and correct-lints-on-deliberately-written-test-code (opted out with
+a new directive).
+
+**Checker fixes (54 → 27), all genuine false positives / imprecision:**
+- **Debug-only primitives** (17): `%blob-ptr`/`%blob-strong-count`/`%force-panic`
+  are `#[cfg(debug_assertions)]`, so a release `nest check` saw every guarded test
+  reference as unbound. The checker now knows their names regardless of build config
+  (`is_debug_only_primitive` in `walk.rs`).
+- **Destructuring pattern-let** (2): `(let ((a b) rhs) (+ a b))` never bound the
+  pattern's symbols → `a`/`b` flagged unbound. `check_let` now binds every symbol
+  leaf of a destructuring binder (`pattern_syms`).
+- **Deliberate shadows** (5): `(let (list …) …)`/`(let (= …) …)`/`(let (*dt* …) …)`
+  — an unused binding that *shadows* a global/curated/file-global is a scope-isolation
+  test, not a leftover, so the unused-`let` lint now exempts it (`ctx.is_file_global`
+  added for the file-global case).
+- **`string-contains?` nil** (1): its sig said `string`, but `index-of` treats a nil
+  haystack as empty (→ false), so arg 1 is really `string | nil` — sig widened.
+- **`bytes?` occurrence typing** (2): a bytes-pattern match lowers to
+  `(if (bytes? m) … (byte-length m) …)`, but `bytes?` wasn't in `Ty::tested_by`, so
+  the guarded `byte-length`/`byte-at` were flagged against a non-bytes scrutinee.
+  Added `bytes? → Bytes` (narrows everywhere now).
+
+**`check-allow` directive (27 → 0).** The remaining 27 (26 non-tail-recursion JIT
+torture cases + 1 redundant `match` clause) are the checker being *correct* — the
+test code deliberately has that shape to exercise it. Comments can't suppress (the
+reader strips them pre-check), so added a form-level directive:
+`(check-allow :category form…)`, a prelude macro expanding to a `%lint-allow` marker
+that survives macroexpansion and is a pure runtime no-op (yields the wrapped body).
+The checker reads it: `recursion.rs` skips a `:non-tail-recursion` subtree, and a
+`SUPPRESS_*` bit threads through `Ctx` so `check_if`'s redundancy lint declines on
+`:unreachable-clause`. An unrecognised category suppresses nothing (no silent
+blanket opt-out). Applied to the 5 torture/redundancy test sites.
+
+**Verified.** `nest check` = **0 warnings** project-wide. New regression test
+`check_allow_suppresses_targeted_lints` (suppresses the right category, not a
+mismatched one, for both lints). Gates: Rust lib 364/364, `types::` 221/221, the
+full in-language suite **2605/2605**, every touched test file green (the `check-allow`
+wrapper preserves `defn`/`match` runtime semantics — confirmed by the passing tests).

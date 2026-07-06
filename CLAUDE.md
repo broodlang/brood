@@ -391,13 +391,17 @@ type variables; **gradual checks** via `GradualTy` — `(def x …)`/return-type
 value-position assignment checking, ADR-110), a per-process tracing **GC**
 (ADR-035), the **package manager** (ADR-037), the **self-hosted REPL in Brood**
 (ADR-048), **LSP Tier 2** (refs/rename, semantic tokens, cross-file nav), and the
-**closure-compiling VM** (now the default engine, ADR-076) are all done. The checker
-is **false-positive-clean** across `std/` + `tests/` (the one remaining `nest check`
-warning class is the *intentional* non-tail recursion lint). The remaining
-type-system item — **precise body inference** (catching a value *merely wider* than a
-declared type, e.g. a `number`-returning body declared `int`) — needs overloaded
-arithmetic sigs or occurrence-typing and is the historical false-positive source, so
-it stays deferred (ADR-011) until a consumer justifies the risk.
+**closure-compiling VM** (now the default engine, ADR-076) are all done. `nest check`
+is at **zero warnings** across `std/` + `tests/`: the checker is false-positive-clean,
+and the few tests that *deliberately* trip a correct lint (non-tail-recursive JIT
+torture fns, a redundant `match` clause under test) opt out with the
+`(check-allow :category form…)` directive (a runtime no-op marker the checker reads;
+see `docs/type-annotations.md`). **Precise body inference** shipped for the catchable
+cases — the int-closed and float-contagion arithmetic rules flow a body's provable
+type to the return check (`(+ x 1.5)` declared `int` → warns "yields float"). Only the
+*merely-wider* residue remains deferred (a body typed exactly `number` declared `int`,
+e.g. `(/ x 2)` which is genuinely int-or-float): pinning it would need occurrence/range
+analysis and flagging it would false-positive, so it stays out (ADR-011).
 
 The later milestones are already underway (vertical-slice style, ADR-045/046):
 **M2 editor data model** — the `ropey`-backed `Value::Rope` kernel + the

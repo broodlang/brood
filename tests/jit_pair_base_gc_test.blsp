@@ -26,9 +26,11 @@
 (defmodule jit-pair-base-gc-test
   (:use test))
 
-(defn alloc-pressure (n)
-  "Build a LOCAL cons-list of length n — pure allocation pressure, result dropped."
-  (if (= n 0) nil (cons n (alloc-pressure (- n 1)))))
+;; deliberately non-tail (the allocation-under-recursion is the subject) — opt out.
+(check-allow :non-tail-recursion
+  (defn alloc-pressure (n)
+    "Build a LOCAL cons-list of length n — pure allocation pressure, result dropped."
+    (if (= n 0) nil (cons n (alloc-pressure (- n 1))))))
 
 ;; ---- arm under test: first ----
 ;; Reads (first xs) twice with a non-tail allocating call between the two reads.

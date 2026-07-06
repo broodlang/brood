@@ -382,9 +382,17 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
   position — assignment semantics (consistent subtyping) where disjointness can't
   reach, with a *bounded-dynamic* (`dynamic_within(t)`) for a redefinable global that
   `Option<Ty>` can't express. FP-safe by construction (over-approximated → `∩`,
-  precise → `⊆`). ⬜ Still: **precise body inference** — a value *merely wider* than a
-  declared type (body typed `number`, declared `int`) needs overloaded arithmetic
-  sigs or occurrence typing (the historical false-positive source).
+  precise → `⊆`). ✅ **Precise body inference** — a body whose type is provably
+  narrower/other than its `number` sig now flows to the return check: the
+  **int-closed** rule (`(* x x)` declared `int` → `int`, no warn) and the
+  **float-contagion** rule (`+ - * /` with a provably-float operand, plus
+  `sqrt`/`sin`/`cos`/`tan`, → `float`, disjoint from `int` → warns `(+ x 1.5)`
+  declared `int`) — both hand-rolled overloaded arithmetic sigs in
+  `numeric_call_ty`, sound because each result stays `⊆ number`. ⬜ The residual
+  *merely-wider* case — a body typed exactly `number` (int ∪ float) declared `int`,
+  e.g. `(/ x 2)` which is genuinely `int` or `float` — stays deferred: it can't be
+  pinned without occurrence/range analysis, and flagging it would false-positive on
+  the int-valued runs (the historical false-positive source).
   Additive; gated on real need (ADR-011). Advisory throughout — never gates, never
   inhibits the dynamic language; not the TypeScript route.
 - ✅ **Opt-in type annotations + runtime contracts** (ADR-082). `(sig name (… ->

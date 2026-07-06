@@ -254,6 +254,24 @@ for variadic tails."
         `(sig! ~name ~type)
         nil)))
 
+;; ---- checker suppression: `(check-allow :category form…)` -------------------
+;; A form-level opt-out for an advisory lint the author deliberately trips — a
+;; non-tail-recursive function written to exercise the deep-recursion path, a
+;; redundant `match` clause under test. The reader strips comments before the
+;; checker runs, so a `;;`-directive can't reach it; this macro expands to a
+;; marker (`%lint-allow`) that survives macroexpansion and that `nest check`
+;; reads. A pure runtime no-op — it just yields the wrapped body's value.
+;; Recognised categories: `:non-tail-recursion`, `:unreachable-clause`. Wraps one
+;; or many forms (top-level defns or an inner expression). See docs/type-annotations.md.
+(defn %lint-allow (category value)
+  "Identity on `value` — the runtime side of `check-allow` (a checker marker)."
+  value)
+(defmacro check-allow (category & body)
+  "Suppress an advisory checker lint over the wrapped forms. `category` is a
+keyword: `:non-tail-recursion` or `:unreachable-clause`. A runtime no-op; the
+marker is read only by the type checker (`nest check`)."
+  `(%lint-allow ~category (do ~@body)))
+
 ;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------
 ;; The opt-in *sound* half of the type system (the paper's "strong arrow", done
 ;; Brood-side). `(sig …)` informs only the checker; `(sig! …)` *also* wraps the

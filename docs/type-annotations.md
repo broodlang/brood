@@ -261,6 +261,37 @@ this fixes (a genuinely mismatched `defmodule`-qualified `sig`+`defn` pair)
 doesn't currently occur anywhere in the committed source, so the fix closes
 the gap without surfacing any pre-existing bugs. See ADR-126.
 
+## Suppressing an advisory lint on purpose — `(check-allow :category form…)`
+
+The advisory lints are false-positive-clean, but some test code *deliberately*
+trips a correct lint: a non-tail-recursive function written to exercise the
+deep-recursion / JIT-recursive-arm path, or a redundant `match` clause proving the
+first match wins. The lint is right; the warning is unwanted. Comments can't
+express the opt-out — the reader strips them before the checker runs — so the
+directive is a form:
+
+```lisp
+(check-allow :non-tail-recursion
+  (defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2))))))
+
+(assert= (check-allow :unreachable-clause (match 1 (1 :first) (1 :second) (_ :z)))
+         :first)
+```
+
+`check-allow` is a prelude macro that expands to a `(%lint-allow :category (do …))`
+marker. That marker **survives macroexpansion** (which is what the checker walks)
+and is a **pure runtime no-op** — `%lint-allow` just yields its body's value, so a
+wrapped top-level `defn` still defines globally and a wrapped expression still
+returns its value. It wraps one form or many.
+
+The checker reads the marker: `recursion.rs` skips a `:non-tail-recursion`-tagged
+subtree entirely, and a `SUPPRESS_*` bit (see `check/ctx.rs`) threads down the walk
+so `check_if`'s redundant-clause lint declines inside an `:unreachable-clause`
+scope. Recognised categories today: **`:non-tail-recursion`** and
+**`:unreachable-clause`**. An unrecognised category suppresses nothing — a typo is a
+no-op that still lints, never a silent blanket opt-out. This is what lets
+`nest check` stay at **zero** warnings project-wide without weakening any lint.
+
 ## Why this is the right "more sound" move for Brood
 
 Classic type soundness needs gating; we don't gate. Sound *gradual* typing

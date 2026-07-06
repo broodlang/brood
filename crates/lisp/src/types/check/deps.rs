@@ -109,7 +109,10 @@ pub(super) fn take_dep_keys(heap: &mut Heap) -> Value {
         (Value::keyword(value::intern(K_SYMS)), syms_l),
         (Value::keyword(value::intern(K_KNS)), kns_l),
         (Value::keyword(value::intern(K_EXP)), exp_l),
-        (Value::keyword(value::intern(K_PROTO)), Value::Bool(dep.protocols)),
+        (
+            Value::keyword(value::intern(K_PROTO)),
+            Value::Bool(dep.protocols),
+        ),
     ])
 }
 

@@ -60,8 +60,14 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // `count` dispatches string?/map?/else-fold, and bytes counts its octets) —
     // but not a number/keyword/etc.
     #[allow(non_upper_case_globals)]
-    const countable: Ty =
-        Ty::of_tags(&[Tag::Str, Tag::Map, Tag::Nil, Tag::Pair, Tag::Vector, Tag::Bytes]);
+    const countable: Ty = Ty::of_tags(&[
+        Tag::Str,
+        Tag::Map,
+        Tag::Nil,
+        Tag::Pair,
+        Tag::Vector,
+        Tag::Bytes,
+    ]);
     #[allow(non_upper_case_globals)]
     const str_ty: Ty = Ty::of(Tag::Str);
     #[allow(non_upper_case_globals)]
@@ -159,11 +165,17 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     put("string->symbol", Sig::new(vec![str_ty], sym_ty));
     // String predicates: nested calls or let+branch bodies.
     //   starts-with?/ends-with? — let + and + branch.
-    //   string-contains?        — (>= (index-of s needle) 0): nested call.
     //   blank?                  — let + cond recursion.
-    for n in ["starts-with?", "ends-with?", "string-contains?"] {
+    for n in ["starts-with?", "ends-with?"] {
         put(n, Sig::new(vec![str_ty, str_ty], bool_ty));
     }
+    //   string-contains? — `(>= (index-of s needle) 0)`; `index-of` treats a nil
+    //   haystack as the empty string (→ false), so arg 1 is `string | nil`, not a
+    //   plain `string` (a documented graceful-nil contract, see chaos_test).
+    put(
+        "string-contains?",
+        Sig::new(vec![str_ty.union(nil_ty), str_ty], bool_ty),
+    );
     put("blank?", Sig::new(vec![str_ty], bool_ty));
     // String transforms: all call recursive helpers or use `apply`; infer_sig bails.
     //   trim/triml/trimr   — call tail-recursive aux helpers.
@@ -364,7 +376,9 @@ pub(super) fn declared_heap_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// form). `None` for a plain single-arrow sig or no declaration at all.
 pub(super) fn declared_heap_overload(heap: &Heap, sym: Symbol) -> Option<Vec<Sig>> {
     let type_value = super::deps::obs_declared_sig_value(heap, sym)?;
-    annot::parse_type(heap, type_value)?.overload_sigs().cloned()
+    annot::parse_type(heap, type_value)?
+        .overload_sigs()
+        .cloned()
 }
 
 /// The **value-type** counterpart of [`declared_heap_sig`] — a non-arrow

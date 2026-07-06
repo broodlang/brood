@@ -178,8 +178,19 @@ pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
 /// narrow `x` (not the bool `cond` itself). The aliasing is sound because
 /// Brood is immutable: between the let and the if, neither `x` nor `cond` can
 /// change, so the assertion the guard recorded still applies.
+/// Advisory-lint categories a `(check-allow …)` marker can suppress for the
+/// subtree it wraps. A cheap `u8` bitset so it copies with every `Ctx` clone
+/// (`narrow`/`bind` clone the ctx per branch); the whole checker needs only a
+/// couple of bits. See `docs/type-annotations.md` and the `%lint-allow` handling
+/// in `walk.rs` / `recursion.rs`.
+pub(super) const SUPPRESS_NON_TAIL: u8 = 1 << 0;
+pub(super) const SUPPRESS_UNREACHABLE: u8 = 1 << 1;
+
 #[derive(Clone, Default)]
 pub(super) struct Ctx {
+    /// Lint categories suppressed in the current subtree (a `(check-allow …)`
+    /// scope, ORed as we descend). `0` = nothing suppressed (the common case).
+    suppressed: u8,
     types: HashMap<Symbol, Ty>,
     /// `bound-name → (variable, type-it-asserts)`: a `let`-stored guard result.
     guards: HashMap<Symbol, (Symbol, Ty)>,
@@ -294,6 +305,24 @@ impl Ctx {
             || self.guards.contains_key(&sym)
             || self.aliases.contains_key(&sym)
             || self.file_globals.contains(&sym)
+    }
+    /// Is `sym` a `def`/`defn`/`defdyn`-defined **file-global** (as opposed to a
+    /// lexical binder)? Used by the unused-`let` lint to tell a deliberate shadow
+    /// of a file-global (`(let (*dt* 5) …)`) from a genuine leftover.
+    pub(super) fn is_file_global(&self, sym: Symbol) -> bool {
+        self.file_globals.contains(&sym)
+    }
+    /// A copy of this ctx with the given lint categories additionally suppressed
+    /// (a `(check-allow …)` scope entered). ORs into any already-suppressed set.
+    pub(super) fn with_suppressed(&self, mask: u8) -> Ctx {
+        let mut c = self.clone();
+        c.suppressed |= mask;
+        c
+    }
+    /// Is any category in `mask` currently suppressed by an enclosing
+    /// `(check-allow …)`? Checked by a lint before emitting a warning.
+    pub(super) fn is_suppressed(&self, mask: u8) -> bool {
+        self.suppressed & mask != 0
     }
     /// Is `sym` a genuine *lexical* binder in scope — a fn/lambda/defn param or a
     /// `let`/`letrec` name (the `locals` set), as opposed to a guard-narrowed free

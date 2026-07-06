@@ -538,12 +538,11 @@ impl Ty {
     /// every existing caller already immediately `.cloned()`s the borrowed
     /// case anyway.
     pub fn elem_ty(&self) -> Option<Ty> {
-        self.elem
-            .as_deref()
-            .cloned()
-            .or_else(|| self.tuple.as_ref().map(|elems| {
-                elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t))
-            }))
+        self.elem.as_deref().cloned().or_else(|| {
+            self.tuple
+                .as_ref()
+                .map(|elems| elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t)))
+        })
     }
 
     /// The type of a concrete value — the bridge from a runtime value to its type.
@@ -581,6 +580,7 @@ impl Ty {
             "symbol?" => Ty::of(Tag::Sym),
             "keyword?" => Ty::of(Tag::Keyword),
             "string?" => Ty::of(Tag::Str),
+            "bytes?" => Ty::of(Tag::Bytes),
             "pair?" => Ty::of(Tag::Pair),
             "vector?" => Ty::of(Tag::Vector),
             "map?" => Ty::of(Tag::Map),
@@ -890,12 +890,7 @@ impl Ty {
                 // itself is absent, rather than rejecting outright.
                 let self_elem = self.elem.clone().or_else(|| {
                     self.tuple.as_ref().map(|elems| {
-                        Arc::new(
-                            elems
-                                .iter()
-                                .cloned()
-                                .fold(Ty::NEVER, |acc, t| acc.union(t)),
-                        )
+                        Arc::new(elems.iter().cloned().fold(Ty::NEVER, |acc, t| acc.union(t)))
                     })
                 });
                 match &self_elem {
@@ -1367,7 +1362,11 @@ impl fmt::Display for Ty {
         // grammar directly, unlike a record's `{ }` shorthand.
         if let Some(elems) = self.tuple_elems() {
             if self.tags == VECTOR_BIT {
-                let joined = elems.iter().map(Ty::to_string).collect::<Vec<_>>().join(", ");
+                let joined = elems
+                    .iter()
+                    .map(Ty::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 return write!(f, "(tuple {joined})");
             }
         }
@@ -1397,7 +1396,11 @@ impl fmt::Display for Ty {
         // any other tag this type also admits (`:a | nil`). Keywords sorted
         // by name (stable regardless of intern order); ints numerically;
         // bools/strings lexicographically.
-        if self.lit.is_some() || self.lit_int.is_some() || self.lit_bool.is_some() || self.lit_str.is_some() {
+        if self.lit.is_some()
+            || self.lit_int.is_some()
+            || self.lit_bool.is_some()
+            || self.lit_str.is_some()
+        {
             let mut kw_parts: Vec<String> = self
                 .lit
                 .iter()
@@ -2119,8 +2122,8 @@ mod tests {
         let g = arr(vec![Ty::of(Tag::Bool)], Ty::of(Tag::Bool));
         let overloaded = f.clone().intersect(g.clone());
         let any_fn = Ty::of_tags(&[Tag::Fn, Tag::Native]); // unrefined
-        // any_fn ∩ overloaded and overloaded ∩ any_fn both keep the overload
-        // untouched (one side contributes zero candidates).
+                                                           // any_fn ∩ overloaded and overloaded ∩ any_fn both keep the overload
+                                                           // untouched (one side contributes zero candidates).
         assert_eq!(
             any_fn.clone().intersect(overloaded.clone()).overload_sigs(),
             overloaded.overload_sigs()

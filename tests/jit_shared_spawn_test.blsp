@@ -49,7 +49,10 @@
 ;; each racing its own. `calc`/`hr-b` above are non-recursive, so they never inline;
 ;; this exercises the inline path specifically, including its hot-reload invalidation.
 ;; `:isolated` — redefines a shared global.
-(defn rr (n) (if (< n 1) 0 (+ n (rr (- n 1)))))        ;; sum 1..n  -> rr(10) = 55
+;; `rr` is deliberately non-tail (it warms the JIT's inlined recursive arm, the
+;; subject of this test) — opt out of the non-tail lint here and at the redef below.
+(check-allow :non-tail-recursion
+  (defn rr (n) (if (< n 1) 0 (+ n (rr (- n 1))))))      ;; sum 1..n  -> rr(10) = 55
 (defn rr-warm (i) (if (= i 0) :done (do (rr 12) (rr-warm (- i 1)))))
 (defn rr-worker (me x) (send me [:r (rr x)]))
 (defn rr-fan (me i k x) (if (>= i k) nil (do (spawn (rr-worker me x)) (rr-fan me (+ i 1) k x))))
@@ -67,7 +70,8 @@
   (test "redefining the shared inlined fn invalidates the shared inline cache"
     ;; rr -> sum of 2n; the epoch bump must drop the shared INLINE entry, else the
     ;; second fan-out would still run the old inlined native and compute the old sum.
-    (defn rr (n) (if (< n 1) 0 (+ (* n 2) (rr (- n 1)))))
+    (check-allow :non-tail-recursion
+      (defn rr (n) (if (< n 1) 0 (+ (* n 2) (rr (- n 1))))))
     (rr-warm 5000)
     (let (me (self))
       (rr-fan me 0 500 10)

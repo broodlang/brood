@@ -15,19 +15,23 @@
 (defmodule unbox-torture-test (:use test))
 
 ;; ---- integer worker ----
-(defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2)))))
-(defn ut-deep (n) (if (< n 1) 0 (+ 1 (ut-deep (- n 1)))))
-(defn ut-fact (n) (if (< n 1) 1 (* n (ut-fact (- n 1)))))
-(defn ut-ack (m n)
-  (if (< m 1) (+ n 1)
-    (if (< n 1) (ut-ack (- m 1) 1) (ut-ack (- m 1) (ut-ack m (- n 1))))))
-(defn ut-digsum (n) (if (< n 1) 0 (+ (rem n 10) (ut-digsum (quot n 10)))))
-(defn ut-xor (n) (if (< n 1) 0 (bit-xor n (ut-xor (- n 1)))))
-(defn ut-let (n) (if (< n 2) n (let (h (quot n 2)) (+ (ut-let (- n 1)) (ut-let (- n 2)) h))))
-(defn ut-div0 (n) (if (< n 0) 0 (+ (rem 10 n) (ut-div0 (- n 1)))))   ; ÷0 at n=0
-(defn ut-div (n) (if (< n 1) 1 (/ (* 2 (ut-div (- n 1))) 1)))         ; exact `/` stays in the worker
-(defn ut-div-inexact (n) (if (< n 2) n (+ (ut-div-inexact (- n 1)) (/ n 3)))) ; inexact `/` deopts to Float
-(defn ut-div-slash0 (n) (if (< n 0) 0 (+ (/ 10 n) (ut-div-slash0 (- n 1))))) ; ÷0 at n=0, via `/`
+;; Every worker below is deliberately *non-tail* recursive — the whole point is
+;; to exercise the JIT's recursive-arm lowering and the depth cliff. `check-allow`
+;; opts the group out of the (correct, but here intentional) non-tail lint.
+(check-allow :non-tail-recursion
+  (defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2)))))
+  (defn ut-deep (n) (if (< n 1) 0 (+ 1 (ut-deep (- n 1)))))
+  (defn ut-fact (n) (if (< n 1) 1 (* n (ut-fact (- n 1)))))
+  (defn ut-ack (m n)
+    (if (< m 1) (+ n 1)
+      (if (< n 1) (ut-ack (- m 1) 1) (ut-ack (- m 1) (ut-ack m (- n 1))))))
+  (defn ut-digsum (n) (if (< n 1) 0 (+ (rem n 10) (ut-digsum (quot n 10)))))
+  (defn ut-xor (n) (if (< n 1) 0 (bit-xor n (ut-xor (- n 1)))))
+  (defn ut-let (n) (if (< n 2) n (let (h (quot n 2)) (+ (ut-let (- n 1)) (ut-let (- n 2)) h))))
+  (defn ut-div0 (n) (if (< n 0) 0 (+ (rem 10 n) (ut-div0 (- n 1)))))   ; ÷0 at n=0
+  (defn ut-div (n) (if (< n 1) 1 (/ (* 2 (ut-div (- n 1))) 1)))         ; exact `/` stays in the worker
+  (defn ut-div-inexact (n) (if (< n 2) n (+ (ut-div-inexact (- n 1)) (/ n 3)))) ; inexact `/` deopts to Float
+  (defn ut-div-slash0 (n) (if (< n 0) 0 (+ (/ 10 n) (ut-div-slash0 (- n 1)))))) ; ÷0 at n=0, via `/`
 
 (describe "unboxed-i64 register worker"
   (test "shallow-wide recursion (fib)"
@@ -62,11 +66,12 @@
     (assert= (ut-div-inexact 20) 70.66666666666667)
     (assert-error (ut-div-slash0 5))))
 
-;; ---- float sibling ----
-(defn ut-ffib (n) (if (< n 2.0) n (+ (ut-ffib (- n 1.0)) (ut-ffib (- n 2.0)))))
-(defn ut-fpow (b n) (if (< n 1.0) 1.0 (* b (ut-fpow b (- n 1.0)))))
-(defn ut-fdeep (n) (if (< n 1.0) 0.0 (+ 1.0 (ut-fdeep (- n 1.0)))))
-(defn ut-flet (n) (if (< n 2.0) n (let (h (/ n 2.0)) (+ (ut-flet (- n 1.0)) (ut-flet (- n 2.0)) h))))
+;; ---- float sibling ---- (also deliberately non-tail; see the integer group)
+(check-allow :non-tail-recursion
+  (defn ut-ffib (n) (if (< n 2.0) n (+ (ut-ffib (- n 1.0)) (ut-ffib (- n 2.0)))))
+  (defn ut-fpow (b n) (if (< n 1.0) 1.0 (* b (ut-fpow b (- n 1.0)))))
+  (defn ut-fdeep (n) (if (< n 1.0) 0.0 (+ 1.0 (ut-fdeep (- n 1.0)))))
+  (defn ut-flet (n) (if (< n 2.0) n (let (h (/ n 2.0)) (+ (ut-flet (- n 1.0)) (ut-flet (- n 2.0)) h)))))
 
 (describe "unboxed-f64 register worker"
   (test "float shallow-wide recursion"

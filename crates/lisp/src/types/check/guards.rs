@@ -422,7 +422,12 @@ fn literal_values_equal(heap: &Heap, a: Value, b: Value) -> bool {
 /// found. Stops silently as soon as `form` isn't itself another same-symbol
 /// `%eq`-guarded `if` (a catch-all body, a `match-no-match` throw, or a
 /// divergent hand-written `if`) — nothing more to reason about.
-pub(super) fn find_redundant_clause(heap: &Heap, form: Value, sym: Symbol, lit: Value) -> Option<Value> {
+pub(super) fn find_redundant_clause(
+    heap: &Heap,
+    form: Value,
+    sym: Symbol,
+    lit: Value,
+) -> Option<Value> {
     let items = list_items(heap, form)?;
     if items.len() != 4 {
         return None;
@@ -749,19 +754,49 @@ fn let_bindings(heap: &Heap, form: Value) -> Option<Vec<Value>> {
     }
 }
 
-/// Result type for the **integer-closed** arithmetic ops — the "int op int → int"
-/// rule. The curated sigs type `+ - * abs` etc. as `(number… -> number)`, which is
-/// sound but too wide: an integer operation on integers yields an integer (an i64
-/// or a bignum — both fold to `Tag::Int`; see `value::tag`), so when every argument
-/// is *known* and `⊆ int`, the result is exactly `int`. This is what lets
-/// `(defn f (x) (* x x))` declared `(int -> int)` not warn while keeping the wider
-/// `number` result for mixed/float operands.
+/// Result type for the arithmetic ops the curated `(number… -> number)` sigs type
+/// too widely — two sound sharpenings that both stay a *subtype* of `number`, so
+/// they can only make a result more precise, never wrong:
 ///
-/// Returns `None` (defer to the curated `number` sig) unless EVERY argument types
-/// to a known `⊆ int` type — so a float or unknown operand stays `number`, never
-/// narrowing below what the value can actually be (no int-vs-float caller-check
-/// regression). `/` is deliberately EXCLUDED: integer division can yield a float.
+/// - **Integer-closed** ("int op int → int"): an integer operation on integers
+///   yields an integer (an i64 or a bignum — both fold to `Tag::Int`, see
+///   `value::tag`), so `+ - * quot rem mod abs` with every operand `⊆ int` is
+///   exactly `int`. This is what lets `(defn f (x) (* x x))` declared `(int -> int)`
+///   not warn. `/` is EXCLUDED here: integer division can yield a float
+///   (`(/ 6 2)` → `3`, `(/ 5 2)` → `2.5`).
+/// - **Float-contagion** ("anything op float → float"): IEEE/tower contagion means
+///   `+ - * /` with any operand *provably* `⊆ float` yields a `float`. Since `float`
+///   is disjoint from `int`, this is what catches an `(int -> int)`-declared body
+///   doing float arithmetic (`(+ x 1.5)` → `float`), plus the always-float unary
+///   math `sqrt sin cos tan` — mismatches the flat `number` sig would silently miss.
+///
+/// Returns `None` (defer to the curated `number` sig) whenever a rule can't fire
+/// with certainty — a non-numeric or unknown operand, a mixed int/`number` set that
+/// proves neither all-int nor any-float, or zero operands (a bare `(+)`). Deferring
+/// is always sound: the wider `number` never narrows below what the value can be.
 fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Option<Ty> {
+    let int = Ty::of(Tag::Int);
+    let float = Ty::of(Tag::Float);
+    let num = Ty::NUMBER;
+
+    // Always-float unary math: `sqrt`/`sin`/`cos`/`tan` return a float even for a
+    // perfect square / whole-number argument (`(sqrt 4)` → `2.0`). Only fires on a
+    // known numeric argument (a non-numeric one is a separate arg-type error the
+    // curated sig already flags).
+    let is_always_float = value::symbol_is(head, "sqrt")
+        || value::symbol_is(head, "sin")
+        || value::symbol_is(head, "cos")
+        || value::symbol_is(head, "tan");
+    if is_always_float {
+        let arg = *items.get(1)?;
+        let t = expr_ty(heap, arg, ctx)?;
+        return t.is_subtype(&num).then_some(float);
+    }
+
+    let is_contagious = value::symbol_is(head, "+")
+        || value::symbol_is(head, "-")
+        || value::symbol_is(head, "*")
+        || value::symbol_is(head, "/");
     let is_int_closed = value::symbol_is(head, "+")
         || value::symbol_is(head, "-")
         || value::symbol_is(head, "*")
@@ -769,23 +804,32 @@ fn numeric_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
         || value::symbol_is(head, "rem")
         || value::symbol_is(head, "mod")
         || value::symbol_is(head, "abs");
-    if !is_int_closed {
+    if !is_contagious && !is_int_closed {
         return None;
     }
-    let int = Ty::of(Tag::Int);
-    // Every operand must be known and an integer; one float / unknown defers.
+    // Every operand must be a known numeric type; one non-numeric / unknown defers.
     // (Zero operands — e.g. a bare `(+)` — also defers, leaving the curated sig.)
     let args = items.get(1..)?;
     if args.is_empty() {
         return None;
     }
+    let mut all_int = true;
+    let mut any_float = false;
     for &arg in args {
         let t = expr_ty(heap, arg, ctx)?;
-        if !t.is_subtype(&int) {
+        if !t.is_subtype(&num) {
             return None;
         }
+        all_int &= t.is_subtype(&int);
+        any_float |= t.is_subtype(&float);
     }
-    Some(int)
+    if is_contagious && any_float {
+        return Some(float);
+    }
+    if is_int_closed && all_int {
+        return Some(int);
+    }
+    None
 }
 
 /// Element-aware result type for the sequence builtins — `None` falls through to
@@ -933,7 +977,11 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
         let map_arg = *items.get(1)?;
         let map_ty = expr_ty(heap, map_arg, ctx);
         if let Value::Keyword(key) = items[2] {
-            if let Some((fty, _required)) = map_ty.as_ref().and_then(Ty::record_fields).and_then(|f| f.get(&key)) {
+            if let Some((fty, _required)) = map_ty
+                .as_ref()
+                .and_then(Ty::record_fields)
+                .and_then(|f| f.get(&key))
+            {
                 return Some(fty.clone().union(Ty::of(Tag::Nil)));
             }
         }

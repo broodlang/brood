@@ -213,7 +213,11 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
             return;
         };
         // items = [defmodule, mod-name, doc?, clause...]; clauses follow name + optional doc.
-        let first_clause = if matches!(items.get(2), Some(Value::Str(_))) { 3 } else { 2 };
+        let first_clause = if matches!(items.get(2), Some(Value::Str(_))) {
+            3
+        } else {
+            2
+        };
         for clause in items.iter().skip(first_clause) {
             let Some(citems) = list_items(heap, *clause) else {
                 continue;
@@ -277,8 +281,10 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 // Load the module if absent (no `mod/*` globals) — the standalone path; in a
                 // whole-project check it's already loaded, so this is skipped.
                 if deps::obs_module_exports(heap, &prefix).is_empty() {
-                    let quoted =
-                        heap.list(vec![Value::Sym(value::intern("quote")), Value::Sym(mod_sym)]);
+                    let quoted = heap.list(vec![
+                        Value::Sym(value::intern("quote")),
+                        Value::Sym(mod_sym),
+                    ]);
                     let form = heap.list(vec![Value::Sym(value::intern("require")), quoted]);
                     let root = heap.global();
                     let _ = crate::eval::eval(heap, form, root); // advisory: swallow load errors
@@ -953,15 +959,20 @@ mod tests {
 
         // Call-site: the optional argument's declared type is checked, same
         // as a required one.
-        let w = file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 2)");
+        let w = file_warnings(
+            "(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 2)",
+        );
         assert!(
-            w.iter().any(|m| m.contains("g: argument 2 expects string") && m.contains("int")),
+            w.iter()
+                .any(|m| m.contains("g: argument 2 expects string") && m.contains("int")),
             "an optional arg's declared type must be checked: {w:?}"
         );
 
         // Arity: calling with just the required arg, or with the optional
         // one supplied, is fine; one too many is an arity error.
-        let w = file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1)");
+        let w = file_warnings(
+            "(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1)",
+        );
         assert!(
             w.iter().all(|m| !m.contains("number of arguments")),
             "omitting an optional arg must not warn: {w:?}"
@@ -972,10 +983,13 @@ mod tests {
 (g 1 "x")"#,
         );
         assert!(
-            w.iter().all(|m| !m.contains("number of arguments") && !m.contains("expects string")),
+            w.iter()
+                .all(|m| !m.contains("number of arguments") && !m.contains("expects string")),
             "supplying the optional arg with the right type must not warn: {w:?}"
         );
-        let w = file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 \"x\" 2)");
+        let w = file_warnings(
+            "(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 \"x\" 2)",
+        );
         assert!(
             w.iter().any(|m| m.contains("number of arguments")),
             "one arg beyond required+optional must still be an arity error: {w:?}"
@@ -990,10 +1004,16 @@ mod tests {
             "(sig g (int &optional string -> int))\n\
              (defn g (a &optional b) (if (nil? b) a (+ a (string-length b))))",
         );
-        assert!(w.is_empty(), "a defensive nil-check on an optional param must not warn: {w:?}");
-        let w = file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) (+ a b))");
         assert!(
-            w.iter().any(|m| m.contains("+: argument 2 expects number") && m.contains("nil | string")),
+            w.is_empty(),
+            "a defensive nil-check on an optional param must not warn: {w:?}"
+        );
+        let w = file_warnings(
+            "(sig g (int &optional string -> int))\n(defn g (a &optional b) (+ a b))",
+        );
+        assert!(
+            w.iter()
+                .any(|m| m.contains("+: argument 2 expects number") && m.contains("nil | string")),
             "using an optional param unconditionally as non-nil must still warn: {w:?}"
         );
 
@@ -1003,7 +1023,8 @@ mod tests {
             "(sig h (int &optional string & number -> int))\n(defn h (a &optional b & c) a)\n(h 1 \"x\" true)",
         );
         assert!(
-            w.iter().any(|m| m.contains("h: argument 3 expects number") && m.contains("bool")),
+            w.iter()
+                .any(|m| m.contains("h: argument 3 expects number") && m.contains("bool")),
             "a rest arg after an optional one must still be checked: {w:?}"
         );
 
@@ -1025,18 +1046,18 @@ mod tests {
         // (not a widened uniform element type), so a mismatched literal
         // argument is caught by the ordinary disjointness check — no new
         // machinery needed at the call site itself.
-        let w = file_warnings(
-            "(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [\"x\" 1])",
-        );
+        let w = file_warnings("(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [\"x\" 1])");
         assert!(
-            w.iter().any(|m| m.contains("f: argument 1 expects (tuple int, string)")
-                && m.contains("got (tuple string, int)")),
+            w.iter()
+                .any(|m| m.contains("f: argument 1 expects (tuple int, string)")
+                    && m.contains("got (tuple string, int)")),
             "a mismatched tuple-shaped literal argument must warn: {w:?}"
         );
-        let w = file_warnings(
-            "(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\"])",
+        let w = file_warnings("(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\"])");
+        assert!(
+            w.is_empty(),
+            "a matching tuple-shaped literal must not warn: {w:?}"
         );
-        assert!(w.is_empty(), "a matching tuple-shaped literal must not warn: {w:?}");
 
         // Different arity is disjoint too (a vector has one definite length).
         let w = file_warnings(
@@ -1055,24 +1076,34 @@ mod tests {
             "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (first t)))",
         );
         assert!(
-            w.iter().any(|m| m.contains("string-length: argument 1 expects string") && m.contains("int")),
+            w.iter().any(
+                |m| m.contains("string-length: argument 1 expects string") && m.contains("int")
+            ),
             "first on a tuple must resolve to position 0's exact type: {w:?}"
         );
         let w = file_warnings(
             "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (second t)))",
         );
-        assert!(w.is_empty(), "second on this tuple is already a string — no warning: {w:?}");
+        assert!(
+            w.is_empty(),
+            "second on this tuple is already a string — no warning: {w:?}"
+        );
         let w = file_warnings(
             "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 0)))",
         );
         assert!(
-            w.iter().any(|m| m.contains("string-length: argument 1 expects string") && m.contains("int")),
+            w.iter().any(
+                |m| m.contains("string-length: argument 1 expects string") && m.contains("int")
+            ),
             "a literal-index nth on a tuple must resolve position-exactly: {w:?}"
         );
         let w = file_warnings(
             "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 1)))",
         );
-        assert!(w.is_empty(), "nth at the string position must not warn: {w:?}");
+        assert!(
+            w.is_empty(),
+            "nth at the string position must not warn: {w:?}"
+        );
 
         // Return-type flow: a tuple-shaped return type is checked against
         // the body's inferred literal shape, same as any other declared
@@ -1082,7 +1113,8 @@ mod tests {
 (defn f () ["x" 1])"#,
         );
         assert!(
-            w.iter().any(|m| m.contains("f: declared return type (tuple int, string)")),
+            w.iter()
+                .any(|m| m.contains("f: declared return type (tuple int, string)")),
             "a mismatched declared tuple return type must warn: {w:?}"
         );
 
@@ -1090,10 +1122,11 @@ mod tests {
         // element of a `tuple<int,string>` is an `int | string`) — so passing
         // a tuple-shaped literal where a plain `(vector …)` is expected must
         // not warn just because the shapes differ.
-        let w = file_warnings(
-            "(sig g ((vector any) -> any))\n(defn g (v) v)\n(g [1 \"x\"])",
+        let w = file_warnings("(sig g ((vector any) -> any))\n(defn g (v) v)\n(g [1 \"x\"])");
+        assert!(
+            w.is_empty(),
+            "a tuple literal must satisfy a uniform vector param: {w:?}"
         );
-        assert!(w.is_empty(), "a tuple literal must satisfy a uniform vector param: {w:?}");
     }
 
     #[test]
@@ -1664,7 +1697,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("not exhaustive") && s.contains(":pending")),
+            w.iter()
+                .any(|s| s.contains("not exhaustive") && s.contains(":pending")),
             "expected a missing-:pending warning, got {w:?}"
         );
     }
@@ -1680,7 +1714,9 @@ mod tests {
 (sig f ((or :ok :error :pending) -> string))
 ";
         assert!(
-            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            file_warnings(src)
+                .iter()
+                .all(|w| !w.contains("not exhaustive")),
             "a fully-covered match should be silent, got {:?}",
             file_warnings(src)
         );
@@ -1699,7 +1735,9 @@ mod tests {
 (sig f ((or :ok :error :pending) -> string))
 ";
         assert!(
-            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            file_warnings(src)
+                .iter()
+                .all(|w| !w.contains("not exhaustive")),
             "a catch-all match should be silent, got {:?}",
             file_warnings(src)
         );
@@ -1716,7 +1754,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("not exhaustive") && s.contains("500")),
+            w.iter()
+                .any(|s| s.contains("not exhaustive") && s.contains("500")),
             "expected a missing-500 warning, got {w:?}"
         );
     }
@@ -1733,7 +1772,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("not exhaustive") && s.contains('5')),
+            w.iter()
+                .any(|s| s.contains("not exhaustive") && s.contains('5')),
             "expected a missing-5 warning, got {w:?}"
         );
     }
@@ -1749,7 +1789,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("not exhaustive") && s.contains("nil")),
+            w.iter()
+                .any(|s| s.contains("not exhaustive") && s.contains("nil")),
             "expected a missing-nil warning, got {w:?}"
         );
     }
@@ -1765,7 +1806,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("not exhaustive") && s.contains("false")),
+            w.iter()
+                .any(|s| s.contains("not exhaustive") && s.contains("false")),
             "expected a missing-false warning, got {w:?}"
         );
     }
@@ -1780,7 +1822,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("not exhaustive") && s.contains("POST")),
+            w.iter()
+                .any(|s| s.contains("not exhaustive") && s.contains("POST")),
             "expected a missing-POST warning, got {w:?}"
         );
     }
@@ -1796,7 +1839,9 @@ mod tests {
 (sig f ((or :ok 5 nil) -> string))
 ";
         assert!(
-            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            file_warnings(src)
+                .iter()
+                .all(|w| !w.contains("not exhaustive")),
             "a fully-covered mixed-kind match should be silent, got {:?}",
             file_warnings(src)
         );
@@ -1815,7 +1860,9 @@ mod tests {
 (sig f ((or :ok :error) -> string))
 ";
         assert!(
-            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            file_warnings(src)
+                .iter()
+                .all(|w| !w.contains("not exhaustive")),
             "a match mixing a literal with a destructuring pattern should stay silent, got {:?}",
             file_warnings(src)
         );
@@ -1833,7 +1880,9 @@ mod tests {
 (sig f (keyword -> string))
 ";
         assert!(
-            file_warnings(src).iter().all(|w| !w.contains("not exhaustive")),
+            file_warnings(src)
+                .iter()
+                .all(|w| !w.contains("not exhaustive")),
             "a non-literal-enum scrutinee should stay silent, got {:?}",
             file_warnings(src)
         );
@@ -1849,7 +1898,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("unreachable clause") && s.contains(":ok")),
+            w.iter()
+                .any(|s| s.contains("unreachable clause") && s.contains(":ok")),
             "expected an unreachable-clause warning, got {w:?}"
         );
     }
@@ -1865,7 +1915,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("unreachable clause") && s.contains(":ok")),
+            w.iter()
+                .any(|s| s.contains("unreachable clause") && s.contains(":ok")),
             "expected an unreachable-clause warning for the non-adjacent duplicate, got {w:?}"
         );
     }
@@ -1880,7 +1931,9 @@ mod tests {
     (_ 3)))
 ";
         assert!(
-            file_warnings(src).iter().all(|w| !w.contains("unreachable clause")),
+            file_warnings(src)
+                .iter()
+                .all(|w| !w.contains("unreachable clause")),
             "no duplicate clauses should be silent, got {:?}",
             file_warnings(src)
         );
@@ -1900,7 +1953,8 @@ mod tests {
 ";
         let w = file_warnings(src);
         assert!(
-            w.iter().any(|s| s.contains("unreachable clause") && s.contains('5')),
+            w.iter()
+                .any(|s| s.contains("unreachable clause") && s.contains('5')),
             "expected an unreachable-clause warning for the hand-written chain, got {w:?}"
         );
     }
@@ -2866,8 +2920,7 @@ mod tests {
             .eval_str(r#"(sig label string) (def label "x") (sig count int)"#)
             .expect("module A loads cleanly");
 
-        let form =
-            reader::read_one(&mut interp.heap, "(def count label)").expect("parse");
+        let form = reader::read_one(&mut interp.heap, "(def count label)").expect("parse");
         let w = check_form(&interp.heap, form);
         assert!(
             w.iter()
@@ -2881,8 +2934,7 @@ mod tests {
         interp
             .eval_str("(sig other string)")
             .expect("module A extension loads cleanly");
-        let form2 =
-            reader::read_one(&mut interp.heap, "(def other label)").expect("parse");
+        let form2 = reader::read_one(&mut interp.heap, "(def other label)").expect("parse");
         let w2 = check_form(&interp.heap, form2);
         assert!(
             w2.iter().all(|m| !m.contains("not assignable")),
@@ -2919,9 +2971,10 @@ mod tests {
         let forms = reader::read_all(&mut interp.heap, src).expect("parse");
         let w = check_file(&mut interp.heap, &forms);
         assert!(
-            w.iter().any(|(_, m)| m.contains("gap-check-test-mod/gap-check-test-f")
-                && m.contains("declared return type string")
-                && m.contains("yields int")),
+            w.iter()
+                .any(|(_, m)| m.contains("gap-check-test-mod/gap-check-test-f")
+                    && m.contains("declared return type string")
+                    && m.contains("yields int")),
             "a defmodule-qualified defn's body vs its declared return type \
              must warn, same as at the root namespace: {w:?}"
         );
@@ -3057,6 +3110,84 @@ mod tests {
             w.iter()
                 .any(|m| m.contains("f: declared return type string") && m.contains("yields int")),
             "an int body declared string must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn precise_body_inference_float_contagion() {
+        // Float-contagion: `+ - * /` with a provably-float operand is precisely
+        // `float` (int⊕float → float in the tower), and the always-float unary math
+        // `sqrt`/`sin`/`cos`/`tan` is `float` even for a whole-number argument. Since
+        // `float` is disjoint from `int`, a body declared `(int -> int)` doing float
+        // arithmetic warns — the merely-wider mismatch the flat `number` sig missed.
+        for src in [
+            "(sig f (int -> int)) (defn f (x) (+ x 1.5))",
+            "(sig f (int -> int)) (defn f (x) (* x 2.0))",
+            "(sig f (int -> int)) (defn f (x) (sqrt x))",
+            "(sig f (int -> int)) (defn f (x) (/ x 2.0))",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().any(
+                    |m| m.contains("f: declared return type int") && m.contains("yields float")
+                ),
+                "a float body declared int must warn ({src}): {w:?}"
+            );
+        }
+        // Sound-defer cases that must NOT warn: a float body declared `float` or
+        // `number`, an all-int body (int-closed rule), and `/` on two ints — which
+        // is genuinely `number` (`(/ 6 2)` → 3, `(/ 5 2)` → 2.5), so it can't be
+        // pinned to `float` and defers rather than false-positive.
+        for src in [
+            "(sig f (int -> float)) (defn f (x) (+ x 1.5))",
+            "(sig f (int -> number)) (defn f (x) (* x 2.0))",
+            "(sig f (int -> int)) (defn f (x) (* x x))",
+            "(sig f (int -> int)) (defn f (x) (/ x 2))",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("return type")),
+                "a consistent/deferred float-arithmetic body must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_allow_suppresses_targeted_lints() {
+        // A `(check-allow :non-tail-recursion …)` wrapper silences the non-tail
+        // lint for the wrapped defn — but only that category, and only inside it.
+        let non_tail = "(defn f (n) (if (< n 1) 0 (+ 1 (f (- n 1)))))";
+        let w = file_warnings(non_tail);
+        assert!(
+            w.iter().any(|m| m.contains("non-tail position")),
+            "unwrapped non-tail recursion must warn: {w:?}"
+        );
+        let w = file_warnings(&format!("(check-allow :non-tail-recursion {non_tail})"));
+        assert!(
+            w.iter().all(|m| !m.contains("non-tail position")),
+            "check-allow :non-tail-recursion must suppress: {w:?}"
+        );
+        // A mismatched category does NOT suppress (no silent blanket opt-out).
+        let w = file_warnings(&format!("(check-allow :unreachable-clause {non_tail})"));
+        assert!(
+            w.iter().any(|m| m.contains("non-tail position")),
+            "a mismatched category must not suppress the non-tail lint: {w:?}"
+        );
+        // Same for the redundant-`match`-clause lint.
+        let dup = "(defn g (x) (match x (1 :a) (1 :b) (_ :z)))";
+        assert!(
+            file_warnings(dup)
+                .iter()
+                .any(|m| m.contains("unreachable clause")),
+            "unwrapped duplicate clause must warn"
+        );
+        let wrapped =
+            "(defn g (x) (check-allow :unreachable-clause (match x (1 :a) (1 :b) (_ :z))))";
+        assert!(
+            file_warnings(wrapped)
+                .iter()
+                .all(|m| !m.contains("unreachable clause")),
+            "check-allow :unreachable-clause must suppress the redundancy lint"
         );
     }
 

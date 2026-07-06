@@ -34,6 +34,18 @@ pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Po
     let Some(items) = list_items(heap, form) else {
         return;
     };
+    // `(%lint-allow :non-tail-recursion body…)` — the `check-allow` suppression
+    // marker (see `walk.rs`). When it names *this* lint, skip its whole subtree:
+    // the wrapped defs deliberately recurse non-tail (JIT depth-cliff torture
+    // tests) and the author has opted out. A marker for a *different* category
+    // falls through and is walked normally.
+    if let Some(&Value::Keyword(cat)) = items.get(1) {
+        if matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "%lint-allow"))
+            && value::symbol_is(cat, "non-tail-recursion")
+        {
+            return;
+        }
+    }
     if let (Some(&Value::Sym(head)), true) = (items.first(), items.len() >= 3) {
         if value::symbol_is(head, kw::DEF) {
             if let Value::Sym(name) = items[1] {

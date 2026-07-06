@@ -27,7 +27,9 @@
 
 ;; a throw deep inside warmed NON-TAIL recursion, caught at the top — the arm gets
 ;; self-inlined, and the thrown error must unwind without reading a freed const.
-(defn deep (n) (if (= n 0) (error "bottom") (+ 1 (deep (- n 1)))))
+;; deliberately non-tail (the warmed recursion is the subject) — opt out of the lint.
+(check-allow :non-tail-recursion
+  (defn deep (n) (if (= n 0) (error "bottom") (+ 1 (deep (- n 1))))))
 (defn hammer3 (i caught)
   (if (= i 0) caught
     (hammer3 (- i 1) (+ caught (try (deep 30) (catch e 1))))))

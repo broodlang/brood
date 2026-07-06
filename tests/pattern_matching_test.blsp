@@ -202,7 +202,10 @@
 ;; CLAUSE ORDERING, BODIES, AND match AS AN EXPRESSION
 ;; ─────────────────────────────────────────────────────────────────────────────
 (describe "clauses and bodies"
-  (test "first matching clause wins" (assert= (match 1 (1 :first) (1 :second) (_ :z)) :first))
+  ;; the duplicate `1` clause is deliberate (proving the first wins) — opt the
+  ;; expression out of the redundant-clause lint.
+  (test "first matching clause wins"
+    (assert= (check-allow :unreachable-clause (match 1 (1 :first) (1 :second) (_ :z))) :first))
   (test "explicit catch-all binding"
     (assert= (match 99 (1 :one) (other (list :got other))) (list :got 99)))
   (test "multi-form body is an implicit do (last value)"
@@ -297,7 +300,9 @@
 (describe "fn / defn clauses"
   :serial
   (test "multi-clause recursion (fac)"
-    (defn pm-fac ((0) 1) ((n) (* n (pm-fac (- n 1)))))
+    ;; deliberately non-tail (`* n (recurse)`) — the point is multi-clause recursion.
+    (check-allow :non-tail-recursion
+      (defn pm-fac ((0) 1) ((n) (* n (pm-fac (- n 1))))))
     (assert= (pm-fac 0) 1)
     (assert= (pm-fac 5) 120))
   (test "multi-clause with a guard"

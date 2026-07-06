@@ -319,7 +319,21 @@ never a false positive.
   self-call sits in a non-tail position is flagged — deep non-tail recursion
   overflows the small green-process coroutine stack (today an uncatchable
   segfault, not a clean error). Advisory; the fix is a tail-recursive accumulator
-  or a process-driven loop.
+  or a process-driven loop. A test that *deliberately* recurses non-tail (to
+  exercise that path) opts out with `(check-allow :non-tail-recursion …)` — see
+  the suppression directive below.
+- ✅ **`(check-allow :category form…)` suppression directive.** A form-level
+  opt-out for an advisory lint the author deliberately trips — the non-tail
+  torture tests, a redundant `match` clause under test. The reader strips comments
+  before the checker runs, so a `;;`-directive can't reach it; `check-allow` (a
+  prelude macro) expands to a `%lint-allow` marker that survives macroexpansion and
+  that the checker reads, then thrown away at runtime (a pure no-op yielding the
+  wrapped body). Categories: `:non-tail-recursion` (skips the subtree in
+  `recursion.rs`) and `:unreachable-clause` (threads a `SUPPRESS_*` bit through the
+  `Ctx` so `check_if`'s redundancy lint declines). An unrecognised category
+  suppresses nothing (a typo never becomes a silent blanket opt-out). This is what
+  keeps `nest check` at **zero** warnings project-wide without weakening a correct
+  lint. See [`type-annotations.md`](type-annotations.md).
 - ✅ **Dead-clause lint** (`walk::newly_dead_sig_param`). When a `(sig …)` pins a
   parameter's type, a `match` / `cond` clause whose guard narrows that parameter
   to the empty type (`NEVER`) is provably unreachable and flagged. Sound because

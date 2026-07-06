@@ -24,8 +24,8 @@ use super::guards::{
     match_exhaustiveness_gap, render_literal_pattern,
 };
 use super::sigs::{
-    arity_of, arity_str, curated_sig, declared_heap_sig, declared_heap_value_ty,
-    is_globally_bound, sig_of,
+    arity_of, arity_str, curated_sig, declared_heap_sig, declared_heap_value_ty, is_globally_bound,
+    sig_of,
 };
 
 /// `symbol_name(s)` is a `String` allocation; we only need the spelling on
@@ -171,6 +171,33 @@ fn unbound_msg(nm: &str) -> String {
     msg
 }
 
+/// The debug-only primitives (registered under `#[cfg(debug_assertions)]`, see
+/// `builtins/mod.rs` / `builtins/system.rs`): they exist in a dev build but not a
+/// release one, so a `nest check` running in a release binary would flag every
+/// (legitimate, `bound?`-guarded) test reference as unbound. They're real
+/// primitives, so the checker knows their names regardless of the build config —
+/// the honest fix for the "release-only phantom unbound" build artifact.
+fn is_debug_only_primitive(nm: &str) -> bool {
+    matches!(nm, "%blob-ptr" | "%blob-strong-count" | "%force-panic")
+}
+
+/// The suppression bitmask a `(check-allow :category …)` marker's category
+/// keyword names. Unknown / missing → `0` (suppress nothing — a typo'd category
+/// is thus a no-op that still lints, never a silent blanket suppression). Keep
+/// the recognised names in sync with the `check-allow` docstring.
+fn lint_allow_mask(category: Option<Value>) -> u8 {
+    let Some(Value::Keyword(k)) = category else {
+        return 0;
+    };
+    if value::symbol_is(k, "non-tail-recursion") {
+        super::ctx::SUPPRESS_NON_TAIL
+    } else if value::symbol_is(k, "unreachable-clause") {
+        super::ctx::SUPPRESS_UNREACHABLE
+    } else {
+        0
+    }
+}
+
 /// A symbol in *reference* position that resolves to nothing — not a local
 /// binder, not a syntactic keyword, not a curated stdlib name, and not in the
 /// heap's globals (which includes macros and, once the project is loaded,
@@ -181,7 +208,7 @@ fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
         return false;
     }
     let nm = name_of(s);
-    if is_syntactic_keyword(&nm) {
+    if is_syntactic_keyword(&nm) || is_debug_only_primitive(&nm) {
         return false;
     }
     // A *qualified* reference (`mod/name`) whose module we don't know — no `mod/*`
@@ -525,6 +552,24 @@ pub(super) fn check_into(
     };
     let Some(&head) = items.first() else { return };
 
+    // `(%lint-allow :category body…)` — the expansion of the `check-allow`
+    // suppression macro. A runtime no-op (it just yields its body), but here it
+    // adds `:category`'s lint to the suppressed set for the wrapped subtree, so a
+    // deliberately-lint-tripping form (a non-tail-recursive JIT torture fn, a
+    // redundant `match` clause under test) can silence exactly that lint without
+    // a comment (the reader strips those before the checker runs). We still walk
+    // the body for every *other* lint.
+    if let Value::Sym(s) = head {
+        if value::symbol_is(s, "%lint-allow") {
+            let mask = lint_allow_mask(items.get(1).copied());
+            let inner = ctx.with_suppressed(mask);
+            for &arg in &items[1..] {
+                check_into(heap, arg, &inner, out);
+            }
+            return;
+        }
+    }
+
     // Special-cased forms that introduce scope or refine types. Each handles
     // its own argument-walking and returns; the generic path below doesn't run.
     if let Value::Sym(s) = head {
@@ -837,7 +882,8 @@ fn check_fn_seeded(
         // widen with `nil` and seed it as a plain (not sig-authoritative)
         // type, so a defensive `(nil? p)` in the body is never mistaken for
         // dead code the way an exact required-param contract would be.
-        let is_optional_pos = sig.is_some_and(|s| i >= s.params.len() && i < s.params.len() + s.optional.len());
+        let is_optional_pos =
+            sig.is_some_and(|s| i >= s.params.len() && i < s.params.len() + s.optional.len());
         match sig.and_then(|s| s.param(i)) {
             Some(ty) if is_optional_pos => {
                 scope = scope.bind(p, Some(ty.union(Ty::of(crate::core::value::Tag::Nil))));
@@ -1145,7 +1191,9 @@ fn check_def(
         // heap-wide fallback `gradual_of`'s reference branch already has
         // (ADR-124): `declared_heap_sig` reads the qualified store
         // `%register-sig` populates, so it matches regardless of namespace.
-        let declared = ctx.declared_sig(name).or_else(|| declared_heap_sig(heap, name));
+        let declared = ctx
+            .declared_sig(name)
+            .or_else(|| declared_heap_sig(heap, name));
         if let Some(sig) = declared {
             if let Some(fn_items) = fn_form_items(heap, value_form) {
                 check_fn_seeded(heap, &fn_items, ctx, out, Some(&sig), Some(name));
@@ -1281,13 +1329,16 @@ fn check_if(
     // always wins, so a later one is dead code). Purely structural — no
     // scrutinee `Ty` involved, so this fires on any hand-written same-symbol
     // `%eq`-if chain too, not just `match`-generated ones.
-    if let Some((sym, lit)) = literal_eq_test_raw(heap, test) {
-        if let Some(dup) = find_redundant_clause(heap, else_form, sym, lit) {
-            let label = render_literal_pattern(heap, lit).unwrap_or_else(|| "this value".to_string());
-            out.push((
-                heap.form_pos_only(dup),
-                format!("match: unreachable clause — {label} is already handled above"),
-            ));
+    if !ctx.is_suppressed(super::ctx::SUPPRESS_UNREACHABLE) {
+        if let Some((sym, lit)) = literal_eq_test_raw(heap, test) {
+            if let Some(dup) = find_redundant_clause(heap, else_form, sym, lit) {
+                let label =
+                    render_literal_pattern(heap, lit).unwrap_or_else(|| "this value".to_string());
+                out.push((
+                    heap.form_pos_only(dup),
+                    format!("match: unreachable clause — {label} is already handled above"),
+                ));
+            }
         }
     }
 
@@ -1393,10 +1444,16 @@ fn check_let(
     let mut i = 0;
     while i < binds.len() {
         let Value::Sym(name) = binds[i] else {
-            // Pattern-target binding (post-Step 4 work) — skip narrowing for it
-            // but still check the RHS as an expression.
+            // Destructuring binder (`(let ((a b) rhs) …)`): we can't pin a precise
+            // type per position here, but the pattern's symbol leaves ARE bound in
+            // the body — bind each to `None` (in scope, unknown type) so a use like
+            // `(+ a b)` doesn't misfire as an unbound-symbol error. Still check the
+            // RHS as an evaluated expression.
             check_value_leaf(heap, binds[i + 1], form, &scope, out);
             check_into(heap, binds[i + 1], &scope, out);
+            for sym in pattern_syms(heap, binds[i]) {
+                scope = scope.bind(sym, None);
+            }
             i += 2;
             continue;
         };
@@ -1456,7 +1513,16 @@ fn check_let(
                 let is_gensym = nm
                     .rsplit_once("__")
                     .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-                if !nm.starts_with('_') && !is_gensym {
+                // Exempt a binding that *shadows* an existing global or curated
+                // builtin (`(let (list …) …)`, `(let (= …) …)`): you never
+                // accidentally name a local after a builtin, so a shadow left
+                // unused is a deliberate scope-isolation / hygiene test, not a
+                // leftover. (`_`-prefixing can't express it — that changes the
+                // name being shadowed.)
+                let shadows_global = is_globally_bound(heap, name)
+                    || curated_sig(name).is_some()
+                    || ctx.is_file_global(name);
+                if !nm.starts_with('_') && !is_gensym && !shadows_global {
                     // letrec: also scan preceding elements (mutual recursion).
                     let preceding_used =
                         letrec && binds[..j].iter().any(|&f| sym_appears_in(heap, f, name));
@@ -1478,6 +1544,37 @@ fn check_let(
             }
             j += 2;
         }
+    }
+}
+
+/// The binder symbols of a destructuring pattern (`(a b)`, `[a b & rest]`,
+/// nested `((a b) c)`) — every `Value::Sym` leaf except the `&` rest marker and
+/// the `_` wildcard, which bind nothing. Literals (ints/keywords/strings) are
+/// match constraints, not binders, so they're skipped. Used to put a pattern-let's
+/// names in scope for the unbound-symbol check (a precise per-position type isn't
+/// available, so each is bound to `None`).
+fn pattern_syms(heap: &Heap, pat: Value) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    collect_pattern_syms(heap, pat, &mut out);
+    out
+}
+
+fn collect_pattern_syms(heap: &Heap, pat: Value, out: &mut Vec<Symbol>) {
+    match pat {
+        Value::Sym(s) => {
+            let nm = name_of(s);
+            if nm != "&" && nm != "_" {
+                out.push(s);
+            }
+        }
+        Value::Pair(_) | Value::Vector(_) => {
+            if let Some(items) = bindings(heap, pat) {
+                for it in items {
+                    collect_pattern_syms(heap, it, out);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
