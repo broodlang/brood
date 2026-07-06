@@ -3153,6 +3153,35 @@ mod tests {
     }
 
     #[test]
+    fn path_narrowing_through_a_record_field_guard() {
+        // `(if (int? (get r :age)) …)` narrows the *path* `(get r :age)` to `int`
+        // in the then-branch — so feeding it to `string-length` (wants string) is
+        // caught, the miss occurrence typing on bare symbols couldn't reach.
+        let w =
+            file_warnings("(defn f (r) (if (int? (get r :age)) (string-length (get r :age)) 0))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("string-length") && m.contains("got int")),
+            "an int-narrowed path fed to string-length must warn: {w:?}"
+        );
+        // Uses consistent with the narrowed type — and an unguarded access (wide
+        // type) — must NOT warn.
+        for src in [
+            "(defn g (r) (if (int? (get r :age)) (+ 1 (get r :age)) 0))",
+            "(defn h (r) (if (string? (get r :n)) (string-length (get r :n)) 0))",
+            "(defn m (r) (string-length (get r :age)))",
+            // else-branch use of a `¬string`-narrowed path must not misfire.
+            "(defn k (r) (if (string? (get r :x)) :s (get r :x)))",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("expects")),
+                "a consistent/unguarded path use must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
     fn overload_call_matching_no_arm_is_flagged() {
         // (sig f (and (int -> int) (bool -> bool))): a call whose argument is
         // disjoint from *every* arm's domain is flagged (ADR-116 completion).

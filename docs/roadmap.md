@@ -818,11 +818,17 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
 - ⬜ **Full type inference / reconstruction** — Brood infers only one-step
   straight-line bodies + guard narrowing; Elixir does guard-driven + local
   inference across a function.
-- ⬜ **Narrowing through non-variable expressions** (`is_integer(p.age)` refining
-  `p`) — still open; occurrence typing today only narrows bare symbols, not a
-  compound path like a record-field access, so this needs new design
-  (recognizing a narrowable path shape in guard analysis, computing a refined
-  record type, and looking it up again later in the branch), not a small slice.
+- 🟡 **Narrowing through non-variable expressions** — first slice **shipped**:
+  a `(get base :key)` **path** is narrowed by a type-predicate guard, so
+  `(if (int? (get r :age)) (string-length (get r :age)) …)` types the path as
+  `int` in the then-branch and catches the `string-length` misuse (`¬` narrows
+  the else-branch too). Sound under immutability (`base` and the pure `get`
+  can't change between guard and use); keyed by `(base, key)` in `Ctx`
+  (`narrow_path`/`path_ty`), recognised by `path_guard_assertion`, consulted by
+  `expr_ty`'s `get` rule; invalidated when `base` is rebound. Still ⬜: the
+  general form — an arbitrary narrowable path shape (nested `get`, computed key)
+  and *refining the record type of `base` itself* (rather than just the field
+  path), which is the deeper design.
 - ✅ **Richer `(sig …)` type-exprs** — turned out mostly already shipped:
   `&` rest params (`parse_arrow`) and nested type variables in compound
   positions (`(list ?A)`, via `SigWithVars`/`SigTerm`, type-variables.md

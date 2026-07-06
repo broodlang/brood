@@ -88,6 +88,65 @@ pub(super) struct Guard {
     pub(super) then_only: bool,
 }
 
+/// A type guard over a **compound path** `(get base key)` rather than a bare
+/// variable — occurrence typing through a record-field access. `(if (int? (get r
+/// :age)) …)` yields `PathGuard { base: r, key: :age, ty: int }`. `then_only`
+/// carries the same meaning as [`Guard`]'s (an ordinary type predicate is
+/// biconditional, so the else-branch narrows to `¬ty`).
+pub(super) struct PathGuard {
+    pub(super) base: Symbol,
+    pub(super) key: Symbol,
+    pub(super) ty: Ty,
+    pub(super) then_only: bool,
+}
+
+/// If `test` is a type predicate applied to a `(get base :key)` path — or its
+/// `(not …)` — return the [`PathGuard`] it asserts. Scoped to the record-field
+/// case (a keyword key and a bare-symbol base), the common and highest-value
+/// shape; a computed base or non-keyword key is left alone (no narrowing, no
+/// false positive). Mirrors [`guard_assertion`]'s structure for the bare-variable
+/// case.
+pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard> {
+    let items = list_items(heap, test)?;
+    let Value::Sym(head) = *items.first()? else {
+        return None;
+    };
+    let head_name = value::symbol_name(head);
+    // `(not <inner>)` — invert a biconditional inner path guard.
+    if items.len() == 2 && head_name == kw::NOT {
+        let inner = path_guard_assertion(heap, items[1])?;
+        if inner.then_only {
+            return None;
+        }
+        return Some(PathGuard {
+            ty: inner.ty.negate(),
+            ..inner
+        });
+    }
+    // `(pred? (get base :key))` — a type predicate over a record-field path.
+    if items.len() != 2 {
+        return None;
+    }
+    let ty = Ty::tested_by(&head_name)?;
+    let inner = list_items(heap, items[1])?;
+    if inner.len() != 3
+        || !matches!(inner.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "get"))
+    {
+        return None;
+    }
+    let (Value::Sym(base), Value::Keyword(key)) = (inner[1], inner[2]) else {
+        return None;
+    };
+    // A `get` whose base is locally shadowed is still a plain variable path here;
+    // narrowing keys off the base symbol either way, so no extra gating is needed.
+    Some(PathGuard {
+        base,
+        key,
+        ty,
+        then_only: false,
+    })
+}
+
 /// If `test` is a recognisable type guard over a single variable, return the
 /// [`Guard`] it implies. A leading `(not …)` flips the assertion via
 /// [`Ty::negate`]. A bare `Sym` is looked up in `ctx`'s guard-alias table (a
@@ -975,6 +1034,15 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // genuinely unknown, not an error.
     if value::symbol_is(head, "get") && items.len() >= 3 {
         let map_arg = *items.get(1)?;
+        // A guard-narrowed path `(get base :key)` wins over the declared field
+        // type — it's the *more specific* type an enclosing `(if (pred? (get base
+        // :key)) …)` proved for this branch (occurrence typing, sound under
+        // immutability). See `Ctx::path_ty` / `path_guard_assertion`.
+        if let (Value::Sym(base), Value::Keyword(key)) = (map_arg, items[2]) {
+            if let Some(t) = ctx.path_ty(base, key) {
+                return Some(t);
+            }
+        }
         let map_ty = expr_ty(heap, map_arg, ctx);
         if let Value::Keyword(key) = items[2] {
             if let Some((fty, _required)) = map_ty

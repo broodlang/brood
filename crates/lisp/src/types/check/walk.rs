@@ -21,7 +21,7 @@ use crate::types::{GradualTy, Ty};
 use super::ctx::Ctx;
 use super::guards::{
     expr_ty, find_redundant_clause, guard_assertion, is_syntactic_keyword, literal_eq_test_raw,
-    match_exhaustiveness_gap, render_literal_pattern,
+    match_exhaustiveness_gap, path_guard_assertion, render_literal_pattern,
 };
 use super::sigs::{
     arity_of, arity_str, curated_sig, declared_heap_overload, declared_heap_sig,
@@ -1435,6 +1435,21 @@ fn check_if(
             (then_ctx, else_ctx)
         }
         None => (ctx.clone(), ctx.clone()),
+    };
+    // Layer a **path** narrowing on top (occurrence typing through a `(get base
+    // :key)` access): `(if (int? (get r :age)) …)` types `(get r :age)` as `int`
+    // in the then-branch (and `¬int` in the else, for a biconditional predicate).
+    let (then_ctx, else_ctx) = match path_guard_assertion(heap, test) {
+        Some(pg) => {
+            let t = then_ctx.narrow_path(pg.base, pg.key, pg.ty.clone());
+            let e = if pg.then_only {
+                else_ctx
+            } else {
+                else_ctx.narrow_path(pg.base, pg.key, pg.ty.negate())
+            };
+            (t, e)
+        }
+        None => (then_ctx, else_ctx),
     };
     check_value_leaf(heap, then_form, form, &then_ctx, out);
     check_into(heap, then_form, &then_ctx, out);

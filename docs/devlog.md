@@ -1963,3 +1963,27 @@ unknown-typed `(f y)` stay silent.
 **Verified.** New test `overload_call_matching_no_arm_is_flagged`; `types::`
 222/222; clippy clean; **`nest check` still 0 warnings** across `std/` + `tests/`
 (no new false positives).
+
+## 2026-07-06 — Path narrowing: occurrence typing through `(get base :key)`
+
+First slice of the roadmap's "narrowing through non-variable expressions": a
+type-predicate guard over a record-field path now narrows the *path*, not just a
+bare variable. `(if (int? (get r :age)) (string-length (get r :age)) …)` types
+`(get r :age)` as `int` in the then-branch — catching the `string-length` misuse
+that the bare-symbol-only occurrence typing missed (and `¬int` narrows the else
+branch, since a type predicate is biconditional).
+
+Pieces: `Ctx` gains `path_types: (base, key) → Ty` with `narrow_path`/`path_ty`
+(and a `bind` that drops a base's paths when it's rebound); `guards.rs` gains a
+`PathGuard` + `path_guard_assertion` recognising `(pred? (get base :key))` and its
+`(not …)`; `expr_ty`'s `get` rule consults the narrowing *first* (it's the more
+specific type the guard proved); `check_if` layers the path narrowing on top of
+the existing symbol narrowing. Sound under Brood's immutability — `base` and the
+pure `get` can't change between the guard and the use, exactly like the
+bare-symbol case. Scoped to a keyword key + bare-symbol base (the record case);
+a computed base / nested path is the deferred general form.
+
+**Verified.** New test `path_narrowing_through_a_record_field_guard` (the
+string-length catch + four consistent/unguarded/else-branch no-warn cases);
+`types::` 223/223; clippy clean; **`nest check` still 0 warnings** across
+`std/` + `tests/`.

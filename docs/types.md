@@ -195,6 +195,17 @@ never a false positive.
   `not int`); `(not <inner>)` flips. Inner shadowing overrides — a fresh
   binding to an unknown RHS *removes* an outer narrowing rather than
   intersecting (otherwise the outer leaks through the shadow).
+- ✅ **Path narrowing (occurrence typing through a `(get base :key)` access).**
+  A type-predicate guard over a record-field path narrows the *path*, not just a
+  bare variable: `(if (int? (get r :age)) (string-length (get r :age)) …)` types
+  `(get r :age)` as `int` in the then-branch, catching the `string-length`
+  misuse (`¬int` in the else-branch, for a biconditional predicate). Sound under
+  immutability — `r` and the pure `get` can't change between the guard and the
+  use. `Ctx` carries `path_types: (base, key) → Ty` (`narrow_path`/`path_ty`),
+  recognised by `path_guard_assertion` and consulted by `expr_ty`'s `get` rule;
+  a rebind of `base` invalidates its path narrowings. Scoped to a keyword key
+  and a bare-symbol base (the record case) — a computed base / nested path is
+  the deferred general form.
 - ✅ **Let-bound guard aliases.** `(let (cond (int? x)) (if cond …))` now
   narrows `x` (not the bool `cond`) inside the if. The `Ctx` carries a second
   table `guards: sym → (var, asserted-ty)`; a `let` records the alias when
