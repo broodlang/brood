@@ -818,24 +818,24 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
 - ⬜ **Full type inference / reconstruction** — Brood infers only one-step
   straight-line bodies + guard narrowing; Elixir does guard-driven + local
   inference across a function.
-- 🟡 **Narrowing through non-variable expressions** — **shipped** for
-  keyword-`get` paths of **arbitrary depth**: a type-predicate guard narrows the
-  path, so `(if (int? (get r :age)) (string-length (get r :age)) …)` and the
-  nested `(if (int? (get (get cfg :db) :port)) (string-length (get (get cfg :db)
-  :port)) …)` both catch the `string-length` misuse (`¬` narrows the else-branch
-  too, and a *different* path isn't affected). Sound under immutability (the base
-  and the pure `get` chain can't change between guard and use); keyed by
-  `(base, [keys…])` in `Ctx` (`narrow_path`/`path_ty`), the chain peeled by
-  `get_path`, recognised by `path_guard_assertion`, consulted by `expr_ty`'s
-  `get` rule; invalidated when `base` is rebound. ✅ **Base refinement flows into
-  calls**: the then-branch also refines `base`'s own type to the open record
-  `{k1: {… {kn: ty}}}` the guard proves, so passing `base` to a function whose
-  parameter requires a conflicting field type is caught — e.g. `r` proven
-  `{age: int}` passed where `{age: string}` is wanted. This needed a sound
-  **record-disjointness** rule in `Ty::is_disjoint` (two records are disjoint
-  when a shared field is required on some side and its types are disjoint —
-  mirrors the tuple rule). Still ⬜: a *computed* (non-keyword) key or
-  `nth`/tuple-index path.
+- ✅ **Narrowing through non-variable expressions** — shipped for **access paths
+  of arbitrary depth**: a type-predicate guard narrows the path, mixing keyword
+  fields (`(get r :age)`) and fixed indices (`(nth t 0)`, `(first/second/third
+  …)`) freely — `(if (int? (nth (get r :items) 0)) (string-length (nth (get r
+  :items) 0)) …)` catches the misuse (`¬` narrows the else-branch too; a
+  *different* path/index isn't affected). Sound under immutability (the base and
+  the pure access chain can't change between guard and use); keyed by
+  `(base, [PathKey…])` in `Ctx` (`narrow_path`/`path_ty`), the chain peeled by
+  `path_of`, recognised by `path_guard_assertion`, consulted by `expr_ty`'s
+  unified path lookup; invalidated when `base` is rebound. **Base refinement flows
+  into calls**: for an all-field path the then-branch also refines `base`'s own
+  type to the open record `{k1: {… {kn: ty}}}` the guard proves, so passing
+  `base` where a conflicting field type is required is caught (`r` proven
+  `{age: int}` passed where `{age: string}` is wanted) — via a sound
+  **record-disjointness** rule in `Ty::is_disjoint` (disjoint when a shared field
+  is required on some side and its types are disjoint; mirrors the tuple rule).
+  The only unsupported form is a *computed* (non-literal) key/index — inherently
+  unpinnable statically, so there's nothing to narrow.
 - ✅ **Richer `(sig …)` type-exprs** — turned out mostly already shipped:
   `&` rest params (`parse_arrow`) and nested type variables in compound
   positions (`(list ?A)`, via `SigWithVars`/`SigTerm`, type-variables.md

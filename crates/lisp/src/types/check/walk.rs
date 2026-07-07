@@ -18,7 +18,7 @@ use crate::core::value::{self, Arity, Symbol, Value};
 use crate::error::Pos;
 use crate::types::{GradualTy, Ty};
 
-use super::ctx::Ctx;
+use super::ctx::{Ctx, PathKey};
 use super::guards::{
     expr_ty, find_redundant_clause, guard_assertion, is_syntactic_keyword, literal_eq_test_raw,
     match_exhaustiveness_gap, path_guard_assertion, render_literal_pattern,
@@ -1446,13 +1446,28 @@ fn check_if(
             // Refine the *base*'s record type in the then-branch so the narrowing
             // flows when `base` is passed to a function (or otherwise used as a
             // value). Sound only in the then-branch: the guard being true proves
-            // the whole `get` chain is present and typed, so `base` is an open
-            // record `{k1: {… {kn: ty}}}` (built inner-out). In the else-branch the
-            // field may simply be absent, so `base` can't be refined to a record.
-            let base_record = pg.keys.iter().rev().fold(pg.ty.clone(), |acc, &k| {
-                Ty::record_of(std::iter::once((k, (acc, true))).collect())
-            });
-            let t = t.narrow(pg.base, base_record);
+            // the whole access chain is present and typed. Only when every step is
+            // a *field* — `base` is then an open record `{k1: {… {kn: ty}}}` (built
+            // inner-out). A path with an *index* step would need a fixed-arity
+            // tuple/vector refinement we can't infer from one position, so base
+            // refinement is skipped there (the path narrowing above still applies).
+            let all_fields: Option<Vec<_>> = pg
+                .keys
+                .iter()
+                .map(|k| match k {
+                    PathKey::Field(s) => Some(*s),
+                    PathKey::Index(_) => None,
+                })
+                .collect();
+            let t = match all_fields {
+                Some(fields) => {
+                    let base_record = fields.iter().rev().fold(pg.ty.clone(), |acc, &k| {
+                        Ty::record_of(std::iter::once((k, (acc, true))).collect())
+                    });
+                    t.narrow(pg.base, base_record)
+                }
+                None => t,
+            };
             let e = if pg.then_only {
                 else_ctx
             } else {

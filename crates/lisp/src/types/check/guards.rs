@@ -16,7 +16,7 @@ use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
 use crate::types::Ty;
 
-use super::ctx::{resolve_overload_ret, Ctx};
+use super::ctx::{resolve_overload_ret, Ctx, PathKey};
 use super::sigs::{declared_heap_overload, sig_of};
 use super::walk::{is_fn_head, list_items};
 
@@ -88,48 +88,65 @@ pub(super) struct Guard {
     pub(super) then_only: bool,
 }
 
-/// A type guard over a **compound path** `(get base key)` rather than a bare
-/// variable — occurrence typing through a record-field access. `(if (int? (get r
-/// :age)) …)` yields `PathGuard { base: r, key: :age, ty: int }`. `then_only`
-/// carries the same meaning as [`Guard`]'s (an ordinary type predicate is
-/// biconditional, so the else-branch narrows to `¬ty`).
+/// A type guard over a **compound access path** — a keyword-`get` and/or fixed
+/// integer-index chain (`(get r :age)`, `(nth t 0)`, `(first (get r :xs))`) —
+/// rather than a bare variable. `(if (int? (get r :age)) …)` yields
+/// `PathGuard { base: r, keys: [Field :age], ty: int }`. `then_only` carries the
+/// same meaning as [`Guard`]'s (an ordinary type predicate is biconditional, so
+/// the else-branch narrows to `¬ty`).
 pub(super) struct PathGuard {
     pub(super) base: Symbol,
-    pub(super) keys: Vec<Symbol>,
+    pub(super) keys: Vec<PathKey>,
     pub(super) ty: Ty,
     pub(super) then_only: bool,
 }
 
-/// Peel a (possibly nested) keyword-`get` chain down to its base symbol and the
-/// ordered keyword keys, base-outward: `(get r :age)` → `(r, [:age])`,
-/// `(get (get cfg :db) :port)` → `(cfg, [:db :port])`. A bare symbol yields
-/// `(s, [])` (the recursion base — an empty-key "path" is just the variable, so
-/// callers that require a real path check for that). `None` for a non-`get`
-/// form or a non-keyword (computed) key — those aren't narrowable paths.
-pub(super) fn get_path(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<Symbol>)> {
+/// Peel a (possibly nested) access chain down to its base symbol and the ordered
+/// [`PathKey`]s, base-outward: `(get r :age)` → `(r, [Field :age])`,
+/// `(nth (get cfg :items) 0)` → `(cfg, [Field :items, Index 0])`. Recognises
+/// `get` with a keyword key and the fixed-index accessors `nth` (literal
+/// non-negative index), `first`/`second`/`third` (0/1/2). A bare symbol yields
+/// `(s, [])` (the recursion base — an empty "path" is just the variable, so
+/// callers that require a real path check for that). `None` for anything else —
+/// a computed (non-literal) key/index, `last` (arity-dependent), or a non-access
+/// form — none of which is a statically pinnable path.
+pub(super) fn path_of(heap: &Heap, expr: Value) -> Option<(Symbol, Vec<PathKey>)> {
     if let Value::Sym(s) = expr {
         return Some((s, Vec::new()));
     }
     let items = list_items(heap, expr)?;
-    if items.len() != 3
-        || !matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "get"))
-    {
-        return None;
-    }
-    let Value::Keyword(key) = items[2] else {
+    let Some(&Value::Sym(head)) = items.first() else {
         return None;
     };
-    let (base, mut keys) = get_path(heap, items[1])?;
+    let (inner, key) = if value::symbol_is(head, "get") && items.len() == 3 {
+        let Value::Keyword(k) = items[2] else {
+            return None;
+        };
+        (items[1], PathKey::Field(k))
+    } else if value::symbol_is(head, "nth") && items.len() == 3 {
+        let Value::Int(i) = items[2] else {
+            return None;
+        };
+        (items[1], PathKey::Index(usize::try_from(i).ok()?))
+    } else if value::symbol_is(head, "first") && items.len() == 2 {
+        (items[1], PathKey::Index(0))
+    } else if value::symbol_is(head, "second") && items.len() == 2 {
+        (items[1], PathKey::Index(1))
+    } else if value::symbol_is(head, "third") && items.len() == 2 {
+        (items[1], PathKey::Index(2))
+    } else {
+        return None;
+    };
+    let (base, mut keys) = path_of(heap, inner)?;
     keys.push(key);
     Some((base, keys))
 }
 
-/// If `test` is a type predicate applied to a keyword-`get` path — or its
-/// `(not …)` — return the [`PathGuard`] it asserts. Handles arbitrary nesting
-/// (`(get (get cfg :db) :port)`) via [`get_path`]; a computed base / non-keyword
-/// key is left alone (no narrowing, no false positive), and a bare variable
-/// (empty path) is deferred to the plain [`guard_assertion`]. Mirrors that
-/// function's structure for the path case.
+/// If `test` is a type predicate applied to an access path — or its `(not …)` —
+/// return the [`PathGuard`] it asserts. Handles arbitrary nesting of field/index
+/// steps via [`path_of`]; a computed key/index or a non-path form is left alone
+/// (no narrowing, no false positive), and a bare variable (empty path) is
+/// deferred to the plain [`guard_assertion`]. Mirrors that function's structure.
 pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard> {
     let items = list_items(heap, test)?;
     let Value::Sym(head) = *items.first()? else {
@@ -152,7 +169,7 @@ pub(super) fn path_guard_assertion(heap: &Heap, test: Value) -> Option<PathGuard
         return None;
     }
     let ty = Ty::tested_by(&head_name)?;
-    let (base, keys) = get_path(heap, items[1])?;
+    let (base, keys) = path_of(heap, items[1])?;
     if keys.is_empty() {
         return None; // a bare variable — `guard_assertion` handles that
     }
@@ -583,6 +600,18 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
         }
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
+            // A guard-narrowed path wins over any structural result type: if this
+            // whole form is a recognised access path (`(get …)`/`(nth …)`/
+            // `(first …)`…) that an enclosing `(if (pred? <path>) …)` narrowed,
+            // that's the most specific type for the branch (occurrence typing,
+            // sound under immutability). Subsumes the per-accessor rules below.
+            if let Some((base, keys)) = path_of(heap, form) {
+                if !keys.is_empty() {
+                    if let Some(t) = ctx.path_ty(base, &keys) {
+                        return Some(t);
+                    }
+                }
+            }
             match items.first().copied() {
                 Some(Value::Sym(s)) => {
                     if value::symbol_is(s, kw::QUOTE) {
@@ -1051,19 +1080,6 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
     // genuinely unknown, not an error.
     if value::symbol_is(head, "get") && items.len() >= 3 {
         let map_arg = *items.get(1)?;
-        // A guard-narrowed path wins over the declared field type — it's the
-        // *more specific* type an enclosing `(if (pred? <this-path>) …)` proved
-        // for this branch (occurrence typing, sound under immutability). The path
-        // is this whole `(get … :key)` chain: peel `map_arg` to `(base, prefix)`
-        // and append this key. See `Ctx::path_ty` / `path_guard_assertion`.
-        if let Value::Keyword(key) = items[2] {
-            if let Some((base, mut keys)) = get_path(heap, map_arg) {
-                keys.push(key);
-                if let Some(t) = ctx.path_ty(base, &keys) {
-                    return Some(t);
-                }
-            }
-        }
         let map_ty = expr_ty(heap, map_arg, ctx);
         if let Value::Keyword(key) = items[2] {
             if let Some((fty, _required)) = map_ty

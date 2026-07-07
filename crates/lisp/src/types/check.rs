@@ -3195,6 +3195,37 @@ mod tests {
     }
 
     #[test]
+    fn path_narrowing_through_index_paths() {
+        // `(nth t 0)` / `(first t)` / `(second …)` / `(third …)` narrow like a
+        // field path: an int-narrowed index fed to `string-length` is caught.
+        for src in [
+            "(defn f (t) (if (int? (nth t 0)) (string-length (nth t 0)) 0))",
+            "(defn f (t) (if (int? (first t)) (string-length (first t)) 0))",
+            // mixed field + index path.
+            "(defn f (r) (if (int? (nth (get r :xs) 0)) (string-length (nth (get r :xs) 0)) 0))",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter()
+                    .any(|m| m.contains("string-length") && m.contains("got int")),
+                "an int-narrowed index path must warn ({src}): {w:?}"
+            );
+        }
+        // A *different* index than the one narrowed must not warn (index-specific),
+        // and a consistent use must not warn.
+        for src in [
+            "(defn f (t) (if (int? (nth t 0)) (string-length (nth t 1)) 0))",
+            "(defn f (t) (if (int? (nth t 0)) (+ 1 (nth t 0)) 0))",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("expects")),
+                "a different/consistent index use must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
     fn path_narrowing_refines_base_record_type_into_calls() {
         // A path guard refines `base`'s *record type* in the then-branch, so it
         // flows into a call: `r` proven `{age: int}` passed where `{age: string}`

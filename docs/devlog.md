@@ -2033,3 +2033,25 @@ behavior — to `record_disjointness_needs_a_required_conflicting_field`.
 `record_disjointness_needs_a_required_conflicting_field` (4 cases); Rust lib
 **366/366**; clippy clean; **`nest check` still 0 warnings** (the new record
 disjointness added no corpus false positives).
+
+## 2026-07-07 — Path narrowing: index paths (`nth`/`first`/`second`/`third`)
+
+Completed path narrowing by generalizing the path key from a bare keyword
+`Symbol` to a `PathKey { Field(Symbol) | Index(usize) }`, so fixed-index accessors
+narrow like field access and mix freely with `get` chains:
+`(if (int? (nth (get r :items) 0)) (string-length (nth (get r :items) 0)) …)` is
+caught. `get_path` became `path_of`, recognising `get` (keyword key), `nth`
+(literal non-negative index), and `first`/`second`/`third` (0/1/2); `last` and any
+computed (non-literal) key/index are excluded — the latter is statically
+unpinnable, so there's nothing left to narrow. The per-accessor path check that
+lived in the `get` rule moved to a single unified lookup at the top of `expr_ty`'s
+call arm (covers every accessor uniformly). Base *record* refinement stays
+field-only (an index step would need a fixed-arity tuple refinement we can't infer
+from one position); an index path still narrows the access itself.
+
+**Verified.** New test `path_narrowing_through_index_paths` (nth/first + mixed
+field-index warn cases; different-index and consistent-use no-warn); the three
+`path_narrowing_*` tests pass; Rust lib 367/367; clippy clean; **`nest check`
+still 0 warnings**. This closes the roadmap's "narrowing through non-variable
+expressions" item — only a genuinely-unpinnable computed key remains, which is
+not a gap.

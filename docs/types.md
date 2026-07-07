@@ -204,15 +204,17 @@ never a false positive.
   use. `Ctx` carries `path_types: (base, [keys…]) → Ty` (`narrow_path`/`path_ty`),
   the chain peeled by `get_path`, recognised by `path_guard_assertion` and
   consulted by `expr_ty`'s `get` rule; a rebind of `base` invalidates its path
-  narrowings. Handles **nested** keyword paths of arbitrary depth
-  (`(get (get cfg :db) :port)`). The then-branch also **refines `base`'s own
-  record type** to the open record `{k1: {… {kn: ty}}}` the guard proves, so the
-  narrowing flows into a call — `r` proven `{age: int}` passed where
+  narrowings. Handles **access paths of arbitrary depth**, mixing keyword fields
+  (`(get r :age)`) and fixed indices (`(nth t 0)`, `(first/second/third …)`)
+  freely — `(get (get cfg :db) :port)`, `(nth (get r :items) 0)`. The chain is
+  peeled to `(base, [PathKey…])` by `path_of`. For an **all-field** path the
+  then-branch also **refines `base`'s own record type** to `{k1: {… {kn: ty}}}`,
+  so the narrowing flows into a call — `r` proven `{age: int}` passed where
   `{age: string}` is wanted is caught. That needed a sound **record-disjointness**
   rule in [`Ty::is_disjoint`]: two records are disjoint when a shared field is
   *required* on some side and its types are disjoint (mirrors the tuple rule;
-  only ever adds a genuine disjoint verdict). A computed (non-keyword) key is the
-  remaining deferred form.
+  only ever adds a genuine disjoint verdict). The only unsupported form is a
+  *computed* (non-literal) key/index — statically unpinnable, nothing to narrow.
 - ✅ **Let-bound guard aliases.** `(let (cond (int? x)) (if cond …))` now
   narrows `x` (not the bool `cond`) inside the if. The `Ctx` carries a second
   table `guards: sym → (var, asserted-ty)`; a `let` records the alias when
