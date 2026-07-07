@@ -426,3 +426,56 @@ fn checker_ns_caches_reflect_hot_reload_adds() {
     );
     assert!(after.iter().any(|n| n == "aaa"), "aaa still exported");
 }
+
+/// Step 2 — **aging** (the Erlang-style 2-generation core). `age_runtime` flips
+/// the RUNTIME code region to a fresh generation slot; code promoted *before* the
+/// flip keeps executing (read from its own `code_gen` slot), and code promoted
+/// *after* lands in the new slot — both live simultaneously with no rewrite. This
+/// is the read-path correctness that the whole 2-generation model rests on: a
+/// handle carries its generation, so the two slabs coexist.
+#[test]
+fn aging_flips_generation_and_both_gens_execute() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    // Generation 0: define `g` and confirm it runs.
+    assert_eq!(interp.heap.runtime_cur_gen(), 0, "starts in gen 0");
+    interp.eval_str("(defn g (x) (* x 10))").expect("define g");
+    let g0 = interp.eval_str("(g 3)").unwrap();
+    assert_eq!(interp.print(g0), "30");
+
+    // Age: target slot 1 is empty, so the flip succeeds.
+    assert!(interp.heap.age_runtime(), "should age (slot 1 empty)");
+    assert_eq!(interp.heap.runtime_cur_gen(), 1, "now in gen 1");
+
+    // Generation 1: define `h`. It lands in slot 1 while `g` still lives in slot 0.
+    interp.eval_str("(defn h (x) (+ x 100))").expect("define h");
+
+    // BOTH generations execute correctly — the two-slab read path is sound.
+    let g1 = interp.eval_str("(g 3)").unwrap();
+    assert_eq!(
+        interp.print(g1),
+        "30",
+        "gen-0 code still executes after aging"
+    );
+    let h1 = interp.eval_str("(h 3)").unwrap();
+    assert_eq!(interp.print(h1), "103", "gen-1 code executes");
+    // A closure that closes over both (calls g and h) — crosses generations in one call.
+    interp
+        .eval_str("(defn gh (x) (+ (g x) (h x)))")
+        .expect("define gh");
+    let gh1 = interp.eval_str("(gh 3)").unwrap();
+    assert_eq!(
+        interp.print(gh1),
+        "133",
+        "a gen-1 closure calling a gen-0 global works",
+    );
+
+    // Cannot age again: slot 0 is still occupied (g lives there) → 2-versions-max.
+    assert!(
+        !interp.heap.age_runtime(),
+        "second age must fail — target slot 0 not empty (g still live)",
+    );
+    assert_eq!(interp.heap.runtime_cur_gen(), 1, "stays in gen 1");
+}

@@ -811,6 +811,25 @@ struct CodeSlabs {
     envs: boxcar::Vec<OnceLock<EnvFrame>>,
 }
 
+impl CodeSlabs {
+    /// True if this generation holds no code — every slab empty. Aging may only
+    /// start a new generation in a slot that is empty (its previous generation
+    /// fully reclaimed), so a fresh gen's handle indices can't collide with a
+    /// stale generation's still-live handles (the 2-versions-max rule, ADR-091).
+    fn is_empty(&self) -> bool {
+        self.pairs.count() == 0
+            && self.vectors.count() == 0
+            && self.maps.count() == 0
+            && self.strings.count() == 0
+            && self.bigints.count() == 0
+            && self.decimals.count() == 0
+            && self.bytes.count() == 0
+            && self.ropes.count() == 0
+            && self.closures.count() == 0
+            && self.envs.count() == 0
+    }
+}
+
 /// A runtime's mutable, shared code region: the code `def`'d at runtime plus the
 /// global bindings table. All of a runtime's inner processes share one of these
 /// (via `Arc::clone`), which is what makes a `def` propagate to them — and what
@@ -990,6 +1009,40 @@ impl RuntimeCode {
     #[inline]
     fn cur_code(&self) -> &CodeSlabs {
         &self.gens[self.cur_gen()]
+    }
+    // Append a value into the *current* code generation and mint a handle tagged
+    // with that generation, so a read later resolves the right slab (2-generation
+    // collector, ADR-091). Centralised so every RUNTIME mint is gen-tagged the same
+    // way — the push slab and the handle's `code_gen` can never disagree.
+    #[inline]
+    fn push_str(&self, v: String) -> StrId {
+        let g = self.cur_gen();
+        StrId::runtime_gen(self.gens[g].strings.push(v), g)
+    }
+    #[inline]
+    fn push_bigint(&self, v: num_bigint::BigInt) -> BigIntId {
+        let g = self.cur_gen();
+        BigIntId::runtime_gen(self.gens[g].bigints.push(v), g)
+    }
+    #[inline]
+    fn push_decimal(&self, v: bigdecimal::BigDecimal) -> DecimalId {
+        let g = self.cur_gen();
+        DecimalId::runtime_gen(self.gens[g].decimals.push(v), g)
+    }
+    #[inline]
+    fn push_bytes(&self, v: Arc<SharedBlob>) -> BytesId {
+        let g = self.cur_gen();
+        BytesId::runtime_gen(self.gens[g].bytes.push(v), g)
+    }
+    #[inline]
+    fn push_rope(&self, v: ropey::Rope) -> RopeId {
+        let g = self.cur_gen();
+        RopeId::runtime_gen(self.gens[g].ropes.push(v), g)
+    }
+    #[inline]
+    fn push_vec(&self, v: VecStore) -> VecId {
+        let g = self.cur_gen();
+        VecId::runtime_gen(self.gens[g].vectors.push(v), g)
     }
     /// A fresh runtime whose global table is seeded with the prelude bindings
     /// (`symbol -> prelude value`). The code slabs start empty — user `def`s
@@ -3353,29 +3406,29 @@ impl Heap {
         match v.unpack() {
             ValueRef::Str(id) if id.region() == LOCAL => {
                 let s = self.string(id).to_string();
-                Value::str_(StrId::runtime(self.runtime.cur_code().strings.push(s)))
+                Value::str_(self.runtime.push_str(s))
             }
             ValueRef::BigInt(id) if id.region() == LOCAL => {
                 // A leaf: clone the value into the shared region (no children).
                 let n = self.bigint(id).clone();
-                Value::bigint(BigIntId::runtime(self.runtime.cur_code().bigints.push(n)))
+                Value::bigint(self.runtime.push_bigint(n))
             }
             ValueRef::Decimal(id) if id.region() == LOCAL => {
                 // A leaf: clone the value into the shared region (no children).
                 let n = self.decimal(id).clone();
-                Value::decimal(DecimalId::runtime(self.runtime.cur_code().decimals.push(n)))
+                Value::decimal(self.runtime.push_decimal(n))
             }
             ValueRef::Bytes(id) if id.region() == LOCAL => {
                 // A leaf: share the Arc<SharedBlob> into the shared region byte-clean —
                 // never through the UTF-8 string path. Just an Arc bump.
                 let b = Arc::clone(self.bytes(id));
-                Value::bytes(BytesId::runtime(self.runtime.cur_code().bytes.push(b)))
+                Value::bytes(self.runtime.push_bytes(b))
             }
             ValueRef::Rope(id) if id.region() == LOCAL => {
                 // Cheap `Arc`-node clone into the shared region; the rope is
                 // immutable, so sibling processes read it concurrently.
                 let r = self.rope(id).clone();
-                Value::rope(RopeId::runtime(self.runtime.cur_code().ropes.push(r)))
+                Value::rope(self.runtime.push_rope(r))
             }
             ValueRef::Pair(id) if id.region() == LOCAL => self.promote_list(id, fwd),
             ValueRef::Vector(id) if id.region() == LOCAL => {
@@ -3385,23 +3438,13 @@ impl Heap {
                     .into_iter()
                     .map(|x| self.promote_in(x, fwd))
                     .collect();
-                Value::vector(VecId::runtime(
-                    self.runtime
-                        .cur_code()
-                        .vectors
-                        .push(VecStore::from_vec(items)),
-                ))
+                Value::vector(self.runtime.push_vec(VecStore::from_vec(items)))
             }
             // A range's backing `[lo hi step]` vector holds only ints (atoms) —
             // copy it across and keep the `Range` wrapper.
             ValueRef::Range(id) if id.region() == LOCAL => {
                 let items = self.vector(id).to_vec();
-                Value::range(VecId::runtime(
-                    self.runtime
-                        .cur_code()
-                        .vectors
-                        .push(VecStore::from_vec(items)),
-                ))
+                Value::range(self.runtime.push_vec(VecStore::from_vec(items)))
             }
             // A seq-view's backing `[source xform]` holds heap values (a
             // collection and a transducer closure), so promote each across like a
@@ -3413,12 +3456,7 @@ impl Heap {
                     .into_iter()
                     .map(|x| self.promote_in(x, fwd))
                     .collect();
-                Value::seqview(VecId::runtime(
-                    self.runtime
-                        .cur_code()
-                        .vectors
-                        .push(VecStore::from_vec(items)),
-                ))
+                Value::seqview(self.runtime.push_vec(VecStore::from_vec(items)))
             }
             ValueRef::Map(id) if id.region() == LOCAL => {
                 // Recursively promote the trie depth-first. Children are
@@ -3465,7 +3503,7 @@ impl Heap {
             if let Some((pos, file)) = self.form_pos.get(&form_pos_key(src)).cloned() {
                 self.runtime.set_position(idx, pos, file);
             }
-            acc = Value::pair(PairId::runtime(idx));
+            acc = Value::pair(PairId::runtime_gen(idx, self.runtime.cur_gen()));
         }
         acc
     }
@@ -3502,7 +3540,10 @@ impl Heap {
             data: new_data,
             children: new_children,
         };
-        MapId::runtime(self.runtime.cur_code().maps.push(promoted))
+        MapId::runtime_gen(
+            self.runtime.cur_code().maps.push(promoted),
+            self.runtime.cur_gen(),
+        )
     }
 
     fn promote_closure(&self, id: ClosureId, fwd: &mut PromoteForward) -> ClosureId {
@@ -3516,7 +3557,7 @@ impl Heap {
         // this closure reached while promoting its captured scope resolves here
         // rather than recursing forever (e.g. `(let (g (fn () g)) g)`).
         let new_idx = self.runtime.cur_code().closures.push(OnceLock::new());
-        let runtime_id = ClosureId::runtime(new_idx);
+        let runtime_id = ClosureId::runtime_gen(new_idx, self.runtime.cur_gen());
         fwd.closures.insert(key, runtime_id);
         let cl = self.closure(id).clone();
         // Promote every arm's body forms and `&optional` defaults into the shared
@@ -3575,7 +3616,7 @@ impl Heap {
             return existing;
         }
         let new_idx = self.runtime.cur_code().envs.push(OnceLock::new());
-        let runtime_id = EnvId::runtime(new_idx);
+        let runtime_id = EnvId::runtime_gen(new_idx, self.runtime.cur_gen());
         fwd.envs.insert(key, runtime_id);
         // Snapshot the frame, then promote its parent and values (no borrow held).
         let (parent, bindings): (Option<EnvId>, Vec<(Symbol, Value)>) = {
@@ -5345,6 +5386,35 @@ impl Heap {
         visited.len()
     }
 
+    /// **RUNTIME collector — Step 2 (aging).** Start a fresh code generation: flip
+    /// `current_gen` so subsequent `def`/`promote` land in the *other* slot, while
+    /// the previous generation's code stays fully readable via its own handle
+    /// `code_gen` bit (no rewrite — the essence of the Erlang-style 2-generation
+    /// model, ADR-091). Returns whether it aged.
+    ///
+    /// Only ages when the target slot is **empty** — its previous generation fully
+    /// reclaimed (the 2-versions-max rule), so a new gen's handle indices can never
+    /// collide with a stale generation's still-live handles. A lightweight atomic
+    /// flip: it needs no unique ownership (unlike compaction), so it's the
+    /// multi-process reclamation primitive. Freeing the *old* generation once no
+    /// live process references it is stage 4 (cooperative liveness).
+    pub fn age_runtime(&self) -> bool {
+        let other = 1 - self.runtime.cur_gen();
+        if !self.runtime.gens[other].is_empty() {
+            return false;
+        }
+        self.runtime
+            .current_gen
+            .store(other, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// The RUNTIME code region's current generation slot (0 or 1). Diagnostic /
+    /// test observation of the [`age_runtime`](Self::age_runtime) flip.
+    pub fn runtime_cur_gen(&self) -> usize {
+        self.runtime.cur_gen()
+    }
+
     /// **RUNTIME collector — Step 2a (out-of-place evacuation).** Trace the live
     /// RUNTIME code reachable from the global bindings + this process's operand roots
     /// and *copy* it into a fresh [`CodeSlabs`], returning `(new_slabs, forwarding)`.
@@ -5417,6 +5487,14 @@ impl Heap {
         // single choke point for BOTH the auto safepoint path (via `rt_gc_due`) and a
         // manual `(runtime-collect)`, so an explicit collect inside `%isolate` is safe too.
         if self.rt_collect_block.get() > 0 {
+            return None;
+        }
+        // Single-process compaction only runs in generation 0 (the pre-aging /
+        // reclaimed-back-to-0 state). After aging (`current_gen == 1`) the
+        // reclamation strategy is whole-generation freeing (the multi-process
+        // path), not compaction — and the compactor's `flush_rt_*` mint gen-0
+        // handles, which would be wrong for a gen-1 region. Bail (a safe no-op).
+        if self.runtime.cur_gen() != 0 {
             return None;
         }
         // Bail unless we uniquely own the runtime region (no concurrent readers).
