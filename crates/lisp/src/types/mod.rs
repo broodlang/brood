@@ -556,7 +556,15 @@ impl Ty {
     /// change than this slice's scope (declared-sig literal sets).
     pub fn of_value(v: Value) -> Ty {
         match v {
+            // Literal singletons (B0 — literal-singleton precision): a literal's
+            // *exact* type is the singleton, e.g. `5 : {5}` (a subtype of `int`),
+            // so a literal argument checks precisely against a literal-set param
+            // (`5` vs `(or 5 6 7)`). String singletons need the heap to read the
+            // bytes, so `of_value` (heap-free) leaves a string flat; `expr_ty`
+            // builds the `str_lit` where it has the heap.
             Value::Keyword(s) => Ty::keyword_lit(s),
+            Value::Int(n) => Ty::int_lit(n),
+            Value::Bool(b) => Ty::bool_lit(b),
             _ => Ty::of(value::tag(v)),
         }
     }
@@ -1813,11 +1821,16 @@ mod tests {
 
     #[test]
     fn of_value_bridges_runtime_values() {
-        // These Value variants are heap-free, so no Heap is needed.
-        assert_eq!(Ty::of_value(Value::int(1)), Ty::of(Tag::Int));
+        // These Value variants are heap-free, so no Heap is needed. Int/bool carry
+        // their *singleton* (B0 — literal-singleton precision), a subtype of the
+        // flat tag; `nil` (no singleton refinement) stays flat.
+        assert_eq!(Ty::of_value(Value::int(1)), Ty::int_lit(1));
         assert_eq!(Ty::of_value(Value::nil()), Ty::of(Tag::Nil));
-        assert_eq!(Ty::of_value(Value::boolean(true)), Ty::of(Tag::Bool));
+        assert_eq!(Ty::of_value(Value::boolean(true)), Ty::bool_lit(true));
+        // …and each singleton is still a subtype of its flat tag / of number.
+        assert!(Ty::of_value(Value::int(1)).is_subtype(&Ty::of(Tag::Int)));
         assert!(Ty::of_value(Value::int(1)).is_subtype(&Ty::NUMBER));
+        assert!(Ty::of_value(Value::boolean(true)).is_subtype(&Ty::of(Tag::Bool)));
     }
 
     #[test]

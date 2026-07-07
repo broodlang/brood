@@ -2142,3 +2142,30 @@ across `std/` + `tests/`.
 New test `undeclared_global_current_type_gates_its_use` (misuse warns;
 consistent/redefined/function globals quiet); Rust lib 369/369 (+1 = 370); clippy
 clean. Gap B stays blocked on B0 (literal-singleton precision) per the design.
+
+## 2026-07-07 — Gating B0: int/bool/string literal-singleton precision
+
+Shipped B0, the prerequisite the gating design ([`type-gating.md`](type-gating.md))
+identified for Gap B. `Ty::of_value` now returns the literal *singleton* for an
+int (`5 : {5}`) or bool (`true : {true}`) — like it already did for keywords — and
+`expr_ty` builds a string literal's `str_lit` where it has the heap. A literal's
+static type is now *faithful* (a subtype of its flat tag) rather than an
+over-approximation, which:
+
+- **removes the false positive at its root** — `stat({200}) ⊆ (or 200 404 500)`
+  now holds, where flat `int ⊄ {200,404,500}` did not — so it also fixes a latent
+  FP in the existing return/def checks (a literal-body-vs-literal-set return);
+- **unblocks B1** (the arg-check `⊆` upgrade), which was unsound without it;
+- makes every diagnostic naming a literal precise: `got 5`, `yields "hello"`,
+  `value of type "hello"` (not `got int` / `yields string`).
+
+That last point is the wording churn the earlier attempt balked at — ≈19 checker
+test message assertions, updated mechanically (the behavior was already correct;
+only the displayed type sharpened). This is `docs/type-int-literals.md`'s once-
+deferred "call-site argument literal precision," now done because gating needs it.
+
+Sound by construction: a singleton is the value's *exact* type (a subtype of the
+flat tag), so it only sharpens — never over-approximates. Bignum literals stay
+flat `int` (`int_lit` is `i64`). **Verified:** `types::` 370/370; clippy clean;
+`nest check` 0 across `std/` + `tests/` (the increased precision surfaced no new
+warnings — no match-redundancy/dead-clause cascade). B1 is the next step.

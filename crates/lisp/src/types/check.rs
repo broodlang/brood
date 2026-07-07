@@ -825,9 +825,11 @@ mod tests {
 
     #[test]
     fn flags_literal_misuse_of_primitives() {
+        // An int literal now infers as its singleton (B0), so the diagnostic
+        // names the exact value (`5`) rather than the coarse `int` tag.
         assert!(warnings("(first 5)")
             .iter()
-            .any(|w| w.contains("first") && w.contains("int")));
+            .any(|w| w.contains("first") && w.contains("got 5")));
         // A keyword literal now infers as its singleton type, so the diagnostic
         // names the exact value (`:k`) rather than the coarse `keyword` tag.
         assert!(warnings("(string-length :k)")
@@ -1014,7 +1016,7 @@ mod tests {
         );
         assert!(
             w.iter()
-                .any(|m| m.contains("g: argument 2 expects string") && m.contains("int")),
+                .any(|m| m.contains("g: argument 2 expects string") && m.contains("got 2")),
             "an optional arg's declared type must be checked: {w:?}"
         );
 
@@ -1074,7 +1076,7 @@ mod tests {
         );
         assert!(
             w.iter()
-                .any(|m| m.contains("h: argument 3 expects number") && m.contains("bool")),
+                .any(|m| m.contains("h: argument 3 expects number") && m.contains("got true")),
             "a rest arg after an optional one must still be checked: {w:?}"
         );
 
@@ -1100,7 +1102,7 @@ mod tests {
         assert!(
             w.iter()
                 .any(|m| m.contains("f: argument 1 expects (tuple int, string)")
-                    && m.contains("got (tuple string, int)")),
+                    && m.contains("got (tuple \"x\", 1)")),
             "a mismatched tuple-shaped literal argument must warn: {w:?}"
         );
         let w = file_warnings("(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\"])");
@@ -2241,8 +2243,8 @@ mod tests {
         // shadows "unknown" in the body. (This is the basic let-tracking.)
         let w = warnings("(let (x 1) (first x))");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "expected a `first x` warning where x : int, got {:?}",
+            w.iter().any(|s| s.contains("first") && s.contains("got 1")),
+            "expected a `first x` warning where x : 1 (int singleton), got {:?}",
             w
         );
     }
@@ -2277,12 +2279,14 @@ mod tests {
         let w = warnings("(let (x 1) (let (x \"hi\") (first x)))");
         assert!(
             w.iter()
-                .any(|s| s.contains("first") && s.contains("string")),
+                .any(|s| s.contains("first") && s.contains("got \"hi\"")),
             "expected the inner string to be the source, got {:?}",
             w
         );
         assert!(
-            !w.iter().any(|s| s.contains("got int")),
+            // Outer `x` is the literal `1` → singleton `{1}`; if it leaked the
+            // message would say "got 1" (B0 — was "got int").
+            !w.iter().any(|s| s.contains("got 1")),
             "outer int must not leak through shadowing: {:?}",
             w
         );
@@ -2302,7 +2306,7 @@ mod tests {
         // `(let [x 1] …)` (vector shape) must work the same as `(let (x 1) …)`.
         let w = warnings("(let [x 1] (first x))");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            w.iter().any(|s| s.contains("first") && s.contains("got 1")),
             "vector-form let bindings must populate the ctx: {:?}",
             w
         );
@@ -2463,7 +2467,7 @@ mod tests {
         let w = warnings("(if (int? x) (let (x \"hi\") (first x)) nil)");
         assert!(
             w.iter()
-                .any(|s| s.contains("first") && s.contains("string")),
+                .any(|s| s.contains("first") && s.contains("got \"hi\"")),
             "shadow must override the guard narrowing: {:?}",
             w
         );
@@ -2768,7 +2772,7 @@ mod tests {
         // `let`+`if`+`%eq`; the checker's narrowing rides the lowered shape.
         let w = warnings_expanded("(match x (5 (first x)) (_ nil))");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
             "match int-literal pattern should narrow x: {:?}",
             w
         );
@@ -2793,13 +2797,13 @@ mod tests {
         // `(%eq m 5)` and `(%eq 5 m)` should narrow.)
         let w = warnings("(if (%eq m 5) (first m) nil)");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
             "%eq with sym + literal should narrow: {:?}",
             w
         );
         let w = warnings("(if (%eq 5 m) (first m) nil)");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
             "%eq with literal + sym (reversed) should narrow: {:?}",
             w
         );
@@ -2831,7 +2835,7 @@ mod tests {
         // The then-branch must still narrow (sanity): `(= m 5)` true ⇒ m : int.
         let w = warnings("(if (%eq m 5) (first m) nil)");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
             "the then-branch must still narrow m to int: {w:?}"
         );
     }
@@ -2865,7 +2869,7 @@ mod tests {
         // not the broken alias.
         let w = warnings("(let (m x) (let (m 5) (first m)))");
         assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
+            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
             "shadowed let should still warn on the inner int: {:?}",
             w
         );
@@ -2962,7 +2966,7 @@ mod tests {
         // the declared type. stat(string) ⊄ int → flagged.
         let w = file_warnings(r#"(sig n int) (def n "hello")"#);
         assert!(
-            w.iter().any(|m| m.contains("n: value of type string")
+            w.iter().any(|m| m.contains("n: value of type \"hello\"")
                 && m.contains("not assignable")
                 && m.contains("int")),
             "a string literal assigned to an int-declared name must warn: {w:?}"
@@ -3074,7 +3078,7 @@ mod tests {
             w.iter()
                 .any(|(_, m)| m.contains("gap-check-test-mod/gap-check-test-f")
                     && m.contains("declared return type string")
-                    && m.contains("yields int")),
+                    && m.contains("yields 42")),
             "a defmodule-qualified defn's body vs its declared return type \
              must warn, same as at the root namespace: {w:?}"
         );
@@ -3146,7 +3150,7 @@ mod tests {
         let w = file_warnings(r#"(sig g (int -> int)) (defn g (x) "hello")"#);
         assert!(
             w.iter()
-                .any(|m| m.contains("g: declared return type int") && m.contains("string")),
+                .any(|m| m.contains("g: declared return type int") && m.contains("\"hello\"")),
             "a string-literal body vs an int return must warn: {w:?}"
         );
     }
@@ -3425,7 +3429,7 @@ mod tests {
         let w = file_warnings(r#"(sig f (int -> int)) (defn f (x) (if (> x 0) x "neg"))"#);
         assert!(
             w.iter()
-                .any(|m| m.contains("f: declared return type int") && m.contains("string")),
+                .any(|m| m.contains("f: declared return type int") && m.contains("\"neg\"")),
             "an `int | string` body declared int must warn: {w:?}"
         );
         // A branchy body that stays within the declared type must NOT warn.
@@ -3462,7 +3466,7 @@ mod tests {
         let w = file_warnings("(def g 5) (defn f () (string-length g))");
         assert!(
             w.iter()
-                .any(|m| m.contains("string-length") && m.contains("got int")),
+                .any(|m| m.contains("string-length") && m.contains("got 5")),
             "an undeclared int global misused must warn: {w:?}"
         );
         // Consistent use, a redefined (ambiguous) global, and a function global
@@ -3658,7 +3662,7 @@ mod tests {
         // `(first ["a" "b"])` : string | nil — disjoint from number → flagged.
         let w = warnings(r#"(+ 1 (first ["a" "b"]))"#);
         assert!(
-            w.iter().any(|s| s.contains("+") && s.contains("string")),
+            w.iter().any(|s| s.contains("+") && s.contains("\"a\"")),
             "expected a number/string mismatch from the element type: {w:?}"
         );
     }
@@ -3678,7 +3682,7 @@ mod tests {
         // `(list "a" "b")` : list<string>, so `(first …)` is string|nil.
         let w = warnings(r#"(+ 1 (first (list "a" "b")))"#);
         assert!(
-            w.iter().any(|s| s.contains("+") && s.contains("string")),
+            w.iter().any(|s| s.contains("+") && s.contains("\"a\"")),
             "(list …) element type should flow to first: {w:?}"
         );
     }

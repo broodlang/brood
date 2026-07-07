@@ -772,13 +772,13 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   and **bool/string** (ADR-120) all shipped: a bare `:ok`/`5`/`true`/`"GET"`
   in type position is a literal singleton, enumerable via `(or …)`, and any
   combination composes freely on one `Ty` (`(or :ok 5)` — independent
-  tags/fields, no special-casing needed). Call-site *argument* literal
-  precision (a literal int/bool/string argument recognized as a singleton the
-  way a literal keyword argument already is, via `Ty::of_value`) stays
-  deferred — tried for int, reverted (see
-  [`type-int-literals.md`](type-int-literals.md)'s Deferred section: it
-  cascaded into unrelated warning-message wording across 7 pre-existing
-  tests, a bigger change than that slice's scope). **`match` exhaustiveness**
+  tags/fields, no special-casing needed). ✅ **Call-site argument literal
+  precision now shipped** (gating "B0", `docs/type-gating.md`): `Ty::of_value`
+  carries int/bool singletons and `expr_ty` builds a string's `str_lit`, so a
+  literal argument is a faithful singleton (`5 : {5}`) — the piece once deferred
+  for warning-wording churn (≈19 test messages updated this time). It sharpens
+  the existing return/def checks and unblocks the arg-check `⊆` upgrade (B1).
+  **`match` exhaustiveness**
   over any *pure* enumerable literal type (any mix of keyword/int/bool/string
   plus `nil`) is shipped (ADR-118, generalized in ADR-121,
   [`type-match-exhaustiveness.md`](type-match-exhaustiveness.md)) — `case`
@@ -884,9 +884,11 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   result (from prototyping):
   B is unsound without int/bool/string literal-singleton precision (B0)** — a
   literal `200`'s type over-approximates to `int`, so `⊆` false-positives against
-  a `(or 200 404 500)` param. So B splits into **B0** (track literal singletons —
-  the tried-and-reverted piece) then **B1** (arg-check `⊆`). B1-without-B0 was
-  prototyped and reverted to the sound `∩` state (`nest check` stays 0).
+  a `(or 200 404 500)` param. So B splits into **B0** (literal singletons) then
+  **B1** (arg-check `⊆`). **B0 ✅ shipped** — `Ty::of_value` carries int/bool
+  singletons, `expr_ty` builds a string's `str_lit`; the literal is now faithful
+  (`5 : {5}`), removing the FP at its root and unblocking B1 (the arg-check `⊆`
+  upgrade, next).
 - ✅ **`BROOD_CONTRACTS=1`** — shipped: enforces *every* `(sig …)` at run time the
   same way `sig!` does, plus element-level `(list E)` / `(vector E)` contract
   checks (`tests/contract_test.blsp`). See [`type-annotations.md`](type-annotations.md).

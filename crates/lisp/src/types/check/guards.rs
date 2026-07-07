@@ -684,7 +684,13 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 _ => None,
             }
         }
-        // Int / Float / Str / Keyword / Bool / Nil: self-evaluating.
+        // A string literal → its singleton `str_lit` (B0 — literal-singleton
+        // precision). `Ty::of_value` can't do this (no heap to read the bytes), so
+        // it's handled here where the heap is in hand; int/bool/keyword singletons
+        // come from `of_value` below.
+        Value::Str(id) => Some(Ty::str_lit(heap.string(id))),
+        // Int / Float / Keyword / Bool / Nil: self-evaluating (int/bool/keyword
+        // carry their singleton via `of_value`; float/nil are flat).
         other => Some(Ty::of_value(other)),
     }
 }
