@@ -139,10 +139,7 @@ impl Jit {
             "brood_rt_vec_nursery_base",
             brood_rt_vec_nursery_base as *const u8,
         );
-        builder.symbol(
-            "brood_rt_vec_old_base",
-            brood_rt_vec_old_base as *const u8,
-        );
+        builder.symbol("brood_rt_vec_old_base", brood_rt_vec_old_base as *const u8);
         builder.symbol("brood_rt_const_load", brood_rt_const_load as *const u8);
         // DEBUG (bug #2): print the callback addresses once, so an offline disasm of a
         // BROOD_DUMP_CODE'd arm can resolve each `movabs/call` target to a name.

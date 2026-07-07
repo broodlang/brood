@@ -301,7 +301,9 @@ fn per_isolate_scoping_bounds_runtime_region_growth() {
     interp
         .eval_str("(loopf (fn (fi) (%isolate (fn () (defmany fi 0 200)))) 0 300)")
         .expect("scoped loop errored");
-    interp.eval_str("(runtime-collect)").expect("collect errored");
+    interp
+        .eval_str("(runtime-collect)")
+        .expect("collect errored");
     let count = interp.heap.runtime_closure_count();
     assert!(
         count < 500,
@@ -332,7 +334,11 @@ fn declared_sigs_survive_a_runtime_compaction() {
     interp.heap.set_rt_auto_collect(true);
     interp.heap.runtime_collect();
     let got = interp.heap.declared_sig_value(sym).expect("sig vanished");
-    assert_eq!(interp.print(got), "(int -> int)", "declared sig corrupted by RUNTIME compaction");
+    assert_eq!(
+        interp.print(got),
+        "(int -> int)",
+        "declared sig corrupted by RUNTIME compaction"
+    );
 }
 
 /// Regression for the KI-6 hardening: a globals snapshot now suppresses RUNTIME
@@ -412,9 +418,7 @@ fn checker_ns_caches_reflect_hot_reload_adds() {
     assert!(!before.iter().any(|n| n == "bbb"), "bbb not defined yet");
     assert!(interp.heap.known_ns_prefixes().contains("mlibZ/"));
     // Hot-reload: the module gains a new export → global count moves → caches must rebuild.
-    interp
-        .eval_str("(def mlibZ/bbb 2)")
-        .expect("add export");
+    interp.eval_str("(def mlibZ/bbb 2)").expect("add export");
     let after = bare_names(interp.heap.module_public_exports("mlibZ/"));
     assert!(
         after.iter().any(|n| n == "bbb"),

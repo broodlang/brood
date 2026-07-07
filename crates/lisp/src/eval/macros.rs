@@ -253,7 +253,11 @@ fn has_autogensym(heap: &Heap, form: Value) -> bool {
             let (car, cdr) = heap.pair(p);
             has_autogensym(heap, car) || has_autogensym(heap, cdr)
         }
-        ValueRef::Vector(id) => heap.vector(id).to_vec().iter().any(|&it| has_autogensym(heap, it)),
+        ValueRef::Vector(id) => heap
+            .vector(id)
+            .to_vec()
+            .iter()
+            .any(|&it| has_autogensym(heap, it)),
         ValueRef::Map(id) => heap
             .map_entries(id)
             .iter()

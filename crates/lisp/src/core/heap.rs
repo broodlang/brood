@@ -3366,13 +3366,17 @@ impl Heap {
                     .into_iter()
                     .map(|x| self.promote_in(x, fwd))
                     .collect();
-                Value::vector(VecId::runtime(self.runtime.code.vectors.push(VecStore::from_vec(items))))
+                Value::vector(VecId::runtime(
+                    self.runtime.code.vectors.push(VecStore::from_vec(items)),
+                ))
             }
             // A range's backing `[lo hi step]` vector holds only ints (atoms) —
             // copy it across and keep the `Range` wrapper.
             ValueRef::Range(id) if id.region() == LOCAL => {
                 let items = self.vector(id).to_vec();
-                Value::range(VecId::runtime(self.runtime.code.vectors.push(VecStore::from_vec(items))))
+                Value::range(VecId::runtime(
+                    self.runtime.code.vectors.push(VecStore::from_vec(items)),
+                ))
             }
             // A seq-view's backing `[source xform]` holds heap values (a
             // collection and a transducer closure), so promote each across like a
@@ -3384,7 +3388,9 @@ impl Heap {
                     .into_iter()
                     .map(|x| self.promote_in(x, fwd))
                     .collect();
-                Value::seqview(VecId::runtime(self.runtime.code.vectors.push(VecStore::from_vec(items))))
+                Value::seqview(VecId::runtime(
+                    self.runtime.code.vectors.push(VecStore::from_vec(items)),
+                ))
             }
             ValueRef::Map(id) if id.region() == LOCAL => {
                 // Recursively promote the trie depth-first. Children are
@@ -6095,10 +6101,8 @@ impl Heap {
         // bounds that transient buffer while staying well above real build working sets
         // (a lone process's floor is 64K; the cap is 8M ≈ a few hundred MB of nursery).
         let live_total = self.local_live_count() + self.old_live_count();
-        self.gc_threshold = std::cmp::max(
-            gc_floor(),
-            live_total.saturating_mul(2).min(NURSERY_MAX),
-        );
+        self.gc_threshold =
+            std::cmp::max(gc_floor(), live_total.saturating_mul(2).min(NURSERY_MAX));
         // Escalate to a *major* (compact the old generation) only when it has grown
         // MAJOR_GROWTH× since the last major — so majors stay rare while minors keep
         // the nursery bounded. Grown 2×→4× (2026-07-01): during a large-structure

@@ -359,9 +359,9 @@ pub(crate) mod backend {
     use std::num::NonZeroU32;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
     use std::sync::mpsc::{self, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration;
     use std::time::Instant;
 
     // Paint-breakdown diagnostics (BROOD_STALL_MS): single GUI thread, so Relaxed is
@@ -1798,10 +1798,7 @@ pub(crate) mod backend {
                 }
                 // Time-proportional decay: 0.97 per 12 ms nominal, scaled by actual
                 // elapsed so the coast curve is independent of render throughput.
-                let elapsed_ms = now
-                    .duration_since(w.scroll_last_tick)
-                    .as_secs_f64()
-                    * 1000.0;
+                let elapsed_ms = now.duration_since(w.scroll_last_tick).as_secs_f64() * 1000.0;
                 let decay = 0.97_f64.powf((elapsed_ms / 12.0).clamp(0.5, 4.0));
                 w.scroll_velocity *= decay;
                 if w.scroll_velocity.abs() < 0.0005 {
@@ -2773,8 +2770,14 @@ pub(crate) mod backend {
             super::CursorStyle::Bar => {
                 let thickness = (w / 8).max(2);
                 fill_cell(
-                    buf, fb_w, fb_h, left, draw_top, thickness,
-                    draw_bottom - draw_top, pack(CURSOR_FG),
+                    buf,
+                    fb_w,
+                    fb_h,
+                    left,
+                    draw_top,
+                    thickness,
+                    draw_bottom - draw_top,
+                    pack(CURSOR_FG),
                 );
             }
             super::CursorStyle::Underline => {
@@ -2949,7 +2952,9 @@ pub(crate) mod backend {
                         let block_w = cells * cw * scale; // the cluster's pixel span
                         let left = ox + cx * cw;
                         if paint_bg {
-                            fill_cell(buf, fb_w, fb_h, left, render_top, block_w, visible_h, bg_packed);
+                            fill_cell(
+                                buf, fb_w, fb_h, left, render_top, block_w, visible_h, bg_packed,
+                            );
                         }
                         r.draw_cluster(
                             buf,
@@ -2970,13 +2975,28 @@ pub(crate) mod backend {
                             // (scaled with the glyph so it stays proportional).
                             let uy_signed = top_signed + ch_s as isize - 2 * scale as isize;
                             if uy_signed >= oy as isize {
-                                fill_cell(buf, fb_w, fb_h, left, uy_signed as usize, block_w, scale, pack(fg));
+                                fill_cell(
+                                    buf,
+                                    fb_w,
+                                    fb_h,
+                                    left,
+                                    uy_signed as usize,
+                                    block_w,
+                                    scale,
+                                    pack(fg),
+                                );
                             }
                         }
                         cx += cells * scale;
                     }
                 }
-                Op::Rect { row, col, w, h, face } => {
+                Op::Rect {
+                    row,
+                    col,
+                    w,
+                    h,
+                    face,
+                } => {
                     // A solid panel: fill the w×h cell block with the face background
                     // (reverse swaps in the fg). No background → nothing to paint.
                     let bg = if face.reverse { face.fg } else { face.bg };
@@ -3000,7 +3020,15 @@ pub(crate) mod backend {
                         }
                     }
                 }
-                Op::FRect { x, y, w, h, face, opacity, radius } => {
+                Op::FRect {
+                    x,
+                    y,
+                    w,
+                    h,
+                    face,
+                    opacity,
+                    radius,
+                } => {
                     // Sub-cell rounded rect: cell-unit floats → px via the same origin +
                     // cell metrics every op shares, then an AA, alpha-blended fill.
                     let bg = if face.reverse { face.fg } else { face.bg };
@@ -3060,7 +3088,14 @@ pub(crate) mod backend {
                         }
                     }
                 }
-                Op::Cells { row0, col0, w, aspect, bytes, color } => {
+                Op::Cells {
+                    row0,
+                    col0,
+                    w,
+                    aspect,
+                    bytes,
+                    color,
+                } => {
                     // Enumerate set bits by a single byte scan — O(bytes + live), and the
                     // same code whether the board came in as a bignum or a byte string.
                     // Each cell is an `aspect`-wide × 1-tall block of screen cells.
@@ -3084,7 +3119,15 @@ pub(crate) mod backend {
                         }
                     }
                 }
-                Op::CellsRgb { row0, col0, w, aspect, bytes, colors, default } => {
+                Op::CellsRgb {
+                    row0,
+                    col0,
+                    w,
+                    aspect,
+                    bytes,
+                    colors,
+                    default,
+                } => {
                     let asp = (*aspect).max(1) as usize;
                     let cell_w = asp * cw;
                     let wmod = (*w).max(1) as usize;

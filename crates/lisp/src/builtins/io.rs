@@ -1469,11 +1469,11 @@ pub(super) fn image_thumb(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     limits.max_image_width = Some(16384);
     limits.max_image_height = Some(16384);
     limits.max_alloc = Some(512 * 1024 * 1024);
-    let mut reader = match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()
-    {
-        Ok(r) => r,
-        Err(_) => return Ok(Value::nil()),
-    };
+    let mut reader =
+        match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
+            Ok(r) => r,
+            Err(_) => return Ok(Value::nil()),
+        };
     reader.limits(limits);
     let Ok(img) = reader.decode() else {
         return Ok(Value::nil());

@@ -3125,7 +3125,7 @@ mod tests {
             "int-declared `other` assigned a string must warn even with no \
              local (sig other …): {warnings:?}"
         );
-        let fp1 = deps_fingerprint(&interp.heap, dep_keys.clone());
+        let fp1 = deps_fingerprint(&interp.heap, dep_keys);
 
         // Module A is "edited": other's declared type widens to accept a
         // string. This file's fingerprint must change — `other` is never

@@ -914,19 +914,38 @@ fn parse_gui_ops(
         if tag == tags.clear_t {
             ops.push(crate::gui::Op::Clear);
         } else if tag == tags.cursor_t {
-            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
-            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
+            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+                continue;
+            };
             let style = cursor_style_from(parts.get(3).copied().unwrap_or(Value::nil()));
-            ops.push(crate::gui::Op::Cursor { row: clamp_u16(row_i), col: clamp_u16(col_i), style });
+            ops.push(crate::gui::Op::Cursor {
+                row: clamp_u16(row_i),
+                col: clamp_u16(col_i),
+                style,
+            });
         } else if tag == tags.rect_t {
-            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
-            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
-            let Ok(w_i)   = expect_int(heap, "gui-draw", arg(&parts, 3)) else { continue };
-            let Ok(h_i)   = expect_int(heap, "gui-draw", arg(&parts, 4)) else { continue };
+            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+                continue;
+            };
+            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else {
+                continue;
+            };
+            let Ok(h_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else {
+                continue;
+            };
             let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::nil()));
             ops.push(crate::gui::Op::Rect {
-                row: clamp_u16(row_i), col: clamp_u16(col_i),
-                w: clamp_u16(w_i), h: clamp_u16(h_i), face,
+                row: clamp_u16(row_i),
+                col: clamp_u16(col_i),
+                w: clamp_u16(w_i),
+                h: clamp_u16(h_i),
+                face,
             });
         } else if tag == tags.frect_t {
             let x = num(arg(&parts, 1));
@@ -939,18 +958,45 @@ fn parse_gui_ops(
                 _ => 1.0,
             };
             let radius = num(parts.get(7).copied().unwrap_or(Value::nil()));
-            ops.push(crate::gui::Op::FRect { x, y, w, h, face, opacity, radius });
+            ops.push(crate::gui::Op::FRect {
+                x,
+                y,
+                w,
+                h,
+                face,
+                opacity,
+                radius,
+            });
         } else if tag == tags.text_t {
-            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
-            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
-            let Ok(s) = expect_string(heap, "gui-draw", arg(&parts, 3)) else { continue };
+            let Ok(row_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+                continue;
+            };
+            let Ok(s) = expect_string(heap, "gui-draw", arg(&parts, 3)) else {
+                continue;
+            };
             let face = gui_face(heap, parts.get(4).copied().unwrap_or(Value::nil()));
-            ops.push(crate::gui::Op::Text { row: clamp_u16(row_i), col: clamp_u16(col_i), s, face });
+            ops.push(crate::gui::Op::Text {
+                row: clamp_u16(row_i),
+                col: clamp_u16(col_i),
+                s,
+                face,
+            });
         } else if tag == tags.cursor_zone_t {
-            let Ok(x_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
-            let Ok(y_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
-            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else { continue };
-            let Ok(h_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else { continue };
+            let Ok(x_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(y_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+                continue;
+            };
+            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else {
+                continue;
+            };
+            let Ok(h_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else {
+                continue;
+            };
             let shape = match parts.get(5) {
                 Some(Value::Keyword(s)) if *s == tags.col_resize_t => {
                     Some(crate::gui::CursorShape::ColResize)
@@ -962,13 +1008,20 @@ fn parse_gui_ops(
             };
             if let Some(shape) = shape {
                 ops.push(crate::gui::Op::CursorZone {
-                    x: clamp_u16(x_i), y: clamp_u16(y_i),
-                    w: clamp_u16(w_i), h: clamp_u16(h_i), shape,
+                    x: clamp_u16(x_i),
+                    y: clamp_u16(y_i),
+                    w: clamp_u16(w_i),
+                    h: clamp_u16(h_i),
+                    shape,
                 });
             }
         } else if tag == tags.vspans_t {
-            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
-            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
+            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+                continue;
+            };
             let col_vals: Vec<Value> = match arg(&parts, 3) {
                 Value::Vector(id) => heap.vector(id).to_vec(),
                 _ => Vec::new(),
@@ -986,18 +1039,32 @@ fn parse_gui_ops(
                         _ => continue,
                     };
                     if s.len() >= 2 {
-                        let Ok(h) = expect_int(heap, "gui-draw", s[0]) else { continue };
+                        let Ok(h) = expect_int(heap, "gui-draw", s[0]) else {
+                            continue;
+                        };
                         segs.push((clamp_u16(h), span_color(heap, s[1])));
                     }
                 }
                 cols.push(segs);
             }
-            ops.push(crate::gui::Op::VSpans { row0: clamp_u16(row0_i), col0: clamp_u16(col0_i), cols });
+            ops.push(crate::gui::Op::VSpans {
+                row0: clamp_u16(row0_i),
+                col0: clamp_u16(col0_i),
+                cols,
+            });
         } else if tag == tags.cells_t {
-            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
-            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
-            let Ok(w_i)    = expect_int(heap, "gui-draw", arg(&parts, 3)) else { continue };
-            let Ok(asp_i)  = expect_int(heap, "gui-draw", arg(&parts, 4)) else { continue };
+            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+                continue;
+            };
+            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else {
+                continue;
+            };
+            let Ok(asp_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else {
+                continue;
+            };
             let bytes = match arg(&parts, 5) {
                 Value::Str(id) => match heap.local_shared_blob(id) {
                     Some(blob) => blob.as_bytes().to_vec(),
@@ -1010,14 +1077,26 @@ fn parse_gui_ops(
             };
             let color = span_color(heap, arg(&parts, 6));
             ops.push(crate::gui::Op::Cells {
-                row0: clamp_u16(row0_i), col0: clamp_u16(col0_i),
-                w: w_i.max(1) as u32, aspect: clamp_u16(asp_i).max(1), bytes, color,
+                row0: clamp_u16(row0_i),
+                col0: clamp_u16(col0_i),
+                w: w_i.max(1) as u32,
+                aspect: clamp_u16(asp_i).max(1),
+                bytes,
+                color,
             });
         } else if tag == tags.cells_rgb_t {
-            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else { continue };
-            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else { continue };
-            let Ok(w_i)    = expect_int(heap, "gui-draw", arg(&parts, 3)) else { continue };
-            let Ok(asp_i)  = expect_int(heap, "gui-draw", arg(&parts, 4)) else { continue };
+            let Ok(row0_i) = expect_int(heap, "gui-draw", arg(&parts, 1)) else {
+                continue;
+            };
+            let Ok(col0_i) = expect_int(heap, "gui-draw", arg(&parts, 2)) else {
+                continue;
+            };
+            let Ok(w_i) = expect_int(heap, "gui-draw", arg(&parts, 3)) else {
+                continue;
+            };
+            let Ok(asp_i) = expect_int(heap, "gui-draw", arg(&parts, 4)) else {
+                continue;
+            };
             let bytes = match arg(&parts, 5) {
                 Value::Str(id) => match heap.local_shared_blob(id) {
                     Some(blob) => blob.as_bytes().to_vec(),
@@ -1033,19 +1112,26 @@ fn parse_gui_ops(
                 for (k, v) in heap.map_entries(mid) {
                     if let (Value::Int(idx), Some(p)) = (k, heap.as_bigint(v)) {
                         let bits: u64 = (&p).try_into().unwrap_or(0);
-                        colors.insert(idx as u64, [
-                            (bits & 4095) as u8,
-                            ((bits >> 12) & 4095) as u8,
-                            ((bits >> 24) & 4095) as u8,
-                        ]);
+                        colors.insert(
+                            idx as u64,
+                            [
+                                (bits & 4095) as u8,
+                                ((bits >> 12) & 4095) as u8,
+                                ((bits >> 24) & 4095) as u8,
+                            ],
+                        );
                     }
                 }
             }
             let default = span_color(heap, arg(&parts, 7)).unwrap_or([229, 229, 229]);
             ops.push(crate::gui::Op::CellsRgb {
-                row0: clamp_u16(row0_i), col0: clamp_u16(col0_i),
-                w: w_i.max(1) as u32, aspect: clamp_u16(asp_i).max(1),
-                bytes, colors, default,
+                row0: clamp_u16(row0_i),
+                col0: clamp_u16(col0_i),
+                w: w_i.max(1) as u32,
+                aspect: clamp_u16(asp_i).max(1),
+                bytes,
+                colors,
+                default,
             });
         } else if tag == tags.scroll_region_t {
             // [:scroll-region dy-frac inner-ops] — shift inner ops upward by dy_frac ×
@@ -1054,7 +1140,10 @@ fn parse_gui_ops(
             let inner_val = arg(&parts, 2);
             if let Ok(inner_parsed) = frame_ops(heap, inner_val, "gui-draw", "scroll-region ops") {
                 let inner_ops = parse_gui_ops(heap, inner_parsed, tags);
-                ops.push(crate::gui::Op::ScrollRegion { dy_frac, ops: inner_ops });
+                ops.push(crate::gui::Op::ScrollRegion {
+                    dy_frac,
+                    ops: inner_ops,
+                });
             }
         }
     }

@@ -1664,7 +1664,14 @@ fn build_inlined_body(
     let mut next_block = 1usize;
     // Pass 1 (depth-1): the top-level self-calls become inlined blocks whose bodies still
     // hold `Node::Call` self-calls.
-    let inlined = inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
+    let inlined = inline_self_calls(
+        &mut spliced,
+        &orig,
+        defn_name,
+        nrequired,
+        m,
+        &mut next_block,
+    );
     if inlined == 0 {
         return None;
     }
@@ -1675,7 +1682,14 @@ fn build_inlined_body(
         if node_count(&spliced) > cap {
             break;
         }
-        inline_self_calls(&mut spliced, &orig, defn_name, nrequired, m, &mut next_block);
+        inline_self_calls(
+            &mut spliced,
+            &orig,
+            defn_name,
+            nrequired,
+            m,
+            &mut next_block,
+        );
     }
     Some((spliced, next_block))
 }
@@ -2385,10 +2399,17 @@ fn hof_apply_native(
                     .map(|k| heap.root_at(staged_start + k))
                     .collect();
                 heap.truncate_roots(base);
-                return Some(apply_value(heap, staged_callee, &staged_args, heap.global()));
+                return Some(apply_value(
+                    heap,
+                    staged_callee,
+                    &staged_args,
+                    heap.global(),
+                ));
             }
             heap.truncate_roots(base);
-            Some(Err(LispError::type_err("jit step tail with no staged call")))
+            Some(Err(LispError::type_err(
+                "jit step tail with no staged call",
+            )))
         }
         // deopt (1) / preempt (2): re-run the arm on the VM. The args survive in the param slots
         // `[base, base+argc)` (GC-updated); re-read, drop the frame, and `vm_apply`.
@@ -6275,11 +6296,11 @@ pub(crate) fn jit_tier(
         arm.shared_published.store(false, Relaxed); // recompiled code must re-publish
         arm.inline_installed.store(false, Relaxed); // re-decide the inline swap at the new epoch
         arm.inline_queued.store(false, Relaxed); // re-enqueue the inlined upgrade if still hot
-        // Drop the stale inlined native too: its inlined operators were validated at the
-        // OLD epoch, so it must not be re-swapped as-is. Nulling forces a clean re-fetch
-        // from the shared inline cache (epoch-checked) or a recompile at the new epoch —
-        // load-bearing now that the inlined native is shared across processes (a stale
-        // pointer left here would otherwise get re-published to the shared cache).
+                                                 // Drop the stale inlined native too: its inlined operators were validated at the
+                                                 // OLD epoch, so it must not be re-swapped as-is. Nulling forces a clean re-fetch
+                                                 // from the shared inline cache (epoch-checked) or a recompile at the new epoch —
+                                                 // load-bearing now that the inlined native is shared across processes (a stale
+                                                 // pointer left here would otherwise get re-published to the shared cache).
         arm.inline_code.store(std::ptr::null_mut(), Release);
         return None;
     }

@@ -939,7 +939,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         "proc-send",
         Arity::exact(2),
         // data may be a string (UTF-8 / codepoints) or a bytes value (verbatim).
-        Sig::new(vec![subprocess_ty, Ty::of_tags(&[Tag::Str, Tag::Bytes])], nil_ty),
+        Sig::new(
+            vec![subprocess_ty, Ty::of_tags(&[Tag::Str, Tag::Bytes])],
+            nil_ty,
+        ),
         proc_send,
     );
     def(

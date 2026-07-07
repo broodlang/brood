@@ -496,7 +496,8 @@ static I64_TOO_DEEP: std::sync::Mutex<Option<std::collections::HashSet<Symbol>>>
 #[cfg(feature = "jit")]
 pub(crate) fn i64_mark_too_deep(sym: Symbol) {
     if let Ok(mut g) = I64_TOO_DEEP.lock() {
-        g.get_or_insert_with(std::collections::HashSet::new).insert(sym);
+        g.get_or_insert_with(std::collections::HashSet::new)
+            .insert(sym);
     }
 }
 
@@ -588,7 +589,9 @@ fn i64_value_ok(
         } => {
             args.len() == nargs
                 && matches!(&**callee, Node::Global(s) | Node::GlobalIc { sym: s, .. } if *s == self_sym)
-                && args.iter().all(|a| i64_value_ok(a, self_sym, nargs, bound, kind))
+                && args
+                    .iter()
+                    .all(|a| i64_value_ok(a, self_sym, nargs, bound, kind))
         }
         // `let`/`let*`: each rhs must be in-subset in the scope built so far (so a `letrec`
         // forward-ref bails), then its slot joins the scope for later binds + the body.
@@ -605,7 +608,10 @@ fn i64_value_ok(
         // `do`: pure in this subset, so only the last form's value matters (the worker lowers
         // just that) — but validate every form is in-subset (else the whole arm bails).
         Node::Do(xs) => {
-            !xs.is_empty() && xs.iter().all(|x| i64_value_ok(x, self_sym, nargs, bound, kind))
+            !xs.is_empty()
+                && xs
+                    .iter()
+                    .all(|x| i64_value_ok(x, self_sym, nargs, bound, kind))
         }
         _ => false,
     }
@@ -633,8 +639,8 @@ struct I64Ctx {
     // `let` binder slots → their SSA variable (index = frame slot; `None` for a param slot).
     // A `Local(k)` with `k >= nargs` reads `use_var(slot_vars[k])`; a `LetBind` `def_var`s it.
     slot_vars: Vec<Option<cranelift_frontend::Variable>>,
-    depth: cranelift_codegen::ir::Value,    // this activation's depth
-    ovf: cranelift_codegen::ir::Value,      // *mut u8 overflow sentinel
+    depth: cranelift_codegen::ir::Value, // this activation's depth
+    ovf: cranelift_codegen::ir::Value,   // *mut u8 overflow sentinel
     poisoned: cranelift_codegen::ir::Block, // shared unwind target (returns 0)
 }
 
@@ -712,9 +718,7 @@ fn lower_i64_arith(
             let zero = b.ins().iconst(cranelift_codegen::ir::types::I64, 0);
             let div0 = b.ins().icmp(IntCC::Equal, y, zero);
             i64_guard_overflow(b, cx, div0);
-            let min = b
-                .ins()
-                .iconst(cranelift_codegen::ir::types::I64, i64::MIN);
+            let min = b.ins().iconst(cranelift_codegen::ir::types::I64, i64::MIN);
             let neg1 = b.ins().iconst(cranelift_codegen::ir::types::I64, -1);
             let x_min = b.ins().icmp(IntCC::Equal, x, min);
             let y_m1 = b.ins().icmp(IntCC::Equal, y, neg1);
@@ -761,7 +765,9 @@ fn lower_i64_value(
             Some(var) => b.use_var(var), // a `let` binder
             None => cx.params[*k],       // a param
         },
-        Node::Prim2 { op, a, b: bn, map, .. } => {
+        Node::Prim2 {
+            op, a, b: bn, map, ..
+        } => {
             let va = lower_i64_value(b, cx, a);
             let vb = lower_i64_value(b, cx, bn);
             let (x, y) = if map[0] == 0 { (va, vb) } else { (vb, va) };
@@ -836,7 +842,9 @@ fn lower_i64_cond(
         InstBuilder,
     };
     match node {
-        Node::Prim2 { op, a, b: bn, map, .. } => {
+        Node::Prim2 {
+            op, a, b: bn, map, ..
+        } => {
             let va = lower_i64_value(b, cx, a);
             let vb = lower_i64_value(b, cx, bn);
             let (x, y) = if map[0] == 0 { (va, vb) } else { (vb, va) };
@@ -1039,9 +1047,12 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         let mut wargs: Vec<cranelift_codegen::ir::Value> = (0..nargs)
             .map(|k| {
                 let slot_off = (k as i64) * STRIDE + PAYLOAD_OFFSET as i64;
-                let bits = b
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), argbase, slot_off as i32);
+                let bits = b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    argbase,
+                    slot_off as i32,
+                );
                 match kind {
                     Scalar::Int => bits,
                     Scalar::Float => b.ins().bitcast(types::F64, MemFlagsData::new(), bits),
@@ -1093,11 +1104,19 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
             Scalar::Int => r,
             Scalar::Float => b.ins().bitcast(types::I64, MemFlagsData::new(), r),
         };
-        b.ins()
-            .store(MemFlagsData::trusted(), payload, addr2, PAYLOAD_OFFSET as i32);
+        b.ins().store(
+            MemFlagsData::trusted(),
+            payload,
+            addr2,
+            PAYLOAD_OFFSET as i32,
+        );
         let z2 = b.ins().iconst(types::I64, 0);
-        b.ins()
-            .store(MemFlagsData::trusted(), z2, addr2, PAYLOAD_OFFSET as i32 + 8);
+        b.ins().store(
+            MemFlagsData::trusted(),
+            z2,
+            addr2,
+            PAYLOAD_OFFSET as i32 + 8,
+        );
         let d = b.ins().iconst(types::I64, 0);
         b.ins().return_(&[d]);
         // Any non-Int arg landed here: outcome 1 (the VM runs the arm).
@@ -1176,10 +1195,10 @@ fn jit_lower_arm_inner(
     slot_tags: &[u8],
     inline: Option<(&Node, &Chunk, usize)>,
 ) -> Option<*const u8> {
+    use crate::core::heap::VecStore as VS;
     use crate::core::value::jit_layout::{
         PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_PAIR, TAG_VECTOR,
     };
-    use crate::core::heap::VecStore as VS;
     use cranelift_codegen::ir::{
         condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlagsData, StackSlotData,
         StackSlotKind,
@@ -2719,80 +2738,87 @@ fn jit_lower_arm_inner(
     // region, spilled/large vector, or out-of-range index) deopts to the VM,
     // which produces `nth`'s exact result. Element read is `slot + JIT_ITEMS_OFF +
     // idx*STRIDE`; `vec` is the handle word-triple, `idx` a compile-time index.
-    let inline_vec_ref = |b: &mut FunctionBuilder,
-                          vec: [cranelift_codegen::ir::Value; 3],
-                          idx: i64|
-     -> Op {
-        let w0 = vec[0];
-        let w1 = vec[1];
-        // Tag byte must be Vector (Range/SeqView share the slab but tag differently).
-        let tagb = b.ins().band_imm(w0, 0xff);
-        let is_vec = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_VECTOR as i64);
-        let c1 = b.create_block();
-        b.ins().brif(is_vec, c1, &[], deopt, &[]);
-        b.switch_to_block(c1);
-        // Region: high 2 bits of the handle == 0 (LOCAL). Deopt for PRELUDE/RUNTIME.
-        let high2 = b.ins().ushr_imm(w1, 62);
-        let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0);
-        let c2 = b.create_block();
-        b.ins().brif(is_local, c2, &[], deopt, &[]);
-        b.switch_to_block(c2);
-        // Age bit 61 (0=nursery, 1=old) selects which slab base to fetch. Fetch it
-        // per-read so a prior safepoint that moved the slab can't leave it stale.
-        let age = b.ins().ushr_imm(w1, 61);
-        let is_old = b.ins().icmp_imm(IntCC::NotEqual, age, 0);
-        let nb = b.create_block();
-        let ob = b.create_block();
-        let merge = b.create_block();
-        b.append_block_param(merge, ptr_ty);
-        b.ins().brif(is_old, ob, &[], nb, &[]);
-        b.switch_to_block(nb);
-        let cn = b.ins().call(vnbase_ref, &[heap]);
-        let bn = b.inst_results(cn)[0];
-        b.ins().jump(merge, &[BlockArg::Value(bn)]);
-        b.switch_to_block(ob);
-        let co = b.ins().call(vobase_ref, &[heap]);
-        let bo = b.inst_results(co)[0];
-        b.ins().jump(merge, &[BlockArg::Value(bo)]);
-        b.switch_to_block(merge);
-        let base = b.block_params(merge)[0];
-        // Slot pointer: base + slab_index * stride. slab_index = low 32 bits.
-        let vidx = b.ins().band_imm(w1, 0xFFFF_FFFFi64);
-        let slot_off = b.ins().imul_imm(vidx, VS::JIT_STRIDE);
-        let slot_ptr = b.ins().iadd(base, slot_off);
-        // Discriminant byte must be `Inline` (spilled/large vectors deopt).
-        let disc = b
-            .ins()
-            .load(types::I8, MemFlagsData::trusted(), slot_ptr, VS::JIT_TAG_OFF);
-        let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
-        let c3 = b.create_block();
-        b.ins().brif(is_inline, c3, &[], deopt, &[]);
-        b.switch_to_block(c3);
-        // Bounds: idx < len (len is the inline element count, a u8).
-        let lenb = b
-            .ins()
-            .load(types::I8, MemFlagsData::trusted(), slot_ptr, VS::JIT_LEN_OFF);
-        let lenw = b.ins().uextend(types::I64, lenb);
-        let idxc = b.ins().iconst(types::I64, idx);
-        let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, idxc, lenw);
-        let c4 = b.create_block();
-        b.ins().brif(in_bounds, c4, &[], deopt, &[]);
-        b.switch_to_block(c4);
-        // Element read: slot_ptr + JIT_ITEMS_OFF + idx*size_of::<Value>().
-        let elem_off = VS::JIT_ITEMS_OFF as i64 + idx * (STRIDE);
-        let elem = b.ins().iadd_imm(slot_ptr, elem_off);
-        let r0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
-        let r1 = b
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), elem, PAYLOAD_OFFSET as i32);
-        let r2 = b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            elem,
-            PAYLOAD_OFFSET as i32 + 8,
-        );
-        Op::Handle(r0, r1, r2)
-    };
+    let inline_vec_ref =
+        |b: &mut FunctionBuilder, vec: [cranelift_codegen::ir::Value; 3], idx: i64| -> Op {
+            let w0 = vec[0];
+            let w1 = vec[1];
+            // Tag byte must be Vector (Range/SeqView share the slab but tag differently).
+            let tagb = b.ins().band_imm(w0, 0xff);
+            let is_vec = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_VECTOR as i64);
+            let c1 = b.create_block();
+            b.ins().brif(is_vec, c1, &[], deopt, &[]);
+            b.switch_to_block(c1);
+            // Region: high 2 bits of the handle == 0 (LOCAL). Deopt for PRELUDE/RUNTIME.
+            let high2 = b.ins().ushr_imm(w1, 62);
+            let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0);
+            let c2 = b.create_block();
+            b.ins().brif(is_local, c2, &[], deopt, &[]);
+            b.switch_to_block(c2);
+            // Age bit 61 (0=nursery, 1=old) selects which slab base to fetch. Fetch it
+            // per-read so a prior safepoint that moved the slab can't leave it stale.
+            let age = b.ins().ushr_imm(w1, 61);
+            let is_old = b.ins().icmp_imm(IntCC::NotEqual, age, 0);
+            let nb = b.create_block();
+            let ob = b.create_block();
+            let merge = b.create_block();
+            b.append_block_param(merge, ptr_ty);
+            b.ins().brif(is_old, ob, &[], nb, &[]);
+            b.switch_to_block(nb);
+            let cn = b.ins().call(vnbase_ref, &[heap]);
+            let bn = b.inst_results(cn)[0];
+            b.ins().jump(merge, &[BlockArg::Value(bn)]);
+            b.switch_to_block(ob);
+            let co = b.ins().call(vobase_ref, &[heap]);
+            let bo = b.inst_results(co)[0];
+            b.ins().jump(merge, &[BlockArg::Value(bo)]);
+            b.switch_to_block(merge);
+            let base = b.block_params(merge)[0];
+            // Slot pointer: base + slab_index * stride. slab_index = low 32 bits.
+            let vidx = b.ins().band_imm(w1, 0xFFFF_FFFFi64);
+            let slot_off = b.ins().imul_imm(vidx, VS::JIT_STRIDE);
+            let slot_ptr = b.ins().iadd(base, slot_off);
+            // Discriminant byte must be `Inline` (spilled/large vectors deopt).
+            let disc = b.ins().load(
+                types::I8,
+                MemFlagsData::trusted(),
+                slot_ptr,
+                VS::JIT_TAG_OFF,
+            );
+            let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
+            let c3 = b.create_block();
+            b.ins().brif(is_inline, c3, &[], deopt, &[]);
+            b.switch_to_block(c3);
+            // Bounds: idx < len (len is the inline element count, a u8).
+            let lenb = b.ins().load(
+                types::I8,
+                MemFlagsData::trusted(),
+                slot_ptr,
+                VS::JIT_LEN_OFF,
+            );
+            let lenw = b.ins().uextend(types::I64, lenb);
+            let idxc = b.ins().iconst(types::I64, idx);
+            let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, idxc, lenw);
+            let c4 = b.create_block();
+            b.ins().brif(in_bounds, c4, &[], deopt, &[]);
+            b.switch_to_block(c4);
+            // Element read: slot_ptr + JIT_ITEMS_OFF + idx*size_of::<Value>().
+            let elem_off = VS::JIT_ITEMS_OFF as i64 + idx * (STRIDE);
+            let elem = b.ins().iadd_imm(slot_ptr, elem_off);
+            let r0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem, 0);
+            let r1 = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                elem,
+                PAYLOAD_OFFSET as i32,
+            );
+            let r2 = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                elem,
+                PAYLOAD_OFFSET as i32 + 8,
+            );
+            Op::Handle(r0, r1, r2)
+        };
 
     // For each leader, which of its operand-stack block params carry a boolean (so the
     // entry reconstruction tags them `Op::Bool`, not `Op::Int`). Populated by the jump

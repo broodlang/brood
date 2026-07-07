@@ -295,7 +295,8 @@ pub(super) fn range_reduce_slow(
             // the gate is off, i.e. `hof` is `None`).
             let step_call = |heap: &mut Heap, acc: Value| -> LispResult {
                 if let Some(h) = &hof {
-                    if let Some(r) = crate::eval::compile::hof_apply_step(heap, h, f, &[acc, Value::int(i)])
+                    if let Some(r) =
+                        crate::eval::compile::hof_apply_step(heap, h, f, &[acc, Value::int(i)])
                     {
                         return r;
                     }
