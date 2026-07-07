@@ -3459,6 +3459,42 @@ mod tests {
     }
 
     #[test]
+    fn argument_check_uses_the_full_gradual_relation() {
+        // Gating B1 (docs/type-gating.md): the arg check now runs the gradual
+        // relation, so a *merely-wider precise* argument is caught (a `number`
+        // sig-param passed where `int` is wanted) — closing the return/arg
+        // asymmetry.
+        let w = file_warnings(
+            "(sig wants-int (int -> int)) (defn wants-int (n) n) \
+             (sig f (number -> int)) (defn f (x) (wants-int x))",
+        );
+        assert!(
+            w.iter().any(
+                |m| m.contains("wants-int: argument 1 expects int") && m.contains("got number")
+            ),
+            "a merely-wider precise argument must warn: {w:?}"
+        );
+        // But B0 keeps it sound: a literal argument is a faithful singleton, so
+        // `200` passed where `(or 200 404 500)` is wanted does NOT false-positive.
+        let w =
+            file_warnings("(sig g ((or 200 404 500) -> int)) (defn g (c) c) (defn u () (g 200))");
+        assert!(
+            w.iter().all(|m| !m.contains("expects")),
+            "a literal in the accepted set must not warn: {w:?}"
+        );
+        // And a *dynamic* argument (a call result) still defers on `∩` — only a
+        // provably-disjoint one warns, never a merely-wider one.
+        let w = file_warnings(
+            "(sig produce (int -> number)) (defn produce (n) n) \
+             (sig h (int -> int)) (defn h (n) n) (defn top () (h (produce 3)))",
+        );
+        assert!(
+            w.iter().all(|m| !m.contains("expects")),
+            "a dynamic (call-result) argument must defer, not over-warn: {w:?}"
+        );
+    }
+
+    #[test]
     fn undeclared_global_current_type_gates_its_use() {
         // Gap A (docs/type-gating.md): an *undeclared* global defined exactly once
         // by `(def g 5)` gets its inferred current-image type (`int`), so misusing

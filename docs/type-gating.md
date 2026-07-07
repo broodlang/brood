@@ -138,16 +138,20 @@ shape is a two-parter: **(B0) track int/bool/string literal singletons** (make
 (B1) route the argument check through the gradual relation. B1 alone
 false-positives; B0 alone adds precision the checker already knows how to carry.
 
-**Status: B0 shipped; B1 unblocked (next).** `Ty::of_value` now carries int/bool
+**Status: B0 + B1 shipped — Gap B complete.** B0: `Ty::of_value` carries int/bool
 singletons and `expr_ty` builds a string's `str_lit` (it has the heap), so a
-literal's static type is faithful (`200 : {200}`, a subtype of `int`). This
-removes the FP at its root: `stat({200}) ⊆ (or 200 404 500)` now holds. It also
-sharpens the existing return/def checks (a literal-body-vs-literal-set return no
-longer false-positives) and every diagnostic naming a literal (`got 5`, not `got
-int`) — the wording churn the earlier attempt balked at (≈19 test messages,
-mechanically updated). Verified: `types::` 370/370, `nest check` 0 (no
-precision-driven cascade in the corpus). The `∩`-only arg check (B1) is now safe
-to upgrade to the gradual relation — the remaining piece.
+literal's static type is faithful (`200 : {200}`, a subtype of `int`) — removing
+the FP at its root (`stat({200}) ⊆ (or 200 404 500)` now holds) and sharpening
+every literal diagnostic (`got 5`, not `got int`). B1: the argument check now runs
+the same `gradual_of` / `consistent_with` the return check uses — `⊆` for a
+precise argument (so a merely-wider `number` passed where `int` is wanted is
+caught), `∩` (`!is_disjoint`) for a dynamic one (a call result / redefinable
+global — no new over-warning, reload-safe). Two supporting fixes shipped with B1:
+`gradual_of` consults a narrowing on *any* symbol (not just lexical locals, so a
+guard-narrowed free variable keeps it), and `consistent_with`'s dynamic branch
+uses `is_disjoint` (refinement-aware — catches record/tuple/literal-set
+conflicts). Verified: `types::` 371/371, `nest check` 0 (no merely-wider false
+positive in the corpus).
 
 ## Recommended sequencing (revised after prototyping)
 
@@ -156,9 +160,10 @@ to upgrade to the gradual relation — the remaining piece.
    `str_lit`. Sharpens the existing return/def checks (removes the latent
    literal-set FP) and makes literal diagnostics name the value. ≈19 test message
    strings updated. `types::` 370/370, `nest check` 0.
-2. **B1 — arg-check → gradual relation.** Only after B0 (now unblocked). Then the `⊆` upgrade is
-   sound (a literal is faithful, so `⊆` no longer over-approximates), and it
-   closes the return/argument asymmetry. Gate on a zero-corpus-warning A/B.
+2. **B1 — arg-check → gradual relation.** ✅ **shipped** (after B0). The `⊆`
+   upgrade is sound (a literal is a faithful singleton, so `⊆` no longer
+   over-approximates), and it closes the return/argument asymmetry. Verified zero
+   corpus warnings.
 3. **Gap A — undeclared-global current type as `dynamic_within`** — ✅ **shipped**
    (defined-exactly-once, same-file, non-function value globals). Independent of
    B0/B1; sound on its own (the `∩` relation). Cross-file inference is the

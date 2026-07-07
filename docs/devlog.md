@@ -2169,3 +2169,29 @@ flat tag), so it only sharpens — never over-approximates. Bignum literals stay
 flat `int` (`int_lit` is `i64`). **Verified:** `types::` 370/370; clippy clean;
 `nest check` 0 across `std/` + `tests/` (the increased precision surfaced no new
 warnings — no match-redundancy/dead-clause cascade). B1 is the next step.
+
+## 2026-07-07 — Gating B1: argument check through the full gradual relation (Gap B complete)
+
+With B0's literal singletons in place, shipped B1 — the argument check now runs
+the same `gradual_of` / `consistent_with` the return check uses, closing the
+return/argument asymmetry. A **precise** argument (a literal singleton, a
+`(sig …)`-typed param, integer-closed arithmetic) is checked with `⊆`, so a
+*merely-wider* misuse is caught — a `number` sig-param passed where `int` is wanted
+now warns "expects int, got number". A **dynamic** argument (a call result, a
+redefinable/inferred global) is checked with `∩` (`!is_disjoint`) — identical to
+the old behaviour, no new over-warning, reload-safe.
+
+B0 is what makes this sound: a literal is now a faithful singleton, so `(f 200)`
+against a `(or 200 404 500)` param does NOT false-positive (`{200} ⊆ {200,404,500}`),
+the exact FP that blocked B1 before. Two supporting fixes shipped with it:
+`gradual_of` now consults a narrowing on *any* symbol (not just lexical locals —
+so a guard-narrowed *free* variable keeps its narrowing in the arg check), and
+`consistent_with`'s dynamic branch uses `is_disjoint` (refinement-aware, so a
+record/tuple/literal-set conflict on a dynamic argument is caught, matching the
+disjointness the flat `∩` missed).
+
+**Gap B complete.** Verified: new test `argument_check_uses_the_full_gradual_relation`
+(merely-wider warns; literal-in-set doesn't; dynamic call-result defers); Rust lib
+371/371; clippy clean; **`nest check` 0** across `std/` + `tests/` (the `⊆` arg
+check surfaced no merely-wider false positive in the corpus). Remaining gating
+work: cross-file inferred-global propagation (the Gap A follow-on).

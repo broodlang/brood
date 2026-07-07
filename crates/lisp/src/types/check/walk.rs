@@ -773,40 +773,34 @@ pub(super) fn check_into(
         if let Some(sig) = sig {
             for (i, &arg) in items[1..].iter().enumerate() {
                 let Some(param) = sig.param(i) else { continue };
-                // Warn only on a *provable* mismatch: the argument's type shares
-                // no tag with what the callee accepts. A superset, an `any`
-                // result, or an unknown argument (`None`) overlaps the param, so
-                // it's never flagged — no false positives.
-                //
-                // A `NEVER` arg type means "this branch is unreachable" — every
-                // intersection with NEVER is NEVER, so it'd warn against
-                // *every* param. That's all noise: the code can't execute, so
-                // there's no real misuse. Skip. This shows up in pattern-match
-                // lowering where a guard has narrowed a variable to a type
-                // that has no inhabitants for the current branch.
-                //
-                // NB: this stays on the `∩`-only `is_disjoint` (not the full
-                // gradual `⊆`) *deliberately* — the merely-wider `⊆` upgrade
-                // (roadmap Gap B, `docs/type-gating.md`) needs int/bool/string
-                // literal-singleton precision first, or it false-positives on a
-                // literal arg against a literal-set param (`200` vs
-                // `(or 200 404 500)`). See the doc's "Prerequisite" section.
-                if let Some(arg_ty) = expr_ty(heap, arg, ctx) {
-                    if arg_ty.is_never() {
-                        continue;
-                    }
-                    if arg_ty.is_disjoint(&param) {
-                        let msg = format!(
-                            "{}: argument {} expects {}, got {} ({})",
-                            name_of(s),
-                            i + 1,
-                            param,
-                            arg_ty,
-                            crate::syntax::printer::print(heap, arg),
-                        );
-                        // Locate to the call form (a Pair the reader positioned).
-                        out.push((heap.form_pos_only(form), msg));
-                    }
+                // Check the argument against the parameter with the **full gradual
+                // relation** — the same `gradual_of` / `consistent_with` the
+                // return-type check uses (ADR-110; gating "B1", docs/type-gating.md).
+                //   - a **precise** argument (a literal singleton — B0 makes these
+                //     faithful, a `(sig …)`-typed param, integer-closed arithmetic)
+                //     is checked with `⊆`, catching a *merely-wider* misuse (a
+                //     `number` where `int` is wanted) — closing the return/argument
+                //     asymmetry;
+                //   - a **dynamic** argument (a call result, an inferred/redefinable
+                //     global) is checked with `∩ ≠ ⊥` (`!is_disjoint`), identical to
+                //     the old behaviour — no new over-warning, reload-safe.
+                // A `NEVER` bound means "this branch is unreachable" (a guard
+                // narrowed the arg to the empty type); skip it — the code can't run,
+                // so there's no real misuse to flag (the old `is_never` skip; under
+                // the dynamic reading a bare NEVER would else read as
+                // disjoint-from-everything).
+                let g = gradual_of(heap, arg, ctx);
+                if !g.bound.is_never() && !g.clone().consistent_with(param.clone()) {
+                    let msg = format!(
+                        "{}: argument {} expects {}, got {} ({})",
+                        name_of(s),
+                        i + 1,
+                        param,
+                        g.bound,
+                        crate::syntax::printer::print(heap, arg),
+                    );
+                    // Locate to the call form (a Pair the reader positioned).
+                    out.push((heap.form_pos_only(form), msg));
                 }
 
                 // Callback-arity check (ADR-078 arrows): when the parameter is a
@@ -1021,20 +1015,25 @@ fn fn_form_items(heap: &Heap, form: Value) -> Option<Vec<Value>> {
 ///   warns). Unknown → pure `dynamic()` (always consistent — defer).
 fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
     if let Value::Sym(s) = expr {
-        // A genuine *lexical* local (fn param / let binding) shadows any global,
-        // so a global `(sig …)` doesn't apply; use its narrowed type if known.
-        if ctx.is_lexical_local(s) {
-            return match ctx.get(s) {
-                // A `(sig …)`-seeded param carries its *exact* contract type, so
-                // it's `stat` (precise, `⊆`): returning/assigning it where a
-                // narrower type is wanted is a real mismatch (`number` param → `int`
-                // slot). A plain `let` local's type can be an over-approximation
-                // (its RHS was a call), so it stays `dynamic` (the `∩` relation,
-                // which never over-warns on a widened type).
-                Some(t) if ctx.is_sig_param(s) => GradualTy::stat(t),
-                Some(t) => GradualTy::dynamic_within(t),
-                None => GradualTy::dynamic(),
+        // A known/narrowed type for `s` in the current scope — a fn param, a let
+        // binding, OR a *guard narrowing* on any variable (a narrowing lands in
+        // `ctx.get`, whether or not `s` is a lexical local, so this must be checked
+        // for every symbol — gating it on `is_lexical_local` dropped a narrowing on
+        // a free variable). A `(sig …)`-seeded param carries its *exact* contract
+        // type → `stat` (precise, `⊆`): using it where a narrower type is wanted is
+        // a real mismatch. Anything else (a `let` local whose RHS was a call, a
+        // guard-narrowed variable) is an over-approximation bound → `dynamic_within`
+        // (the `∩` relation, which never over-warns on a merely-wider type).
+        if let Some(t) = ctx.get(s) {
+            return if ctx.is_sig_param(s) {
+                GradualTy::stat(t)
+            } else {
+                GradualTy::dynamic_within(t)
             };
+        }
+        // A lexical local with no known type is in scope but unknown → `dynamic()`.
+        if ctx.is_lexical_local(s) {
+            return GradualTy::dynamic();
         }
         // Otherwise a (redefinable) global / file-global: dynamic, bounded by its
         // own declared value type when it has one — the bounded-dynamic case.

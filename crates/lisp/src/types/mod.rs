@@ -1748,7 +1748,13 @@ impl GradualTy {
     /// Dynamic: some inhabited materialisation fits, `bound ∩ expected ≠ ⊥`.
     pub fn consistent_with(&self, expected: Ty) -> bool {
         if self.dynamic {
-            !self.bound.clone().intersect(expected).is_never()
+            // Some inhabited materialisation fits — i.e. `bound` is not *provably
+            // disjoint* from `expected`. Uses [`Ty::is_disjoint`], not
+            // `intersect().is_never()`: the two agree on flat tags, but only
+            // `is_disjoint` also sees the refinement-level conflicts (record
+            // fields, tuple shapes, literal sets), so a dynamic value with a
+            // refined type that provably can't fit is caught here too.
+            !self.bound.is_disjoint(&expected)
         } else {
             self.bound.is_subtype(&expected)
         }

@@ -881,14 +881,16 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   reload-safe), so its misuse is caught (same-file today; declared globals already
   gated). **B** — the call-argument check uses `∩`-only `is_disjoint`, missing the
   *merely-wider* mismatch the return check already catches via `⊆`. **Key design
-  result (from prototyping):
-  B is unsound without int/bool/string literal-singleton precision (B0)** — a
-  literal `200`'s type over-approximates to `int`, so `⊆` false-positives against
-  a `(or 200 404 500)` param. So B splits into **B0** (literal singletons) then
-  **B1** (arg-check `⊆`). **B0 ✅ shipped** — `Ty::of_value` carries int/bool
-  singletons, `expr_ty` builds a string's `str_lit`; the literal is now faithful
-  (`5 : {5}`), removing the FP at its root and unblocking B1 (the arg-check `⊆`
-  upgrade, next).
+  result (from prototyping): B was unsound without int/bool/string
+  literal-singleton precision (B0)** — a literal `200`'s type over-approximated to
+  `int`, so `⊆` false-positived against a `(or 200 404 500)` param. B split into
+  **B0** (literal singletons) then **B1** (arg-check `⊆`), **both ✅ shipped**: B0
+  makes `Ty::of_value` carry int/bool singletons (`5 : {5}`) + `expr_ty` build a
+  string's `str_lit`; B1 routes the arg check through the gradual relation (`⊆`
+  precise / `∩` dynamic), catching a merely-wider precise argument and closing the
+  return/argument asymmetry — verified zero corpus false positives. **Gap B is
+  complete.** The remaining 🎯 work is cross-file inferred-global propagation
+  (Gap A follow-on) and any further decision points.
 - ✅ **`BROOD_CONTRACTS=1`** — shipped: enforces *every* `(sig …)` at run time the
   same way `sig!` does, plus element-level `(list E)` / `(vector E)` contract
   checks (`tests/contract_test.blsp`). See [`type-annotations.md`](type-annotations.md).
