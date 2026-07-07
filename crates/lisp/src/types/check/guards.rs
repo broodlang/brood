@@ -11,6 +11,8 @@
 //!   "do I know what this expression returns?" probe the misuse-check
 //!   reads off.
 
+use std::cell::Cell;
+
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
@@ -568,12 +570,52 @@ pub(super) fn global_value_ty(heap: &Heap, s: Symbol) -> Option<Ty> {
     Some(t)
 }
 
+thread_local! {
+    /// [`expr_ty`]'s recursion depth on this thread. `expr_ty` and
+    /// `control_flow_ty` mutually recurse into a form's nesting, and Tier-2 return
+    /// inference (`infer_sig` → `expr_ty(body)`) walks whole function bodies at
+    /// call sites — so a pathologically deep, usually macro-expanded form (a huge
+    /// `cond`/`or`/threaded expansion) could overflow the stack. Per-thread → sound
+    /// under the parallel checker.
+    static EXPR_TY_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Depth cap for [`expr_ty`]. Comfortably below the ~1900-level overflow observed,
+/// small enough for the green-process coroutine stack the parallel checker runs
+/// on, and far past any real form's nesting. Past it, `expr_ty` returns `None`
+/// (unknown → defer) — sound: it only ever *loses* a warning, never invents one.
+const MAX_EXPR_TY_DEPTH: u32 = 128;
+
+/// RAII depth counter for [`expr_ty`]: `enter` bumps the thread-local depth and
+/// yields `None` at [`MAX_EXPR_TY_DEPTH`] (so `expr_ty` bails); `Drop` restores it.
+struct DepthGuard;
+impl DepthGuard {
+    fn enter() -> Option<DepthGuard> {
+        EXPR_TY_DEPTH.with(|d| {
+            let n = d.get();
+            if n >= MAX_EXPR_TY_DEPTH {
+                None
+            } else {
+                d.set(n + 1);
+                Some(DepthGuard)
+            }
+        })
+    }
+}
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        EXPR_TY_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 /// The static type of an expression form *in `ctx`*, or `None` when it can't
 /// be pinned. `None` is "unknown" and is never flagged. Self-evaluating
 /// literals get their exact tag; a `quote`d datum gets the datum's tag; a call
 /// with a known signature gets its result type; a variable returns whatever
 /// `ctx` knows about it (typically `None` for a free / global reference).
 pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
+    // Bail (defer) if the type-walk is pathologically deep — overflow guard.
+    let _depth = DepthGuard::enter()?;
     match form {
         // A bare symbol is a variable reference — looked up in the local ctx
         // (let-bound RHS / if-guard narrowing). A miss falls back to a `(sig x T)`

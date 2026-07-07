@@ -298,15 +298,32 @@ thread_local! {
     static INFERRING: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
 }
 
+/// Max cross-function depth for return-type inference. Tier-2 inference recurses
+/// along the *call graph* (`infer_sig` → `expr_ty(body)` → `sig_of` → `infer_sig`
+/// for a tail call into another function), and the [`INFERRING`] set only breaks
+/// *cycles* — a deep acyclic chain (or one that slips a cycle via a qualified vs
+/// bare name) would recurse unbounded and overflow the stack. This caps the chain:
+/// beyond it, inference bails to `None` (sound — the deep function's return just
+/// stays unknown). Realistic return-inference chains (a public fn delegating to an
+/// internal one, …) are 2–3 deep, so this loses nothing in practice.
+const MAX_INFER_DEPTH: usize = 8;
+
 /// RAII marker for "inferring `sym` right now". [`enter`](Self::enter) returns
-/// `None` when `sym` is already in progress (a cycle) — the caller then bails —
+/// `None` when `sym` is already in progress (a cycle) **or** the inference chain
+/// is already `MAX_INFER_DEPTH` deep (overflow guard) — the caller then bails —
 /// and `Drop` clears the mark, so *every* early return from `infer_sig` is
 /// covered without hand-threaded cleanup.
 struct InferGuard(Symbol);
 impl InferGuard {
     fn enter(sym: Symbol) -> Option<InferGuard> {
         INFERRING
-            .with(|s| s.borrow_mut().insert(sym))
+            .with(|s| {
+                let mut set = s.borrow_mut();
+                if set.len() >= MAX_INFER_DEPTH {
+                    return false;
+                }
+                set.insert(sym)
+            })
             .then_some(InferGuard(sym))
     }
 }

@@ -2222,3 +2222,35 @@ new. **Gap A is now complete (same-file + cross-file).** Verified: new
 `cross_file_undeclared_global_gates_via_loaded_image` (cross-context catch; dynvar
 excluded; fn global not gated); Rust lib 372/372; clippy clean; **`nest check` 0**
 across `std/` + `tests/` (every cross-module reference, no FP).
+
+## 2026-07-07 — Fix: stack overflow in Tier-2 return inference (deep bodies) + gate cleanup
+
+Running the full `nest test` (which I hadn't re-run since the type-checker work
+landed) crashed with a **main-thread stack overflow** in its check pre-flight —
+while `nest check` passed. Backtrace: ~1900 nested `expr_ty`/`control_flow_ty`
+frames. Cause: **Tier-2 return-only inference** (commit `7732f14`) made
+`sig_of` walk a function's whole body via `expr_ty` at *every call site*
+(`infer_sig` → `expr_ty(body)`), and `expr_ty`/`control_flow_ty` had **no
+recursion-depth bound** — so a function with a pathologically deep (macro-expanded)
+body overflowed the type-walk. The `InferGuard` cycle-breaker didn't help: the
+depth is *within one body*, not the cross-function chain.
+
+**Fix — two bounds, both sound (a cap yields `None` = "unknown" = defer, which can
+only lose a warning, never invent one):**
+- `expr_ty` gained a thread-local recursion-depth guard (`MAX_EXPR_TY_DEPTH = 128`)
+  — comfortably below the ~1900 overflow, past any real form's nesting, and
+  per-thread so it's correct under the parallel checker. This is the actual fix.
+- `infer_sig` gained a cross-function depth cap (`MAX_INFER_DEPTH = 8`) on the
+  `INFERRING` set — bounds (and de-duplicates the O(N²) re-walk of) a deep
+  return-inference call chain; realistic chains are 2–3 deep.
+
+Also cleared two red CI gates found along the way: whole-tree `cargo fmt`
+(11 committed files had accumulated drift — the feature-gated `terminal`/`jit`/`gui`
+files most of it; purely cosmetic re-wrapping) and one clippy `clone_on_copy` on a
+`Value` in a test.
+
+**Verified:** `nest test` now **2605/2605** (was: overflow); `nest check` 0; Rust
+lib 372/372; clippy `--all-targets --all-features` clean; `cargo fmt --check`
+clean. The tracked known-issues list (`known-issues.md`) remains empty (KI-1–KI-8
+fixed, KI-9 transient); this was a regression introduced and fixed within the
+session.
