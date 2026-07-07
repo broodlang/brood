@@ -876,10 +876,12 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   day (ADR-126, `docs/type-annotations.md`'s "Fixed gap" section).
 - 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** —
   designed in [`type-gating.md`](type-gating.md). Two grounded gaps. **A ✅
-  shipped** — an *undeclared* global defined exactly once by `(def g <non-fn>)`
-  now carries its inferred current-image type (as `dynamic_within` → `∩`,
-  reload-safe), so its misuse is caught (same-file today; declared globals already
-  gated). **B** — the call-argument check uses `∩`-only `is_disjoint`, missing the
+  shipped (same-file + cross-file)** — an *undeclared* global carries its inferred
+  current-image type (as `dynamic_within` → `∩`, reload-safe), so its misuse is
+  caught: same-file via `expr_ty(RHS)` of an exactly-once def, cross-file via the
+  loaded image's heap value (`global_value_ty`, like `infer_sig` for functions),
+  with dynamic variables (`defdyn`) excluded (their value isn't fixed).
+  **B** — the call-argument check used `∩`-only `is_disjoint`, missing the
   *merely-wider* mismatch the return check already catches via `⊆`. **Key design
   result (from prototyping): B was unsound without int/bool/string
   literal-singleton precision (B0)** — a literal `200`'s type over-approximated to

@@ -2195,3 +2195,30 @@ disjointness the flat `∩` missed).
 371/371; clippy clean; **`nest check` 0** across `std/` + `tests/` (the `⊆` arg
 check surfaced no merely-wider false positive in the corpus). Remaining gating
 work: cross-file inferred-global propagation (the Gap A follow-on).
+
+## 2026-07-07 — Cross-file Gap A (and a dynamic-var soundness fix)
+
+Closed the cross-file half of gating Gap A — and it needed none of the pre-pass /
+eval-tracking infrastructure I'd first scoped. Realization: cross-file *function*
+checking already works because `infer_sig` reads the current closure from the
+loaded heap (`obs_global`) — the image is loaded before checking. So an undeclared
+*value* global gets the same treatment: `global_value_ty` reads its current heap
+value and types it (`Ty::of_value`), consulted last in `expr_ty` / `gradual_of`
+(after declared + same-file-inferred), always as `dynamic_within`. `obs_global`
+records the dependency, so a change re-checks the reader (ADR-125). No new store,
+no order concerns, no eval change.
+
+**Dynamic-var fix (the real soundness catch).** A `defdyn` global's heap value is
+only its *default*, but `binding` rebinds it to any type in a dynamic extent — so
+typing a use against the default is unsound (`(binding (*d* "s") (string-length
+*d*))` is valid but would false-positive against `*d* : {0}`). Excluded dynamic
+variables (`value::is_dynamic`) from *both* the new cross-file path and the
+already-shipped same-file Pass 2.7, where it was a **latent** hole (the corpus only
+escaped it by using its dyn-vars consistently as int).
+
+Shares `infer_sig`'s one narrow, pre-existing FP class (a top-level use that ran at
+load before a same-name redefinition) — already accepted for functions, nothing
+new. **Gap A is now complete (same-file + cross-file).** Verified: new
+`cross_file_undeclared_global_gates_via_loaded_image` (cross-context catch; dynvar
+excluded; fn global not gated); Rust lib 372/372; clippy clean; **`nest check` 0**
+across `std/` + `tests/` (every cross-module reference, no FP).

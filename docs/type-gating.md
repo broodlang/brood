@@ -48,12 +48,25 @@ undeclared global defined **exactly once** by `(def g <non-fn-expr>)` — the RH
 `expr_ty` — and records it in `Ctx::inferred_value_ty`. `expr_ty` (the arg check)
 and `gradual_of` (value/return checks) consult it after the declared value type,
 always as `dynamic_within` (the `∩` relation → reload-safe, warns only on provable
-disjointness). Scoped conservatively: same-file only, defined-exactly-once (a
-redefined global is ambiguous → stays `dynamic()`), and non-function values (a
-function global's arrow is handled by sig inference). Verified: `(def g 5)` then
-`(string-length g)` warns; a redefined or function global stays quiet; whole
-corpus stays at zero warnings. Cross-file inference (a heap-wide inferred store,
-like `declared_heap_value_ty`) is the natural follow-on, not yet built.
+disjointness). Same-file is conservative: defined-exactly-once (a redefined global
+is ambiguous → stays `dynamic()`), non-function values.
+
+**Cross-file: also shipped** — and it needed no new store or pre-pass. An
+undeclared global used in *another* file is typed from its **current heap value**
+(`global_value_ty` → `Ty::of_value(obs_global …)`), the exact mechanism
+`infer_sig` already uses for functions: the image is loaded before checking, so
+the value is in hand, and `obs_global` records the dependency so a change
+re-checks the reader (ADR-125). Consulted last, after the declared and
+same-file-inferred types, always as `dynamic_within`. It **excludes dynamic
+variables** (`defdyn`): their heap value is only the default, but `binding`
+rebinds them to any type in a dynamic extent, so typing a use against the default
+would be unsound — this exclusion also closed a latent hole in the same-file path.
+It shares `infer_sig`'s one narrow, *pre-existing* false-positive class (a
+top-level use that ran at load before a same-name redefinition), which the project
+already accepts for functions; it introduces nothing new. Verified: a `(def g 5)`
+in the image with `(string-length g)` elsewhere warns; a dynvar used
+polymorphically via `binding` does not; the whole corpus (every cross-module
+reference) stays at zero warnings.
 
 Today a global with no `(sig …)` is `dynamic()` (bound `ANY`), so every use of it
 defers. The reload-soundness doc's "Step 1" (globals get a real current type)
@@ -166,8 +179,9 @@ positive in the corpus).
    corpus warnings.
 3. **Gap A — undeclared-global current type as `dynamic_within`** — ✅ **shipped**
    (defined-exactly-once, same-file, non-function value globals). Independent of
-   B0/B1; sound on its own (the `∩` relation). Cross-file inference is the
-   follow-on.
+   B0/B1; sound on its own (the `∩` relation). ✅ **Cross-file too** — typed from
+   the loaded image's heap value (`global_value_ty`), like `infer_sig` for
+   functions; dynamic variables excluded.
 4. **Re-check coverage.** All of the above rely on ADR-125's reload re-check to
    re-derive after a `def`; that trigger is already shipped for `nest run
    --watch`. REPL-level and LSP-push triggers stay open (noted in the reload

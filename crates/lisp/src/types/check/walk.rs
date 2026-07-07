@@ -20,8 +20,8 @@ use crate::types::{GradualTy, Ty};
 
 use super::ctx::{Ctx, PathKey};
 use super::guards::{
-    expr_ty, find_redundant_clause, guard_assertion, is_syntactic_keyword, literal_eq_test_raw,
-    match_exhaustiveness_gap, path_guard_assertion, render_literal_pattern,
+    expr_ty, find_redundant_clause, global_value_ty, guard_assertion, is_syntactic_keyword,
+    literal_eq_test_raw, match_exhaustiveness_gap, path_guard_assertion, render_literal_pattern,
 };
 use super::sigs::{
     arity_of, arity_str, curated_sig, declared_heap_overload, declared_heap_sig,
@@ -1046,9 +1046,11 @@ fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
             .declared_value_ty(s)
             .or_else(|| declared_heap_value_ty(heap, s))
             .or_else(|| ctx.inferred_value_ty(s))
+            .or_else(|| global_value_ty(heap, s))
         {
-            // The Gap A inferred current-image type (last `.or_else`) is exposed as
-            // `dynamic_within` like a declared global — the `∩` relation, so a
+            // The Gap A inferred current-image type (same-file `inferred_value_ty`,
+            // or cross-file `global_value_ty` read from the loaded image) is exposed
+            // as `dynamic_within` like a declared global — the `∩` relation, so a
             // reload that changes it is re-checked, never a stale hard proof.
             Some(t) => GradualTy::dynamic_within(t),
             None => GradualTy::dynamic(),

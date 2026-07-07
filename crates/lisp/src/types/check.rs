@@ -507,7 +507,14 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
             let Some((name, rhs)) = def_name_and_value(heap, form) else {
                 continue;
             };
-            if def_count.get(&name) != Some(&1) || ctx.is_file_macro(name) {
+            // Skip a global defined more than once (ambiguous), a macro, and a
+            // **dynamic variable** (`defdyn`): a dynvar's `def` sets only the
+            // default, but `binding` rebinds it to any type in a dynamic extent, so
+            // its value type isn't fixed — it must stay `dynamic()`.
+            if def_count.get(&name) != Some(&1)
+                || ctx.is_file_macro(name)
+                || value::is_dynamic(name)
+            {
                 continue;
             }
             if let Some(ty) = guards::expr_ty(heap, rhs, &ctx) {
@@ -3518,6 +3525,38 @@ mod tests {
                 "a consistent/ambiguous/function global must not warn ({src}): {w:?}"
             );
         }
+    }
+
+    #[test]
+    fn cross_file_undeclared_global_gates_via_loaded_image() {
+        // Cross-file Gap A: an undeclared global defined in one place (loaded into
+        // the image) is typed from its heap value where it's used elsewhere — the
+        // same mechanism `infer_sig` uses for functions. `check_with_defs` evals
+        // the def, then checks a separate form (the cross-context path).
+        let w = check_with_defs(&["(def gg 5)"], "(string-length gg)");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("string-length") && m.contains("got 5")),
+            "a cross-file undeclared int global misused must warn: {w:?}"
+        );
+        // A **dynamic variable** must be excluded — its heap value is only the
+        // default; `binding` rebinds it to any type, so typing a use against the
+        // default would false-positive. `(binding (*dv* "s") (string-length *dv*))`
+        // is valid and must NOT warn.
+        let w = check_with_defs(
+            &["(defdyn *dv* 0)"],
+            "(binding (*dv* \"s\") (string-length *dv*))",
+        );
+        assert!(
+            w.iter().all(|m| !m.contains("expects")),
+            "a dynamic variable must stay unknown, not be typed from its default: {w:?}"
+        );
+        // A function global isn't gated as a value (its arrow is handled by sig_of).
+        let w = check_with_defs(&["(defn ff (x) x)"], "(+ 1 ff)");
+        assert!(
+            w.iter().all(|m| !m.contains("expects")),
+            "a function global must not be gated as a plain value: {w:?}"
+        );
     }
 
     #[test]

@@ -541,6 +541,33 @@ pub(super) fn find_redundant_clause(
     find_redundant_clause(heap, items[3], sym, lit)
 }
 
+/// The type of an *undeclared* global's current heap value — the cross-file half
+/// of Gap A (`docs/type-gating.md`). Same current-image observation same-file
+/// Gap A makes, but read from the loaded image (via `obs_global`, which also
+/// records the dependency so a change re-checks the reader — ADR-125), so it
+/// reaches uses in *other* files exactly as `infer_sig` already does for
+/// functions. `None` for an absent global or a **function/native** value (a fn
+/// global's arrow is handled by `sig_of`; a bare function name used as a value is
+/// a separate concern). Callers expose the result as `dynamic_within` (the `∩`
+/// relation) — never a precise `stat` — since a global is redefinable.
+pub(super) fn global_value_ty(heap: &Heap, s: Symbol) -> Option<Ty> {
+    // A **dynamic variable** (`defdyn`) must stay unknown: its heap value is only
+    // the *default*, but `binding` rebinds it to any type within a dynamic extent,
+    // so typing a use against the default would be unsound.
+    if value::is_dynamic(s) {
+        return None;
+    }
+    let v = super::deps::obs_global(heap, s)?;
+    let t = match v {
+        Value::Str(id) => Ty::str_lit(heap.string(id)),
+        other => Ty::of_value(other),
+    };
+    if t.contains_tag(Tag::Fn) || t.contains_tag(Tag::Native) {
+        return None;
+    }
+    Some(t)
+}
+
 /// The static type of an expression form *in `ctx`*, or `None` when it can't
 /// be pinned. `None` is "unknown" and is never flagged. Self-evaluating
 /// literals get their exact tag; a `quote`d datum gets the datum's tag; a call
@@ -560,10 +587,12 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 None
             } else {
                 // Declared value type first (authoritative), then the Gap A
-                // inferred current-image type for an undeclared global. Both feed
-                // the `∩`-only `is_disjoint` arg check, so this is reload-safe.
+                // inferred current-image type: same-file (`inferred_value_ty`),
+                // then cross-file (`global_value_ty`, read from the loaded image).
+                // All feed the gradual relation, so it's reload-safe.
                 ctx.declared_value_ty(s)
                     .or_else(|| ctx.inferred_value_ty(s))
+                    .or_else(|| global_value_ty(heap, s))
             }
         }),
         // A vector literal `[a b c]` — its elements are evaluated in place, so
