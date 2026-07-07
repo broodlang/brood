@@ -43,6 +43,18 @@ disjointness. That asymmetry is Gap B. Gap A is the empty middle column.
 
 ## Gap A — a current type for an *undeclared* global
 
+**Status: shipped.** `check_file` Pass 2.7 infers a current-image value type for an
+undeclared global defined **exactly once** by `(def g <non-fn-expr>)` — the RHS's
+`expr_ty` — and records it in `Ctx::inferred_value_ty`. `expr_ty` (the arg check)
+and `gradual_of` (value/return checks) consult it after the declared value type,
+always as `dynamic_within` (the `∩` relation → reload-safe, warns only on provable
+disjointness). Scoped conservatively: same-file only, defined-exactly-once (a
+redefined global is ambiguous → stays `dynamic()`), and non-function values (a
+function global's arrow is handled by sig inference). Verified: `(def g 5)` then
+`(string-length g)` warns; a redefined or function global stays quiet; whole
+corpus stays at zero warnings. Cross-file inference (a heap-wide inferred store,
+like `declared_heap_value_ty`) is the natural follow-on, not yet built.
+
 Today a global with no `(sig …)` is `dynamic()` (bound `ANY`), so every use of it
 defers. The reload-soundness doc's "Step 1" (globals get a real current type)
 shipped only for *declared* value sigs (ADR-124); an **inferred** type for an
@@ -141,10 +153,10 @@ B0 lands. Verified: reverting leaves `types::` 369/369 and `nest check` at 0.
 2. **B1 — arg-check → gradual relation.** Only after B0. Then the `⊆` upgrade is
    sound (a literal is faithful, so `⊆` no longer over-approximates), and it
    closes the return/argument asymmetry. Gate on a zero-corpus-warning A/B.
-3. **Gap A — undeclared-global current type as `dynamic_within`**, starting with
-   defined-exactly-once globals. Independent of B0/B1; depends on the per-global
-   type store the reload-soundness doc describes. Sound on its own (the `∩`
-   relation), so it can go before or after B1.
+3. **Gap A — undeclared-global current type as `dynamic_within`** — ✅ **shipped**
+   (defined-exactly-once, same-file, non-function value globals). Independent of
+   B0/B1; sound on its own (the `∩` relation). Cross-file inference is the
+   follow-on.
 4. **Re-check coverage.** All of the above rely on ADR-125's reload re-check to
    re-derive after a `def`; that trigger is already shipped for `nest run
    --watch`. REPL-level and LSP-push triggers stay open (noted in the reload

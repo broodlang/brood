@@ -116,7 +116,7 @@ mod recursion;
 mod sigs;
 mod walk;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
@@ -487,6 +487,36 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
             ctx.add_declared_value_ty(name, ty);
         }
     }
+    // Pass 2.7: infer a current value type for an *undeclared* global defined
+    // exactly once by `(def g <non-fn-expr>)` (Gap A — docs/type-gating.md). The
+    // RHS's `expr_ty` becomes `g`'s current-image type, consulted by `expr_ty` /
+    // `gradual_of` as `dynamic_within` (the `∩` relation — reload-safe, warns only
+    // on provable disjointness). Skipped for: a declared global (authoritative,
+    // handled by `add_inferred_value_ty`); a global defined more than once
+    // (ambiguous type → stays `dynamic()`); a macro; and a function/native value
+    // (its arrow is inferred separately, and gating a bare function name used as a
+    // value is a different concern).
+    {
+        let mut def_count: HashMap<Symbol, usize> = HashMap::new();
+        for &form in &expanded {
+            if let Some((name, _)) = def_name_and_value(heap, form) {
+                *def_count.entry(name).or_insert(0) += 1;
+            }
+        }
+        for &form in &expanded {
+            let Some((name, rhs)) = def_name_and_value(heap, form) else {
+                continue;
+            };
+            if def_count.get(&name) != Some(&1) || ctx.is_file_macro(name) {
+                continue;
+            }
+            if let Some(ty) = guards::expr_ty(heap, rhs, &ctx) {
+                if !ty.contains_tag(value::Tag::Fn) && !ty.contains_tag(value::Tag::Native) {
+                    ctx.add_inferred_value_ty(name, ty);
+                }
+            }
+        }
+    }
     // Pass 2.6: protocol/behaviour conformance. Model `(defprotocol …)` /
     // `(defbehaviour …)` (from the un-expanded forms + the runtime registry of
     // imported ones), then check that every `(defimpl …)` provides each declared op
@@ -574,6 +604,26 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     heap.set_ns_known_names(prev_known);
     heap.set_imports(prev_imports);
     out
+}
+
+/// A `(def NAME RHS)` form → `(NAME, RHS)`. `None` for anything else — a
+/// non-`def` head, a `(defmacro …)` (which stays a special form, never expands to
+/// `def`), or a malformed def. Used by Gap A's undeclared-global type inference.
+fn def_name_and_value(heap: &Heap, form: Value) -> Option<(Symbol, Value)> {
+    let items = list_items(heap, form)?;
+    if items.len() != 3 {
+        return None;
+    }
+    let Value::Sym(head) = items[0] else {
+        return None;
+    };
+    if !value::symbol_is(head, kw::DEF) {
+        return None;
+    }
+    let Value::Sym(name) = items[1] else {
+        return None;
+    };
+    Some((name, items[2]))
 }
 
 /// [`check_file`] plus the Phase-2 incremental-cache **dep-keys** for the file: the
@@ -3400,6 +3450,32 @@ mod tests {
             assert!(
                 w.iter().all(|m| !m.contains("return type")),
                 "an unknown-result body must defer ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_global_current_type_gates_its_use() {
+        // Gap A (docs/type-gating.md): an *undeclared* global defined exactly once
+        // by `(def g 5)` gets its inferred current-image type (`int`), so misusing
+        // it is caught — via `dynamic_within` (the `∩` relation), reload-safe.
+        let w = file_warnings("(def g 5) (defn f () (string-length g))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("string-length") && m.contains("got int")),
+            "an undeclared int global misused must warn: {w:?}"
+        );
+        // Consistent use, a redefined (ambiguous) global, and a function global
+        // must NOT warn.
+        for src in [
+            "(def g 5) (defn f () (+ 1 g))", // int used as int
+            "(def g 5) (def g \"s\") (defn f () (string-length g))", // redefined → dynamic
+            "(defn g (x) x) (defn f () (+ 1 (g 2)))", // function global, not a value
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("expects")),
+                "a consistent/ambiguous/function global must not warn ({src}): {w:?}"
             );
         }
     }

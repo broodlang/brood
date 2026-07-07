@@ -2118,3 +2118,27 @@ roadmap 🎯 item now record B0 as B1's prerequisite, and the recommended sequen
 (B0 → B1, with Gap A independent and sound on its own). No language behavior
 changed this session — the deliverable is the grounded design + the soundness
 finding.
+
+## 2026-07-07 — Gating Gap A: undeclared globals get a current-image type
+
+Shipped Gap A from the gating design ([`type-gating.md`](type-gating.md)): an
+*undeclared* global defined **exactly once** by `(def g <non-fn-expr>)` now
+carries an inferred current-image value type, so its misuse is caught — `(def g 5)`
+then `(string-length g)` warns "expects string, got int" (declared globals already
+gated; this closes the undeclared case). `check_file` Pass 2.7 counts top-level
+defs, and for each exactly-once, non-macro `(def g RHS)` records `expr_ty(RHS)` in
+`Ctx::inferred_value_ty` (skipping a function/native result — a defn's arrow is
+inferred separately). `expr_ty` (arg check) and `gradual_of` (value/return checks)
+consult it *after* the declared value type, always as `dynamic_within` — the `∩`
+relation, so it warns only on provable disjointness and a reload that changes the
+global is re-derived (ADR-125), never a stale hard proof.
+
+Sound and conservative by construction: a global defined more than once is
+ambiguous → stays `dynamic()` (no FP from a redefinition); scoped to same-file
+(cross-file needs a heap-wide inferred store — the follow-on); function globals
+untouched. **Verified zero corpus false positives** — `nest check` stays at 0
+across `std/` + `tests/`.
+
+New test `undeclared_global_current_type_gates_its_use` (misuse warns;
+consistent/redefined/function globals quiet); Rust lib 369/369 (+1 = 370); clippy
+clean. Gap B stays blocked on B0 (literal-singleton precision) per the design.

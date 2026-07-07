@@ -1046,7 +1046,11 @@ fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
         return match ctx
             .declared_value_ty(s)
             .or_else(|| declared_heap_value_ty(heap, s))
+            .or_else(|| ctx.inferred_value_ty(s))
         {
+            // The Gap A inferred current-image type (last `.or_else`) is exposed as
+            // `dynamic_within` like a declared global — the `∩` relation, so a
+            // reload that changes it is re-checked, never a stale hard proof.
             Some(t) => GradualTy::dynamic_within(t),
             None => GradualTy::dynamic(),
         };

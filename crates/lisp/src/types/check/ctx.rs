@@ -259,6 +259,14 @@ pub(super) struct Ctx {
     /// assigns a value consistent with `T` (via [`GradualTy::consistent_with`]).
     /// Separate from [`declared`] (function arrow sigs); a name has at most one.
     declared_value_ty: HashMap<Symbol, Ty>,
+    /// **Inferred** value types for undeclared globals defined exactly once by a
+    /// `(def g <non-fn-expr>)` (Gap A, `docs/type-gating.md`). The type of the RHS,
+    /// used as a *current-image* observation — always exposed as `dynamic_within`
+    /// (the `∩` relation), never a precise `stat`, because a global is redefinable
+    /// (a reload re-derives it; ADR-125). Read *after* [`declared_value_ty`], which
+    /// is authoritative. Only populated for globals defined exactly once (a
+    /// redefined global's type is ambiguous — it stays `dynamic()`).
+    inferred_value_ty: HashMap<Symbol, Ty>,
     /// User-declared sigs that contain type variables (`?A`) — the full
     /// [`SigWithVars`] for unification at call sites.  Populated alongside
     /// [`declared`] when the sig annotation has at least one `?`-symbol.
@@ -523,6 +531,20 @@ impl Ctx {
     /// Record a `(sig x T)` value-type declaration (`T` non-arrow).
     pub(super) fn add_declared_value_ty(&mut self, sym: Symbol, ty: Ty) {
         self.declared_value_ty.insert(sym, ty);
+    }
+    /// The **inferred** value type for undeclared global `sym` (Gap A), if one was
+    /// recorded. Never returned when a declared value type exists (callers check
+    /// [`declared_value_ty`] first). Callers must treat it as `dynamic_within`.
+    pub(super) fn inferred_value_ty(&self, sym: Symbol) -> Option<Ty> {
+        self.inferred_value_ty.get(&sym).cloned()
+    }
+    /// Record an inferred current-image value type for an undeclared,
+    /// defined-exactly-once global (Gap A). No-op if a declared value type already
+    /// exists (that's authoritative).
+    pub(super) fn add_inferred_value_ty(&mut self, sym: Symbol, ty: Ty) {
+        if !self.declared_value_ty.contains_key(&sym) {
+            self.inferred_value_ty.insert(sym, ty);
+        }
     }
     /// The full (variable-bearing) declared sig for `sym`, if it was parsed
     /// with at least one type variable.

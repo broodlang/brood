@@ -559,7 +559,11 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
             if ctx.is_lexical_local(s) {
                 None
             } else {
+                // Declared value type first (authoritative), then the Gap A
+                // inferred current-image type for an undeclared global. Both feed
+                // the `∩`-only `is_disjoint` arg check, so this is reload-safe.
                 ctx.declared_value_ty(s)
+                    .or_else(|| ctx.inferred_value_ty(s))
             }
         }),
         // A vector literal `[a b c]` — its elements are evaluated in place, so
