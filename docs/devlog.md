@@ -2089,3 +2089,32 @@ caught; guarded param not inferred; overlapping union no-warn; recursion
 terminates & stays sound). Rust lib 369/369; soundness oracle 2/2; clippy clean;
 **`nest check` 0 warnings** across `std/` + `tests/` (~3s, no perf regression) —
 the empirical proof that the amplified inference introduces no false positives.
+
+## 2026-07-07 — Gating design + the B0 prerequisite (prototyped, reverted to sound)
+
+Started the design for the roadmap's 🎯 gating item (full gradual consistency in
+the checker's decisions), written up in [`type-gating.md`](type-gating.md). Since
+reload-soundness already shipped the *workflow* half (re-check on reload, CI
+gate), "gating" here is purely the checker's internal decision logic. Grounded two
+gaps against the current binary: **A** — undeclared globals carry no tracked type
+(declared globals already gate both value-position and call-arg, verified); **B** —
+the call-argument check uses `∩`-only `is_disjoint`, missing the *merely-wider*
+mismatch the return check already catches with `⊆`.
+
+**Prototyped Gap B (arg-check → gradual `consistent_with`), and it produced a real
+false positive — the key result.** `Ty::of_value` gives an int/bool/string literal
+the flat tag (`200 : int`, not `{200}`), so `stat(int) ⊆ (or 200 404 500)` fails
+even though `200` is in the set. Making literals `dynamic` fixes that FP but then
+loses a real catch (a partial-overlap union `(if (> x 0) x "neg")` declared `int`
+→ `int|string`, which `⊆` flags but `∩` misses). The two conflict irreconcilably
+without **int/bool/string literal-singleton precision (B0)** — the tried-and-
+reverted feature. So Gap B is really B0 (track literal singletons) → B1 (arg-check
+`⊆`); B1 alone is unsound.
+
+Per the "no false positives, ever" bar, **reverted the whole Gap B prototype** to
+the sound `∩`-only arg check (a lone explanatory comment remains at the site).
+Verified back to sound: `types::` 369/369, `nest check` 0. The design doc and the
+roadmap 🎯 item now record B0 as B1's prerequisite, and the recommended sequencing
+(B0 → B1, with Gap A independent and sound on its own). No language behavior
+changed this session — the deliverable is the grounded design + the soundness
+finding.

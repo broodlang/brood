@@ -784,6 +784,13 @@ pub(super) fn check_into(
                 // there's no real misuse. Skip. This shows up in pattern-match
                 // lowering where a guard has narrowed a variable to a type
                 // that has no inhabitants for the current branch.
+                //
+                // NB: this stays on the `∩`-only `is_disjoint` (not the full
+                // gradual `⊆`) *deliberately* — the merely-wider `⊆` upgrade
+                // (roadmap Gap B, `docs/type-gating.md`) needs int/bool/string
+                // literal-singleton precision first, or it false-positives on a
+                // literal arg against a literal-set param (`200` vs
+                // `(or 200 404 500)`). See the doc's "Prerequisite" section.
                 if let Some(arg_ty) = expr_ty(heap, arg, ctx) {
                     if arg_ty.is_never() {
                         continue;

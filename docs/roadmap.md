@@ -874,10 +874,19 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   A real, separate checker gap surfaced along the way — a `defmodule`-declared
   arrow sig didn't seed the body-return-type check — and was fixed the same
   day (ADR-126, `docs/type-annotations.md`'s "Fixed gap" section).
-- 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** — the
-  `GradualTy` foundation already exists; this is the remaining work to wire it
-  into actual gating decisions (not just advisory assignment checks), which
-  full soundness on globals will require.
+- 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** —
+  designed in [`type-gating.md`](type-gating.md). Two grounded gaps: **A** — an
+  *undeclared* global carries no tracked type (declared ones already gate, both
+  value-position and call-arg, verified); fix is a `dynamic_within(inferred)`
+  current-type store, sound via `∩` and reload-safe. **B** — the call-argument
+  check uses `∩`-only `is_disjoint`, missing the *merely-wider* mismatch the
+  return check already catches via `⊆`. **Key design result (from prototyping):
+  B is unsound without int/bool/string literal-singleton precision (B0)** — a
+  literal `200`'s type over-approximates to `int`, so `⊆` false-positives against
+  a `(or 200 404 500)` param. So B splits into **B0** (track literal singletons —
+  the tried-and-reverted piece) then **B1** (arg-check `⊆`). B1-without-B0 was
+  prototyped and reverted to the sound `∩` state (`nest check` stays 0). Gap A is
+  independent and sound on its own.
 - ✅ **`BROOD_CONTRACTS=1`** — shipped: enforces *every* `(sig …)` at run time the
   same way `sig!` does, plus element-level `(list E)` / `(vector E)` contract
   checks (`tests/contract_test.blsp`). See [`type-annotations.md`](type-annotations.md).
