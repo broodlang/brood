@@ -2106,15 +2106,65 @@ mod tests {
             "let-alias: param type should propagate from callee: {:?}",
             w
         );
-        // A non-param let (binding a computed value, not a param rename) is NOT peeled.
+        // A non-param let (binding a computed value) isn't peeled by the precise
+        // *parameter*-inferring tier — but the sound **return-only** tier still
+        // infers `wrap`'s result as `number` (`wrap 3` = 8), so a real misuse of
+        // that result is caught (`(string-length 8)` genuinely errors at runtime).
         let w = check_with_defs(
             &["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"],
             "(string-length (wrap 3))",
         );
         assert!(
-            w.is_empty(),
-            "let with non-param RHS must not be peeled — no inference: {:?}",
+            w.iter().any(|s| s.contains("string-length")),
+            "return-only inference should type wrap's result as number: {:?}",
             w
+        );
+        // …but the *parameter* is NOT inferred from a branchy/multi-step body
+        // (that would be unsound), so a differently-typed argument never warns.
+        let w = check_with_defs(&["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"], "(wrap :k)");
+        assert!(
+            w.is_empty(),
+            "return-only inference must leave the parameter unconstrained: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn return_only_inference_is_sound() {
+        // The return type of a branchy/multi-step body is inferred (sound: it's a
+        // union of the possible results), so misusing the *result* is caught…
+        let w = check_with_defs(
+            &["(defn pick (c) (if c 1 2))"],
+            "(string-length (pick true))",
+        );
+        assert!(
+            w.iter().any(|s| s.contains("string-length")),
+            "a numeric-returning branchy body's result misuse must warn: {w:?}"
+        );
+        // …but a parameter used as a number only *inside a guard* must NOT be
+        // inferred as number — that's the guarded-use false positive full param
+        // inference would create. `(g "x")` is valid (returns 0), so no warning.
+        let w = check_with_defs(&["(defn g (x) (if (number? x) (+ x 1) 0))"], "(g \"x\")");
+        assert!(
+            w.is_empty(),
+            "a guarded numeric use must not infer the parameter as number: {w:?}"
+        );
+        // A union result that *overlaps* the sink must not warn (int | string fed
+        // to `+` — the int arm overlaps `number`).
+        let w = check_with_defs(&["(defn u (c) (if c 1 \"s\"))"], "(+ 1 (u true))");
+        assert!(
+            w.is_empty(),
+            "a result overlapping the expected type must not warn: {w:?}"
+        );
+        // Recursion terminates (the re-entry guard) and stays sound — no hang,
+        // no spurious warning on a valid use.
+        let w = check_with_defs(
+            &["(defn rfac (n) (if (< n 1) 1 (* n (rfac (- n 1)))))"],
+            "(+ 1 (rfac 5))",
+        );
+        assert!(
+            w.iter().all(|s| !s.contains("expects")),
+            "recursive-body return inference must stay sound: {w:?}"
         );
     }
 

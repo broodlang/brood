@@ -543,12 +543,21 @@ broken new code leaves the running version in place — but that's hot-reload
 hygiene, independent of the type checker.) The type system stays **entirely
 external**: it observes and advises; it is never in the execution or reload path.
 
-Why no inference *engine* (ADR-011): full body inference needs control-flow /
-dominance analysis to avoid false positives from *guarded* uses (a param used as
-a number only inside `(if (number? x) …)` doesn't make the param a number). That
-machinery is the bulk of the complexity and the only false-positive source — so
-we cut it, keeping curated sigs + the trivially-sound straight-line case, and add
-more only when a concrete need justifies it.
+Why no full inference *engine* (ADR-011): inferring **parameter** types from
+arbitrary body usage needs control-flow / dominance analysis to avoid false
+positives from *guarded* uses (a param used as a number only inside
+`(if (number? x) …)` doesn't make the param a number). That machinery is the bulk
+of the complexity and the only false-positive source — so parameter inference
+stays limited to the trivially-sound unconditional case.
+
+**Return-type inference, though, is sound without any of that** — it doesn't touch
+parameters, so the guarded-use problem can't arise, and `expr_ty` already
+over-approximates and unions branch results. So `infer_sig` has a second tier: for
+any single-arm body it infers the *return* as `expr_ty` of the body tail (params
+`ANY`), typing a multi-step/branchy function's result while leaving its parameters
+unconstrained. A per-thread `InferGuard` re-entry set breaks recursive/mutual
+call-graph cycles (a cycle just declines to infer). This is "sound, not complete":
+we type what we can prove and never constrain a parameter we can't.
 
 ## Compatibility contract
 

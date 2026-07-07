@@ -815,9 +815,21 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   argument types, e.g. `(sig identity (?A -> ?A))`. The curated *built-in* HOFs
   (`map`/`filter`/…) still use per-rule result types rather than internally
   migrating to type variables (slice 3, deferred — Option B was sufficient).
-- ⬜ **Full type inference / reconstruction** — Brood infers only one-step
-  straight-line bodies + guard narrowing; Elixir does guard-driven + local
-  inference across a function.
+- 🟡 **Local type inference** — the **sound** half shipped (soundness over
+  completeness, by design). `infer_sig` now has two tiers: (1) the precise
+  params+return case (a single known-callee call, unchanged), and (2) a
+  **return-only** tier for *any* single-arm body — the return type is `expr_ty`
+  of the body tail (params bound `ANY`), so a multi-step or branchy function's
+  *result* is typed and its misuse caught (`(string-length (wrap 3))` where
+  `wrap` returns `number`). Return-only **never constrains a parameter**, so it
+  can't reproduce the guarded-use false positive that full param inference would
+  (`(defn g (x) (if (number? x) (+ x 1) 0))` must not type `x` as number — and
+  doesn't). Sound because `expr_ty` is a proven over-approximation that already
+  unions branch results; an `InferGuard` re-entry set breaks recursive/mutual
+  call-graph cycles. Verified zero corpus false positives. ⬜ Still deferred (the
+  *unsound-without-occurrence-typing* part): inferring **parameter** types from
+  arbitrary body usage across branches — needs guard-aware dominance analysis, so
+  it stays out until it can be done false-positive-clean (ADR-011).
 - ✅ **Narrowing through non-variable expressions** — shipped for **access paths
   of arbitrary depth**: a type-predicate guard narrows the path, mixing keyword
   fields (`(get r :age)`) and fixed indices (`(nth t 0)`, `(first/second/third

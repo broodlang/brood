@@ -2055,3 +2055,37 @@ field-index warn cases; different-index and consistent-use no-warn); the three
 still 0 warnings**. This closes the roadmap's "narrowing through non-variable
 expressions" item — only a genuinely-unpinnable computed key remains, which is
 not a gap.
+
+## 2026-07-07 — Local type inference: the sound (return-only) half
+
+Added a second tier to `infer_sig` — **sound, not complete**, the explicit design
+call (the user's framing: "we have to be sound, we don't have to be complete
+yet"). Tier 1 (unchanged) is the precise params+return case: a body that's one
+direct call to a known-sig callee. Tier 2 (new) is **return-only**: for any other
+single-arm body, infer just the return type as `expr_ty` of the body tail with
+parameters bound `ANY`. So a multi-step or branchy function's *result* now has a
+type and its misuse is caught — `(string-length (wrap 3))` where
+`(defn wrap (x) (let (y (+ x 1)) (* y 2)))` returns `number` (wrap 3 = 8, so the
+call genuinely errors at runtime).
+
+**Why this is sound where full inference isn't.** The false-positive source in
+inference is *parameter* inference across branches: a param used as a number only
+inside `(if (number? x) …)` must not be typed number (else `(f "x")` — valid —
+warns). Return-only inference never constrains a parameter, so that failure mode
+can't arise. And `expr_ty` is a proven over-approximation (soundness oracle) that
+already unions branch results, so a branchy body's inferred return is a sound
+superset — a disjointness warning on the result is then a genuine error. A
+per-thread `InferGuard` re-entry set breaks recursive/mutual call-graph cycles
+(return inference runs `expr_ty` → `sig_of` → `infer_sig`); a cycle declines to
+infer.
+
+Deliberately **not** done: parameter inference from arbitrary/branchy bodies —
+needs guard-aware dominance analysis, deferred until it's false-positive-clean
+(ADR-011).
+
+**Verified.** Updated `infers_through_let_alias` (the `wrap` result is now typed;
+its *parameter* still isn't) + new `return_only_inference_is_sound` (result-misuse
+caught; guarded param not inferred; overlapping union no-warn; recursion
+terminates & stays sound). Rust lib 369/369; soundness oracle 2/2; clippy clean;
+**`nest check` 0 warnings** across `std/` + `tests/` (~3s, no perf regression) —
+the empirical proof that the amplified inference introduces no false positives.

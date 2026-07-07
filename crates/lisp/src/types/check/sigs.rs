@@ -8,16 +8,21 @@
 //!    `reduce`-based / higher-order closures the checker can't infer but
 //!    that matter (`+ - * /`, `map`, `filter`, `reduce`, …). See
 //!    [`curated_sig`].
-//! 3. **One-step inference** for a closure whose body is exactly one direct
-//!    call to a known sig (no `if`/`cond`/`let`/`match`/recursion). The
-//!    parameter types are pinned to the callee's expectation at the
-//!    position(s) where each parameter is passed. Sound because a
-//!    straight-line use is unconditional. See [`infer_sig`].
+//! 3. **Body inference** ([`infer_sig`]), two sound tiers. (a) *Precise* — a body
+//!    that is one direct call to a known sig pins each parameter to the callee's
+//!    expectation (sound: a straight-line use is unconditional). (b) *Return-only*
+//!    — for any other single-arm body, the return type is `expr_ty` of the body
+//!    tail (parameters left `ANY`), so a multi-step/branchy function's *result* is
+//!    typed. Sound (`expr_ty` over-approximates and unions branches) and — by not
+//!    constraining parameters — free of the guarded-use false positive that full
+//!    parameter inference would create. Complete parameter inference stays out
+//!    (needs occurrence-typing; ADR-011).
 //!
 //! `arity_of` is independent: it works for any callable (primitive or
 //! closure) without needing a sig.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::core::heap::{Heap, SymbolMap};
@@ -25,6 +30,8 @@ use crate::core::value::{self, Arity, Symbol, Tag, Value};
 use crate::types::{Sig, Ty};
 
 use super::annot;
+use super::ctx::Ctx;
+use super::guards::expr_ty;
 use super::walk::list_items;
 
 /// Curated stdlib sigs, keyed by interned `Symbol`. Built once at first
@@ -281,52 +288,113 @@ fn unwrap_let_alias(
     (items[2], map)
 }
 
-/// Inferred signature for a **user closure** named `sym` whose body is one
-/// straight-line expression — a single call to a callee with a known
-/// primitive/curated sig. Each closure parameter inherits the type the callee
-/// expects at the position(s) where the parameter is passed directly; the
-/// closure's return is the callee's.
+thread_local! {
+    /// Symbols whose signature is currently being inferred **on this thread** — a
+    /// re-entry guard so the return-type inference (which runs [`expr_ty`], hence
+    /// `sig_of` → `infer_sig`, over the body) can't loop on a recursive or
+    /// mutually-recursive call graph. A cycle yields `None` (no inference), which
+    /// is sound and conservative. Per-thread, so it stays correct under the
+    /// parallel `nest check` worker pool (each worker has its own set).
+    static INFERRING: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
+}
+
+/// RAII marker for "inferring `sym` right now". [`enter`](Self::enter) returns
+/// `None` when `sym` is already in progress (a cycle) — the caller then bails —
+/// and `Drop` clears the mark, so *every* early return from `infer_sig` is
+/// covered without hand-threaded cleanup.
+struct InferGuard(Symbol);
+impl InferGuard {
+    fn enter(sym: Symbol) -> Option<InferGuard> {
+        INFERRING
+            .with(|s| s.borrow_mut().insert(sym))
+            .then_some(InferGuard(sym))
+    }
+}
+impl Drop for InferGuard {
+    fn drop(&mut self) {
+        INFERRING.with(|s| {
+            s.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+/// Inferred signature for a **user closure** named `sym`. Two tiers, both sound:
 ///
-/// Also handles a single let-alias wrapper: `(let (y x) (callee y))` is treated
-/// as `(callee x)` — the alias is resolved back to the closure parameter before
-/// matching. One level only; deeper nesting isn't worth the complexity.
+/// 1. **Precise (params + return)** — a single-expression body that's one direct
+///    call to a callee with a known primitive/curated sig (optionally through one
+///    let-alias). Each parameter inherits the type the callee expects at the
+///    position(s) it's passed *directly*; the return is the callee's. Sound
+///    because a straight-line use is unconditional. See [`infer_from_single_call`].
+/// 2. **Return-only (sound, not complete)** — for any other single-arm body, infer
+///    just the *return* type as [`expr_ty`] of the body's tail, with parameters
+///    bound to `ANY`. This never constrains a parameter, so it **cannot** produce
+///    the guarded-use false positive that full parameter inference would (a param
+///    used as a number only inside `(if (number? x) …)` must NOT be typed number).
+///    Sound because `expr_ty` is a proven over-approximation (soundness oracle)
+///    and already unions branch results — so even a branchy body's return is safe.
 ///
-/// Deliberately *narrow*. Skipped when:
-/// - the body isn't exactly one expression (branches, multi-step bodies);
-/// - the closure takes `&optional` / rest params;
-/// - the body isn't a known-callee call (literal/variable / macro head / recursion).
-///
-/// Sound because a straight-line use is unconditional — no false positives.
+/// Skipped for a multi-arity closure or one taking `&optional` / rest params (no
+/// single signature / arity to state cleanly). Recursion — direct or mutual — is
+/// broken by [`InferGuard`], so a cyclic call graph just declines to infer.
 fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
+    // Break inference cycles (direct/mutual recursion reached via `expr_ty`).
+    let _guard = InferGuard::enter(sym)?;
+
     let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
         return None;
     };
     let closure = heap.closure(cid);
-    // Only infer for a plain single-arity, single-body closure (no optionals /
-    // rest). A multi-arity closure has no single signature to infer — bail.
+    // Only infer for a plain single-arity closure (no optionals / rest). A
+    // multi-arity closure has no single signature to infer — bail.
     if closure.arms.len() != 1 {
         return None;
     }
     let arm = &closure.arms[0];
-    if arm.body.len() != 1 || !arm.optionals.is_empty() || arm.rest.is_some() {
+    if arm.body.is_empty() || !arm.optionals.is_empty() || arm.rest.is_some() {
         return None;
     }
-    let body = arm.body[0];
-    // Copy out before we ask sig_of (which borrows the heap again).
+    // Copy out before we ask `sig_of` / `expr_ty` (which borrow the heap again).
     let params: Vec<Symbol> = arm.params.clone();
     let self_name = closure.name;
 
-    // Optionally unwrap a single let-alias: `(let (y x) call)` where `x` is a
-    // closure param.  The alias `y` is resolved back to `x` in the arg loop.
-    let (call_form, alias_map) = unwrap_let_alias(heap, body, &params);
+    // Tier 1: precise params + return from a single known-callee call.
+    if arm.body.len() == 1 {
+        if let Some(sig) = infer_from_single_call(heap, arm.body[0], &params, self_name) {
+            return Some(sig);
+        }
+    }
 
+    // Tier 2: sound return-only inference. Bind parameters to `ANY` (in scope, no
+    // constraint) and read the body tail's type — the return, unconditionally.
+    let tail = *arm.body.last()?;
+    let mut ctx = Ctx::default();
+    for &p in &params {
+        ctx = ctx.bind(p, Some(Ty::ANY));
+    }
+    let ret = expr_ty(heap, tail, &ctx)?;
+    Some(Sig::new(vec![Ty::ANY; params.len()], ret))
+}
+
+/// Tier 1 of [`infer_sig`]: the precise, parameter-inferring case — a body that is
+/// exactly one call to a primitive/curated callee (optionally through one
+/// let-alias `(let (y x) (callee … y …))`). Returns `None` (so `infer_sig` falls
+/// to the sound return-only tier) for anything else: a non-call body, a
+/// user/unknown callee, a macro head, or direct self-recursion.
+fn infer_from_single_call(
+    heap: &Heap,
+    body: Value,
+    params: &[Symbol],
+    self_name: Option<Symbol>,
+) -> Option<Sig> {
+    // Optionally unwrap a single let-alias: `(let (y x) call)` where `x` is a
+    // closure param. The alias `y` is resolved back to `x` in the arg loop.
+    let (call_form, alias_map) = unwrap_let_alias(heap, body, params);
     let items = list_items(heap, call_form)?;
     let Value::Sym(callee) = items.first().copied()? else {
         return None;
     };
-    // No recursion — neither direct (the closure calls itself by name) nor
-    // through inference (`sig_of` is the *non-inferring* lookup so a chain
-    // like `defn a (x) (b x)` / `defn b (x) (a x)` can't loop).
+    // No direct self-recursion, and only a callee we can describe *without*
+    // inference (`primitive`/`curated`) — so this precise tier never recurses.
     if self_name == Some(callee) {
         return None;
     }
