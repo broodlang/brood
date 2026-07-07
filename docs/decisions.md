@@ -5575,13 +5575,16 @@ frontends"), ADR-053 (the observer's *pull* remote-attach this complements), ADR
 (dual-listen — local + remote front doors), ADR-011 (deferring shared model / resize).
 Lives in `std/editor/serve.blsp`; `nest attach` in `crates/nest/src/main.rs`.
 
-## ADR-091 — RUNTIME-region collection: single-process compaction now; multi-process via a cooperative rolling quiesce later
+## ADR-091 — RUNTIME-region collection: single-process compaction now; multi-process via an Erlang-style 2-generation model
 
-**Status:** accepted (2026-06-01). The single-process collector is **implemented +
-tested**; the multi-process collector is **designed here, deferred** (ADR-011). This
-ADR supersedes the exploratory `docs/runtime-collector-exploration.md` as the source
-of truth. No language-surface change beyond the `(runtime-collect)` builtin + the
-`:runtime-*` keys on `(gc-stats)`.
+**Status:** accepted (2026-06-01; multi-process direction revised 2026-07-07). The
+single-process collector is **implemented + tested**. The multi-process collector
+pivoted from the original cooperative rolling quiesce (deferred, hard) to an
+**Erlang-style 2-generation model** (Step 2 below); Stages 1a/1b/2 of it have
+**landed** (behavior-preserving), Stages 3–4 (reclamation) remain. This ADR supersedes
+the exploratory `docs/runtime-collector-exploration.md` as the source of truth. No
+language-surface change beyond the `(runtime-collect)` builtin + the `:runtime-*` keys
+on `(gc-stats)`.
 
 **Context — two kinds of memory.** Brood's heap has a per-process **LOCAL** region
 (private; collected by the generational copying GC, ADR-055/061/072 — no coordination,
@@ -5625,11 +5628,46 @@ program). With live spawned processes the `Arc` is shared, the gate declines, an
 `crates/lisp/tests/runtime_collector.rs` (3000 redefs → live <50 → compacted; the
 auto-safepoint bound; a LOCAL-held handle rewritten across a collect).
 
-**Decision — Step 2 (designed, deferred): a cooperative rolling quiesce.** Because the
-scheduler is *cooperative* (processes yield at the eval safepoint) and each process's
-`Heap` lives on its own coroutine stack (unreachable from outside — so a coordinator
-cannot rewrite another process's handles; each must rewrite its own), the multi-process
-collector is a **rolling quiesce**, not a hard freeze:
+**Decision — Step 2 (in progress): the Erlang-style 2-generation model.** The
+cooperative rolling-quiesce sketch (below, superseded) tried to *compact + rewrite
+handles across every process* — the largest, most race-prone kernel design in the
+repo. We replaced it with what Erlang's code server actually does: **at most two
+generations of code, no rewriting.** RUNTIME becomes two slabs (`gens: [CodeSlabs; 2]`
++ an atomic `current_gen`); a RUNTIME handle carries a 1-bit `code_gen` tag (GEN bit
+32, kept distinct by the region-aware `canonical()`), so both generations resolve
+simultaneously with **no handle migration** — the whole reason the rolling quiesce was
+hard. `def`/`promote` mint into the *current* generation; **aging** (`age_runtime`)
+flips `current_gen` to the other slot so new code lands there while the previous
+generation keeps executing in-flight calls (exactly Erlang's *old* vs *current*). The
+old generation is freed **whole** once no live process references it — reclamation
+driven by process lifecycle + a cooperative liveness scan, never a per-cell trace of
+the shared region. The 2-versions-max rule (aging refuses when the target slot is
+non-empty) means a third redef must wait for the old generation to drain (Erlang
+*purges* stragglers; we soft-wait for pins) — bounding the region to two versions,
+not unbounded churn.
+
+Why this is the right shape for Brood: **data is immutable and per-process**, so the
+shared region holds *only code*, and code is only ever *appended* (hot reload never
+mutates a live closure). That means a generation is a pure add-only epoch — we can drop
+an entire old generation atomically instead of compacting live cells, sidestepping the
+cross-process handle-rewrite entirely.
+
+Progress: **Stage 1a** (handle `code_gen` tagging + region-aware `canonical()`),
+**Stage 1b** (two-slab `RuntimeCode` + generation-aware accessors, behavior-preserving),
+and **Stage 2** (generation-tagged `promote` + the `age_runtime` flip + the two-gen
+read-path test) have landed. Normal runs never age (`current_gen` stays 0), so behavior
+is unchanged until the reclamation stages arm it. Remaining: **Stage 3** (cooperative
+liveness — each process reports its old-gen references at safepoints, giving the union
+"is the old generation dead?" answer) and **Stage 4** (free the old generation when
+unreferenced + soft-wait/purge for pins + auto-trigger aging at the RUNTIME safepoint).
+Exercise under `BROOD_GC_STRESS` across the worker pool before arming auto-aging.
+
+<details><summary>Superseded sketch — the cooperative rolling quiesce (kept for context)</summary>
+
+Because the scheduler is *cooperative* (processes yield at the eval safepoint) and each
+process's `Heap` lives on its own coroutine stack (unreachable from outside — so a
+coordinator cannot rewrite another process's handles; each must rewrite its own), the
+earlier design was a **rolling quiesce**, not a hard freeze:
 1. A coordinator builds the new compacted region + a forwarding table from the *union*
    of all processes' roots (each process contributes its RUNTIME roots at its safepoint).
 2. The **old region is kept alive** (a second live `CodeSlabs`); handles resolve against
@@ -5637,13 +5675,11 @@ collector is a **rolling quiesce**, not a hard freeze:
 3. Each process, at its next safepoint, applies the forwarding table to its own
    heap/roots/arms (self-rewrite) and acknowledges the new epoch.
 4. The old region is freed only once **every** process has migrated.
-Open wrinkles to resolve when built: a permanently-**parked** process pins the old
-region (needs a wake-to-migrate or epoch-bounded escape hatch); handles may need a small
-region/epoch tag to resolve against two live regions; and the read path may move to an
-`ArcSwap<CodeSlabs>` (an atomic load per code read — a measured cost). This is the
-largest, most race-prone remaining kernel piece, gated on a real long-lived
-multi-process server demonstrating the need (the M4 daemon, ADR-090, is the candidate
-consumer) — exercise it under `BROOD_GC_STRESS` across the worker pool before shipping.
+The killer wrinkle was step 3: every process rewriting handles in its own private heap,
+race-free, with a parked process pinning the region indefinitely. The 2-generation model
+avoids all of it by never rewriting a handle — it just tags which generation a handle
+belongs to and drops a whole dead generation.
+</details>
 
 **Consequences.** Hot-reload churn is bounded for single-process use today, with
 `(gc-stats)` `:runtime-closures`/`:runtime-threshold` + `(runtime-collect)` for

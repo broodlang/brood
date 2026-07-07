@@ -2254,3 +2254,41 @@ lib 372/372; clippy `--all-targets --all-features` clean; `cargo fmt --check`
 clean. The tracked known-issues list (`known-issues.md`) remains empty (KI-1–KI-8
 fixed, KI-9 transient); this was a regression introduced and fixed within the
 session.
+
+## 2026-07-07 — Multi-process RUNTIME GC: Erlang-style 2-generation model (Stages 1a/1b/2)
+
+Replaced ADR-091's deferred *cooperative rolling quiesce* (compact + rewrite every
+process's RUNTIME handles — the repo's most race-prone unbuilt design) with what
+Erlang's code server actually does: **at most two code generations, no handle
+rewriting.** The pivot is enabled by Brood's own invariants — the shared region holds
+*only code*, code is *append-only* (hot reload never mutates a live closure), and data
+is immutable + per-process — so a generation is a pure add-only epoch that can be
+dropped *whole* atomically, sidestepping the cross-process handle-migration that made
+the quiesce hard.
+
+Shipped this session (all behavior-preserving — normal runs never age, `current_gen`
+stays 0):
+- **Stage 1a** (`ad51345`): RUNTIME handles carry a 1-bit `code_gen` tag (GEN bit 32);
+  region-aware `canonical()` keeps gen-0/gen-1 same-index handles distinct for
+  equality/hashing (LOCAL still masks the full GEN field). `runtime_gen(idx, gen)`
+  constructor + `code_gen()` accessor + round-trip tests.
+- **Stage 1b** (`b9c4b33`): `RuntimeCode.code` → `gens: [CodeSlabs; 2]` + atomic
+  `current_gen`; every accessor / `region_ref!` RUNTIME arm reads `gens[id.code_gen()]`,
+  fills go to `cur_code()`.
+- **Stage 2** (`da81ac3`): all 12 `promote` mints gen-tag the fresh handle (push helpers
+  on `RuntimeCode` for leaf slabs; inline `runtime_gen(idx, cur_gen)` for
+  map/pair/closure/env). `Heap::age_runtime()` — a lightweight atomic flip of
+  `current_gen` (needs no unique ownership, unlike compaction) that refuses unless the
+  target slot is empty (**2-versions-max** — so a new gen's indices can't collide with a
+  prior generation's live handles). Compaction guarded to gen 0. New test
+  `aging_flips_generation_and_both_gens_execute`: define in gen 0 → age → define in gen 1
+  → **both** generations execute (incl. a gen-1 closure calling a gen-0 global), and a
+  second age correctly refuses.
+
+Remaining: **Stage 3** cooperative liveness (each process reports old-gen references at
+safepoints → union "is the old gen dead?"), **Stage 4** free the dead generation +
+soft-wait/purge pins + auto-trigger aging at the RUNTIME safepoint.
+
+**Verified:** Rust lib 375/375; `runtime_collector` 11/11 (incl. `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1`); clippy `--all-targets --all-features` clean; `cargo fmt --check`
+clean; `nest check` 0 warnings; `nest test` 2605/2605.
