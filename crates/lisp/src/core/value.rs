@@ -279,19 +279,46 @@ macro_rules! handle {
                 );
                 $name((index as u64) | ((PRELUDE as u64) << REGION_SHIFT))
             }
-            /// A handle into the runtime's mutable shared code region (no generation).
+            /// A handle into the runtime's mutable shared code region, in code
+            /// **generation 0** (the shorthand for the common single-generation
+            /// case). See [`runtime_gen`](Self::runtime_gen) for the 2-generation
+            /// RUNTIME collector (ADR-091 Erlang-style): `code_gen` selects which
+            /// of the two live `CodeSlabs` this handle addresses.
             #[inline]
             pub fn runtime(index: usize) -> Self {
+                Self::runtime_gen(index, 0)
+            }
+            /// A handle into the runtime shared code region in code generation
+            /// `code_gen` (0 or 1). The generation occupies **bit 32** (the low bit
+            /// of the `GEN` field, unused by RUNTIME handles otherwise), so it is
+            /// preserved by [`canonical`](Self::canonical) for RUNTIME — two handles
+            /// at the same index in *different* generations are distinct objects.
+            /// It does **not** touch the `AGE` bit, so `is_old()` stays `false` for
+            /// RUNTIME (the LOCAL accessors that read `is_old()`/`generation()` are
+            /// never reached for a RUNTIME handle — region-guarded in `region_ref!`).
+            #[inline]
+            pub fn runtime_gen(index: usize, code_gen: usize) -> Self {
                 debug_assert!(
                     index < (1usize << GEN_SHIFT),
                     "runtime index {} overflows",
                     index
                 );
+                debug_assert!(code_gen < 2, "code generation must be 0 or 1");
                 debug_assert!(
                     RUNTIME < REGION_RESERVED,
                     "region 0b11 is reserved for EnvId::GLOBAL"
                 );
-                $name((index as u64) | ((RUNTIME as u64) << REGION_SHIFT))
+                $name(
+                    (index as u64)
+                        | (((code_gen as u64) & 1) << GEN_SHIFT)
+                        | ((RUNTIME as u64) << REGION_SHIFT),
+                )
+            }
+            /// Which of the two RUNTIME code generations this handle addresses
+            /// (bit 32). Only meaningful when `region() == RUNTIME`; `0` otherwise.
+            #[inline]
+            pub fn code_gen(self) -> usize {
+                ((self.0 >> GEN_SHIFT) & 1) as usize
             }
             /// Which region this handle addresses ([`LOCAL`]/[`PRELUDE`]/[`RUNTIME`]).
             #[inline]
@@ -319,9 +346,23 @@ macro_rules! handle {
             /// Region + index with the generation cleared — the identity used for
             /// equality and hashing, so a handle compares equal to itself across
             /// epochs (same object) while the stamp still flags stale *derefs*.
+            ///
+            /// **Region-aware:** for LOCAL the whole `GEN` epoch is masked (a LOCAL
+            /// object keeps its identity across collections). For RUNTIME the low
+            /// `GEN` bit is the **code generation** ([`runtime_gen`](Self::runtime_gen)) —
+            /// a real object distinction (two live `CodeSlabs`), *not* an epoch
+            /// stamp — so it is kept in the identity; only the unused high `GEN`
+            /// bits are masked. Without this, a gen-0 and a gen-1 handle at the same
+            /// slab index would wrongly compare equal during the migration overlap.
             #[inline]
             fn canonical(self) -> u64 {
-                self.0 & !(GEN_MASK << GEN_SHIFT)
+                if self.region() == RUNTIME {
+                    // Keep region + index + code-gen bit; mask only the unused
+                    // high GEN bits (33..) and the AGE bit (always 0 for RUNTIME).
+                    self.0 & !(((GEN_MASK >> 1) << (GEN_SHIFT + 1)) | AGE_OLD)
+                } else {
+                    self.0 & !(GEN_MASK << GEN_SHIFT)
+                }
             }
         }
         impl PartialEq for $name {
@@ -1091,6 +1132,49 @@ pub(crate) mod jit_layout {
     /// small-vector element read (`Range`/`SeqView` share the backing slab but
     /// carry their own tags, so they deopt to the VM). Pinned by the layout test.
     pub const TAG_VECTOR: u8 = 10;
+}
+
+#[cfg(test)]
+mod runtime_gen_handle_tests {
+    use super::*;
+
+    // The 2-generation RUNTIME code handle encoding (ADR-091 Erlang-style).
+    #[test]
+    fn runtime_gen_round_trips_and_stays_runtime() {
+        for &g in &[0usize, 1] {
+            let h = PairId::runtime_gen(1234, g);
+            assert_eq!(h.region(), RUNTIME);
+            assert_eq!(h.index(), 1234);
+            assert_eq!(h.code_gen(), g);
+            // The AGE bit is untouched, so RUNTIME handles never read as "old"
+            // (the LOCAL accessors that key off `is_old()` are never reached).
+            assert!(!h.is_old(), "RUNTIME code-gen must not set the AGE bit");
+        }
+        // `runtime(i)` is generation 0.
+        assert_eq!(PairId::runtime(7).code_gen(), 0);
+        assert_eq!(PairId::runtime(7), PairId::runtime_gen(7, 0));
+    }
+
+    #[test]
+    fn different_code_generations_are_distinct_objects() {
+        // Same slab index, different generation → NOT equal / distinct hash key
+        // (they address different live `CodeSlabs` during a migration overlap).
+        let g0 = ClosureId::runtime_gen(42, 0);
+        let g1 = ClosureId::runtime_gen(42, 1);
+        assert_ne!(g0, g1, "gen-0 and gen-1 at the same index must differ");
+        use std::collections::HashSet;
+        let set: HashSet<ClosureId> = [g0, g1].into_iter().collect();
+        assert_eq!(set.len(), 2, "distinct generations must hash distinctly");
+        // …but a handle equals itself.
+        assert_eq!(g1, ClosureId::runtime_gen(42, 1));
+    }
+
+    #[test]
+    fn local_identity_still_ignores_the_generation_epoch() {
+        // Region-aware `canonical`: LOCAL keeps identity across epochs (the point
+        // of masking GEN), unaffected by the RUNTIME carve-out above.
+        assert_eq!(PairId::local_gen(9, 3), PairId::local_gen(9, 100));
+    }
 }
 
 #[cfg(test)]
