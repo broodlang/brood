@@ -5772,6 +5772,21 @@ resume that code). This is strictly a soft purge: it never removes a live pin, o
 completes only because the parked worker is inspected and acked — it deadlocks without the
 inspection).
 
+**Stage 5 soundness — re-home a `def`'d value out of the draining generation.** A later
+review found the drain gate had a hole: the shared **globals table** (and `declared_sigs`)
+is a drain root that no *process* liveness walk covers. `promote` is a no-op on an
+already-RUNTIME value, so `(def k v)` with `v` resident in the draining generation stored
+that stale handle into globals *after* migration moved the live globals off it — re-pinning
+a generation a process already acked clean; once that process exits, the union goes
+all-clean and the generation is freed with a live global still pointing into it (a
+use-after-free), and the same shape let migration's reconcile clobber a concurrent
+`(def k old-gen-value)`. Fix: `Heap::rehome_to_current` deep-copies a value in a non-current
+RUNTIME generation into the current one (migration's `flush_rt_value`, under `promote_lock`),
+wired into the global `env_define` and `set_declared_sig` paths — restoring the invariant
+"no shared root points at the draining generation." No-op on the default single-generation
+path. Regression:
+`runtime_collector.rs::a_def_of_an_old_gen_value_is_rehomed_off_the_freed_generation`.
+
 Still **deferred** — a purge policy for a *genuinely* pinned generation (a process actively
 **looping** in old code, not merely parked). Whole-generation reclamation needs every live
 process to become quiescent w.r.t. the draining generation; such a process pins it forever

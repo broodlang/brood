@@ -244,7 +244,8 @@ impl<'a> Parser<'a> {
             StringScan::Unterminated => Err(self.err_incomplete("unterminated bytes literal")),
             StringScan::BadEscape { at } => Err(self.err_at(
                 self.s.pos_at(at),
-                "malformed escape in bytes literal: \\x needs two hex digits",
+                "malformed escape in bytes literal: an unknown letter escape (\\d, \\w, …) \
+                 is rejected (write \\\\d); \\x needs two hex digits",
             )),
         }
     }

@@ -1018,3 +1018,46 @@ fn migration_drain_free_cycles_and_stays_bounded() {
     );
 }
 
+
+/// Stage 5 soundness (ADR-091) — a `def` of a value resident in the *draining*
+/// generation must be re-homed into the current generation. Otherwise it stores a
+/// stale handle into the shared globals table (an un-walked drain root), re-pinning
+/// a generation a process already acked clean; freeing that generation then leaves
+/// the global dangling. Here a straggler binds a gen-0 handle *after* migration moved
+/// the live globals off gen 0; with the re-home it lands in gen 1 and survives the
+/// free, without it it dangles into the emptied gen-0 slab.
+#[test]
+fn a_def_of_an_old_gen_value_is_rehomed_off_the_freed_generation() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    // f is born in gen 0. Capture its gen-0 handle before aging (a process could
+    // likewise still hold such a value across the flip).
+    interp.eval_str("(def f (fn () 42))").expect("def f");
+    let g_env = interp.heap.global();
+    let f_gen0 = interp
+        .heap
+        .env_get(g_env, brood::core::value::intern("f"))
+        .expect("f is bound");
+
+    // Age to gen 1 and migrate the live globals off gen 0. gen 0 now holds only the
+    // superseded original — unreferenced by any *global*, but we still hold `f_gen0`.
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+    interp.heap.migrate_live_globals(0);
+    interp.heap.collect(&mut [], &mut []);
+
+    // The straggler: bind a NEW global `g` to the gen-0 handle (what `(def g <old>)`
+    // does after a departed process handed the value on).
+    let g_sym = brood::core::value::intern("g");
+    interp.heap.env_define(g_env, g_sym, f_gen0);
+    interp.heap.collect(&mut [], &mut []);
+
+    // Free gen 0. With the re-home fix `g` was copied into gen 1, so this is safe;
+    // without it `g` still points into the now-empty gen-0 slab.
+    assert!(interp.heap.free_runtime_gen(0), "gen 0 freed");
+
+    // `g` must still resolve + run — proving it was re-homed off the freed generation.
+    let r = interp.eval_str("(g)").expect("call g after gen 0 freed");
+    assert_eq!(interp.print(r), "42", "g was re-homed into the live generation");
+}

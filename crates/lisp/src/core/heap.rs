@@ -5102,8 +5102,13 @@ impl Heap {
                 }
             }
             // Global code/data is shared across inner processes, so promote it
-            // into the shared RUNTIME region before binding.
-            let shared = self.promote(val);
+            // into the shared RUNTIME region before binding. `rehome_to_current`
+            // then re-homes a value that promote left in a *non-current* generation
+            // (an already-RUNTIME handle promote passes through unchanged) into the
+            // current one, so a `def` can never re-pin a draining generation through
+            // the shared globals table (ADR-091 Stage 5 soundness). No-op unless the
+            // multi-generation collector is armed.
+            let shared = self.rehome_to_current(self.promote(val));
             self.runtime.globals_write().insert(sym, shared);
             // Invalidate every process's global inline cache (late binding).
             self.runtime.version.fetch_add(1, Ordering::Relaxed);
@@ -5286,7 +5291,10 @@ impl Heap {
     /// just overwrites. (No `version` bump — declared sigs aren't consulted by the
     /// per-process global inline cache.)
     pub fn set_declared_sig(&mut self, sym: Symbol, type_value: Value) {
-        let shared = self.promote(type_value);
+        // Re-home into the current generation, for the same reason as a global `def`
+        // (`declared_sigs` is a shared root the drain scans; a stale old-gen handle
+        // stored here would re-pin a draining generation — ADR-091 Stage 5).
+        let shared = self.rehome_to_current(self.promote(type_value));
         self.runtime
             .declared_sigs
             .write()
@@ -5751,6 +5759,51 @@ impl Heap {
     ///
     /// A no-op (returns 0) unless a prior [`age_runtime`](Self::age_runtime) left
     /// `old_gen != cur_gen` and `old_gen` is non-empty.
+    /// **RUNTIME collector — Stage 5 soundness (ADR-091).** Re-home a value resident
+    /// in a *non-current* RUNTIME generation into the current generation, deep-copying
+    /// its code tree (the same flush [`migrate_live_globals`] uses). A value already in
+    /// the current generation — or not a RUNTIME handle — is returned unchanged.
+    ///
+    /// This closes a drain hole a global `def` could otherwise open. `promote` is a
+    /// no-op on an already-RUNTIME value, so `(def k v)` with `v` resident in the
+    /// *draining* generation would store that stale handle straight into the shared
+    /// globals table — an un-walked GC root — *after* migration moved the live globals
+    /// off it, re-pinning a generation a process already reported clean for. If that
+    /// process then exits, the drain union can go all-clean and free a still-referenced
+    /// generation → dangling handle. Re-homing at def time keeps the invariant "no
+    /// shared root points at the draining generation" intact, so the drain gate stays
+    /// sound; it also stops migration's reconcile from mistaking a concurrent
+    /// `(def k old-gen-value)` for a stale binding and clobbering it.
+    ///
+    /// Holds `promote_lock` (read) so an aging flip can't relocate the current
+    /// generation between reading it and appending the copy — the same discipline
+    /// `promote` uses. A no-op on the default single-generation path (every RUNTIME
+    /// value is already current, so the fast-path check returns immediately).
+    fn rehome_to_current(&self, v: Value) -> Value {
+        let g = match runtime_gen_of(v) {
+            Some(g) => g,
+            None => return v,
+        };
+        if g == self.runtime.cur_gen() {
+            return v;
+        }
+        let _guard = self
+            .runtime
+            .promote_lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        // Re-read the current generation under the lock: aging (which holds the write
+        // lock) can't now flip it out from under the flush.
+        let cur = self.runtime.cur_gen();
+        if g == cur {
+            return v;
+        }
+        let old_guard = self.runtime.gens[g].load();
+        let dst_guard = self.runtime.gens[cur].load();
+        let mut fwd = RuntimeForward::for_gens(g, cur);
+        flush_rt_value(&old_guard, &dst_guard, &mut fwd, v)
+    }
+
     pub fn migrate_live_globals(&self, old_gen: usize) -> usize {
         let dest_gen = self.runtime.cur_gen();
         if dest_gen == old_gen || self.runtime.gens[old_gen].load().is_empty() {
@@ -8372,19 +8425,28 @@ impl RuntimeForward {
 /// globals still living in the aged-out generation and to detect a concurrent
 /// redefinition (which moves the binding to the current generation) at reconcile.
 fn value_in_gen(v: Value, gen: usize) -> bool {
+    runtime_gen_of(v) == Some(gen)
+}
+
+/// Which RUNTIME generation a value's handle lives in, or `None` if it isn't a
+/// RUNTIME handle (a LOCAL/PRELUDE handle, or an immediate). The companion to
+/// [`value_in_gen`] that returns *which* generation rather than testing one — used
+/// by [`Heap::rehome_to_current`] to decide whether a value needs re-homing.
+fn runtime_gen_of(v: Value) -> Option<usize> {
+    let in_rt = |region: u8, gen: usize| (region == RUNTIME).then_some(gen);
     match v.unpack() {
-        ValueRef::Pair(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        ValueRef::Pair(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::Vector(id) | ValueRef::Range(id) | ValueRef::SeqView(id) => {
-            id.region() == RUNTIME && id.code_gen() == gen
+            in_rt(id.region(), id.code_gen())
         }
-        ValueRef::Map(id) => id.region() == RUNTIME && id.code_gen() == gen,
-        ValueRef::Str(id) => id.region() == RUNTIME && id.code_gen() == gen,
-        ValueRef::BigInt(id) => id.region() == RUNTIME && id.code_gen() == gen,
-        ValueRef::Decimal(id) => id.region() == RUNTIME && id.code_gen() == gen,
-        ValueRef::Bytes(id) => id.region() == RUNTIME && id.code_gen() == gen,
-        ValueRef::Rope(id) => id.region() == RUNTIME && id.code_gen() == gen,
-        ValueRef::Fn(id) | ValueRef::Macro(id) => id.region() == RUNTIME && id.code_gen() == gen,
-        _ => false,
+        ValueRef::Map(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::Str(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::BigInt(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::Decimal(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::Bytes(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::Rope(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::Fn(id) | ValueRef::Macro(id) => in_rt(id.region(), id.code_gen()),
+        _ => None,
     }
 }
 

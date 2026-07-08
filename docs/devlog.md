@@ -2565,3 +2565,35 @@ Still deferred (see ADR-091): the harder purge rungs for a genuinely *pinned* ge
 a `recur-latest` re-dispatch convention (its own small ADR — new language surface) and a
 hard purge (kill + supervised restart). `BROOD_RT_MULTIGEN` stays default-off pending those
 + the perf A/B.
+
+### Stage 5 soundness fix — re-home a `def`'d value out of the draining generation
+
+A review of the multi-process collector (ADR-091 stages 3–5) surfaced a real, if
+latent (`BROOD_RT_MULTIGEN` is off by default), use-after-free. `promote` is a no-op
+on an already-RUNTIME value, so `(def k v)` with `v` resident in the **draining**
+generation stored that stale handle straight into the shared globals table — an
+un-walked drain root — *after* migration had moved the live globals off it. That
+re-pins a generation a process already reported clean for; if that process then
+exits, the drain union can go all-clean and `free_runtime_gen` empties a generation a
+global still points at → the next lookup of `k` dereferences a freed slab (panic /
+miscompile). The same shape also let migration's reconcile clobber a concurrent
+`(def k old-gen-value)` (a lost def).
+
+Fix: `Heap::rehome_to_current` — a `def`/`sig` of a value in a non-current RUNTIME
+generation now deep-copies it into the current generation (the same `flush_rt_value`
+machinery migration uses), under `promote_lock` so an aging flip can't relocate the
+target mid-copy. Wired into the global `env_define` and `set_declared_sig` paths — the
+two shared roots the drain scans. This keeps the invariant "no shared root points at
+the draining generation" intact, so the drain gate stays sound, and a concurrent def
+is no longer mistaken for a stale binding. No-op on the default single-generation path
+(the fast-path gen check returns immediately).
+
+Verified: `runtime_collector.rs::a_def_of_an_old_gen_value_is_rehomed_off_the_freed_generation`
+— a straggler binds a gen-0 handle after migration, then gen 0 is freed; with the fix
+`(g)` returns 42, without it the test panics with the exact `runtime closure handle`
+use-after-free the review predicted. Full suite green (2610/0), collector 20, lib 375.
+Also polished the bytes-literal bad-escape message to match the string path.
+
+The review also confirmed the storage/guard machinery, promote⇄age locking,
+parked-process inspection (lock ordering + quiescence), and the 2-generation cap are
+sound; and that the footgun fixes (spawn/if/def/escape) have no correctness issues.
