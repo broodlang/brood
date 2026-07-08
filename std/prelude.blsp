@@ -1294,17 +1294,37 @@ its printed form."
 ;; `dist::unregister_dead_pid`), so a later reload re-spawns cleanly.
 ;; A literal zero-arg lambda `(fn () …)` is *already* a process thunk. Re-wrapping
 ;; it (`(fn () (fn () …))`) would make the process merely build a closure and
-;; discard it — a silent no-op, the classic spawn footgun. So pass such a form
-;; through unwrapped: `(spawn (fn () body))` and `(spawn body)` then mean the same.
+;; discard it — a silent no-op. So pass such a form through unwrapped:
+;; `(spawn (fn () body))` and `(spawn body)` then mean the same. (The dual footgun —
+;; a bare function *name* like `(spawn worker)`, which used to yield the closure and
+;; exit — is handled by `spawn--body-thunk` below, which wraps a symbol as a *call*.)
 (defn spawn--thunk-form? (form)
   (and (list? form) (not (empty? form)) (= (first form) 'fn)
     (let (params (second form)) (and (list? params) (empty? params)))))
+
+;; The process-body thunk a `spawn`-family macro wraps its body form in. Three cases,
+;; each closing off a footgun so no `spawn` shape can silently do nothing:
+;;   - a literal `(fn () …)` is already the thunk → pass it through (re-wrapping it
+;;     would build-and-discard a closure);
+;;   - a **bare symbol** is a function *name* → wrap it as a CALL `(fn () (name))`,
+;;     so `(spawn worker)` runs `worker` (Erlang's `spawn(fun name/0)`) instead of
+;;     yielding the closure and exiting. A process body that merely *evaluates* a
+;;     symbol has no effect, so this is never a legitimate use — the call either
+;;     works or raises a loud "not callable", never a silent no-op;
+;;   - anything else is the body expression → `(fn () expr)`.
+(defn spawn--body-thunk (form)
+  (cond
+    (spawn--thunk-form? form) form
+    (symbol? form) `(fn () (~form))
+    :else `(fn () ~form)))
 
 (defmacro spawn (head & more)
   "Run an expression in a new green process; returns its pid. Shapes:
   - `(spawn expr)` — anonymous; `expr` is the process body.
   - `(spawn (fn () expr))` — same as above (a zero-arg lambda is the body too, so
     the Erlang `spawn(fun() -> … end)` habit just works, no silent no-op).
+  - `(spawn fn-name)` — a bare function name is **called**: `(spawn worker)` runs
+    `(worker)` (Erlang's `spawn(fun name/0)`), not `worker`-then-exit.
   - `(spawn name expr)` — named & idempotent: returns the existing pid if
     a live process is already registered under `name`. The hot-reload-friendly
     form (reloading the file doesn't fire a second worker).
@@ -1314,11 +1334,9 @@ its printed form."
   ;; Param name is `more` (not `rest`) so the body can still call the
   ;; prelude's `rest` function without param-shadowing itself.
   (if (empty? more)
-    (if (spawn--thunk-form? head) `(%spawn ~head) `(%spawn (fn () ~head)))
+    `(%spawn ~(spawn--body-thunk head))
     (if (empty? (rest more))
-      (if (spawn--thunk-form? (first more))
-        `(%spawn-named ~head ~(first more))
-        `(%spawn-named ~head (fn () ~(first more))))
+      `(%spawn-named ~head ~(spawn--body-thunk (first more)))
       (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
 
 (defmacro spawn-link (expr)
@@ -1331,9 +1349,7 @@ instant exit reaches the caller with its **true** reason — unlike a separate
 and reports `:noproc` (losing `:normal`). Supervised children should use this so a fast
 `:normal` exit isn't misread as a crash. A zero-arg lambda `(fn () …)` body is
 passed through (not re-wrapped), like `spawn`."
-  (if (spawn--thunk-form? expr)
-    `(%spawn-link ~expr)
-    `(%spawn-link (fn () ~expr))))
+  `(%spawn-link ~(spawn--body-thunk expr)))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk
@@ -1358,7 +1374,7 @@ passed through (not re-wrapped), like `spawn`."
   "Run `expr` in a fresh process on `node` (a node-name keyword/symbol — `(node-name)` for the local node, or a connected peer's). Returns `nil`; the spawned process lives on the remote and runs detached (capture the parent's pid in a `let` and `(send parent (self))` from inside `expr` if you need its pid). `expr` ships as a closure (ADR-033) — free locals ride along, free globals re-resolve on the receiver. A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `spawn`. The **receiver** must have called `(start-remote-spawn)` (typically right after `node-start`); the macro itself does no setup on either side."
   `(do
      (send {:name :remote-spawn :node ~node}
-           [:run ~(if (spawn--thunk-form? expr) expr `(fn () ~expr))])
+           [:run ~(spawn--body-thunk expr)])
      nil))
 
 (defmacro remote-spawn-sync (node expr)
@@ -1370,7 +1386,7 @@ through (not re-wrapped), like `spawn`. Use this when you need the child's pid �
 e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
   `(let (r# (ref))
      (send {:name :remote-spawn :node ~node}
-           [:run-sync ~(if (spawn--thunk-form? expr) expr `(fn () ~expr)) (self) r#])
+           [:run-sync ~(spawn--body-thunk expr) (self) r#])
      (receive ([:spawned got# child#] :when (= got# r#) child#)
        (after 5000
          (throw "remote-spawn-sync: no reply (is start-remote-spawn running on the peer?)")))))
