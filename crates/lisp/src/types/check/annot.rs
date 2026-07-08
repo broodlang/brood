@@ -82,7 +82,7 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
         Value::Int(n) => Some(Ty::int_lit(n)),
         // Bare bool/string literals, same story (ADR-120).
         Value::Bool(b) => Some(Ty::bool_lit(b)),
-        Value::Str(id) => Some(Ty::str_lit(heap.string(id))),
+        Value::Str(id) => Some(Ty::str_lit(&heap.string(id))),
         Value::Pair(_) => {
             let items = list_items(heap, form)?;
             // An arrow: a list containing the `->` marker. Detect it first, so

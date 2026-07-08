@@ -33,9 +33,10 @@
 //! traced (they hold no LOCAL refs, by the promotion invariant — see
 //! [`promote`](Self::promote)); the collector only touches LOCAL.
 
-use std::cell::RefCell;
+use arc_swap::{ArcSwap, Guard};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
@@ -97,8 +98,8 @@ impl LocalString {
 /// all-three-region reference accessors share this; `pair` (returns by value)
 /// and the region-restricted `native`/`env_frame` stay hand-written.
 macro_rules! region_ref {
-    ($name:ident, $id:ty, $field:ident, $ret:ty, $what:literal) => {
-        pub fn $name(&self, id: $id) -> $ret {
+    ($name:ident, $id:ty, $field:ident, $t:ty, $what:literal) => {
+        pub fn $name(&self, id: $id) -> SlabRef<'_, $t> {
             match id.region() {
                 LOCAL if id.is_old() => {
                     #[cfg(debug_assertions)]
@@ -109,7 +110,7 @@ macro_rules! region_ref {
                         stringify!($name),
                         id.0,
                     );
-                    &self.old.$field[id.index()]
+                    SlabRef::direct(&self.old.$field[id.index()])
                 }
                 LOCAL => {
                     #[cfg(debug_assertions)]
@@ -129,13 +130,17 @@ macro_rules! region_ref {
                         stringify!($name),
                         id.0,
                     );
-                    &self.local.$field[id.index()]
+                    SlabRef::direct(&self.local.$field[id.index()])
                 }
-                PRELUDE => &self.prelude.slabs.$field[id.index()],
-                RUNTIME => self.runtime.gens[id.code_gen()]
-                    .$field
-                    .get(id.index())
-                    .expect($what),
+                PRELUDE => SlabRef::direct(&self.prelude.slabs.$field[id.index()]),
+                RUNTIME => {
+                    let guard = self.runtime.code_gen(id.code_gen());
+                    let r: &$t = guard.$field.get(id.index()).expect($what);
+                    let ptr = r as *const $t;
+                    // SAFETY: `ptr` points into `guard`'s CodeSlabs (stable `boxcar`
+                    // address), kept alive by the guard moved into the `SlabRef`.
+                    unsafe { SlabRef::guarded(guard, ptr) }
+                }
                 _ => unreachable!("invalid handle region"),
             }
         }
@@ -381,6 +386,17 @@ fn rt_gc_floor() -> usize {
             gc_count_env("BROOD_RT_GC_FLOOR").unwrap_or(4096)
         }
     })
+}
+
+/// Is the **multi-process RUNTIME collector** (ADR-091 Stage 4 — age + migrate live
+/// globals + drain + free) armed? Off by default: whole-generation reclamation on a
+/// *shared* runtime is opt-in via `BROOD_RT_MULTIGEN` pending a perf A/B of the aging
+/// migration copy and the purge policy for a genuinely-pinned generation. When off, a
+/// shared runtime behaves exactly as before (single-process compaction only, with the
+/// exponential back-off). Cached once — a free relaxed load on the safepoint path.
+fn rt_multigen_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_RT_MULTIGEN").is_some())
 }
 
 /// Live old-gen object count below which a **major** collection never fires —
@@ -811,6 +827,114 @@ struct CodeSlabs {
     envs: boxcar::Vec<OnceLock<EnvFrame>>,
 }
 
+/// A borrow into a slab, valid for as long as the wrapper is held. It is either a
+/// **direct** `&self`-borrow (LOCAL / PRELUDE, or a compaction-time RUNTIME read) or
+/// a **guarded** borrow into an ArcSwap-managed RUNTIME generation, where the held
+/// [`Guard`] keeps that generation's slab alive so a concurrent Stage-4 free
+/// ([`Heap::free_runtime_gen`], ADR-091) can swap the slab out without invalidating
+/// an in-flight read. `Deref`s to `T`, so call sites use it exactly like `&T`.
+pub struct SlabRef<'a, T: ?Sized> {
+    /// Keeps the RUNTIME generation's `Arc<CodeSlabs>` alive while borrowed; `None`
+    /// for a direct borrow. Never read directly — held purely so its `Drop` (the
+    /// Arc release) runs no earlier than the pointer's last use.
+    _guard: Option<Guard<Arc<CodeSlabs>>>,
+    /// Points into the borrowed slot — a direct `&'a T`, or into the slab the guard
+    /// pins. Valid for the wrapper's whole lifetime either way.
+    ptr: *const T,
+    _life: std::marker::PhantomData<&'a T>,
+}
+
+// SAFETY: `SlabRef` is a plain shared borrow (a `&T` plus, optionally, the `Arc`
+// that keeps `T` alive). It is `Send`/`Sync` exactly when `&T` is — the guard is an
+// `Arc` clone (already `Send`+`Sync` for our `CodeSlabs`), and the raw pointer only
+// ever yields shared `&T` access.
+unsafe impl<T: ?Sized + Sync> Sync for SlabRef<'_, T> {}
+unsafe impl<T: ?Sized + Sync> Send for SlabRef<'_, T> {}
+
+impl<'a, T: ?Sized> SlabRef<'a, T> {
+    /// A direct `&self`-borrow (LOCAL / PRELUDE, or a compaction-time RUNTIME read).
+    #[inline]
+    fn direct(r: &'a T) -> Self {
+        SlabRef {
+            _guard: None,
+            ptr: r as *const T,
+            _life: std::marker::PhantomData,
+        }
+    }
+    /// A guarded borrow into the ArcSwap generation `guard` pins.
+    ///
+    /// SAFETY: `ptr` must point into the `CodeSlabs` held alive by `guard` (obtained
+    /// from `&*guard`), so it stays valid for the wrapper's whole lifetime.
+    #[inline]
+    unsafe fn guarded(guard: Guard<Arc<CodeSlabs>>, ptr: *const T) -> Self {
+        SlabRef {
+            _guard: Some(guard),
+            ptr,
+            _life: std::marker::PhantomData,
+        }
+    }
+    /// Re-project the borrow to a part of `T` (e.g. a field), carrying the same guard
+    /// so the underlying slab stays pinned. Like `Ref::map`.
+    #[inline]
+    pub(crate) fn map<U: ?Sized>(self, f: impl FnOnce(&T) -> &U) -> SlabRef<'a, U> {
+        // SAFETY: `self.ptr` is valid (invariant of `SlabRef`); the projected `&U`
+        // points within the same slab the guard (moved below) keeps alive.
+        let ptr = f(unsafe { &*self.ptr }) as *const U;
+        SlabRef {
+            _guard: self._guard,
+            ptr,
+            _life: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: ?Sized> std::ops::Deref for SlabRef<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        // SAFETY: `ptr` is either a direct `&'a T` or points into the slab the held
+        // `_guard` keeps alive; both outlive `&self`.
+        unsafe { &*self.ptr }
+    }
+}
+
+// `&T`-like ergonomics so a `SlabRef` drops into most call sites unchanged.
+impl<T: ?Sized> AsRef<T> for SlabRef<'_, T> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+impl<T: ?Sized + std::fmt::Debug> std::fmt::Debug for SlabRef<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+impl<T: ?Sized + std::fmt::Display> std::fmt::Display for SlabRef<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+impl<T: ?Sized + PartialEq> PartialEq for SlabRef<'_, T> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+impl<T: ?Sized + PartialEq> PartialEq<T> for SlabRef<'_, T> {
+    #[inline]
+    fn eq(&self, other: &T) -> bool {
+        **self == *other
+    }
+}
+// Comparing a `SlabRef<str>` against a string literal / `&str` (`sr == "foo"`).
+impl PartialEq<&str> for SlabRef<'_, str> {
+    #[inline]
+    fn eq(&self, other: &&str) -> bool {
+        &**self == *other
+    }
+}
+
 impl CodeSlabs {
     /// True if this generation holds no code — every slab empty. Aging may only
     /// start a new generation in a slot that is empty (its previous generation
@@ -884,7 +1008,14 @@ pub struct RuntimeCode {
     /// read resolves `gens[handle.code_gen()]` — no shared read on the hot path.
     /// Until aging is wired, `current_gen` stays `0` and `gens[1]` is empty, so this
     /// behaves exactly like the former single `code: CodeSlabs`.
-    gens: [CodeSlabs; 2],
+    ///
+    /// Each slot is an [`ArcSwap`] so a drained generation can be **freed while the
+    /// runtime is shared** (ADR-091 Stage 4): [`Heap::free_runtime_gen`] stores a
+    /// fresh empty `CodeSlabs`, and the old `Arc` drops once the last reader releases
+    /// its [`Guard`]. Reads stay lock-free (`gens[g].load()`); appends push into the
+    /// loaded slab's `boxcar` in place (visible to every holder of that `Arc`), so a
+    /// store only ever happens on a free — never on the `def`/`promote` hot path.
+    gens: [ArcSwap<CodeSlabs>; 2],
     /// Index (0 or 1) of the current code generation — read at `promote`/collect,
     /// never on the hot read path (the handle carries its own generation).
     current_gen: AtomicUsize,
@@ -954,6 +1085,66 @@ pub struct RuntimeCode {
     /// layer must not depend on `types` (the checker parses it on read). Shared
     /// across the runtime's processes via `Arc`, like `globals`.
     declared_sigs: RwLock<SymbolMap<Value>>,
+    /// **RUNTIME collector — Stage 3b (cooperative drain coordination, ADR-091).**
+    /// When an aged-out generation is being reclaimed, each of the runtime's
+    /// processes cooperatively reports — at its safepoint / before parking —
+    /// whether it still references the draining generation
+    /// ([`Heap::runtime_gen_referenced`]). The old generation is dead (Stage 4 may
+    /// free it) only once *every* live process has reported clean for the current
+    /// drain epoch. Shared across the runtime's processes via `Arc`, like `globals`.
+    ///
+    /// `drain_active` is `false` when no drain is in progress (the always-case until
+    /// Stage 4 arms one, so the whole mechanism is inert by default). `drain_gen` is
+    /// the generation being reclaimed. `drain_epoch` is **strictly monotonic** (a new
+    /// drain bumps it and clears `drain_acks`), so a stale ack from a previous drain
+    /// can never be mistaken for a current-epoch one. `drain_acks` maps a process's
+    /// pid → the epoch it last reported *clean* for; a process still referencing the
+    /// draining generation has no current-epoch entry, so it pins the generation.
+    drain_active: AtomicBool,
+    drain_gen: AtomicUsize,
+    drain_epoch: AtomicU64,
+    drain_acks: RwLock<HashMap<u64, u64>>,
+    /// **RUNTIME collector — Stage 4 (free-generation epoch, ADR-091).** Bumped each
+    /// time a generation is freed ([`Heap::free_runtime_gen`]). A freed slot is later
+    /// reused by aging, minting handles with bit-identical `(gen, index)` to the freed
+    /// ones — so a per-process `vm_cache` entry (keyed on the closure handle bits, not
+    /// version-stamped) could otherwise alias *old* compiled code onto *new* code. Each
+    /// process compares this against its own [`Heap::seen_free_epoch`] on the
+    /// `vm_cache` read path and clears its `vm_cache` once when it advances. The
+    /// version-stamped caches (`global_ic`, the call/global ICs, the shared JIT caches)
+    /// self-invalidate on the `version` bump a free also does, so only `vm_cache` needs
+    /// this. Relaxed: it only has to *change* (a lazy one-shot cache clear, no data
+    /// publication gated on it — the freed slab is already unreachable by the drain).
+    free_epoch: AtomicU64,
+    /// **RUNTIME collector — Stage 4 (single-flight aging, ADR-091).** Held for the
+    /// duration of an `age + migrate_live_globals + begin_gen_drain` sequence so at
+    /// most one process ages at a time. Two processes racing the safepoint could both
+    /// observe the other slot empty and both run the migration, double-copying the
+    /// live image into the new generation (wasteful, and the second's reconcile would
+    /// mostly no-op). A plain CAS gate ([`Heap::begin_aging`]/[`Heap::end_aging`]) —
+    /// the loser skips this safepoint and retries at the next one.
+    aging: AtomicBool,
+    /// **RUNTIME collector — Stage 4 (freed-generation counter, ADR-091).** Bumped by
+    /// [`Heap::free_runtime_gen`] each time a whole generation is reclaimed. Diagnostic
+    /// only — surfaced via [`Heap::runtime_free_count`] so a test can confirm the
+    /// multi-process collector actually fired end-to-end (not just that the program ran).
+    free_count: AtomicU64,
+    /// **RUNTIME collector — Stage 4 (aging counter, ADR-091).** Bumped by
+    /// [`Heap::age_runtime`]; surfaced via [`Heap::runtime_aged_count`] so a test can
+    /// confirm the multi-generation collector aged, even when a full free is timing-
+    /// dependent.
+    aged_count: AtomicU64,
+    /// **RUNTIME collector — Stage 4 (promote⇄age mutual exclusion, ADR-091).** A
+    /// generation flip ([`Heap::age_runtime`]) must not interleave with an in-flight
+    /// [`Heap::promote`] on another process: promote reserves a slot in the current
+    /// generation and then fills it, re-reading `cur_code()` — if aging flipped
+    /// `current_gen` in between, the fill would target the *wrong* generation's slab
+    /// (a panic or cross-generation-split closure). Promotion holds this **read** lock
+    /// (many concurrent promotes are fine — they append to a lock-free `boxcar`);
+    /// aging holds the **write** lock, so the flip waits for every in-flight promote to
+    /// finish and no promote ever spans it. Uncontended on the default single-generation
+    /// path (nothing ever ages), so it's a bare read-lock acquire per `def`/`spawn`.
+    promote_lock: RwLock<()>,
 }
 
 /// Where a global was defined: the file, and the start position of its
@@ -985,7 +1176,10 @@ pub struct GlobalsSnapshot {
 impl Default for RuntimeCode {
     fn default() -> Self {
         RuntimeCode {
-            gens: [CodeSlabs::default(), CodeSlabs::default()],
+            gens: [
+                ArcSwap::from_pointee(CodeSlabs::default()),
+                ArcSwap::from_pointee(CodeSlabs::default()),
+            ],
             current_gen: AtomicUsize::new(0),
             globals: RwLock::new(SymbolMap::default()),
             version: AtomicU64::new(0),
@@ -994,6 +1188,15 @@ impl Default for RuntimeCode {
             jit_code_cache: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
+            drain_active: AtomicBool::new(false),
+            drain_gen: AtomicUsize::new(0),
+            drain_epoch: AtomicU64::new(0),
+            drain_acks: RwLock::new(HashMap::new()),
+            free_epoch: AtomicU64::new(0),
+            aging: AtomicBool::new(false),
+            free_count: AtomicU64::new(0),
+            aged_count: AtomicU64::new(0),
+            promote_lock: RwLock::new(()),
         }
     }
 }
@@ -1004,11 +1207,18 @@ impl RuntimeCode {
     fn cur_gen(&self) -> usize {
         self.current_gen.load(Ordering::Relaxed)
     }
-    /// The current code generation's slabs — the target of `promote`/`def` and the
-    /// region the single-process compactor operates on.
+    /// A guard on the current code generation's slabs — the target of `promote`/`def`
+    /// and the region the single-process compactor operates on. Derefs to
+    /// `&CodeSlabs`; hold it (don't re-call) across a multi-step read so the slab
+    /// can't be freed mid-use.
     #[inline]
-    fn cur_code(&self) -> &CodeSlabs {
-        &self.gens[self.cur_gen()]
+    fn cur_code(&self) -> Guard<Arc<CodeSlabs>> {
+        self.gens[self.cur_gen()].load()
+    }
+    /// A guard on generation `g`'s slabs. Derefs to `&CodeSlabs`.
+    #[inline]
+    fn code_gen(&self, g: usize) -> Guard<Arc<CodeSlabs>> {
+        self.gens[g].load()
     }
     // Append a value into the *current* code generation and mint a handle tagged
     // with that generation, so a read later resolves the right slab (2-generation
@@ -1017,32 +1227,32 @@ impl RuntimeCode {
     #[inline]
     fn push_str(&self, v: String) -> StrId {
         let g = self.cur_gen();
-        StrId::runtime_gen(self.gens[g].strings.push(v), g)
+        StrId::runtime_gen(self.gens[g].load().strings.push(v), g)
     }
     #[inline]
     fn push_bigint(&self, v: num_bigint::BigInt) -> BigIntId {
         let g = self.cur_gen();
-        BigIntId::runtime_gen(self.gens[g].bigints.push(v), g)
+        BigIntId::runtime_gen(self.gens[g].load().bigints.push(v), g)
     }
     #[inline]
     fn push_decimal(&self, v: bigdecimal::BigDecimal) -> DecimalId {
         let g = self.cur_gen();
-        DecimalId::runtime_gen(self.gens[g].decimals.push(v), g)
+        DecimalId::runtime_gen(self.gens[g].load().decimals.push(v), g)
     }
     #[inline]
     fn push_bytes(&self, v: Arc<SharedBlob>) -> BytesId {
         let g = self.cur_gen();
-        BytesId::runtime_gen(self.gens[g].bytes.push(v), g)
+        BytesId::runtime_gen(self.gens[g].load().bytes.push(v), g)
     }
     #[inline]
     fn push_rope(&self, v: ropey::Rope) -> RopeId {
         let g = self.cur_gen();
-        RopeId::runtime_gen(self.gens[g].ropes.push(v), g)
+        RopeId::runtime_gen(self.gens[g].load().ropes.push(v), g)
     }
     #[inline]
     fn push_vec(&self, v: VecStore) -> VecId {
         let g = self.cur_gen();
-        VecId::runtime_gen(self.gens[g].vectors.push(v), g)
+        VecId::runtime_gen(self.gens[g].load().vectors.push(v), g)
     }
     /// A fresh runtime whose global table is seeded with the prelude bindings
     /// (`symbol -> prelude value`). The code slabs start empty — user `def`s
@@ -1053,7 +1263,10 @@ impl RuntimeCode {
             globals.insert(s, v);
         }
         RuntimeCode {
-            gens: [CodeSlabs::default(), CodeSlabs::default()],
+            gens: [
+                ArcSwap::from_pointee(CodeSlabs::default()),
+                ArcSwap::from_pointee(CodeSlabs::default()),
+            ],
             current_gen: AtomicUsize::new(0),
             globals: RwLock::new(globals),
             version: AtomicU64::new(0),
@@ -1062,6 +1275,15 @@ impl RuntimeCode {
             jit_code_cache: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
+            drain_active: AtomicBool::new(false),
+            drain_gen: AtomicUsize::new(0),
+            drain_epoch: AtomicU64::new(0),
+            drain_acks: RwLock::new(HashMap::new()),
+            free_epoch: AtomicU64::new(0),
+            aging: AtomicBool::new(false),
+            free_count: AtomicU64::new(0),
+            aged_count: AtomicU64::new(0),
+            promote_lock: RwLock::new(()),
         }
     }
 
@@ -1362,6 +1584,13 @@ pub struct Heap {
     /// so the trampoline can hold the compiled body across a call without borrowing
     /// the cache.
     vm_cache: RefCell<VmCacheMap<Option<Arc<crate::eval::compile::CompiledClosure>>>>,
+    /// The [`RuntimeCode::free_epoch`] this process last synced its [`Self::vm_cache`]
+    /// to (ADR-091 Stage 4). When the shared free-epoch advances (a generation was
+    /// freed and its slot may be reused with bit-identical handles), the `vm_cache`
+    /// read path clears the cache once and updates this — so a stale compiled body
+    /// can't alias a reused handle. Cheap: one relaxed atomic load + compare per
+    /// closure-call cache lookup, a full clear only on the rare free.
+    seen_free_epoch: Cell<u64>,
     /// The compiled arms **currently executing** on this process's stack — a stack
     /// pushed by `compile::vm_apply` (and the top-level `run`) on entry, the top
     /// updated on a tail-call into a different arm, popped on return. `runtime_collect`
@@ -1716,6 +1945,7 @@ impl Heap {
             gc_reclaimed: 0,
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
+            seen_free_epoch: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -1768,6 +1998,7 @@ impl Heap {
             gc_reclaimed: 0,
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
+            seen_free_epoch: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -2998,20 +3229,19 @@ impl Heap {
     /// Resolve a rope handle to its `&ropey::Rope`. LOCAL slots are the common
     /// case; RUNTIME holds a rope `def`'d to a global (shared read-only across
     /// the runtime's processes). There is no PRELUDE rope (see `to_prelude`).
-    pub fn rope(&self, id: RopeId) -> &ropey::Rope {
+    pub fn rope(&self, id: RopeId) -> SlabRef<'_, ropey::Rope> {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, ropes, "rope", "ropes");
-                &self.old.ropes[id.index()]
+                SlabRef::direct(&self.old.ropes[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, ropes, "rope", "ropes");
-                &self.local.ropes[id.index()]
+                SlabRef::direct(&self.local.ropes[id.index()])
             }
-            RUNTIME => self.runtime.gens[id.code_gen()]
-                .ropes
-                .get(id.index())
-                .expect("runtime rope handle"),
+            RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
+                c.ropes.get(id.index()).expect("runtime rope handle")
+            }),
             _ => unreachable!("Rope handles live only in LOCAL or RUNTIME"),
         }
     }
@@ -3055,21 +3285,20 @@ impl Heap {
     /// case; RUNTIME holds a bignum `def`'d to a global or baked into shared code;
     /// PRELUDE a bignum literal frozen into the prelude (none today, but the path
     /// mirrors `string`). Honours the GC poison/epoch tripwires like every leaf.
-    pub fn bigint(&self, id: BigIntId) -> &num_bigint::BigInt {
+    pub fn bigint(&self, id: BigIntId) -> SlabRef<'_, num_bigint::BigInt> {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, bigints, "bigint", "bigints");
-                &self.old.bigints[id.index()]
+                SlabRef::direct(&self.old.bigints[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, bigints, "bigint", "bigints");
-                &self.local.bigints[id.index()]
+                SlabRef::direct(&self.local.bigints[id.index()])
             }
-            PRELUDE => &self.prelude.slabs.bigints[id.index()],
-            RUNTIME => self.runtime.gens[id.code_gen()]
-                .bigints
-                .get(id.index())
-                .expect("runtime bigint handle"),
+            PRELUDE => SlabRef::direct(&self.prelude.slabs.bigints[id.index()]),
+            RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
+                c.bigints.get(id.index()).expect("runtime bigint handle")
+            }),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -3085,21 +3314,20 @@ impl Heap {
 
     /// Resolve a decimal handle to its `&bigdecimal::BigDecimal` (mirrors
     /// [`bigint`](Self::bigint)). Honours the GC poison/epoch tripwires like every leaf.
-    pub fn decimal(&self, id: DecimalId) -> &bigdecimal::BigDecimal {
+    pub fn decimal(&self, id: DecimalId) -> SlabRef<'_, bigdecimal::BigDecimal> {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, decimals, "decimal", "decimals");
-                &self.old.decimals[id.index()]
+                SlabRef::direct(&self.old.decimals[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, decimals, "decimal", "decimals");
-                &self.local.decimals[id.index()]
+                SlabRef::direct(&self.local.decimals[id.index()])
             }
-            PRELUDE => &self.prelude.slabs.decimals[id.index()],
-            RUNTIME => self.runtime.gens[id.code_gen()]
-                .decimals
-                .get(id.index())
-                .expect("runtime decimal handle"),
+            PRELUDE => SlabRef::direct(&self.prelude.slabs.decimals[id.index()]),
+            RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
+                c.decimals.get(id.index()).expect("runtime decimal handle")
+            }),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -3116,21 +3344,20 @@ impl Heap {
     /// Resolve a bytes handle to its `&Arc<SharedBlob>` (mirrors
     /// [`bigint`](Self::bigint)). Honours the GC poison/epoch tripwires. The
     /// caller reads `.as_bytes()` — raw bytes, never decoded as UTF-8 text.
-    pub fn bytes(&self, id: BytesId) -> &Arc<SharedBlob> {
+    pub fn bytes(&self, id: BytesId) -> SlabRef<'_, Arc<SharedBlob>> {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, bytes, "bytes", "bytes");
-                &self.old.bytes[id.index()]
+                SlabRef::direct(&self.old.bytes[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, bytes, "bytes", "bytes");
-                &self.local.bytes[id.index()]
+                SlabRef::direct(&self.local.bytes[id.index()])
             }
-            PRELUDE => &self.prelude.slabs.bytes[id.index()],
-            RUNTIME => self.runtime.gens[id.code_gen()]
-                .bytes
-                .get(id.index())
-                .expect("runtime bytes handle"),
+            PRELUDE => SlabRef::direct(&self.prelude.slabs.bytes[id.index()]),
+            RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
+                c.bytes.get(id.index()).expect("runtime bytes handle")
+            }),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -3390,6 +3617,16 @@ impl Heap {
     /// Appends only (never mutates existing shared code), so a redefinition adds
     /// a new version while in-flight calls keep running the old one.
     pub fn promote(&self, v: Value) -> Value {
+        // Hold the promote⇄age read lock for the whole (recursive) promotion so a
+        // concurrent `age_runtime` on another process can't flip `current_gen` between
+        // this promote's slot reservation and its fill (ADR-091). Uncontended off the
+        // multi-generation path. Acquired once at the top — the recursion must not
+        // re-acquire (std `RwLock` read isn't reentrant against a queued writer).
+        let _promote_guard = self
+            .runtime
+            .promote_lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut fwd = PromoteForward::default();
         self.promote_in(v, &mut fwd)
     }
@@ -3421,7 +3658,7 @@ impl Heap {
             ValueRef::Bytes(id) if id.region() == LOCAL => {
                 // A leaf: share the Arc<SharedBlob> into the shared region byte-clean —
                 // never through the UTF-8 string path. Just an Arc bump.
-                let b = Arc::clone(self.bytes(id));
+                let b = Arc::clone(&self.bytes(id));
                 Value::bytes(self.runtime.push_bytes(b))
             }
             ValueRef::Rope(id) if id.region() == LOCAL => {
@@ -3876,7 +4113,9 @@ impl Heap {
                 self.local.pairs[id.index()]
             }
             PRELUDE => self.prelude.slabs.pairs[id.index()],
-            RUNTIME => *self.runtime.gens[id.code_gen()]
+            RUNTIME => *self
+                .runtime
+                .code_gen(id.code_gen())
                 .pairs
                 .get(id.index())
                 .expect("runtime pair handle"),
@@ -3889,33 +4128,54 @@ impl Heap {
     pub fn cdr(&self, id: PairId) -> Value {
         self.pair(id).1
     }
-    region_ref!(vector, VecId, vectors, &[Value], "runtime vector handle");
-    region_ref!(map_node, MapId, maps, &MapNode, "runtime map node");
+    region_ref!(vector, VecId, vectors, [Value], "runtime vector handle");
+    region_ref!(map_node, MapId, maps, MapNode, "runtime map node");
+
+    /// Build a guarded [`SlabRef`] into RUNTIME generation `g` by projecting the
+    /// generation's [`CodeSlabs`] to the `&T` a hand-written accessor wants. The
+    /// [`Guard`] is moved into the `SlabRef`, keeping the generation's slab alive for
+    /// the borrow's lifetime — so a concurrent Stage-4 free can't drop it mid-read
+    /// (ADR-091). Mirrors the `RUNTIME` arm of [`region_ref!`] for the accessors that
+    /// can't use the macro (`OnceLock`/`LocalString`/`Arc` projections).
+    #[inline]
+    fn rt_slab_ref<T: ?Sized>(
+        &self,
+        g: usize,
+        project: impl FnOnce(&CodeSlabs) -> &T,
+    ) -> SlabRef<'_, T> {
+        let guard = self.runtime.code_gen(g);
+        let ptr = project(&guard) as *const T;
+        // SAFETY: `ptr` points into `guard`'s `CodeSlabs` (stable `boxcar` address);
+        // the guard moved into the `SlabRef` keeps that slab alive for the borrow.
+        unsafe { SlabRef::guarded(guard, ptr) }
+    }
 
     /// Resolve a string handle to a `&str`. Hand-written (not via the
     /// `region_ref!` macro) because LOCAL slots are `LocalString` enum
     /// variants that need a match to extract their bytes, while PRELUDE and
     /// RUNTIME store plain `String` (PRELUDE is inline-extracted at freeze;
     /// RUNTIME is append-only via `boxcar::Vec<String>` for stable refs).
-    pub fn string(&self, id: StrId) -> &str {
+    pub fn string(&self, id: StrId) -> SlabRef<'_, str> {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, strings, "string", "strings");
-                self.old.strings[id.index()].as_str()
+                SlabRef::direct(self.old.strings[id.index()].as_str())
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, strings, "string", "strings");
-                self.local.strings[id.index()].as_str()
+                SlabRef::direct(self.local.strings[id.index()].as_str())
             }
             // PRELUDE's `Slabs::strings` is also `Vec<LocalString>` because
             // it shares the `Slabs` shape, but `freeze_as_shared_code`
             // inline-extracts any `Shared` entries — every prelude slot is
             // `Inline`. `as_str` works either way.
-            PRELUDE => self.prelude.slabs.strings[id.index()].as_str(),
-            RUNTIME => self.runtime.gens[id.code_gen()]
-                .strings
-                .get(id.index())
-                .expect("runtime string handle"),
+            PRELUDE => SlabRef::direct(self.prelude.slabs.strings[id.index()].as_str()),
+            RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
+                c.strings
+                    .get(id.index())
+                    .expect("runtime string handle")
+                    .as_str()
+            }),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -3925,23 +4185,24 @@ impl Heap {
     /// (reserve-then-fill cycle break, see `CodeSlabs::closures`); the cell is
     /// always filled before its handle is published, so `get()` is infallible in
     /// practice.
-    pub fn closure(&self, id: ClosureId) -> &Closure {
+    pub fn closure(&self, id: ClosureId) -> SlabRef<'_, Closure> {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, closures, "closure", "closures");
-                &self.old.closures[id.index()]
+                SlabRef::direct(&self.old.closures[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, closures, "closure", "closures");
-                &self.local.closures[id.index()]
+                SlabRef::direct(&self.local.closures[id.index()])
             }
-            PRELUDE => &self.prelude.slabs.closures[id.index()],
-            RUNTIME => self.runtime.gens[id.code_gen()]
-                .closures
-                .get(id.index())
-                .expect("runtime closure handle")
-                .get()
-                .expect("runtime closure read before promote filled its slot"),
+            PRELUDE => SlabRef::direct(&self.prelude.slabs.closures[id.index()]),
+            RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
+                c.closures
+                    .get(id.index())
+                    .expect("runtime closure handle")
+                    .get()
+                    .expect("runtime closure read before promote filled its slot")
+            }),
             _ => unreachable!("invalid handle region"),
         }
     }
@@ -4125,7 +4386,7 @@ impl Heap {
                 8u8.hash(h);
                 let xs = self.vector(id);
                 (xs.len() as u64).hash(h);
-                for &x in xs {
+                for &x in xs.iter() {
                     self.hash_value_into(x, h);
                 }
             }
@@ -4429,24 +4690,24 @@ impl Heap {
             // magnitude than any i64) — `BigInt::cmp` after promotion gives that
             // for free.
             (BigInt(_) | Int(_), BigInt(_) | Int(_)) => self.bigint_of(a).cmp(&self.bigint_of(b)),
-            (BigInt(x), Float(y)) => bigint_cmp_float(self.bigint(x), y),
-            (Float(x), BigInt(y)) => bigint_cmp_float(self.bigint(y), x).reverse(),
+            (BigInt(x), Float(y)) => bigint_cmp_float(&self.bigint(x), y),
+            (Float(x), BigInt(y)) => bigint_cmp_float(&self.bigint(y), x).reverse(),
             // Decimals order by value; against an Int/BigInt promote both to
             // BigDecimal; against a Float compare exactly in base 10 (the f64 is
             // an exact decimal — so ordering is precise, unlike the arithmetic
             // tower's deliberate float contagion).
-            (Decimal(x), Decimal(y)) => self.decimal(x).cmp(self.decimal(y)),
+            (Decimal(x), Decimal(y)) => self.decimal(x).cmp(&self.decimal(y)),
             (Decimal(x), Int(y)) => self.decimal(x).cmp(&bigdecimal::BigDecimal::from(y)),
-            (Int(x), Decimal(y)) => bigdecimal::BigDecimal::from(x).cmp(self.decimal(y)),
+            (Int(x), Decimal(y)) => bigdecimal::BigDecimal::from(x).cmp(&self.decimal(y)),
             (Decimal(x), BigInt(y)) => self
                 .decimal(x)
                 .cmp(&bigdecimal::BigDecimal::from(self.bigint(y).clone())),
             (BigInt(x), Decimal(y)) => {
-                bigdecimal::BigDecimal::from(self.bigint(x).clone()).cmp(self.decimal(y))
+                bigdecimal::BigDecimal::from(self.bigint(x).clone()).cmp(&self.decimal(y))
             }
-            (Decimal(x), Float(y)) => bigdecimal_cmp_float(self.decimal(x), y),
-            (Float(x), Decimal(y)) => bigdecimal_cmp_float(self.decimal(y), x).reverse(),
-            (Str(x), Str(y)) => self.string(x).cmp(self.string(y)),
+            (Decimal(x), Float(y)) => bigdecimal_cmp_float(&self.decimal(x), y),
+            (Float(x), Decimal(y)) => bigdecimal_cmp_float(&self.decimal(y), x).reverse(),
+            (Str(x), Str(y)) => self.string(x).cmp(&self.string(y)),
             // Symbols/keywords sort by spelling so it's stable and human-meaningful.
             (Sym(x), Sym(y)) | (Keyword(x), Keyword(y)) => {
                 crate::core::value::symbol_name(x).cmp(&crate::core::value::symbol_name(y))
@@ -4547,7 +4808,7 @@ impl Heap {
         }
     }
 
-    fn env_frame(&self, env: EnvId) -> &EnvFrame {
+    fn env_frame(&self, env: EnvId) -> SlabRef<'_, EnvFrame> {
         // `EnvId::GLOBAL` is a sentinel (region bits `0b11`) — there is no
         // frame to return; the global scope routes through
         // `runtime.globals_read()` instead. Callers MUST short-circuit
@@ -4564,7 +4825,7 @@ impl Heap {
             LOCAL if env.is_old() => {
                 #[cfg(debug_assertions)]
                 self.check_epoch_aged(true, env.generation(), env.index(), "env_frame", env.0);
-                &self.old.envs[env.index()]
+                SlabRef::direct(&self.old.envs[env.index()])
             }
             LOCAL => {
                 #[cfg(debug_assertions)]
@@ -4580,14 +4841,15 @@ impl Heap {
                 );
                 #[cfg(debug_assertions)]
                 self.check_epoch_aged(false, env.generation(), env.index(), "env_frame", env.0);
-                &self.local.envs[env.index()]
+                SlabRef::direct(&self.local.envs[env.index()])
             }
-            RUNTIME => self.runtime.gens[env.code_gen()]
-                .envs
-                .get(env.index())
-                .expect("runtime env frame")
-                .get()
-                .expect("runtime env read before promote filled its slot"),
+            RUNTIME => self.rt_slab_ref(env.code_gen(), |c| {
+                c.envs
+                    .get(env.index())
+                    .expect("runtime env frame")
+                    .get()
+                    .expect("runtime env read before promote filled its slot")
+            }),
             _ => unreachable!("env frames live only in the local or runtime region"),
         }
     }
@@ -4599,9 +4861,10 @@ impl Heap {
     /// the shared global table), so the walk stops there — globals resolve on
     /// the receiver, never travel. The borrow is tied to `&self` (the LOCAL slab
     /// or the stable-ref RUNTIME boxcar), so callers walk a chain without cloning.
-    pub fn env_frame_ref(&self, env: EnvId) -> (Option<EnvId>, &[(Symbol, Value)]) {
+    pub fn env_frame_ref(&self, env: EnvId) -> (Option<EnvId>, SlabRef<'_, [(Symbol, Value)]>) {
         let frame = self.env_frame(env);
-        (frame.parent, &frame.vars)
+        let parent = frame.parent;
+        (parent, frame.map(|f| f.vars.as_slice()))
     }
 
     /// The name `env`'s *immediate* frame binds to `val`, if any — used by the VM's
@@ -5399,20 +5662,536 @@ impl Heap {
     /// multi-process reclamation primitive. Freeing the *old* generation once no
     /// live process references it is stage 4 (cooperative liveness).
     pub fn age_runtime(&self) -> bool {
+        // Exclude every in-flight `promote` for the flip: the write lock waits for all
+        // promote read-guards to drain, so no promote's slot reservation and fill can
+        // straddle the `current_gen` change (ADR-091 — else the fill hits the wrong
+        // generation's slab). Held only across the atomic flip; promotion resumes
+        // immediately after, now targeting the new generation.
+        let _age_guard = self
+            .runtime
+            .promote_lock
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let other = 1 - self.runtime.cur_gen();
-        if !self.runtime.gens[other].is_empty() {
+        if !self.runtime.gens[other].load().is_empty() {
             return false;
         }
         self.runtime
             .current_gen
             .store(other, std::sync::atomic::Ordering::Relaxed);
+        self.runtime.aged_count.fetch_add(1, Ordering::Relaxed);
         true
+    }
+
+    /// How many times this runtime has aged ([`age_runtime`](Self::age_runtime))
+    /// — diagnostic, lets a test confirm the multi-generation collector's aging path
+    /// fired end-to-end even when a full free is timing-dependent.
+    pub fn runtime_aged_count(&self) -> u64 {
+        self.runtime.aged_count.load(Ordering::Relaxed)
     }
 
     /// The RUNTIME code region's current generation slot (0 or 1). Diagnostic /
     /// test observation of the [`age_runtime`](Self::age_runtime) flip.
     pub fn runtime_cur_gen(&self) -> usize {
         self.runtime.cur_gen()
+    }
+
+    /// How many whole RUNTIME generations this runtime has freed
+    /// ([`free_runtime_gen`](Self::free_runtime_gen)). Diagnostic — lets a test confirm
+    /// the multi-process collector actually reclaimed, end-to-end.
+    pub fn runtime_free_count(&self) -> u64 {
+        self.runtime.free_count.load(Ordering::Relaxed)
+    }
+
+    /// **RUNTIME collector — Stage 4 (single-flight aging gate).** Claim the exclusive
+    /// right to run an `age + migrate + drain` cycle: a CAS on the shared `aging` flag.
+    /// Returns `true` to the one winner; a loser skips this safepoint (the winner's
+    /// cycle will reclaim). Paired with [`end_aging`](Self::end_aging).
+    pub fn begin_aging(&self) -> bool {
+        self.runtime
+            .aging
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Release the single-flight aging gate ([`begin_aging`](Self::begin_aging)).
+    pub fn end_aging(&self) {
+        self.runtime.aging.store(false, Ordering::Release);
+    }
+
+    /// **RUNTIME collector — Stage 4 (live-globals migration, ADR-091).** Re-export the
+    /// live globals from the just-aged-out generation `old_gen` into the current
+    /// generation — the piece that makes whole-generation reclamation actually
+    /// *converge*. Returns how many bindings it migrated.
+    ///
+    /// **Why it's needed.** [`age_runtime`](Self::age_runtime) only flips which slot new
+    /// code lands in; it moves no existing binding. Because Brood's `def` is per-global
+    /// (unlike an Erlang module reload, which re-exports *all* of a module's functions
+    /// as a unit), a global defined once and never redefined would stay in `old_gen`
+    /// forever and pin it — so the generation never drains and can never be freed. This
+    /// copies each live global's RUNTIME sub-graph into the current generation and
+    /// repoints the shared globals table at the copy, so `old_gen` is left holding only
+    /// superseded versions plus whatever in-flight process state still references it —
+    /// which drains as those calls finish (exactly Erlang's old-vs-current code).
+    ///
+    /// **How it stays safe under concurrency** (this runs on `&self` — the runtime is
+    /// shared, no unique ownership):
+    /// - It copies into the *current* generation's `boxcar` slab, which peer processes'
+    ///   `def`/`promote` also append to — lock-free concurrent appends give disjoint
+    ///   indices, so there's no collision.
+    /// - It does **not** touch any process's private roots (stacks, captured closures);
+    ///   those keep their `old_gen` handles, which stay valid because `old_gen` is
+    ///   *retained* (not freed) until the Stage-3 drain says it's unreferenced.
+    /// - The reconcile installs a migrated handle **only if the global still resides in
+    ///   `old_gen`** — a concurrent redefinition moves the binding to the current
+    ///   generation, and that newer value wins (its handle isn't in `old_gen`, so the
+    ///   migrated copy is skipped and simply becomes unreferenced, reclaimed later).
+    ///   This needs no value-equality: after aging, `old_gen` is frozen — the *only*
+    ///   way a binding leaves it is a redefinition into the current generation.
+    ///
+    /// A no-op (returns 0) unless a prior [`age_runtime`](Self::age_runtime) left
+    /// `old_gen != cur_gen` and `old_gen` is non-empty.
+    pub fn migrate_live_globals(&self, old_gen: usize) -> usize {
+        let dest_gen = self.runtime.cur_gen();
+        if dest_gen == old_gen || self.runtime.gens[old_gen].load().is_empty() {
+            return 0;
+        }
+        let old_guard = self.runtime.gens[old_gen].load();
+        let dst_guard = self.runtime.gens[dest_gen].load();
+        let old_slab: &CodeSlabs = &old_guard;
+        let dst_slab: &CodeSlabs = &dst_guard;
+        let mut fwd = RuntimeForward::for_gens(old_gen, dest_gen);
+
+        // (a) Snapshot the shared roots still resident in `old_gen`: globals + the
+        // declared `(sig …)` type-exprs. (Read lock — released before the flush.)
+        let glob_snap: Vec<(Symbol, Value)> = self
+            .runtime
+            .globals_read()
+            .iter()
+            .filter(|(_, v)| value_in_gen(**v, old_gen))
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        let sig_snap: Vec<(Symbol, Value)> = self
+            .runtime
+            .declared_sigs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, v)| value_in_gen(**v, old_gen))
+            .map(|(k, v)| (*k, *v))
+            .collect();
+
+        // (b) Trace + copy each into the current generation (off any table lock; the
+        // boxcar append is concurrency-safe). Record (symbol, migrated handle).
+        let glob_new: Vec<(Symbol, Value)> = glob_snap
+            .iter()
+            .map(|(k, v)| (*k, flush_rt_value(old_slab, dst_slab, &mut fwd, *v)))
+            .collect();
+        let sig_new: Vec<(Symbol, Value)> = sig_snap
+            .iter()
+            .map(|(k, v)| (*k, flush_rt_value(old_slab, dst_slab, &mut fwd, *v)))
+            .collect();
+
+        // (b2) Carry `(form-pos …)` entries for every forwarded pair to its new index,
+        // so source positions resolve on the migrated code too (the old-gen entries stay
+        // for as long as `old_gen` is retained). Diagnostics-only, mirroring compaction.
+        {
+            let mut p = self
+                .runtime
+                .positions
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for (&old_idx, &new_idx) in fwd.pairs.iter() {
+                if let Some(entry) = p.get(&(old_idx as usize)).cloned() {
+                    p.insert(new_idx as usize, entry);
+                }
+            }
+        }
+
+        // (c) Reconcile under the write locks: install a migrated handle only where the
+        // binding still points into `old_gen` (a concurrent redefinition wins).
+        let mut migrated = 0usize;
+        {
+            let mut g = self.runtime.globals_write();
+            for (k, new_v) in &glob_new {
+                if g.get(k).is_some_and(|cur| value_in_gen(*cur, old_gen)) {
+                    g.insert(*k, *new_v);
+                    migrated += 1;
+                }
+            }
+        }
+        {
+            let mut s = self
+                .runtime
+                .declared_sigs
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for (k, new_v) in &sig_new {
+                if s.get(k).is_some_and(|cur| value_in_gen(*cur, old_gen)) {
+                    s.insert(*k, *new_v);
+                }
+            }
+        }
+
+        // Bump the version so every process's version-stamped caches (global_ic, the
+        // call/global ICs, the shared JIT caches) re-resolve to the migrated handles;
+        // clear this process's own caches eagerly (they may hold old_gen handles).
+        self.runtime.version.fetch_add(1, Ordering::Relaxed);
+        self.vm_cache.borrow_mut().clear();
+        self.global_ic.borrow_mut().clear();
+        self.vm_call_ics.borrow_mut().clear();
+        self.vm_fast_links.borrow_mut().clear();
+        #[cfg(debug_assertions)]
+        self.dbg_site_pos.borrow_mut().clear();
+        self.vm_global_ics.borrow_mut().clear();
+        migrated
+    }
+
+    /// **RUNTIME collector — Stage 4 (free a drained generation).** Reclaim the
+    /// aged-out generation `old_gen` — which the Stage-3 union has confirmed no live
+    /// process references ([`crate::process::old_gen_drained`]) — by storing a fresh
+    /// empty slab into its [`ArcSwap`] slot. The old `Arc<CodeSlabs>` drops once the
+    /// last reader guard releases it (there are none, by the drain), reclaiming the
+    /// whole superseded generation at once — no per-cell trace, no handle rewrite.
+    /// Ends the drain. Returns `false` (a no-op) if `old_gen` is the current
+    /// generation or already empty.
+    ///
+    /// Cross-process cache coherence:
+    /// - `version` is bumped, so every process's `global_ic` / call-&-global ICs and
+    ///   the shared JIT caches (all `version`/epoch-stamped) miss and re-resolve —
+    ///   none can hand back a handle into the freed slab.
+    /// - `free_epoch` is bumped, so every process clears its `vm_cache` (keyed on raw
+    ///   handle bits, not `version`) on its next lookup — a reused slot's
+    ///   bit-identical handle can't hit a stale compiled body.
+    ///
+    /// This process's own caches are cleared eagerly; the shared JIT caches too.
+    ///
+    /// SAFETY of the store: the drain guarantees no live process holds a handle into
+    /// `old_gen`, so no accessor is (or will be) borrowing into its slab — the old
+    /// `Arc` has no live [`SlabRef`] guard and drops without invalidating a read. (A
+    /// concurrent `load()` on the slot is still memory-safe: `ArcSwap` hands out
+    /// either the old or new `Arc`, both valid — the drain only rules out a *semantic*
+    /// use of an old-gen handle.)
+    pub fn free_runtime_gen(&self, old_gen: usize) -> bool {
+        if old_gen == self.runtime.cur_gen() || self.runtime.gens[old_gen].load().is_empty() {
+            return false;
+        }
+        // Drop the whole generation: store a fresh empty slab; the old `Arc` releases
+        // when the last (already none, by the drain) reader guard does.
+        self.runtime.gens[old_gen].store(Arc::new(CodeSlabs::default()));
+        self.runtime.free_count.fetch_add(1, Ordering::Relaxed);
+        // Invalidate the version-stamped caches (global_ic, call/global ICs, JIT)…
+        self.runtime.version.fetch_add(1, Ordering::Relaxed);
+        // …and the handle-keyed vm_cache (via free_epoch) across every process.
+        self.runtime.free_epoch.fetch_add(1, Ordering::Relaxed);
+        // Eagerly clear this process's caches (peers clear lazily on their next use).
+        self.vm_cache.borrow_mut().clear();
+        self.seen_free_epoch
+            .set(self.runtime.free_epoch.load(Ordering::Relaxed));
+        self.global_ic.borrow_mut().clear();
+        self.vm_call_ics.borrow_mut().clear();
+        self.vm_fast_links.borrow_mut().clear();
+        #[cfg(debug_assertions)]
+        self.dbg_site_pos.borrow_mut().clear();
+        self.vm_global_ics.borrow_mut().clear();
+        // Drop the shared JIT-code caches (the version bump already epoch-invalidated
+        // them; clearing reclaims the memory and prevents a recycled id lingering).
+        if let Ok(mut c) = self.runtime.jit_code_cache.write() {
+            c.clear();
+        }
+        if let Ok(mut c) = self.runtime.jit_inline_cache.write() {
+            c.clear();
+        }
+        // The drain is complete.
+        self.end_gen_drain();
+        true
+    }
+
+    /// **RUNTIME collector — Stage 3 (cooperative liveness probe).** Is generation
+    /// `gen` still *referenced* by any live code, as seen from this process? Walks
+    /// the shared roots (the global bindings + declared `(sig …)` type-exprs) and
+    /// this process's own private roots — the operand/env stack, dynamic bindings,
+    /// both LOCAL heap generations, and the live VM arms mid-execution — following
+    /// RUNTIME handles transitively, and returns `true` the instant it reaches a
+    /// live handle in generation `gen`. Read-only: moves and frees nothing.
+    ///
+    /// This is the per-process half of the Stage 3 union that decides when an
+    /// aged-out old generation may be freed (Stage 4): the generation is dead only
+    /// when *every* live process (and the shared globals) reports `false`. For a
+    /// single-process runtime this heap sees the whole picture, so its answer is
+    /// exact. A process holding an old-generation closure in a local variable,
+    /// mid-call, or captured in data keeps that generation pinned — exactly
+    /// Erlang's "old code lives until no process still runs it".
+    ///
+    /// The per-process **caches** (`vm_cache`/`global_ic`/…) are deliberately *not*
+    /// scanned: they hold RUNTIME handles too, but rebuild lazily, so Stage 4 clears
+    /// them when it frees a generation (as [`runtime_collect`] already does) rather
+    /// than treating a cached handle as a live pin. Only the live VM arms — which
+    /// are mid-execution and can't be cleared — are scanned.
+    pub fn runtime_gen_referenced(&self, gen: usize) -> bool {
+        // An empty generation slot is trivially dead — the common case (normal runs
+        // never age, so `gens[1]` stays empty and this short-circuits).
+        if self.runtime.gens[gen].load().is_empty() {
+            return false;
+        }
+
+        // `visited` keys on (gen, index): the two generations share one index space,
+        // so a bare slab index would conflate gen-0 #5 with gen-1 #5.
+        let mut visited: HashSet<(usize, usize)> = HashSet::new();
+        let mut visited_env: HashSet<(usize, usize)> = HashSet::new();
+        let mut work: Vec<Value> = Vec::new();
+        let mut env_work: Vec<EnvId> = Vec::new();
+
+        // --- Shared roots: globals + declared `(sig …)` type-exprs. ---
+        work.extend(self.runtime.globals_read().values().copied());
+        work.extend(
+            self.runtime
+                .declared_sigs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .copied(),
+        );
+        // --- This process's private roots (operand/env stack, dynamics). ---
+        work.extend(self.roots.iter().copied());
+        env_work.extend(self.env_roots.iter().copied());
+        work.extend(self.dynamics.iter().map(|(_, v)| *v));
+        // --- The LOCAL heap (both generations): immutable data can embed a captured
+        // RUNTIME closure handle — the one place the shared-root walk can't reach.
+        // Every cell is seeded directly (a LOCAL handle is never gen-tagged RUNTIME,
+        // so the transitive walk below only ever follows RUNTIME sub-handles). ---
+        for slabs in [&self.local, &self.old] {
+            for (a, b) in slabs.pairs.iter() {
+                work.push(*a);
+                work.push(*b);
+            }
+            for vec in slabs.vectors.iter() {
+                work.extend(vec.iter().copied());
+            }
+            for node in slabs.maps.iter() {
+                for (k, v) in node.data.iter() {
+                    work.push(*k);
+                    work.push(*v);
+                }
+            }
+            for cl in slabs.closures.iter() {
+                for arm in cl.arms.iter() {
+                    work.extend(arm.body.iter().copied());
+                    work.extend(arm.optionals.iter().map(|(_, d)| *d));
+                }
+                if let Some(e) = cl.env {
+                    env_work.push(e);
+                }
+            }
+            for fr in slabs.envs.iter() {
+                work.extend(fr.vars.iter().map(|(_, v)| *v));
+                if let Some(p) = fr.parent {
+                    env_work.push(p);
+                }
+            }
+        }
+        // --- Live VM arms mid-execution: RUNTIME literals baked into Const/MakeClosure
+        // (the one holder off the GC root graph, mirroring compaction's step 3b). Read
+        // them via the arm-handle visitor, returning each value unchanged. ---
+        let live_arms = self.live_vm_arms.clone();
+        for arm in &live_arms {
+            crate::eval::compile::rewrite_arm_handles(arm, &mut |v| {
+                work.push(v);
+                v
+            });
+        }
+
+        // --- Transitive walk. Detect generation `gen`; follow every RUNTIME sub-handle
+        // (a gen-current closure can embed a gen-`gen` handle in a body/env). ---
+        loop {
+            while let Some(env) = env_work.pop() {
+                if env == EnvId::GLOBAL || env.region() != RUNTIME {
+                    continue;
+                }
+                if env.code_gen() == gen {
+                    return true;
+                }
+                if visited_env.insert((env.code_gen(), env.index())) {
+                    let frame = self.env_frame(env);
+                    work.extend(frame.vars.iter().map(|(_, v)| *v));
+                    if let Some(p) = frame.parent {
+                        env_work.push(p);
+                    }
+                }
+            }
+            let Some(v) = work.pop() else { break };
+            match v.unpack() {
+                ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => {
+                    if id.code_gen() == gen {
+                        return true;
+                    }
+                    if visited.insert((id.code_gen(), id.index())) {
+                        let cl = self.closure(id);
+                        for arm in &cl.arms {
+                            work.extend(arm.body.iter().copied());
+                            work.extend(arm.optionals.iter().map(|(_, d)| *d));
+                        }
+                        if let Some(e) = cl.env {
+                            env_work.push(e);
+                        }
+                    }
+                }
+                ValueRef::Pair(id) if id.region() == RUNTIME => {
+                    if id.code_gen() == gen {
+                        return true;
+                    }
+                    if visited.insert((id.code_gen(), id.index())) {
+                        let (h, t) = self.pair(id);
+                        work.push(h);
+                        work.push(t);
+                    }
+                }
+                ValueRef::Vector(id) if id.region() == RUNTIME => {
+                    if id.code_gen() == gen {
+                        return true;
+                    }
+                    if visited.insert((id.code_gen(), id.index())) {
+                        work.extend(self.vector(id).iter().copied());
+                    }
+                }
+                ValueRef::Map(id) if id.region() == RUNTIME => {
+                    if id.code_gen() == gen {
+                        return true;
+                    }
+                    if visited.insert((id.code_gen(), id.index())) {
+                        self.fold_entries(id, &mut |k, val| {
+                            work.push(k);
+                            work.push(val);
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// **RUNTIME collector — Stage 3b (begin a cooperative drain).** Arm a drain of
+    /// the aged-out generation `old_gen`: bump the strictly-monotonic drain epoch
+    /// (so no ack from a prior drain can count) and clear the ack table, so every
+    /// live process must re-report clean before the generation is considered dead.
+    /// Returns the new epoch. Shared via the runtime `Arc`, so any process observes
+    /// the drain at its next [`report_gen_liveness`](Self::report_gen_liveness).
+    ///
+    /// Ordered so a concurrent reader sees a consistent drain: `drain_gen` and the
+    /// epoch (and the ack clear) are published *before* `drain_active` flips true.
+    pub fn begin_gen_drain(&self, old_gen: usize) -> u64 {
+        let rt = &self.runtime;
+        rt.drain_gen.store(old_gen, Ordering::Relaxed);
+        let epoch = rt.drain_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        rt.drain_acks
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        rt.drain_active.store(true, Ordering::Release);
+        epoch
+    }
+
+    /// **RUNTIME collector — Stage 3b (end a drain).** Disarm the current drain
+    /// (Stage 4 calls this once the generation is freed, or to abandon a drain). The
+    /// epoch is left monotonically advanced; the ack table is cleared. After this,
+    /// [`report_gen_liveness`](Self::report_gen_liveness) is inert again.
+    pub fn end_gen_drain(&self) {
+        let rt = &self.runtime;
+        rt.drain_active.store(false, Ordering::Release);
+        rt.drain_acks
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// Is a cooperative generation drain currently armed? A single relaxed atomic
+    /// load — the cheap gate the eval safepoint checks before reporting (Stage 3c),
+    /// so the always-case (no drain) costs almost nothing.
+    #[inline]
+    pub fn drain_active(&self) -> bool {
+        self.runtime.drain_active.load(Ordering::Acquire)
+    }
+
+    /// The generation currently being drained (meaningful only while
+    /// [`drain_active`](Self::drain_active)).
+    pub fn drain_gen(&self) -> usize {
+        self.runtime.drain_gen.load(Ordering::Relaxed)
+    }
+
+    /// **RUNTIME collector — Stage 3b (this process's cooperative report).** If a
+    /// drain is armed, probe whether *this* process still references the draining
+    /// generation ([`runtime_gen_referenced`](Self::runtime_gen_referenced)) and
+    /// record the result under `pid`: a **clean** process acks the current epoch; a
+    /// process that still references the generation drops its ack, so it pins the
+    /// generation until it reports clean at a later safepoint. A no-op when no drain
+    /// is armed. Called at the eval safepoint and just before a process parks
+    /// (Stage 3c wires those); safe to call from any of the runtime's processes
+    /// (each writes only its own pid's entry, under the shared lock).
+    pub fn report_gen_liveness(&self, pid: u64) {
+        let rt = &self.runtime;
+        if !rt.drain_active.load(Ordering::Acquire) {
+            return;
+        }
+        let epoch = rt.drain_epoch.load(Ordering::Relaxed);
+        // Already reported clean for this epoch? Skip the re-walk. Sound by the
+        // no-new-refs invariant: once a process is clean of the draining generation,
+        // it *stays* clean — post-aging all `def`/`promote` land in the current
+        // generation, globals were migrated off `old_gen` before the drain armed, and
+        // an old-gen handle can never arrive by message (messages deep-copy, promoting
+        // closures into the receiver's current generation). So a clean ack needn't be
+        // re-earned each safepoint — this bounds a process to one liveness walk per
+        // drain, keeping a slow-to-free drain from taxing every safepoint.
+        {
+            let acks = rt.drain_acks.read().unwrap_or_else(|e| e.into_inner());
+            if acks.get(&pid) == Some(&epoch) {
+                return;
+            }
+        }
+        let gen = rt.drain_gen.load(Ordering::Relaxed);
+        let clean = !self.runtime_gen_referenced(gen);
+        let mut acks = rt.drain_acks.write().unwrap_or_else(|e| e.into_inner());
+        if clean {
+            acks.insert(pid, epoch);
+        } else {
+            acks.remove(&pid);
+        }
+    }
+
+    /// **RUNTIME collector — Stage 3b (the union answer).** Is the draining
+    /// generation dead — i.e. has *every* currently-live process reported clean for
+    /// the current drain epoch? The caller supplies the live-pid set (the process
+    /// layer reads it from the scheduler registry; keeping the enumeration out of
+    /// `core` preserves the layering). Returns `false` if no drain is armed. Once
+    /// this is `true`, Stage 4 may free the generation (after clearing the per-process
+    /// caches that hold — but never pin — its handles).
+    ///
+    /// Soundness: a process acks clean only when its probe (which includes the shared
+    /// globals) sees no reference to the generation. After aging, new code only ever
+    /// lands in the *current* generation, so a global can never come to point at the
+    /// drained one again — a clean ack therefore stays valid, and a process cannot
+    /// re-acquire a reference except by spawning a child (which enters the live set
+    /// un-acked, keeping the answer `false` until it too reports clean).
+    pub fn gen_drained(&self, live_pids: &[u64]) -> bool {
+        let rt = &self.runtime;
+        if !rt.drain_active.load(Ordering::Acquire) {
+            return false;
+        }
+        let epoch = rt.drain_epoch.load(Ordering::Relaxed);
+        let acks = rt.drain_acks.read().unwrap_or_else(|e| e.into_inner());
+        live_pids.iter().all(|pid| acks.get(pid) == Some(&epoch))
+    }
+
+    /// Drop a process's drain ack (Stage 3c calls this from the scheduler's process-
+    /// exit path). A dead process is removed from the live set the union queries, so
+    /// its ack no longer matters; clearing it just keeps the table from accreting
+    /// stale pids across drains. A no-op if it had no ack.
+    pub fn clear_gen_ack(&self, pid: u64) {
+        self.runtime
+            .drain_acks
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&pid);
     }
 
     /// **RUNTIME collector — Step 2a (out-of-place evacuation).** Trace the live
@@ -5423,11 +6202,14 @@ impl Heap {
     /// the runtime-wide stop-the-world (2c). Single-process root view.
     fn runtime_evacuate(&self) -> (CodeSlabs, RuntimeForward) {
         let new = CodeSlabs::default();
-        let mut fwd = RuntimeForward::default();
+        // Same-generation compaction: copy from the current gen back into itself.
+        let cg = self.runtime.cur_gen();
+        let mut fwd = RuntimeForward::for_gens(cg, cg);
         let mut roots: Vec<Value> = self.runtime.globals_read().values().copied().collect();
         roots.extend(self.roots.iter().copied());
+        let cur = self.runtime.cur_code();
         for r in roots {
-            flush_rt_value(self.runtime.cur_code(), &new, &mut fwd, r);
+            flush_rt_value(&cur, &new, &mut fwd, r);
         }
         (new, fwd)
     }
@@ -5503,13 +6285,16 @@ impl Heap {
         // suspect (it copies the whole live shared-code region). Log if it's slow.
         let _sg = stall_guard("runtime-compact");
         let before = self.runtime.cur_code().closures.count();
-        // Compact the *current* generation in place (single-process). Move it out
-        // (owned) so we can read it while mutating self's LOCAL slabs without a
-        // borrow conflict; the slot is left empty meanwhile.
+        // Compact the *current* generation in place (single-process). Swap it out
+        // (owned `Arc`) so we can read it while mutating self's LOCAL slabs without a
+        // borrow conflict; the slot holds a fresh empty slab meanwhile. Sound because
+        // we uniquely own the runtime (the `Arc::get_mut` gate above), so no other
+        // process can be reading the swapped-out slab.
         let cur = self.runtime.cur_gen();
-        let old_code = std::mem::take(&mut Arc::get_mut(&mut self.runtime).unwrap().gens[cur]);
+        let old_code = self.runtime.gens[cur].swap(Arc::new(CodeSlabs::default()));
         let new = CodeSlabs::default();
-        let mut fwd = RuntimeForward::default();
+        // In-place compaction copies the current generation back into itself.
+        let mut fwd = RuntimeForward::for_gens(cur, cur);
 
         // 1. Globals (the primary roots).
         {
@@ -5608,7 +6393,7 @@ impl Heap {
         // 5. Install the compacted region; bump the version so any IC stamp is stale.
         {
             let rt = Arc::get_mut(&mut self.runtime).unwrap();
-            rt.gens[cur] = new;
+            rt.gens[cur].store(Arc::new(new));
             rt.version.fetch_add(1, Ordering::Relaxed);
             // Drop the shared JIT-code cache: compaction rewrites closure ids, so its
             // `(id, argc)` keys no longer denote the same closures. The version bump
@@ -5679,18 +6464,91 @@ impl Heap {
     /// Step 2c lets it run under load). `extra_roots`/`extra_envs` carry the eval
     /// loop's live `expr`/`env` to be rewritten alongside the rooted set.
     pub fn maybe_runtime_collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
+        // A multi-generation drain in flight takes priority and must be advanced
+        // (freed once every live process reports clean) **regardless of runtime
+        // ownership** — a drain armed while the runtime was shared has to still
+        // complete if it later goes quiescent (otherwise the aged-out generation would
+        // leak, never freed). Compaction can't run on a generation being drained anyway.
+        if rt_multigen_enabled() && self.drain_active() {
+            self.advance_runtime_multigen();
+            let count = self.runtime.cur_code().closures.count();
+            self.rt_gc_threshold = if self.drain_active() {
+                // Still draining — keep re-entering at the next safepoint to free promptly.
+                count.max(rt_gc_floor())
+            } else {
+                rt_gc_floor().max(count.saturating_mul(2))
+            };
+            return;
+        }
         match self.runtime_collect_with(extra_roots, extra_envs) {
             Some((_before, after)) => {
                 self.rt_gc_threshold = rt_gc_floor().max(after.saturating_mul(2));
             }
             None => {
+                // Single-process compaction couldn't run (the runtime is shared). When
+                // the multi-generation collector is armed (`BROOD_RT_MULTIGEN`), advance
+                // its state machine — age + migrate + drain + free the aged-out
+                // generation. Otherwise this is inert (the pre-Stage-4 exponential
+                // back-off, so a shared runtime only re-attempts O(log) times).
+                if rt_multigen_enabled() {
+                    self.advance_runtime_multigen();
+                }
                 let count = self.runtime.cur_code().closures.count();
-                self.rt_gc_threshold = self
-                    .rt_gc_threshold
-                    .max(count.saturating_mul(2))
-                    .max(rt_gc_floor());
+                self.rt_gc_threshold = if rt_multigen_enabled() && self.drain_active() {
+                    // A drain is in flight — re-enter at the next safepoint to free it
+                    // promptly once every live process has reported clean.
+                    count.max(rt_gc_floor())
+                } else {
+                    self.rt_gc_threshold
+                        .max(count.saturating_mul(2))
+                        .max(rt_gc_floor())
+                };
             }
         }
+    }
+
+    /// **RUNTIME collector — Stage 4 (multi-process reclamation state machine, ADR-091).**
+    /// One step of whole-generation reclamation, driven at the RUNTIME safepoint when
+    /// in-place compaction can't run (the runtime is shared). Idempotent and cheap when
+    /// there's nothing to do; the caller gates it on the `BROOD_RT_MULTIGEN` opt-in.
+    ///
+    /// The state machine (at most one action per call):
+    /// - **Drain in flight** → try to free the draining generation. Each live process
+    ///   reports clean at its own safepoint (Stage 3c); once the union is clean,
+    ///   [`free_drained_gen`](crate::process::free_drained_gen) reclaims the slot and
+    ///   ends the drain. Until then, wait.
+    /// - **Idle, and the other slot is empty** (its previous generation already freed) →
+    ///   start a cycle: [`age_runtime`](Self::age_runtime) flips into it,
+    ///   [`migrate_live_globals`](Self::migrate_live_globals) re-exports the live globals
+    ///   so the vacated generation holds only superseded + in-flight code, then
+    ///   [`begin_gen_drain`](Self::begin_gen_drain) arms its drain. Single-flight via
+    ///   [`begin_aging`](Self::begin_aging) — a losing racer simply waits.
+    /// - **Idle, but the other slot is still occupied** (its previous generation not yet
+    ///   freed) → wait. This is the 2-versions-max back-pressure: at most two live
+    ///   generations exist at once.
+    ///
+    /// Ordering is load-bearing: migrate **before** arming the drain, so by the time any
+    /// process reports for the new drain epoch the globals already point into the current
+    /// generation (nothing can newly acquire an `old_gen` reference — the invariant the
+    /// clean-stays-clean report optimization rests on).
+    pub fn advance_runtime_multigen(&self) {
+        if self.drain_active() {
+            crate::process::free_drained_gen(self);
+            return;
+        }
+        let other = 1 - self.runtime.cur_gen();
+        if !self.runtime.gens[other].load().is_empty() {
+            return; // previous generation not yet freed — 2-versions-max back-pressure
+        }
+        if !self.begin_aging() {
+            return; // another process is running a cycle
+        }
+        let old = self.runtime.cur_gen();
+        if self.age_runtime() {
+            self.migrate_live_globals(old);
+            self.begin_gen_drain(old);
+        }
+        self.end_aging();
     }
 
     /// Should the next safepoint run a collection? Compares LOCAL live count
@@ -5770,7 +6628,24 @@ impl Heap {
         &self,
         k: VmCacheKey,
     ) -> Option<Option<Arc<crate::eval::compile::CompiledClosure>>> {
+        self.sync_free_epoch();
         self.vm_cache.borrow().get(&k).cloned()
+    }
+
+    /// **RUNTIME collector — Stage 4.** Clear this process's [`Self::vm_cache`] once
+    /// if a generation was freed since it was last synced. A freed slot is reused by
+    /// aging with bit-identical `(gen, index)` handles, and `vm_cache` keys on those
+    /// bits (not `version`), so a stale compiled body could otherwise be served for a
+    /// *new* closure. The version-stamped caches self-heal on the `version` bump a
+    /// free also does; only `vm_cache` needs this one-shot clear. Called on the
+    /// `vm_cache` read path — one relaxed load + compare in the common (no-free) case.
+    #[inline]
+    fn sync_free_epoch(&self) {
+        let cur = self.runtime.free_epoch.load(Ordering::Relaxed);
+        if self.seen_free_epoch.get() != cur {
+            self.vm_cache.borrow_mut().clear();
+            self.seen_free_epoch.set(cur);
+        }
     }
 
     /// Like [`vm_cache_get`] but resolves straight to the `argc` arm under the
@@ -5785,6 +6660,7 @@ impl Heap {
         k: VmCacheKey,
         argc: usize,
     ) -> Option<Option<Arc<crate::eval::compile::CompiledArm>>> {
+        self.sync_free_epoch();
         self.vm_cache
             .borrow()
             .get(&k)
@@ -7466,49 +8342,100 @@ struct RuntimeForward {
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
     envs: HashMap<u32, u32>,
+    /// The generation the flush copies **from**: only RUNTIME handles tagged with
+    /// this generation are forwarded; handles in the *other* generation (and PRELUDE)
+    /// pass through untouched. For same-generation compaction `old_gen == dest_gen`;
+    /// for ADR-091 **global migration** they differ (copy the live image from the
+    /// aged-out generation into the current one). See [`RuntimeForward::for_gens`].
+    old_gen: usize,
+    /// The generation the copied handles are minted **into** — every new slab index
+    /// is tagged with this via `Id::runtime_gen(idx, dest_gen)`, so a cross-generation
+    /// migration produces correctly-tagged handles (not gen-0 as the bare
+    /// `Id::runtime` constructor would).
+    dest_gen: usize,
+}
+
+impl RuntimeForward {
+    /// A forwarding map that copies RUNTIME handles from generation `old_gen` into
+    /// `dest_gen` (equal for in-place compaction; different for global migration).
+    fn for_gens(old_gen: usize, dest_gen: usize) -> Self {
+        RuntimeForward {
+            old_gen,
+            dest_gen,
+            ..RuntimeForward::default()
+        }
+    }
+}
+
+/// Is `v` a RUNTIME handle resident in generation `gen`? (A leaf test on the top-level
+/// handle — not transitive.) Used by [`Heap::migrate_live_globals`] to snapshot the
+/// globals still living in the aged-out generation and to detect a concurrent
+/// redefinition (which moves the binding to the current generation) at reconcile.
+fn value_in_gen(v: Value, gen: usize) -> bool {
+    match v.unpack() {
+        ValueRef::Pair(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        ValueRef::Vector(id) | ValueRef::Range(id) | ValueRef::SeqView(id) => {
+            id.region() == RUNTIME && id.code_gen() == gen
+        }
+        ValueRef::Map(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        ValueRef::Str(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        ValueRef::BigInt(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        ValueRef::Decimal(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        ValueRef::Bytes(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        ValueRef::Rope(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        ValueRef::Fn(id) | ValueRef::Macro(id) => id.region() == RUNTIME && id.code_gen() == gen,
+        _ => false,
+    }
 }
 
 /// Copy a value's RUNTIME sub-graph into `new`, returning the value with its RUNTIME
 /// handles rewritten to their new indices. Non-RUNTIME values (atoms, LOCAL,
 /// PRELUDE) are returned unchanged — only the runtime region moves.
 fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v: Value) -> Value {
+    // Only forward handles resident in the *source* generation; a handle already in
+    // the destination generation (or PRELUDE, whose `region() != RUNTIME`) is left
+    // untouched — load-bearing for cross-generation migration, where a live global's
+    // graph can already straddle both generations.
+    let g = fwd.old_gen;
     match v.unpack() {
-        ValueRef::Pair(id) if id.region() == RUNTIME => {
+        ValueRef::Pair(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::pair(flush_rt_pair(old, new, fwd, id))
         }
-        ValueRef::Vector(id) if id.region() == RUNTIME => {
+        ValueRef::Vector(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::vector(flush_rt_vector(old, new, fwd, id))
         }
         // A range's backing `[lo hi step]` vector moves like any other vector;
         // keep the `Range` wrapper on the forwarded handle.
-        ValueRef::Range(id) if id.region() == RUNTIME => {
+        ValueRef::Range(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::range(flush_rt_vector(old, new, fwd, id))
         }
         // Like a range, a seq-view's backing vector moves under a runtime
         // compaction; `flush_rt_vector` forwards its elements. Keep the wrapper.
-        ValueRef::SeqView(id) if id.region() == RUNTIME => {
+        ValueRef::SeqView(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::seqview(flush_rt_vector(old, new, fwd, id))
         }
-        ValueRef::Map(id) if id.region() == RUNTIME => Value::map(flush_rt_map(old, new, fwd, id)),
-        ValueRef::Str(id) if id.region() == RUNTIME => {
+        ValueRef::Map(id) if id.region() == RUNTIME && id.code_gen() == g => {
+            Value::map(flush_rt_map(old, new, fwd, id))
+        }
+        ValueRef::Str(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::str_(flush_rt_string(old, new, fwd, id))
         }
-        ValueRef::BigInt(id) if id.region() == RUNTIME => {
+        ValueRef::BigInt(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::bigint(flush_rt_bigint(old, new, fwd, id))
         }
-        ValueRef::Decimal(id) if id.region() == RUNTIME => {
+        ValueRef::Decimal(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::decimal(flush_rt_decimal(old, new, fwd, id))
         }
-        ValueRef::Bytes(id) if id.region() == RUNTIME => {
+        ValueRef::Bytes(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::bytes(flush_rt_bytes(old, new, fwd, id))
         }
-        ValueRef::Rope(id) if id.region() == RUNTIME => {
+        ValueRef::Rope(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::rope(flush_rt_rope(old, new, fwd, id))
         }
-        ValueRef::Fn(id) if id.region() == RUNTIME => {
+        ValueRef::Fn(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::func(flush_rt_closure(old, new, fwd, id))
         }
-        ValueRef::Macro(id) if id.region() == RUNTIME => {
+        ValueRef::Macro(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::macro_(flush_rt_closure(old, new, fwd, id))
         }
         _ => v,
@@ -7516,9 +8443,9 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
 }
 
 fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: PairId) -> PairId {
-    let key = id.index() as u32;
+    let (key, src_gen, dest) = (id.index() as u32, fwd.old_gen, fwd.dest_gen);
     if let Some(&n) = fwd.pairs.get(&key) {
-        return PairId::runtime(n as usize);
+        return PairId::runtime_gen(n as usize, dest);
     }
     // `boxcar` is append-only (no write-back), so we can't reserve-then-fill. RUNTIME
     // code lists are **immutable and acyclic** — no cons cycle is constructible — so
@@ -7545,12 +8472,14 @@ fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id:
             // (handled by `flush_rt_value` on the terminal), so we only extend
             // the spine for fresh cells.
             ValueRef::Pair(p)
-                if p.region() == RUNTIME && !fwd.pairs.contains_key(&(p.index() as u32)) =>
+                if p.region() == RUNTIME
+                    && p.code_gen() == src_gen
+                    && !fwd.pairs.contains_key(&(p.index() as u32)) =>
             {
                 cur_id = p;
             }
-            // Nil / atom / dotted tail / shared-or-copied RUNTIME pair: flush it
-            // (cheap, no spine recursion) and stop.
+            // Nil / atom / dotted tail / other-generation or shared-or-copied RUNTIME
+            // pair: flush it (cheap, no spine recursion) and stop.
             other => break flush_rt_value(old, new, fwd, other),
         }
     };
@@ -7562,7 +8491,7 @@ fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id:
         let new_car = flush_rt_value(old, new, fwd, car);
         let new_idx = new.pairs.push((new_car, next));
         fwd.pairs.insert(key, new_idx as u32);
-        next = Value::pair(PairId::runtime(new_idx));
+        next = Value::pair(PairId::runtime_gen(new_idx, dest));
     }
     match next.unpack() {
         ValueRef::Pair(pid) => pid,
@@ -7571,9 +8500,9 @@ fn flush_rt_pair(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id:
 }
 
 fn flush_rt_vector(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: VecId) -> VecId {
-    let key = id.index() as u32;
+    let (key, dest) = (id.index() as u32, fwd.dest_gen);
     if let Some(&n) = fwd.vectors.get(&key) {
-        return VecId::runtime(n as usize);
+        return VecId::runtime_gen(n as usize, dest);
     }
     let src = old.vectors.get(id.index()).expect("rt vector");
     let n = src.len();
@@ -7584,18 +8513,18 @@ fn flush_rt_vector(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, i
     let store = VecStore::from_flushed(n, |i| flush_rt_value(old, new, fwd, src[i]));
     let new_idx = new.vectors.push(store);
     fwd.vectors.insert(key, new_idx as u32);
-    VecId::runtime(new_idx)
+    VecId::runtime_gen(new_idx, dest)
 }
 
 fn flush_rt_string(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: StrId) -> StrId {
-    let key = id.index() as u32;
+    let (key, dest) = (id.index() as u32, fwd.dest_gen);
     if let Some(&n) = fwd.strings.get(&key) {
-        return StrId::runtime(n as usize);
+        return StrId::runtime_gen(n as usize, dest);
     }
     let s = old.strings.get(id.index()).expect("rt string").clone();
     let new_idx = new.strings.push(s);
     fwd.strings.insert(key, new_idx as u32);
-    StrId::runtime(new_idx)
+    StrId::runtime_gen(new_idx, dest)
 }
 
 fn flush_rt_bigint(
@@ -7604,14 +8533,14 @@ fn flush_rt_bigint(
     fwd: &mut RuntimeForward,
     id: BigIntId,
 ) -> BigIntId {
-    let key = id.index() as u32;
+    let (key, dest) = (id.index() as u32, fwd.dest_gen);
     if let Some(&n) = fwd.bigints.get(&key) {
-        return BigIntId::runtime(n as usize);
+        return BigIntId::runtime_gen(n as usize, dest);
     }
     let v = old.bigints.get(id.index()).expect("rt bigint").clone();
     let new_idx = new.bigints.push(v);
     fwd.bigints.insert(key, new_idx as u32);
-    BigIntId::runtime(new_idx)
+    BigIntId::runtime_gen(new_idx, dest)
 }
 
 /// Flush a RUNTIME decimal during a runtime-region compaction (mirrors
@@ -7622,14 +8551,14 @@ fn flush_rt_decimal(
     fwd: &mut RuntimeForward,
     id: DecimalId,
 ) -> DecimalId {
-    let key = id.index() as u32;
+    let (key, dest) = (id.index() as u32, fwd.dest_gen);
     if let Some(&n) = fwd.decimals.get(&key) {
-        return DecimalId::runtime(n as usize);
+        return DecimalId::runtime_gen(n as usize, dest);
     }
     let v = old.decimals.get(id.index()).expect("rt decimal").clone();
     let new_idx = new.decimals.push(v);
     fwd.decimals.insert(key, new_idx as u32);
-    DecimalId::runtime(new_idx)
+    DecimalId::runtime_gen(new_idx, dest)
 }
 
 /// Flush a RUNTIME bytes value during a runtime-region compaction (mirrors
@@ -7640,31 +8569,31 @@ fn flush_rt_bytes(
     fwd: &mut RuntimeForward,
     id: BytesId,
 ) -> BytesId {
-    let key = id.index() as u32;
+    let (key, dest) = (id.index() as u32, fwd.dest_gen);
     if let Some(&n) = fwd.bytes.get(&key) {
-        return BytesId::runtime(n as usize);
+        return BytesId::runtime_gen(n as usize, dest);
     }
     let v = old.bytes.get(id.index()).expect("rt bytes").clone();
     let new_idx = new.bytes.push(v);
     fwd.bytes.insert(key, new_idx as u32);
-    BytesId::runtime(new_idx)
+    BytesId::runtime_gen(new_idx, dest)
 }
 
 fn flush_rt_rope(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: RopeId) -> RopeId {
-    let key = id.index() as u32;
+    let (key, dest) = (id.index() as u32, fwd.dest_gen);
     if let Some(&n) = fwd.ropes.get(&key) {
-        return RopeId::runtime(n as usize);
+        return RopeId::runtime_gen(n as usize, dest);
     }
     let r = old.ropes.get(id.index()).expect("rt rope").clone();
     let new_idx = new.ropes.push(r);
     fwd.ropes.insert(key, new_idx as u32);
-    RopeId::runtime(new_idx)
+    RopeId::runtime_gen(new_idx, dest)
 }
 
 fn flush_rt_map(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: MapId) -> MapId {
-    let key = id.index() as u32;
+    let (key, src_gen, dest) = (id.index() as u32, fwd.old_gen, fwd.dest_gen);
     if let Some(&n) = fwd.maps.get(&key) {
-        return MapId::runtime(n as usize);
+        return MapId::runtime_gen(n as usize, dest);
     }
     let node = old.maps.get(id.index()).expect("rt map");
     let (size, data_map, node_map, is_collision) =
@@ -7675,7 +8604,7 @@ fn flush_rt_map(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: 
     let new_children: SmallVec<[MapId; 4]> = children_snapshot
         .iter()
         .map(|&c| {
-            if c.region() == RUNTIME {
+            if c.region() == RUNTIME && c.code_gen() == src_gen {
                 flush_rt_map(old, new, fwd, c)
             } else {
                 c
@@ -7700,7 +8629,7 @@ fn flush_rt_map(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, id: 
         children: new_children,
     });
     fwd.maps.insert(key, new_idx as u32);
-    MapId::runtime(new_idx)
+    MapId::runtime_gen(new_idx, dest)
 }
 
 fn flush_rt_closure(
@@ -7709,9 +8638,9 @@ fn flush_rt_closure(
     fwd: &mut RuntimeForward,
     id: ClosureId,
 ) -> ClosureId {
-    let key = id.index() as u32;
+    let (key, dest) = (id.index() as u32, fwd.dest_gen);
     if let Some(&n) = fwd.closures.get(&key) {
-        return ClosureId::runtime(n as usize);
+        return ClosureId::runtime_gen(n as usize, dest);
     }
     let cl = old
         .closures
@@ -7750,16 +8679,18 @@ fn flush_rt_closure(
         doc: cl.doc,
         env,
     });
-    ClosureId::runtime(new_idx)
+    ClosureId::runtime_gen(new_idx, dest)
 }
 
 fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env: EnvId) -> EnvId {
-    if env == EnvId::GLOBAL || env.region() != RUNTIME {
+    // Leave the global env, PRELUDE frames, and frames already in the destination
+    // generation untouched — only source-generation frames are copied.
+    if env == EnvId::GLOBAL || env.region() != RUNTIME || env.code_gen() != fwd.old_gen {
         return env;
     }
-    let key = env.index() as u32;
+    let (key, dest) = (env.index() as u32, fwd.dest_gen);
     if let Some(&n) = fwd.envs.get(&key) {
-        return EnvId::runtime(n as usize);
+        return EnvId::runtime_gen(n as usize, dest);
     }
     let (parent, vars_snapshot): (Option<EnvId>, EnvVars) = {
         let frame = old
@@ -7781,7 +8712,7 @@ fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env:
         vars,
         parent: new_parent,
     });
-    EnvId::runtime(new_idx)
+    EnvId::runtime_gen(new_idx, dest)
 }
 
 /// Verify an evacuated `CodeSlabs`: every RUNTIME handle it contains must point

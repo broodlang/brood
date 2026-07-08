@@ -10,10 +10,16 @@ use crate::error::{error_codes, LispError, LispResult};
 
 use super::numeric::{arg, expect_int};
 
-/// Borrow a `Value::Bytes`'s raw bytes, or a type error.
-fn as_bytes<'h>(heap: &'h Heap, who: &str, v: Value) -> Result<&'h [u8], LispError> {
+/// Borrow a `Value::Bytes`'s raw bytes, or a type error. The borrow is a guarded
+/// [`SlabRef`](crate::core::heap::SlabRef) (derefs to `&[u8]`) so a RUNTIME bytes
+/// value's generation can't be freed while it's read (ADR-091 Stage 4).
+fn as_bytes<'h>(
+    heap: &'h Heap,
+    who: &str,
+    v: Value,
+) -> Result<crate::core::heap::SlabRef<'h, [u8]>, LispError> {
     match v {
-        Value::Bytes(id) => Ok(heap.bytes(id).as_bytes()),
+        Value::Bytes(id) => Ok(heap.bytes(id).map(|b| -> &[u8] { b.as_bytes() })),
         _ => Err(LispError::wrong_type(heap, who, "bytes", v)),
     }
 }
@@ -106,7 +112,7 @@ pub(super) fn subbytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 pub(super) fn bytes_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mut out = Vec::new();
     for &v in args {
-        out.extend_from_slice(as_bytes(heap, "bytes-concat", v)?);
+        out.extend_from_slice(&as_bytes(heap, "bytes-concat", v)?);
     }
     Ok(heap.alloc_bytes(SharedBlob::new(&out)))
 }
@@ -130,7 +136,7 @@ pub(super) fn bytes_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
     } else {
         hay[from..]
             .windows(needle.len())
-            .position(|w| w == needle)
+            .position(|w| w == &*needle)
             .map(|p| (p + from) as i64)
             .unwrap_or(-1)
     };

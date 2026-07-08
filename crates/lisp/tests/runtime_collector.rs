@@ -8,7 +8,10 @@
 //! leak is real and would be reclaimable.
 
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
+use brood::core::heap::Heap;
+use brood::process;
 use brood::Interp;
 
 static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
@@ -479,3 +482,539 @@ fn aging_flips_generation_and_both_gens_execute() {
     );
     assert_eq!(interp.heap.runtime_cur_gen(), 1, "stays in gen 1");
 }
+
+/// Stage 3 — the **cooperative liveness probe** (`runtime_gen_referenced`). It is
+/// the per-process half of the union that decides when an aged-out old generation
+/// can be freed (Stage 4): the generation is dead only when every live process (and
+/// the shared globals) reports it unreferenced. Here, single-process, the probe
+/// sees everything, so its answer is exact — we watch a generation go from
+/// referenced (its code still bound in the globals) to dead (every binding
+/// superseded into the new generation).
+#[test]
+fn old_generation_liveness_probe() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    // Generation 0: define `f`. It is referenced (bound in the globals); the empty
+    // gen-1 slot is trivially unreferenced (the fast path).
+    interp.eval_str("(defn f (x) (* x 2))").expect("define f");
+    assert!(
+        interp.heap.runtime_gen_referenced(0),
+        "gen 0 is referenced — `f` is bound there",
+    );
+    assert!(
+        !interp.heap.runtime_gen_referenced(1),
+        "gen 1 slot is empty → trivially unreferenced",
+    );
+
+    // Age to gen 1. Aging alone moves NO bindings, so `f` still lives in gen 0 and
+    // gen 0 stays referenced; gen 1 is still empty until something is promoted there.
+    assert!(interp.heap.age_runtime(), "should age (slot 1 empty)");
+    assert_eq!(interp.heap.runtime_cur_gen(), 1);
+    assert!(
+        interp.heap.runtime_gen_referenced(0),
+        "gen 0 still referenced after aging — `f`'s binding hasn't moved",
+    );
+    assert!(
+        !interp.heap.runtime_gen_referenced(1),
+        "gen 1 still empty right after aging",
+    );
+
+    // Promote fresh code into gen 1: `h` lands there and is referenced; gen 0 (still
+    // holding `f`) stays referenced too — both generations live at once.
+    interp.eval_str("(defn h (x) (+ x 100))").expect("define h");
+    assert!(
+        interp.heap.runtime_gen_referenced(1),
+        "gen 1 now referenced — `h` is bound there",
+    );
+    assert!(
+        interp.heap.runtime_gen_referenced(0),
+        "gen 0 still referenced — `f` hasn't been superseded yet",
+    );
+
+    // Drain gen 0: redefine `f` (structurally different, so ADR-042 dedup can't skip
+    // the promote) — its binding now points into gen 1. Nothing live references the
+    // superseded gen-0 `f` any more; a LOCAL collect drops any transient remnant.
+    interp
+        .eval_str("(defn f (x) (+ (* x 3) 7))")
+        .expect("redefine f");
+    interp.heap.collect(&mut [], &mut []);
+    assert!(
+        !interp.heap.runtime_gen_referenced(0),
+        "gen 0 is now dead — every binding it held has been superseded into gen 1",
+    );
+    // Gen 1 carries the current `f` + `h` and remains referenced.
+    assert!(
+        interp.heap.runtime_gen_referenced(1),
+        "gen 1 holds the live code",
+    );
+}
+
+/// Stage 3b — the **cross-process drain union**. A generation is dead only once
+/// *every* live process has reported clean for the current drain epoch. Driven here
+/// with two real heaps sharing one runtime `Arc` (as `spawn` builds a child), so the
+/// union is exercised deterministically without leaning on scheduler timing: one
+/// process superseded its reference, the other still pins the old generation via a
+/// captured closure handle — the union must stay `false` until that pin is released.
+#[test]
+fn cross_process_drain_union() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    // Gen 0: define `f` and capture its (gen-0) closure handle before anything moves.
+    interp.eval_str("(defn f (x) (* x 2))").expect("define f");
+    let f_gen0 = interp.eval_str("f").expect("resolve f");
+
+    // Age, then supersede `f` into gen 1, so the shared globals no longer point at
+    // gen 0 — the precondition that makes a clean ack stay clean.
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+    interp
+        .eval_str("(defn f (x) (+ (* x 3) 7))")
+        .expect("redefine f");
+    interp.heap.collect(&mut [], &mut []);
+    assert!(
+        !interp.heap.runtime_gen_referenced(0),
+        "main no longer references gen 0 (globals moved to gen 1)",
+    );
+
+    // A second process of the SAME runtime that captured the gen-0 `f` in a local
+    // root — exactly the private-state pin the shared-globals view can't see.
+    let mut child = Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    child.push_root(f_gen0);
+    assert!(
+        child.runtime_gen_referenced(0),
+        "child pins gen 0 via the captured handle",
+    );
+
+    // Arm the drain of gen 0. Both heaps observe it through the shared runtime.
+    const MAIN: u64 = 1;
+    const CHILD: u64 = 2;
+    let epoch = interp.heap.begin_gen_drain(0);
+    assert_eq!(epoch, 1, "first drain is epoch 1");
+    assert!(
+        interp.heap.drain_active() && child.drain_active(),
+        "the drain is visible to every process of the runtime",
+    );
+
+    // Each process reports. Main is clean; child still pins → the union is NOT drained.
+    interp.heap.report_gen_liveness(MAIN);
+    child.report_gen_liveness(CHILD);
+    assert!(
+        !interp.heap.gen_drained(&[MAIN, CHILD]),
+        "gen 0 is not dead — the child still references it",
+    );
+    // The pinning child is exactly what a single-process view would miss.
+    assert!(
+        interp.heap.gen_drained(&[MAIN]),
+        "main considered alone is clean",
+    );
+
+    // Child releases the captured handle and re-reports → generation now drained.
+    child.truncate_roots(0);
+    assert!(
+        !child.runtime_gen_referenced(0),
+        "child released its only gen-0 reference",
+    );
+    child.report_gen_liveness(CHILD);
+    assert!(
+        interp.heap.gen_drained(&[MAIN, CHILD]),
+        "every live process reported clean → gen 0 is dead",
+    );
+
+    // A fresh drain bumps the epoch, so the stale clean acks no longer count.
+    let epoch2 = interp.heap.begin_gen_drain(0);
+    assert_eq!(epoch2, 2, "the drain epoch is strictly monotonic");
+    assert!(
+        !interp.heap.gen_drained(&[MAIN, CHILD]),
+        "a new drain epoch invalidates prior acks — every process must re-report",
+    );
+
+    // Ending the drain makes the reporting path inert again.
+    interp.heap.end_gen_drain();
+    assert!(!interp.heap.drain_active());
+    assert!(
+        !interp.heap.gen_drained(&[MAIN]),
+        "no drain armed → the union answer is false",
+    );
+}
+
+/// Stage 3c — the drain report **wired through the live scheduler**. A real spawned
+/// process running under the worker pool participates in the union via the eval / VM
+/// safepoint (its report) and the scheduler registry (the live set). A worker that
+/// captured the old generation's code and parked pins it — `old_gen_drained` stays
+/// `false` until the worker releases the reference and exits, at which point the root
+/// (having reported clean at its own safepoint) is the only pinner left and the
+/// generation is dead. Genuinely concurrent (default worker pool); the outcome is
+/// deterministic because it hinges on process *liveness*, not scheduling order.
+#[test]
+fn drain_report_wires_through_the_scheduler() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    // Define `f` (gen 0). Spawn a worker that captures the gen-0 `f` in a closure and
+    // parks on `receive` holding it — a live process pinning gen 0 that the root's
+    // single-process view can't see. It reports its pid in `:ready` (so the root can
+    // release it later) and only replies `:released` after dropping the reference.
+    interp
+        .eval_str(
+            r#"
+            (defn f (x) (* x 2))
+            (def root (self))
+            (defn worker (held)
+              (do
+                (send root [:ready (self)])
+                (receive (:release (send root :released)))))
+            (spawn (fn () (worker f)))
+            (receive ([:ready wp] (def worker-pid wp)))
+            "#,
+        )
+        .expect("spawn a worker that parks holding the gen-0 closure");
+
+    // Age, then supersede EVERY gen-0 global (`f` and `worker`) into gen 1, so the
+    // shared globals no longer point at gen 0. The still-running worker process keeps
+    // its own captured gen-0 copies — that is the pin the drain must respect — but the
+    // root itself is now clean of gen 0.
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+    interp
+        .eval_str(
+            "(defn f (x) (+ (* x 3) 7)) \
+             (defn worker (held) (do (send root :v2) :ignored))",
+        )
+        .expect("redefine the gen-0 globals into gen 1");
+    interp.heap.collect(&mut [], &mut []);
+    assert!(
+        !interp.heap.runtime_gen_referenced(0),
+        "the root itself no longer references gen 0",
+    );
+
+    // Arm the drain of gen 0, then make the root report at its own safepoint (calling
+    // gen-1 `f` drives the VM trampoline). Root is clean → it acks the epoch.
+    interp.heap.begin_gen_drain(0);
+    interp.eval_str("(f 3)").expect("root safepoint report");
+
+    // The worker (parked, holding the gen-0 closure) is in the live set but has no
+    // ack for this epoch, so the generation is NOT drained — the whole point of the
+    // cross-process union.
+    assert!(
+        process::live_pids().len() >= 2,
+        "root and the parked worker are both live",
+    );
+    assert!(
+        !process::old_gen_drained(&interp.heap),
+        "the parked worker still pins gen 0",
+    );
+
+    // Release the worker: it drops the captured gen-0 closure, replies, and exits.
+    interp
+        .eval_str("(do (send worker-pid :release) (receive (:released :ok)))")
+        .expect("release the worker and await its acknowledgement");
+
+    // Once the worker has left the registry, the root is the only live process and it
+    // already acked clean → gen 0 is drained. Poll briefly for the worker's exit to
+    // finish (its `:released` send races a hair ahead of deregistration).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let drained = loop {
+        if process::old_gen_drained(&interp.heap) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(
+        drained,
+        "after the worker exits, every live process has reported clean → gen 0 is dead",
+    );
+}
+
+/// Stage 4 — **freeing a drained generation reclaims its slot**. Once the Stage-3
+/// union confirms no live process references the old generation, `free_runtime_gen`
+/// stores a fresh empty slab into its ArcSwap slot. Driven with two heaps sharing one
+/// runtime: the free is refused while a peer still pins the generation, and succeeds —
+/// emptying the slot so aging can reuse it — once the pin is released.
+#[test]
+fn free_reclaims_after_cross_process_drain() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    interp.eval_str("(defn f (x) (* x 2))").expect("define f");
+    let f_gen0 = interp.eval_str("f").expect("resolve f");
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+    interp
+        .eval_str("(defn f (x) (+ (* x 3) 7))")
+        .expect("redefine f");
+    interp.heap.collect(&mut [], &mut []);
+    assert!(!interp.heap.runtime_gen_referenced(0));
+
+    let mut child = Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    child.push_root(f_gen0);
+    assert!(child.runtime_gen_referenced(0), "child pins gen 0");
+
+    const MAIN: u64 = 1;
+    const CHILD: u64 = 2;
+    interp.heap.begin_gen_drain(0);
+    interp.heap.report_gen_liveness(MAIN);
+    child.report_gen_liveness(CHILD);
+
+    // The child still pins gen 0 → the drain gate says NOT drained, so a caller
+    // (`free_drained_gen`) would not free. Aging back into slot 0 is refused too — it
+    // is non-empty (the 2-versions rule).
+    assert!(!interp.heap.gen_drained(&[MAIN, CHILD]), "child pins gen 0");
+    assert!(
+        !interp.heap.age_runtime(),
+        "cannot age into non-empty slot 0"
+    );
+
+    // Release the pin; now the generation is drained and safe to free.
+    child.truncate_roots(0);
+    child.report_gen_liveness(CHILD);
+    assert!(
+        interp.heap.gen_drained(&[MAIN, CHILD]),
+        "gen 0 is now drained"
+    );
+
+    // Free it: the slot empties, the drain ends, and aging can reclaim slot 0.
+    assert!(interp.heap.free_runtime_gen(0), "free the drained gen 0");
+    assert!(!interp.heap.drain_active(), "the drain ended");
+    assert!(
+        !interp.heap.runtime_gen_referenced(0),
+        "gen 0 slot is empty after the free",
+    );
+    assert!(
+        interp.heap.age_runtime(),
+        "slot 0 is now empty → aging can reuse it",
+    );
+    assert_eq!(interp.heap.runtime_cur_gen(), 0);
+}
+
+/// Stage 4 — **a reused slot never serves stale compiled code**. Freeing a generation
+/// and aging back into its slot mints handles with bit-identical `(gen, index)` to the
+/// freed ones. `vm_cache` keys on those bits (not `version`), so without the
+/// `free_epoch` lazy-clear a process could execute the *old* closure's compiled body
+/// for the *new* closure. This drives a real define → call (populating `vm_cache`) →
+/// free → reuse → call and asserts the new code runs.
+#[test]
+fn reused_slot_runs_new_code_not_stale_cache() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    // Gen 0: define `f` and CALL it, so its compiled body is cached under its
+    // (gen 0, index) handle.
+    interp.eval_str("(defn f (x) (* x 2))").expect("define f");
+    {
+        let r = interp.eval_str("(f 5)").unwrap();
+        assert_eq!(interp.print(r), "10");
+    }
+
+    // Age, supersede `f` into gen 1, drop the gen-0 remnant. Gen 0 is now unreferenced
+    // (its old `f` lingers only in the excluded-from-liveness `vm_cache`).
+    assert!(interp.heap.age_runtime());
+    interp
+        .eval_str("(defn f (x) (+ x 100))")
+        .expect("redefine f into gen 1");
+    interp.heap.collect(&mut [], &mut []);
+    assert!(!interp.heap.runtime_gen_referenced(0));
+
+    // Free gen 0 (bumps `free_epoch`), then age back into the freed slot 0 and define a
+    // NEW `f` there — its handle can reuse the old `f`'s `(gen 0, index)` bits.
+    assert!(interp.heap.free_runtime_gen(0), "free drained gen 0");
+    assert!(interp.heap.age_runtime(), "age back into the freed slot 0");
+    assert_eq!(interp.heap.runtime_cur_gen(), 0);
+    interp
+        .eval_str("(defn f (x) (- x 1))")
+        .expect("define a new f in the reused slot");
+
+    // The new `f` must run — NOT the stale gen-0 `(* x 2)` a bit-identical `vm_cache`
+    // key would otherwise serve.
+    {
+        let r = interp.eval_str("(f 5)").unwrap();
+        assert_eq!(
+            interp.print(r),
+            "4",
+            "the reused slot runs the new f (5-1), not the stale cached (* 5 2)=10"
+        );
+    }
+}
+
+/// Stage 4 — **migration lets a generation with a stable global still be freed**. This
+/// is the case that *stalls* without live-globals migration: a global defined once and
+/// never redefined stays in its birth generation, pinning it forever (Brood's `def` is
+/// per-global, unlike an Erlang module reload that re-exports every function). After
+/// `migrate_live_globals` re-exports the live globals into the current generation, the
+/// aged-out one is unreferenced and freeable — while every binding keeps working.
+#[test]
+fn migration_re_exports_globals_so_a_stable_global_does_not_pin() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    // A stable global (defined once) and a churny one (redefined a few times), all in
+    // generation 0.
+    interp
+        .eval_str("(defn stable (x) (+ x 1000))")
+        .expect("stable");
+    for k in 0..5 {
+        interp
+            .eval_str(&format!("(defn f (x) (+ x {k}))"))
+            .expect("define f");
+    }
+    assert_eq!(interp.heap.runtime_cur_gen(), 0);
+
+    // Age into generation 1. Nothing has moved yet — every global still lives in gen 0,
+    // so without migration gen 0 would stay pinned by `stable` forever.
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+    let migrated = interp.heap.migrate_live_globals(0);
+    assert!(
+        migrated >= 2,
+        "expected ≥2 live globals (stable + f + …) migrated, got {migrated}",
+    );
+
+    // Both globals still compute — now resolving to their gen-1 copies.
+    {
+        let r = interp.eval_str("(stable 5)").unwrap();
+        assert_eq!(interp.print(r), "1005");
+    }
+    {
+        let r = interp.eval_str("(f 5)").unwrap();
+        assert_eq!(interp.print(r), "9", "f is the last redef (+ x 4)");
+    }
+
+    // A LOCAL collect first: the eval results from the `def`s left gen-0 closure handles
+    // as garbage in this process's LOCAL heap (the liveness walk conservatively counts
+    // every LOCAL cell, so unreclaimed garbage still pins the generation). A real process
+    // reclaims this at its safepoint before reporting clean — do the same here.
+    interp.heap.collect(&mut [], &mut []);
+
+    // THE point: with the live globals migrated off it, generation 0 is unreferenced —
+    // so it can be freed (without migration, `stable` would keep this true forever).
+    assert!(
+        !interp.heap.runtime_gen_referenced(0),
+        "gen 0 is unreferenced after migration — a stable global no longer pins it",
+    );
+    assert!(interp.heap.free_runtime_gen(0), "free the drained gen 0");
+
+    // Everything still works after the free, and fresh code runs on the compacted region.
+    {
+        let r = interp.eval_str("(stable 7)").unwrap();
+        assert_eq!(interp.print(r), "1007", "stable survives the free");
+    }
+    {
+        let r = interp.eval_str("(f 7)").unwrap();
+        assert_eq!(interp.print(r), "11");
+    }
+    {
+        let r = interp.eval_str("(defn g (a) (* a a)) (g 6)").unwrap();
+        assert_eq!(interp.print(r), "36", "fresh code runs post-free");
+    }
+}
+
+/// Stage 4 — **migration never clobbers a binding redefined after aging**. The reconcile
+/// installs a migrated handle only where the global still resides in the aged-out
+/// generation; a redefinition (which lands in the *current* generation) is left alone.
+/// This drives the ordering deterministically: age, redefine `g` into the new
+/// generation, then migrate — `g` must keep the redefinition, not revert to the copy of
+/// its old-generation body.
+#[test]
+fn migration_preserves_a_post_aging_redefinition() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+
+    interp.eval_str("(defn g (x) (* x 10))").expect("g gen 0");
+    interp
+        .eval_str("(defn keep (x) (- x 1))")
+        .expect("keep gen 0");
+    assert!(interp.heap.age_runtime(), "age to gen 1");
+
+    // A redefinition after aging lands in generation 1 (the current generation).
+    interp
+        .eval_str("(defn g (x) (+ x 1))")
+        .expect("redefine g into gen 1");
+
+    // Migrate the still-in-gen-0 globals (`keep`). `g` is already in gen 1, so it is not
+    // a migration candidate and the reconcile leaves it untouched.
+    let migrated = interp.heap.migrate_live_globals(0);
+    assert!(migrated >= 1, "keep should migrate, got {migrated}");
+
+    {
+        let r = interp.eval_str("(g 5)").unwrap();
+        assert_eq!(
+            interp.print(r),
+            "6",
+            "g keeps its post-aging redefinition (+ 5 1), not the migrated (* 5 10)",
+        );
+    }
+    {
+        let r = interp.eval_str("(keep 5)").unwrap();
+        assert_eq!(interp.print(r), "4", "keep was migrated intact");
+    }
+}
+
+/// Stage 4 — **age → migrate → drain → free cycles repeatedly and stays bounded**. Two
+/// heaps share one runtime; across several cycles the region is churned, aged, its live
+/// globals migrated, the vacated generation drained (both processes report clean) and
+/// freed. The current-generation closure count must stay bounded across cycles — the
+/// proof that whole-generation reclamation actually converges, not just runs once.
+#[test]
+fn migration_drain_free_cycles_and_stays_bounded() {
+    LazyLock::force(&MEM_GUARD);
+    let mut interp = Interp::new();
+    interp.heap.set_rt_auto_collect(false);
+    interp.eval_str("(defn f (x) (+ x 0))").expect("seed f");
+
+    // A peer heap sharing the runtime — it holds no old-generation references, so it
+    // reports clean every cycle (its role is to keep the runtime genuinely shared).
+    let child = Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+
+    const MAIN: u64 = 1;
+    const CHILD: u64 = 2;
+    let mut counts = Vec::new();
+    for cycle in 0..4 {
+        // Churn: redefine `f` several times, superseding versions in the current gen.
+        for k in 0..8 {
+            interp
+                .eval_str(&format!("(defn f (x) (+ x {})) ", cycle * 10 + k))
+                .expect("redef f");
+        }
+        let old = interp.heap.runtime_cur_gen();
+        assert!(interp.heap.age_runtime(), "cycle {cycle}: age");
+        interp.heap.migrate_live_globals(old);
+        // Reclaim this process's LOCAL gen-`old` garbage (the churn's eval results) so it
+        // reports clean — mirrors a real process's safepoint LOCAL GC before it reports.
+        interp.heap.collect(&mut [], &mut []);
+        interp.heap.begin_gen_drain(old);
+
+        // Both processes report clean (neither holds an old-gen handle after migration).
+        interp.heap.report_gen_liveness(MAIN);
+        child.report_gen_liveness(CHILD);
+        assert!(
+            interp.heap.gen_drained(&[MAIN, CHILD]),
+            "cycle {cycle}: gen {old} drained",
+        );
+        assert!(
+            interp.heap.free_runtime_gen(old),
+            "cycle {cycle}: free gen {old}",
+        );
+
+        // `f` still computes the latest redefinition on the freshly-migrated generation.
+        let r = interp.eval_str("(f 100)").unwrap();
+        let want = 100 + cycle * 10 + 7;
+        assert_eq!(interp.print(r), want.to_string(), "cycle {cycle}: f works");
+        counts.push(interp.heap.runtime_closure_count());
+    }
+
+    // Convergence: the current-generation live count doesn't grow cycle over cycle —
+    // each freed generation reclaims the prior cycle's churn.
+    let max = *counts.iter().max().unwrap();
+    assert!(
+        max < 64,
+        "current-gen closures stayed bounded across cycles ({counts:?}), got max {max}",
+    );
+}
+

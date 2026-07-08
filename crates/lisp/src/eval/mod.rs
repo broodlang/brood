@@ -240,6 +240,15 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
             expr = roots[0];
             env = envs[0];
         }
+        // RUNTIME-drain cooperative report (ADR-091 Stage 3c). While a generation
+        // drain is armed (rare — Stage 4 arms it), report whether this process still
+        // references the draining generation, so the collector's cross-process union
+        // learns when it's dead. The probe is read-only (safe even with unrooted
+        // transients — it moves nothing), so it needs no GC/macro gate; the hot path
+        // is one atomic load returning false.
+        if heap.drain_active() {
+            crate::process::report_drain_liveness(heap);
+        }
         // Memory safety backstop (ADR-043): if total allocation has crossed the
         // soft ceiling, fail *here* with a clean, catchable error rather than
         // running on to the hard allocator limit (which aborts the whole
@@ -872,7 +881,8 @@ pub(crate) fn passthrough_arm(
     cl: ClosureId,
     argc: usize,
 ) -> Option<(Value, SmallVec<[usize; 4]>)> {
-    let arm = heap.closure(cl).select_arm(argc)?;
+    let cl_ref = heap.closure(cl);
+    let arm = cl_ref.select_arm(argc)?;
     arm.passthrough.as_ref().map(|p| (p.head, p.map.clone()))
 }
 
@@ -893,7 +903,7 @@ fn bind_params(
         let cl_data = heap.closure(cl);
         let arm = match cl_data.select_arm(argv.len()) {
             Some(a) => a,
-            None => return Err(arity_error_for(cl_data, argv.len())),
+            None => return Err(arity_error_for(&cl_data, argv.len())),
         };
         params.extend_from_slice(&arm.params);
         optionals.extend_from_slice(&arm.optionals);

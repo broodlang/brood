@@ -104,6 +104,10 @@ tree-sitter-elixir = { version = "0.3", optional = true }
 # bodies lock-free while `def` appends new code (old versions never move/free —
 # in-flight calls keep running them; Erlang-style hot reload). See docs/shared-code.md.
 boxcar = "0.2"
+# Atomic Arc swap for the two RUNTIME code generations (ADR-091 Stage 4). A dead
+# generation is freed by storing a fresh empty slab; readers hold a guard so the old
+# slab can't drop while in use — lock-free reads, safe whole-generation reclamation.
+arc-swap = "1"
 # Image decoding (PNG/JPEG/GIF/WebP/BMP) for the `image-thumb` primitive — the one
 # thing an image renderer genuinely can't bootstrap in Brood (a decoder + resampler).
 # `default-features = false` pulls only the common web/raster codecs (no TIFF/EXR/…

@@ -373,7 +373,7 @@ fn collect_syms_into(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
             collect_syms_into(heap, cdr, out);
         }
         Value::Vector(vid) => {
-            for &v in heap.vector(vid) {
+            for &v in heap.vector(vid).iter() {
                 collect_syms_into(heap, v, out);
             }
         }

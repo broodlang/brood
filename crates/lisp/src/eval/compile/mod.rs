@@ -4835,6 +4835,23 @@ fn vm_run_bc(
         if !crate::process::macro_block_active() && heap.gc_due() {
             heap.collect(&mut [], &mut []);
         }
+        // RUNTIME-region collection (ADR-091): the VM-engine counterpart of the
+        // tree-walker's safepoint. Once churn crosses the threshold, compact the shared
+        // code region (single-process) or — on a shared runtime with the multi-process
+        // collector armed — advance the age/migrate/drain/free state machine. Every
+        // live RUNTIME handle at this frame boundary is already on `heap.roots`/
+        // `env_roots`/`live_vm_arms` (which the compactor rewrites), so no extra roots
+        // are needed. Gated on the same macro-block guard as the LOCAL collect.
+        if !crate::process::macro_block_active() && heap.rt_gc_due() {
+            heap.maybe_runtime_collect(&mut [], &mut []);
+        }
+        // RUNTIME-drain cooperative report (ADR-091 Stage 3c): the VM-engine
+        // counterpart of the tree-walker's safepoint report. While a generation
+        // drain is armed, this process reports whether it still references the
+        // draining generation. Read-only probe; the hot path is one atomic load.
+        if heap.drain_active() {
+            crate::process::report_drain_liveness(heap);
+        }
         if let Some(used) = crate::core::alloc::soft_limit_hit() {
             unwind(heap);
             return Err(crate::eval::memory_limit_error(used));
@@ -5186,7 +5203,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
         let mut e = env;
         while !heap.is_global(e) {
             let (parent, bindings) = heap.env_frame_ref(e);
-            for &(sym, _) in bindings {
+            for &(sym, _) in bindings.iter() {
                 scope.enclosing.push(sym);
             }
             match parent {

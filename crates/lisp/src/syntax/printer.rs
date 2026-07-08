@@ -98,7 +98,7 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
                 }
                 out.push('"');
             } else {
-                out.push_str(s);
+                out.push_str(&s);
             }
         }
         ValueRef::Pair(_) => write_list(out, heap, v, readable, depth),

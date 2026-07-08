@@ -174,7 +174,7 @@ fn to_message_rec(
         // A decimal ships as its canonical decimal string (mirrors BigInt).
         Value::Decimal(id) => Message::Decimal(heap.decimal(id).to_string()),
         // Raw bytes ship their Arc<SharedBlob> by reference (no byte copy). Byte-clean.
-        Value::Bytes(id) => Message::Bytes(Arc::clone(heap.bytes(id))),
+        Value::Bytes(id) => Message::Bytes(Arc::clone(&heap.bytes(id))),
         Value::Float(f) => Message::Float(f),
         Value::Sym(s) => Message::Sym(s),
         Value::Keyword(s) => Message::Keyword(s),

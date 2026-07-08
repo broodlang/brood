@@ -1518,6 +1518,94 @@ pub fn self_pid() -> u64 {
     ensure_ctx().pid
 }
 
+/// This process's pid **without** minting a context — `None` if it has none yet.
+/// A process with no ctx has never `spawn`ed or messaged, so it isn't in
+/// [`REGISTRY`] and can't be sharing a runtime under a drain — so skipping its
+/// report is sound. The cheap read the eval / VM safepoint uses to report drain
+/// liveness (ADR-091 Stage 3c); a single thread-local borrow, no allocation.
+pub fn current_pid() -> Option<u64> {
+    CURRENT.with(|c| c.borrow().as_ref().map(|ctx| ctx.pid))
+}
+
+/// A snapshot of every live local process's pid — the [`REGISTRY`] keys. This is
+/// the live set the RUNTIME-drain union queries (ADR-091 Stage 3c). It is
+/// **complete** for the drain's purposes: `spawn` registers a child (before it can
+/// run) and its parent, and `receive`/`self` register the root, so every process
+/// that could hold a reference to the draining generation is present.
+pub fn live_pids() -> Vec<u64> {
+    crate::core::sync::lock(&REGISTRY).keys().copied().collect()
+}
+
+/// The eval / VM safepoint's cooperative RUNTIME-drain report (ADR-091 Stage 3c):
+/// this process reports whether it still references the draining generation. Called
+/// only when [`Heap::drain_active`](crate::core::heap::Heap::drain_active) already
+/// returned true, so it's off the hot path. A process with no ctx (not in the live
+/// set) is skipped.
+pub fn report_drain_liveness(heap: &Heap) {
+    if let Some(pid) = current_pid() {
+        heap.report_gen_liveness(pid);
+    }
+}
+
+/// **RUNTIME collector — Stage 5 (parked-process drain inspection, ADR-091).** A parked
+/// process (suspended in `receive`) can't report its own liveness for a drain armed
+/// *after* it parked — it isn't running, so it never reaches a safepoint. Left
+/// unhandled, an idle server parked on current-generation code would block **every**
+/// later drain forever (the parked-can't-ack problem). So the drain coordinator inspects
+/// each parked process's captured continuation directly and drives its self-report: a
+/// paused process's live values sit on its own heap's `roots`/`env_roots`/`live_vm_arms`
+/// (the continuation is relocatable heap data — ADR-100), which [`report_gen_liveness`]
+/// walks, acking it iff it's clean of the draining generation. This is exactly Erlang's
+/// `check_process_code` inspecting a process externally — no wakeup, no kill. A process
+/// genuinely paused *in* old-generation code stays dirty (correct: it will resume that
+/// code and so still pins the generation).
+///
+/// [`report_gen_liveness`]: crate::core::heap::Heap::report_gen_liveness
+fn report_parked_liveness() {
+    // Snapshot (pid, mailbox) first — never hold REGISTRY across a per-mailbox lock (the
+    // crate lock discipline). The parked process's heap is quiescent (no worker owns it)
+    // and shares the runtime `Arc`, so its `report_gen_liveness` writes the shared drain
+    // ack map on its own behalf.
+    let entries: Vec<(u64, Arc<Mailbox>)> = crate::core::sync::lock(&REGISTRY)
+        .iter()
+        .map(|(pid, mb)| (*pid, Arc::clone(mb)))
+        .collect();
+    for (pid, mailbox) in entries {
+        let state = crate::core::sync::lock(&mailbox.state);
+        if let Some(proc) = state.waiter.as_ref() {
+            proc.heap.report_gen_liveness(pid);
+        }
+    }
+}
+
+/// Is the currently-draining RUNTIME generation dead — has *every* live process
+/// reported clean for the current drain epoch (ADR-091 Stage 3c)? Reads the live
+/// set from the scheduler [`REGISTRY`] and delegates the per-epoch ack check to the
+/// heap. `false` when no drain is armed. Once this is `true`, Stage 4 may free the
+/// generation.
+///
+/// Also drives [`report_parked_liveness`] first, so a parked-but-clean process (which
+/// can't report for itself) doesn't block the drain — Erlang `check_process_code`-style.
+pub fn old_gen_drained(heap: &Heap) -> bool {
+    if heap.drain_active() {
+        report_parked_liveness();
+    }
+    heap.gen_drained(&live_pids())
+}
+
+/// **RUNTIME collector — Stage 4.** If the current drain has completed — every live
+/// process reported clean ([`old_gen_drained`]) — free the drained generation
+/// ([`Heap::free_runtime_gen`]) and end the drain. Returns whether it freed. The
+/// union check reads the live set from the scheduler `REGISTRY`; the free itself is a
+/// shared-safe `ArcSwap` store, so it needs no unique ownership. A no-op when no drain
+/// is armed or the generation isn't drained yet.
+pub fn free_drained_gen(heap: &Heap) -> bool {
+    if !old_gen_drained(heap) {
+        return false;
+    }
+    heap.free_runtime_gen(heap.drain_gen())
+}
+
 /// Are we currently running inside a **green** (spawned) process — as opposed to the
 /// *root* thread (the REPL / file runner / MCP dispatcher)? True when [`in_capture_run`]
 /// is set (the worker is driving a process body). Used by the eval-time `unbound` raise

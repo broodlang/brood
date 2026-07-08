@@ -5580,8 +5580,11 @@ Lives in `std/editor/serve.blsp`; `nest attach` in `crates/nest/src/main.rs`.
 **Status:** accepted (2026-06-01; multi-process direction revised 2026-07-07). The
 single-process collector is **implemented + tested**. The multi-process collector
 pivoted from the original cooperative rolling quiesce (deferred, hard) to an
-**Erlang-style 2-generation model** (Step 2 below); Stages 1a/1b/2 of it have
-**landed** (behavior-preserving), Stages 3–4 (reclamation) remain. This ADR supersedes
+**Erlang-style 2-generation model** (Step 2 below); Stages 1a/1b/2/3a/3b/3c **and all of
+Stage 4 — the free mechanism, live-globals migration, and the safepoint auto-arming state
+machine — have landed.** The default path is unchanged (nothing ages or frees); the
+multi-process collector is opt-in via `BROOD_RT_MULTIGEN` pending a **purge policy** for a
+permanently-pinned generation and a perf A/B (see Stage 4 below). This ADR supersedes
 the exploratory `docs/runtime-collector-exploration.md` as the source of truth. No
 language-surface change beyond the `(runtime-collect)` builtin + the `:runtime-*` keys
 on `(gc-stats)`.
@@ -5656,11 +5659,131 @@ Progress: **Stage 1a** (handle `code_gen` tagging + region-aware `canonical()`),
 **Stage 1b** (two-slab `RuntimeCode` + generation-aware accessors, behavior-preserving),
 and **Stage 2** (generation-tagged `promote` + the `age_runtime` flip + the two-gen
 read-path test) have landed. Normal runs never age (`current_gen` stays 0), so behavior
-is unchanged until the reclamation stages arm it. Remaining: **Stage 3** (cooperative
-liveness — each process reports its old-gen references at safepoints, giving the union
-"is the old generation dead?" answer) and **Stage 4** (free the old generation when
-unreferenced + soft-wait/purge for pins + auto-trigger aging at the RUNTIME safepoint).
-Exercise under `BROOD_GC_STRESS` across the worker pool before arming auto-aging.
+is unchanged until the reclamation stages arm it. **Stage 3a** (the per-process
+liveness *probe*, `Heap::runtime_gen_referenced(gen)`) has also landed: a read-only walk
+of the shared roots (globals + declared sigs) plus this process's private roots (operand/
+env stack, dynamics, both LOCAL heap generations, and the live VM arms mid-execution),
+returning whether generation `gen` is still referenced — the per-process half of the
+Stage 3 union, exact for a single-process runtime. **Stage 3b** (the cross-process
+union *mechanism*) has also landed: shared drain-coordination state on `RuntimeCode`
+(`drain_active`/`drain_gen`/`drain_epoch` + a `pid → clean-epoch` ack map) plus
+`Heap::{begin_gen_drain, report_gen_liveness, gen_drained, end_gen_drain, clear_gen_ack}`.
+A drain arms a strictly-monotonic epoch and clears the acks; each process reports at its
+safepoint (a clean process acks the epoch, a pinning one drops its ack); `gen_drained`
+answers the union — every live pid acked the current epoch — with the caller supplying
+the live-pid set (kept out of `core` for layering). It is **inert until a drain is armed**
+(the always-case), so it's behavior-preserving with zero hot-path change. Soundness rests
+on the post-aging invariant that new code only lands in the *current* generation, so a
+clean ack stays clean (a global can never re-point at the drained generation). **Stage 3c**
+(wiring the union into the live scheduler) has also landed: the cooperative report fires at
+**both** engines' eval safepoints — the tree-walker loop and the VM trampoline
+(`vm_run_bc`) — gated on a single `drain_active()` atomic load so it's inert (and free)
+when no drain is armed; `process::{current_pid, live_pids, report_drain_liveness,
+old_gen_drained}` supply the live set from the scheduler `REGISTRY` and answer the union.
+Soundness across parked processes rests on the same no-new-refs invariant: a process that
+acked clean can't reacquire a reference post-aging (so the probe needn't scan a parked
+continuation), and a pinning process simply has no current-epoch ack (blocking the drain,
+safely). Per-exit `clear_gen_ack` was left unwired — the ack map is cleared at every drain
+boundary and dead pids are never queried (pids aren't reused), so it's pure hygiene with no
+correctness role; the method stays for Stage 4's use. **Stage 4 (the free *mechanism*)**
+has landed. Two pieces:
+
+1. **Freeable storage — the generation slabs became `[ArcSwap<CodeSlabs>; 2]`.** A dead
+   generation can't be reclaimed while the runtime `Arc` is shared: the append-only
+   `boxcar` slabs can't be cleared through `&self`, and `Arc::get_mut` never succeeds with
+   live processes (so the single-process compactor path can't run). `ArcSwap` lets
+   `free_runtime_gen` **store a fresh empty slab** through `&self`; the old `Arc<CodeSlabs>`
+   drops when the last reader guard releases it. The cost is that the reference-returning
+   RUNTIME accessors (`closure`/`string`/`vector`/`map_node`/`env_frame`/`rope`/…) now hand
+   back a guard-holding **`SlabRef<T>`** (derefs to `&T`) instead of a bare `&T`, so a read
+   in flight during a free keeps the slab alive — safe by construction (chosen over an
+   unsafe in-place swap that would rest on the drain invariant). `promote`/`def` append into
+   the loaded slab's `boxcar` in place, so a store only ever happens on a free — never on the
+   hot `def` path.
+2. **The free — `Heap::free_runtime_gen(old_gen)`** (driven by `process::free_drained_gen`,
+   gated on `old_gen_drained`): stores the empty slab, bumps `version` (self-invalidating
+   the version-stamped `global_ic`/call-&-global ICs/shared JIT caches across every process)
+   and a new `free_epoch` (each process lazily clears its handle-keyed `vm_cache` — which
+   isn't version-stamped — on its next lookup, so a **reused slot's bit-identical
+   `(gen,index)` handle can't hit a stale compiled body**). Verified by
+   `reused_slot_runs_new_code_not_stale_cache` (define→call→free→age-into-freed-slot→define
+   →call runs the new code, not the cached old body) and `free_reclaims_after_cross_process_drain`
+   (two heaps; free refused while a peer pins, succeeds once released, slot then reusable).
+
+**Stage 4 (the auto-arming — live-globals migration + the safepoint state machine)** has
+now also landed, behind the `BROOD_RT_MULTIGEN` opt-in (default **off**). Four pieces:
+
+3. **Live-globals migration — `Heap::migrate_live_globals(old_gen)`.** The design point
+   [`age_runtime`](#) surfaced: aging only flips which slot new code lands in; it moves no
+   existing binding. Because Brood's `def` is per-global (unlike an Erlang module reload,
+   which re-exports *all* a module's functions as a unit), a global defined once and never
+   redefined would stay in its birth generation forever and pin it. So aging is now paired
+   with migration: it re-exports the live globals + `declared_sigs` into the current
+   generation (reusing the compaction `flush_rt_*` machinery, generalised to be
+   *gen-selective* — forward only `old_gen` nodes — and mint *dest-gen*-tagged handles),
+   leaving the aged-out generation holding only superseded + in-flight code. The reframe: this
+   is compaction where the "forwarding" is done by **retaining** the old generation (old
+   handles stay resolvable) until its holders drain, instead of the un-coordinatable
+   cross-process handle rewrite the abandoned rolling-quiesce needed. The reconcile installs a
+   migrated handle only where the global still resides in `old_gen` (a concurrent
+   redefinition — which lands in the current generation — wins), so it needs no value
+   equality: after aging, `old_gen` is frozen. Single-flight via a `begin_aging`/`end_aging`
+   CAS.
+4. **The state machine — `Heap::advance_runtime_multigen`**, driven at the RUNTIME safepoint
+   (both engines) when compaction can't run (shared runtime): *drain in flight* → free once
+   the union is clean; *idle + other slot empty* → age + migrate + arm the drain; *idle +
+   other slot occupied* → wait (the 2-versions-max back-pressure). Migration runs **before**
+   arming the drain, so no process can newly acquire an `old_gen` reference once the drain is
+   live — the invariant the "clean stays clean" report optimisation rests on (a process that
+   reports clean for a drain epoch is not re-walked, bounding it to one liveness walk per
+   drain).
+5. **A promote⇄age soundness fix.** The concurrency test exposed a real bug: a generation
+   flip on one process could interleave with an in-flight `promote` on another — `promote`
+   reserves a slot in the current generation then fills it re-reading `cur_code()`, so a flip
+   in between made the fill hit the *wrong* generation's slab (a panic / cross-generation
+   split). Fixed with a `promote_lock` `RwLock`: promotion holds it **read** (concurrent
+   appends to a lock-free `boxcar` are fine), aging holds it **write**, so no promote ever
+   spans a flip. Uncontended on the default single-generation path.
+
+Verified: five deterministic mechanism tests in `runtime_collector.rs` (migration re-exports
+a stable global so its generation frees; migration preserves a post-aging redefinition; the
+full age→migrate→drain→free cycle repeats and stays bounded; plus the Stage-4 free tests),
+and an end-to-end `runtime_multigen.rs` (real workers churn a global under
+`BROOD_RT_MULTIGEN`; the collector ages + migrates mid-flight and never miscompiles — every
+`(f 0)` stays 0). JIT-native code executing an old generation is handled by the drain gate
+(a process running it references the generation, so its probe blocks the free) plus the
+`version`/`free_epoch` invalidation.
+
+**Stage 5 (the soft purge — parked-process drain inspection)** has now landed. A generation
+frees only once *every* live process reports clean, and reporting happens at an eval
+safepoint — but a process **parked** in `receive` never reaches a safepoint, so a drain
+armed after it parked could never collect its ack, and an idle server parked on
+current-generation code would block every later drain forever (the parked-can't-ack
+problem). Fixed the way Erlang's `check_process_code` does it — by *external inspection*: a
+paused process's continuation is relocatable heap data (ADR-100 — its live values sit on its
+own `Heap`'s `roots`/`env_roots`/`live_vm_arms`), and the scheduler holds that heap in the
+mailbox's `waiter` slot, so the drain coordinator (`old_gen_drained` →
+`report_parked_liveness`) walks each parked process's *own* quiescent heap and lets it ack
+if it's clean of the draining generation. No wakeup, no kill — a parked-clean process stops
+blocking the drain; a process genuinely paused *in* old code stays dirty (correct — it will
+resume that code). This is strictly a soft purge: it never removes a live pin, only stops a
+*false* pin (a clean-but-unreported parked process) from stalling reclamation. Verified in
+`runtime_drain.rs` (a worker parks on gen-1 code while a drain of gen 0 is armed; the drain
+completes only because the parked worker is inspected and acked — it deadlocks without the
+inspection).
+
+Still **deferred** — a purge policy for a *genuinely* pinned generation (a process actively
+**looping** in old code, not merely parked). Whole-generation reclamation needs every live
+process to become quiescent w.r.t. the draining generation; such a process pins it forever
+(exactly Erlang's `code:purge` condition), and with a permanent pin the region grows
+unbounded (churn can't reclaim past the 2-versions cap). Today's policy is the safe option
+(c): don't age a third time — accept the 2× ceiling until the pin clears. The remaining
+rungs — a `recur-latest` re-dispatch convention (the Brood analogue of Erlang's
+local-vs-external call distinction: let a long-running loop voluntarily jump to the current
+generation at its own safepoint) and a hard purge (kill + let a supervisor restart a
+straggler, Erlang's `code:purge`) — are separate future decisions, the former worth its own
+small ADR (it is new language surface). Off by default pending those + a perf A/B of the
+aging migration copy.
 
 <details><summary>Superseded sketch — the cooperative rolling quiesce (kept for context)</summary>
 

@@ -645,7 +645,7 @@ pub(super) fn face_rgb(heap: &Heap, v: Value) -> Option<[u8; 3]> {
                 None
             }
         }
-        Value::Str(id) => parse_hex_color(heap.string(id)),
+        Value::Str(id) => parse_hex_color(&heap.string(id)),
         _ => None,
     }
 }

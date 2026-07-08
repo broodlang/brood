@@ -615,7 +615,7 @@ pub(super) fn display_width(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     let v = arg(args, 0);
     match v {
         Value::Str(id) => Ok(Value::int(
-            crate::text_width::display_width(heap.string(id)) as i64,
+            crate::text_width::display_width(&heap.string(id)) as i64,
         )),
         _ => Err(LispError::wrong_type(heap, "display-width", "string", v)),
     }

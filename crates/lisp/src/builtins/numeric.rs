@@ -78,7 +78,7 @@ pub(super) fn expect_rope_ref<'h>(
     heap: &'h Heap,
     who: &str,
     v: Value,
-) -> Result<&'h ropey::Rope, LispError> {
+) -> Result<crate::core::heap::SlabRef<'h, ropey::Rope>, LispError> {
     expect!(heap, who, v, "rope",
         Value::Rope(id) => heap.rope(id),
     )
