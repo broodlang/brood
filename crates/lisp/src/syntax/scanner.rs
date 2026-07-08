@@ -217,10 +217,16 @@ impl<'a> Scanner<'a> {
     /// [`StringScan::BadEscape`], carrying the backslash's offset. Silently
     /// passing the chars through as literals (the old rule) was a
     /// wrong-output footgun (kernel audit): `"\xZZ"` quietly became `"xZZ"`.
-    /// The body is still scanned through its closing quote so the tolerant
-    /// CST keeps the right span; an unterminated string wins over a bad
-    /// escape (the REPL continuation prompt keys off `Unterminated`). The
-    /// catch-all `\X` → literal X rule for *other* chars is unchanged.
+    /// An unknown **alphabetic** escape (`\d`, `\w`, `\s`, `\q`, …) is the same
+    /// footgun and is likewise a hard `BadEscape`: it's almost always a regex
+    /// class written in a plain string, where dropping the backslash silently
+    /// breaks the pattern (`"\d+"` → `"d+"`) — the user wants `\\d`. A `\X`
+    /// escape of *punctuation or a digit* (`\.`, `\/`, `\1`) still passes
+    /// through as literal X — that's the documented, non-footgunny way to write
+    /// a literal in a regex string. The body is still scanned through its
+    /// closing quote so the tolerant CST keeps the right span; an unterminated
+    /// string wins over a bad escape (the REPL continuation prompt keys off
+    /// `Unterminated`).
     ///
     /// On `Closed`, `pos` is past the close quote. On `Unterminated`, `pos`
     /// is at EOF (the reader treats this as a parse error; the CST records an
@@ -265,17 +271,37 @@ impl<'a> Scanner<'a> {
                             }
                         }
                         other => {
-                            if let Some(buf) = out.as_deref_mut() {
-                                buf.push(match other {
-                                    'n' => '\n',
-                                    't' => '\t',
-                                    'r' => '\r',
-                                    'e' => '\u{1b}', // ESC — for ANSI terminal control
-                                    '0' => '\0',
-                                    '\\' => '\\',
-                                    '"' => '"',
-                                    c => c, // `\X` falls through to literal X
-                                });
+                            let decoded = match other {
+                                'n' => Some('\n'),
+                                't' => Some('\t'),
+                                'r' => Some('\r'),
+                                'e' => Some('\u{1b}'), // ESC — for ANSI terminal control
+                                '0' => Some('\0'),
+                                '\\' => Some('\\'),
+                                '"' => Some('"'),
+                                // An unknown *alphabetic* escape (`\d`, `\w`, `\s`,
+                                // `\q`, …) is almost always a mistake — most often a
+                                // regex character class written in a plain string,
+                                // where silently dropping the backslash yields a
+                                // wrong-matching pattern with no error at all (`"\d+"`
+                                // → `"d+"`). Reject it like a malformed `\x`/`\u` (the
+                                // sibling wrong-output footgun this file already
+                                // hardened); the user wants `\\d`.
+                                c if c.is_ascii_alphabetic() => None,
+                                // `\X` for punctuation/digits (`\.`, `\/`, `\1`) stays
+                                // literal X — the documented convenience, and not a
+                                // footgun (it's how one escapes a literal in a regex).
+                                c => Some(c),
+                            };
+                            match decoded {
+                                Some(ch) => {
+                                    if let Some(buf) = out.as_deref_mut() {
+                                        buf.push(ch);
+                                    }
+                                }
+                                None => {
+                                    bad.get_or_insert(ch_start);
+                                }
                             }
                         }
                     },
@@ -445,13 +471,21 @@ mod tests {
                 "expected BadEscape for {bad:?}"
             );
         }
+        // An unknown *alphabetic* escape is a hard error (the regex-class footgun:
+        // `\d` silently becoming `d` broke patterns). `\q"x` reports BadEscape.
         let mut s = Scanner::new(r#"\q"x"#);
+        assert!(matches!(
+            s.scan_string_body(None),
+            StringScan::BadEscape { at: 0 }
+        ));
+        // A `\X` of punctuation/digit still passes through as literal X.
+        let mut s = Scanner::new(r#"\.\1"x"#);
         let mut out = String::new();
         assert!(matches!(
             s.scan_string_body(Some(&mut out)),
             StringScan::Closed
         ));
-        assert_eq!(out, "q", "unknown non-hex escapes still pass through");
+        assert_eq!(out, ".1", "punctuation/digit escapes stay literal");
     }
 
     #[test]

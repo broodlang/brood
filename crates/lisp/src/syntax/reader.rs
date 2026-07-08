@@ -373,7 +373,8 @@ impl<'a> Parser<'a> {
             StringScan::Unterminated => Err(self.err_incomplete("unterminated string")),
             StringScan::BadEscape { at } => Err(self.err_at(
                 self.s.pos_at(at),
-                "malformed string escape: \\x needs two hex digits, \
+                "malformed string escape: an unknown letter escape like \\d \\w \\s \
+                 is rejected (write \\\\d for a regex class); \\x needs two hex digits; \
                  \\u needs {1-6 hex digits} (a Unicode scalar value)"
                     .to_string(),
             )),

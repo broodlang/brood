@@ -307,7 +307,19 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // so no intermediate Vec is allocated per conditional.
                     let (test_form, r) = uncons(heap, rest);
                     let (then_form, r) = uncons(heap, r);
-                    let (else_form, _) = uncons(heap, r);
+                    let (else_form, r) = uncons(heap, r);
+                    // The else-branch is a *single* form — reject a trailing tail
+                    // rather than silently dropping it. In Emacs Lisp `(if c then
+                    // e1 e2 …)` runs the trailing forms as an implicit-`progn` else;
+                    // that muscle memory would otherwise vanish here without a peep
+                    // (Brood is an Emacs-like editor language). Point at `do`.
+                    if !matches!(r.unpack(), ValueRef::Nil) {
+                        return Err(LispError::arity(
+                            "if: too many arguments — the else-branch is a single form; \
+                             wrap multiple forms in (do …)",
+                        )
+                        .or_form_pos(heap, expr));
+                    }
                     // Evaluating the test can collect at ANY depth (ADR-061), so
                     // keep the unchosen branches + env on the operand stack and
                     // re-read the relocated handles before the tail hand-off.
@@ -337,6 +349,18 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                 },
                 Some(SpecialForm::Def) => {
                     let args = heap.list_to_vec(rest)?;
+                    // `(def name value?)` — at most a name and one value. Reject a
+                    // trailing tail rather than silently dropping it (a `(def pi 3.14
+                    // "doc")` docstring habit, or stray forms the user expected to
+                    // run, would vanish without a peep). `def` takes no docstring —
+                    // use `defn`, or attach docs to the value.
+                    if args.len() > 2 {
+                        return Err(LispError::arity(
+                            "def: too many arguments — expected (def name value); \
+                             def takes no docstring and runs no extra forms",
+                        )
+                        .or_form_pos(heap, expr));
+                    }
                     let name = as_symbol(
                         args.first()
                             .copied()

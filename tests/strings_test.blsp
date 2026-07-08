@@ -95,9 +95,19 @@
     (assert-error (read-string "\"\\u{}\""))
     (assert-error (read-string "\"\\u{nothex}\""))
     (assert-error (read-string "\"\\u{110000}\"")))
-  (test "unknown non-hex escapes still pass through as literals"
-    (assert= "\q" "q")
-    (assert= (read-string "\"\\q\"") "q")))
+  (test "unknown punctuation/digit escapes pass through as literal X"
+    ;; `\X` for punctuation or a digit stays literal — how you write a literal
+    ;; metacharacter in a regex string (`\.` etc.), and not a footgun.
+    (assert= (read-string "\"\\.\"") ".")
+    (assert= (read-string "\"\\/\"") "/")
+    (assert= (read-string "\"\\1\"") "1"))
+  (test "unknown ALPHABETIC escapes are a hard error (regex-class footgun)"
+    ;; `"\d+"` used to silently become `"d+"`, breaking regex patterns with no
+    ;; error. An unknown letter escape now rejects — the user wants `\\d`.
+    (assert-error (read-string "\"\\q\""))
+    (assert-error (read-string "\"\\d+\""))
+    (assert-error (read-string "\"\\w\""))
+    (assert-error (read-string "\"\\s\""))))
 
 (describe "search"
   (test "index-of finds the first occurrence"

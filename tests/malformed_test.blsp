@@ -266,8 +266,12 @@
   (test "\"#q\" reads as a symbol, not an error"
     (is (symbol? (read-string "#q"))))
 
-  (test "unknown backslash escape in a string literal silently drops the backslash"
-    (assert= "q" (read-string "\"\\q\""))))
+  (test "unknown alphabetic backslash escape is a hard read error (regex footgun)"
+    ;; `"\d"` used to silently become `"d"`, breaking regex patterns; a letter
+    ;; escape now rejects (the user wants `\\d`). Punctuation/digit escapes still
+    ;; pass through as literal X.
+    (assert-error (read-string "\"\\q\""))
+    (assert= "." (read-string "\"\\.\""))))
 
 ;; ── 11. apply and map/filter arity ───────────────────────────────────────────
 
