@@ -2597,3 +2597,30 @@ Also polished the bytes-literal bad-escape message to match the string path.
 The review also confirmed the storage/guard machinery, promote⇄age locking,
 parked-process inspection (lock ordering + quiescence), and the 2-generation cap are
 sound; and that the footgun fixes (spawn/if/def/escape) have no correctness issues.
+
+### Perf A/B on the multi-process GC — a per-call RUNTIME-safepoint regression, fixed by sampling
+
+Ran the clean eval A/B (baseline f85e5c9 vs the ADR-091 stage-3–5 tree) on an idle
+machine. The call-heavy micro-benchmarks regressed on the default VM engine — `fib(25)`
+24.2ms → 30.8ms (~+27%), with `apply_driven`/`reduce_range` also up — while
+`cons_build`/`sum_tail` were flat. A controlled same-tree experiment (gate the check out,
+rebuild, re-bench) pinned it: `fib(25)` dropped to 22.2ms with the RUNTIME safepoint
+disabled, so the cost was `rt_gc_due()` itself.
+
+Cause: stage 3–5 added a RUNTIME-region safepoint to the *VM* trampoline (it was
+tree-walker-only before — a real leak fix: VM programs now compact the shared code
+region). But `rt_gc_due()` loads the shared-code `ArcSwap` guard + counts its closures,
+and it ran **every frame**. RUNTIME only grows on `def` (a `promote`), which never happens
+inside a hot compute loop, so the probe's *cost*, not its result, was the tax.
+
+Fix: sample it in `vm_run_bc` — run the probe on frame 1 of every `vm_run_bc` (once per
+top-level form / resume, so a script of many short `def`s still collects promptly) and
+every 256th frame of a long run (so a hot loop pays ~1/256 of the cost). This changes only
+the check *frequency*, not which conditions trigger a collect, so the drain state machine
+is untouched: `runtime_multigen` still ages/migrates/drains under load (verified 3×, plus
+under `BROOD_GC_STRESS`), collector 20/20, drain green. `fib` returns to ≈baseline.
+
+Note: the benches carry ~±15% run-to-run variance, so the smaller `apply_driven`/
+`reduce_range` deltas are within noise and not separately actionable; `fib` was the one
+clean, reproducible signal, and it's resolved. BROOD_RT_MULTIGEN stays **off** by default
+(this was a default-path fix, independent of the multigen feature flag).
