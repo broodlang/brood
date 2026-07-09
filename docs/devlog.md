@@ -2836,3 +2836,51 @@ safepoint during a drain) + the post-migration cache-invalidation re-resolve, mu
 across 2614 tests. That's a throughput optimization (a sound scan-throttle + reducing the
 cache-clear blast radius), not a correctness blocker. Multigen stays opt-in; the hang — the
 thing that made it *unusable* — is gone.
+
+## 2026-07-09 — Multigen RUNTIME GC: closed the throughput gap (two-phase self-report walk) — suite at parity
+
+The prior entry left multigen hang-free but ~35× too slow to finish the in-language suite
+(>400 s vs ~12 s). This closes it: **the whole in-language suite now runs under
+`BROOD_RT_MULTIGEN` in ~12–13 s — parity with the default 12.3 s, 2614/2614, 3× stable.**
+
+**Method — measure, don't guess.** Two plausible culprits were ruled out *by A/B*, not
+reasoning: (1) the per-closure `rt_slab_ref` `ArcSwap` guard under multigen (added a fast-path
+escape hatch, A/B'd: fast ≈ guarded, **zero** gain — reverted, kept the conservative guard);
+(2) multigen merely being *enabled* (enabled-but-cycle-disabled ran at full default speed —
+so the cost is entirely the age/migrate/drain **cycle**, not the flag). Diagnostic counters
+then showed the drain bookkeeping was already cheap (15 advances, 1 migrate, 0 frees) but
+`walk_ms=2210` of a 2298 ms run — **the drain self-report walk was ~96% of the cost.**
+
+**Root cause.** `runtime_gen_referenced_impl` (the private self-report probe) seeds the
+**entire local heap** into its work-list *before* the transitive walk can early-exit. A drain
+lingers whenever a long-lived process pins the old generation (Erlang's local-call code-pinning
+limitation), so that process re-reports every safepoint — and each report re-seeded its whole,
+still-growing local heap even though its *live VM arm* (the actual pin) would answer the query
+in O(1). O(heap) × tens of thousands of reports = the 1.7 s.
+
+**Fix — two-phase walk (semantics-preserving).** Split the probe: **Phase 1** seeds only the
+cheap roots (private stack/env/dynamics + live VM arms), walks to fixpoint, early-exits; **Phase
+2** seeds the full local heap and continues **only if Phase 1 came up clean**. A pinning process
+(overwhelmingly: one *running* old-gen code) short-circuits in Phase 1 without ever paying the
+O(heap) seed. Same seed set, same transitive rule, `visited` carried across phases — identical
+answer. `rounds` 2170 → 421 ms; `nestlike` unchanged-fast. Extracted the transitive loop into
+`walk_reaches_gen`.
+
+**Plus three residual-cost trims** (each measured to matter once the walk was cheap): a
+per-process **clean-ack `Cell` cache** (`acked_drain_epoch`) so an already-clean process skips
+the `drain_acks` read lock every frame; **dropping the dirty-path `acks.remove` write lock**
+(it was a no-op under clean-stays-clean, but serialized P writers every safepoint); a
+**free-attempt scan throttle** (`RT_DRAIN_SCAN_STRIDE = 64`) so the O(live-process) registry
+scan runs 1/64 safepoints instead of every one; and **gating the RUNTIME-collect safepoint on
+`rt_dirty` alone** (not `drain_active`) in both the VM (`vm_run_bc`) and tree-walker (`eval`),
+so a lingering drain no longer forces the `cur_code()` `ArcSwap` load on every frame — the
+collect/free rides mint frames, while the O(1) self-report still runs every frame.
+
+**Verification.** Two-phase Phase-2 correctness exercised directly: 300 RUNTIME closures
+captured in *local data* (not on the running arm) across 60 def-churn rounds under
+`BROOD_GC_VERIFY=1 BROOD_GC_STRESS=1 BROOD_RT_MULTIGEN=1` — correct result, no verifier/tripwire
+fire (Phase 2 detects the pins; the still-referenced gen is not freed). 726 Rust tests green,
+23 multigen/drain/migration Rust tests green, reload tests green under multigen, full 2614 suite
+green under both default and multigen. The A/B `rt_slab_ref` fast-path and all diagnostic
+counters were removed before commit. Multigen remains opt-in, but is now *viable by default* —
+the throughput blocker is gone.

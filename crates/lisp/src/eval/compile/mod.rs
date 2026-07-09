@@ -4844,13 +4844,21 @@ fn vm_run_bc(
         // are needed. Gated on `rt_dirty`/`drain_active` (see below) and the same
         // macro-block guard as the LOCAL collect.
         // Gate the (costly) `rt_gc_due` probe — an `ArcSwap` load + closure count —
-        // on two cheap relaxed loads: run it only when the RUNTIME region has grown
-        // since the last check (`rt_dirty`, set at the sole mint point) or a drain is
-        // in progress (which needs every safepoint to advance/free it). A def-free
-        // hot loop (`fib`, `reduce`, `apply`) trips neither and pays nothing; a mint
-        // re-arms `rt_dirty` so a collect is at most one frame late.
-        if (heap.rt_dirty() || heap.drain_active()) && !crate::process::macro_block_active()
-        {
+        // on one cheap relaxed load: run it only when the RUNTIME region has grown
+        // since the last check (`rt_dirty`, set at the sole mint point). A def-free hot
+        // loop (`fib`, `reduce`, `apply`) trips it never and pays nothing; a mint re-arms
+        // `rt_dirty` so a collect is at most one frame late.
+        //
+        // NOTE: this gate deliberately does **not** also fire on `drain_active`. A
+        // lingering drain (a long-lived process pins the generation, so it never frees)
+        // would otherwise force this whole block — the `cur_code()` `ArcSwap` load — on
+        // *every* frame for the rest of the run, which is the multigen `rounds`-shape
+        // overhead. The drain is instead advanced/freed on `rt_dirty` (mint) frames,
+        // which occur whenever code churns; the separate O(1) drain self-report below
+        // still runs every frame so acks stay current, and a completable drain frees at
+        // the next mint (retaining one extra generation over a fully idle interval is
+        // bounded and harmless).
+        if heap.rt_dirty() && !crate::process::macro_block_active() {
             heap.rt_dirty_clear();
             if heap.rt_gc_due() {
                 heap.maybe_runtime_collect(&mut [], &mut []);

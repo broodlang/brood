@@ -388,6 +388,12 @@ fn rt_gc_floor() -> usize {
     })
 }
 
+/// How often a process runs the multigen drain free-attempt (the O·live-process
+/// `report_parked_liveness` registry scan) at its RUNTIME safepoint while a drain is
+/// armed: once every `RT_DRAIN_SCAN_STRIDE` safepoints, not every frame. See the
+/// `rt_drain_tick` field for why (the pinned-generation scan storm).
+const RT_DRAIN_SCAN_STRIDE: u32 = 64;
+
 /// Is the **multi-process RUNTIME collector** (ADR-091 Stage 4 — age + migrate live
 /// globals + drain + free) armed? Off by default: whole-generation reclamation on a
 /// *shared* runtime is opt-in via `BROOD_RT_MULTIGEN` pending a perf A/B of the aging
@@ -1633,6 +1639,35 @@ pub struct Heap {
     rt_gen_cache: std::cell::UnsafeCell<[Option<Arc<CodeSlabs>>; 2]>,
     /// The [`RuntimeCode::gens_epoch`] this process last synced `rt_gen_cache` to.
     seen_gens_epoch: Cell<u64>,
+    /// **RUNTIME collector — Stage 4 (drain free-attempt throttle, ADR-091).** A
+    /// per-process tick rate-limiting how often this process runs the multigen drain
+    /// **free-attempt** ([`crate::process::free_drained_gen`] → the O·live-process
+    /// `report_parked_liveness` whole-registry scan) at its safepoint. While a drain is
+    /// armed the threshold is held low so every safepoint re-enters the collector; when
+    /// the drain can't yet complete — a long-lived process still runs old-generation
+    /// code, so the generation stays pinned — that means the O(live-process) registry
+    /// scan runs on *every* safepoint of *every* worker purely to re-discover "still not
+    /// drained" (measured: 800 k scans / 20 M mailbox locks on a 30-round repro, ~6×
+    /// the default runtime). Throttling the free-attempt to 1/[`RT_DRAIN_SCAN_STRIDE`]
+    /// cuts that ~stride-fold; the free is still attempted regularly (no lost wakeup) as
+    /// long as any process reaches a safepoint, and every process's O(1) drain
+    /// self-report still runs every frame so acks stay current. A plain `Cell` (the
+    /// `Heap` is single-threaded), so the throttle adds no atomic or cross-core traffic.
+    rt_drain_tick: Cell<u32>,
+    /// **RUNTIME collector — Stage 3c (local clean-ack cache, ADR-091).** The drain
+    /// epoch this process last reported *clean* for (0 = none). While a drain stays
+    /// armed — which it does for the whole run whenever a long-lived process pins the
+    /// draining generation (a top-level test-runner loop still executing old-gen code;
+    /// Erlang has the same local-call limitation) — every process's safepoint calls
+    /// `report_gen_liveness`, and a process that already acked clean would re-take the
+    /// shared `drain_acks` *read* lock every frame just to re-confirm its ack. That
+    /// per-frame lock, across every worker for the whole run, is the residual cost once
+    /// the scan and the dirty write are handled (the `rounds`-shape ~6× overhead). This
+    /// `Cell` short-circuits it: once clean for epoch E, the process is clean for E by
+    /// the clean-stays-clean invariant, so a `Cell` read + compare replaces the lock. A
+    /// fresh drain bumps the epoch (≠ the cached value) so the process re-reports. Plain
+    /// `Cell`: the `Heap` is single-threaded.
+    acked_drain_epoch: Cell<u64>,
     /// The compiled arms **currently executing** on this process's stack — a stack
     /// pushed by `compile::vm_apply` (and the top-level `run`) on entry, the top
     /// updated on a tail-call into a different arm, popped on return. `runtime_collect`
@@ -1990,6 +2025,8 @@ impl Heap {
             seen_free_epoch: Cell::new(0),
             rt_gen_cache: std::cell::UnsafeCell::new([None, None]),
             seen_gens_epoch: Cell::new(0),
+            rt_drain_tick: Cell::new(0),
+            acked_drain_epoch: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -2045,6 +2082,8 @@ impl Heap {
             seen_free_epoch: Cell::new(0),
             rt_gen_cache: std::cell::UnsafeCell::new([None, None]),
             seen_gens_epoch: Cell::new(0),
+            rt_drain_tick: Cell::new(0),
+            acked_drain_epoch: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -6103,6 +6142,14 @@ impl Heap {
         let mut work: Vec<Value> = Vec::new();
         let mut env_work: Vec<EnvId> = Vec::new();
 
+        // === Phase 1 — the CHEAP roots, walked to fixpoint first with an early exit. ===
+        // The private roots and live VM arms are O(process stack + arm count); the local
+        // heap (Phase 2) is O(heap size). A drain's overwhelmingly common pin is a process
+        // *running* old-gen code — its live arm sits here — so checking these first lets a
+        // pinning process's per-safepoint report short-circuit without paying the O(heap)
+        // seed at all. (The two-batch split is semantics-preserving: same seed set, same
+        // transitive rule; Phase 2 only runs when Phase 1 didn't already find the gen.)
+
         // --- Shared roots: globals + declared `(sig …)` type-exprs. Skipped by the
         // private probe (the drain self-report) — see `runtime_gen_referenced_private`. ---
         if include_shared {
@@ -6120,10 +6167,25 @@ impl Heap {
         work.extend(self.roots.iter().copied());
         env_work.extend(self.env_roots.iter().copied());
         work.extend(self.dynamics.iter().map(|(_, v)| *v));
-        // --- The LOCAL heap (both generations): immutable data can embed a captured
-        // RUNTIME closure handle — the one place the shared-root walk can't reach.
-        // Every cell is seeded directly (a LOCAL handle is never gen-tagged RUNTIME,
-        // so the transitive walk below only ever follows RUNTIME sub-handles). ---
+        // --- Live VM arms mid-execution: RUNTIME literals baked into Const/MakeClosure
+        // (the one holder off the GC root graph, mirroring compaction's step 3b). Read
+        // them via the arm-handle visitor, returning each value unchanged. ---
+        let live_arms = self.live_vm_arms.clone();
+        for arm in &live_arms {
+            crate::eval::compile::rewrite_arm_handles(arm, &mut |v| {
+                work.push(v);
+                v
+            });
+        }
+        if self.walk_reaches_gen(gen, &mut work, &mut env_work, &mut visited, &mut visited_env) {
+            return true;
+        }
+
+        // === Phase 2 — the LOCAL heap (both generations): immutable data can embed a
+        // captured RUNTIME closure handle — the one place the shared-root walk can't
+        // reach. Only reached when the cheap roots didn't already pin the gen. Every cell
+        // is seeded directly (a LOCAL handle is never gen-tagged RUNTIME, so the walk only
+        // ever follows RUNTIME sub-handles). ---
         for slabs in [&self.local, &self.old] {
             for (a, b) in slabs.pairs.iter() {
                 work.push(*a);
@@ -6154,16 +6216,21 @@ impl Heap {
                 }
             }
         }
-        // --- Live VM arms mid-execution: RUNTIME literals baked into Const/MakeClosure
-        // (the one holder off the GC root graph, mirroring compaction's step 3b). Read
-        // them via the arm-handle visitor, returning each value unchanged. ---
-        let live_arms = self.live_vm_arms.clone();
-        for arm in &live_arms {
-            crate::eval::compile::rewrite_arm_handles(arm, &mut |v| {
-                work.push(v);
-                v
-            });
-        }
+        self.walk_reaches_gen(gen, &mut work, &mut env_work, &mut visited, &mut visited_env)
+    }
+
+    /// Drive the transitive reachability walk over the seeded `work`/`env_work` lists to
+    /// fixpoint, following every RUNTIME sub-handle; return `true` the instant a handle in
+    /// generation `gen` is seen. Shared by both phases of `runtime_gen_referenced_impl`
+    /// (the `visited` sets carry across phases so Phase 2 never re-walks Phase 1's graph).
+    fn walk_reaches_gen(
+        &self,
+        gen: usize,
+        work: &mut Vec<Value>,
+        env_work: &mut Vec<EnvId>,
+        visited: &mut HashSet<(usize, usize)>,
+        visited_env: &mut HashSet<(usize, usize)>,
+    ) -> bool {
 
         // --- Transitive walk. Detect generation `gen`; follow every RUNTIME sub-handle
         // (a gen-current closure can embed a gen-`gen` handle in a body/env). ---
@@ -6320,11 +6387,21 @@ impl Heap {
         // generation, globals were migrated off `old_gen` before the drain armed, and
         // an old-gen handle can never arrive by message (messages deep-copy, promoting
         // closures into the receiver's current generation). So a clean ack needn't be
-        // re-earned each safepoint — this bounds a process to one liveness walk per
-        // drain, keeping a slow-to-free drain from taxing every safepoint.
+        // re-earned each safepoint — this bounds a process to one liveness walk per drain.
+        //
+        // The check is two-tiered: a **local** `Cell` first (no lock — the common path
+        // when a drain lingers because some other process pins the generation, so *this*
+        // process spends the whole run already-clean), then the **shared** ack table
+        // (which also catches an ack written on this pid's behalf by the parked-process
+        // inspector while it was suspended). Caching the shared hit locally means each
+        // subsequent frame is a `Cell` read, not a `drain_acks` read lock.
+        if self.acked_drain_epoch.get() == epoch {
+            return;
+        }
         {
             let acks = rt.drain_acks.read().unwrap_or_else(|e| e.into_inner());
             if acks.get(&pid) == Some(&epoch) {
+                self.acked_drain_epoch.set(epoch);
                 return;
             }
         }
@@ -6342,12 +6419,25 @@ impl Heap {
         // needed — and it still catches the only way a process can actually pin the
         // generation: a handle it captured privately before the migration.
         let clean = !self.runtime_gen_referenced_private(gen);
-        let mut acks = rt.drain_acks.write().unwrap_or_else(|e| e.into_inner());
         if clean {
-            acks.insert(pid, epoch);
-        } else {
-            acks.remove(&pid);
+            rt.drain_acks
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(pid, epoch);
+            // Cache the clean ack locally so subsequent frames short-circuit at the
+            // `Cell` check above without re-taking the `drain_acks` read lock.
+            self.acked_drain_epoch.set(epoch);
         }
+        // Dirty → take no write lock. A process reaching here holds no current-epoch ack
+        // (the fast path above returns if it did) and `begin_gen_drain` cleared the table
+        // at epoch start, so there is nothing to remove — simply not acking already pins
+        // the generation. The former `acks.remove(&pid)` here was a no-op that still took
+        // the `drain_acks` *write* lock on every safepoint of every still-pinning process:
+        // P-way writer serialization (measured as the dominant residual cost once the
+        // scan is throttled — a churny multi-process drain). Sound by clean-stays-clean
+        // (ADR-091): post-migrate no process can newly acquire an old-gen handle, so a
+        // process that ever acked clean never becomes dirty again and needs no removal; a
+        // fresh drain bumps the epoch and clears the table, so no stale ack survives.
     }
 
     /// **RUNTIME collector — Stage 3b (the union answer).** Is the draining
@@ -6665,14 +6755,31 @@ impl Heap {
         // complete if it later goes quiescent (otherwise the aged-out generation would
         // leak, never freed). Compaction can't run on a generation being drained anyway.
         if rt_multigen_enabled() && self.drain_active() {
-            self.advance_runtime_multigen();
+            // Throttle the free-attempt (the O·live-process `report_parked_liveness`
+            // registry scan) to 1/stride of this process's safepoints. A drain that can't
+            // yet complete otherwise re-runs that whole-registry scan on every safepoint of
+            // every worker purely to re-discover "still not drained" — the dominant cost
+            // once the self-report walk is cheap (measured: ~800 k scans / 20 M mailbox
+            // locks / 30-round repro). Every process's O(1) self-report still runs every
+            // frame, so acks stay current and the free is still attempted every `stride`
+            // frames as long as any process reaches a safepoint (no lost wakeup).
+            let t = self.rt_drain_tick.get().wrapping_add(1);
+            self.rt_drain_tick.set(t);
+            if t % RT_DRAIN_SCAN_STRIDE == 0 {
+                self.advance_runtime_multigen();
+            }
+            // Back off the threshold even while the drain is still armed, rather than
+            // pinning it to `count`. Pinning made `rt_gc_due` true every frame, so every
+            // safepoint re-entered this branch and paid the `cur_code()` `ArcSwap` loads —
+            // for the whole run, whenever a drain lingers because a long-lived process
+            // pins the generation (which it does across a churny workload; Erlang's
+            // local-call code-pinning limitation). With the exponential back-off the
+            // collector is re-entered only at region-growth doublings; the O(1) drain
+            // self-report still runs every frame (so acks stay current) and the free is
+            // still attempted at each doubling (no lost wakeup — completion never needs
+            // the free, and a completable drain frees at the next doubling).
             let count = self.runtime.cur_code().closures.count();
-            self.rt_gc_threshold = if self.drain_active() {
-                // Still draining — keep re-entering at the next safepoint to free promptly.
-                count.max(rt_gc_floor())
-            } else {
-                rt_gc_floor().max(count.saturating_mul(2))
-            };
+            self.rt_gc_threshold = rt_gc_floor().max(count.saturating_mul(2));
             return;
         }
         match self.runtime_collect_with(extra_roots, extra_envs) {

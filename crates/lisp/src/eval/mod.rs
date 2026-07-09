@@ -233,12 +233,20 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // here. Runs only when this heap uniquely owns the runtime (single-process
         // / quiescent); a shared runtime backs off. Cost when not due: a `boxcar`
         // length read + a compare.
-        if !crate::process::macro_block_active() && heap.rt_gc_due() {
-            let mut roots = [expr];
-            let mut envs = [env];
-            heap.maybe_runtime_collect(&mut roots, &mut envs);
-            expr = roots[0];
-            env = envs[0];
+        // Gated on `rt_dirty` (a real mint since the last check), mirroring the VM
+        // safepoint: without it, `rt_gc_due` — a `cur_code()` `ArcSwap` load — ran on
+        // every tree-walk step, and during a lingering multigen drain that is pure
+        // overhead (the collect/free is driven off mint frames; the drain self-report
+        // below runs every frame separately).
+        if heap.rt_dirty() && !crate::process::macro_block_active() {
+            heap.rt_dirty_clear();
+            if heap.rt_gc_due() {
+                let mut roots = [expr];
+                let mut envs = [env];
+                heap.maybe_runtime_collect(&mut roots, &mut envs);
+                expr = roots[0];
+                env = envs[0];
+            }
         }
         // RUNTIME-drain cooperative report (ADR-091 Stage 3c). While a generation
         // drain is armed (rare — Stage 4 arms it), report whether this process still
