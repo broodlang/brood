@@ -935,7 +935,24 @@ impl Ty {
                             return false;
                         }
                     }
-                    None => return false, // self = "any map" ⊄ a specific map<K,V>
+                    None => match &self.fields {
+                        // A closed record IS a map with keyword keys: it's a subtype of
+                        // `map<K,V>` when a keyword key fits K and every field value type
+                        // fits V. (Uses the conservative "any keyword" for the key rather
+                        // than the exact literal set — enough for the common `map<keyword,
+                        // any>`, and never a false accept.)
+                        Some(fields) => {
+                            if !Ty::of(Tag::Keyword).is_subtype(&b.0) {
+                                return false;
+                            }
+                            for (_k, (vty, _opt)) in fields.iter() {
+                                if !vty.is_subtype(&b.1) {
+                                    return false;
+                                }
+                            }
+                        }
+                        None => return false, // self = "any map" ⊄ a specific map<K,V>
+                    },
                 }
             }
             if let Some(b) = &other.fields {
@@ -2299,6 +2316,23 @@ mod tests {
         // incomplete.
         let bare = rec(&[]);
         assert!(!bare.is_subtype(&a_optional));
+    }
+
+    #[test]
+    fn record_is_a_subtype_of_map_with_keyword_keys() {
+        // A closed record IS a map with keyword keys, so it satisfies a
+        // `map<keyword, any>` annotation (config maps / option bags). Regression:
+        // the checker used to flag `(config/window-mode {:fullscreen :maximized})`.
+        let r = rec(&[("fullscreen", Ty::of_value(value::kw("maximized")), true)]);
+        let map_kw_any = Ty::map_of(Ty::of(Tag::Keyword), Ty::ANY);
+        assert!(r.is_subtype(&map_kw_any));
+        assert!(rec(&[]).is_subtype(&map_kw_any)); // an empty record too
+
+        // Depth still bites: each field value must fit V. A string-valued field
+        // fits `map<keyword, string>` but not `map<keyword, int>`.
+        let str_rec = rec(&[("k", Ty::of(Tag::Str), true)]);
+        assert!(str_rec.is_subtype(&Ty::map_of(Ty::of(Tag::Keyword), Ty::of(Tag::Str))));
+        assert!(!str_rec.is_subtype(&Ty::map_of(Ty::of(Tag::Keyword), Ty::of(Tag::Int))));
     }
 
     #[test]
