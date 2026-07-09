@@ -2659,3 +2659,34 @@ slowdown on an unchanged engine) gave a much cleaner read. Two findings:
    reusing the existing `free_epoch`/`seen_free_epoch`/`vm_cache` pattern. On the default path
    `gens[0]`'s `Arc` never changes (age/free only fire under multigen; single-process compaction
    mutates in place via `Arc::get_mut`), so the cache would load once and never invalidate.
+
+### The HOF regression, fixed — epoch-keyed memoization of the RUNTIME slab read
+
+Closed the +16% `apply`/`reduce`/`map`/`fold` regression from the previous entry (the
+`ArcSwap`-per-closure-deref that Stage 4 introduced so a generation can be freed while the
+runtime is shared). `Heap::rt_slab_ref` now caches each generation's `Arc<CodeSlabs>`
+per-process and skips the `ArcSwap` load, revalidating against a new
+`RuntimeCode::gens_epoch` bumped at the only two sites that replace a `gens[_]` Arc
+(single-process compaction's commit + `free_runtime_gen`). A projected `&CodeSlabs` is
+handed out with `&self`'s lifetime (the cached `Arc` lives in the heap), so the common
+deref is a relaxed epoch load + a pointer read — no atomic `ArcSwap` protocol.
+
+Soundness rests on a gate: the fast path runs **only when the multi-process collector is
+disabled** (`!rt_multigen_enabled()`, the default). Verified from the code that every
+`gens` store then happens single-threaded — compaction is `Arc::get_mut`-gated to the sole
+process, and the only direct-free caller off the flag (`runtime_collector`) is
+single-threaded, while every *multi-threaded* free path (`runtime_multigen`) sets
+`BROOD_RT_MULTIGEN`. So no generation is ever freed concurrently with a fast-path deref,
+and a synchronous deref can't observe a mid-use `Arc` swap. When multigen *is* armed,
+`rt_slab_ref` falls back to the original `ArcSwap` `Guard` (which defers a concurrent
+free's drop) — that branch is byte-identical to the pre-change code.
+
+Result (interleaved A/B, baseline `f85e5c9` vs fix; round-1 same-thermal pair):
+`reduce_range/1e6` −3.8%, `apply_driven/1e5` +0.5% — both back to baseline from +17%/+16%;
+`fib`/`sum_tail` flat. Validation: default full suite 2610/0; `runtime_collector`
+(single-threaded age/migrate/**free** — exercises exactly the epoch invalidation) 20/20
+under `BROOD_GC_STRESS`+`BROOD_GC_VERIFY`; `runtime_multigen` (multigen on → Guard path)
+green under stress; lib 375/0 under stress+verify. (The *full* suite under
+`BROOD_RT_MULTIGEN=1` is too slow to complete in-budget — active whole-generation
+collection across 2610 tests — but the Guard path is unchanged, so the default-path suite
+plus the multigen unit tests cover both branches.)

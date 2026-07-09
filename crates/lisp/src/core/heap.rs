@@ -1126,6 +1126,19 @@ pub struct RuntimeCode {
     /// this. Relaxed: it only has to *change* (a lazy one-shot cache clear, no data
     /// publication gated on it — the freed slab is already unreachable by the drain).
     free_epoch: AtomicU64,
+    /// Bumped whenever a `gens[_]` slot's **`Arc` is replaced** — the two `store`
+    /// sites: single-process compaction ([`Heap::runtime_collect_with`]) and a
+    /// generation free ([`Heap::free_runtime_gen`]). Aging never stores (it only
+    /// flips `current_gen`), and `promote`/migration append into the *existing* slab
+    /// in place, so neither bumps this. The fast RUNTIME-read path
+    /// ([`Heap::rt_slab_ref`], taken only when the multi-process collector is
+    /// disabled) caches each generation's slab pointer and revalidates it against
+    /// this epoch, so a compaction/free that swaps the `Arc` invalidates the cache
+    /// before the next deref. Relaxed: with multigen off every such store is
+    /// single-threaded (compaction is `Arc::get_mut`-gated to one process; a
+    /// direct-free test drives one thread), so there is no cross-thread ordering to
+    /// establish — the reader is the writer.
+    gens_epoch: AtomicU64,
     /// **RUNTIME collector — Stage 4 (single-flight aging, ADR-091).** Held for the
     /// duration of an `age + migrate_live_globals + begin_gen_drain` sequence so at
     /// most one process ages at a time. Two processes racing the safepoint could both
@@ -1204,6 +1217,7 @@ impl Default for RuntimeCode {
             drain_epoch: AtomicU64::new(0),
             drain_acks: RwLock::new(HashMap::new()),
             free_epoch: AtomicU64::new(0),
+            gens_epoch: AtomicU64::new(0),
             aging: AtomicBool::new(false),
             free_count: AtomicU64::new(0),
             aged_count: AtomicU64::new(0),
@@ -1292,6 +1306,7 @@ impl RuntimeCode {
             drain_epoch: AtomicU64::new(0),
             drain_acks: RwLock::new(HashMap::new()),
             free_epoch: AtomicU64::new(0),
+            gens_epoch: AtomicU64::new(0),
             aging: AtomicBool::new(false),
             free_count: AtomicU64::new(0),
             aged_count: AtomicU64::new(0),
@@ -1603,6 +1618,21 @@ pub struct Heap {
     /// can't alias a reused handle. Cheap: one relaxed atomic load + compare per
     /// closure-call cache lookup, a full clear only on the rare free.
     seen_free_epoch: Cell<u64>,
+    /// Fast-path RUNTIME slab cache (see [`Heap::rt_slab_ref`]). Per generation index,
+    /// the `Arc<CodeSlabs>` last loaded from `gens[g]`, reused without an `ArcSwap`
+    /// load while [`RuntimeCode::gens_epoch`] is unchanged — this removes an `ArcSwap`
+    /// load from *every* RUNTIME closure/string deref (the `apply`/`reduce`/`map` HOF
+    /// path resolves the callee per element with no inline cache, so it paid one such
+    /// load per call). Consulted **only when the multi-process collector is disabled**
+    /// (the default): there every `gens` store is single-threaded, so a bare
+    /// `&CodeSlabs` projected from the cached `Arc` and handed out with `&self`'s
+    /// lifetime cannot be freed or replaced mid-use. `UnsafeCell` (not `RefCell`) so
+    /// that projected reference can carry `&self`'s lifetime instead of a borrow
+    /// guard's; `rt_slab_ref`'s access discipline upholds the aliasing rules. Holds an
+    /// `Arc` clone (not a raw pointer) so `Heap` stays `Send` for live migration.
+    rt_gen_cache: std::cell::UnsafeCell<[Option<Arc<CodeSlabs>>; 2]>,
+    /// The [`RuntimeCode::gens_epoch`] this process last synced `rt_gen_cache` to.
+    seen_gens_epoch: Cell<u64>,
     /// The compiled arms **currently executing** on this process's stack — a stack
     /// pushed by `compile::vm_apply` (and the top-level `run`) on entry, the top
     /// updated on a tail-call into a different arm, popped on return. `runtime_collect`
@@ -1958,6 +1988,8 @@ impl Heap {
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
             seen_free_epoch: Cell::new(0),
+            rt_gen_cache: std::cell::UnsafeCell::new([None, None]),
+            seen_gens_epoch: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -2011,6 +2043,8 @@ impl Heap {
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
             seen_free_epoch: Cell::new(0),
+            rt_gen_cache: std::cell::UnsafeCell::new([None, None]),
+            seen_gens_epoch: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -4158,11 +4192,50 @@ impl Heap {
         g: usize,
         project: impl FnOnce(&CodeSlabs) -> &T,
     ) -> SlabRef<'_, T> {
-        let guard = self.runtime.code_gen(g);
-        let ptr = project(&guard) as *const T;
-        // SAFETY: `ptr` points into `guard`'s `CodeSlabs` (stable `boxcar` address);
-        // the guard moved into the `SlabRef` keeps that slab alive for the borrow.
-        unsafe { SlabRef::guarded(guard, ptr) }
+        if rt_multigen_enabled() {
+            // Multi-process collector armed: a generation can be **freed concurrently**
+            // by the collector while other processes run, so keep the `ArcSwap` guard —
+            // it defers the freed `Arc`'s drop until this borrow ends.
+            let guard = self.runtime.code_gen(g);
+            let ptr = project(&guard) as *const T;
+            // SAFETY: `ptr` points into `guard`'s `CodeSlabs` (stable `boxcar` address);
+            // the guard moved into the `SlabRef` keeps that slab alive for the borrow.
+            return unsafe { SlabRef::guarded(guard, ptr) };
+        }
+        // Fast path — multi-process collector disabled (the default). A `gens[g]` `Arc`
+        // is then replaced only by single-process compaction (`Arc::get_mut`-gated, so
+        // this is the sole process) or a single-threaded direct free; never
+        // concurrently. So we cache the loaded `Arc` per generation and skip the
+        // `ArcSwap` load, revalidating against `gens_epoch` (bumped at both store
+        // sites) so a compaction/free that swaps the `Arc` is caught before the next
+        // deref.
+        let ep = self.runtime.gens_epoch.load(Ordering::Relaxed);
+        // Refresh the cache: clear on epoch change, populate the requested slot. Scoped
+        // `&mut` so it does not overlap the shared reborrow below.
+        {
+            // SAFETY: `Heap` runs on one thread at a time (a green process); this `&mut`
+            // is confined to this block and does not alias any live borrow of the cache.
+            let cache = unsafe { &mut *self.rt_gen_cache.get() };
+            if self.seen_gens_epoch.get() != ep {
+                cache[0] = None;
+                cache[1] = None;
+                self.seen_gens_epoch.set(ep);
+            }
+            if cache[g].is_none() {
+                cache[g] = Some(arc_swap::Guard::into_inner(self.runtime.code_gen(g)));
+            }
+        }
+        // SAFETY: the cached `Arc` lives in `self.rt_gen_cache` and, on this path, is
+        // replaced only when `gens_epoch` advances — checked above before the reference
+        // is formed, and (multigen off ⇒ every store single-threaded) it cannot happen
+        // concurrently with, or partway through, this synchronous use. The projected
+        // `&CodeSlabs` therefore stays valid for `&self`'s lifetime, matching the borrow
+        // the returned `SlabRef` carries.
+        let slabs: &CodeSlabs = unsafe {
+            let cache = &*self.rt_gen_cache.get();
+            &*(&**cache[g].as_ref().expect("rt_gen_cache slot populated") as *const CodeSlabs)
+        };
+        SlabRef::direct(project(slabs))
     }
 
     /// Resolve a string handle to a `&str`. Hand-written (not via the
@@ -5947,6 +6020,9 @@ impl Heap {
         // Drop the whole generation: store a fresh empty slab; the old `Arc` releases
         // when the last (already none, by the drain) reader guard does.
         self.runtime.gens[old_gen].store(Arc::new(CodeSlabs::default()));
+        // Replaced a `gens` Arc — invalidate every process's fast-path slab-pointer
+        // cache (see `RuntimeCode::gens_epoch`).
+        self.runtime.gens_epoch.fetch_add(1, Ordering::Relaxed);
         self.runtime.free_count.fetch_add(1, Ordering::Relaxed);
         // Invalidate the version-stamped caches (global_ic, call/global ICs, JIT)…
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
@@ -6478,6 +6554,9 @@ impl Heap {
         {
             let rt = Arc::get_mut(&mut self.runtime).unwrap();
             rt.gens[cur].store(Arc::new(new));
+            // Replaced a `gens` Arc — invalidate the fast-path slab-pointer cache
+            // (see `RuntimeCode::gens_epoch`).
+            rt.gens_epoch.fetch_add(1, Ordering::Relaxed);
             rt.version.fetch_add(1, Ordering::Relaxed);
             // Drop the shared JIT-code cache: compaction rewrites closure ids, so its
             // `(id, argc)` keys no longer denote the same closures. The version bump
