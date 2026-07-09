@@ -476,8 +476,9 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     other readers), bounding the REPL / single-process `--watch`. Tests:
     `crates/lisp/tests/runtime_collector.rs` (3000 redefs → live <50 → compacted) +
     `tests/runtime_collect_test.blsp`. ✅ **Multi-process** (the shared region with live
-    processes) now landed as the **Erlang 2-generation model** (`BROOD_RT_MULTIGEN`, off by
-    default): at most two code generations in `ArcSwap`ped storage; a threshold **ages** the
+    processes) now landed as the **Erlang 2-generation model** (unconditional — a shared
+    runtime always reclaims this way; single-process compaction still handles the
+    uniquely-owned case): at most two code generations in `ArcSwap`ped storage; a threshold **ages** the
     current gen (`promote_lock`: promote=read, age=write), **migrates** the live globals into
     the fresh gen, then **drains** — every live process reports at its safepoint whether it
     still references the draining gen (VM + tree-walker), and the coordinator externally
@@ -500,7 +501,7 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     quasiquote-style hazard left to shrink.
   - ✅ **RUNTIME-region collector** — single- and multi-process both done (see the bullet
     above + ADR-091): the multi-process shared-region collector shipped as the Erlang
-    2-generation model (age/migrate/drain/free + soft purge, `BROOD_RT_MULTIGEN`). Only a
+    2-generation model (age/migrate/drain/free + soft purge), now unconditional. Only a
     purge policy for a genuinely *looping* old-code process remains deferred (ADR-011).
 - ✅ **Self-hosted REPL in Brood** (ADR-048) — the read-eval-print loop is now
   `std/repl.blsp`, not Rust: a tail-recursive loop over `read-line` (the one new

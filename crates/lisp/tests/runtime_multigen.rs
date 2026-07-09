@@ -1,6 +1,7 @@
 //! End-to-end **multi-process RUNTIME collector** (ADR-091 Stage 4 auto-arming). Its own
-//! test binary so the `BROOD_RT_MULTIGEN` / `BROOD_RT_GC_FLOOR` env `OnceLock`s are read
-//! with these values (they cache on first use; a shared binary would race other tests).
+//! test binary so the `BROOD_RT_GC_FLOOR` env `OnceLock` is read with this low value (it
+//! caches on first use; a shared binary would race other tests). The collector itself is
+//! always on — a shared runtime always reclaims via the generational state machine.
 //!
 //! Real green processes keep the runtime genuinely *shared* (so single-process compaction
 //! can't run and the multi-generation state machine drives instead) while the root
@@ -30,12 +31,11 @@ static MEM_GUARD: LazyLock<()> = LazyLock::new(|| {
     );
 });
 
-/// Arm the multi-process collector at a low churn floor so aging triggers within a few
-/// dozen redefinitions. Must run before the first heap op (the flags cache once).
+/// Lower the RUNTIME churn floor so aging triggers within a few dozen redefinitions
+/// (the collector is always on). Must run before the first heap op (the flag caches once).
 fn arm_multigen() {
-    // SAFETY: set at test start, before any thread reads these env vars.
+    // SAFETY: set at test start, before any thread reads this env var.
     unsafe {
-        std::env::set_var("BROOD_RT_MULTIGEN", "1");
         std::env::set_var("BROOD_RT_GC_FLOOR", "48");
     }
 }

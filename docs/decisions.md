@@ -5582,9 +5582,12 @@ single-process collector is **implemented + tested**. The multi-process collecto
 pivoted from the original cooperative rolling quiesce (deferred, hard) to an
 **Erlang-style 2-generation model** (Step 2 below); Stages 1a/1b/2/3a/3b/3c **and all of
 Stage 4 — the free mechanism, live-globals migration, and the safepoint auto-arming state
-machine — have landed.** The default path is unchanged (nothing ages or frees); the
-multi-process collector is opt-in via `BROOD_RT_MULTIGEN` pending a **purge policy** for a
-permanently-pinned generation and a perf A/B (see Stage 4 below). This ADR supersedes
+machine — have landed.** The multi-process collector is now **unconditional** (2026-07-09):
+a shared runtime always reclaims via the 2-generation machine, single-process compaction
+still handles the uniquely-owned case, and the two perf blockers that had kept it opt-in
+(the drain self-report walk cost + the per-deref `ArcSwap`) are resolved — full suite at
+parity. Only a **purge policy** for a permanently-pinned (genuinely looping) generation
+stays deferred. This ADR supersedes
 the exploratory `docs/runtime-collector-exploration.md` as the source of truth. No
 language-surface change beyond the `(runtime-collect)` builtin + the `:runtime-*` keys
 on `(gc-stats)`.
@@ -5711,7 +5714,8 @@ has landed. Two pieces:
    (two heaps; free refused while a peer pins, succeeds once released, slot then reusable).
 
 **Stage 4 (the auto-arming — live-globals migration + the safepoint state machine)** has
-now also landed, behind the `BROOD_RT_MULTIGEN` opt-in (default **off**). Four pieces:
+now also landed, and is **unconditional** (no flag — a shared runtime always reclaims this
+way). Four pieces:
 
 3. **Live-globals migration — `Heap::migrate_live_globals(old_gen)`.** The design point
    [`age_runtime`](#) surfaced: aging only flips which slot new code lands in; it moves no
@@ -5748,8 +5752,8 @@ now also landed, behind the `BROOD_RT_MULTIGEN` opt-in (default **off**). Four p
 Verified: five deterministic mechanism tests in `runtime_collector.rs` (migration re-exports
 a stable global so its generation frees; migration preserves a post-aging redefinition; the
 full age→migrate→drain→free cycle repeats and stays bounded; plus the Stage-4 free tests),
-and an end-to-end `runtime_multigen.rs` (real workers churn a global under
-`BROOD_RT_MULTIGEN`; the collector ages + migrates mid-flight and never miscompiles — every
+and an end-to-end `runtime_multigen.rs` (real workers churn a global; the collector ages +
+migrates mid-flight and never miscompiles — every
 `(f 0)` stays 0). JIT-native code executing an old generation is handled by the drain gate
 (a process running it references the generation, so its probe blocks the free) plus the
 `version`/`free_epoch` invalidation.
