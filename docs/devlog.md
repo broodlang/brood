@@ -2747,3 +2747,49 @@ calls (redefine `view-scale` before realise → fold sees the new def). Green:
 `BROOD_GC_STRESS`, `BROOD_GC_VERIFY`, and `BROOD_RT_MULTIGEN=1`+stress. Docs
 updated (`language.md`, `brood-for-claude.md`, `compute-frontier.md`,
 `llm-native.md`, `writing-brood-skill.md`).
+
+## 2026-07-09 — Multigen RUNTIME GC: diagnosed the suite hang (pre-existing), fix attempts reverted
+
+Investigated why `BROOD_RT_MULTIGEN=1` can't run the suite (the devlog's "too slow to
+complete in-budget"). Built a faithful repro — 300 green processes, each promoting ~200
+distinct accumulating RUNTIME `def`s, crossing the RT-GC floor so real collection cycles
+fire — and measured **12–20× slowdown** vs default *and* an **intermittent hang** (a run
+either finishes in ~2–7 s or wedges past 45 s).
+
+**Root cause (measured, not guessed).** With the RT-GC floor raised so migration never
+fires, multigen ≈ default (389 ms vs 329 ms) — so the whole cost is the collection cycle.
+Instrumenting the cycle showed migration itself is cheap (one ~26 ms copy of ~3.8 k live
+globals) and the generation **never frees** (`freed=0`): a long-lived process (here the root
+running `collect`, and every worker still executing its own load-time `gen0` code) genuinely
+*pins* the draining generation, so the drain can't complete for the whole run. While a drain
+is armed the threshold is pinned to `count`, so **every process re-enters the safepoint
+collector every frame** and runs `free_drained_gen` → `old_gen_drained` → `report_parked_liveness`,
+a whole-`REGISTRY` scan that locks every mailbox — O(P²·safepoints) of lock traffic — while
+each *pinning* process also re-walks its roots and takes the `drain_acks` write lock every
+safepoint. The result is a contention livelock that intermittently looks like a hang. Confirmed
+**pre-existing**: a worktree build at `HEAD` (no changes) hangs *more* often (2/2) than any
+patched build.
+
+**Fix attempts — all reverted.** Tried, in `heap.rs`/`scheduler.rs`: (1) single-flight the
+parked-liveness scan (one scanner per frame); (2) a pid-ceiling "drain cohort" so processes
+born after the drain armed (which provably can't hold an `old_gen` handle) don't block the
+union under churn; (3) eliminate the no-op `drain_acks` write on the pinning path. These cut
+the working-case time ~3.6× (≈7 s → ≈1.9 s) but did **not** remove the intermittent hang, and
+worse, the pid-ceiling change **broke two committed drain tests** (`cross_process_drain_union`,
+`free_reclaims_after_cross_process_drain`): those construct a pinning child with a fixed low
+pid, so the ceiling wrongly excluded a process that genuinely pins the generation — the
+ceiling assumes scheduler-monotonic pids and is unsound against the tested contract. The
+remaining livelock is deeper than the drain bookkeeping (a scheduler-level progress issue the
+multigen safepoint overhead exposes) and needs `ptrace`/`rr` + a deterministic repro to pin —
+both unavailable here (yama blocks `ptrace` in this sandbox). So the whole change set was
+reverted to the committed state (all 22 multigen/collector/drain Rust tests green, 3×).
+
+**Where this leaves multigen.** Correct and adequate for its real use case — bounded-live-set
+hot reload where old versions *supersede* (single-process and multi-process steady-state both
+measured at parity with default). It stays **opt-in / off by default**. The blocker for
+default-on is this pinned-generation contention livelock, not throughput. A real fix wants:
+(a) don't force the O(P) union scan every safepoint when a drain legitimately can't complete
+(back off, but without the lost-wakeup a naive `2*count` backoff caused — the free must still
+be re-attempted); (b) throttle a *pinning* process's per-safepoint self-report; (c) a
+scheduler-lock-order audit of the Stage-3c parked-liveness inspection vs message delivery /
+unpark; (d) proper concurrency tooling to verify. Deferred as its own focused piece of work.
