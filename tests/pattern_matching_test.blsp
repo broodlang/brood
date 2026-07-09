@@ -135,6 +135,22 @@
     (assert= (match [42] ([x] x) (_ :no)) 42)
     (assert= (match [2 3 4] ([a b c] (* a b c))) 24)))
 
+(describe "map patterns"
+  (test "binds :keys" (assert= (match {:a 1 :b 2} ({:keys [a b]} (+ a b))) 3))
+  (test "absent key binds nil"
+    (assert= (match {:a 1} ({:keys [a b]} (list a b))) (list 1 nil)))
+  (test ":or supplies a default for an absent key"
+    (assert= (match {:a 1} ({:keys [a b] :or {b 9}} (list a b)) ) (list 1 9)))
+  (test ":or is ignored when the key is present"
+    (assert= (match {:a 1 :b 2} ({:keys [a b] :or {b 9}} b)) 2))
+  (test "a non-map falls through"
+    (assert= (match 5 ({:keys [a]} a) (_ :not-a-map)) :not-a-map)
+    (assert= (match [1 2] ({:keys [a]} a) (_ :not-a-map)) :not-a-map))
+  (test "extra map entries are ignored"
+    (assert= (match {:a 1 :b 2 :c 3} ({:keys [a]} a)) 1))
+  (test "nested under a vector pattern"
+    (assert= (match [:pt {:x 1 :y 2}] ([:pt {:keys [x y]}] (list x y))) (list 1 2))))
+
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; NESTING / COMPOSITION
 ;; ─────────────────────────────────────────────────────────────────────────────
@@ -285,6 +301,9 @@
     (assert= (let ([x x] [4 4]) x) 4)
     (assert-error (let ([x x] [4 5]) x)))
   (test "pin inside a let pattern" (assert= (let (tag :ok) (let ([~tag v] [:ok 9]) v)) 9))
+  (test "map bind" (assert= (let ({:keys [a b]} {:a 1 :b 2}) (+ a b)) 3))
+  (test "map bind with :or default"
+    (assert= (let ({:keys [a b] :or {b 40}} {:a 2}) (+ a b)) 42))
   (test "refutable: a non-match raises, with :let context"
     (assert-error (let ([:ok v] [:err 1]) v))
     (assert= (try
@@ -330,6 +349,9 @@
     (assert= ((fn (a [x y]) (+ a x y)) 1 [2 3]) 6))
   (test "anonymous fn with a nested pattern param"
     (assert= ((fn ([:pt [x y]]) (+ x y)) [:pt [5 6]]) 11))
+  (test "map-destructuring param"
+    (defn pm-mag ({:keys [x y]}) (+ (* x x) (* y y)))
+    (assert= (pm-mag {:x 3 :y 4}) 25))
   (test "pattern param coexists with &optional"
     (defn pm-box (a [x y] &optional (c 10)) (+ a x y c))
     (assert= (pm-box 1 [2 3]) 16)

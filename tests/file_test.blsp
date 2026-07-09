@@ -26,7 +26,30 @@
     (let (p (path-join (ftmp) "b.txt"))
       (append-file p "one")
       (append-file p "two")
-      (assert= (read-file p) "onetwo"))))
+      (assert= (read-file p) "onetwo")))
+  (test "spit-append is the atomic primitive append-file aliases"
+    (let (p (path-join (ftmp) "c.txt"))
+      (spit-append p "x")            ; creates when absent
+      (spit-append p "y")
+      (assert= (slurp p) "xy")))
+  (test "concurrent appends from many processes all land (atomic O_APPEND)"
+    ;; The point of the atomic primitive over a read-modify-write: N processes each
+    ;; appending a distinct line never lose or clobber a write. 40 workers each
+    ;; append one line; the file must end up with exactly 40 distinct lines.
+    (let (p (path-join (ftmp) "log.txt")
+          me (self)
+          n 40)
+      (dotimes (i n)
+        (spawn (fn ()
+                 (spit-append p (str "worker-" i "\n"))
+                 (send me :done))))
+      (fa-await n)                                    ; barrier: all workers finished
+      (let (lines (filter (fn (l) (not (empty? l))) (string-split (slurp p) "\n")))
+        (assert= (count lines) n)                     ; none lost
+        (assert= (count (frequencies lines)) n)))))   ; all distinct — none clobbered
+
+;; Collect `n` :done messages (order-independent) — a simple fan-in barrier.
+(defn fa-await (n) (when (> n 0) (receive (:done (fa-await (dec n))))))
 
 (describe "file: size / delete / rename"
   (test "file-size reports byte length, nil when missing"

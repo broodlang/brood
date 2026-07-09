@@ -843,6 +843,31 @@ pub(super) fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     Ok(Value::nil())
 }
 
+/// `(spit-append path content)` — append `content` (a string) to the file at
+/// `path`, creating it if absent. Returns nil. Unlike `spit` (which truncates),
+/// this opens in append mode, so each call's write lands at end-of-file — the
+/// atomic-append the OS guarantees for an `O_APPEND` handle, which is what makes a
+/// log file safe to write from several processes concurrently. The string sibling
+/// of `append-bytes`.
+pub(super) fn spit_append(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::io::Write;
+    let path = expect_string(heap, "spit-append", arg(args, 0))?;
+    let content = expect_string(heap, "spit-append", arg(args, 1))?;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .map_err(|e| {
+            LispError::runtime(format!("spit-append: {}: {}", path, e))
+                .with_code(crate::error::error_codes::FILE_IO)
+        })?;
+    f.write_all(content.as_bytes()).map_err(|e| {
+        LispError::runtime(format!("spit-append: {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    Ok(Value::nil())
+}
+
 /// `(spit-bytes path bytes)` — write a byte sequence (a `bytes` value, a vector,
 /// or a list of byte ints 0–255) to `path` byte-faithfully, replacing any
 /// existing file. Returns nil. The binary write-side counterpart to `slurp-bytes`:

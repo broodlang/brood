@@ -904,6 +904,14 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   "Thread `x` through the forms as each one's *last* argument: `(->> x (f a) (g b))` is `(g b (f a x))`."
   (reduce thread-last-step x forms))
 
+;; (as-> x name (f a name) (g name b)) — thread `x` as `name`, in ANY position.
+;; Brood's `let` is sequential and re-binds a repeated name, so this is one `let`:
+;;   (as-> 5 $ (+ $ 1) (* $ 2))  =>  (let ($ 5  $ (+ $ 1)  $ (* $ 2)) $)  =>  12
+(defmacro as-> (expr name & forms)
+  "Thread `expr` through `forms`, re-binding it to `name` at each step so it can sit in *any* argument position: `(as-> 5 $ (+ $ 1) (* $ 2))` is `12`."
+  (let (steps (reduce (fn (acc form) (append acc (list name form))) (list name expr) forms))
+    `(let ~steps ~name)))
+
 ;; ---- error handling ----
 ;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
 ;; user-facing — `error`, `try`/`catch` — is written here in Brood.
@@ -1028,6 +1036,7 @@ its printed form."
     (match-bytes-pattern? pat) (match-bytes-vars (rest pat))
     (pair? pat) (match-seq-vars pat)
     (vector? pat) (match-seq-vars (match-vec->list pat))
+    (match-map-pattern? pat) (match-map-vars pat)
     else nil))
 (defn match-seq-vars (pats)
   (cond
@@ -1053,6 +1062,7 @@ its printed form."
     ; (bytes seg…): destructure a bytes value, Elixir-style binary matching
     (pair? pat) (match-compile-list pat target bound success fail)
     (vector? pat) (match-compile-vector pat target bound success fail)
+    (match-map-pattern? pat) (match-compile-map pat target bound success fail)
     else `(if (%eq ~target ~pat) ~success ~fail)))
 ; literal (number/string/keyword/bool/nil)
 
@@ -1194,6 +1204,38 @@ its printed form."
                   fail)
           this (match-compile p el bound inner fail))
       `(let (~el (vector-ref ~target ~i)) ~this))))
+
+;; associative (map) pattern: {:keys [a b] :or {a default}} — a map literal in
+;; pattern position destructures a map. Each symbol in :keys binds to the value at
+;; the same-named keyword (nil if absent, or the :or default). The target must be a
+;; map, else the clause fails. Mirrors Clojure's associative destructuring, minus
+;; the power forms — general `{:key subpattern}` nesting and `:as` are deferred
+;; (ADR-011: ship the simple shape, add the rest on a concrete need).
+(defn match-map-pattern? (p) (map? p))
+
+;; :keys value is a vector [a b] (or a list); return it as a list of symbols.
+(defn match-map-keys (pat)
+  (let (kv (get pat :keys))
+    (cond (nil? kv) nil (vector? kv) (match-vec->list kv) else kv)))
+
+(defn match-map-vars (pat) (match-map-keys pat))
+
+(defn match-compile-map (pat target bound success fail)
+  `(if (map? ~target)
+     ~(match-map-binds (match-map-keys pat) (get pat :or) target success)
+     ~fail))
+
+;; Bind each key symbol to (get target :key); when the key is absent, fall back to
+;; its :or default (evaluated only then) if one is given, else nil.
+(defn match-map-binds (keys ors target success)
+  (if (empty? keys)
+    success
+    (let (k (first keys)
+          kw (keyword (name k))
+          getter (if (and ors (contains? ors k))
+                   `(if (contains? ~target ~kw) (get ~target ~kw) ~(get ors k))
+                   `(get ~target ~kw)))
+      `(let (~k ~getter) ~(match-map-binds (rest keys) ors target success)))))
 
 ;; -- clauses: (pattern [:when guard] body...) — one shape for match / fn / receive --
 (defn match-parse-clause (clause)
@@ -1976,6 +2018,10 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 (defn max-by (f coll)
   "The item in `coll` for which `(f item)` is largest. Errors on empty input."
   (fold (fn (best x) (if (> (f x) (f best)) x best)) (first coll) (rest coll)))
+
+(defn clamp (x lo hi)
+  "Constrain `x` to the closed range [`lo`, `hi`]: `lo` if `x` is below it, `hi` if above, else `x`."
+  (max lo (min hi x)))
 
 (defn repeat--acc (n x acc) (if (<= n 0) acc (repeat--acc (dec n) x (cons x acc))))
 (defn repeat (n x)

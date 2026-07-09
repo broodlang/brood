@@ -319,11 +319,20 @@ by ADR-011). `throw` and the low-level `%try` are primitives; `try`/`catch` and
 
 ## 11. Not yet specified (planned)
 
-The following are on the roadmap and intentionally absent from this version:
+The features this section once listed have all shipped: **dynamic variables**
+(`defdyn` / `binding`), **map literals** `{ }` and their operations (CHAMP
+tries), **modules / namespaces** (`defmodule`), and a **per-process tracing GC**
+(ADR-035 and its successors) are all part of the language today and specified in
+the sections above.
 
-- **Dynamic variables** (`defdyn` / `binding`).
-- **Map literals** `{ }` and map operations.
-- **Modules / namespaces** beyond the single global environment.
-- A **tracing GC** (the current `Rc` model leaks reference cycles).
+The following are still on the roadmap and intentionally absent from this
+version:
+
+- **Rest-parameter notation in `(sig …)`** — a signature form for variadic
+  arguments.
+- **Lazy sequences** (and `iterate`). Tail-recursive accumulators cover the
+  finite cases today; unbounded streams are deferred.
+- **Records** (`defrecord`) remain a deliberate helpful-error stub — data is
+  modelled with plain maps pending an ADR (roadmap).
 
 See [roadmap.md](roadmap.md) for sequencing.

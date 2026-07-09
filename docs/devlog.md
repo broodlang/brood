@@ -2970,3 +2970,55 @@ full `make test` (Rust + Brood, no-JIT) green; 23 multigen/drain/migration/colle
 tests green; Phase-2 detection correct under `GC_VERIFY` (300 closures captured in local
 data across 60 churn rounds, no verifier fire). `CLAUDE.md`, `docs/roadmap.md`, and ADR-091
 were updated at the time; this entry backfills the devlog step that the commit skipped.
+
+## 2026-07-09 — brood-life feedback triage: shipped the accepted cluster + ADR-130
+
+Worked the whole accepted set from the brood-life language-feedback triage (roadmap ACTION
+item) in one pass. Each item was checked against the tree first — which mattered, because
+three "headline" asks turned out already done and would have been wasted work.
+
+**Shipped (all pure Brood except one thin I/O primitive):**
+- **`clamp` + `as->`** (`std/prelude.blsp`). `(clamp x lo hi)` = `(max lo (min hi x))`;
+  `as->` binds the thread value to a name and expands to one *sequential* `let` (Brood's
+  `let` re-binds a repeated name, so `(as-> 5 $ (+ $ 1) (* $ 2))` → `(let ($ 5 $ (+ $ 1)
+  $ (* $ 2)) $)`). Tests in `suite_test.blsp`.
+- **`{:keys […]}` / `:or` map destructuring.** The pattern matcher is a Brood pattern→code
+  compiler in the prelude, so this is a Brood change, not a VM one: a `match-map-pattern?`
+  (`map?`) arm in `match-compile`/`pattern-vars`, plus `match-compile-map` emitting
+  `(if (map? t) <lets> fail)` where each `:keys` symbol binds to `(get t :sym)` (or the
+  `:or` default via a presence check, evaluated only when absent). Because `let`/`fn`/`match`
+  all delegate to this one compiler, map destructuring works at every binding site for free.
+  The namespace resolver's `collect_all_syms` and the checker's binder tracking already
+  walked `Map` patterns, so `nest check` stayed clean with no checker change. General
+  `{:key subpattern}` nesting and `:as` deferred (ADR-011). Tests across
+  `pattern_matching_test.blsp`.
+- **`nest mcp eval` multi-form.** `read-string`'s trailing-form drop was *already* fixed
+  (it errors on trailing content; `read-all`/`read-first`/`eval-string` exist) — but
+  `mcp-eval-tool` still used `read-first`, so a pasted batch ran only its first form. Now
+  `eval-string` (eval-all, returns the last value). New `mcp_test.blsp`.
+- **`spit-append`** (`builtins/io.rs`) — a thin `O_APPEND` string-append primitive (the
+  ADR-006 mechanism exception; string sibling of the existing `append-bytes`).
+  `std/file.blsp`'s `append-file` was a non-atomic slurp+concat+spit read-modify-write; it's
+  now a `spit-append` alias — atomic and O(1) per write. `file_test.blsp` gains a 40-process
+  concurrent-append race that asserts all 40 distinct lines survive.
+
+**Design settled, not built — ADR-130.** `defrecord` (the review's top pick) contradicted the
+standing "model data with plain maps" stub, so it needed a decision, not a slipped-in macro.
+ADR-130 rules it: `defrecord` is **pure prelude sugar over closed maps** — a positional
+constructor + one accessor per field + an optional per-field `sig` lowering to the existing
+`(record …)` type (ADR-115); zero new core, records *are* maps, accessors turn field-name
+typos into checker-caught undefined-function errors. Accepted as direction; implementation is
+a follow-up.
+
+**Doc fixes (both verified against code).** `spec.md §11` listed four shipped features
+(dynvars, map literals, modules, tracing GC) as "not yet specified" — rewritten to the real
+gaps. `value-repr.md` said the `Value` enum is 16 bytes; the kernel hard-asserts **24** (the
+`Pid { node, id }` variant needs two payload words) — corrected throughout, drift noted.
+
+**Already-done, ruled out of the work (verified, no code):** JIT-default-on (`b9c3a20`), the
+parallel-allocation lock fix (`67c2ec2`), and `transients.md` (rewritten 2026-06-15).
+
+**Verified.** `nest check` clean (zero warnings across `std/` + `tests/`) — the map-pattern
+binders need no checker change. Targeted suites green: `suite_test` 64/64, `pattern_matching_test`
+112/112, `mcp_test` 5/5, `file_test` 18/18 (incl. the concurrent-append race). Full `make test`
+green.

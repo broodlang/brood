@@ -1,6 +1,6 @@
 # Plan — the `Value` representation decision (the JIT prerequisite)
 
-> **Update (2026-06-14): decision held — the tier-1 JIT shipped on the 16-byte enum
+> **Update (2026-06-14): decision held — the tier-1 JIT shipped on the enum
 > (§5, option D), and the easy codegen wins are landed (geomean 19.5× → 13.5×). With a
 > real JIT in hand, the remaining single-threaded gaps profile as
 > *data-structure*-specific (boxcar vectors, eager sequences, allocation) — **not**
@@ -23,8 +23,8 @@ The JIT calling convention (ADR-101 §6.2) keeps GC-visible values in `Heap::roo
 at tier 1, so it *works* with either representation. But:
 
 - A **single-word `Value`** is what JIT'd register code wants — it can hold an
-  operand in a register across a safepoint-free segment instead of a 16-byte load/store
-  pair, and it halves operand-stack (`Heap::roots`) traffic, which the compute profile
+  operand in a register across a safepoint-free segment instead of a 24-byte load/store
+  triple, and it cuts operand-stack (`Heap::roots`) traffic, which the compute profile
   shows is the per-iteration cost (every `Local`/`Const`/prim push-pops a slot).
 - **Pre-alpha is the cheapest window.** `Value` is `Copy` and pattern-matched at
   *every* builtin and eval site; the later we change it, the more call sites move.
@@ -35,14 +35,27 @@ deliberate choice, not a default.
 
 ## 2. Current state
 
-`Value` is a **16-byte `#[derive(Copy)]` Rust enum** (`core/value.rs`), ~21 variants,
+`Value` is a **24-byte `#[derive(Copy)]` Rust enum** (`core/value.rs`), ~21 variants,
 tag universe in `Tag` (18 tags). Construction already funnels through `value.rs`
 helpers (`cons`/`list`/`sym`/`str_val`/…) per ADR-002 — the one fact that makes a
 repr change *containable* rather than a scatter-edit.
 
-Why 16 bytes: the widest variant is `Pid { node: Symbol (u32), id: u64 }` = 96 bits of
-payload → 16 bytes with the discriminant. The variants that carry a **≥64-bit payload**
-are the crux of any packing scheme:
+> **Size note (drift since this plan was written):** the figures below originally
+> read "16 bytes," but the shipped enum is **24 bytes** — `value.rs` now hard-asserts
+> `size_of::<Value>() == 24` (`value_layout_is_stable_for_the_jit`, the JIT's slot
+> `STRIDE`). The reasoning that put it at 16 was wrong about the layout: the widest
+> variant `Pid { node: Symbol (u32), id: u64 }` needs **two** payload words (`id` at
+> offset 8, `node` at offset 16), which — with the discriminant occupying the first
+> 8-byte word — forces 8 (tag) + 8 + 8 = **24 bytes**, not 16. A single-payload-word
+> variant (`Int`/`Float`/a heap handle) only uses the word at offset 8, but the enum
+> is sized to its widest member. The size grew from 16 → 24 when `Pid` gained its
+> second payload word; everything below about the *decision* (keep the enum, don't
+> NaN-box) is unaffected — only the byte figure changed.
+
+Why not narrower: the widest variant is `Pid { node: Symbol (u32), id: u64 }` = 96 bits
+of payload, and because `id` is a `u64` it can't co-locate with the discriminant, so the
+payload spans two 8-byte words → 24 bytes with the discriminant. The variants that carry
+a **≥64-bit payload** are the crux of any packing scheme:
 
 | variant | payload | fits in a 48–51-bit NaN-box payload? |
 |---|---|---|
@@ -69,10 +82,10 @@ bits, or ~48 if we reserve tag bits).
   GC surface + message-copy work to the hot pid/ref paths). Pointer-bits assume 48-bit
   canonical addresses (fine on current x86-64/AArch64, but an assumption).
 
-### B. Keep the 16-byte enum
+### B. Keep the enum (24 bytes)
 - **Pro:** zero churn; every variant stays immediate; simplest; tier-1 JIT (values in
   `Heap::roots`) works as-is.
-- **Con:** 16-byte operand slots (2× the traffic the profile flags); a `Value` can't ride
+- **Con:** 24-byte operand slots (3× the traffic the profile flags); a `Value` can't ride
   in a single register, so the JIT never gets values-in-registers (caps the ceiling at
   "native dispatch + native arithmetic, operands through memory"). Leaves the
   "decide before 1.0" debt unpaid.
@@ -114,6 +127,8 @@ regressing** the immediate-scalar concurrency/dist paths or the float kernels.
 Measured factor 1 directly with an isolated A/B: the operand-stack element (`heap.rs`
 `roots: Vec<Value>`) was padded from 16 → 32 bytes (a clean revertable change, not
 touching `Value` or any match site) to size how sensitive compute is to slot size.
+(This A/B was run when `Value` was 16 bytes; it is 24 today, which sits *inside* the
+tested 16 → 32 span — so the "no effect" conclusion still covers the shipped size.)
 Best-of-3, release, on the brood-benchmarks compute loops:
 
 | benchmark | 16-byte slot (baseline) | 32-byte slot (padded) |
@@ -124,25 +139,26 @@ Best-of-3, release, on the brood-benchmarks compute loops:
 
 **Doubling the slot made no difference** (all within noise). Compute loops are
 CPU/dispatch-bound and their operand stacks stay L1-resident regardless of element
-size, so a *single-word* `Value` (halving the slot) would give ≈**zero** tier-1
-speedup. The only real 1-word benefit is **tier-2 register-passing**, which is deferred.
+size, so a *single-word* `Value` (shrinking the 24-byte slot to 8) would give
+≈**zero** tier-1 speedup. The only real 1-word benefit is **tier-2 register-passing**,
+which is deferred.
 Since the upside is ~zero, any NaN-box downside (factors 2–3: boxing the immediate
 `Pid`/`Ref`/`Socket`/`i64` scalars, penalizing floats) makes it **net-negative now** —
 no need to measure those precisely.
 
-## 5. Decision: **D — keep the 16-byte enum; build the JIT on it** (2026-06-08)
+## 5. Decision: **D — keep the enum; build the JIT on it** (2026-06-08)
 
 The §4 measurement settles it: the operand-traffic upside of a single-word `Value` is
 ~zero for tier-1, so NaN-boxing is net-negative now (zero upside, real wide-scalar
-downside). **Build the JIT Stage 0–1 on the current 16-byte enum** (values in
-`Heap::roots`). Revisit the repr only if a future tier-2 (values-in-registers) profile —
+downside). **Build the JIT Stage 0–1 on the current enum** (values in
+`Heap::roots`; 16 bytes at the time of this decision, 24 today — see the §2 size note). Revisit the repr only if a future tier-2 (values-in-registers) profile —
 taken *with a real JIT in hand* — shows register-passing is worth it; the NaN-box option
 (A) stays on the table for that, behind the `value.rs` accessor migration (§6). This is
 the original "lead with D" recommendation, now confirmed by data rather than assumed.
 
 ### Original framing (kept for context)
 
-**Lead with D, keep A on the table.** Build the JIT Stage 0–1 on the current 16-byte enum
+**Lead with D, keep A on the table.** Build the JIT Stage 0–1 on the current enum
 (values in `Heap::roots`) to capture the large compute win that needs no repr change, and
 run the §4 measurement *with a real JIT in hand* (the honest way to value
 values-in-registers). Only if that measurement shows register operands are worth it — and

@@ -32,7 +32,7 @@ these are the ones to unlearn:
 | `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | The class name gets bound *as* the variable and `e` is treated as body → cryptic `unbound symbol: e`. |
 | Multi-arity `(fn ((x) …) ((x y) …))` | **Supported** (ADR-047) — dispatch by argument count, like Clojure. But param lists are **lists** `(x)`, not vectors `[x]`, and a clause head may *also* be a same-arity **pattern** (Erlang-style; see [Pattern matching](#pattern-matching)). The two don't mix in one `defn`. | Vector heads `([x] …)` read as a one-tuple-param pattern clause, not an arity clause. |
 | `{:a 1}` map literal | **Supported.** Immutable, insertion-ordered; `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (see [Maps](#maps)). | Works as you'd expect. |
-| `{:keys [a b]}` / `:or` map destructuring | No map *patterns* yet (maps themselves exist; the pattern syntax for them doesn't). Sequence/tuple destructuring **is** supported — `(let ([a b] v) …)`, `(let ((h & t) v) …)`. | Parse / type error. |
+| `{:keys [a b]}` / `:or` map destructuring | **Supported** — a map literal in pattern position binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default): `(let ({:keys [a b] :or {b 0}} m) …)`, works in `let`/`fn`/`match`. General `{:key subpattern}` nesting and `:as` are deferred (ADR-011). | Works as in Clojure for the `:keys`/`:or` subset. |
 | `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. | Works (vectors are accepted in binding position), but it's non-idiomatic — prefer lists. |
 | `(/ 7 2)` → ratio `7/2` | No ratios. Integer args give an integer **only when they divide evenly**; otherwise a float. `(/ 12 3)` → `4`, `(/ 7 2)` → `3.5`. | A float where you expected an exact ratio. |
 
@@ -391,11 +391,12 @@ Auto-gensym fires only on *literal* template symbols; a `x#` inside an unquote
 symbol: `` `(let (~'it ~val) ~@body) ``. `gensym` itself remains available for
 cases where you need a fresh symbol outside a template.
 
-The `->` and `->>` threading macros are also defined in the prelude:
+The `->`, `->>`, and `as->` threading macros are also defined in the prelude:
 
 ```clojure
-(-> 5 (- 1) (* 2))            ;=> 8     ; (* (- 5 1) 2)
-(->> (list 1 2 3) (map inc))  ;=> (2 3 4)
+(-> 5 (- 1) (* 2))            ;=> 8     ; (* (- 5 1) 2)   thread as FIRST arg
+(->> (list 1 2 3) (map inc))  ;=> (2 3 4)                 thread as LAST arg
+(as-> 5 $ (+ $ 1) (* $ 2))    ;=> 12    ; bind $, thread into ANY position
 ```
 
 > Note: nested quasiquote is not level-tracked yet. Auto-gensym (`x#`) / `gensym`
@@ -423,6 +424,7 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `(p1 p2 …)` | a list of that exact length, element-wise |
 | `(p1 & rest)` | head(s) + the tail bound to `rest` |
 | `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom** |
+| `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the value isn't a map |
 
 Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
 shadows) — it does **not** test against a same-named value. Match a known value
@@ -1161,7 +1163,8 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 - `scan`/`reductions` is a running fold — returns a list of all intermediate accumulator
   values starting with the initial value (like Haskell's `scanl`).
 - `flat-map`/`mapcat` maps a list-valued function and concatenates the results. `min-by`/`max-by`
-  select the extremum of a collection by a key function.
+  select the extremum of a collection by a key function. `(clamp x lo hi)` constrains a
+  number to the closed range `[lo, hi]`.
 - `repeat` builds a list of `n` copies of a value; `repeatedly` calls a
   zero-argument function `n` times and collects the results.
 - `sort` orders ascending (or with a strict less-than predicate:

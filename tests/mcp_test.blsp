@@ -1,0 +1,19 @@
+(defmodule mcp-test (:use test))
+(require 'mcp)
+
+;; The `eval` MCP tool must evaluate *every* form in a multi-form `:source` and
+;; return the last value — not silently drop everything after the first form (the
+;; old `read-first` behaviour, which made a pasted batch of `defn`s run only the
+;; first). See docs/devlog.md and the brood-life feedback triage.
+(describe "mcp eval tool"
+  (test "runs every form in a multi-form source, returns the last value"
+    (assert= {:value "21"}
+      (mcp/mcp-eval-tool {:source "(defn mcpt-a (x) (* x 2)) (defn mcpt-b (x) (+ x 1)) (mcpt-b (mcpt-a 10))"})))
+  (test "a def and its use in the same batch both take effect"
+    (assert= {:value "42"} (mcp/mcp-eval-tool {:source "(def mcpt-q 41) (+ mcpt-q 1)"})))
+  (test "a single form still works"
+    (assert= {:value "5"} (mcp/mcp-eval-tool {:source "(+ 2 3)"})))
+  (test "a non-string :source is rejected (thrown for the dispatcher to catch)"
+    (assert-error (mcp/mcp-eval-tool {:source 42})))
+  (test "a parse error surfaces as :error, not a drop"
+    (is (contains? (mcp/mcp-eval-tool {:source "(+ 1"}) :error))))

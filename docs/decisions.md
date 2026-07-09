@@ -8167,3 +8167,131 @@ fault before concluding either way.
 362/362 unit tests unaffected (this bug and its fix are entirely CLI/cache-
 layer; `cargo test`'s in-process `file_warnings()` never touched this cache
 and was never at risk).
+
+## ADR-130 — `defrecord` is pure prelude sugar over closed maps, not a new `Value` kind
+
+**Status:** accepted (direction); **not yet built** — this ADR settles the
+map-first-vs-records question the roadmap deferred "pending an ADR" and scopes
+the work; implementation is a follow-up slice, gated per ADR-011 on it staying
+this small. Revisits, but does **not** reverse, the standing "model data with
+plain maps" stance (the `eval/mod.rs` helpful-error stub for
+`defrecord`/`deftype`).
+
+**Context.** The brood-life dogfooding review's top cross-axis request is a
+`defrecord` macro with an optional per-field type. Its three motivations are
+real and independently confirmed by other Brood code: (1) the `(get m :key)`
+**access tax** — every field read is a verbose primitive call that names the
+key but not the thing; (2) program state is **unnamed** — a bare `{:x … :y …}`
+map carries no clue what record it is at the def site or in an error; (3)
+**map-key typos are silent** — `(get m :witdh)` returns `nil` and the bug
+surfaces far away, with nothing to catch it. Against that pull stands a
+documented decision (the stub: *"Brood has no records/types — model data with
+plain maps; for polymorphism use `defprotocol`/`defimpl`"*), the absolute
+immutability rule (ADR-026/112), and the keep-the-core-small rule (ADR-011).
+Two things have since shifted the ground under the old stance: the checker now
+has real record/shape types — `(record :k T …)`, open, width/depth subtyping,
+per-field `get` result types (ADR-115) — and a **closed record is already a
+subtype of `map<keyword, any>`** (commit `132bb2a`, `types/mod.rs`). So the
+*type* machinery a typed record needs already exists; the only open question is
+the *surface* — and whether it demands any new core.
+
+**Options considered.**
+
+1. **Reject — status quo (plain maps + `defprotocol`).** Cheapest in surface,
+   but it leaves all three costs standing. The typo cost is the sharpest: it is
+   a whole class of silent bug that the language gives the programmer *no* tool
+   against, in a codebase whose entire premise is catching mistakes statically
+   where it cheaply can. `defprotocol` answers polymorphism, not naming or
+   typo-safety. Rejected: the payoff is real and recurring, not a one-off.
+
+2. **`defrecord` as a pure prelude macro over closed maps** — a `defmacro` in
+   `std/`, expanding to plain map construction/`get`, with an optional per-field
+   `sig` that lowers to the *existing* `(record …)` type. No new `Value`, no new
+   `Tag`, no new special form, no kernel Rust at all; records **are** maps at
+   runtime, so every map operation (`assoc`, `merge`, `keys`, pattern match,
+   `send` across processes) keeps working and immutability is untouched.
+   **Chosen.**
+
+3. **A real new `Value`/`Tag` nominal record kind.** Gives nominal identity
+   (two records with identical fields are distinguishable; protocol dispatch can
+   key on the type) and closed-by-construction typo-safety. Rejected: it is a
+   new core `Value` kind (compatibility-contract cost per `docs/types.md`), it
+   fractures the "records are maps" property (every map builtin would need a
+   record arm, or records become second-class), and it buys nominal identity we
+   have no concrete consumer for. Exactly the power-feature ADR-011 says to
+   defer until a need forces it, and a violation of "Rust provides mechanism,
+   Brood provides policy" (ADR-006) — this is policy.
+
+**Decision — option 2, worked out concretely.** `defrecord` is a Brood prelude
+macro (bootstrapped like the other `def*` macros; the `eval/mod.rs` stub is
+deleted and its LSP/grammar/`treesit` keyword entries updated). `(defrecord
+point (x y))` expands to plain `defn`s over existing primitives:
+
+```lisp
+(defn point   (x y) {:x x :y y})   ; positional constructor, named after the record
+(defn point-x (p)   (get p :x))    ; one accessor per field
+(defn point-y (p)   (get p :y))
+```
+
+- **Construction** is a plain closed-map literal — a fresh immutable `Value`,
+  no tag, nothing mutable. **Access** goes through the generated accessors,
+  which is what kills the `(get m :key)` tax *and* buys typo-safety for free:
+  `(point-witdh p)` is a call to an **undefined function**, caught today by the
+  checker's unbound-reference lint and at runtime — whereas `(get p :witdh)` is
+  forever silent. That is the crux of why the sugar earns its place: the same
+  bytes, but a typo becomes a name error instead of a `nil`.
+- **Functional update** reuses plain `assoc`/`merge` (records are maps):
+  `(assoc p :x 9)` returns a fresh record. We ship *no* new updater primitive;
+  an `assoc`-style `(update-record …)` helper is deferred sugar (see open
+  questions), not core.
+- **Per-field `sig`** is opt-in and lowers to the shipped type grammar. A typed
+  `(defrecord point ((x int) (y int)))` additionally emits
+  `(sig point (int int -> (record :x int :y int)))` for the constructor and
+  `(sig point-x ((record :x int) -> int))` per accessor. Field-presence and
+  field-type checking then fall out of the *existing* ADR-115 machinery with
+  zero new checker code: the constructor's declared return flows a precise
+  record type to every call site, and `(get r :k)`-by-literal already resolves
+  to the exact field type. This composes with the gradual checker exactly like
+  every other `sig` — advisory, contract #5 holds, never rejects a runnable
+  program.
+
+**Net kernel cost: zero.** No `Value`, no `Tag`, no special form, no builtin —
+100% a prelude macro plus type machinery that already shipped. This is the
+option maximally aligned with all three governing rules at once: minimal core
+(ADR-011 — a macro over primitives, never a special form), write-the-language-
+in-the-language (ADR-006 — it lives in `std/`), and absolute immutability
+(ADR-026 — a record is a plain immutable map, no sneaky mutable anything). It
+complements rather than reverses the map-first stance: records *are* maps, so
+the stub's advice was never wrong, only incomplete — `defrecord` is the named,
+typo-checked *front door* to the same immutable map it always recommended.
+
+**Open sub-questions, deferred to the build slice (each an ADR-011 additive, not
+a blocker):**
+
+- **Nominal vs. structural identity.** As specified a record has **no** nominal
+  identity — two `defrecord`s with the same fields produce indistinguishable
+  maps, and there is no `point?` predicate that can reliably tell a `point` from
+  any other `{:x :y}` map. Recommendation: stay **structural** (no hidden
+  `:__type__` tag) until a concrete consumer — most likely protocol dispatch on
+  record type — forces nominal identity; a tag field is a pure, immutability-
+  preserving addition later. Do **not** add it speculatively.
+- **Can `sig` typo-catching be a *checker lint* without false positives?** The
+  accessor route already catches typos with **zero** false-positive risk (an
+  unbound function name is unambiguous). Pushing further — flagging
+  `(get r :typo)` on a *closed* record as an unknown key — needs the deferred
+  **closed-record** variant (ADR-115's deferral list) and risks false positives
+  on legitimate open extension (a map that carries extra keys by design). Keep
+  the guaranteed-clean accessor lint now; treat a closed-record key lint as its
+  own later decision, gated on measuring the false-positive rate against `std/`.
+- **Constructor / updater ergonomics.** Positional `(point 1 2)` is the minimal
+  constructor; a keyword-arg constructor and a functional `(update-point p :x
+  inc)` updater are ergonomic sugar to defer. Also open: whether accessors
+  should validate shape (they don't — a plain `get`, keeping them a
+  transparent alias) and the surface bikeshed (record-name casing; the exact
+  per-field `sig` spelling). None affect the core decision.
+
+**Trade.** Adds prelude surface (one macro family) in exchange for naming,
+a killed access tax, and free typo-safety — at zero core cost. Supersedes the
+`defrecord`/`deftype` helpful-error stub in `eval/mod.rs` (records now exist, as
+sugar); extends ADR-115's record types with a value-level front end; leaves
+ADR-026 immutability and the ADR-006/011 core-size rules fully intact.

@@ -171,7 +171,18 @@
 
 (describe "threading macros"
   (test "->" (assert= (-> 5 (- 1) (* 2)) 8))
-  (test "->>" (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4))))
+  (test "->>" (assert= (->> (list 1 2 3) (map inc)) (list 2 3 4)))
+  (test "as-> threads into any position"
+    (assert= (as-> 5 $ (+ $ 1) (* $ 2)) 12)
+    (assert= (as-> [1 2 3] xs (map inc xs) (fold + 0 xs)) 9))
+  (test "as-> with no forms is the value" (assert= (as-> 10 n n) 10)))
+
+(describe "clamp"
+  (test "constrains to the range"
+    (assert= (clamp 300 0 255) 255)
+    (assert= (clamp -7 0 255) 0)
+    (assert= (clamp 42 0 255) 42))
+  (test "respects float bounds" (assert= (clamp 1.5 0.0 1.0) 1.0)))
 
 ;; Pattern matching has its own dedicated, exhaustive suite —
 ;; tests/pattern_matching.blsp (run by `cargo test` via suite.rs, and directly

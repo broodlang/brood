@@ -47,8 +47,10 @@ error inside the user expression surfaces here as the `:error` branch."
     (when (not (string? src))
       (throw "eval: :source must be a string"))
     (try
-      (let (form (read-first src)
-            value (eval form))
+      ;; Evaluate *every* form and return the last value — so pasting a multi-form
+      ;; block (a batch of `defn`s, say) runs all of them instead of silently
+      ;; dropping every form after the first (the old `read-first` behaviour).
+      (let (value (eval-string src))
         {:value (pr-str value)})
       (catch e
         {:error (mcp--error-shape e)}))))

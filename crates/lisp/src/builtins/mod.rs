@@ -1696,6 +1696,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "spit-append",
+        Arity::exact(2),
+        Sig::new(vec![string, string], nil_ty),
+        spit_append,
+    );
+    def(
+        heap,
         "slurp",
         Arity::exact(1),
         Sig::new(vec![string], string),
@@ -2575,7 +2582,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("dir?", &["path"], "Whether path is a directory."),
     ("list-dir", &["path"], "The entry names directly under directory path, sorted."),
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
-    ("spit", &["path", "s"], "Write string s to the file at path."),
+    ("spit", &["path", "s"], "Write string s to the file at path, replacing any existing file."),
+    ("spit-append", &["path", "s"], "Append string s to the file at path, creating it if absent (unlike spit, which truncates). Returns nil. Opens in append mode so each write lands at end-of-file — the OS-atomic append that makes a log safe to write from several processes at once. The string sibling of append-bytes."),
     ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
     ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),

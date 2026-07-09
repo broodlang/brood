@@ -6,8 +6,8 @@
 ;; here is policy (ADR-006): whole-file and line I/O, directory walking, and the
 ;; path helpers the prelude doesn't already provide. No new Rust.
 ;;
-;; (Deletion / rename / atomic append / file-size await kernel primitives — noted
-;; where relevant; `append-file` is a non-atomic read-modify-write for now.)
+;; (Deletion / rename / file-size are kernel primitives; `append-file` is the
+;; atomic `spit-append` primitive — each write lands at end-of-file.)
 
 (defmodule file
   "The file & filesystem library (`(require 'file)`): whole-file and line read/write
@@ -25,9 +25,10 @@ primitives. The kernel also provides the always-available file primitives
 (def write-file spit)
 ; friendly alias — write a string to a file (overwriting)
 
-(defn append-file (path s)
-  "Append string `s` to the file at `path` (creating it if absent). Not atomic — a read-modify-write — pending a kernel append primitive."
-  (spit path (str (if (file-exists? path) (slurp path) "") s)))
+(def append-file spit-append)
+; friendly alias — append a string to a file (creating it if absent). Atomic:
+; each write lands at end-of-file, so it's safe from concurrent processes (was a
+; non-atomic read-modify-write before `spit-append` landed).
 
 (defn read-lines (path)
   "The lines of the file at `path` as a list of strings, without their newlines. A trailing newline does not yield an empty final line; an empty file yields nil."

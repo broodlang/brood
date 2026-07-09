@@ -25,39 +25,42 @@ session `nest` (12 scheduler workers).
   their own entries. Verified-against-code so nothing already-shipped got
   re-proposed and nothing already-decided got silently reversed.
 
-  **Accepted → new ⬜ items** (each a self-contained, on-mission change; ordered
-  cheapest-first):
-  - ⬜ **`clamp` + `as->` prelude adds** — neither exists today (`->`/`->>` do).
-    `clamp` is a pure 3-arg fn; `as->` a threading macro that binds the thread
-    value to a name so it can sit in any argument position. Trivial, pure Brood.
-  - ⬜ **`{:keys […]}` / `:or` map destructuring** — unsupported today
-    (`docs/language.md` §35 says so explicitly); sequence/tuple destructuring
-    *is* supported. This extends the existing pattern-lowering in
-    `eval/macros.rs` to map patterns — no design tension, squarely a macro/pattern
-    change. Kills much of the `(get m :key)` tax without needing records.
-  - ⬜ **`read-string` silent trailing-form drop** — confirmed still present:
-    `(read-string "(def a 1) (def b 2)")` returns only `(def a 1)`, and the `nest
-    mcp` `eval` tool inherits it, so a pasted multi-form block runs only its first
-    form. Fix at the reader/eval seam: `read-string` should error on trailing
-    non-whitespace (or expose `read-all`), and `eval`/mcp-eval adopt eval-all or
-    report "N trailing forms ignored". Rough edge, not a design question.
-  - ⬜ **atomic file `append` primitive (low priority)** — only `spit` (truncating
-    overwrite) exists. A `spit`-family append genuinely needs a thin Rust I/O
-    primitive (this is mechanism, the ADR-006 exception), so it's a small kernel
-    add rather than Brood policy.
+  **Accepted → all shipped 2026-07-09** (each a self-contained, on-mission change):
+  - ✅ **`clamp` + `as->` prelude adds** — `(clamp x lo hi)` (pure fn) and `as->`
+    (a threading macro binding the thread value to a name so it can sit in any
+    argument position) landed in `std/prelude.blsp`, both pure Brood, tested in
+    `suite_test.blsp`.
+  - ✅ **`{:keys […]}` / `:or` map destructuring** — a map literal in pattern
+    position destructures a map (each `:keys` symbol ← same-named keyword, nil if
+    absent or the `:or` default; fails on a non-map in refutable position). Works
+    in `let`/`fn`/`match`, since all three share the Brood pattern→code compiler in
+    `std/prelude.blsp` (no Rust). Tested across `pattern_matching_test.blsp`;
+    `nest check` stays clean (the checker already tracks map-pattern binders).
+    General `{:key subpattern}` nesting and `:as` deferred (ADR-011).
+  - ✅ **`read-string` trailing-form drop** — the language side was **already
+    fixed** (`read-string` → `read_one_complete` errors on trailing content, and
+    `read-all`/`read-first`/`eval-string` all exist). The remaining hole was the
+    `nest mcp` `eval` tool, which still used `read-first` (first form only); now
+    `eval-string` (eval-all, returns the last value), so a pasted multi-form block
+    runs every form. Tested in the new `mcp_test.blsp`.
+  - ✅ **atomic file `append` primitive** — added `spit-append` (a thin `O_APPEND`
+    Rust builtin, the ADR-006 mechanism exception), the string sibling of the
+    existing `append-bytes`. Rewrote `std/file.blsp`'s `append-file` (previously a
+    non-atomic read-modify-write) as a `spit-append` alias — now atomic and O(1).
+    `file_test.blsp` covers it, including a 40-process concurrent-append race.
 
-  **Deferred → needs a design decision, not a quick add:**
-  - 🎯 **`defrecord` macro + per-field `sig`** (the review's top cross-axis pick) —
-    **deferred pending an ADR.** It directly contradicts a *standing* decision:
-    `defrecord`/`deftype` are currently deliberate helpful-error stubs
-    (`eval/mod.rs` — "Brood has no records/types — model data with plain maps").
-    The pull is real (names state, kills the `(get m :key)` tax, makes map-key
-    typos catchable — and closed-record ⊆ `map<keyword, any>` subtyping just
-    landed in `132bb2a`, so the *type* side is already moving), but reversing a
-    documented map-first stance is an ADR-011 minimal-core question, not a prelude
-    macro to slip in. Write the ADR (records-as-closed-maps sugar vs. a real new
-    `Value` kind; how `sig` per-field types compose with the gradual checker)
-    before building. Blocks on that decision.
+  **Deferred → design settled by ADR, implementation is a follow-up slice:**
+  - 🟡 **`defrecord` macro + per-field `sig`** (the review's top cross-axis pick) —
+    the ADR is written (**ADR-130**): `defrecord` is **pure prelude sugar over
+    closed maps** — a `defmacro` in `std/` expanding to a positional constructor +
+    one accessor per field, with an optional per-field `sig` that lowers to the
+    *existing* `(record …)` type (ADR-115; closed-record ⊆ `map<keyword, any>`
+    landed in `132bb2a`). No new `Value`/`Tag`/special form/Rust; records *are*
+    maps at runtime, so immutability and every map op are untouched. Accessors kill
+    the `(get m :key)` tax *and* make typos an undefined-function error the checker
+    already catches. Status: accepted (direction), **not yet built** — the
+    remaining work is the prelude macro + deleting the `eval/mod.rs` stub +
+    updating the LSP/grammar keyword lists.
   - ⬜ **JIT float specialisation** — deferred as ordinary perf tuning (partial
     scaffolding already in `compile/mod.rs`, "type-specialize float arms"); gated
     on a concrete hot float workload, not this triage.
@@ -72,14 +75,15 @@ session `nest` (12 scheduler workers).
   - ✅ **Stale doc `transients.md`** — already rewritten 2026-06-15 to document the
     Phase-2 user-facing-transient *removal*; it is current, not stale.
 
-  **Accepted doc fixes (verified wrong) → ⬜ sweep:**
-  - ⬜ **`spec.md §11`** — "Not yet specified (planned)" still lists dynamic
-    variables, map literals, modules/namespaces, and a tracing GC as absent —
-    **all four have since shipped.** Rewrite the section to the genuinely-remaining
-    gaps.
-  - ⬜ **`value-repr.md` byte count** — says "16-byte enum" throughout, but the
-    kernel now hard-asserts `size_of::<Value>() == 24` (the `Pid { node, id }`
-    variant needs two payload words). Correct the figure and the rationale.
+  **Accepted doc fixes (verified wrong) → fixed 2026-07-09:**
+  - ✅ **`spec.md §11`** — rewrote "Not yet specified (planned)": it listed dynamic
+    variables, map literals, modules/namespaces, and a tracing GC as absent, but
+    **all four have shipped**; the section now lists only the genuinely-remaining
+    gaps (rest-param `sig` notation, lazy sequences, the `defrecord` stub).
+  - ✅ **`value-repr.md` byte count** — corrected "16-byte enum" → **24 bytes**
+    throughout (the kernel hard-asserts `size_of::<Value>() == 24`; the `Pid {
+    node, id }` variant needs two payload words), fixing both the figure and the
+    now-wrong "fits in 16" rationale, with a note on the 16→24 drift.
 
 - ✅ **[HIGH] GC: transient maps corrupt when the build allocates** — *fixed,
   commit `32bbda7`.* A `transient`/`assoc!`/`persistent!` build whose per-entry

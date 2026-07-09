@@ -69,6 +69,7 @@ One vocabulary, shared by every site:
 | `(p1 p2 …)` | a list of exactly that length, element-wise |
 | `(p1 & rest)` | head(s) + tail bound — reuses the `&` rest marker |
 | `[p1 p2 …]` | a vector of exactly that length — the Erlang *tuple* |
+| `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the target isn't a map |
 | nested | patterns compose to any depth |
 
 **It's additive.** Every binding form Brood has today is already the
@@ -261,6 +262,20 @@ These are layers on the same compiler.
   *within* one pattern to be equal; pin constrains a position to a value from
   *outside* the pattern. **Decided:** `~x` (no reader change; the "drop to
   evaluation" intuition is the same one `~` has in quasiquote).
+
+- **Associative (map) patterns** — a map literal in pattern position
+  destructures a map, Clojure-style:
+
+  ```clojure
+  (let ({:keys [x y] :or {y 0}} pt)   ; x <- (:x pt), y <- (:y pt) or 0 if absent
+    (+ x y))
+  ```
+
+  Each symbol in `:keys` binds to the value at the same-named keyword — `nil`
+  when the key is absent, or the `:or` default. In refutable position (`match`)
+  the clause fails if the value isn't a map. Only the `:keys`/`:or` subset ships;
+  general `{:key subpattern}` nesting and `:as` are deferred until a concrete need
+  (ADR-011).
 
 ## Errors
 
