@@ -2884,3 +2884,29 @@ fire (Phase 2 detects the pins; the still-referenced gen is not freed). 726 Rust
 green under both default and multigen. The A/B `rt_slab_ref` fast-path and all diagnostic
 counters were removed before commit. Multigen remains opt-in, but is now *viable by default* —
 the throughput blocker is gone.
+
+## 2026-07-09 — JIT is now a default cargo feature (on for everything)
+
+Following the multigen-unconditional simplification, made the **tier-1 JIT (ADR-101) a
+default cargo feature** so the whole toolchain is uniform: bare `cargo build`, `cargo test`,
+`make test`, rust-analyzer, and the shipped `brood`/`nest` binaries all get it — no more
+`--features jit` dance. Previously JIT was default-on only for the *product* binaries
+(`make run`/`release`/`install`, `WITH_JIT ?= 1`) but **off for `make test` and bare cargo
+builds**, so the suite didn't exercise what ships.
+
+Wiring: `crates/lisp` `default = ["dev-tools", "treesit", "jit"]`; `crates/cli`
+`default = ["brood/dev-tools", "brood/jit"]` (it pins `default-features = false` on the brood
+dep, so it must name `brood/jit` explicitly). `nest`/`brood-lsp` depend on brood with default
+features, so they inherit it. The opt-out is unchanged and still `--no-default-features`: the
+lean `nest release` bundle strips it and re-adds via `brood/jit` only when the host supports
+Cranelift (`./configure --without-jit` → `WITH_JIT=0` keeps it stripped). The per-crate `jit`
+features are kept for those `--no-default-features` builds.
+
+Cost accepted (per the deliberate choice): every clean `cargo build`/`cargo check`/
+rust-analyzer now compiles the four Cranelift crates (`cranelift-codegen` is a whole codegen
+backend). In exchange the tested config == the shipped config, and there's one engine story.
+
+Verified: plain `cargo build --release --bin brood` (no feature flag) produces a JIT-active
+binary (`BROOD_JIT_DUMP_IR=1` emits `[jit-ir]` lines); full `make test` now **763 tests, 763
+passed, 1 skipped** — up from 726 because the `jit` unit/e2e and `differential` binaries are
+built by default now. Docs updated (CLAUDE.md perf-build note, Makefile `WITH_JIT` comment).

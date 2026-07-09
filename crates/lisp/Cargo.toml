@@ -11,7 +11,11 @@ name = "brood"
 path = "src/lib.rs"
 
 [features]
-default = ["dev-tools", "treesit"]
+# `jit` is a default feature: the tier-1 JIT (ADR-101) is on for every ordinary
+# `cargo build`/`cargo test`/rust-analyzer and the shipped `brood`/`nest` binaries.
+# The lean `nest release` bundle and unsupported hosts strip it via
+# `--no-default-features` (then re-add what they need), same as `dev-tools`/`treesit`.
+default = ["dev-tools", "treesit", "jit"]
 # Dev/tooling surface baked into the runtime: the test framework (`test`), the
 # process observer (`observer`), the agent/doc/hot-reload tooling (`mcp`/`docs`/
 # `reload`), the interactive REPL (`repl`/`lineedit`), and the GC debug builtins

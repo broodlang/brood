@@ -26,11 +26,12 @@ GUI_GPU_FEATURES := $(if $(filter-out 0,$(WITH_GUI_GPU)),--features brood/gui-gp
 # portable (no audio) and only an opt-in build carries the ALSA dependency.
 WITH_AUDIO ?= 0
 AUDIO_FEATURES := $(if $(filter-out 0,$(WITH_AUDIO)),--features brood/audio,)
-# JIT (ADR-101): the tier-1 template JIT, ON by default — hot compute loops run as
-# native code, and it's compiled out (zero cost) only when disabled. `make install`
-# defaults it on even without ./configure; `./configure --without-jit` (WITH_JIT=0)
-# opts out for an unsupported host or a minimal build. Baked into the binaries that
-# run user code (brood, nest); the LSP doesn't run hot user code, so it's left out.
+# JIT (ADR-101): the tier-1 template JIT, ON by default — now a *cargo default
+# feature* of the brood lib, so ordinary `cargo build`/`cargo test`/`make test`/
+# rust-analyzer and every binary get it uniformly (hot compute loops run as native
+# code). This variable only governs the `--no-default-features` release/install
+# path below: `./configure --without-jit` (WITH_JIT=0) re-strips it for an
+# unsupported host or a minimal build; otherwise the lean bundle re-adds it here.
 WITH_JIT ?= 1
 JIT_FEATURES := $(if $(filter-out 0,$(WITH_JIT)),--features brood/jit,)
 # tree-sitter (foreign-language editor modes — ruby/elixir, ROADMAP §C). The
