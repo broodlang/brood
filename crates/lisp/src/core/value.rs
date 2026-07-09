@@ -691,59 +691,11 @@ impl Value {
             _ => None,
         }
     }
-    /// The `bool` if this is a `Bool`.
-    #[inline]
-    pub fn as_bool(self) -> Option<bool> {
-        match self {
-            Value::Bool(b) => Some(b),
-            _ => None,
-        }
-    }
-    /// The interned `Symbol` if this is a `Sym`.
-    #[inline]
-    pub fn as_sym(self) -> Option<Symbol> {
-        match self {
-            Value::Sym(s) => Some(s),
-            _ => None,
-        }
-    }
-    /// The interned `Symbol` if this is a `Keyword`.
-    #[inline]
-    pub fn as_keyword(self) -> Option<Symbol> {
-        match self {
-            Value::Keyword(s) => Some(s),
-            _ => None,
-        }
-    }
     /// The [`PairId`] if this is a `Pair` (not a `Range`/`SeqView`).
     #[inline]
     pub fn as_pair(self) -> Option<PairId> {
         match self {
             Value::Pair(p) => Some(p),
-            _ => None,
-        }
-    }
-    /// The backing [`VecId`] if this is a `Vector`.
-    #[inline]
-    pub fn as_vector(self) -> Option<VecId> {
-        match self {
-            Value::Vector(v) => Some(v),
-            _ => None,
-        }
-    }
-    /// The [`StrId`] if this is a `Str`.
-    #[inline]
-    pub fn as_str_id(self) -> Option<StrId> {
-        match self {
-            Value::Str(s) => Some(s),
-            _ => None,
-        }
-    }
-    /// The [`MapId`] if this is a `Map`.
-    #[inline]
-    pub fn as_map(self) -> Option<MapId> {
-        match self {
-            Value::Map(m) => Some(m),
             _ => None,
         }
     }

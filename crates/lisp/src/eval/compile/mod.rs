@@ -1150,7 +1150,7 @@ fn ea_scalar_replace(node: &mut Node, next_slot: &mut usize) -> bool {
 // return — exactly the "no alias analysis needed; a value is only reachable through
 // references the code creates" property `local_escapes` relies on. The observable
 // result is an ordinary immutable map (ADR-026 holds: the only mutable thing is a
-// `Table`, never surfaced). Gated behind `BROOD_LINMAP` while it stabilises.
+// `Table`, never surfaced). On by default; opt out with `BROOD_LINMAP=0`.
 
 /// Whitelisted map READ ops (return a value — safe in any position) → Table op.
 fn linmap_read_op(sym: Symbol) -> Option<&'static str> {

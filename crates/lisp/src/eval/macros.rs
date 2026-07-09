@@ -997,8 +997,9 @@ fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -
                 out.push(macroexpand_all_depth(heap, item, env, depth + 1)?);
             }
             // Wrapper-split a linear immutable-map fold into an in-place table loop
-            // (docs/linear-map-accumulator.md); no-op unless BROOD_LINMAP is set and
-            // the def is a qualifying `(def NAME (fn …))`.
+            // (docs/linear-map-accumulator.md); applies to a qualifying
+            // `(def NAME (fn …))` that passes the `linmap_probe` reachability gate.
+            // On by default; opt out with `BROOD_LINMAP=0`.
             if let Some(split) = linmap_split_def(heap, &out) {
                 return Ok(split);
             }

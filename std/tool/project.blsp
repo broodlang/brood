@@ -473,7 +473,6 @@ resolve in the advisory checker. Returns the project root."
   (cond
     (= op :check) (project--check-chunk chunk)
     (= op :scan-entries) (project--scan-entries-chunk chunk)
-    (= op :scan) (project--scan-chunk chunk)
     (= op :check-deps) (project--check-deps-chunk chunk)
     else (error "project--pfold-run: unknown op " op)))
 
@@ -780,10 +779,6 @@ resolve in the advisory checker. Returns the project root."
                   (join ", " where)
                   ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
-(defn project--check-duplicate-defs-seq (files)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
-    0
-    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--duplicate-def-warnings-seq files))))
 
 ;; --- unused module-private defns (whole-project, ADR-065 `--` convention) -----
 ;; A `--` name is private *by convention*, not enforced: the editor legitimately
@@ -804,7 +799,7 @@ resolve in the advisory checker. Returns the project root."
 ;; `mod/name` therefore contains `--` too, so a reference counts toward "used" only
 ;; if it is a `--` name. Skipping the rest shrinks the count map from every symbol
 ;; in the project to just the private-related ones — far less to build, ship back
-;; from a `:scan` worker, and merge (was O(all symbols) ≈ O(files)). Recurses
+;; from a scan worker, and merge (was O(all symbols) ≈ O(files)). Recurses
 ;; through a node's value, which is one of: raw text (a leaf — nothing to do), a
 ;; single child node (a wrapper like `:quote`, whose value is itself a `[:kind …]`
 ;; node-vector), or a vector of child nodes (`:list`/`:vector`/`:map`/`:root`).
@@ -825,7 +820,7 @@ resolve in the advisory checker. Returns the project root."
     (project--walk-val (project--node-val node) acc)))
 
 ;; Merge symbol-count map `b` into `a` (name→count), summing counts. The reduce
-;; step for the parallel `:scan` workers' per-chunk partial counts. Folding a map
+;; step for the parallel scan workers' per-chunk partial counts. Folding a map
 ;; yields its `[k v]` entries.
 (defn project--merge-counts (a b)
   (fold (fn (m entry) (let ([k v] entry) (map-assoc m k (+ (map-get m k 0) v)))) a b))
@@ -869,29 +864,6 @@ resolve in the advisory checker. Returns the project root."
                r (check-file-deps p))
            [p [mt (nth r 0) (nth r 1) (nth r 2)]]))
      chunk))
-
-;; The `:scan` op (runs in a worker): the AGGREGATED (non-per-file) scan used by
-;; the over-cap / cache-off path (`project--unused-private-warnings-agg`). Returns
-;; `[counts privs]` for the whole chunk — `counts` the merged `--`-symbol counts,
-;; `privs` a flat list of `[path [[bare qual]…]]`. Aggregating in the worker keeps
-;; the message compact (vs `:scan-entries`, which ships one entry per file — right
-;; for the cache but wasteful when there is no cache), so a huge project's
-;; from-scratch check is not regressed by the cache machinery.
-(defn project--scan-chunk (chunk)
-  (fold (fn (acc path)
-          (let ([counts privs] acc
-                root-nodes (project--node-val (parse-source (slurp path)))
-                counts2 (fold (fn (a node) (project--node-syms--acc node a)) counts root-nodes)
-                list-nodes (filter (fn (c) (= (project--node-kind c) :list)) root-nodes)
-                ns (first (keep project--module-name list-nodes))
-                fprivs (keep (fn (node)
-                               (let (nm (project--def-name node))
-                                 (when (and (not (nil? nm)) (string-contains? (str nm) "--"))
-                                   [(str nm) (str (project--qualify ns nm))])))
-                         list-nodes))
-            [counts2 (if (empty? fprivs) privs (cons [path fprivs] privs))]))
-    [{} nil]
-    chunk))
 
 ;; ── incremental check cache (Phase 1, ADR-119) ───────────────────────────────
 ;; The two whole-project CST passes below (unused-private, duplicate-defs) are pure
@@ -1014,11 +986,11 @@ resolve in the advisory checker. Returns the project root."
 ;; Warning strings for private defs unreferenced anywhere in `files`. `used` =
 ;; the bare name appears ≥2× (its own def, plus a same-module call) OR — when a
 ;; module qualifies it — the qualified `mod/name` appears at all (a cross-module /
-;; test reference). The parse + per-file scan is fanned across the worker pool via
-;; the `:scan` op — a map-reduce: workers each parse a slice and return partial
-;; symbol counts + their files' private defs; the driver `project--merge-counts`s
-;; the counts and concatenates the private defs. The GLOBAL merged counts then
-;; decide each private def's fate (so cross-module references are seen). A scan
+;; test reference). The parse + per-file scan is fanned across the worker pool
+;; upstream (`project--gather-extracts`, `:scan-entries`), producing the `extracts`
+;; map this consumes; here the driver `project--merge-counts`s the per-file counts
+;; into a GLOBAL merged count that decides each private def's fate (so cross-module
+;; references are seen). A scan
 ;; worker that dies leaves the counts under-complete for its slice — which could
 ;; only suppress a real warning or add a false one — so it is surfaced rather than
 ;; dropped silently.
@@ -1050,39 +1022,6 @@ resolve in the advisory checker. Returns the project root."
     0
     (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--unused-private-warnings extracts))))
 
-;; AGGREGATED unused-private (over-cap / cache-off path): the parallel `:scan`
-;; map-reduce — workers merge `--`-counts per chunk and concat privs, the driver
-;; merges the counts, then verdicts. No per-file extract map, no cache — the
-;; compact-shipping path that keeps a huge from-scratch check fast.
-(defn project--unused-private-warnings-agg (files)
-  (let (scanned (project--pfold-files files :scan
-                  (fn (acc cr)
-                    (let ([ac ap] acc [cc cp] cr)
-                      [(project--merge-counts ac cc) (append-two cp ap)]))
-                  (fn (acc chunk reason)
-                    (eprintln (str "warning: unused-private scan worker died on "
-                                (count chunk) " file(s) — results may be incomplete: "
-                                (pr-str reason)))
-                    acc)
-                  [{} nil])
-        [counts privs] scanned)
-    (fold (fn (acc entry)
-            (let ([path pds] entry)
-              (append-two
-                (keep (fn (pd)
-                        (let ([bare qual] pd
-                              used (or (>= (map-get counts bare 0) 2)
-                                     (and (not (= qual bare)) (>= (map-get counts qual 0) 1))))
-                          (when (not used)
-                            (str path ": warning: unused private function: " bare))))
-                  pds)
-                acc)))
-      '()
-      privs)))
-(defn project--check-unused-private-agg (files)
-  (if (= (getenv "BROOD_NO_CHECK") "1")
-    0
-    (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--unused-private-warnings-agg files))))
 
 (defn check-project ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."

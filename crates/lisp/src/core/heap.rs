@@ -1129,11 +1129,6 @@ pub struct RuntimeCode {
     /// mostly no-op). A plain CAS gate ([`Heap::begin_aging`]/[`Heap::end_aging`]) —
     /// the loser skips this safepoint and retries at the next one.
     aging: AtomicBool,
-    /// **RUNTIME collector — Stage 4 (freed-generation counter, ADR-091).** Bumped by
-    /// [`Heap::free_runtime_gen`] each time a whole generation is reclaimed. Diagnostic
-    /// only — surfaced via [`Heap::runtime_free_count`] so a test can confirm the
-    /// multi-process collector actually fired end-to-end (not just that the program ran).
-    free_count: AtomicU64,
     /// **RUNTIME collector — Stage 4 (aging counter, ADR-091).** Bumped by
     /// [`Heap::age_runtime`]; surfaced via [`Heap::runtime_aged_count`] so a test can
     /// confirm the multi-generation collector aged, even when a full free is timing-
@@ -1200,7 +1195,6 @@ impl Default for RuntimeCode {
             drain_acks: RwLock::new(HashMap::new()),
             free_epoch: AtomicU64::new(0),
             aging: AtomicBool::new(false),
-            free_count: AtomicU64::new(0),
             aged_count: AtomicU64::new(0),
             promote_lock: RwLock::new(()),
         }
@@ -1288,7 +1282,6 @@ impl RuntimeCode {
             drain_acks: RwLock::new(HashMap::new()),
             free_epoch: AtomicU64::new(0),
             aging: AtomicBool::new(false),
-            free_count: AtomicU64::new(0),
             aged_count: AtomicU64::new(0),
             promote_lock: RwLock::new(()),
         }
@@ -1910,7 +1903,7 @@ pub enum EnvRoot {
     Slot(usize),
 }
 
-/// A key into the compiling-VM body cache ([`Heap::vm_cache_get`]). Two stable
+/// A key into the compiling-VM body cache ([`Heap::vm_cache_arm`]). Two stable
 /// handle spaces are namespaced apart (ADR-076 §2c): a top-level closure is keyed
 /// by its own RUNTIME [`ClosureId`] handle; a local-capturing closure is keyed by
 /// the immovable **body-code handle** its (recycled LOCAL) `ClosureId` points at.
@@ -3198,15 +3191,6 @@ impl Heap {
     /// of its own subtree, so the root's `size` is the answer.
     pub fn map_size(&self, id: MapId) -> usize {
         self.map_node(id).size as usize
-    }
-
-    /// True if `id` resolves to a map with `key` as one of its keys (so
-    /// `(contains? m k)` distinguishes a stored `nil`/`false` from absence
-    /// — both are valid stored values, only "not bound" returns false here).
-    /// Same cost as `map_get`; we delegate rather than duplicate the trie
-    /// walk.
-    pub fn map_contains(&self, id: MapId, key: Value) -> bool {
-        self.map_get(id, key).is_some()
     }
 
     /// Allocate a new map node — the path-copy primitive every assoc /
@@ -5407,8 +5391,7 @@ impl Heap {
     // fire — see `docs/memory-model.md`. Empty on the hot path.
 
     /// Push `v` onto the explicit root stack so it survives any GC that may run
-    /// between now and the matching [`Self::truncate_roots`] (or
-    /// [`Self::pop_root`]). Cheap: one `Vec` push.
+    /// between now and the matching [`Self::truncate_roots`]. Cheap: one `Vec` push.
     pub fn push_root(&mut self, v: Value) {
         self.roots.push(v);
     }
@@ -5419,11 +5402,6 @@ impl Heap {
     pub fn extend_roots_to_nil(&mut self, len: usize) {
         debug_assert!(len >= self.roots.len());
         self.roots.resize(len, Value::nil());
-    }
-
-    /// Pop the most recently pushed root (the matching unwind of `push_root`).
-    pub fn pop_root(&mut self) -> Option<Value> {
-        self.roots.pop()
     }
 
     /// Raw base pointer of the operand-stack/`roots` buffer, for JIT'd code to index
@@ -5750,13 +5728,6 @@ impl Heap {
         self.runtime.cur_gen()
     }
 
-    /// How many whole RUNTIME generations this runtime has freed
-    /// ([`free_runtime_gen`](Self::free_runtime_gen)). Diagnostic — lets a test confirm
-    /// the multi-process collector actually reclaimed, end-to-end.
-    pub fn runtime_free_count(&self) -> u64 {
-        self.runtime.free_count.load(Ordering::Relaxed)
-    }
-
     /// **RUNTIME collector — Stage 4 (single-flight aging gate).** Claim the exclusive
     /// right to run an `age + migrate + drain` cycle: a CAS on the shared `aging` flag.
     /// Returns `true` to the one winner; a loser skips this safepoint (the winner's
@@ -5978,7 +5949,6 @@ impl Heap {
         // Drop the whole generation: store a fresh empty slab; the old `Arc` releases
         // when the last (already none, by the drain) reader guard does.
         self.runtime.gens[old_gen].store(Arc::new(CodeSlabs::default()));
-        self.runtime.free_count.fetch_add(1, Ordering::Relaxed);
         // Invalidate the version-stamped caches (global_ic, call/global ICs, JIT)…
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
         // …and the handle-keyed vm_cache (via free_epoch) across every process.
@@ -6380,17 +6350,6 @@ impl Heap {
         live_pids.iter().all(|pid| acks.get(pid) == Some(&epoch))
     }
 
-    /// Drop a process's drain ack (Stage 3c calls this from the scheduler's process-
-    /// exit path). A dead process is removed from the live set the union queries, so
-    /// its ack no longer matters; clearing it just keeps the table from accreting
-    /// stale pids across drains. A no-op if it had no ack.
-    pub fn clear_gen_ack(&self, pid: u64) {
-        self.runtime
-            .drain_acks
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&pid);
-    }
 
     /// **RUNTIME collector — Step 2a (out-of-place evacuation).** Trace the live
     /// RUNTIME code reachable from the global bindings + this process's operand roots
@@ -6834,18 +6793,6 @@ impl Heap {
 
     // ===== Compiling-VM body cache and inline caches (ADR-076/096) =============
 
-    /// The cached compile result for closure key `k` (see [`VmCacheKey`]):
-    /// `None` = not cached yet; `Some(None)` = cached as ineligible; `Some(Some(a))`
-    /// = the compiled body. `&self` (interior-mutable `RefCell`), so the VM can
-    /// consult it on the read-only hot path.
-    pub fn vm_cache_get(
-        &self,
-        k: VmCacheKey,
-    ) -> Option<Option<Arc<crate::eval::compile::CompiledClosure>>> {
-        self.sync_free_epoch();
-        self.vm_cache.borrow().get(&k).cloned()
-    }
-
     /// **RUNTIME collector — Stage 4.** Clear this process's [`Self::vm_cache`] once
     /// if a generation was freed since it was last synced. A freed slot is reused by
     /// aging with bit-identical `(gen, index)` handles, and `vm_cache` keys on those
@@ -6862,8 +6809,9 @@ impl Heap {
         }
     }
 
-    /// Like [`vm_cache_get`] but resolves straight to the `argc` arm under the
-    /// cache borrow, cloning **only** that `Arc<CompiledArm>` — never the whole
+    /// Look up the compiled body for closure key `k` (see [`VmCacheKey`]) and resolve
+    /// straight to the `argc` arm under the cache borrow, cloning **only** that
+    /// `Arc<CompiledArm>` — never the whole
     /// `CompiledClosure`. The compiling VM's per-call hot path (`compiled_arm_for`)
     /// uses this so each closure call pays one arm clone instead of a transient
     /// `CompiledClosure` clone + an arm clone. Outer `None` = key absent (a cache
