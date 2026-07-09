@@ -1103,6 +1103,16 @@ pub struct RuntimeCode {
     drain_active: AtomicBool,
     drain_gen: AtomicUsize,
     drain_epoch: AtomicU64,
+    /// RUNTIME-churn dirty bit: set true whenever a closure is minted into the
+    /// current code generation (`promote_closure` — i.e. every `def`/`spawn`/
+    /// hot-reload `promote`). The eval safepoint reads it to decide whether the
+    /// (relatively costly) `rt_gc_due` probe — an `ArcSwap` load + a closure count
+    /// — is worth running: the RUNTIME region only grows on a mint, which never
+    /// happens inside a hot compute loop, so a def-free loop (`fib`, `reduce`,
+    /// `apply`) skips the probe entirely. Cleared once the safepoint has run the
+    /// probe. A plain relaxed `bool`: a read keeps the cache line Shared across
+    /// worker cores (no invalidation), a mint writes it once.
+    rt_dirty: AtomicBool,
     drain_acks: RwLock<HashMap<u64, u64>>,
     /// **RUNTIME collector — Stage 4 (free-generation epoch, ADR-091).** Bumped each
     /// time a generation is freed ([`Heap::free_runtime_gen`]). A freed slot is later
@@ -1189,6 +1199,7 @@ impl Default for RuntimeCode {
             jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             drain_active: AtomicBool::new(false),
+            rt_dirty: AtomicBool::new(true),
             drain_gen: AtomicUsize::new(0),
             drain_epoch: AtomicU64::new(0),
             drain_acks: RwLock::new(HashMap::new()),
@@ -1276,6 +1287,7 @@ impl RuntimeCode {
             jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             drain_active: AtomicBool::new(false),
+            rt_dirty: AtomicBool::new(true),
             drain_gen: AtomicUsize::new(0),
             drain_epoch: AtomicU64::new(0),
             drain_acks: RwLock::new(HashMap::new()),
@@ -3794,6 +3806,9 @@ impl Heap {
         // this closure reached while promoting its captured scope resolves here
         // rather than recursing forever (e.g. `(let (g (fn () g)) g)`).
         let new_idx = self.runtime.cur_code().closures.push(OnceLock::new());
+        // The RUNTIME closure count just grew — arm the eval safepoint's `rt_gc_due`
+        // probe (see `rt_dirty`). This is the one place closures enter the region.
+        self.runtime.rt_dirty.store(true, Ordering::Relaxed);
         let runtime_id = ClosureId::runtime_gen(new_idx, self.runtime.cur_gen());
         fwd.closures.insert(key, runtime_id);
         let cl = self.closure(id).clone();
@@ -6164,6 +6179,22 @@ impl Heap {
     #[inline]
     pub fn drain_active(&self) -> bool {
         self.runtime.drain_active.load(Ordering::Acquire)
+    }
+
+    /// Has the RUNTIME region grown (a closure minted via `promote_closure`) since
+    /// the eval safepoint last ran its `rt_gc_due` probe? A single relaxed load —
+    /// the cheap gate that lets a def-free hot loop skip the probe entirely.
+    #[inline]
+    pub fn rt_dirty(&self) -> bool {
+        self.runtime.rt_dirty.load(Ordering::Relaxed)
+    }
+
+    /// Clear the RUNTIME-churn dirty bit — called by the safepoint right before it
+    /// runs the `rt_gc_due` probe, so the next mint re-arms it. Only ever stored on
+    /// the (rare) dirty path, keeping the flag's cache line Shared in steady state.
+    #[inline]
+    pub fn rt_dirty_clear(&self) {
+        self.runtime.rt_dirty.store(false, Ordering::Relaxed);
     }
 
     /// The generation currently being drained (meaningful only while

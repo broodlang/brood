@@ -2624,3 +2624,38 @@ Note: the benches carry ~±15% run-to-run variance, so the smaller `apply_driven
 `reduce_range` deltas are within noise and not separately actionable; `fib` was the one
 clean, reproducible signal, and it's resolved. BROOD_RT_MULTIGEN stays **off** by default
 (this was a default-path fix, independent of the multigen feature flag).
+
+### RUNTIME safepoint, take 2 — a dirty-bit gate (replaces the frame sampler); plus a located HOF regression
+
+A thermally-controlled **interleaved** A/B (baseline `f85e5c9` vs main, alternating rounds
+so both see the same CPU thermal state — the earlier back-to-back full run was contaminated
+by a uniform ~+25% throttle on the *second* run, visible as an across-the-board tree-walker
+slowdown on an unchanged engine) gave a much cleaner read. Two findings:
+
+1. **The frame-sampler was replaced by a dirty-bit gate.** Instead of sampling `rt_gc_due`
+   every 256 frames + frame 1 (which still cost one `ArcSwap` load per `vm_apply`, taxing
+   HOF loops), the safepoint now gates on `heap.rt_dirty()` — a relaxed `AtomicBool` on
+   `RuntimeCode` set at the *sole* RUNTIME closure-mint point (`promote_closure`, i.e. every
+   `def`/`spawn`/hot-reload) and cleared once the probe runs — plus `drain_active()`. A
+   def-free hot loop (`fib`, `reduce`, `apply`) trips neither and skips the `ArcSwap`+count
+   entirely; a mint re-arms it so a collect is at most one frame late. Min-of-3 interleaved:
+   `fib/25` +1.0%, `sum_tail/100000` −0.2%, `cons_build/100000` +0.9% — all flat (the
+   per-frame `rt_gc_due` tax is gone). Collector unaffected (only the probe *frequency*
+   changes): `runtime_multigen` ages/drains under load + `BROOD_GC_STRESS`, collector 20,
+   drain green, full suite 2610/0.
+
+2. **A separate, real HOF regression is located but NOT yet fixed.** `apply_driven/100000`
+   (+16%, consistent every round) and `reduce_range/1000000` (+17%) regress vs `f85e5c9`,
+   and this is *not* `rt_gc_due` (a controlled "probe fully disabled" build still showed it)
+   and *not* thermal (interleaved). Root cause: Stage 4 changed `cur_code()` from `&CodeSlabs`
+   to an `ArcSwap` `Guard` load and `closure()` from `&Closure` to a guard-holding `SlabRef`
+   (necessary so a drained generation can be **freed while the runtime is shared**). So every
+   closure deref now does an `ArcSwap::load`. `fib` is immune — its self-call resolves once
+   through the call-site inline cache — but `apply`/`reduce`/`map`/`fold` resolve the callee
+   *per element* via `apply_value`, which has no IC, so they pay one `ArcSwap` load per call
+   (~15ns × 1e6 ≈ the measured +16%). This is a default-path cost imposed by an off-by-default
+   feature. Proposed fix (deferred — a safety-critical hot-path change deserving its own cycle
+   with `BROOD_GC_VERIFY`/stress): epoch-keyed per-process memoization of `rt_slab_ref`,
+   reusing the existing `free_epoch`/`seen_free_epoch`/`vm_cache` pattern. On the default path
+   `gens[0]`'s `Arc` never changes (age/free only fire under multigen; single-process compaction
+   mutates in place via `Arc::get_mut`), so the cache would load once and never invalidate.

@@ -4828,15 +4828,6 @@ fn vm_run_bc(
     #[cfg(not(feature = "jit"))]
     let _ = fresh; // silence unused warning when the JIT is off
 
-    // RUNTIME-safepoint sampling counter. `rt_gc_due` loads the shared-code `ArcSwap`
-    // + counts its closures — too costly to run every frame (it measurably regressed
-    // call-heavy code, e.g. `fib`, ~25%). The RUNTIME region only grows on `def`
-    // (a `promote`), which never happens inside a hot compute loop, so the probe's
-    // *cost*, not its result, was the tax. Sample it once every 256 frames: a RUNTIME
-    // collect at most 256 frames late is immaterial (a soft threshold, floor ~4096
-    // closures), and the LOCAL collect below still runs every frame.
-    let mut rt_gc_tick: u32 = 0;
-
     loop {
         // Per-iteration safepoint / preemption / deadline — relocates every frame's
         // slots and env in place (all on `Heap::roots`/`env_roots`). Mirrors the
@@ -4850,19 +4841,20 @@ fn vm_run_bc(
         // collector armed — advance the age/migrate/drain/free state machine. Every
         // live RUNTIME handle at this frame boundary is already on `heap.roots`/
         // `env_roots`/`live_vm_arms` (which the compactor rewrites), so no extra roots
-        // are needed. Sampled every 256 frames (see `rt_gc_tick` above); gated on the
-        // same macro-block guard as the LOCAL collect.
-        rt_gc_tick = rt_gc_tick.wrapping_add(1);
-        // Frame 1 of every `vm_run_bc` (once per top-level form / resume — a short
-        // `(def …)` form is only a few frames, so per-call cost is not incurred),
-        // then every 256th frame of a long run. Frame 1 keeps a script of many short
-        // `def`s (each its own `vm_run_bc`) collecting the RUNTIME region promptly;
-        // the 256-sampling keeps a hot compute loop cheap.
-        if (rt_gc_tick == 1 || rt_gc_tick & 0xFF == 0)
-            && !crate::process::macro_block_active()
-            && heap.rt_gc_due()
+        // are needed. Gated on `rt_dirty`/`drain_active` (see below) and the same
+        // macro-block guard as the LOCAL collect.
+        // Gate the (costly) `rt_gc_due` probe — an `ArcSwap` load + closure count —
+        // on two cheap relaxed loads: run it only when the RUNTIME region has grown
+        // since the last check (`rt_dirty`, set at the sole mint point) or a drain is
+        // in progress (which needs every safepoint to advance/free it). A def-free
+        // hot loop (`fib`, `reduce`, `apply`) trips neither and pays nothing; a mint
+        // re-arms `rt_dirty` so a collect is at most one frame late.
+        if (heap.rt_dirty() || heap.drain_active()) && !crate::process::macro_block_active()
         {
-            heap.maybe_runtime_collect(&mut [], &mut []);
+            heap.rt_dirty_clear();
+            if heap.rt_gc_due() {
+                heap.maybe_runtime_collect(&mut [], &mut []);
+            }
         }
         // RUNTIME-drain cooperative report (ADR-091 Stage 3c): the VM-engine
         // counterpart of the tree-walker's safepoint report. While a generation
