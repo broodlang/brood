@@ -2910,3 +2910,35 @@ Verified: plain `cargo build --release --bin brood` (no feature flag) produces a
 binary (`BROOD_JIT_DUMP_IR=1` emits `[jit-ir]` lines); full `make test` now **763 tests, 763
 passed, 1 skipped** — up from 726 because the `jit` unit/e2e and `differential` binaries are
 built by default now. Docs updated (CLAUDE.md perf-build note, Makefile `WITH_JIT` comment).
+
+## 2026-07-09 — Remove dead complexity: the inert PoisonBits tripwire + two stdlib dups
+
+Cleared the remaining survey items from the earlier kernel/stdlib sweep. No behaviour
+change; full `make test` 764/764 (debug_assertions on, so the epoch tripwire is exercised
+on every deref), GC stress+verify clean on the churn repros.
+
+**PoisonBits removed (`heap.rs`, ~235 lines).** The debug-only `PoisonBits` use-after-GC
+tripwire has had **no writer** since the in-place mark-sweep's `sweep` was deleted — the
+copying collector relocates survivors and drops the dead wholesale, never freeing a slot in
+place — so every `PoisonBits::is(...)` answered `false` and every `debug_assert!(!poisoned)`
+was a no-op. It was fully superseded by the generational-handle epoch tripwire
+(`check_epoch_aged`, ADR-054). Deleted the struct/impl/field/inits, the two flush-time
+`.clear()` blocks, the `env_is_poisoned` / `debug_walk_env_chain` / `env_chain_debug`
+(`BROOD_ENV_DEBUG`) diagnostics, and their three `eval/mod.rs` call sites. Simplified the
+`local_gc_check!` macro (dropped the now-unused `$poison`/`$label` params) and the
+`region_ref!` LOCAL arm. **The active `check_epoch_aged` tripwire is byte-for-byte
+unchanged** — the diff only removes the inert poison lines around it (verified: no
+`check_epoch_aged` call added or removed).
+
+**Two stdlib duplicates removed.** `datetime/dt--fmod` (floor-mod) → the prelude's Euclidean
+`mod`: identical for the one call site's positive divisor 7. `stats/frequencies` was a slower
+duplicate of the prelude `frequencies` (not part of the stats module's documented API, and
+`mode` already calls it bare → prelude); deleted it and its now-redundant test block.
+
+**Assessed and deliberately left** (a little duplication beats the wrong coupling, and
+"stabilise" says don't silently change public behaviour): `file`↔`path` path helpers *look*
+duplicated but diverge — `file/path-extension` uses the prelude `path-basename` (keeps
+trailing slashes) while `path/extension` uses `path/basename` (strips them), so merging would
+change public behaviour. The five open-coded hex encoders (`encoding`/`hash`/`uuid`/`json`/
+`url`) are each ~4 self-contained lines; consolidating would couple foundational crypto
+modules onto `encoding` and risk digest correctness for negligible gain.

@@ -80,14 +80,6 @@
     (assert-error (stats/stats-max []))
     (assert-error (stats/range-of []))))
 
-(describe "frequencies"
-  (test "basic count"
-    (assert= (stats/frequencies [:a :b :a :c :a :b]) {:a 3 :b 2 :c 1}))
-  (test "empty sequence"
-    (assert= (stats/frequencies []) {}))
-  (test "single element"
-    (assert= (stats/frequencies [42]) {42 1})))
-
 (describe "mode"
   (test "clear mode"
     (assert= (stats/mode [1 2 2 3]) 2))

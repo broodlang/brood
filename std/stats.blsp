@@ -88,10 +88,8 @@ For an even-length sequence, returns the mean of the two middle values."
   (- (stats-max xs) (stats-min xs)))
 
 ;; ---- frequency ---------------------------------------------------------------
-
-(defn frequencies (xs)
-  "A map from each distinct value in `xs` to its count."
-  (fold (fn (m x) (assoc m x (+ (get m x 0) 1))) {} xs))
+;; `mode` uses the prelude's `frequencies` (a general sequence op); no stats-local
+;; copy — it was a slower duplicate of the same function.
 
 (defn mode (xs)
   "The most frequent value in `xs` (first occurrence wins on ties). Raises on empty."

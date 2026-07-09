@@ -15,9 +15,6 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z)."))
   (let (q (quot a b) r (rem a b))
     (if (< r 0) (- q 1) q)))
 
-(defn dt--fmod (a b)
-  (- a (* b (dt--fdiv a b))))
-
 (defn dt--zero-pad (n width)
   ;; Render n as a decimal string of at least `width` digits. Handles negative n.
   (if (< n 0)
@@ -286,7 +283,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z)."))
 
 (defn day-of-week (dt)
   "Day of week as a keyword: :monday … :sunday. Based on UTC date."
-  (let (w (dt--fmod (+ (dt--ymd->days (get dt :year) (get dt :month) (get dt :day)) 3) 7))
+  (let (w (mod (+ (dt--ymd->days (get dt :year) (get dt :month) (get dt :day)) 3) 7))
     (nth [:monday :tuesday :wednesday :thursday :friday :saturday :sunday] w)))
 
 (defn day-of-year (dt)

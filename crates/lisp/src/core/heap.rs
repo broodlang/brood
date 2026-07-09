@@ -114,15 +114,6 @@ macro_rules! region_ref {
                 }
                 LOCAL => {
                     #[cfg(debug_assertions)]
-                    debug_assert!(
-                        !PoisonBits::is(&self.poison.$field, id.index()),
-                        "use-after-GC: {}() on freed nursery {} slot {} (handle {:#x}).",
-                        stringify!($name),
-                        stringify!($field),
-                        id.index(),
-                        id.0
-                    );
-                    #[cfg(debug_assertions)]
                     self.check_epoch_aged(
                         false,
                         id.generation(),
@@ -147,44 +138,24 @@ macro_rules! region_ref {
     };
 }
 
-/// Emit the use-after-GC tripwire prelude for **one LOCAL match arm** of a
-/// hand-written accessor — the poison `debug_assert!` (nursery only) and the
-/// generational `check_epoch_aged`. Factors the byte-for-byte-identical preamble
-/// the `pair`/`string`/`closure`/`rope`/`bigint`/`transient_cell` accessors each
-/// copy-pasted; `region_ref!` already inlines the same checks for the uniform
-/// reference accessors. The expansion is semantically identical per site — same
-/// old/nursery flags, same `{name}()`/`{label}` words in the panic message, same
-/// `check_epoch_aged` "what" string — so the tripwire fires exactly as it did
-/// hand-written. `$name` is the accessor name (for `{name}()` + the epoch
-/// "what"); `$label` the slot label in the poison message (usually the slab
-/// field name, but `pair` uses the singular "pair"); `$poison` the poison-bitmap
-/// field; `$h` the handle expression (`id.index()`/`id.0`/`id.generation()`).
+/// Emit the use-after-GC tripwire for **one LOCAL match arm** of a hand-written
+/// accessor — the generational `check_epoch_aged`. Factors the byte-for-byte-identical
+/// preamble the `pair`/`string`/`closure`/`rope`/`bigint` accessors each copy-pasted;
+/// `region_ref!` already inlines the same check for the uniform reference accessors.
+/// `$name` is the accessor name (for the epoch "what" string); `$h` the handle
+/// expression (`id.index()`/`id.0`/`id.generation()`).
 ///
-/// Two forms: `old` emits just the epoch check; `nursery` emits the poison
-/// assert then the epoch check. (env_frame stays hand-written — its message
-/// carries extra docs prose and binds `env`, not `id`.)
+/// Two forms select the aged flag: `old` → aged, `nursery` → nursery. (env_frame stays
+/// hand-written — its message carries extra docs prose and binds `env`, not `id`.)
 macro_rules! local_gc_check {
-    (old, $self:ident, $h:expr, $poison:ident, $name:literal, $label:literal) => {
+    (old, $self:ident, $h:expr, $name:literal) => {
         #[cfg(debug_assertions)]
         $self.check_epoch_aged(true, $h.generation(), $h.index(), $name, $h.0);
     };
-    (nursery, $self:ident, $h:expr, $poison:ident, $name:literal, $label:literal) => {{
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            !PoisonBits::is(&$self.poison.$poison, $h.index()),
-            concat!(
-                "use-after-GC: ",
-                $name,
-                "() on freed nursery ",
-                $label,
-                " slot {} (handle {:#x})."
-            ),
-            $h.index(),
-            $h.0
-        );
+    (nursery, $self:ident, $h:expr, $name:literal) => {
         #[cfg(debug_assertions)]
         $self.check_epoch_aged(false, $h.generation(), $h.index(), $name, $h.0);
-    }};
+    };
 }
 
 /// Inline storage for an env frame's bindings. A frame holds a handful (function
@@ -267,17 +238,6 @@ fn tag_rank(v: Value) -> u8 {
         ValueRef::Table(_) => 18,
         ValueRef::Bytes(_) => 20,
     }
-}
-
-/// Opt-in (`BROOD_ENV_DEBUG=1`) for the legacy poison-based env-chain
-/// diagnostics. Off by default: they run per eval / per symbol and walk the env
-/// chain, so leaving them always-on made debug builds pathologically slow — and
-/// they're superseded by the generational-handle tripwire (ADR-054). Kept as an
-/// on-demand tool. Debug-only.
-#[cfg(debug_assertions)]
-fn env_chain_debug() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_ENV_DEBUG").is_some())
 }
 
 /// Parse a GC threshold override (an *object count*, with an optional `K`/`M`
@@ -695,45 +655,6 @@ fn slab_bytes(s: &Slabs) -> usize {
         + s.closures.len() * size_of::<Closure>()
         + s.natives.len() * size_of::<NativeFn>()
         + s.envs.len() * size_of::<EnvFrame>()
-}
-
-/// Use-after-GC tripwire bits, one per LOCAL slot in each slab. **Debug-only**:
-/// the field on `Heap` is `#[cfg(debug_assertions)]`, and every accessor that
-/// consults this drops out entirely in release. A `debug_assert!` in each
-/// handle accessor checks the bit so a *use of a dangling handle* panics at
-/// the instant of the bad deref — pointing the backtrace at the actual
-/// offender, not at the eventual symptom (e.g. an "unbound symbol" arising
-/// later when the reclaimed env's parent chain is read).
-///
-/// **Currently inert:** the only writer was the in-place mark-sweep's `sweep`
-/// (deleted — the live collector relocates survivors into fresh slabs and
-/// drops the dead wholesale, so no slot is ever freed in place). The live
-/// use-after-GC detector is the generation-epoch check (`check_epoch`,
-/// ADR-054). The bits and their accessor checks are kept because they're
-/// woven through every accessor and any future in-place reclaimer would need
-/// exactly this tripwire back.
-#[cfg(debug_assertions)]
-#[derive(Default)]
-struct PoisonBits {
-    pairs: Vec<bool>,
-    vectors: Vec<bool>,
-    maps: Vec<bool>,
-    strings: Vec<bool>,
-    bigints: Vec<bool>,
-    decimals: Vec<bool>,
-    bytes: Vec<bool>,
-    ropes: Vec<bool>,
-    closures: Vec<bool>,
-    envs: Vec<bool>,
-}
-
-#[cfg(debug_assertions)]
-impl PoisonBits {
-    /// Is `idx` currently poisoned? Out-of-range answers `false` — a slot we
-    /// never sized for can't have been poisoned.
-    fn is(bits: &[bool], idx: usize) -> bool {
-        bits.get(idx).copied().unwrap_or(false)
-    }
 }
 
 /// The immutable, read-only prelude region (closures, code values, the
@@ -1364,16 +1285,6 @@ pub struct Heap {
     /// the old generation is **not a root set for a minor collection** — no write
     /// barrier, no remembered set.
     old: Slabs,
-    /// Debug-build use-after-GC tripwire: a bit per LOCAL slot. Every handle
-    /// accessor (`pair`, `vector`, `closure`, `env_frame`, …)
-    /// `debug_assert!`s its slot isn't poisoned, so a dangling handle panics
-    /// at the *moment of use* with a backtrace pointing at the offender —
-    /// instead of returning silently-stale data that surfaces as an "unbound
-    /// symbol" or wrong-arity error many call frames later
-    /// (`docs/claude-demo-findings.md` § Scheduler race). Skipped in release
-    /// (`#[cfg(debug_assertions)]`) so there's zero hot-path cost shipped.
-    #[cfg(debug_assertions)]
-    poison: PoisonBits,
     prelude: Arc<SharedCode>,
     runtime: Arc<RuntimeCode>,
     /// This process's global scope. For a real runtime this is [`EnvId::GLOBAL`]
@@ -1943,8 +1854,6 @@ impl Heap {
         Heap {
             local: Slabs::default(),
             old: Slabs::default(),
-            #[cfg(debug_assertions)]
-            poison: PoisonBits::default(),
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
@@ -1998,8 +1907,6 @@ impl Heap {
         Heap {
             local: Slabs::default(),
             old: Slabs::default(),
-            #[cfg(debug_assertions)]
-            poison: PoisonBits::default(),
             prelude,
             runtime,
             global: EnvId::local(0),
@@ -3255,11 +3162,11 @@ impl Heap {
     pub fn rope(&self, id: RopeId) -> SlabRef<'_, ropey::Rope> {
         match id.region() {
             LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, ropes, "rope", "ropes");
+                local_gc_check!(old, self, id, "rope");
                 SlabRef::direct(&self.old.ropes[id.index()])
             }
             LOCAL => {
-                local_gc_check!(nursery, self, id, ropes, "rope", "ropes");
+                local_gc_check!(nursery, self, id, "rope");
                 SlabRef::direct(&self.local.ropes[id.index()])
             }
             RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
@@ -3307,15 +3214,15 @@ impl Heap {
     /// Resolve a bignum handle to its `&num_bigint::BigInt`. LOCAL is the common
     /// case; RUNTIME holds a bignum `def`'d to a global or baked into shared code;
     /// PRELUDE a bignum literal frozen into the prelude (none today, but the path
-    /// mirrors `string`). Honours the GC poison/epoch tripwires like every leaf.
+    /// mirrors `string`). Honours the GC epoch tripwire like every leaf.
     pub fn bigint(&self, id: BigIntId) -> SlabRef<'_, num_bigint::BigInt> {
         match id.region() {
             LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, bigints, "bigint", "bigints");
+                local_gc_check!(old, self, id, "bigint");
                 SlabRef::direct(&self.old.bigints[id.index()])
             }
             LOCAL => {
-                local_gc_check!(nursery, self, id, bigints, "bigint", "bigints");
+                local_gc_check!(nursery, self, id, "bigint");
                 SlabRef::direct(&self.local.bigints[id.index()])
             }
             PRELUDE => SlabRef::direct(&self.prelude.slabs.bigints[id.index()]),
@@ -3336,15 +3243,15 @@ impl Heap {
     }
 
     /// Resolve a decimal handle to its `&bigdecimal::BigDecimal` (mirrors
-    /// [`bigint`](Self::bigint)). Honours the GC poison/epoch tripwires like every leaf.
+    /// [`bigint`](Self::bigint)). Honours the GC epoch tripwire like every leaf.
     pub fn decimal(&self, id: DecimalId) -> SlabRef<'_, bigdecimal::BigDecimal> {
         match id.region() {
             LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, decimals, "decimal", "decimals");
+                local_gc_check!(old, self, id, "decimal");
                 SlabRef::direct(&self.old.decimals[id.index()])
             }
             LOCAL => {
-                local_gc_check!(nursery, self, id, decimals, "decimal", "decimals");
+                local_gc_check!(nursery, self, id, "decimal");
                 SlabRef::direct(&self.local.decimals[id.index()])
             }
             PRELUDE => SlabRef::direct(&self.prelude.slabs.decimals[id.index()]),
@@ -3365,16 +3272,16 @@ impl Heap {
     }
 
     /// Resolve a bytes handle to its `&Arc<SharedBlob>` (mirrors
-    /// [`bigint`](Self::bigint)). Honours the GC poison/epoch tripwires. The
+    /// [`bigint`](Self::bigint)). Honours the GC epoch tripwire. The
     /// caller reads `.as_bytes()` — raw bytes, never decoded as UTF-8 text.
     pub fn bytes(&self, id: BytesId) -> SlabRef<'_, Arc<SharedBlob>> {
         match id.region() {
             LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, bytes, "bytes", "bytes");
+                local_gc_check!(old, self, id, "bytes");
                 SlabRef::direct(&self.old.bytes[id.index()])
             }
             LOCAL => {
-                local_gc_check!(nursery, self, id, bytes, "bytes", "bytes");
+                local_gc_check!(nursery, self, id, "bytes");
                 SlabRef::direct(&self.local.bytes[id.index()])
             }
             PRELUDE => SlabRef::direct(&self.prelude.slabs.bytes[id.index()]),
@@ -3442,20 +3349,12 @@ impl Heap {
     /// string, used by the `%blob-ptr` primitive for identity assertions in
     /// cross-process tests. `None` for an inline string or a non-LOCAL handle.
     /// Does **not** clone the `Arc`, so the read leaves the refcount
-    /// untouched. Honours the GC poison bitmap — a use-after-flush trips an
+    /// untouched. Honours the GC epoch tripwire — a use-after-GC trips an
     /// assertion at the call site, the same as every other LOCAL accessor.
     #[cfg(debug_assertions)]
     pub(crate) fn local_shared_blob_ptr(&self, id: StrId) -> Option<*const SharedBlob> {
         if id.region() != LOCAL {
             return None;
-        }
-        if !id.is_old() {
-            debug_assert!(
-                !PoisonBits::is(&self.poison.strings, id.index()),
-                "use-after-GC: local_shared_blob_ptr() on freed nursery strings slot {} (handle {:#x}).",
-                id.index(),
-                id.0
-            );
         }
         self.check_epoch_aged(
             id.is_old(),
@@ -3474,20 +3373,11 @@ impl Heap {
     /// Used by `%blob-strong-count` for leak-check assertions; like
     /// [`Self::local_shared_blob_ptr`] this does not bump the count, so the
     /// reading caller doesn't itself perturb the value it's checking.
-    /// Honours the poison bitmap.
+    /// Honours the GC epoch tripwire.
     #[cfg(debug_assertions)]
     pub(crate) fn local_shared_blob_strong_count(&self, id: StrId) -> Option<usize> {
         if id.region() != LOCAL {
             return None;
-        }
-        if !id.is_old() {
-            debug_assert!(
-                !PoisonBits::is(&self.poison.strings, id.index()),
-                "use-after-GC: local_shared_blob_strong_count() on freed nursery strings slot {} \
-                 (handle {:#x}).",
-                id.index(),
-                id.0
-            );
         }
         self.check_epoch_aged(
             id.is_old(),
@@ -3510,15 +3400,6 @@ impl Heap {
     pub(crate) fn local_shared_blob(&self, id: StrId) -> Option<Arc<SharedBlob>> {
         if id.region() != LOCAL {
             return None;
-        }
-        #[cfg(debug_assertions)]
-        if !id.is_old() {
-            debug_assert!(
-                !PoisonBits::is(&self.poison.strings, id.index()),
-                "use-after-GC: local_shared_blob() on freed nursery strings slot {} (handle {:#x}).",
-                id.index(),
-                id.0
-            );
         }
         #[cfg(debug_assertions)]
         self.check_epoch_aged(
@@ -3989,19 +3870,6 @@ impl Heap {
                 self.form_pos.insert(new_idx as u64, pos);
             }
         }
-        #[cfg(debug_assertions)]
-        {
-            self.poison.pairs.clear();
-            self.poison.vectors.clear();
-            self.poison.maps.clear();
-            self.poison.strings.clear();
-            self.poison.bigints.clear();
-            self.poison.decimals.clear();
-            self.poison.bytes.clear();
-            self.poison.ropes.clear();
-            self.poison.closures.clear();
-            self.poison.envs.clear();
-        }
         // GC observability (Tier-1). After the flip the fresh slabs hold exactly
         // the survivors, so `local_live_count()` is the survivor count. Saturating
         // so a pathological wrap can't panic on the collector hot path.
@@ -4131,11 +3999,11 @@ impl Heap {
     pub fn pair(&self, id: PairId) -> (Value, Value) {
         match id.region() {
             LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, pairs, "pair", "pair");
+                local_gc_check!(old, self, id, "pair");
                 self.old.pairs[id.index()]
             }
             LOCAL => {
-                local_gc_check!(nursery, self, id, pairs, "pair", "pair");
+                local_gc_check!(nursery, self, id, "pair");
                 self.local.pairs[id.index()]
             }
             PRELUDE => self.prelude.slabs.pairs[id.index()],
@@ -4188,11 +4056,11 @@ impl Heap {
     pub fn string(&self, id: StrId) -> SlabRef<'_, str> {
         match id.region() {
             LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, strings, "string", "strings");
+                local_gc_check!(old, self, id, "string");
                 SlabRef::direct(self.old.strings[id.index()].as_str())
             }
             LOCAL => {
-                local_gc_check!(nursery, self, id, strings, "string", "strings");
+                local_gc_check!(nursery, self, id, "string");
                 SlabRef::direct(self.local.strings[id.index()].as_str())
             }
             // PRELUDE's `Slabs::strings` is also `Vec<LocalString>` because
@@ -4218,11 +4086,11 @@ impl Heap {
     pub fn closure(&self, id: ClosureId) -> SlabRef<'_, Closure> {
         match id.region() {
             LOCAL if id.is_old() => {
-                local_gc_check!(old, self, id, closures, "closure", "closures");
+                local_gc_check!(old, self, id, "closure");
                 SlabRef::direct(&self.old.closures[id.index()])
             }
             LOCAL => {
-                local_gc_check!(nursery, self, id, closures, "closure", "closures");
+                local_gc_check!(nursery, self, id, "closure");
                 SlabRef::direct(&self.local.closures[id.index()])
             }
             PRELUDE => SlabRef::direct(&self.prelude.slabs.closures[id.index()]),
@@ -4785,59 +4653,6 @@ impl Heap {
     // top-level frame's parent chain bottoms out there. (During prelude *build*
     // the global is instead a real local root frame with no parent.)
 
-    /// True if `env` points at a LOCAL env slot whose poison tripwire bit is
-    /// set (i.e. a freed slot whose handle leaked past GC). Debug-only entry
-    /// point for the use-after-GC chase in [`crate::eval`]; in release the
-    /// `poison` field doesn't exist, so the method is `#[cfg]`-gated too —
-    /// every call site is `#[cfg(debug_assertions)]`-gated to match. Note the
-    /// bits currently have no writer (see [`PoisonBits`]), so this answers
-    /// `false` under today's relocate-don't-reuse collector.
-    ///
-    /// **Opt-in** (`BROOD_ENV_DEBUG=1`): superseded by the generational-handle
-    /// tripwire (ADR-054), which catches use-after-GC precisely at the deref. Off
-    /// by default because it (and [`debug_walk_env_chain`]) run per eval / per
-    /// symbol and walk the env chain — pathologically slow always-on. Kept as an
-    /// on-demand tool. [`debug_walk_env_chain`]: Self::debug_walk_env_chain
-    #[cfg(debug_assertions)]
-    pub fn env_is_poisoned(&self, env: EnvId) -> bool {
-        env_chain_debug()
-            && env != EnvId::GLOBAL
-            && env.region() == LOCAL
-            && PoisonBits::is(&self.poison.envs, env.index())
-    }
-
-    /// Walk the parent chain from `env` looking up `_sym`, logging at the
-    /// first poisoned link. Helps localise *which* frame in a lookup chain
-    /// is the use-after-GC offender. Debug-only; no-op in release.
-    #[cfg(debug_assertions)]
-    pub fn debug_walk_env_chain(&self, env: EnvId, _sym: Symbol) {
-        if !env_chain_debug() || !crate::process::in_green_process() {
-            return;
-        }
-        let mut cur = env;
-        let mut depth = 0u32;
-        while cur != EnvId::GLOBAL {
-            if cur.region() == LOCAL && PoisonBits::is(&self.poison.envs, cur.index()) {
-                eprintln!(
-                    "[panic-context] env chain hit POISONED frame at depth {} env={:#x}",
-                    depth, cur.0
-                );
-                return;
-            }
-            match self.local.envs.get(cur.index()) {
-                Some(frame) => match frame.parent {
-                    Some(p) => cur = p,
-                    None => return,
-                },
-                None => return,
-            }
-            depth += 1;
-            if depth > 10_000 {
-                return; // safety belt — env chains shouldn't be this deep
-            }
-        }
-    }
-
     fn env_frame(&self, env: EnvId) -> SlabRef<'_, EnvFrame> {
         // `EnvId::GLOBAL` is a sentinel (region bits `0b11`) — there is no
         // frame to return; the global scope routes through
@@ -4858,17 +4673,6 @@ impl Heap {
                 SlabRef::direct(&self.old.envs[env.index()])
             }
             LOCAL => {
-                #[cfg(debug_assertions)]
-                debug_assert!(
-                    !PoisonBits::is(&self.poison.envs, env.index()),
-                    "use-after-GC: env_frame on freed nursery env slot {} \
-                     (handle {:#x}). This slot was poisoned as freed; some \
-                     caller held the EnvId across a GC safepoint without \
-                     rooting it. See docs/claude-demo-findings.md § Scheduler \
-                     race.",
-                    env.index(),
-                    env.0
-                );
                 #[cfg(debug_assertions)]
                 self.check_epoch_aged(false, env.generation(), env.index(), "env_frame", env.0);
                 SlabRef::direct(&self.local.envs[env.index()])
@@ -7372,19 +7176,6 @@ impl Heap {
             } else if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
                 self.form_pos.insert((new_idx as u64) | new_age_bit, pos);
             }
-        }
-        #[cfg(debug_assertions)]
-        {
-            self.poison.pairs.clear();
-            self.poison.vectors.clear();
-            self.poison.maps.clear();
-            self.poison.strings.clear();
-            self.poison.bigints.clear();
-            self.poison.decimals.clear();
-            self.poison.bytes.clear();
-            self.poison.ropes.clear();
-            self.poison.closures.clear();
-            self.poison.envs.clear();
         }
         // Install the relocated space. Tenure: `dest` is the grown old gen; the
         // nursery stays the empty Slabs left by the take. Flip: `dest` is the fresh

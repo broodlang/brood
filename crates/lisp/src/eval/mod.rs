@@ -92,15 +92,6 @@ pub(crate) fn is_special_form(s: Symbol) -> bool {
 pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     let mut expr = expr;
     let mut env = env;
-    #[cfg(debug_assertions)]
-    if crate::process::in_green_process() && heap.env_is_poisoned(env) {
-        eprintln!(
-            "[entry] eval entered with POISONED env={:#x} gc_block={}",
-            env.0,
-            crate::process::gc_block_depth()
-        );
-    }
-
     // GC-block guard: increments `GC_BLOCK` for the lifetime of this `eval` frame.
     // Since ADR-061 the GC safepoint no longer gates on this depth (it collects at
     // any eval depth — every frame roots its transients on the operand stack); the
@@ -138,8 +129,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
     'tail: loop {
         match expr.unpack() {
             ValueRef::Sym(s) => {
-                #[cfg(debug_assertions)]
-                heap.debug_walk_env_chain(env, s);
                 let expr_sym = expr;
                 return heap
                     .env_get(env, s)
@@ -576,8 +565,6 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
 
         let callee = match head.unpack() {
             ValueRef::Sym(s) => {
-                #[cfg(debug_assertions)]
-                heap.debug_walk_env_chain(env, s);
                 // An unbound-symbol error from a *tail-position* call (the
                 // last form of a `do`/`let`/`letrec` body, set as `expr` via
                 // `continue 'tail`) exits this eval frame directly — no outer
