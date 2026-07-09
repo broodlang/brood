@@ -15,7 +15,7 @@ A small, dynamic Lisp implemented in Rust.
   **process** (`spawn` / `send` / `receive`) or behind a Rust-backed handle.
 - **No loops.** Use recursion (proper tail calls are guaranteed, including
   tail calls to *other* functions) or the higher-order combinators
-  `fold` / `reduce` / `map` / `transduce`.
+  `fold` / `reduce` / `map` / `filter`.
 - **Truthy / falsy**: only `nil` and `false` are falsy. `0`, `""`, `()` are
   *truthy*.
 - **Late binding**: globals can be re-defined; a redefinition is visible to
@@ -273,13 +273,25 @@ rebuild.
 while a kernel error is a `{:kind :message …}` map. `error-message` normalises
 any of them to a human string — don't branch on `string?`/`map?` yourself.
 
-For longer pipelines, **transducers** fuse intermediate collections (one pass,
-no throwaway lists):
+For longer pipelines over large data, the **lazy `l*` combinators** fuse
+intermediate collections (one pass, no throwaway lists). Thread them with `->>`:
 
 ```lisp
-(transduce (comp (xmap sq) (xfilter even?)) + 0 (range 1000))
-(transduce (xtake-while (fn (x) (< x 100))) + 0 (map sq (range 1000)))
+;; eager: builds two throwaway lists of ~1000 / ~500 elements
+(reduce + 0 (map sq (filter even? (range 1000))))
+;; fused: one pass, no intermediate lists (≈3× faster on large inputs)
+(->> (range 1000) (lfilter even?) (lmap sq) (reduce + 0))
 ```
+
+`lmap`/`lfilter`/`lkeep`/`lremove` each return a lazy **seq-view** — a
+non-materialising value carrying the transform over a source. Chaining composes
+the transforms onto one view, so the whole pipeline folds/reduces in a single
+pass. Consume with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`; `seq`/
+`into`/`str`/`=` realise it. Two things to know: a view is **lazy** (it defers
+its fns until realised — don't build one for side effects; use eager `map`), and
+a view is **heap-local** (`send` refuses to ship one — realise it with `seq`/
+`into` before crossing a process). Eager `map`/`filter`/`keep`/`remove` are
+unchanged: use them for a concrete list or for side effects.
 
 **`range` is a reducible lazy range — folding it builds no list.** `(range n)`
 returns a lazy range, not a materialised list: `reduce` / `fold` / `sum` /
@@ -311,8 +323,9 @@ path:
   ```
 
   Same shape for build-a-collection-then-rebuild: fold the source straight into
-  the target instead of `filter`-then-`into`. (For longer pipelines, transducers
-  do this fusion for you — reach for them before hand-rolling a `fold`.)
+  the target instead of `filter`-then-`into`. (For longer `map`/`filter`
+  pipelines over large data, the `l*` combinators threaded with `->>` do this
+  fusion for you — reach for them before hand-rolling a `fold`.)
 
 - **A comprehension over a tiny fixed set loses to an explicit literal.** `for`
   lowers to a fused `fold` (no per-element intermediate lists), but it still pays
@@ -677,15 +690,15 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`)
   `send` `receive` `self` `ref` `monitor` `demonitor` `register` `whereis`
   — plus the **`proc/gen`** framework below
-- **transducers**: `comp` `xmap` `xfilter` `xremove` `xkeep` `xmapcat`
-  `xtake-while` `transduce` `reduced` `reduced?`
+- **lazy fusing views**: `lmap` `lfilter` `lkeep` `lremove` (thread with `->>`;
+  realise with `seq`/`into`) plus `comp` for function composition
 
 ## Pitfalls when generating Brood code
 
 - **No `setq` / `set!` / atoms.** State = a process, or re-bind a global with
   `def`.
 - **No `while` / `for`.** Use recursion (TCO is guaranteed) or
-  `fold` / `map` / `filter` / `reduce` / `transduce`.
+  `fold` / `map` / `filter` / `reduce`.
 - **Calls are `(f x)`, never `f(x)`.** Brood has no C-style call syntax: `f(x)`
   reads as *two* forms — `f`, then `(x)` — so the `(x)` tries to *call the value
   of* `x` and you get `cannot call non-function`. Write `(println "hi")`, not

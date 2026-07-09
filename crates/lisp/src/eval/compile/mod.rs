@@ -2206,7 +2206,7 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compi
     compiled.and_then(|cc| cc.arm_for(argc).cloned())
 }
 
-/// The higher-order-fn closure-call fast path (gated). A `reduce`/`eduction`/… driver calls
+/// The higher-order-fn closure-call fast path (gated). A `reduce`/`fold`/… driver calls
 /// the SAME step closure once per element; the general per-call path (`apply_value` → `dispatch`)
 /// re-resolves the closure's arm (`vm_cache_arm`) and re-runs the passthrough/arity matching every
 /// element — ~40–50% of `pipeline`/`nqueens` per the profile, and a user-closure fold is ~60× a

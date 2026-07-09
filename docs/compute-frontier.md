@@ -251,9 +251,10 @@ lazy *by default* breaks Brood's entrenched "iterate for side effects" idiom —
 loader (`(map require-one …)`) and the test runner (`(map run-test …)`) rely on eager
 evaluation, and a lazy view silently drops those effects (immutability covers *data*, not
 *I/O*). So the eager combinators are unchanged and the fusing views are explicit:
-`lmap`/`lfilter`/`lkeep`/`lremove` and the general `eduction` (compose transducers over a
-source). Measured `pipeline` (n = 1e6): eager `(->> … filter map (reduce +))` ≈ 2.0 s / 173 MB
-→ fused `(reduce + 0 (eduction (xfilter …) (xmap …) (range n)))` ≈ 0.63 s / 13 MB
+`lmap`/`lfilter`/`lkeep`/`lremove`, threaded with `->>` (the transducer plumbing that backs
+them is internal — `%x*` — not public surface). Measured `pipeline` (n = 1e6): eager
+`(->> … (filter …) (map …) (reduce +))` ≈ 2.0 s / 173 MB → fused
+`(->> (range n) (lfilter …) (lmap …) (reduce + 0))` ≈ 0.63 s / 13 MB
 (~3.3× faster, ~13× less memory).
 
 **`strings` still open.** `join` realises a view before the native `%string-join`

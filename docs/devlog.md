@@ -2690,3 +2690,60 @@ green under stress; lib 375/0 under stress+verify. (The *full* suite under
 `BROOD_RT_MULTIGEN=1` is too slow to complete in-budget — active whole-generation
 collection across 2610 tests — but the Guard path is unchanged, so the default-path suite
 plus the multigen unit tests cover both branches.)
+
+## 2026-07-09 — Sequence API: shrink the lazy surface to `l*` + `->>`, drop transducers/`eduction`
+
+Simplified the public lazy/fusion surface to the smallest coherent set and hid
+the plumbing. The design question (lazy-by-default? auto-fusion? explicit?) was
+settled first: **explicit lazy** wins under Brood's constraints — lazy-by-default
+breaks the entrenched "iterate for side effects" idiom (`(map require-one …)`,
+`(map run-test …)`), and immutability forbids a memoizing lazy value (no mutable
+thunk cell), so a lazy default would silently re-compute or drop effects. Auto-
+fusion (rewrite `(map f (filter p xs))` at compile time) was rejected too: it
+erodes hot-reload late-binding at the fused call sites and is more magic than the
+BEAM's explicit `Enum`/`Stream` split, which is the model we already mirror.
+
+**What changed (all in `std/prelude.blsp`):**
+- **Public lazy surface = `lmap` / `lfilter` / `lkeep` / `lremove` only**,
+  composed with the standard `->>`. Each returns a lazy `%seqview`; chaining
+  fuses the stages onto one view so a `->>` pipeline folds/reduces in a single
+  pass with no intermediate lists.
+- **Removed from the public surface:** `eduction`, `transduce`, `transduce--step`,
+  `reduced`, `reduced?`, `deref-reduced`, and the `xmapcat`/`xtake-while`
+  transducers (and their `reduced`-based early-termination protocol) — deleted
+  outright, since nothing but the now-gone public `transduce`/`eduction` reached
+  them.
+- **Hidden, not removed:** the four transducer constructors the `l*` combinators
+  actually use are renamed `%xmap` / `%xfilter` / `%xkeep` / `%xremove` (the
+  established `%`-prefix internal convention). `comp` stays public (general
+  function composition).
+
+**Measured (n = 2e6, release+jit):** fused `(->> (range n) (lfilter even?)
+(lmap inc) (reduce + 0))` ≈ 0.5 s vs eager `(reduce + 0 (map inc (filter even?
+(range n))))` ≈ 1.5 s — **~3×**, and it holds for both cheap and expensive
+per-element work (the win is avoiding the two large intermediate lists, not
+per-element cost). Crossover: a *single* lazy stage is slightly slower than eager
+(view overhead, no intermediate to eliminate), so fusion only pays for **2+
+stages over large data**.
+
+**Stdlib retrofit — deliberately NOT done.** Surveyed `std/` for fusion
+candidates: exactly one 2-stage `map`/`filter` chain exists (`diff.blsp:110`,
+over a tiny op-list); everything else is single-stage or cold tooling. None is
+both hot and large, so retrofitting would be inert churn that trades clear eager
+code for lazy+realise with no measurable win — and would violate the "optimize
+only when it improves perf broadly and builds a real capability" bar. The fusion
+capability already exists; it pays off in *user* code over large data, which is
+where it belongs.
+
+**Correctness / invariants verified.** A view is **heap-local**: `send` *refuses*
+to ship one (`cannot send a lazy seq-view in a message; realise it first`) rather
+than silently shipping a heap-referencing value — the immutability/network guard
+holds. Added explicit coverage in `tests/sequence_test.blsp`: `->>`-fused
+pipelines, a view rejected by `send`, a realised view round-tripping through a
+worker as a deep-copied list, N workers each fusing a view over a shared global
+concurrently, and a view honouring hot-reload late-binding of a global its fn
+calls (redefine `view-scale` before realise → fold sees the new def). Green:
+`nest check` 0 warnings, full suite 2614/2614, `sequence_test` 76/76 under
+`BROOD_GC_STRESS`, `BROOD_GC_VERIFY`, and `BROOD_RT_MULTIGEN=1`+stress. Docs
+updated (`language.md`, `brood-for-claude.md`, `compute-frontier.md`,
+`llm-native.md`, `writing-brood-skill.md`).

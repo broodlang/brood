@@ -55,7 +55,7 @@ MCP server is mostly a thin JSON-RPC wrapper around APIs that exist.
 - A system-prompt fragment with the do's and don'ts:
   > When writing Brood, prefer `match` over nested `if`; use `_` for
   > wildcard and `_x` for "I'm binding but won't use it"; reach for
-  > `defprocess` over raw `receive` loops; use `transduce` instead of
+  > `defprocess` over raw `receive` loops; use fused `->>`/`lmap` pipelines instead of
   > chained `map`/`filter`; remember bare symbols in patterns *bind*…
 
 `nest new` could optionally drop this skill into the new project so any
@@ -80,7 +80,7 @@ Format suggestion:
 
 ```markdown
 ## 2026-05-28 — Claude Opus 4.7 — concurrent Mandelbrot
-**Goal:** demo program exercising processes + transducers + macros.
+**Goal:** demo program exercising processes + fused pipelines + macros.
 **Blockers:** scheduler race; type-checker noise; formatter aggression.
 **Surprises:** `defprocess` is in hatch (require 'proc/hatch); apply exists.
 **What I'd tell next-me:** read std/prelude.blsp once; use -j 1 for
@@ -172,7 +172,7 @@ examples/by-task/
   actor-pool/              ;; fan out work to N workers, gather results
   concurrent-aggregator/   ;; state owned by a process, queried by call
   state-machine/           ;; tagged-data + multi-clause fn dispatch
-  parse-and-transform/     ;; transducer pipeline over input
+  parse-and-transform/     ;; fused l*/->> pipeline over input
   cli-tool/                ;; nest run with args, exit codes
   long-running-server/     ;; hatch + supervision + reconnect
   ring-of-processes/       ;; the Erlang ring benchmark
@@ -194,7 +194,7 @@ file (#3) over time — then catch them statically:
 |---|---|
 | `prefer-match` | nested `if` doing tagged dispatch |
 | `prefer-and-or` | `if x (if y …)` composing booleans |
-| `prefer-transduce` | chained `(filter pred (map f xs))` |
+| `prefer-lazy-pipeline` | chained `(filter pred (map f xs))` over large data |
 | `no-fn-send` | `(send pid (fn …))` — closures don't cross |
 | `pin-or-bind` | bare symbol in pattern that should probably be `'sym` |
 | `tail-position` | non-tail recursion on a value that could be large |
@@ -327,7 +327,7 @@ When writing Brood code:
 - Prefer match over nested if for tagged-data dispatch
 - Use _x (not _) when you're binding but won't use the value
 - Reach for defprocess + hatch over raw receive loops
-- Use transduce instead of chained map/filter
+- Use fused `->>`/`lmap`/`lfilter` instead of chained eager map/filter over large data
 - Remember: bare symbols in patterns BIND; use 'sym to match literal
 - Closures don't cross process boundaries via send; data does
 - For benchmarks, prefer (bench expr) over hand-rolled (now) diffs
@@ -413,7 +413,7 @@ LLMs. Brood gets the rare chance to bake them in from the start.
 | **5** | Macroexpand visible: MCP tool, LSP hover, CLI-error expansion context, docstring `:expands-to` | partial — MCP `macroexpand` tool shipped; the rest TBD |
 | **6** | `brood --watch` as LLM's REPL | partial — `--watch <file>` flag exists on `brood` and `nest run` (`std/tool/reload.blsp`); structured JSON-lines output TBD |
 | **7** | Worked-example index by intent (`examples/by-task/`) | ❌ |
-| **8** | Idiom-aware lints (`prefer-match`, `prefer-transduce`, `no-fn-send`, `pin-or-bind`, …) | ❌ |
+| **8** | Idiom-aware lints (`prefer-match`, `prefer-lazy-pipeline`, `no-fn-send`, `pin-or-bind`, …) | ❌ |
 | **9** | Property-test syntax `(prop "..." (a int?) ...)` | ❌ |
 | **10** | `nest eval-llm` gauntlet | ❌ |
 | **11** | `brood --think-aloud` | ❌ |

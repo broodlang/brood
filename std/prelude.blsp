@@ -1988,71 +1988,50 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
   "A list of `n` successive calls to the zero-argument function `f` (in call order)."
   (repeatedly--acc n f nil))
 
-;; ---- transducers ------------------------------------------------------------
-;; A *reducing function* has shape `(rf acc x) -> new-acc` — what `fold`
-;; consumes. A *transducer* is a function `(xf rf) -> rf'` that wraps one
-;; reducing function in another. Composing transducers is just function
-;; composition (`comp`); the resulting transducer, applied to a reducer, fuses
-;; the pipeline into a single per-step function — **no intermediate collections**.
+;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
+;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
+;; running them for side effects (`(map require-one mods)`, `(map run-test ts)`)
+;; works as it always has. Fusion is **opt-in**, via `lmap`/`lfilter`/`lkeep`/
+;; `lremove` composed with `->>`. Each returns a lazy seq-view (`%seqview`): a
+;; non-materialising value carrying a transducer over a source. Chaining
+;; composes the transducers onto one view, so a `->>` pipeline folds/reduces in
+;; a **single pass with no intermediate lists**:
 ;;
-;; The eager pipeline `(reduce + 0 (filter even? (map sq xs)))` builds two
-;; throwaway lists; the transducer form
+;;   (->> xs (lmap sq) (lfilter even?) (reduce + 0))   ; one pass, no temp lists
 ;;
-;;   (transduce (comp (xmap sq) (xfilter even?)) + 0 xs)
-;;
-;; walks `xs` once and never materialises the intermediates.
-;;
-;; v1 is *stateless* — `xtake`/`xdrop`/`xpartition` are deferred until we add an
-;; early-termination protocol (the language has no mutable cells).
+;; Consume a view with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`/`nth`/
+;; `first`/`rest`; `seq`/`into`/`str`/`=` materialise it to a concrete value. A
+;; view is heap-local: **`send` refuses to ship one** (a view references its
+;; source process's heap), so realise it first (`(seq v)`/`(into [] v)`) before
+;; crossing a process or the network. Footgun: like any lazy value, a view
+;; defers the work in its fns (and a `throw` therein) until realised — so don't
+;; build a view for side effects; use eager `map`/`doseq` for that.
 
-;; Composition (the glue for transducer chains, also generally useful).
+;; Composition — general right-to-left function composition; also the glue that
+;; fuses a view's stages.
 (defn comp--compose (f g) (fn (x) (f (g x))))
 (defn comp (& fns)
   "Right-to-left function composition. `((comp f g) x)` is `(f (g x))`; with no
-arguments, `identity`. For transducers, the *leftmost* `xform`'s transformation
-applies to each input first."
+arguments, `identity`."
   (cond
     (empty? fns) identity
     (empty? (rest fns)) (first fns)
     else (fold comp--compose (first fns) (rest fns))))
 
-;; Stateless transducer constructors. Named `x*` so the eager `map`/`filter`
-;; keep their fixed-arity (no rest-list) fast path — see the perf devlog.
-(defn xmap (f)
-  "A transducer that applies `f` to each input. The fused counterpart of `(map f coll)`."
+;; Internal stateless transducer constructors — the fused stages behind the
+;; `l*` combinators. A transducer is `(xf rf) -> rf'`; composing them (`comp`)
+;; fuses a pipeline into one per-step reducing function. Named `%x*` because they
+;; are plumbing: the public surface is `lmap`/`lfilter`/`lkeep`/`lremove`, not
+;; raw transducers. Fixed-arity (no rest-list) so they keep the fast call path.
+(defn %xmap (f)
   (fn (rf) (fn (acc x) (rf acc (f x)))))
-
-(defn xfilter (pred)
-  "A transducer that keeps inputs for which `(pred x)` is truthy. The fused counterpart of `(filter pred coll)`."
+(defn %xfilter (pred)
   (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
-
-(defn xremove (pred)
-  "A transducer that drops inputs for which `(pred x)` is truthy — the inverse of `xfilter`."
+(defn %xremove (pred)
   (fn (rf) (fn (acc x) (if (pred x) acc (rf acc x)))))
-
-(defn xkeep (f)
-  "A transducer that keeps the non-nil results of `(f x)` — map and filter fused in one stage."
+(defn %xkeep (f)
   (fn (rf) (fn (acc x) (let (y (f x)) (if (nil? y) acc (rf acc y))))))
 
-(defn xmapcat (f)
-  "A transducer that maps `f` over each input (expected to return a list or vector) and feeds the *items* of each result into the next stage — fused `mapcat`, no intermediate per-element lists."
-  (fn (rf) (fn (acc x) (fold rf acc (f x)))))
-
-(defn xtake-while (pred)
-  "A transducer that lets each input through as long as `(pred x)` holds; the first input that fails the predicate ends the reduction (the failing item is *not* fed downstream). Stateless — predicate-driven via the `reduced` sentinel."
-  (fn (rf) (fn (acc x) (if (pred x) (rf acc x) (reduced acc)))))
-
-;; ---- explicit lazy/fusing views (ADR: lazy seq-view, compute-frontier lever 3)
-;; `map`/`filter`/`keep`/`remove` stay EAGER (they return a concrete list, and
-;; running them for side effects — `(map require-one mods)`, `(map run-test ts)` —
-;; works as it always has). Fusion is **opt-in**, via the combinators below: a
-;; lazy seq-view (`%seqview`) is a non-materialising value carrying a transducer
-;; over a source. Chaining composes the transducers onto one view, so a pipeline
-;; folds/reduces in a single pass with **no intermediate lists**. Consume a view
-;; with `fold`/`reduce`/`sum`/`count`/`into`/`join`/`seq`/`vec`; `pr`/`=`/`send`
-;; realise it at their boundary. Footgun: like any lazy value, a view defers the
-;; work in its fns (and a `throw` therein) until realised — so don't build a view
-;; for side effects; use eager `map`/`doseq` for that.
 (defn %seqview-wrap (coll xf)
   "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
 view, compose `xf` onto its transducer (same source) so the stages fuse."
@@ -2063,69 +2042,23 @@ view, compose `xf` onto its transducer (same source) so the stages fuse."
 
 (defn lmap (f coll)
   "Lazy, fusing `map`: a seq-view of `(f x)` for each `x` in `coll`. Composes with
-adjacent `l*` stages and folds/reduces in one pass with no intermediate lists.
-Realise with `seq`/`vec`/`into`, or just consume it (`fold`/`reduce`/`count`/…).
-Use eager `map` when you want a concrete list or are iterating for side effects."
-  (%seqview-wrap coll (xmap f)))
+adjacent `l*` stages (thread them with `->>`) and folds/reduces in one pass with
+no intermediate lists. Realise with `seq`/`into`, or just consume it
+(`fold`/`reduce`/`count`/…). Use eager `map` when you want a concrete list or are
+iterating for side effects."
+  (%seqview-wrap coll (%xmap f)))
 
 (defn lfilter (pred coll)
   "Lazy, fusing `filter` — see `lmap`."
-  (%seqview-wrap coll (xfilter pred)))
+  (%seqview-wrap coll (%xfilter pred)))
 
 (defn lkeep (f coll)
   "Lazy, fusing `keep` (map + filter of non-nil `(f x)`) — see `lmap`."
-  (%seqview-wrap coll (xkeep f)))
+  (%seqview-wrap coll (%xkeep f)))
 
 (defn lremove (pred coll)
   "Lazy, fusing `remove` — see `lmap`."
-  (%seqview-wrap coll (xremove pred)))
-
-(defn eduction (& xforms+coll)
-  "A lazy, fusing view of a collection (the LAST argument) with the transducers
-(all earlier arguments) composed left-to-right. `(eduction (xfilter odd?) (xmap
-sq) (range n))` folds/reduces in a single pass with no intermediate lists — the
-general form of the `l*` combinators. Realise with `seq`/`vec`/`into`, or consume
-directly. With no transducers it is just a view of the collection."
-  (let (coll (last xforms+coll) xforms (drop-last 1 xforms+coll))
-    (if (empty? xforms)
-      (%seqview-wrap coll (xmap identity))
-      (%seqview-wrap coll (apply comp xforms)))))
-
-;; ---- early-termination sentinel ---------------------------------------------
-;; A `reduced`-wrapped accumulator signals "stop the reduction now and unwrap
-;; me." `xtake-while` returns one when its predicate fails; `transduce` (below)
-;; sees it and halts. Count-based `xtake n` / `xdrop n` would need *internal*
-;; mutable state per transducer, which Brood doesn't have (ADR-026), and are
-;; deferred until either an accumulator-wrapping protocol or a mutable-cell
-;; primitive lands.
-
-(defn reduced (x)
-  "Wrap `x` as a final, short-circuit reduced value. `transduce` sees this and stops walking the input, unwrapping `x` as the result."
-  [:%reduced x])
-
-(defn reduced? (x)
-  "Is `x` a value wrapped by `reduced`?"
-  ;; Hand-rolled nested-if — `reduced?` runs per-step on the transduce hot path,
-  ;; so we skip `vector?`'s user-fn frame and `and`'s gensym/let dance.
-  (if (%eq (type-of x) :vector)
-    (if (%eq (vector-length x) 2) (%eq (vector-ref x 0) :%reduced) false)
-    false))
-
-(defn deref-reduced (x)
-  "Unwrap a `reduced` value; otherwise return `x` unchanged."
-  (if (reduced? x) (vector-ref x 1) x))
-
-;; Driver — short-circuits on a `reduced` accumulator. The per-step `reduced?`
-;; check is cheap for typical accumulators (it fails `vector?` immediately).
-(defn transduce--step (rf acc coll)
-  (cond
-    (reduced? acc) (deref-reduced acc)
-    (empty? coll) acc
-    else (transduce--step rf (rf acc (first coll)) (rest coll))))
-
-(defn transduce (xform rf init coll)
-  "Reduce `coll` with `(xform rf)` from `init`. `xform` and `rf` fuse into a single pass; the equivalent eager pipeline (with intermediate collections) is `(reduce rf init (... xform-applied-to ... coll))`. If a step returns a `reduced` value (e.g. via `xtake-while`) the walk stops and that value is unwrapped as the result."
-  (transduce--step (xform rf) init coll))
+  (%seqview-wrap coll (%xremove pred)))
 
 ;; ---- iteration combinators --------------------------------------------------
 ;; Hide the hand-rolled counter/accumulator recursion behind names that read as

@@ -290,6 +290,12 @@
 (defn seq-sum (got total acc)
   (if (= got total) acc (seq-sum (+ got 1) total (receive ([:s v] (+ acc v))))))
 
+; worker i folds a fused VIEW over the shared global — same Σ 1..i as seq-reader
+(defn seq-view-reader (parent i)
+  (send parent [:s (->> seq-data (take i) (lfilter (fn (_) true)) (lmap identity) (reduce + 0))]))
+(defn seq-spawn-view-readers (parent n)
+  (when (> n 0) (spawn (seq-view-reader parent n)) (seq-spawn-view-readers parent (- n 1))))
+
 (describe "sequences across processes"
   :isolated
 
@@ -311,9 +317,9 @@
     (assert= (seq-sum 0 10 0) 220)))
 
 ;; ---- lazy, fusing seq-views (compute-frontier lever 3) -----------------------
-;; `lmap`/`lfilter`/`lkeep`/`lremove`/`eduction` return a non-materialising view
-;; that fuses through `fold`; `map`/`filter` stay EAGER (and keep running side
-;; effects). See ADR lazy-seq-view.
+;; `lmap`/`lfilter`/`lkeep`/`lremove` return a non-materialising view that fuses
+;; through `fold`; compose them with `->>`. `map`/`filter` stay EAGER (and keep
+;; running side effects). See ADR lazy-seq-view.
 
 (describe "lazy seq-views"
   (test "lmap/lfilter are views; map/filter stay eager lists"
@@ -338,10 +344,12 @@
     (assert= (reduce + 0 (lmap (fn (i) (* i i)) (lfilter (fn (i) (or (= 0 (rem i 3)) (= 0 (rem i 5)))) (range 20)))) 944)
     (assert= (seq (lremove even? (lmap inc (range 6)))) (list 1 3 5)))
 
-  (test "eduction composes transducers left-to-right over its last arg"
-    (assert= (reduce + 0 (eduction (xfilter even?) (xmap inc) (range 10))) 25)
-    (assert= (seq (eduction (xmap inc) (range 3))) (list 1 2 3))
-    (assert= (seq (eduction (range 3))) (list 0 1 2)))
+  (test "->> threads l* stages into one fused left-to-right pipeline"
+    ;; (even? then inc): 0→1, 2→3, 4→5, 6→7, 8→9 ⇒ 1+3+5+7+9 = 25
+    (assert= (->> (range 10) (lfilter even?) (lmap inc) (reduce + 0)) 25)
+    (assert= (seq (->> (range 3) (lmap inc))) (list 1 2 3))
+    (assert= (->> (range 6) (lfilter odd?) (lmap (fn (i) (* i i))) (sum)) 35)
+    (assert= (into [] (->> (range 8) (lremove even?) (lkeep (fn (x) (if (> x 3) x nil))))) [5 7]))
 
   (test "view interop: first/rest/nth/empty?/into/=/join/apply/str"
     (assert= (first (lmap inc [10 20])) 11)
@@ -374,4 +382,36 @@
     (assert= (with-out-str (map print (range 5))) "01234")          ; eager → runs now
     (assert= (with-out-str (lmap print (range 5))) "")              ; view built, not realised → nothing
     (assert= (with-out-str (seq (lmap print (range 5)))) "01234")   ; seq realises → runs
-    (assert= (with-out-str (reduce (fn (a _) a) nil (lmap print (range 5)))) "01234")))  ; fold realises
+    (assert= (with-out-str (reduce (fn (a _) a) nil (lmap print (range 5)))) "01234")))
+
+;; ---- views across processes / network / hot-reload --------------------------
+;; A view is heap-local: `send` REFUSES to ship one (it references the sender's
+;; heap), so it must be realised (`seq`/`into`) before crossing a process. Once
+;; realised it deep-copies like any value. And a view's fns are late-bound like
+;; any Brood code, so redefining a global they call before the view is realised
+;; is visible — the hot-reload invariant (ADR-013).
+
+(describe "lazy seq-views across processes and reload"
+  :isolated
+
+  (test "a raw view cannot be sent — it must be realised first (heap-local guard)"
+    (assert-error (send (self) [:v (lmap inc [1 2 3])])))
+
+  (test "a realised view round-trips through a worker as a deep-copied list"
+    (let (me (self)
+          _w (spawn (send me [:v (seq (->> (range 5) (lmap inc) (lfilter even?)))])))
+      (let (got (receive ([:v xs] xs)))
+        (refute (seqview? got))            ; the receiver got a plain list, not a live view
+        (assert= got (list 2 4)))))
+
+  (test "many workers each fuse a view over the shared GLOBAL list concurrently"
+    (seq-spawn-view-readers (self) 10)
+    (assert= (seq-sum 0 10 0) 220))
+
+  (test "a view honours hot-reload late-binding of a global its fn calls"
+    ;; The view's fn calls `view-scale` BY NAME; redefining that global before the
+    ;; view is realised means the fold sees the NEW definition (late binding).
+    (def view-scale (fn (x) (* x 1)))
+    (let (v (lmap (fn (x) (view-scale x)) (range 4)))   ; view built, NOT realised
+      (def view-scale (fn (x) (* x 10)))
+      (assert= (seq v) (list 0 10 20 30)))))  ; fold realises

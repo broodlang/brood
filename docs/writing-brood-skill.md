@@ -20,7 +20,7 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 
 2. **No loops.** No `while`, no `for`, no `loop`/`recur`. Iterate with
    **tail-recursion + an accumulator** (TCO is guaranteed, O(1) stack), or with
-   `fold` / `reduce` / `map` / `filter` / `transduce`. Deep *non*-tail
+   `fold` / `reduce` / `map` / `filter`. Deep *non*-tail
    recursion overflows the green-process stack.
 
 3. **Lists for code, vectors for data.** Binding forms are **lists**, not
