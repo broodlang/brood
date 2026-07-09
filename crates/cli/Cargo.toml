@@ -21,10 +21,9 @@ default = ["brood/dev-tools", "brood/jit"]
 # Forward the brood lib's VM work-attribution counters (docs/benchmarking.md):
 # `cargo run -p cli --features perf-stats`. Off by default — zero cost.
 perf-stats = ["brood/perf-stats"]
-# Explicit JIT toggle (ADR-101) for `--no-default-features` builds — the lean
-# `nest release` bundle re-adds the JIT through this. Otherwise JIT is already on
-# via `default` above.
-jit = ["brood/jit"]
+# (No `jit` passthrough: the JIT is a default feature of the brood lib now, so it's
+# already on via `default` above. A lean `--no-default-features` build re-adds it
+# with `--features brood/jit` directly — see the Makefile's JIT_FEATURES.)
 
 [dependencies]
 brood = { path = "../lisp", default-features = false }

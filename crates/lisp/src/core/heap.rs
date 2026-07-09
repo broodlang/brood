@@ -1493,14 +1493,13 @@ pub struct Heap {
     ///
     /// [`gc_enabled`]: Self::gc_enabled
     gc_threshold: usize,
-    /// Adaptive **RUNTIME**-collection trigger: the eval safepoint auto-compacts
-    /// the shared code region (when this heap uniquely owns it) once the RUNTIME
-    /// closure count crosses this. Recomputed after each auto-collect as
-    /// `max(RT_GC_FLOOR, 2 * live)`; on a *shared* runtime (collect can't run
-    /// without Step 2c's stop-the-world) it's raised to `2 * count` instead, so a
-    /// multi-process runtime backs off exponentially rather than attempting and
-    /// bailing every safepoint. `usize::MAX` while [`gc_enabled`] is false. See
-    /// [`rt_gc_floor`] and [`maybe_runtime_collect`](Self::maybe_runtime_collect).
+    /// Adaptive **RUNTIME**-collection trigger: the eval safepoint reclaims the shared
+    /// code region once the RUNTIME closure count crosses this — in-place compaction when
+    /// this heap uniquely owns the runtime, else a step of the 2-generation collector.
+    /// Recomputed after each reclaim as `max(RT_GC_FLOOR, 2 * live)`, so the collector
+    /// re-enters only as the region grows rather than bailing every safepoint.
+    /// `usize::MAX` while [`gc_enabled`] is false. See [`rt_gc_floor`] and
+    /// [`maybe_runtime_collect`](Self::maybe_runtime_collect).
     rt_gc_threshold: usize,
     /// GC switch. `false` during the prelude *build* (`Heap::new`), `true` for
     /// real process heaps (`Heap::with_regions`); also forced `false` when the
@@ -6397,8 +6396,9 @@ impl Heap {
     /// RUNTIME code reachable from the global bindings + this process's operand roots
     /// and *copy* it into a fresh [`CodeSlabs`], returning `(new_slabs, forwarding)`.
     /// Installs nothing and mutates nothing live — purely an evacuation preview, the
-    /// safe foundation for the in-place swap + cross-process handle-rewrite (2b) and
-    /// the runtime-wide stop-the-world (2c). Single-process root view.
+    /// safe foundation for the single-process in-place compaction swap it feeds. (The
+    /// *shared*-runtime case is reclaimed by the 2-generation collector instead —
+    /// ADR-091 — not by a stop-the-world.) Single-process root view.
     fn runtime_evacuate(&self) -> (CodeSlabs, RuntimeForward) {
         let new = CodeSlabs::default();
         // Same-generation compaction: copy from the current gen back into itself.
@@ -6433,9 +6433,9 @@ impl Heap {
     ///
     /// **Safety gate — `Arc::get_mut`.** Runs only when *this* heap uniquely owns the
     /// runtime `Arc` — i.e. no other process/thread can be reading the code region
-    /// concurrently. That makes it sound without any stop-the-world (which is Step
-    /// 2c, for the multi-process case); when the runtime is shared it returns `None`
-    /// and reclaims nothing. The eval safepoint calls it automatically once churn
+    /// concurrently. That makes it sound without any stop-the-world; when the runtime is
+    /// shared it returns `None` (the 2-generation collector reclaims that case instead —
+    /// ADR-091). The eval safepoint calls it automatically once churn
     /// crosses [`rt_gc_threshold`](Self::rt_gc_threshold)
     /// ([`maybe_runtime_collect`](Self::maybe_runtime_collect)); the
     /// `(runtime-collect)` builtin is the explicit/force form.
@@ -6648,19 +6648,20 @@ impl Heap {
         self.rt_gc_threshold = if on { rt_gc_floor() } else { usize::MAX };
     }
 
-    /// Auto-compact the RUNTIME region at the eval safepoint (the shared-code
-    /// analog of the LOCAL [`collect`](Self::collect)). Opportunistic: the
-    /// underlying [`runtime_collect_with`](Self::runtime_collect_with) runs the
-    /// compaction only when this heap **uniquely owns** the runtime `Arc` (single-
-    /// process / quiescent — sound without stop-the-world); otherwise it returns
-    /// `None` and nothing changes.
+    /// Reclaim the RUNTIME region at the eval safepoint (the shared-code analog of the
+    /// LOCAL [`collect`](Self::collect)). Two complementary reclaimers, chosen by runtime
+    /// ownership: when this heap **uniquely owns** the runtime `Arc` (single-process /
+    /// quiescent), [`runtime_collect_with`](Self::runtime_collect_with) compacts in place
+    /// (sound without stop-the-world); when the runtime is **shared** with live processes
+    /// it can't compact, so the 2-generation collector drives instead
+    /// ([`advance_runtime_multigen`](Self::advance_runtime_multigen) — age/migrate/drain/
+    /// free, ADR-091).
     ///
     /// Either way the adaptive threshold is reset so this isn't re-attempted every
-    /// safepoint: after a real collect, to `max(RT_GC_FLOOR, 2 * live)` (the next
-    /// collect waits for the live set to roughly double via fresh churn); on a
-    /// *shared* runtime, to `2 * count` (exponential back-off — a multi-process
-    /// runtime attempts a collect only O(log) times as the region grows, until
-    /// Step 2c lets it run under load). `extra_roots`/`extra_envs` carry the eval
+    /// safepoint: after a real compaction, to `max(RT_GC_FLOOR, 2 * live)` (the next runs
+    /// once the live set roughly doubles via fresh churn); on the shared path, to
+    /// `2 * count` between generational cycles, or `count` (re-enter promptly) while a
+    /// drain is in flight and waiting to free. `extra_roots`/`extra_envs` carry the eval
     /// loop's live `expr`/`env` to be rewritten alongside the rooted set.
     pub fn maybe_runtime_collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
         // A multi-generation drain in flight takes priority and must be advanced
@@ -8536,10 +8537,11 @@ fn flush_nursery_old_refs(
 // out-of-place evacuation core** — it traces the live RUNTIME code reachable from a
 // root set and *copies* it into a fresh `CodeSlabs`, building an old→new forwarding
 // map, exactly mirroring the LOCAL GC's `flush_*` but over `CodeSlabs` (`boxcar`,
-// `OnceLock` closures/envs) and RUNTIME handles. It **installs nothing** — the
-// in-place swap + full cross-process handle-rewrite (2b) and the runtime-wide
-// stop-the-world (2c) come next. Out-of-place means it cannot corrupt the live
-// region; it's the safe, testable algorithmic foundation.
+// `OnceLock` closures/envs) and RUNTIME handles. It **installs nothing** — it feeds
+// the single-process in-place compaction swap. (Reclamation on a *shared* runtime is
+// handled by the 2-generation collector — ADR-091 — rather than a stop-the-world.)
+// Out-of-place means it cannot corrupt the live region; it's the safe, testable
+// algorithmic foundation.
 
 /// Old→new RUNTIME index maps, one per slab kind (the RUNTIME counterpart of
 /// [`FlushForward`] — but no generation epoch: RUNTIME handles are region+index).

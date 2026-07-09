@@ -113,9 +113,9 @@ breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwi
 	# deadlock the scheduler. Each file is a self-contained `brood --test` suite.
 	#
 	# Built fast-but-armed: `--release` for speed (the loops warm the JIT past its
-	# tiering threshold, which needs real iteration counts) + `--features jit` so
-	# the JIT actually fires + `-C debug-assertions=on` so the per-deref GC
-	# tripwire and the heap verifier stay armed (catch a use-after-GC at the bad
+	# tiering threshold, which needs real iteration counts; the JIT is a default
+	# feature so it fires without a flag) + `-C debug-assertions=on` so the per-deref
+	# GC tripwire and the heap verifier stay armed (catch a use-after-GC at the bad
 	# deref, not as a distant SIGSEGV). For the heaviest GC hunt, re-run with
 	# `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 make breakagetests` (much slower:
 	# collects at every safepoint).
@@ -124,7 +124,7 @@ breakagetests: ## Run the aggressive `breakage/` stress suite (JIT on, GC tripwi
 	# failure mode) is contained to that file — the loop keeps going and the
 	# summary still prints. Exits non-zero if any file failed or crashed.
 	@echo ">>> building brood (release, +jit, debug-assertions armed) ..."
-	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=on" cargo build --release -p cli --features jit
+	RUSTFLAGS="$(RUSTFLAGS) -C debug-assertions=on" cargo build --release -p cli
 	@bin=target/release/brood; fail=0; \
 	echo ">>> running breakage suite with $$bin"; \
 	for f in breakage/*.blsp; do \
