@@ -2942,3 +2942,31 @@ trailing slashes) while `path/extension` uses `path/basename` (strips them), so 
 change public behaviour. The five open-coded hex encoders (`encoding`/`hash`/`uuid`/`json`/
 `url`) are each ~4 self-contained lines; consolidating would couple foundational crypto
 modules onto `encoding` and risk digest correctness for negligible gain.
+
+## 2026-07-09 — Multigen RUNTIME GC is now unconditional (ADR-091) — flag + dual paths deleted
+
+Closing the record on the multigen thread. With multigen proven at parity the prior three
+entries (hang fix → drain-livelock fix → two-phase throughput → suite parity), the two
+shared-runtime strategies were collapsed into one and the opt-in machinery deleted
+(commit `09fd96a`). This supersedes the "Multigen remains opt-in, but is now *viable by
+default*" line closing the throughput entry above: it is no longer opt-in — it is the only
+shared-runtime path.
+
+Not a behaviour change for the default path: a shared runtime already couldn't reclaim
+RUNTIME code without multigen (it just leaked via exponential back-off); now it always
+reclaims via age/migrate/drain/free. Single-process compaction is unchanged and still
+handles the uniquely-owned case — the two are complementary by ownership, not alternatives.
+
+**Removed.** The `BROOD_RT_MULTIGEN` flag, its `OnceLock`, and the env read; all four gate
+sites (`maybe_runtime_collect` drain-priority + `None`-branch advance + threshold) are now
+unconditional. Also the `rt_slab_ref` fast-path slab cache (`rt_gen_cache` `UnsafeCell` +
+`seen_gens_epoch`) and the `gens_epoch` that existed solely to invalidate it — always the
+guarded `ArcSwap` load now (measured ~0 cost on the shipped JIT path — fib(33) 22 ms either
+way — and ~5% only on the no-JIT fallback, in exchange for deleting an `UnsafeCell` and its
+use-after-GC aliasing invariants). Net −67 lines in `heap.rs` (−129/+41 across the commit).
+
+**Verified** (in the commit): full in-language suite 2615/2615 on the now-default path;
+full `make test` (Rust + Brood, no-JIT) green; 23 multigen/drain/migration/collector Rust
+tests green; Phase-2 detection correct under `GC_VERIFY` (300 closures captured in local
+data across 60 churn rounds, no verifier fire). `CLAUDE.md`, `docs/roadmap.md`, and ADR-091
+were updated at the time; this entry backfills the devlog step that the commit skipped.
