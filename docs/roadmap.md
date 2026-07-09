@@ -18,19 +18,68 @@ Life whose per-frame hot spot is rebuilding a ~3.6k-entry colour map). Both are
 in the **allocation / GC** layer and gate real perf work; measured against the
 session `nest` (12 scheduler workers).
 
-- ⬜ **[ACTION] Go over the full brood-life language feedback** — a
-  broader four-axis review from the test-bed (performance, code style, features,
-  abstractions + types), beyond the two GC items below. **Triage it into roadmap
-  items**, deciding accept / defer / reject per proposal. Headlines to rule on:
-  a **`defrecord` prelude macro + per-field `sig`** (its top cross-axis pick —
-  kills the `(get m :key)` tax, names state, makes map-key typos catchable);
-  `{:keys […]}` map destructuring; a `clamp`/`as->` prelude add; the
-  `read-string`/`eval` silent trailing-form drop; an atomic file `append`
-  primitive; **parallel allocation off the global lock** (the deepest perf
-  ceiling, flagged below, with *no design doc yet*); JIT-default-on + float
-  specialisation. The doc also flags **stale docs** to sweep (`transients.md`,
-  `spec.md §11`, `value-repr.md` byte count). Each accepted item graduates into
-  its own ✅/🟡/⬜ entry here.
+- ✅ **[ACTION] Triage the full brood-life language feedback** — *done
+  2026-07-09.* The broader four-axis review (performance, code style, features,
+  abstractions + types) was triaged proposal-by-proposal against the current
+  codebase; each headline is ruled on below and the accepted ones graduate into
+  their own entries. Verified-against-code so nothing already-shipped got
+  re-proposed and nothing already-decided got silently reversed.
+
+  **Accepted → new ⬜ items** (each a self-contained, on-mission change; ordered
+  cheapest-first):
+  - ⬜ **`clamp` + `as->` prelude adds** — neither exists today (`->`/`->>` do).
+    `clamp` is a pure 3-arg fn; `as->` a threading macro that binds the thread
+    value to a name so it can sit in any argument position. Trivial, pure Brood.
+  - ⬜ **`{:keys […]}` / `:or` map destructuring** — unsupported today
+    (`docs/language.md` §35 says so explicitly); sequence/tuple destructuring
+    *is* supported. This extends the existing pattern-lowering in
+    `eval/macros.rs` to map patterns — no design tension, squarely a macro/pattern
+    change. Kills much of the `(get m :key)` tax without needing records.
+  - ⬜ **`read-string` silent trailing-form drop** — confirmed still present:
+    `(read-string "(def a 1) (def b 2)")` returns only `(def a 1)`, and the `nest
+    mcp` `eval` tool inherits it, so a pasted multi-form block runs only its first
+    form. Fix at the reader/eval seam: `read-string` should error on trailing
+    non-whitespace (or expose `read-all`), and `eval`/mcp-eval adopt eval-all or
+    report "N trailing forms ignored". Rough edge, not a design question.
+  - ⬜ **atomic file `append` primitive (low priority)** — only `spit` (truncating
+    overwrite) exists. A `spit`-family append genuinely needs a thin Rust I/O
+    primitive (this is mechanism, the ADR-006 exception), so it's a small kernel
+    add rather than Brood policy.
+
+  **Deferred → needs a design decision, not a quick add:**
+  - 🎯 **`defrecord` macro + per-field `sig`** (the review's top cross-axis pick) —
+    **deferred pending an ADR.** It directly contradicts a *standing* decision:
+    `defrecord`/`deftype` are currently deliberate helpful-error stubs
+    (`eval/mod.rs` — "Brood has no records/types — model data with plain maps").
+    The pull is real (names state, kills the `(get m :key)` tax, makes map-key
+    typos catchable — and closed-record ⊆ `map<keyword, any>` subtyping just
+    landed in `132bb2a`, so the *type* side is already moving), but reversing a
+    documented map-first stance is an ADR-011 minimal-core question, not a prelude
+    macro to slip in. Write the ADR (records-as-closed-maps sugar vs. a real new
+    `Value` kind; how `sig` per-field types compose with the gradual checker)
+    before building. Blocks on that decision.
+  - ⬜ **JIT float specialisation** — deferred as ordinary perf tuning (partial
+    scaffolding already in `compile/mod.rs`, "type-specialize float arms"); gated
+    on a concrete hot float workload, not this triage.
+
+  **Already resolved (no new item — verified against the tree):**
+  - ✅ **JIT-default-on** — shipped 2026-07-09 (`b9c3a20` + `brood/jit`); it's now
+    a default cargo feature across the whole toolchain.
+  - ✅ **Parallel allocation off the global lock** — fixed in `67c2ec2`
+    (thread-local intern cache + 64-way sharded byte counter); see the ✅ perf
+    item below. The "perfectly serial allocation" ceiling is gone; a concurrent
+    collector + per-process limits remain separate future work.
+  - ✅ **Stale doc `transients.md`** — already rewritten 2026-06-15 to document the
+    Phase-2 user-facing-transient *removal*; it is current, not stale.
+
+  **Accepted doc fixes (verified wrong) → ⬜ sweep:**
+  - ⬜ **`spec.md §11`** — "Not yet specified (planned)" still lists dynamic
+    variables, map literals, modules/namespaces, and a tracing GC as absent —
+    **all four have since shipped.** Rewrite the section to the genuinely-remaining
+    gaps.
+  - ⬜ **`value-repr.md` byte count** — says "16-byte enum" throughout, but the
+    kernel now hard-asserts `size_of::<Value>() == 24` (the `Pid { node, id }`
+    variant needs two payload words). Correct the figure and the rationale.
 
 - ✅ **[HIGH] GC: transient maps corrupt when the build allocates** — *fixed,
   commit `32bbda7`.* A `transient`/`assoc!`/`persistent!` build whose per-entry
