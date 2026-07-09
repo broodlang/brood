@@ -6073,6 +6073,23 @@ impl Heap {
     /// than treating a cached handle as a live pin. Only the live VM arms — which
     /// are mid-execution and can't be cleared — are scanned.
     pub fn runtime_gen_referenced(&self, gen: usize) -> bool {
+        self.runtime_gen_referenced_impl(gen, true)
+    }
+
+    /// The **private-only** reachability probe: like [`runtime_gen_referenced`] but
+    /// *without* seeding the shared globals + `(sig …)` roots — it walks only this
+    /// process's own roots, local heap, and live VM arms. Used by the drain self-report
+    /// ([`Self::report_gen_liveness`]): the drain arms only after `migrate_live_globals`
+    /// moved every value off the draining generation, and post-aging no shared root can
+    /// come to point at it again, so the shared roots provably never reach it — including
+    /// them is O(globals) cost with no effect. The only way a process can genuinely pin
+    /// the generation is a handle it captured *privately* before the migration, which
+    /// this probe still catches.
+    fn runtime_gen_referenced_private(&self, gen: usize) -> bool {
+        self.runtime_gen_referenced_impl(gen, false)
+    }
+
+    fn runtime_gen_referenced_impl(&self, gen: usize, include_shared: bool) -> bool {
         // An empty generation slot is trivially dead — the common case (normal runs
         // never age, so `gens[1]` stays empty and this short-circuits).
         if self.runtime.gens[gen].load().is_empty() {
@@ -6086,16 +6103,19 @@ impl Heap {
         let mut work: Vec<Value> = Vec::new();
         let mut env_work: Vec<EnvId> = Vec::new();
 
-        // --- Shared roots: globals + declared `(sig …)` type-exprs. ---
-        work.extend(self.runtime.globals_read().values().copied());
-        work.extend(
-            self.runtime
-                .declared_sigs
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .values()
-                .copied(),
-        );
+        // --- Shared roots: globals + declared `(sig …)` type-exprs. Skipped by the
+        // private probe (the drain self-report) — see `runtime_gen_referenced_private`. ---
+        if include_shared {
+            work.extend(self.runtime.globals_read().values().copied());
+            work.extend(
+                self.runtime
+                    .declared_sigs
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .values()
+                    .copied(),
+            );
+        }
         // --- This process's private roots (operand/env stack, dynamics). ---
         work.extend(self.roots.iter().copied());
         env_work.extend(self.env_roots.iter().copied());
@@ -6309,7 +6329,19 @@ impl Heap {
             }
         }
         let gen = rt.drain_gen.load(Ordering::Relaxed);
-        let clean = !self.runtime_gen_referenced(gen);
+        // Use the **private** reachability probe (this process's own roots / local heap /
+        // live arms only), NOT the full one that also seeds every shared global + `(sig)`.
+        // The drain armed only *after* `migrate_live_globals` moved every value off the
+        // draining generation, and post-aging no global can come to point at it again
+        // (the `gen_drained` soundness note), so the shared roots provably never reach the
+        // drained generation — seeding them is pure cost. That cost is O(globals): re-run
+        // by *every* still-pinning process on *every* safepoint over a large accumulated
+        // global set, it is the whole-registry work that livelocked a many-process drain
+        // (`BROOD_RT_MULTIGEN` suite hang). The private probe is O(this process's own
+        // state), so a pinning process's per-safepoint report is cheap and no throttle is
+        // needed — and it still catches the only way a process can actually pin the
+        // generation: a handle it captured privately before the migration.
+        let clean = !self.runtime_gen_referenced_private(gen);
         let mut acks = rt.drain_acks.write().unwrap_or_else(|e| e.into_inner());
         if clean {
             acks.insert(pid, epoch);

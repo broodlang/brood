@@ -2793,3 +2793,46 @@ default-on is this pinned-generation contention livelock, not throughput. A real
 be re-attempted); (b) throttle a *pinning* process's per-safepoint self-report; (c) a
 scheduler-lock-order audit of the Stage-3c parked-liveness inspection vs message delivery /
 unpark; (d) proper concurrency tooling to verify. Deferred as its own focused piece of work.
+
+## 2026-07-09 — Multigen RUNTIME GC: fixed the drain livelock/hang (private self-report walk)
+
+Root-caused and fixed the intermittent hang under `BROOD_RT_MULTIGEN` (the one the
+previous entry reverted three failed attempts at). Characterization: a hung process runs
+at ~1100 % CPU (12 threads in `R`, none blocked) — a **CPU-spin livelock**, not a deadlock,
+and **bimodal** (~2 s or >45 s). The repro (300 processes each promoting ~200 accumulating
+`def`s) hangs; a `HEAD` build hangs *worse* (confirming it's pre-existing).
+
+**Root cause.** The drain self-report `report_gen_liveness` calls `runtime_gen_referenced`
+to decide if this process still pins the draining generation — and that probe **seeds every
+shared global + `(sig …)` into its walk**. On the accumulate-everything workload that's the
+whole 60 k-entry global table, walked **on every safepoint by every still-pinning process**
+(a long-lived process legitimately executing old-gen code never acks, so it re-walks forever).
+O(P × globals) per round, and it takes the shared `globals` read lock each time. That work
+saturates all cores and starves the very processes whose progress would end the drain — the
+livelock. It only bites the many-globals shape, which is why realistic hot-reload (bounded
+live set) never hit it.
+
+**Fix (one file, +43/−11).** A **private-only** probe `runtime_gen_referenced_private` for
+the self-report: walk only this process's own roots / local heap / live VM arms, **not** the
+shared globals/sigs. Sound by the collector's own documented invariant — the drain arms only
+after `migrate_live_globals` moved every value off the draining generation, and post-aging no
+shared root can ever point at it again, so seeding the globals provably contributes nothing;
+the only way a process can genuinely pin the generation is a handle it captured *privately*
+before the migration, which the private walk still catches. The full `runtime_gen_referenced`
+(globals included) is unchanged for its other role as the general liveness probe the tests
+assert against. The walk drops from O(globals) to O(this process's own state) — no throttle,
+no semantic change to the union.
+
+**Result.** The repro goes from intermittent-hang / bimodal 2–45 s to a **consistent
+~1.3 s, 15/15 hang-free** (default, no collection, is ~0.25 s). All 22 multigen/collector/
+drain Rust tests green (3×); full default suite 2614/2614. Three earlier dead-ends are
+recorded in the prior entry — the mistake there was treating the symptom (throttle the scan /
+the acks write) instead of the cause (the O(globals) self-report walk).
+
+**Still open (separate, non-hang).** The whole in-language suite under `BROOD_RT_MULTIGEN`
+is hang-free now but still too slow to finish in-budget (>400 s vs ~11 s default): the
+per-file migration + the O(live-process) `report_parked_liveness` union scan (still run every
+safepoint during a drain) + the post-migration cache-invalidation re-resolve, multiplied
+across 2614 tests. That's a throughput optimization (a sound scan-throttle + reducing the
+cache-clear blast radius), not a correctness blocker. Multigen stays opt-in; the hang — the
+thing that made it *unusable* — is gone.
