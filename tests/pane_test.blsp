@@ -103,6 +103,16 @@
       (assert= (pane-selected-payload (pane-other (pane-other t))) {:buf 2 :top 9})
       (assert= (pane-selected-payload t) {:buf 0})))  ; selection (buf 0) unchanged
 
+  (test "pane-payload-at reads the payload at a path (the getter half of update-path)"
+    (let (t (wt-tree3))
+      ;; each leaf by its path — the read sibling of pane-update-path / pane-selected-payload
+      (assert= (pane-payload-at t (list :a :a)) {:buf 0})
+      (assert= (pane-payload-at t (list :a :b)) {:buf 1})
+      (assert= (pane-payload-at t (list :b)) {:buf 2})
+      ;; the reuse rule: find the path whose pane already shows a given buffer
+      (assert= (find (fn (p) (= 2 (get (pane-payload-at t p) :buf))) (pane-leaf-paths t))
+        (list :b))))
+
   (test "pane-map rewrites every pane's payload (e.g. re-pointing buffer refs)"
     (let (t (pane-map (wt-tree3) (fn (p) (assoc p :buf (inc (get p :buf)))))
           p0 (pane-selected-payload t)

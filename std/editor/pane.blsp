@@ -115,6 +115,13 @@ position-targeted sibling of `pane-update-selected`. Lets an editor act on the p
 disturbing which pane is selected."
   (pane--update tree path (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
 
+(defn pane-payload-at (tree path)
+  "The payload of the pane at `path` — the read half of `pane-update-path`, and the
+position-targeted sibling of `pane-selected-payload`. Combined with `pane-leaf-paths`
+it lets an editor answer 'which pane, if any, already shows buffer N?' (the reuse rule
+behind an Emacs-style `display-buffer`)."
+  (get (pane--get tree path) :payload))
+
 (defn pane-map (tree f)
   "The tree with `f` applied to *every* pane's payload (leaves only; splits and
 selection unchanged). For an editor re-pointing pane→buffer references after the
