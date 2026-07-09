@@ -466,20 +466,30 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     loops, root and spawned, cyclic-promote cross-process, gc-stats/gc-collect/
     gc-trace) and the `BROOD_GC_STRESS=1` + `debug-assertions` tripwire. See
     `memory-model.md`, `memory-review.md`.
-  - 🟡 **RUNTIME-region collector** (ADR-072 Stage 5 → ADR-091). The per-process LOCAL
-    heap is collected; the **shared mutable RUNTIME code region** (where `def`/hot-reload
-    `promote`s code) grows with hot-reload churn. ✅ **Single-process** compaction is
-    **done** (`Heap::runtime_collect`, the `(runtime-collect)` builtin, auto-fired at the
-    eval safepoint, `BROOD_RT_GC_FLOOR`; `(gc-stats)` now reports `:runtime-closures`/
-    `:runtime-threshold`): it evacuates-and-rewrites the live graph + every holder, gated
-    on `Arc::get_mut` (sound because a uniquely-owned runtime has no other readers), so it
-    bounds the REPL / single-process `--watch`. Tests: `crates/lisp/tests/runtime_collector.rs`
-    (3000 redefs → live <50 → compacted) + `tests/runtime_collect_test.blsp` (the shared
-    no-op gate + the stats). ⬜ **Multi-process** (the shared region with live processes)
-    remains — a cooperative **rolling quiesce** (old region kept alive; each process
-    self-rewrites at its safepoint; freed when all migrate), designed in ADR-091 and
-    deferred (ADR-011) until a long-lived multi-process server (the M4 daemon, ADR-090)
-    demonstrates the need. It's the largest, most race-prone remaining kernel piece.
+  - ✅ **RUNTIME-region collector** (ADR-072 Stage 5 → ADR-091) — **done, single- and
+    multi-process.** The per-process LOCAL heap is collected; the **shared mutable RUNTIME
+    code region** (where `def`/hot-reload `promote`s code) grows with hot-reload churn.
+    ✅ **Single-process** compaction (`Heap::runtime_collect`, the `(runtime-collect)`
+    builtin, auto-fired at the eval safepoint, `BROOD_RT_GC_FLOOR`; `(gc-stats)` reports
+    `:runtime-closures`/`:runtime-threshold`): evacuates-and-rewrites the live graph +
+    every holder, gated on `Arc::get_mut` (sound because a uniquely-owned runtime has no
+    other readers), bounding the REPL / single-process `--watch`. Tests:
+    `crates/lisp/tests/runtime_collector.rs` (3000 redefs → live <50 → compacted) +
+    `tests/runtime_collect_test.blsp`. ✅ **Multi-process** (the shared region with live
+    processes) now landed as the **Erlang 2-generation model** (`BROOD_RT_MULTIGEN`, off by
+    default): at most two code generations in `ArcSwap`ped storage; a threshold **ages** the
+    current gen (`promote_lock`: promote=read, age=write), **migrates** the live globals into
+    the fresh gen, then **drains** — every live process reports at its safepoint whether it
+    still references the draining gen (VM + tree-walker), and the coordinator externally
+    **inspects parked processes' quiescent heaps** (Erlang `check_process_code`-style soft
+    purge, so a clean-but-parked `receive`r can't stall reclamation) — and **frees** the dead
+    gen whole once the union is clean. A `def` of a value resident in the draining gen is
+    **re-homed** into the current gen so it can't re-pin a drained gen through the shared
+    globals table (Stage 5 soundness). The per-frame RUNTIME safepoint is sampled so it
+    doesn't tax the default path. Tests: `runtime_multigen.rs` (age/migrate/drain/free under
+    load, + `BROOD_GC_STRESS`), `runtime_drain.rs` (parked-clean process doesn't block a
+    drain), `runtime_collector.rs` (re-home regression). Only a purge policy for a
+    *genuinely looping* old-code process stays deferred (ADR-011).
   - ✅ **Rooted-Rust `eval` re-entry — done / nothing left** (re-examined 2026-05-31).
     Quasiquote moved off the runtime walker to a compile/eval-time transform
     (ADR-084), the worst offender. The remaining frames are already safe: the
@@ -488,9 +498,10 @@ cores — is designed in [`concurrency.md`](concurrency.md) and tracked in
     `reload-defs` mirrors the rooted `eval_str` loop. macroexpand can't be a
     transform-not-walker (running a macro *is* eval re-entry), so there's no
     quasiquote-style hazard left to shrink.
-  - 🟡 **RUNTIME-region collector** — single-process done, multi-process deferred (see
-    the bullet above + ADR-091). The remaining open GC item is the *multi-process*
-    rolling-quiesce collector for the shared region under live processes.
+  - ✅ **RUNTIME-region collector** — single- and multi-process both done (see the bullet
+    above + ADR-091): the multi-process shared-region collector shipped as the Erlang
+    2-generation model (age/migrate/drain/free + soft purge, `BROOD_RT_MULTIGEN`). Only a
+    purge policy for a genuinely *looping* old-code process remains deferred (ADR-011).
 - ✅ **Self-hosted REPL in Brood** (ADR-048) — the read-eval-print loop is now
   `std/repl.blsp`, not Rust: a tail-recursive loop over `read-line` (the one new
   primitive) + `eval-string` + `pr-str`, with multi-line balance detection,
