@@ -257,11 +257,23 @@ them is internal — `%x*` — not public surface). Measured `pipeline` (n = 1e6
 `(->> (range n) (lfilter …) (lmap …) (reduce + 0))` ≈ 0.63 s / 13 MB
 (~3.3× faster, ~13× less memory).
 
-**`strings` still open.** `join` realises a view before the native `%string-join`
-(`seq_items` can't run a transducer), so `(join "," (lmap number->string (range n)))` still
-materialises the parts list — no win yet. Full fusion needs a **string-builder reducer**
-(a transient/mutable buffer the transducer appends into, O(n)); deferred as a follow-up.
-Entry: `%string-join` in `builtins.rs`, and the transient machinery (`%map-into`).
+**`strings` — partly fused, residual deferred (measured 2026-07-09).** `join` over a
+view realises the *fused* view to a single strings list (`(seq view)`), then the native
+`%string-join` walks it. This already **beats eager** because the stages fuse — no
+per-stage intermediate list: measured n = 1e6, `(join "," (lmap number->string (range n)))`
+≈ 0.51 s vs eager `(join "," (map number->string (range n)))` ≈ 0.81 s (~1.6×); the
+two-stage `->>` view ≈ 0.37 s vs eager ≈ 0.61 s. The *only* residue is the final strings
+list (the transformed elements, which the Brood transform closures must produce anyway) plus
+its list→Vec pass. Eliminating that would need a **string-builder reducer folding straight
+into one buffer** — i.e. a mutable-buffer accumulator driven per-element from inside
+`%string-join` (via the `apply` callback). That is a single-call-site win of ~1.3× at best
+(the per-element closure call dominates — cf. the closure-free range fast path at ~25 ms),
+it fights ADR-026 (the acc would be observably mutable unless hidden behind the `%map-into`
+GC-quiet discipline), and driving the transducer's `rf` protocol from Rust is reentrancy-
+fragile under the green scheduler. Verdict: **deferred as low-ROI** — it doesn't clear the
+"optimize only to build a *broad* primitive" bar (`~/CLAUDE.md`); the view path already fuses
+the stages, which was the real win. Entry if revisited: `%string-join` in
+`builtins/sequences.rs` + the `apply` callback helper in `builtins/mod.rs`.
 
 A second, immutability-enabled lever for the memory side (and for `spawn`/`pfib`'s
 message cost): **zero-copy message passing.** Today `to_message` *deep-copies* a value
