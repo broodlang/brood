@@ -321,18 +321,20 @@ by ADR-011). `throw` and the low-level `%try` are primitives; `try`/`catch` and
 
 The features this section once listed have all shipped: **dynamic variables**
 (`defdyn` / `binding`), **map literals** `{ }` and their operations (CHAMP
-tries), **modules / namespaces** (`defmodule`), and a **per-process tracing GC**
-(ADR-035 and its successors) are all part of the language today and specified in
+tries), **modules / namespaces** (`defmodule`), a **per-process tracing GC**
+(ADR-035 and its successors), **rest-parameter notation in `(sig …)`** (`&` /
+`&optional`, ADR-127), **records** (`defrecord` — pure sugar over closed maps,
+ADR-130), and **fusing lazy seq-views** (`lmap`/`lfilter`/`lkeep`/`lremove`
+threaded with `->>`, ADR-111) are all part of the language today and specified in
 the sections above.
 
 The following are still on the roadmap and intentionally absent from this
 version:
 
-- **Rest-parameter notation in `(sig …)`** — a signature form for variadic
-  arguments.
-- **Lazy sequences** (and `iterate`). Tail-recursive accumulators cover the
-  finite cases today; unbounded streams are deferred.
-- **Records** (`defrecord`) remain a deliberate helpful-error stub — data is
-  modelled with plain maps pending an ADR (roadmap).
+- **Unbounded lazy streams** (`iterate` and infinite producers). The fusing
+  lazy seq-views above cover finite pipelines; tail-recursive accumulators cover
+  the rest — an unbounded generator is deferred until an editor feature needs one.
+- **A first-class set type + `#{…}` literal** — the `set` library ships
+  (sets-over-maps, ADR-060); a distinct `Tag::Set` + reader literal is deferred.
 
 See [roadmap.md](roadmap.md) for sequencing.

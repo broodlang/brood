@@ -3108,3 +3108,76 @@ now *correct*, since the qualification fix made the sig actually attach.
 **Verified.** New Rust tests (`sig_call_site_wrong_literal_arg_is_flagged`,
 `check_allow_type_mismatch_suppresses_call_and_return_lints`) green; `nest check` clean across
 `std/` + `tests/` (isolated worktree, 0 warnings); full `make test` green.
+
+## 2026-07-10 — Type-checker gating: reconciled docs to the shipped state + reload-aware invariant
+
+Audited "what's next for the type system" and found the checker's gating work is
+further along than the roadmap said. **Gap A (cross-file inferred-global
+propagation)** — an *undeclared* global typed from its current-image heap value
+where it's used in another file — was already implemented (`global_value_ty` in
+`types/check/guards.rs`, consulted by `gradual_of`) and unit-tested
+(`cross_file_undeclared_global_gates_via_loaded_image`), but the roadmap still
+carried the whole "wiring `dynamic()` / full gradual consistency" item as 🎯.
+Verified end-to-end in a scratch project: a cross-file `(def max-port 8080)`
+misused as `(string-length max-port)` warns `expects string, got 8080
+(hello/max-port)` and `nest check` exits 1. The only follow-on genuinely left is
+the reload *re-check trigger* beyond `nest run --watch` (REPL/LSP push), which is
+a reload-workflow concern in `type-soundness-reload.md`, not checker decision
+logic — that surface is now feature-complete.
+
+**Reload-aware invariant, written down.** The reload-soundness mechanism
+(ADR-123/124/125/126) shipped a while back, but `CLAUDE.md` and `docs/types.md`
+compatibility contract #5 still carried the older "checking never rejects a
+runnable program" phrasing. Revised both to the precise form: *the checker never
+gates the live image, and never warns on a use valid for the image's current
+state* — a `def`/reload always wins, the checker re-derives on every reload, and
+the one hard reject is batch/CI only (`nest check`'s nonzero exit). Contract #4
+gained a clause noting a global may carry a tracked current-image type but always
+as `dynamic_within(T)` (the `∩` relation), never a precise `stat(T)`. Updated
+`type-gating.md`'s status header (design → shipped) and its "invariant this
+revises" section (TODO → done).
+
+**Drive-by:** `nest check` on the repo had drifted to two warnings —
+`tests/serve_test.blsp` bound two spawned-client pids (`a`/`b`) it never used
+(from the buffer-markers commit). Renamed to `_a`/`_b` (the exempt-from-lint
+idiom, per `chaos_test.blsp`'s `_w (spawn …)`); back to zero warnings. Doc-only
++ test-rename change; `types::` tests and the serve suite (7/7) green.
+
+## 2026-07-10 — Dead-clause lint broadens to precise surface `let`-locals (ADR-131)
+
+Shipped the roadmap's last ⬜ type-checker item: the dead-clause lint now flags a
+guard that narrows a **precise surface `let`-local** to the empty type, not just a
+sig-typed param. `(let (port 8080) (cond (string? port) …))` now warns
+`unreachable clause: port is 8080, which can never be string — this branch is dead
+code`.
+
+**Design.** A second eligibility set, `Ctx::dead_clause_locals`, alongside
+`sig_params`; the scan (`newly_dead_sig_param` → `newly_dead_binding`) walks both.
+A `let`-local joins it only when its RHS is **precise** (`gradual_of.dynamic ==
+false` — a literal / integer-closed expr; a call-result or redefinable global is
+`dynamic` → excluded, keeping the verdict reload-safe) and its name is **surface**
+(non-gensym; factored `is_gensym_sym`, also de-duped out of the unused-let lint).
+That binding-level gate *is* the surface-vs-generated scoping the roadmap flagged
+as the prerequisite — a macro tests its own gensym temps, never the user's named
+local, so no guard-site position check is needed (the sig-param lint never used
+one either; my first cut added a position gate and it wrongly suppressed
+`cond`-generated `if`s, which lack positions — removed). Sound because a local is
+immutable, so an over-approximated-but-precise type narrowed to `never` genuinely
+proves the branch dead.
+
+**Verified.** Two new checker tests (catch + the three exclusions:
+compatible-narrowing, `dynamic` call-result RHS, gensym; plus a shadow-drops-
+eligibility case). `types::` 235/235. `nest check` across `std/` + `tests/` stays
+at **zero warnings** (no corpus false positive), and a real project catches the
+`(let (port 8080) …)` case end-to-end.
+
+**Doc reconciliation (audit of "what shipped vs the docs").** Fanned out two
+audits. The type-system roadmap section had no further drift (the earlier Gap A
+fix was the only one). The broader sweep found three stale markers, now fixed:
+lazy sequences were ⬜ though the **fusing lazy seq-views** shipped (ADR-111) —
+split to 🟡 (seq-views done, unbounded `iterate` still ⬜); the **JIT tier-1**
+parent was ⬜ though the core shipped and is a default cargo feature — now 🟡 (only
+native-IC + float-spec sub-stages remain); and `spec.md §11` still listed
+rest-param `sig` notation (ADR-127), lazy seq-views (ADR-111), and `defrecord`
+(ADR-130) as unshipped — trimmed to just unbounded `iterate` + the `#{…}` set
+literal.

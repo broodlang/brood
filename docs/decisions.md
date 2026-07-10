@@ -8305,3 +8305,58 @@ a killed access tax, and free typo-safety — at zero core cost. Supersedes the
 `defrecord`/`deftype` helpful-error stub in `eval/mod.rs` (records now exist, as
 sugar); extends ADR-115's record types with a value-level front end; leaves
 ADR-026 immutability and the ADR-006/011 core-size rules fully intact.
+
+## ADR-131 — Dead-clause lint broadens to precise surface `let`-locals (not just sig-typed params)
+
+**Status:** accepted, shipped 2026-07-10.
+
+**Context.** The dead-clause lint (a guard that narrows a variable's type to the
+empty set, so the branch can never run — `docs/type-annotations.md`) fired only
+for **sig-typed parameters** (`Ctx::sig_params`). That gate kept it
+false-positive-free but left the common surface case uncovered:
+
+```lisp
+(let (port 8080)
+  (cond (string? port) …   ; can never run — port is int
+        :else …))
+```
+
+The roadmap tracked this as ⬜ "broaden the dead-clause lint beyond sig-typed
+params (needs the surface-vs-generated scoping)."
+
+**Decision.** Add a second dead-clause-eligible set, `Ctx::dead_clause_locals`,
+holding **surface `let`-locals with a precise type**, and make the lint scan both
+sets (`newly_dead_binding`). A `let`-local qualifies iff **all** hold:
+
+1. **Precise (non-redefinable) RHS** — `gradual_of(rhs).dynamic == false`: a
+   literal or integer-closed expression, never a call-result or global reference.
+   This is what makes the conclusion **reload-safe**: a `dynamic` binding's type
+   could change under hot reload, so a "dead" verdict on it could go stale — those
+   are excluded, exactly as ADR-124/Gap A excludes redefinable globals.
+2. **Surface name** — not a gensym temporary (`<prefix>__<digits>`, factored into
+   `is_gensym_sym`). A macro tests its own gensym temps, never the user's named
+   local, so the gensym filter *is* the surface-vs-generated scoping the roadmap
+   called for — no position inspection at the guard site needed (the sig-param
+   lint never needed one either).
+3. **Known, non-`never` type** with a source position on the binding.
+
+**Soundness.** A `let`-binding is immutable within its scope, so even an
+*over-approximated but precise* type narrowed to `never` proves the branch dead:
+if the tracked type `T ⊇` the real type and `T ∩ guard = ⊥`, then
+`real ∩ guard ⊆ T ∩ guard = ⊥` too. Restricting to precise (non-`dynamic`)
+bindings is not needed for *this-execution* soundness (immutability already gives
+it) but keeps every verdict stable across reloads — the same bar the rest of the
+reload-aware checker holds (ADR-123/124/125). Shadowing a name drops its
+eligibility (mirrors `sig_params`).
+
+**Verification.** Two new checker tests (`dead_clause_flagged_for_a_precise_let_local`,
+`dead_clause_let_local_respects_precision_gensym_and_compatibility`) cover the
+catch plus the three exclusions (compatible narrowing, call-result/`dynamic` RHS,
+gensym); the existing sig-param tests are unchanged. `nest check` stays at **zero
+warnings** across `std/` + `tests/` — no false positive in the corpus — and a
+real project catches `(let (port 8080) (cond (string? port) …))` end-to-end.
+
+**Trade.** One small `Ctx` set + one gensym helper (also de-duplicated out of the
+unused-let lint) for a materially more useful lint, with the surface-vs-generated
+risk handled entirely at the *binding* (eligibility), never at the guard. Leaves
+the sig-param path and every soundness invariant intact.

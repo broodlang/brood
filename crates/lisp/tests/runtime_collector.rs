@@ -1018,7 +1018,6 @@ fn migration_drain_free_cycles_and_stays_bounded() {
     );
 }
 
-
 /// Stage 5 soundness (ADR-091) — a `def` of a value resident in the *draining*
 /// generation must be re-homed into the current generation. Otherwise it stores a
 /// stale handle into the shared globals table (an un-walked drain root), re-pinning
@@ -1059,5 +1058,9 @@ fn a_def_of_an_old_gen_value_is_rehomed_off_the_freed_generation() {
 
     // `g` must still resolve + run — proving it was re-homed off the freed generation.
     let r = interp.eval_str("(g)").expect("call g after gen 0 freed");
-    assert_eq!(interp.print(r), "42", "g was re-homed into the live generation");
+    assert_eq!(
+        interp.print(r),
+        "42",
+        "g was re-homed into the live generation"
+    );
 }

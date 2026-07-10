@@ -323,8 +323,13 @@ co-author trailer, overriding any default that would append one.
     would require — there are none to support.
 - **Types are set-theoretic, gradual, and advisory** (ADR-023/024;
   `docs/types.md`). A type *is* a set of runtime `Tag`s; subtyping is set
-  inclusion; redefinable globals are `dynamic()`, never `Any`; checking never
-  rejects a runnable program. Before adding a `Value` kind, primitive, special
+  inclusion; redefinable globals are `dynamic()`, never `Any`. The checker
+  **never gates the live image and never warns on a use valid for the image's
+  current state** — a `def`/reload always wins, and the checker re-derives on
+  every reload (ADR-123/124/125/126; `docs/type-soundness-reload.md`). It still
+  *warns* advisorily, and the one hard reject is **batch/CI only** (`nest check`
+  exits nonzero on any warning). This supersedes the older "checking never
+  rejects a runnable program" phrasing. Before adding a `Value` kind, primitive, special
   form, or pattern, check it against the **compatibility contract** in
   `docs/types.md` — several points are compiler-enforced (a new `Value` needs a
   `Tag` + bit in `types.rs`; primitives will need a signature like `Arity`). Not

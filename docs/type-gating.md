@@ -1,6 +1,10 @@
 # Gating: full gradual consistency in the checker's decisions (design)
 
-**Status:** design, not yet built. Scopes the roadmap's 🎯 item — "wiring
+**Status:** ✅ **shipped** — Gap A (same-file + cross-file) and Gap B (B0 + B1)
+are all built, tested, and verified end-to-end (2026-07-10). This doc now reads
+as the as-built design; the only follow-on left is the reload *re-check trigger*
+beyond `nest run --watch` (REPL/LSP push), tracked in the reload-soundness doc.
+Scopes what was the roadmap's 🎯 item — "wiring
 `dynamic()` / full gradual consistency into the checker … actual gating decisions
 (not just advisory assignment checks)." Companion to
 [`type-soundness-reload.md`](type-soundness-reload.md) (ADR-123/124/125/126),
@@ -200,10 +204,11 @@ runnable program." That stays literally true — nothing here gates the live ima
 misuse** (Gap B) and on a **provably-disjoint use of an undeclared global's
 current-image type** (Gap A). Neither is a false positive under the
 reload-soundness model — the first is an author-contract tension, the second is a
-real misuse of the current image that a reload re-checks. Update contract #5's
-wording to: *the checker never gates the live image, and never warns on a use that
-is valid for the image's current state* — the precise, reload-aware form of the
-old "runnable program" phrasing.
+real misuse of the current image that a reload re-checks. ✅ **Done:** contract #5
+in [`types.md`](types.md) (and the matching invariant in `CLAUDE.md`) now read
+*the checker never gates the live image, and never warns on a use that is valid
+for the image's current state* — the precise, reload-aware form of the old
+"runnable program" phrasing.
 
 ## Explicitly out of scope
 

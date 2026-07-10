@@ -51,7 +51,9 @@ fn parked_process_clean_of_the_draining_gen_does_not_block_it() {
     // reports its pid in `:ready` so the test can release it afterwards (no leaked
     // permanently-parked process).
     interp
-        .eval_str("(spawn (fn () (do (send root [:ready (self)]) (receive (:go (send root :bye)))))) ")
+        .eval_str(
+            "(spawn (fn () (do (send root [:ready (self)]) (receive (:go (send root :bye)))))) ",
+        )
         .expect("spawn a gen-1 worker");
     interp
         .eval_str("(receive ([:ready p] (def worker-pid p)))")

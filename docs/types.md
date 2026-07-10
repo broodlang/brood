@@ -586,11 +586,27 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
 4. **Redefinable bindings are `dynamic()`, never assumed static.** Any feature
    touching `def` / globals / hot reload must keep them `dynamic()` so a checker
    can never contradict a future redefinition. This is the "don't inhibit the
-   language" invariant.
-5. **Checking is advisory.** No change may let a type result *reject* a runnable
-   program — except provably-sound special-form *structure* errors (special forms
-   aren't redefinable, so those can't be wrong). Types warn and optimise; they
-   never gate.
+   language" invariant. A global *may* carry a tracked **current-image** type
+   (a declared `(sig g T)`, or an inferred type for an undeclared global —
+   ADR-124, Gap A), but it is exposed as **`dynamic_within(T)`**, never a precise
+   `stat(T)`: decisions run the `∩` relation (defer unless *provably* disjoint),
+   so a redefinition the author intends is never pre-rejected. That is still
+   `dynamic()` — a current-state observation, not a static promise.
+5. **The checker never gates the live image, and never warns on a use that is
+   valid for the image's current state.** This is the reload-aware successor to
+   the old "checking may never reject a runnable program" phrasing (ADR-123/124/
+   125/126; [`type-soundness-reload.md`](type-soundness-reload.md),
+   [`type-gating.md`](type-gating.md)). A `def`/reload *always* wins — the running
+   image is never blocked, so live editing and `nest run --watch` stay free
+   (ADR-013). The checker still *warns* (it is advisory to the live image), and it
+   re-derives on every reload, so a warning only ever describes the image's
+   **current** state — including a **merely-wider precise misuse** and a
+   **provably-disjoint use of a global's current-image type**; neither is a false
+   positive under the reload-soundness model. The one legitimate *hard reject* is
+   **batch/CI only**: `nest check` exits nonzero on any warning (there is no
+   `--strict` flag — it always has). Provably-sound special-form *structure*
+   errors still reject unconditionally (special forms aren't redefinable, so those
+   can't be wrong).
 6. **Every primitive declares its type. (enforced)** A new builtin supplies a
    result `Ty` (+ arg `Ty`s) next to its `Arity` — `NativeFn` carries a `Sig`
    field, the same mechanism that makes `Arity` mandatory: omitting it is a

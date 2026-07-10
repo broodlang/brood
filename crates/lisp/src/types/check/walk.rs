@@ -37,6 +37,18 @@ fn name_of(s: Symbol) -> String {
     value::symbol_name(s)
 }
 
+/// Is `s` a **gensym temporary** — a `<prefix>__<digits>` name minted by macro
+/// expansion (`value::gensym`)? Such a binding is compiler-introduced, so the
+/// lints that only want *surface* (user-written) names — the unused-let-binding
+/// lint and the broadened dead-clause lint (ADR-131) — exempt it: warning on a
+/// name the user can't rename is noise. (A rare hand-written `x__1` is only a
+/// missed warning, which these lints already tolerate.)
+fn is_gensym_sym(s: Symbol) -> bool {
+    name_of(s)
+        .rsplit_once("__")
+        .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// The arity of a callback argument, when it can be determined *unambiguously* —
 /// the input to the callback-arity check (ADR-078). A named **global** function
 /// (its arity lives in the heap) or a simple single-clause lambda literal yields
@@ -1490,13 +1502,18 @@ fn check_if(
     let (then_ctx, else_ctx) = match guard_assertion(heap, test, ctx) {
         Some(g) => {
             let then_ctx = ctx.narrow(g.sym, g.ty.clone());
-            // **Dead-clause lint.** If the guard narrowed a *sig-typed parameter*
-            // to the empty type, this branch can never run — the parameter's
-            // declared type is disjoint from what the guard (a `cond` predicate or
+            // **Dead-clause lint.** If the guard narrowed a dead-clause-eligible
+            // binding — a *sig-typed parameter* or a *precise surface `let`-local*
+            // (ADR-131) — to the empty type, this branch can never run: the
+            // binding's type is disjoint from what the guard (a `cond` predicate or
             // a `match` literal pattern, reached here via the scrutinee alias)
-            // asserts. Gated on a sig-typed param: a literal scrutinee or a
-            // compiler-generated guard never involves one, so no false positives.
-            if let Some((p, known)) = then_ctx.newly_dead_sig_param(ctx) {
+            // asserts. Eligibility (see `Ctx::dead_clause_locals`) is the whole of
+            // the surface-vs-generated scoping: it admits only a non-gensym,
+            // precisely-typed, immutable local, so a literal scrutinee, a
+            // redefinable global, a call-result, and every macro-generated temp are
+            // ruled out at the *binding*, never at the guard site — exactly how the
+            // sig-param lint stays false-positive-free without inspecting positions.
+            if let Some((p, known)) = then_ctx.newly_dead_binding(ctx) {
                 out.push((
                     heap.form_pos_only(form),
                     format!(
@@ -1649,8 +1666,23 @@ fn check_let(
         check_value_leaf(heap, rhs, form, &scope, out);
         check_into(heap, rhs, &scope, out);
         let rhs_ty = expr_ty(heap, rhs, &scope);
+        // Is the RHS *precise* (non-redefinable)? Computed in the pre-bind scope.
+        // `dynamic == false` ⇔ a literal / integer-closed expression, never a
+        // call-result or global reference — the reload-safe subset the dead-clause
+        // lint may key off (ADR-131).
+        let rhs_precise = !gradual_of(heap, rhs, &scope).dynamic;
         let rhs_guard = guard_assertion(heap, rhs, &scope);
-        scope = scope.bind(name, rhs_ty);
+        scope = scope.bind(name, rhs_ty.clone());
+        // Dead-clause lint eligibility: a surface (non-gensym), precisely-typed
+        // `let`-local joins the set the dead-clause lint may flag, so a later guard
+        // that narrows it to `never` is caught — `(let (x 5) (cond (string? x) …))`.
+        if rhs_precise
+            && rhs_ty.as_ref().is_some_and(|t| !t.is_never())
+            && !is_gensym_sym(name)
+            && heap.form_pos_only(form).is_some()
+        {
+            scope.mark_dead_clause_local(name);
+        }
         // Only alias a *biconditional* guard: a `then_only` guard (the `and`
         // short-circuit) must not be stored as a let-alias, or a later
         // `(if alias …)` would negate it in the else-branch (unsound).
@@ -1692,13 +1724,8 @@ fn check_let(
                 // Exempt gensym temporaries (`<prefix>__<n>`, value::gensym): a
                 // macro expansion (match / pattern lowering) can attach its
                 // call-site position to the generated `let`, so the position
-                // check below doesn't catch them — but the name does. Warning on
-                // a compiler-introduced binding the user can't rename is noise.
-                // (Suppressing a rare hand-written `x__1` is only a missed
-                // warning — this lint already errs toward false negatives.)
-                let is_gensym = nm
-                    .rsplit_once("__")
-                    .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                // check below doesn't catch them — but the name does.
+                let is_gensym = is_gensym_sym(name);
                 // Exempt a binding that *shadows* an existing global or curated
                 // builtin (`(let (list …) …)`, `(let (= …) …)`): you never
                 // accidentally name a local after a builtin, so a shadow left

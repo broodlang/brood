@@ -86,6 +86,22 @@ already tried is flagged as unreachable, whether or not it came from `match`.
 See [type-match-exhaustiveness.md](type-match-exhaustiveness.md) and
 [type-match-redundancy.md](type-match-redundancy.md).
 
+**Dead-clause lint (ADR-131).** A guard (`cond` predicate or `match` literal
+pattern) that narrows a *typed* binding to the empty type flags the branch as
+dead code — `is X, which can never be Y`. It fires for two kinds of binding: a
+**sig-typed parameter** (`(sig f (int -> …))` + `(cond (string? n) …)`), and a
+**precise surface `let`-local** (`(let (port 8080) (cond (string? port) …))`).
+Eligibility is deliberately narrow — a `let`-local qualifies only when its RHS is
+**precise** (a literal / integer-closed expression, so `gradual_of.dynamic ==
+false`; a call-result or redefinable-global binding is `dynamic` and excluded,
+keeping the verdict reload-safe) and its name is **surface** (not a gensym macro
+temp). That binding-level gate is the whole of the surface-vs-generated scoping:
+a macro tests its own gensym temps, never the user's named local, so no guard-site
+position check is needed. Sound because a local is immutable within its scope, so
+an over-approximated-but-precise type narrowed to `never` genuinely proves the
+branch dead. A negative test that *deliberately* writes a dead clause opts out
+with `(check-allow :unreachable-clause …)`.
+
 **`&optional` params (ADR-127).** `(sig f (int &optional string -> int))`
 declares `f`'s second argument as optional, mirroring a closure's own
 `(a &optional b)` shape; combine with a trailing `& rest` for all three

@@ -1333,6 +1333,62 @@ mod tests {
     }
 
     #[test]
+    fn dead_clause_flagged_for_a_precise_let_local() {
+        // ADR-131: the dead-clause lint now covers a *precise, surface* `let`-local,
+        // not just a sig-typed param. `x` is statically `5` (a literal, precise), so
+        // a `string?` clause can never run.
+        let w = file_warnings("(defn f () (let (x 5) (cond (string? x) :a :else :b)))");
+        assert!(
+            w.iter()
+                .any(|m| m.contains("unreachable clause") && m.contains("string")),
+            "a string? clause on a let-local typed 5 should be dead: {w:?}"
+        );
+        // A `match` literal pattern disjoint from the local's type is dead too.
+        let w = file_warnings("(defn g () (let (x 5) (match x (\"hi\" :s) (_ :o))))");
+        assert!(
+            w.iter().any(|m| m.contains("unreachable clause")),
+            "a string-literal pattern on a let-local typed int should be dead: {w:?}"
+        );
+    }
+
+    #[test]
+    fn dead_clause_let_local_respects_precision_gensym_and_compatibility() {
+        // A *compatible* guard narrows without emptying — not dead.
+        assert!(
+            file_warnings("(defn a () (let (x 5) (cond (int? x) :a :else :b)))")
+                .iter()
+                .all(|m| !m.contains("unreachable")),
+            "(int? x) when x : int must not flag"
+        );
+        // A local bound to a **call result** is `dynamic` (redefinable → the type
+        // could change on reload), so it's excluded — no dead-clause warning even
+        // though the current-image type would narrow to `never`. Reload-safe.
+        assert!(
+            file_warnings(
+                "(defn h () 5)\n(defn b () (let (x (h)) (cond (string? x) :a :else :b)))"
+            )
+            .iter()
+            .all(|m| !m.contains("unreachable")),
+            "a call-result local is dynamic and must not be flagged dead"
+        );
+        // A **gensym** temporary (macro-introduced) is exempt — warning on a name
+        // the user can't rename would be noise.
+        assert!(
+            file_warnings("(defn c () (let (x__1 5) (cond (string? x__1) :a :else :b)))")
+                .iter()
+                .all(|m| !m.contains("unreachable")),
+            "a gensym let-local must never be flagged dead"
+        );
+        // Shadowing a precise local with an unknown one drops eligibility.
+        assert!(
+            file_warnings("(defn d (y) (let (x 5) (let (x y) (cond (string? x) :a :else :b))))")
+                .iter()
+                .all(|m| !m.contains("unreachable")),
+            "a shadowing rebind of unknown type must not be flagged dead"
+        );
+    }
+
+    #[test]
     fn curated_helper_sigs_catch_misuse() {
         // even?/odd?/abs require a number.
         assert!(warnings("(even? \"x\")")
@@ -3268,8 +3324,7 @@ mod tests {
         let w = file_warnings(r#"(sig f (int -> int)) (defn f (x) x) (f "hello")"#);
         assert!(
             w.iter()
-                .any(|m| m.contains("f: argument 1 expects int")
-                    && m.contains("\"hello\"")),
+                .any(|m| m.contains("f: argument 1 expects int") && m.contains("\"hello\"")),
             "a string literal passed where int is declared must warn: {w:?}"
         );
         // A correct literal, and a dynamic (non-literal) argument, must not warn.

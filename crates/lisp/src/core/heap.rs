@@ -5867,7 +5867,13 @@ impl Heap {
                 v
             });
         }
-        if self.walk_reaches_gen(gen, &mut work, &mut env_work, &mut visited, &mut visited_env) {
+        if self.walk_reaches_gen(
+            gen,
+            &mut work,
+            &mut env_work,
+            &mut visited,
+            &mut visited_env,
+        ) {
             return true;
         }
 
@@ -5906,7 +5912,13 @@ impl Heap {
                 }
             }
         }
-        self.walk_reaches_gen(gen, &mut work, &mut env_work, &mut visited, &mut visited_env)
+        self.walk_reaches_gen(
+            gen,
+            &mut work,
+            &mut env_work,
+            &mut visited,
+            &mut visited_env,
+        )
     }
 
     /// Drive the transitive reachability walk over the seeded `work`/`env_work` lists to
@@ -5921,7 +5933,6 @@ impl Heap {
         visited: &mut HashSet<(usize, usize)>,
         visited_env: &mut HashSet<(usize, usize)>,
     ) -> bool {
-
         // --- Transitive walk. Detect generation `gen`; follow every RUNTIME sub-handle
         // (a gen-current closure can embed a gen-`gen` handle in a body/env). ---
         loop {
@@ -6153,7 +6164,6 @@ impl Heap {
         let acks = rt.drain_acks.read().unwrap_or_else(|e| e.into_inner());
         live_pids.iter().all(|pid| acks.get(pid) == Some(&epoch))
     }
-
 
     /// **RUNTIME collector — Step 2a (out-of-place evacuation).** Trace the live
     /// RUNTIME code reachable from the global bindings + this process's operand roots
@@ -6443,7 +6453,7 @@ impl Heap {
             // frames as long as any process reaches a safepoint (no lost wakeup).
             let t = self.rt_drain_tick.get().wrapping_add(1);
             self.rt_drain_tick.set(t);
-            if t % RT_DRAIN_SCAN_STRIDE == 0 {
+            if t.is_multiple_of(RT_DRAIN_SCAN_STRIDE) {
                 self.advance_runtime_multigen();
             }
             // Back off the threshold even while the drain is still armed, rather than

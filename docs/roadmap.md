@@ -80,7 +80,10 @@ session `nest` (12 scheduler workers).
   - ✅ **`spec.md §11`** — rewrote "Not yet specified (planned)": it listed dynamic
     variables, map literals, modules/namespaces, and a tracing GC as absent, but
     **all four have shipped**; the section now lists only the genuinely-remaining
-    gaps (rest-param `sig` notation, lazy sequences, the `defrecord` stub).
+    gaps. (Follow-up 2026-07-10: rest-param `sig` notation (ADR-127), fusing lazy
+    seq-views (ADR-111), and `defrecord` (ADR-130) have since shipped too, so
+    `spec.md §11` was trimmed again to just unbounded `iterate` + the `#{…}` set
+    literal.)
   - ✅ **`value-repr.md` byte count** — corrected "16-byte enum" → **24 bytes**
     throughout (the kernel hard-asserts `size_of::<Value>() == 24`; the `Pid {
     node, id }` variant needs two payload words), fixing both the figure and the
@@ -940,8 +943,8 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   A real, separate checker gap surfaced along the way — a `defmodule`-declared
   arrow sig didn't seed the body-return-type check — and was fixed the same
   day (ADR-126, `docs/type-annotations.md`'s "Fixed gap" section).
-- 🎯 **Wiring `dynamic()` / full gradual consistency into the checker** —
-  designed in [`type-gating.md`](type-gating.md). Two grounded gaps. **A ✅
+- ✅ **Wiring `dynamic()` / full gradual consistency into the checker** —
+  designed in [`type-gating.md`](type-gating.md); **both gaps shipped**. **A ✅
   shipped (same-file + cross-file)** — an *undeclared* global carries its inferred
   current-image type (as `dynamic_within` → `∩`, reload-safe), so its misuse is
   caught: same-file via `expr_ty(RHS)` of an exactly-once def, cross-file via the
@@ -957,13 +960,24 @@ Gaps to parity (⬜ = not started; 🎯 = the open design question above blocks 
   string's `str_lit`; B1 routes the arg check through the gradual relation (`⊆`
   precise / `∩` dynamic), catching a merely-wider precise argument and closing the
   return/argument asymmetry — verified zero corpus false positives. **Gap B is
-  complete.** The remaining 🎯 work is cross-file inferred-global propagation
-  (Gap A follow-on) and any further decision points.
+  complete.** Verified end-to-end 2026-07-10: a cross-file `(def max-port 8080)`
+  misused as `(string-length max-port)` warns `expects string, got 8080
+  (hello/max-port)` and `nest check` exits 1. The only follow-on left is the
+  reload *re-check trigger* beyond `nest run --watch` — REPL-level and LSP-push
+  re-checks — which is a reload-workflow concern tracked under
+  [`type-soundness-reload.md`](type-soundness-reload.md), not checker decision
+  logic (which is now feature-complete).
 - ✅ **`BROOD_CONTRACTS=1`** — shipped: enforces *every* `(sig …)` at run time the
   same way `sig!` does, plus element-level `(list E)` / `(vector E)` contract
   checks (`tests/contract_test.blsp`). See [`type-annotations.md`](type-annotations.md).
-- ⬜ **Broaden the dead-clause lint beyond sig-typed params** (needs the
-  surface-vs-generated scoping noted in `docs/type-annotations.md`).
+- ✅ **Broaden the dead-clause lint beyond sig-typed params** — shipped
+  (ADR-131, 2026-07-10). The lint now also flags a guard that narrows a **precise
+  surface `let`-local** to the empty type (`(let (port 8080) (cond (string? port)
+  …))`), not just a sig-typed param. The surface-vs-generated scoping is handled
+  entirely at the *binding*: only a non-gensym, precisely-typed (`gradual_of.dynamic
+  == false` → reload-safe, excludes call-results/redefinable globals), immutable
+  local is eligible (`Ctx::dead_clause_locals`). Verified zero corpus false
+  positives. See [`type-annotations.md`](type-annotations.md).
 
 The deeper rationale (why advisory + editor-serving rather than Elixir's sound
 gate) is in [`research/set-theoretic-types-in-brood.md`](research/set-theoretic-types-in-brood.md);
@@ -979,9 +993,12 @@ the workaround available today.
   `difference`/`subset?`) shipped (ADR-060); the **kernel** piece — a `#{…}` reader
   literal, `#{…}` printing, and a distinct `set?`/`Tag::Set` — is still deferred,
   and picks up when "set of X" becomes a common pattern in M2+ editor code.
-- ⬜ **Lazy sequences + `iterate`** — tail-recursive accumulator helpers
-  cover the case today; picks up when an editor feature needs unbounded
-  streams (animation frames, file lines, undo history).
+- 🟡 **Lazy sequences + `iterate`** — the **fusing lazy seq-views** half shipped
+  (ADR-111; refined by the 2026-07-09 "shrink the lazy surface" devlog): `lmap`/
+  `lfilter`/`lkeep`/`lremove` threaded with `->>` fuse into a single pass with no
+  intermediate lists, `seqview?` identifies them (`docs/language.md` §lazy). Still
+  ⬜: **unbounded stream generation** (`iterate` / an infinite producer) — picks up
+  when an editor feature needs it (animation frames, file lines, undo history).
 - ✅ **MCP runtime-introspection tools** — landed 2026-05-31. The `processes`
   tool now returns full `(process-info pid)` maps (mailbox, **reductions**,
   memory, GC count, monitors) instead of bare pids — the observer's per-process
@@ -1148,9 +1165,13 @@ the workaround available today.
     like `%range-reduce` (blocked on (1) — running `try` bodies on the VM surfaces the
     divergence). Then **bytecode lowering** (ADR-096; the JIT on-ramp), gated on the
     now-available profile.
-  - ⬜ **JIT tier-1: template JIT via Cranelift** (ADR-101,
-    [`vm-perf-and-jit-runway.md §6`](vm-perf-and-jit-runway.md)) —
-    **gated on three**: (a) bytecode lowering — ✅ done; (b) a profile naming
+  - 🟡 **JIT tier-1: template JIT via Cranelift** (ADR-101,
+    [`vm-perf-and-jit-runway.md §6`](vm-perf-and-jit-runway.md)) — **the core
+    tier-1 JIT shipped and is now a default cargo feature, on for the whole
+    toolchain** (2026-07-09 devlog; see the ✅ "JIT-default-on" item up top). Stages
+    0–2 below are ✅/🟡; only the native-IC (Stage 3) and float-specialisation
+    sub-stages remain, so this parent stays 🟡, not ✅.
+    **Gated on three**: (a) bytecode lowering — ✅ done; (b) a profile naming
     dispatch as the bottleneck — ✅ for **compute** (loop/pfib: 100% prim2-inline,
     ~100% IC hit, near-zero alloc → dispatch-bound, JIT-amenable), ✗ for **editor
     redisplay** (env/alloc/native-bound — JIT won't help there; profiled 2026-06-08);

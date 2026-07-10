@@ -296,6 +296,17 @@ pub(super) struct Ctx {
     /// (destructure / `match` lowering) never involves a sig-typed param, so it
     /// is never flagged. Shadowing removes a name (see [`bind`](Ctx::bind)).
     sig_params: HashSet<Symbol>,
+    /// **Surface `let`-locals eligible for the dead-clause lint** — the broadening
+    /// of that lint past sig-typed params. A `let`-bound local qualifies only when
+    /// its RHS has a **precise** (`GradualTy.dynamic == false`) type — a literal or
+    /// integer-closed expression, never a call-result or redefinable-global
+    /// reference (those are `dynamic`, so a "dead" conclusion could be invalidated
+    /// by a reload — excluding them keeps the lint reload-safe) — and its name is
+    /// **surface** (not a gensym temp from macro expansion) with a source position.
+    /// A local is immutable within its scope, so an over-approximated-but-precise
+    /// type narrowed to `never` by a guard proves the branch dead, exactly as a
+    /// sig-param does. Shadowing removes a name (see [`bind`](Ctx::bind)).
+    dead_clause_locals: HashSet<Symbol>,
     /// Whether to flag *operand / value-slot* unbound symbols (a bare symbol in
     /// an evaluated argument or a `def`/`let`/`if` value position). On only when
     /// checking a **complete file** ([`check_file`]): there every top-level def
@@ -444,9 +455,11 @@ impl Ctx {
         // A fresh binding of `sym` invalidates any `(get sym :k)` path narrowing —
         // the new value is unrelated to whatever a prior guard asserted.
         c.path_types.retain(|(base, _), _| *base != sym);
-        // A fresh binding shadows the sig-typed param of the same name — the new
-        // binding's type is unrelated, so it must not drive the dead-clause lint.
+        // A fresh binding shadows the sig-typed param / dead-clause local of the
+        // same name — the new binding's type is unrelated, so it must not drive
+        // the dead-clause lint.
         c.sig_params.remove(&sym);
+        c.dead_clause_locals.remove(&sym);
         if let Some(neighbours) = c.aliases.remove(&sym) {
             for n in neighbours {
                 if let Some(set) = c.aliases.get_mut(&n) {
@@ -585,22 +598,32 @@ impl Ctx {
     pub(super) fn is_sig_param(&self, sym: Symbol) -> bool {
         self.sig_params.contains(&sym)
     }
-    /// After a guard narrowed this scope from `before`, return a **sig-typed
-    /// param that has just become the empty type** (with the type it had in
-    /// `before`), if any — i.e. a parameter whose declared type is disjoint from
-    /// what the guard asserts, so the branch is unreachable. `sig_params` is tiny
-    /// (one function's params), so this scan is cheap. Only sig-typed params are
-    /// considered, which is exactly what makes the dead-clause lint sound.
-    pub(super) fn newly_dead_sig_param(&self, before: &Ctx) -> Option<(Symbol, Ty)> {
-        self.sig_params.iter().find_map(|&p| {
-            let now_never = self.types.get(&p).is_some_and(Ty::is_never);
-            let was_never = before.types.get(&p).is_some_and(Ty::is_never);
-            if now_never && !was_never {
-                before.types.get(&p).map(|prior| (p, prior.clone()))
-            } else {
-                None
-            }
-        })
+    /// Mark an already-bound `let`-local as **dead-clause eligible** — see
+    /// [`dead_clause_locals`](Ctx::dead_clause_locals). Called by `check_let` after
+    /// `bind`, only for a surface, precisely-typed binding.
+    pub(super) fn mark_dead_clause_local(&mut self, sym: Symbol) {
+        self.dead_clause_locals.insert(sym);
+    }
+    /// After a guard narrowed this scope from `before`, return a **dead-clause-
+    /// eligible binding that has just become the empty type** (with the type it had
+    /// in `before`), if any — i.e. a sig-typed param or a precise surface `let`-local
+    /// whose type is disjoint from what the guard asserts, so the branch is
+    /// unreachable. Both sets are tiny (one scope's typed bindings), so the scan is
+    /// cheap. Restricting to these two sets is what keeps the dead-clause lint sound
+    /// and free of false positives on generated / redefinable bindings.
+    pub(super) fn newly_dead_binding(&self, before: &Ctx) -> Option<(Symbol, Ty)> {
+        self.sig_params
+            .iter()
+            .chain(self.dead_clause_locals.iter())
+            .find_map(|&p| {
+                let now_never = self.types.get(&p).is_some_and(Ty::is_never);
+                let was_never = before.types.get(&p).is_some_and(Ty::is_never);
+                if now_never && !was_never {
+                    before.types.get(&p).map(|prior| (p, prior.clone()))
+                } else {
+                    None
+                }
+            })
     }
     /// Turn on operand / value-slot unbound checking — see [`check_operands`].
     /// [`check_file`] calls this on the root ctx so the whole-file walk runs
