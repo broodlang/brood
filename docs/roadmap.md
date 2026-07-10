@@ -330,6 +330,38 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   `utf8-bytes->string`, vectors of 0–255): deliver `[:proc h bytevec]` (a per-spawn
   bytes mode) rather than introducing a whole bytes Value kind. Deferred until a
   byte-framed protocol needs >64 KiB faithfulness; the common case is unaffected.
+  **(In progress 2026-07-10 — picked up as the first stability item below.)**
+
+### Stability backlog (2026-07-10)
+
+A stability sweep (roadmap + devlog + source) found the core is clean — zero
+`TODO`/`FIXME`, `nest check` at zero warnings, the historically fragile areas
+(scheduler races, use-after-GC, the multigen GC hang) all root-caused and closed.
+The remaining items are robustness, not open bugs:
+
+1. 🟡 **Byte-faithful I/O for `proc`/`net`** — the one concrete correctness bug
+   (multi-byte char split across a 64 KiB read boundary is mangled by
+   `from_utf8_lossy`, can desync a length-framed protocol). Design + workaround
+   above. *In progress.*
+2. ⬜ **Continuous fuzzing (`cargo-fuzz`).** The recent hardening crashes
+   (`bundle.rs` u64 overflow, `terminal.rs` `parse_hex_color` non-char-boundary
+   slice, reader/JSON grammar gaps) were all found by *hand-hunting* malformed
+   input. Add libFuzzer targets for the highest-risk untrusted-input parsers —
+   the **reader/scanner**, **JSON**, the **dist wire framing** (`dist/wire.rs`),
+   and the **bundle footer/archive** (`bundle.rs`) — to catch this class
+   automatically and continuously. Composes with the existing `BROOD_GC_VERIFY`
+   + epoch tripwires (`rr`/`valgrind` unavailable in-sandbox). Highest long-term
+   leverage for *keeping* the kernel stable as it grows.
+3. ⬜ **Host-panic hardening (deferred audit residue, see above).** Adversarial
+   input can still panic the Rust host in a few spots: no recursion-depth counter
+   on `expr_ty`/`check_into` (checker stack overflow on deeply-nested types), no
+   `catch_unwind` around the worker `run_one`, no RAII guard on `check_file`'s
+   panic path.
+4. ⬜ **Promote the multigen RUNTIME GC to default (after a soak).** It's
+   hang-free and at suite-parity throughput as of 2026-07-09 but still opt-in
+   (`BROOD_RT_MULTIGEN=1`); a long-uptime process pinning old code can't reclaim
+   the shared code region under the default. Making it default (once a soak
+   confirms no regression) directly improves the editor/daemon long-running case.
 
 ---
 
