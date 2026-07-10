@@ -602,7 +602,10 @@ mod chunk_tests {
     #[test]
     fn ascii_passes_straight_through() {
         let mut carry = Vec::new();
-        assert_eq!(text(chunk_payload(&mut carry, b"hello", false)).as_deref(), Some("hello"));
+        assert_eq!(
+            text(chunk_payload(&mut carry, b"hello", false)).as_deref(),
+            Some("hello")
+        );
         assert!(carry.is_empty());
     }
 
@@ -611,10 +614,16 @@ mod chunk_tests {
         // "é" is 0xC3 0xA9; split it across the chunk boundary.
         let mut carry = Vec::new();
         // First read ends mid-character: deliver the valid prefix, carry the tail.
-        assert_eq!(text(chunk_payload(&mut carry, b"ab\xc3", false)).as_deref(), Some("ab"));
+        assert_eq!(
+            text(chunk_payload(&mut carry, b"ab\xc3", false)).as_deref(),
+            Some("ab")
+        );
         assert_eq!(carry, vec![0xc3]);
         // Second read completes it: no U+FFFD anywhere.
-        assert_eq!(text(chunk_payload(&mut carry, b"\xa9cd", false)).as_deref(), Some("écd"));
+        assert_eq!(
+            text(chunk_payload(&mut carry, b"\xa9cd", false)).as_deref(),
+            Some("écd")
+        );
         assert!(carry.is_empty());
     }
 
@@ -626,7 +635,10 @@ mod chunk_tests {
         assert_eq!(text(chunk_payload(&mut carry, b"\x9f", false)), None);
         assert_eq!(text(chunk_payload(&mut carry, b"\xa6", false)), None);
         assert_eq!(carry.len(), 3); // carry never exceeds 3 bytes
-        assert_eq!(text(chunk_payload(&mut carry, b"\x80", false)).as_deref(), Some("🦀"));
+        assert_eq!(
+            text(chunk_payload(&mut carry, b"\x80", false)).as_deref(),
+            Some("🦀")
+        );
         assert!(carry.is_empty());
     }
 
@@ -634,15 +646,21 @@ mod chunk_tests {
     fn a_genuinely_invalid_byte_is_lossy_now_not_carried_forever() {
         // 0xFF is never a valid UTF-8 byte: replace it immediately, don't accumulate.
         let mut carry = Vec::new();
-        assert_eq!(text(chunk_payload(&mut carry, b"a\xffb", false)).as_deref(), Some("a\u{fffd}b"));
+        assert_eq!(
+            text(chunk_payload(&mut carry, b"a\xffb", false)).as_deref(),
+            Some("a\u{fffd}b")
+        );
         assert!(carry.is_empty());
     }
 
     #[test]
     fn binary_mode_is_byte_faithful_and_flushes_a_text_carry() {
         let mut carry = vec![0xc3]; // a partial char left over from text mode
-        // Flipping to binary flushes the carry ahead of the new bytes, verbatim.
-        assert_eq!(raw(chunk_payload(&mut carry, &[0x28, 0xff], true)), vec![0xc3, 0x28, 0xff]);
+                                    // Flipping to binary flushes the carry ahead of the new bytes, verbatim.
+        assert_eq!(
+            raw(chunk_payload(&mut carry, &[0x28, 0xff], true)),
+            vec![0xc3, 0x28, 0xff]
+        );
         assert!(carry.is_empty());
     }
 

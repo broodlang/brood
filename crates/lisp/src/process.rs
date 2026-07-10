@@ -48,8 +48,8 @@ pub use mailbox::{
     list_local_pids, mailbox_len, process_gc_runs, process_mem, process_reductions, process_status,
     receive_match, send,
 };
-pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 pub(crate) use message::{chunk_flush, chunk_payload};
+pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 // The wire codec (`dist::wire`) defines its decode-depth cap in terms of this so
 // the two can't diverge; crate-internal, hence `pub(crate)`.
 pub(crate) use message::MAX_MESSAGE_DEPTH;
