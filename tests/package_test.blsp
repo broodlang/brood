@@ -20,7 +20,10 @@
 ;; Turn a fixture dir into a one-commit git repo (so :git deps can be exercised
 ;; offline via a file:// URL — no network). Returns the file:// URL.
 (defn pkg-git-init (dir)
-  (run-process "git" (list "-C" dir "init" "-q"))
+  ;; `-b main` pins the initial branch: a bare `git init` uses the ambient
+  ;; `init.defaultBranch` (often `master` on CI runners), but the deps below pin
+  ;; `:ref "main"`, so without this the ref wouldn't resolve on those hosts.
+  (run-process "git" (list "-C" dir "init" "-q" "-b" "main"))
   (run-process "git" (list "-C" dir "config" "user.email" "t@example.com"))
   (run-process "git" (list "-C" dir "config" "user.name" "Test"))
   ;; Disable commit/tag signing in the fixture repo: the dev's global config may

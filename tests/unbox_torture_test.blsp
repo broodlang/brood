@@ -47,7 +47,13 @@
     (assert= 51090942171709440000 (ut-fact 21))          ; 21! first overflow → BigInt
     (assert= 15511210043330985984000000 (ut-fact 25)))
 
-  (test "multi-arg non-tail recursion (Ackermann)"
+  ;; `:isolated` so this CPU-heavy (~4s solo) compute runs ALONE on the runner
+  ;; instead of competing with the rest of the 2700-case suite. Under the default
+  ;; concurrent phase on a few-core CI box its *wall-clock* balloons past the 120s
+  ;; per-test cap (fair reduction-scheduling starves a long CPU-bound green process
+  ;; when thousands are runnable) — not a correctness issue, purely contention. Run
+  ;; alone it finishes in seconds. Keeps the full ack(3,10) stress on the JIT.
+  (test "multi-arg non-tail recursion (Ackermann)" :isolated
     (assert= 2045 (ut-ack 3 8))
     (assert= 8189 (ut-ack 3 10)))
 
