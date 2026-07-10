@@ -221,6 +221,28 @@ is always torn down (`:leave`) on exit. `cookie` defaults to `(node-cookie)`."
           ((get display :leave)))
         (catch e (do ((get display :leave)) (throw e)))))))
 
+(defn attach-display-local (display)
+  "Attach `display` (e.g. `(gui-display)`, a native window) to a serve session running in THIS
+SAME runtime — the daemon operator's *own* window, so a host can watch and drive the app it
+serves instead of running blind and headless. No node link is needed (the session manager and
+session pids are in-process): handshake directly with the local manager registered under
+`serve-name`, then run the same unified frame/input loop (`attach--display-loop`, with a nil
+peer — there is no node to go down) until the window closes (`:close`) or the app quits
+(`[:bye]`). Blocks. Precondition: `(serve …)` or `(serve-shared …)` already ran in this runtime.
+Composes with both: under `serve` the host gets its own session; under `serve-shared` it joins
+the one shared model — its own view of the collaborative doc. The display is always torn down
+(`:leave`) on exit."
+  (do
+    ((get display :enter))
+    (try
+      (let ([cols rows] ((get display :size)))
+        (send (whereis serve-name) [:attach (self) cols rows])
+        (let (session (receive ([:attached s] s)
+                        (after 5000 (error "attach-display-local: the local serve manager did not answer"))))
+          (when session (do (monitor session) (attach--display-loop nil session display))))
+        ((get display :leave)))
+      (catch e (do ((get display :leave)) (throw e))))))
+
 ;; ---- shared session (many frontends, ONE model — collaborative) --------------
 ;; `serve` gives each client its OWN model (independent sessions). `serve-shared` runs a
 ;; SINGLE `ui-run` and fans its frames to every attached client while merging all their

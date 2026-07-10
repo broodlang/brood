@@ -74,6 +74,24 @@
                            (shared-client-loop session report :none)))
     (after 2000 (send report [:cready :no-attach]))))
 
+;; Receive `[:drew t]` frames until one equals `want` (skipping tick re-renders of an
+;; unchanged frame), or time out — the deduped wait the local-window test drives.
+(defn wait-drew (want)
+  (receive ([:drew t] (if (= t want) :ok (wait-drew want))) (after 3000 :timeout)))
+
+(describe "editor/serve — attach-display-local (the host's own window)" :isolated
+  (test "the operator attaches a local display to the session it serves in the same runtime"
+    ;; No node link: attach-display-local handshakes with the local manager (whereis serve-name)
+    ;; and runs the unified loop, so a served daemon can also show the host a live window.
+    (let (report (self))
+      (serve mk vw up)   ; register a manager under serve-name in THIS (isolated) runtime
+      (let (host (spawn (fn () (attach-display-local (gui-mock-display report)))))
+        (is (= (wait-drew "n=0") :ok))          ; the fresh model paints to the host's window
+        (send host "+")                          ; a window key ships to the session -> new frame
+        (is (= (wait-drew "n=1") :ok))
+        (send host :close)                       ; the window's X detaches and leaves cleanly
+        (is (= (wait-drew :left) :ok))))))
+
 (describe "editor/serve — serving a ui-run app to a remote frontend"
   (test "an attached client gets a session pid, the initial frame, then key-driven frames"
     (let (mgr (spawn (editor/serve/serve--manager mk vw up)))  ; the daemon's session manager
@@ -152,13 +170,13 @@
           hub (spawn (editor/serve/shared--hub () nil [80 24]))
           session (spawn (ui-run (mk) vw up (editor/serve/shared--display hub)))
           mgr (spawn (editor/serve/serve-shared--manager session hub)))
-      (let (a (spawn (shared-client mgr me))
+      (let (_a (spawn (shared-client mgr me))
             aid (receive ([:cready c] c) (after 2000 :none)))
         (is (not (= aid :none)))
         ;; A sees the shared model's initial frame
         (assert= (receive ([:cframe _ t] t) (after 2000 :none)) "n=0")
         ;; B attaches to the SAME session and also sees n=0
-        (let (b (spawn (shared-client mgr me))
+        (let (_b (spawn (shared-client mgr me))
               bid (receive ([:cready c] c) (after 2000 :none)))
           (is (not (= bid :none)))
           (assert= (receive ([:cframe _ t] t) (after 2000 :none)) "n=0")
