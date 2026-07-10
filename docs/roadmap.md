@@ -1169,8 +1169,9 @@ the workaround available today.
     [`vm-perf-and-jit-runway.md §6`](vm-perf-and-jit-runway.md)) — **the core
     tier-1 JIT shipped and is now a default cargo feature, on for the whole
     toolchain** (2026-07-09 devlog; see the ✅ "JIT-default-on" item up top). Stages
-    0–2 below are ✅/🟡; only the native-IC (Stage 3) and float-specialisation
-    sub-stages remain, so this parent stays 🟡, not ✅.
+    0–2 below are ✅/🟡; native-IC increment 1 shipped but **increment 2 is a NO-GO**
+    (Stage 3 below — the call-heavy win is **leaf inlining**, not cheapening the
+    call), and float-specialisation + Stage 4 remain, so this parent stays 🟡, not ✅.
     **Gated on three**: (a) bytecode lowering — ✅ done; (b) a profile naming
     dispatch as the bottleneck — ✅ for **compute** (loop/pfib: 100% prim2-inline,
     ~100% IC hit, near-zero alloc → dispatch-bound, JIT-amenable), ✗ for **editor
@@ -1240,10 +1241,19 @@ the workaround available today.
       recursion). Free-global callee via `brood_rt_global` (live env, late binding);
       comparison results box as `Bool` not `Int`; a tail-call body-weight gate (≥4 work
       ops) avoids the per-hop round-trip regressing thin ping/pong loops.
-    - ⬜ **Stage 3 — IC in native code**: epoch-guarded call-site IC compiles to
-      `cmp [EPOCH_SLOT], r_epoch; jne slow_path` *inside* the JIT'd code (the
-      Stage-1.5 guard is a per-activation Rust check in `jit_tier`); global-read
-      IC same.
+    - 🟡 **Stage 3 — IC in native code.** ✅ **Increment 1 shipped** (default-on,
+      `BROOD_NO_JIT_ICALL` opts out): the epoch-guarded call-site IC check compiles
+      to a `cmp`/`jne` against the flat `FastLink` table *inside* the JIT'd code
+      (fib ~20%). ❌ **Increment 2 (in-IR frame setup + `call_indirect`) — NO-GO,
+      confirmed twice.** Built end-to-end + verified correct but reverted for
+      regressing ~5% (`3e196ab`/`269b77a`/`f0dfd15`); re-examined 2026-07-10 with a
+      *delegator* benchmark (small helper in a hot loop — where ~63% of runtime *is*
+      this dispatch, unlike fib whose self-calls bypass it) and the conclusion holds:
+      the cost is the **irreducible frame setup + `call_indirect` dispatch, not the
+      FFI boundary** — LLVM compiles the frame work better than hand-emitted Cranelift
+      and the in-IR path *adds* per-call eligibility checks. **Do not retry this
+      lever** (the `icall_enabled()` comment says so too). The call-heavy win is
+      **leaf inlining** below, not cheapening the call.
     - ⬜ **Stage 4 — RUNTIME compaction survival** (ADR-091): constant pool
       (indirection table per ADR-096 §4.C) lets `runtime_collect` rewrite
       handles without invalidating machine code.
@@ -1251,6 +1261,27 @@ the workaround available today.
       for the interpreter loop, if profiling after Stage 1 still shows dispatch
       overhead worth removing (x86-64 only, `#[cfg]`-gated, pure-Rust fallback).
       Additive; not on the critical path.
+    - ⬜ **Technique B, Phase 2 — leaf callee inlining (TO TRY; the real call-heavy
+      lever).** Since the per-call dispatch can't be *cheapened* (Stage 3 inc-2
+      NO-GO), *remove* it: splice a small non-recursive callee's body into the caller
+      so `(add1 n)` in a hot loop needs no call/frame/dispatch at all — this is what
+      the delegator's ~63% dispatch cost demands. Genuinely unbuilt; the splice +
+      **dual-body / per-engine frame sizing** infra that made *self*-inlining
+      net-positive (`shift_slots`/`build_inlined_body`/`inline_nslots`,
+      `jit-optimizing-tier.md` §Phase 2) is already there to reuse, and hot-reload
+      safety is free (the caller arm's `compile_epoch` guard invalidates on any
+      `def`). **Measure-first** (behind `BROOD_JIT_LEAF_INLINE`): a throwaway Phase-0
+      prototype + a full `make benchmark` A/B gates the whole lever — every adjacent
+      attempt (FFI-collapse §6a, early self-inliner §6c, inc-2) regressed, and
+      self-inlining itself was net-negative globally until dual-body. Full warm-start
+      plan: `~/.claude-personal/plans/peaceful-tinkering-valley.md`. Do it as a
+      **fresh focused effort** — the runtime's riskiest code (`jit-tier2.md §7`).
+    - ⬜ **Known gap — heap-walking benchmarks don't tier** (`bintree`/`nqueens`,
+      ~39×/187× behind Elixir — a *far* larger gap than call dispatch). Structure-
+      walking bodies bail the JIT subset / don't lower, so they run interpreted;
+      inlining a structure-walking body is gated on the lever-2 allocation work
+      (`allocation-elimination.md`). Higher ceiling than the call-dispatch levers —
+      worth profiling before picking the next JIT push.
 
 ## M2 — Editor data model
 

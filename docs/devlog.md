@@ -3181,3 +3181,45 @@ native-IC + float-spec sub-stages remain); and `spec.md §11` still listed
 rest-param `sig` notation (ADR-127), lazy seq-views (ADR-111), and `defrecord`
 (ADR-130) as unshipped — trimmed to just unbounded `iterate` + the `#{…}` set
 literal.
+
+## 2026-07-10 — JIT native-IC increment 2: re-confirmed NO-GO; pivot to leaf inlining
+
+Picked up "JIT tier-1: native-IC" from the roadmap. Profiled first (the project's
+own rule: don't ship perf work that doesn't move the benchmark). **Key reframe:**
+fib is the wrong benchmark for the call-dispatch path — its self-calls compile to
+direct native recursion and bypass the fast-frame path entirely (dispatch ~0%, 86%
+in the native arm). The right shape is a **delegator** — a small helper called
+non-tail in a hot loop: `(defn add1 (n) (+ n 1)) (defn work (n acc) (if (< n 1) acc
+(work (- n 1) (+ acc (add1 n)))))`. On that, `perf` self-time is `jit_run_fast_link`
+37%, `brood_rt_fast_frame` 15%, `brood_rt_push` 7.5%, table/base re-fetches ~3% —
+**~63% of runtime is the call-dispatch plumbing** increment 2 targets, and toggling
+increment 1 off (`BROOD_NO_JIT_ICALL=1`) is 5.33 s vs 4.05 s on, so the path is real.
+
+Designed increment 2 (inline the frame setup + `call_indirect` into IR; env-rooting
+split by env-word bit 62 — Stable/GLOBAL done in IR, movable bails to
+`brood_rt_fast_frame`) and landed sub-increment **2a** — the `roots: Vec<Value>` →
+`Roots { buf, len }` split that makes the frame length IR-writable (behavior-neutral,
+`make test` 769 green under GC stress). **Then found in git history that increment 2
+was already built end-to-end, verified correct, and reverted for regressing ~5%**
+(`3e196ab`/`269b77a`/`f0dfd15`, 2026-06-19; fib(38) in-IR 1.25 s vs FFI 1.19 s) — the
+`icall_enabled()` comment even says "don't retry this lever." The measured cause is
+decisive: **the dispatch cost is the irreducible frame setup + `call_indirect`, not
+the FFI boundary** — `brood_rt_fast_frame`'s FFI call is cheap, LLVM compiles the
+frame work (`resize`/nil-fill) better than hand-emitted Cranelift, and the in-IR path
+*adds* per-call eligibility checks. Two adjacent attempts also regressed
+(`jit-optimizing-tier.md` §6a FFI-collapse, §6c early self-inliner). So the ~63% I
+measured is genuinely there, but it can't be *cheapened* — only *removed*.
+
+**Reverted everything** (2a commit dropped, tree clean at `e69b1c1`). **Pivot: the
+call-heavy win is inlining the callee, not cheapening the call** — Technique B Phase 2
+(leaf callee inlining), which splices a small non-recursive callee into the caller so
+the call/frame/dispatch vanish. Genuinely unbuilt; reuses the self-inliner's splice +
+dual-body/per-engine-frame-sizing infra (the thing that made self-inlining
+net-positive globally), hot-reload safety free via the `compile_epoch` guard. Warm-
+start plan (measure-first: a throwaway Phase-0 prototype + full `make benchmark` A/B
+gates the whole lever, since every adjacent attempt regressed) in
+`~/.claude-personal/plans/peaceful-tinkering-valley.md`; roadmap updated (Stage 3
+inc-2 marked NO-GO, leaf inlining + the bigger heap-walk-tiering gap logged as
+to-try). To be done as a fresh focused effort. **Net code change this session: zero**
+— the value is ruling out a known-failed lever before wasting the build, and the
+correctly-aimed pivot.
