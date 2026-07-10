@@ -75,39 +75,20 @@ as a unit — descending through them is a deferred refinement."
 ;; before point or the form after it. So `narrow` slices the text to that neighbourhood
 ;; (the previous, enclosing, and next top-level forms) and the queries run on the slice,
 ;; shifting positions back by its base. O(buffer) → O(neighbouring forms). A top-level form
-;; start is a column-0 open bracket that lies OUTSIDE any string or comment: `sexp--defun-start`
-;; forward-lexes from the top (skipping strings and `;` comments) so a column-0 bracket inside
-;; a multi-line docstring is NOT mistaken for a form start (`highlight/safe-restart` is the
-;; same idea). A backward char-scan can't do this — it can't know whether a `(` it lands on is
-;; inside an unterminated string without the lexer state a forward pass carries.
+;; start is a column-0 open bracket that lies OUTSIDE any string or comment
+;; (`highlight/safe-restart` is the same idea) — found by the native `scan-form-start`:
+;; the awareness needs a forward lexical pass from the top (a backward char-scan can't know
+;; whether a `(` sits inside an unterminated string), and interpreted that pass made every
+;; structural query O(pos) at char-recursion cost.
 
 (defn sexp--open? (c) (or (= c "(") (= c "[") (= c "{")))
 (defn sexp--close? (c) (or (= c ")") (= c "]") (= c "}")))
 
-(defn sexp--col0-open? (text i)
-  "True if offset `i` is a column-0 (start-of-line) open bracket."
-  (and (or (= i 0) (= (char-at text (dec i)) "\n")) (sexp--open? (char-at text i))))
-
-;; Forward from `i`, skipping strings (`sexp--str-end`) and `;` comments (`sexp--eol`);
-;; `best` is the greatest column-0 open bracket seen OUTSIDE any string/comment at an offset
-;; ≤ `pos`. The skipping is exactly what stops a column-0 bracket inside a multi-line string
-;; from counting. (`sexp--str-end` / `sexp--eol` are defined just below; resolved at call time.)
-(defn sexp--defun-scan (text i n pos best)
-  (cond
-    (or (>= i n) (> i pos)) best
-    (= (char-at text i) "\"") (sexp--defun-scan text (sexp--str-end text (inc i) n) n pos best)
-    (= (char-at text i) ";") (sexp--defun-scan text (sexp--eol text (inc i) n) n pos best)
-    (sexp--col0-open? text i) (sexp--defun-scan text (inc i) n pos i)
-    :else (sexp--defun-scan text (inc i) n pos best)))
-
 (defn sexp--defun-start (text i)
   "Greatest offset ≤ `i` that starts a top-level form — a column-0 open bracket lying
 OUTSIDE any string or comment; 0 if none. The raw-text `beginning-of-defun` the narrowing
-window hangs off. String/comment-aware (a forward lex from the top), so a column-0 bracket
-inside a multi-line docstring is not read as a form start; O(i) but a plain lexical pass,
-far cheaper than parsing the source."
-  (let (n (string-length text))
-    (if (<= n 0) 0 (sexp--defun-scan text 0 n (min i (dec n)) 0))))
+window hangs off (the native `scan-form-start`, string/comment-aware)."
+  (scan-form-start text i))
 
 (defn sexp--str-end (text i n)
   "Index just past the closing `\"` of a string whose first content char is at `i`

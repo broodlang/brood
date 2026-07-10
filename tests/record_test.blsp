@@ -16,7 +16,13 @@
   (test "a record IS a plain map"
     (is (map? (point 1 2)))
     (assert= (get (point 1 2) :x) 1)
-    (assert= (keys (point 1 2)) (list :x :y))))
+    ;; exactly the two field keys — membership, not order: map key order is
+    ;; hash-order under CHAMP (ADR-040), an implementation accident that shifts
+    ;; with the intern table (a fixed-order assert breaks on unrelated changes)
+    (let (ks (keys (point 1 2)))
+      (assert= (count ks) 2)
+      (is (includes? ks :x))
+      (is (includes? ks :y)))))
 
 (describe "defrecord: records are immutable maps"
   (test "functional update via assoc returns a fresh record"

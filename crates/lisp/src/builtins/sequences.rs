@@ -921,6 +921,59 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(heap.alloc_vector(out))
 }
 
+/// `(scan-form-start s pos)` — the greatest char offset ≤ `pos` of a column-0 open
+/// bracket (`(`/`[`/`{`) in `s` lying OUTSIDE any string or `;` comment, else 0. The
+/// string/comment-aware `beginning-of-defun` primitive behind `highlight/safe-restart`
+/// and `tool/sexp`'s narrowing window: correctness requires a forward lexical pass from
+/// the top (a backward scan cannot know whether a bracket sits inside a string without
+/// the lexer state a forward pass carries), and that pass is O(pos) — ruinous per
+/// keystroke in interpreted Brood on a large file (eldoc / fontify-restart / structural
+/// motion all sit on it), trivial here. Strings honour `\\` escapes; a comment runs to
+/// end-of-line — the same lexical rules as `scan-tokens`.
+pub(super) fn scan_form_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "scan-form-start", arg(args, 0))?;
+    let pos = expect_int(heap, "scan-form-start", arg(args, 1))?;
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return Ok(Value::int(0));
+    }
+    let pos = pos.clamp(0, (n - 1) as i64) as usize;
+    let mut best = 0usize;
+    let mut i = 0usize;
+    while i < n && i <= pos {
+        match chars[i] {
+            '"' => {
+                // skip the string body: \ escapes the next char; an unterminated
+                // string swallows the rest (nothing below it can be a form start)
+                let mut j = i + 1;
+                while j < n {
+                    match chars[j] {
+                        '\\' => j += 2,
+                        '"' => {
+                            j += 1;
+                            break;
+                        }
+                        _ => j += 1,
+                    }
+                }
+                i = j.min(n);
+            }
+            ';' => {
+                while i < n && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '(' | '[' | '{' if i == 0 || chars[i - 1] == '\n' => {
+                best = i;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(Value::int(best as i64))
+}
+
 /// Append the run `[lo, hi)` (absolute offsets; `base` is the text's first char) in
 /// `face` to `runs`, coalescing into the previous run when the faces are `equal` — the
 /// runs partition the line contiguously, so coalescing just extends the last run's end.
