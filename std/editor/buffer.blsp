@@ -581,14 +581,20 @@ the resulting buffer."
 ;; `process-backend` send), so `(add-backend (process-backend a-buffer-pid))` streams
 ;; log output straight into a buffer — async, share-nothing, no glue.
 
-(defn buffer--push (subs version buf)
+(defn buffer--push (subs version buf &optional origin)
   "Notify every subscriber of an edit: send each its `[:buffer-updated <bufpid> version
-view]`, where `view` is `(proj buf)` for its registered projection `proj` (a nil projection
-pushes a nil view — a bare change notification). Runs in the buffer process, so `(self)` is
-the buffer pid the subscriber keys on."
+view origin]`, where `view` is `(proj buf)` for its registered projection `proj` (a nil
+projection pushes a nil view — a bare change notification) and `origin` is whatever the
+edit carried (nil when untagged). An origin lets a subscriber recognise its OWN edit
+coming back — the echo-suppression seam: a collaborative client that already applied its
+edit locally can fold its own push as a version bump instead of a content rebuild, so
+fast typing never flickers under its round-trip. Runs in the buffer process, so `(self)`
+is the buffer pid the subscriber keys on."
   (doseq (s subs)
     (send (get s :pid)
-      [:buffer-updated (self) version (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))])))
+      [:buffer-updated (self) version
+        (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))
+        origin])))
 
 (defn buffer--serve (buf subs version)
   "The receive loop of a buffer process over its immutable `buf`, tracking `subs` (subscriber
@@ -608,12 +614,14 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
   (receive
     ([:edit f] (let (nb (f buf) v (inc version))
                  (do (buffer--push subs v nb) (buffer--serve nb subs v))))
+    ([:edit f origin] (let (nb (f buf) v (inc version))
+                        (do (buffer--push subs v nb origin) (buffer--serve nb subs v))))
     ([:io-write s] (let (nb (insert (end-of-buffer buf) s) v (inc version))
                      (do (buffer--push subs v nb) (buffer--serve nb subs v))))
     ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version)))
     ([:subscribe pid proj]
       (do (monitor pid)
-        (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf))])
+        (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf)) nil])
         (buffer--serve buf (cons {:pid pid :proj proj} subs) version)))
     ([:unsubscribe pid] (buffer--serve buf (remove (fn (s) (= (get s :pid) pid)) subs) version))
     ([:down _ pid _]
@@ -636,10 +644,14 @@ name/file/point/mark) and rebuilds the rope inside the new process. Drive it wit
         mk (buffer-mark buf))
     (spawn (buffer--serve (assoc (make-buffer text name file) :point pt :mark mk) () 0))))
 
-(defn buffer-edit (bp f)
+(defn buffer-edit (bp f &optional origin)
   "Apply pure transform `f` (a `buffer -> buffer` fn) inside buffer process `bp`.
-Asynchronous — returns nil."
-  (send bp [:edit f]))
+With `origin` (any value — conventionally the sender's pid), the resulting push is
+tagged with it, so subscribers can recognise their own edit coming back (see
+`buffer--push` — the echo-suppression seam). Asynchronous — returns nil."
+  (if (nil? origin)
+    (send bp [:edit f])
+    (send bp [:edit f origin])))
 
 (defn buffer-query (bp f)
   "Synchronously read a derived view from buffer process `bp` via pure fn `f` (a

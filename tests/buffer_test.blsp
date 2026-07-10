@@ -423,7 +423,7 @@
 
 ;; The push side of buffers-as-processes: subscribers get the new projection on every edit.
 (defn buf-relay-loop (bp tag report)
-  (receive ([:buffer-updated _bp v txt] (do (send report [:relayed tag v txt])
+  (receive ([:buffer-updated _bp v txt _] (do (send report [:relayed tag v txt])
                                           (buf-relay-loop bp tag report)))))
 (defn buf-relay (bp tag report)
   (do (subscribe-buffer bp buffer-text) (buf-relay-loop bp tag report)))
@@ -436,25 +436,25 @@
   (test "a subscriber is seeded, then pushed each edit with a bumped version"
     (let (bp (spawn-buffer (make-buffer "hi")))
       (subscribe-buffer bp buffer-text)
-      (assert= (receive ([:buffer-updated _bp v txt] [v txt]) (after 2000 :none)) [0 "hi"])
+      (assert= (receive ([:buffer-updated _bp v txt _] [v txt]) (after 2000 :none)) [0 "hi"])
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "!")))
-      (assert= (receive ([:buffer-updated _bp v txt] [v txt]) (after 2000 :none)) [1 "hi!"])
+      (assert= (receive ([:buffer-updated _bp v txt _] [v txt]) (after 2000 :none)) [1 "hi!"])
       (stop-buffer bp)))
 
   (test "unsubscribe-buffer stops the pushes"
     (let (bp (spawn-buffer (make-buffer "x")))
       (subscribe-buffer bp buffer-text)
-      (receive ([:buffer-updated _bp _ _] nil) (after 2000 nil))      ; drain the seed
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))      ; drain the seed
       (unsubscribe-buffer bp)
       (receive (after 200 nil))                                       ; let the unsubscribe land
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "y")))
-      (assert= (receive ([:buffer-updated _bp _ _] :got) (after 400 :none)) :none)
+      (assert= (receive ([:buffer-updated _bp _ _ _] :got) (after 400 :none)) :none)
       (stop-buffer bp)))
 
   (test "a nil projection pushes a bare notification (nil view)"
     (let (bp (spawn-buffer (make-buffer "a")))
       (subscribe-buffer bp nil)
-      (assert= (receive ([:buffer-updated _bp v view] [v view]) (after 2000 :none)) [0 nil])
+      (assert= (receive ([:buffer-updated _bp v view _] [v view]) (after 2000 :none)) [0 nil])
       (stop-buffer bp)))
 
   (test "two subscribers both receive an edit — the point of buffers-as-processes"
@@ -469,6 +469,18 @@
         (is (member? :b (map (fn (m) (nth m 0)) zs))))
       (stop-buffer bp)))
 
+  (test "an origin-tagged edit's push carries the origin (the echo-suppression seam)"
+    (let (bp (spawn-buffer (make-buffer "hi")))
+      (subscribe-buffer bp buffer-text)
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))    ; drain the seed
+      ;; untagged edit → nil origin; tagged edit → the tag comes back with the push
+      (buffer-edit bp (fn (b) (insert (end-of-buffer b) "!")))
+      (assert= (receive ([:buffer-updated _bp _ _ o] o) (after 2000 :none)) nil)
+      (buffer-edit bp (fn (b) (insert (end-of-buffer b) "?")) :me-the-editor)
+      (assert= (receive ([:buffer-updated _bp _ txt o] [txt o]) (after 2000 :none))
+        ["hi!?" :me-the-editor])
+      (stop-buffer bp)))
+
   (test "a dead subscriber is dropped and its pid-keyed marker (its cursor) is cleaned up"
     ;; The lifecycle seam presence rides on: a participant keys its cursor marker by its
     ;; own pid; when it dies (crash / detach / link drop) the buffer process — which
@@ -476,17 +488,17 @@
     ;; so survivors see the cursor vanish rather than a ghost caret forever.
     (let (bp (spawn-buffer (make-buffer "hello")))
       (subscribe-buffer bp buffer-markers)
-      (receive ([:buffer-updated _bp _ _] nil) (after 2000 nil))      ; drain our seed
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))      ; drain our seed
       ;; a second participant: subscribes, plants its pid-keyed cursor, then dies
       (spawn (let (me (self))
                (subscribe-buffer bp nil)
                (buffer-edit bp (fn (b) (buffer-marker-set b me 3)))
                (receive (after 100 nil))))                            ; a beat, then a normal exit
       ;; we see its cursor arrive …
-      (let ([_ marks] (receive ([:buffer-updated _bp v mk] [v mk]) (after 2000 [:none :none])))
+      (let ([_ marks] (receive ([:buffer-updated _bp v mk _] [v mk]) (after 2000 [:none :none])))
         (assert= (count marks) 1))
       ;; … and vanish again when it dies (the cleanup push)
-      (let ([_ marks] (receive ([:buffer-updated _bp v mk] [v mk]) (after 2000 [:none :none])))
+      (let ([_ marks] (receive ([:buffer-updated _bp v mk _] [v mk]) (after 2000 [:none :none])))
         (assert= marks {}))
       (assert= (buffer-query bp buffer-markers) {})
       (stop-buffer bp))))
