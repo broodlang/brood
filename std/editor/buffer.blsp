@@ -596,6 +596,12 @@ is the buffer pid the subscriber keys on."
         (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))
         origin])))
 
+(defn buffer--push-view (subs version view origin)
+  "Push a ready-made `view` (a delta — see the `:splice` / `:marker-set` arms) to every
+subscriber verbatim, bypassing projections: one small value, fanned as-is."
+  (doseq (s subs)
+    (send (get s :pid) [:buffer-updated (self) version view origin])))
+
 (defn buffer--serve (buf subs version)
   "The receive loop of a buffer process over its immutable `buf`, tracking `subs` (subscriber
 `{:pid :proj}` records) and a monotonic `version`. `:edit`/`:io-write` apply a change, bump
@@ -616,6 +622,27 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                  (do (buffer--push subs v nb) (buffer--serve nb subs v))))
     ([:edit f origin] (let (nb (f buf) v (inc version))
                         (do (buffer--push subs v nb origin) (buffer--serve nb subs v))))
+    ;; A structured edit: the change arrives as DATA (a positional splice), so the push
+    ;; can carry the DELTA — {:splice [lo hi repl] :markers … :participants …} — instead
+    ;; of each subscriber's full projection. O(change), not O(document): the seam that
+    ;; makes collaborative typing on a large buffer cheap. Structured ops push this light
+    ;; view to EVERY subscriber regardless of its projection (document accordingly);
+    ;; closure edits (:edit) and the seed keep the full projection contract.
+    ([:splice lo hi repl origin]
+      (let (nb (replace-region buf lo hi repl) v (inc version))
+        (do (buffer--push-view subs v
+              {:splice [lo hi repl] :markers (buffer-markers nb)
+               :participants (get nb :participants {})}
+              origin)
+          (buffer--serve nb subs v))))
+    ;; A cursor move as data: no text change at all — the push carries markers + names
+    ;; only, so presence traffic on a large document never ships its text.
+    ([:marker-set id pos origin]
+      (let (nb (buffer-marker-set buf id pos) v (inc version))
+        (do (buffer--push-view subs v
+              {:markers (buffer-markers nb) :participants (get nb :participants {})}
+              origin)
+          (buffer--serve nb subs v))))
     ([:io-write s] (let (nb (insert (end-of-buffer buf) s) v (inc version))
                      (do (buffer--push subs v nb) (buffer--serve nb subs v))))
     ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version)))
@@ -626,7 +653,12 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
     ([:unsubscribe pid] (buffer--serve buf (remove (fn (s) (= (get s :pid) pid)) subs) version))
     ([:down _ pid _]
       (let (ns (remove (fn (s) (= (get s :pid) pid)) subs)
-            nb (buffer-marker-delete buf pid))
+            ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
+            ;; or by a vector containing it (e.g. [pid :mark] — its selection anchor)
+            nb (fold (fn (b k) (buffer-marker-delete b k))
+                 buf
+                 (filter (fn (k) (or (= k pid) (and (vector? k) (member? pid k))))
+                   (keys (buffer-markers buf)))))
         (if (= nb buf)
           (buffer--serve buf ns version)  ; no marker for it — just drop the subscriber
           (let (v (inc version)) (do (buffer--push ns v nb) (buffer--serve nb ns v))))))
@@ -652,6 +684,21 @@ tagged with it, so subscribers can recognise their own edit coming back (see
   (if (nil? origin)
     (send bp [:edit f])
     (send bp [:edit f origin])))
+
+(defn buffer-splice (bp lo hi repl &optional origin)
+  "Replace `[lo, hi)` with `repl` inside buffer process `bp` — the structured-edit
+counterpart of `buffer-edit` for a change already expressed positionally. Because the
+change is data, the resulting push carries only the DELTA (`{:splice … :markers …
+:participants …}`) instead of each subscriber's full projection — O(change) per
+keystroke on a shared buffer, whatever the document's size. `origin` tags the push as
+for `buffer-edit`. Asynchronous — returns nil."
+  (send bp [:splice lo hi repl origin]))
+
+(defn buffer-marker-move (bp id pos &optional origin)
+  "Set marker `id` to `pos` inside buffer process `bp`, pushing only `{:markers …
+:participants …}` — a cursor move never ships the document. `origin` tags the push.
+Asynchronous — returns nil."
+  (send bp [:marker-set id pos origin]))
 
 (defn buffer-query (bp f)
   "Synchronously read a derived view from buffer process `bp` via pure fn `f` (a

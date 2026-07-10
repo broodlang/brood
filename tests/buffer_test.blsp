@@ -481,6 +481,25 @@
         ["hi!?" :me-the-editor])
       (stop-buffer bp)))
 
+  (test "buffer-splice / buffer-marker-move push DELTAS — the document never ships"
+    (let (bp (spawn-buffer (make-buffer "hello")))
+      (subscribe-buffer bp buffer-text)
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))    ; drain the seed
+      ;; a structured splice: the push carries [lo hi repl] + markers, not the text
+      (buffer-splice bp 5 5 "!" :alice)
+      (let ([v view o] (receive ([:buffer-updated _bp v view o] [v view o])
+                         (after 2000 [:none :none :none])))
+        (assert= (get view :splice) [5 5 "!"])
+        (assert= o :alice))
+      (assert= (buffer-query bp buffer-text) "hello!")
+      ;; a marker move: no text, no splice — markers only
+      (buffer-marker-move bp :alice 3 :alice)
+      (let ([_ view _] (receive ([:buffer-updated _bp v view o] [v view o])
+                         (after 2000 [:none :none :none])))
+        (is (nil? (get view :splice)))
+        (assert= (get (get view :markers) :alice) 3))
+      (stop-buffer bp)))
+
   (test "a dead subscriber is dropped and its pid-keyed marker (its cursor) is cleaned up"
     ;; The lifecycle seam presence rides on: a participant keys its cursor marker by its
     ;; own pid; when it dies (crash / detach / link drop) the buffer process — which
