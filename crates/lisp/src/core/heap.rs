@@ -4323,7 +4323,17 @@ impl Heap {
             }
             ValueRef::Pid { node, id } => {
                 14u8.hash(h);
-                node.hash(h);
+                // Normalize the node stamp for LOCAL pids — `nonode` (pre-node-start)
+                // and the current node name are the same runtime — so a pid captured
+                // before `node-start` hashes (and compares: see `equal`) the same as
+                // the identical process's post-node-start `(self)`. Both stamps map
+                // to one sentinel, so a pid-keyed map entry survives the node coming
+                // up. Remote pids hash by their real node.
+                if crate::dist::is_local(node) {
+                    u32::MAX.hash(h);
+                } else {
+                    node.hash(h);
+                }
                 id.hash(h);
             }
             ValueRef::Rope(id) => {
@@ -4459,7 +4469,16 @@ impl Heap {
             (Native(x), Native(y)) => x == y,
             (Ref(x), Ref(y)) => x == y,
             // Pids are equal by node identity + local id (same process, anywhere).
-            (Pid { node: n1, id: i1 }, Pid { node: n2, id: i2 }) => n1 == n2 && i1 == i2,
+            // Node identity is *normalized for local pids*: a pid captured BEFORE
+            // `node-start` is stamped `nonode`, while the same process's `(self)`
+            // afterwards carries the node name — both mean "this runtime" (exactly
+            // as `dist::is_local` already treats them for routing), so they must
+            // compare equal or every pre-node-start captured pid (a subscriber
+            // list, a registry, a pid-keyed marker) silently stops matching the
+            // moment the node comes up.
+            (Pid { node: n1, id: i1 }, Pid { node: n2, id: i2 }) => {
+                i1 == i2 && (n1 == n2 || (crate::dist::is_local(n1) && crate::dist::is_local(n2)))
+            }
             // Ropes compare by text content (ropey's PartialEq walks chunks; no
             // full materialisation). Distinct handles to equal text are `=`.
             (Rope(x), Rope(y)) => self.rope(x) == self.rope(y),

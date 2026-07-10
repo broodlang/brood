@@ -1,0 +1,27 @@
+;; Pid identity across `node-start` — the captured-before-vs-self-after footgun.
+;; A pid captured pre-node-start is stamped `nonode`; the same process's `(self)`
+;; afterwards carries the node name. Routing always treated both as "this runtime"
+;; (`dist::is_local`); value equality and hashing now do too — otherwise every
+;; pre-node-start captured pid (a subscriber record, a registry entry, a pid-keyed
+;; marker) silently stops matching the moment the node comes up. This bit myedit's
+;; collab presence for real: the shared buffer process was spawned before the
+;; daemon's node-start, so `[:buffer-updated pid …]` pushes matched no slot.
+(defmodule pid-identity-test (:use test))
+
+(describe "pid identity across node-start" :isolated
+  (test "a pid captured before node-start equals (self) after — and still works as a map key"
+    (let (before (self)
+          keyed {before :cursor})
+      (node-start (keyword (str "pid-eq-" (now))) "127.0.0.1:0" (node-cookie))
+      (let (after (self))
+        ;; same process, either stamp: equal both ways round
+        (is (= before after))
+        (is (= after before))
+        ;; and hash-compatible: the pre-start key resolves under the post-start pid …
+        (assert= (get keyed after) :cursor)
+        ;; … and vice versa (a map built after finds the pre-start value)
+        (assert= (get {after :here} before) :here)
+        ;; a selective receive pinned on the OLD stamp still matches a message
+        ;; carrying the NEW one (receive patterns compare with =)
+        (send (self) [:from after])
+        (assert= (receive ([:from ~before] :matched) (after 1000 :no-match)) :matched)))))
