@@ -83,28 +83,46 @@ consumes them), leaving a served app deaf to everything but keys."
 
 ;; ---- daemon side -------------------------------------------------------------
 
-(defn serve--session (client cols rows make-model view update)
+(defn serve--session (client cols rows opts make-model view update)
   "One attached client's session: monitor the client (so its death tears us down),
 tell it our pid (so it can ship keys here), then run the app's `ui-run` against a
 `remote-display` to that client. A fresh `(make-model)` per session keeps clients
-independent."
+independent. When the client attached with a non-empty `opts` map (its identity —
+see `attach`), it is queued to this session's own mailbox as `[:client-opts opts]`
+BEFORE `ui-run` starts, so it is the first event the app's `update` folds (through
+`remote-display`'s async pass-through) — the seam a collaborative app reads a
+participant's name from."
   (do
     (monitor client)
     (send client [:attached (self)])
+    (when (and (map? opts) (not (empty? opts)))
+      (send (self) [:client-opts opts]))
     (ui-run (make-model) view update (remote-display client cols rows))))
 
 (defn serve--manager (make-model view update)
   "The session manager loop (registered under `serve-name`): on each `[:attach client
-cols rows]`, spawn an independent session for that client. Tail-recursive, so it
-serves any number of clients over its lifetime."
-  (receive ([:attach client cols rows] (do
-                                         (spawn (serve--session client
-                                                  cols
-                                                  rows
-                                                  make-model
-                                                  view
-                                                  update))
-                                         (serve--manager make-model view update)))
+cols rows]` / `[:attach client cols rows opts]`, spawn an independent session for that
+client (`opts` — the client's identity map — defaults to `{}` for an old-style attach).
+Tail-recursive, so it serves any number of clients over its lifetime."
+  (receive
+    ([:attach client cols rows] (do
+                                  (spawn (serve--session client
+                                           cols
+                                           rows
+                                           {}
+                                           make-model
+                                           view
+                                           update))
+                                  (serve--manager make-model view update)))
+    ([:attach client cols rows opts] (do
+                                       (spawn (serve--session client
+                                                cols
+                                                rows
+                                                opts
+                                                make-model
+                                                view
+                                                update))
+                                       (serve--manager make-model view update)))
     (_ (serve--manager make-model view update))))
 
 (defn serve (make-model view update)
@@ -146,34 +164,40 @@ the daemon says `[:bye]` or the link drops."
         (attach--loop peer session)
         (do (send session [:key k]) (attach--loop peer session))))))
 
-(defn attach--handshake (peer cols rows)
-  "Report our `cols`×`rows` and ask `peer`'s session manager to attach us; return the
+(defn attach--handshake (peer cols rows &optional opts)
+  "Report our `cols`×`rows` (and, when given, our identity `opts` map — e.g.
+`{:name \"alice\"}`) and ask `peer`'s session manager to attach us; return the
 session pid it replies with, nil if the link drops first (`[:nodedown]`), or error on
 timeout. The connect handshake shared by the terminal (`attach`) and GUI
 (`attach-display`) clients — the only difference between them is the frontend, not the
-protocol."
+protocol. An empty/nil `opts` sends the old 4-element attach, so a new client still
+speaks to an old daemon."
   (do
-    (send {:name serve-name :node peer} [:attach (self) cols rows])
+    (if (and (map? opts) (not (empty? opts)))
+      (send {:name serve-name :node peer} [:attach (self) cols rows opts])
+      (send {:name serve-name :node peer} [:attach (self) cols rows]))
     (receive
       ([:attached session] session)
       ([:nodedown ~peer] nil)
       (after 5000 (error "attach: no response from the server (is it serving?)")))))
 
-(defn attach--session (peer)
+(defn attach--session (peer &optional opts)
   "Report our terminal size, ask `peer`'s session manager to attach us, and run the
 client loop once the daemon replies with our session pid."
   (let ([cols rows] (term-size)
-        session (attach--handshake peer cols rows))
+        session (attach--handshake peer cols rows opts))
     (when session (do (monitor session) (attach--loop peer session)))))
 
-(defn attach (spec &optional cookie)
+(defn attach (spec &optional cookie opts)
   "Attach this terminal to a `ui-run` app served by the peer named in `spec`
 (\"name\" over a local Unix socket, or \"name@host:port\" over TCP) — the
 `emacsclient` to a daemon's `serve`. `cookie` defaults to `(node-cookie)` (the shared
-`~/.config/brood/cookie`). Connects *before* taking the terminal, so a refused /
-wrong-cookie / bad-spec error surfaces cleanly without wrecking the screen; then
-enters raw mode, paints the frames the daemon pushes, and ships back every key until
-the app quits (`[:bye]`) or the link drops. The terminal is always restored on exit."
+`~/.config/brood/cookie`); `opts` is an optional identity map (e.g. `{:name \"alice\"}`)
+the daemon hands the session as a `[:client-opts …]` event. Connects *before* taking
+the terminal, so a refused / wrong-cookie / bad-spec error surfaces cleanly without
+wrecking the screen; then enters raw mode, paints the frames the daemon pushes, and
+ships back every key until the app quits (`[:bye]`) or the link drops. The terminal is
+always restored on exit."
   (do
     (node-start (attach--gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
     (let (peer (connect spec))
@@ -181,7 +205,7 @@ the app quits (`[:bye]`) or the link drops. The terminal is always restored on e
       (monitor-node peer)
       (term-enter)
       (try
-        (do (attach--session peer) (term-leave))
+        (do (attach--session peer opts) (term-leave))
         (catch e (do (term-leave) (throw e)))))))
 
 ;; ---- client side (a GUI / any-display frontend) ------------------------------
@@ -208,7 +232,7 @@ else is a key/mouse input shipped to the daemon `session` as `[:key …]`. Tail-
     (:close (send session [:detach]))
     (m (do (send session [:key m]) (attach--display-loop peer session display)))))
 
-(defn attach-display (spec display &optional cookie)
+(defn attach-display (spec display &optional cookie opts)
   "Attach `display` — any `ui-run` frontend map, e.g. `(gui-display)` (a native window)
 — to a `ui-run` app served by `spec` (\"name\", or \"name@host:port\"). The GUI analogue
 of `attach` (which is terminal-only): the daemon runs the app, this client paints the
@@ -216,7 +240,8 @@ frames it pushes to `display` and ships back its input, until the app quits or t
 drops. Because window input and daemon frames share this process's mailbox, one receive
 loop (`attach--display-loop`) serves both. Connects *before* entering the display, so a
 refused / wrong-cookie / bad-spec error surfaces without stranding a window; the display
-is always torn down (`:leave`) on exit. `cookie` defaults to `(node-cookie)`."
+is always torn down (`:leave`) on exit. `cookie` defaults to `(node-cookie)`; `opts` is
+the optional identity map (see `attach`)."
   (do
     (node-start (attach--gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
     (let (peer (connect spec))
@@ -224,12 +249,12 @@ is always torn down (`:leave`) on exit. `cookie` defaults to `(node-cookie)`."
       ((get display :enter))
       (try
         (let ([cols rows] ((get display :size))
-              session (attach--handshake peer cols rows))
+              session (attach--handshake peer cols rows opts))
           (when session (do (monitor session) (attach--display-loop peer session display)))
           ((get display :leave)))
         (catch e (do ((get display :leave)) (throw e)))))))
 
-(defn attach-display-local (display)
+(defn attach-display-local (display &optional opts)
   "Attach `display` (e.g. `(gui-display)`, a native window) to a serve session running in THIS
 SAME runtime — the daemon operator's *own* window, so a host can watch and drive the app it
 serves instead of running blind and headless. No node link is needed (the session manager and
@@ -238,13 +263,16 @@ session pids are in-process): handshake directly with the local manager register
 peer — there is no node to go down) until the window closes (`:close`) or the app quits
 (`[:bye]`). Blocks. Precondition: `(serve …)` or `(serve-shared …)` already ran in this runtime.
 Composes with both: under `serve` the host gets its own session; under `serve-shared` it joins
-the one shared model — its own view of the collaborative doc. The display is always torn down
-(`:leave`) on exit."
+the one shared model — its own view of the collaborative doc. `opts` is the optional identity
+map (see `attach`) — the host is a participant too. The display is always torn down (`:leave`)
+on exit."
   (do
     ((get display :enter))
     (try
       (let ([cols rows] ((get display :size)))
-        (send (whereis serve-name) [:attach (self) cols rows])
+        (if (and (map? opts) (not (empty? opts)))
+          (send (whereis serve-name) [:attach (self) cols rows opts])
+          (send (whereis serve-name) [:attach (self) cols rows]))
         (let (session (receive ([:attached s] s)
                         (after 5000 (error "attach-display-local: the local serve manager did not answer"))))
           (when session (do (monitor session) (attach--display-loop nil session display))))
@@ -305,10 +333,17 @@ which is dropped (a nil ⇒ tick) rather than leaked to the app."
 
 (defn serve-shared--manager (session hub)
   "The session manager for a SHARED session: every client attaches to the SAME running
-`session`. On `[:attach client …]`, add the client to `hub` and tell it the shared session
-pid (so it ships keys there); monitor it so its death drops it from the hub. Tail-recursive."
+`session`. On `[:attach client …]` (with or without an identity `opts` — one shared model
+has no per-participant state, so opts are accepted and ignored), add the client to `hub`
+and tell it the shared session pid (so it ships keys there); monitor it so its death drops
+it from the hub. Tail-recursive."
   (receive
     ([:attach client cols rows]
+      (do (monitor client)
+        (send hub [:add client])
+        (send client [:attached session])
+        (serve-shared--manager session hub)))
+    ([:attach client cols rows _opts]
       (do (monitor client)
         (send hub [:add client])
         (send client [:attached session])

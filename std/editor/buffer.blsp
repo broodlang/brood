@@ -596,8 +596,15 @@ the buffer pid the subscriber keys on."
 the version, and **push** the new projection to every subscriber — the collaboration seam:
 two panes or sessions subscribed to one buffer both see every edit. `:get` replies a derived
 view synchronously; `:subscribe`/`:unsubscribe` manage the push set (a new subscriber is
-seeded with the current state at once); `:stop` ends. The rope never leaves this process —
-pushes and replies carry only derived, non-rope values (`proj`/`f` must return such)."
+seeded with the current state at once, and monitored); `:stop` ends. The rope never leaves
+this process — pushes and replies carry only derived, non-rope values (`proj`/`f` must
+return such).
+
+**Subscriber lifecycle:** every subscriber is monitored, so a dead one (crash, detach, link
+drop) is removed rather than lingering. A marker keyed by the dead subscriber's *pid* is
+deleted too — the convention for transient per-subscriber state (a participant's cursor on a
+shared buffer: key your marker by your pid and it is cleaned up with you) — and when that
+changed the buffer, survivors get a push (they see the cursor vanish)."
   (receive
     ([:edit f] (let (nb (f buf) v (inc version))
                  (do (buffer--push subs v nb) (buffer--serve nb subs v))))
@@ -605,9 +612,16 @@ pushes and replies carry only derived, non-rope values (`proj`/`f` must return s
                      (do (buffer--push subs v nb) (buffer--serve nb subs v))))
     ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version)))
     ([:subscribe pid proj]
-      (do (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf))])
+      (do (monitor pid)
+        (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf))])
         (buffer--serve buf (cons {:pid pid :proj proj} subs) version)))
     ([:unsubscribe pid] (buffer--serve buf (remove (fn (s) (= (get s :pid) pid)) subs) version))
+    ([:down _ pid _]
+      (let (ns (remove (fn (s) (= (get s :pid) pid)) subs)
+            nb (buffer-marker-delete buf pid))
+        (if (= nb buf)
+          (buffer--serve buf ns version)  ; no marker for it — just drop the subscriber
+          (let (v (inc version)) (do (buffer--push ns v nb) (buffer--serve nb ns v))))))
     ([:stop from r] (send from [:reply r :stopped]))))
 
 (defn spawn-buffer (buf)

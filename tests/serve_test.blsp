@@ -11,12 +11,16 @@
 ;; count. An async `[:note n]` event (a non-key mailbox message — the event-bus shape)
 ;; sets the count directly. Each client gets a fresh model from `mk`.
 (defn mk () {:n 0})
-(defn vw (m c r) [(text 0 0 (str "n=" (get m :n)))])
+(defn vw (m c r)
+  [(text 0 0 (str "n=" (get m :n)
+               (if (get m :who) (str " who=" (get m :who)) "")))])
 (defn up (m input c r)
   (cond
     (= input "+") (assoc m :n (+ (get m :n) 1))
     (= input "q") (assoc m :done true)
     (and (vector? input) (= (first input) :note)) (assoc m :n (nth input 1))
+    ;; the identity event a named attach delivers before any key (serve--session)
+    (and (vector? input) (= (first input) :client-opts)) (assoc m :who (get (nth input 1) :name))
     :else m))
 
 ;; The text string of a frame's first `[:text row col s]` op — what the app rendered.
@@ -220,6 +224,22 @@
         ;; not a [:key …] — an async event, as a buffer push or task reply would arrive
         (send session [:note 42])
         (assert= (frame-text (receive ([:frame f] f) (after 2000 :none))) "n=42"))))
+
+  (test "an attach with an identity opts map reaches the app as [:client-opts …] before any key"
+    ;; The 5-element [:attach client cols rows opts] handshake: the session queues the opts
+    ;; to its own mailbox before ui-run starts, so the FIRST event the app folds is its
+    ;; participant identity — the seam a collaborative app reads a name from. A plain
+    ;; 4-element attach (every other test here) still works: opts default to {}.
+    (let (mgr (spawn (editor/serve/serve--manager mk vw up)))
+      (send mgr [:attach (self) 80 24 {:name "alice"}])
+      (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
+        (is (not (= session :no-attach)))
+        ;; the first frame already reflects the identity (folded before the initial render's
+        ;; first poll returns a key) — or at latest the next one; accept either
+        (let (t (frame-text (receive ([:frame f] f) (after 2000 :none))))
+          (if (string-contains? t "who=alice")
+            (is true)
+            (assert= (frame-text (receive ([:frame f] f) (after 2000 :none))) "n=0 who=alice"))))))
 
   (test "an async mailbox message reaches a SHARED session's update too"
     (let (me (self)

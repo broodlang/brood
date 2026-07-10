@@ -467,4 +467,26 @@
       (let (zs (filter (fn (m) (= (nth m 2) "Z")) (drain-relayed ())))
         (is (member? :a (map (fn (m) (nth m 0)) zs)))
         (is (member? :b (map (fn (m) (nth m 0)) zs))))
+      (stop-buffer bp)))
+
+  (test "a dead subscriber is dropped and its pid-keyed marker (its cursor) is cleaned up"
+    ;; The lifecycle seam presence rides on: a participant keys its cursor marker by its
+    ;; own pid; when it dies (crash / detach / link drop) the buffer process — which
+    ;; monitors every subscriber — prunes the subscription AND the marker, and pushes,
+    ;; so survivors see the cursor vanish rather than a ghost caret forever.
+    (let (bp (spawn-buffer (make-buffer "hello")))
+      (subscribe-buffer bp buffer-markers)
+      (receive ([:buffer-updated _bp _ _] nil) (after 2000 nil))      ; drain our seed
+      ;; a second participant: subscribes, plants its pid-keyed cursor, then dies
+      (spawn (let (me (self))
+               (subscribe-buffer bp nil)
+               (buffer-edit bp (fn (b) (buffer-marker-set b me 3)))
+               (receive (after 100 nil))))                            ; a beat, then a normal exit
+      ;; we see its cursor arrive …
+      (let ([_ marks] (receive ([:buffer-updated _bp v mk] [v mk]) (after 2000 [:none :none])))
+        (assert= (count marks) 1))
+      ;; … and vanish again when it dies (the cleanup push)
+      (let ([_ marks] (receive ([:buffer-updated _bp v mk] [v mk]) (after 2000 [:none :none])))
+        (assert= marks {}))
+      (assert= (buffer-query bp buffer-markers) {})
       (stop-buffer bp))))
