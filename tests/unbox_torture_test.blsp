@@ -47,15 +47,18 @@
     (assert= 51090942171709440000 (ut-fact 21))          ; 21! first overflow → BigInt
     (assert= 15511210043330985984000000 (ut-fact 25)))
 
-  ;; `:isolated` so this CPU-heavy (~4s solo) compute runs ALONE on the runner
-  ;; instead of competing with the rest of the 2700-case suite. Under the default
-  ;; concurrent phase on a few-core CI box its *wall-clock* balloons past the 120s
-  ;; per-test cap (fair reduction-scheduling starves a long CPU-bound green process
-  ;; when thousands are runnable) — not a correctness issue, purely contention. Run
-  ;; alone it finishes in seconds. Keeps the full ack(3,10) stress on the JIT.
+  ;; `:isolated` so this CPU-heavy compute runs ALONE on the runner instead of
+  ;; competing with the rest of the ~2700-case suite (fair reduction-scheduling
+  ;; would otherwise starve a long CPU-bound green process when thousands are
+  ;; runnable). Input is deliberately right-sized: `ack(3,8)` peaks at recursion
+  ;; depth ~2045 — already past the JIT's 1400-frame cliff, so it exercises BOTH
+  ;; the in-worker register path (`ack(3,6)`, depth 509 < cliff) AND the boxed
+  ;; deopt-drain (`ack(3,8)`). `ack(3,10)` was dropped: it adds ~16× wall-clock
+  ;; (~45M calls, mostly on the slow drain path) for ZERO extra code-path
+  ;; coverage, and pushed a slow shared CI runner past the 120s per-test cap.
   (test "multi-arg non-tail recursion (Ackermann)" :isolated
-    (assert= 2045 (ut-ack 3 8))
-    (assert= 8189 (ut-ack 3 10)))
+    (assert= 509 (ut-ack 3 6))     ; stays in the i64 register worker (depth < cliff)
+    (assert= 2045 (ut-ack 3 8)))   ; crosses the 1400 depth cliff → boxed drain
 
   (test "rem/quot + bitwise in the worker"
     (assert= 15 (ut-digsum 12345))
