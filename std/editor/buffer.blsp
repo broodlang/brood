@@ -425,21 +425,53 @@ read-only contract lives in the model (no consumer has to remember to check). Re
 `buf` unchanged when writable, for use as a guard expression."
   (if (read-only? buf) (error "buffer is read-only") buf))
 
+;; ---- markers: edit-surviving positions --------------------------------------
+;; A marker is a named char position the editing ops keep in sync as text is inserted or
+;; deleted before it — so an overlay, a diagnostic, or a *remote participant's cursor*
+;; tracks the same logical spot across edits (the buffers-as-processes / collaboration
+;; foundation). Markers live under `:markers` ({id -> pos}); a buffer with none carries no
+;; `:markers` key and is byte-identical to before this facility (the adjust step is a no-op
+;; then). Gravity is left: an insert exactly AT a marker leaves it put, so text typed at one
+;; cursor lands after another user's cursor sitting at the same spot.
+
+(defn buffer--markers-insert (markers p n)
+  "Shift `markers` for an insert of `n` chars at `p`: a marker strictly after `p` moves
+right by `n` (left-gravity — a marker exactly at `p` stays put)."
+  (update-vals markers (fn (pos) (if (> pos p) (+ pos n) pos))))
+
+(defn buffer--markers-delete (markers lo hi)
+  "Shift `markers` for a delete of `[lo, hi)`: a marker at/before `lo` is unchanged, one
+inside the range collapses to `lo`, one at/after `hi` moves left by the deleted width."
+  (let (d (- hi lo))
+    (update-vals markers (fn (pos) (cond (<= pos lo) pos (< pos hi) lo :else (- pos d))))))
+
+(defn buffer--adjust-markers (buf kind a b)
+  "Return `buf` with its markers shifted for an edit — `:insert` (a=pos, b=len) or `:delete`
+(a=lo, b=hi) — or `buf` unchanged when it has no markers, so marker-less buffers are untouched."
+  (let (m (get buf :markers))
+    (if (nil? m)
+      buf
+      (assoc buf :markers (if (= kind :insert)
+                            (buffer--markers-insert m a b)
+                            (buffer--markers-delete m a b))))))
+
 (defn insert (buf s)
-  "Insert string `s` at point; point advances past it. Recorded for undo. Throws if
-`buf` is read-only."
+  "Insert string `s` at point; point advances past it. Recorded for undo. Markers after the
+insertion point shift with the text. Throws if `buf` is read-only."
   (buffer--barf-if-read-only buf)
   (if (= (string-length s) 0)
     buf
     (let (p (get buf :point)
           buf (buffer--push-undo buf))
-      (assoc buf
-        :rope
-        (rope-insert (get buf :rope) p s)
-        :point
-        (+ p (string-length s))
-        :mark
-        nil))))
+      (buffer--adjust-markers
+        (assoc buf
+          :rope
+          (rope-insert (get buf :rope) p s)
+          :point
+          (+ p (string-length s))
+          :mark
+          nil)
+        :insert p (string-length s)))))
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
@@ -450,7 +482,9 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
     (if (= p end)
       buf
       (let (buf (buffer--push-undo buf))
-        (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)))))
+        (buffer--adjust-markers
+          (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)
+          :delete p end)))))
 
 (defn delete-backward-char (buf &optional (n 1))
   "Delete `n` characters *before* point (backspace); point moves back with it.
@@ -461,7 +495,9 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
     (if (= p start)
       buf
       (let (buf (buffer--push-undo buf))
-        (assoc buf :rope (rope-delete (get buf :rope) start p) :point start :mark nil)))))
+        (buffer--adjust-markers
+          (assoc buf :rope (rope-delete (get buf :rope) start p) :point start :mark nil)
+          :delete start p)))))
 
 (defn delete-region (buf)
   "Delete the text between point and mark; point moves to the region start and
@@ -476,7 +512,9 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
         (if (= lo hi)
           (assoc buf :mark nil)
           (let (buf (buffer--push-undo buf))
-            (assoc buf :rope (rope-delete (get buf :rope) lo hi) :point lo :mark nil)))))))
+            (buffer--adjust-markers
+              (assoc buf :rope (rope-delete (get buf :rope) lo hi) :point lo :mark nil)
+              :delete lo hi)))))))
 
 (defn replace-region (buf start end s)
   "Replace the characters in `[start, end)` with string `s`, leaving point just after
@@ -484,6 +522,29 @@ the inserted text. The splice primitive: completion-at-point, comment toggling,
 query-replace, re-indentation, and transpose are all this. Composes `delete-char` +
 `insert`, so range clamping and undo behave exactly as those do."
   (insert (delete-char (goto-char buf start) (- end start)) s))
+
+;; ---- public marker API ------------------------------------------------------
+
+(defn buffer-marker-set (buf id pos)
+  "Set marker `id` (any value — a keyword, a participant pid) to char position `pos`
+(clamped into the buffer). The marker then survives edits: text inserted or deleted before
+it shifts it, so it tracks the same logical spot. The basis for overlays, diagnostics, and
+remote participants' cursors on a shared buffer."
+  (assoc buf :markers (assoc (or (get buf :markers) {}) id (buffer--clamp 0 (buffer-length buf) pos))))
+
+(defn buffer-marker (buf id)
+  "The char position of marker `id` (clamped to the current length), or nil if unset."
+  (let (p (get (or (get buf :markers) {}) id))
+    (if (nil? p) nil (buffer--clamp 0 (buffer-length buf) p))))
+
+(defn buffer-marker-delete (buf id)
+  "Remove marker `id`. A no-op if it (or any marker) isn't set."
+  (let (m (get buf :markers))
+    (if (nil? m) buf (assoc buf :markers (dissoc m id)))))
+
+(defn buffer-markers (buf)
+  "The marker map `{id -> pos}` (positions clamped to the current length), or `{}` if none."
+  (update-vals (or (get buf :markers) {}) (fn (pos) (buffer--clamp 0 (buffer-length buf) pos))))
 
 ;; ---- line-wise region ops (the scaffold for comment / indent-region / …) -----
 
@@ -520,13 +581,33 @@ the resulting buffer."
 ;; `process-backend` send), so `(add-backend (process-backend a-buffer-pid))` streams
 ;; log output straight into a buffer — async, share-nothing, no glue.
 
-(defn buffer--serve (buf)
-  "The receive loop of a buffer process over its immutable `buf`. Handles `:edit`
-(apply a closure), `:get` (reply a derived view), `:io-write` (append a string — the
-`io`/logger sink path), and `:stop`."
-  (receive ([:edit f] (buffer--serve (f buf)))
-    ([:io-write s] (buffer--serve (insert (end-of-buffer buf) s)))
-    ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf)))
+(defn buffer--push (subs version buf)
+  "Notify every subscriber of an edit: send each its `[:buffer-updated <bufpid> version
+view]`, where `view` is `(proj buf)` for its registered projection `proj` (a nil projection
+pushes a nil view — a bare change notification). Runs in the buffer process, so `(self)` is
+the buffer pid the subscriber keys on."
+  (doseq (s subs)
+    (send (get s :pid)
+      [:buffer-updated (self) version (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))])))
+
+(defn buffer--serve (buf subs version)
+  "The receive loop of a buffer process over its immutable `buf`, tracking `subs` (subscriber
+`{:pid :proj}` records) and a monotonic `version`. `:edit`/`:io-write` apply a change, bump
+the version, and **push** the new projection to every subscriber — the collaboration seam:
+two panes or sessions subscribed to one buffer both see every edit. `:get` replies a derived
+view synchronously; `:subscribe`/`:unsubscribe` manage the push set (a new subscriber is
+seeded with the current state at once); `:stop` ends. The rope never leaves this process —
+pushes and replies carry only derived, non-rope values (`proj`/`f` must return such)."
+  (receive
+    ([:edit f] (let (nb (f buf) v (inc version))
+                 (do (buffer--push subs v nb) (buffer--serve nb subs v))))
+    ([:io-write s] (let (nb (insert (end-of-buffer buf) s) v (inc version))
+                     (do (buffer--push subs v nb) (buffer--serve nb subs v))))
+    ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version)))
+    ([:subscribe pid proj]
+      (do (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf))])
+        (buffer--serve buf (cons {:pid pid :proj proj} subs) version)))
+    ([:unsubscribe pid] (buffer--serve buf (remove (fn (s) (= (get s :pid) pid)) subs) version))
     ([:stop from r] (send from [:reply r :stopped]))))
 
 (defn spawn-buffer (buf)
@@ -539,7 +620,7 @@ name/file/point/mark) and rebuilds the rope inside the new process. Drive it wit
         file (buffer-file buf)
         pt (buffer-point buf)
         mk (buffer-mark buf))
-    (spawn (buffer--serve (assoc (make-buffer text name file) :point pt :mark mk)))))
+    (spawn (buffer--serve (assoc (make-buffer text name file) :point pt :mark mk) () 0))))
 
 (defn buffer-edit (bp f)
   "Apply pure transform `f` (a `buffer -> buffer` fn) inside buffer process `bp`.
@@ -553,6 +634,19 @@ Asynchronous — returns nil."
   (let (r (ref))
     (send bp [:get f (self) r])
     (receive ([:reply ~r v] v))))
+
+(defn subscribe-buffer (bp proj)
+  "Subscribe the calling process to buffer process `bp`. It immediately receives — and then
+gets on every edit — `[:buffer-updated bp version view]`, where `view` is `(proj buffer)`, a
+derived non-rope value (a viewport projection, the text, a marker set), or nil when `proj` is
+nil (a bare change notification). The push side of buffers-as-processes: a pane subscribes
+with its viewport projection and re-renders from each pushed frame instead of polling. Many
+processes may subscribe to one buffer — that is what lets several sessions see each edit."
+  (send bp [:subscribe (self) proj]))
+
+(defn unsubscribe-buffer (bp)
+  "Stop the calling process receiving `[:buffer-updated …]` pushes from buffer process `bp`."
+  (send bp [:unsubscribe (self)]))
 
 (defn stop-buffer (bp)
   "Stop buffer process `bp` (it leaves its loop). Synchronous; returns :stopped."

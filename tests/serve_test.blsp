@@ -5,7 +5,7 @@
 ;; serve → frame → key → frame → quit protocol is exercised without a node or a TTY.
 ;; The cross-node, real-TCP variant is `crates/cli/tests/serve_attach.rs`.
 
-(defmodule serve-test (:use test) (:use editor/serve) (:use editor/display))
+(defmodule serve-test (:use test) (:use editor/serve) (:use editor/display) (:use editor/ui))
 
 ;; A tiny served app: a counter. `"+"` increments, `"q"` quits; the view paints the
 ;; count. Each client gets a fresh model from `mk`.
@@ -34,6 +34,45 @@
         (receive ([:frame f] (send report [:probed (frame-text f)]))
           (after 2000 (send report [:probed :no-frame])))))
     (after 2000 (send report [:probed :no-attach]))))
+
+;; A scripted GUI-style display for the any-display client (`attach--display-loop`):
+;; `:draw` reports the frame's text to `report`. Input is NOT read via `:poll` — the
+;; unified client loop reads the mailbox directly (as a real gui-display's input does),
+;; so the test injects keys by `send`ing them to the client process.
+(defn gui-mock-display (report)
+  {:enter (fn () nil)
+   :leave (fn () (send report [:drew :left]))
+   :size (fn () [80 24])
+   :draw (fn (f) (send report [:drew (frame-text f)]))
+   :poll (fn (ms) nil)})
+
+;; A GUI client played in-process: attach to `mgr`, tell the test our pid + session, then
+;; run the unified any-display loop. The test drives it by `send`ing keys to our pid.
+(defn gui-probe (mgr ready)
+  (send mgr [:attach (self) 80 24])
+  (receive
+    ([:attached session]
+      (do (send ready [:ready (self) session])
+        (editor/serve/attach--display-loop nil session (gui-mock-display ready))))
+    (after 2000 (send ready [:ready :no-attach :no-attach]))))
+
+;; A shared-session client played in-process: attach, announce our pid, then loop —
+;; reporting each CHANGED frame's text (deduped, so tick re-renders don't spam the test)
+;; and shipping a [:press k] from the test to the shared session as a keystroke.
+(defn shared-client-loop (session report last)
+  (receive
+    ([:frame f] (let (t (frame-text f))
+                  (do (when (not (= t last)) (send report [:cframe (self) t]))
+                    (shared-client-loop session report t))))
+    ([:press k] (do (send session [:key k]) (shared-client-loop session report last)))
+    ([:bye] nil)))
+
+(defn shared-client (mgr report)
+  (send mgr [:attach (self) 80 24])
+  (receive
+    ([:attached session] (do (send report [:cready (self)])
+                           (shared-client-loop session report :none)))
+    (after 2000 (send report [:cready :no-attach]))))
 
 (describe "editor/serve — serving a ui-run app to a remote frontend"
   (test "an attached client gets a session pid, the initial frame, then key-driven frames"
@@ -80,6 +119,55 @@
     (do
       (serve mk vw up)
       (is (not (nil? (whereis serve-name))))))
+
+  (test "attach-display (GUI client): frames paint to the display, input ships back, :close tears down"
+    ;; The terminal client reads input from the TTY; a GUI client reads window input from
+    ;; the SAME mailbox the daemon pushes frames to, so `attach--display-loop` unifies both
+    ;; in one receive. This drives that loop with a scripted display and in-process pids —
+    ;; the full frame → key → frame → detach protocol, no node or window.
+    (let (me (self)
+          mgr (spawn (editor/serve/serve--manager mk vw up)))
+      (spawn (gui-probe mgr me))
+      (let ([client session] (receive ([:ready c s] [c s]) (after 2000 [nil nil])))
+        (is (not (nil? client)))
+        (is (not (= client :no-attach)))
+        ;; the session renders the fresh model immediately; the client paints it
+        (assert= (receive ([:drew t] t) (after 2000 :none)) "n=0")
+        ;; a window key lands in the client's mailbox -> shipped to the session -> new frame
+        (send client "+")
+        (assert= (receive ([:drew t] t) (after 2000 :none)) "n=1")
+        (send client "+")
+        (assert= (receive ([:drew t] t) (after 2000 :none)) "n=2")
+        ;; the window's close button ships [:detach]; the session's remote-display maps that
+        ;; to :close, ui-run quits, and the session process ends — observed via a monitor.
+        (monitor session)
+        (send client :close)
+        (assert= (receive ([:down _ _ _] :down) (after 2000 :no-down)) :down))))
+
+  (test "serve-shared: two clients share ONE model — an edit by one is seen by both"
+    ;; Unlike `serve` (a fresh model per client), `serve-shared` runs a single ui-run and
+    ;; fans it to all clients while merging their input. Two in-process clients attach to the
+    ;; SAME session; a "+" from one increments the shared model and BOTH see the new frame.
+    (let (me (self)
+          hub (spawn (editor/serve/shared--hub () nil [80 24]))
+          session (spawn (ui-run (mk) vw up (editor/serve/shared--display hub)))
+          mgr (spawn (editor/serve/serve-shared--manager session hub)))
+      (let (a (spawn (shared-client mgr me))
+            aid (receive ([:cready c] c) (after 2000 :none)))
+        (is (not (= aid :none)))
+        ;; A sees the shared model's initial frame
+        (assert= (receive ([:cframe _ t] t) (after 2000 :none)) "n=0")
+        ;; B attaches to the SAME session and also sees n=0
+        (let (b (spawn (shared-client mgr me))
+              bid (receive ([:cready c] c) (after 2000 :none)))
+          (is (not (= bid :none)))
+          (assert= (receive ([:cframe _ t] t) (after 2000 :none)) "n=0")
+          ;; A presses "+"; the shared model increments and BOTH clients get the n=1 frame
+          (send aid [:press "+"])
+          (let (t1 (receive ([:cframe _ t] t) (after 2000 :none))
+                t2 (receive ([:cframe _ t] t) (after 2000 :none)))
+            (assert= t1 "n=1")
+            (assert= t2 "n=1"))))))
 
   (test "remote-display: :draw ships a frame, :size reports the attach size, :poll maps input"
     (let (d (remote-display (self) 80 24))

@@ -392,3 +392,79 @@
         (is (string-contains? txt "disk low")))
       (log/stop-logger)
       (delete-buffer bp))))
+
+;; Markers — named positions the editing ops keep in sync as text shifts. Pure (no process).
+(describe "markers — positions that survive edits"
+  (test "a marker after an insertion point shifts right with the text"
+    (let (b (buffer-marker-set (make-buffer "hello world") :m 6))       ; at "world"
+      (assert= (buffer-marker b :m) 6)
+      (assert= (buffer-marker (insert (goto-char b 0) "XY") :m) 8)))    ; +2 (insert before it)
+  (test "a marker before an insertion point is unchanged"
+    (let (b (buffer-marker-set (make-buffer "hello world") :m 2))
+      (assert= (buffer-marker (insert (goto-char b 6) "XY") :m) 2)))
+  (test "left-gravity: an insert exactly at a marker leaves it put"
+    (let (b (buffer-marker-set (make-buffer "abc") :m 1))
+      (assert= (buffer-marker (insert (goto-char b 1) "Z") :m) 1)))
+  (test "a delete before a marker shifts it left by the deleted width"
+    (let (b (buffer-marker-set (make-buffer "hello world") :m 8))       ; "r"
+      (assert= (buffer-marker (delete-char (goto-char b 0) 3) :m) 5)))  ; delete [0,3)
+  (test "a delete straddling a marker collapses it to the range start"
+    (let (b (buffer-marker-set (make-buffer "hello world") :m 8))
+      (assert= (buffer-marker (delete-char (goto-char b 6) 4) :m) 6)))  ; delete [6,10), 8 inside
+  (test "set / read / delete a marker; buffer-markers lists them"
+    (let (b (buffer-marker-set (make-buffer "abcdef") :m 5))
+      (assert= (buffer-markers b) {:m 5})
+      (is (nil? (buffer-marker (buffer-marker-delete b :m) :m)))))
+  (test "a marker read is clamped to the current length after a shrinking edit"
+    (let (b (buffer-marker-set (make-buffer "abcdef") :m 5))
+      (assert= (buffer-marker (delete-char (goto-char b 0) 6) :m) 0)))  ; whole buffer gone
+  (test "a marker-less buffer stays marker-less across edits (no :markers key added)"
+    (assert= (buffer-markers (insert (make-buffer "abc") "x")) {})))
+
+;; The push side of buffers-as-processes: subscribers get the new projection on every edit.
+(defn buf-relay-loop (bp tag report)
+  (receive ([:buffer-updated _bp v txt] (do (send report [:relayed tag v txt])
+                                          (buf-relay-loop bp tag report)))))
+(defn buf-relay (bp tag report)
+  (do (subscribe-buffer bp buffer-text) (buf-relay-loop bp tag report)))
+(defn drain-relayed (acc)
+  (receive ([:relayed t v txt] (drain-relayed (cons [t v txt] acc))) (after 500 (reverse acc))))
+
+(describe "buffer process — subscribe / push (the collaboration seam)"
+  :isolated
+
+  (test "a subscriber is seeded, then pushed each edit with a bumped version"
+    (let (bp (spawn-buffer (make-buffer "hi")))
+      (subscribe-buffer bp buffer-text)
+      (assert= (receive ([:buffer-updated _bp v txt] [v txt]) (after 2000 :none)) [0 "hi"])
+      (buffer-edit bp (fn (b) (insert (end-of-buffer b) "!")))
+      (assert= (receive ([:buffer-updated _bp v txt] [v txt]) (after 2000 :none)) [1 "hi!"])
+      (stop-buffer bp)))
+
+  (test "unsubscribe-buffer stops the pushes"
+    (let (bp (spawn-buffer (make-buffer "x")))
+      (subscribe-buffer bp buffer-text)
+      (receive ([:buffer-updated _bp _ _] nil) (after 2000 nil))      ; drain the seed
+      (unsubscribe-buffer bp)
+      (receive (after 200 nil))                                       ; let the unsubscribe land
+      (buffer-edit bp (fn (b) (insert (end-of-buffer b) "y")))
+      (assert= (receive ([:buffer-updated _bp _ _] :got) (after 400 :none)) :none)
+      (stop-buffer bp)))
+
+  (test "a nil projection pushes a bare notification (nil view)"
+    (let (bp (spawn-buffer (make-buffer "a")))
+      (subscribe-buffer bp nil)
+      (assert= (receive ([:buffer-updated _bp v view] [v view]) (after 2000 :none)) [0 nil])
+      (stop-buffer bp)))
+
+  (test "two subscribers both receive an edit — the point of buffers-as-processes"
+    (let (me (self)
+          bp (spawn-buffer (make-buffer "")))
+      (spawn (buf-relay bp :a me))
+      (spawn (buf-relay bp :b me))
+      (receive (after 300 nil))                                       ; let both subscribe + seed
+      (buffer-edit bp (fn (b) (insert (end-of-buffer b) "Z")))
+      (let (zs (filter (fn (m) (= (nth m 2) "Z")) (drain-relayed ())))
+        (is (member? :a (map (fn (m) (nth m 0)) zs)))
+        (is (member? :b (map (fn (m) (nth m 0)) zs))))
+      (stop-buffer bp))))

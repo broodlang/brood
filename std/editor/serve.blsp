@@ -34,8 +34,11 @@ model (ADR-090). The app's model/`view`/`update` run on the daemon; a thin clien
 registers the app under the well-known node name `serve-name` (`:ui`); each attaching
 client gets its own session process running `ui-run` against a `remote-display` —
 the frontend whose `:draw` sends the frame over the node link and whose `:poll`
-receives the client's input. Many clients may attach at once (independent sessions).
-Built purely on `ui-run` + the node-link primitives (`(require 'editor/serve)`)."
+receives the client's input. The thin client is frontend-agnostic: `attach` paints to
+the terminal, `attach-display` to any `ui-run` display (e.g. `(gui-display)`, a native
+window) — same protocol, different frontend. Many clients may attach at once
+(independent sessions). Built purely on `ui-run` + the node-link primitives
+(`(require 'editor/serve)`)."
   (:use editor/ui))
 
 ;; The registered name a daemon's session-manager listens under, and an attaching
@@ -135,15 +138,25 @@ the daemon says `[:bye]` or the link drops."
         (attach--loop peer session)
         (do (send session [:key k]) (attach--loop peer session))))))
 
+(defn attach--handshake (peer cols rows)
+  "Report our `cols`×`rows` and ask `peer`'s session manager to attach us; return the
+session pid it replies with, nil if the link drops first (`[:nodedown]`), or error on
+timeout. The connect handshake shared by the terminal (`attach`) and GUI
+(`attach-display`) clients — the only difference between them is the frontend, not the
+protocol."
+  (do
+    (send {:name serve-name :node peer} [:attach (self) cols rows])
+    (receive
+      ([:attached session] session)
+      ([:nodedown ~peer] nil)
+      (after 5000 (error "attach: no response from the server (is it serving?)")))))
+
 (defn attach--session (peer)
   "Report our terminal size, ask `peer`'s session manager to attach us, and run the
 client loop once the daemon replies with our session pid."
-  (let ([cols rows] (term-size))
-    (send {:name serve-name :node peer} [:attach (self) cols rows])
-    (receive
-      ([:attached session] (do (monitor session) (attach--loop peer session)))
-      ([:nodedown ~peer] nil)
-      (after 5000 (error "attach: no response from the server (is it serving?)")))))
+  (let ([cols rows] (term-size)
+        session (attach--handshake peer cols rows))
+    (when session (do (monitor session) (attach--loop peer session)))))
 
 (defn attach (spec &optional cookie)
   "Attach this terminal to a `ui-run` app served by the peer named in `spec`
@@ -162,3 +175,120 @@ the app quits (`[:bye]`) or the link drops. The terminal is always restored on e
       (try
         (do (attach--session peer) (term-leave))
         (catch e (do (term-leave) (throw e)))))))
+
+;; ---- client side (a GUI / any-display frontend) ------------------------------
+;; The terminal client (above) reads input from the TTY (`term-poll`) and frames from
+;; its mailbox — two separate streams, so it drains frames then polls the terminal. A
+;; GUI frontend is different: `gui-open` delivers window input to the *same mailbox* the
+;; daemon pushes frames to (ADR-058), so both arrive interleaved. Hence a single unified
+;; `receive` loop here, rather than the drain-then-poll split — and the client uses the
+;; display's `:draw`/`:size`/`:enter`/`:leave`, but NOT its `:poll` (input is read off the
+;; mailbox directly). This makes the thin client frontend-agnostic, the same way `ui-run`
+;; and the daemon-side `remote-display` already are (ADR-046).
+
+(defn attach--display-loop (peer session display)
+  "The any-display client loop: frames, control, and window input all land on THIS
+process's mailbox, so one `receive` serves them. A `[:frame f]` is painted to `display`;
+`[:bye]` (the app quit), `[:nodedown]` (link dropped), or `[:down …]` (the session died)
+ends the loop; `:close` (the window's X button) ships a `[:detach]` and ends; anything
+else is a key/mouse input shipped to the daemon `session` as `[:key …]`. Tail-recursive."
+  (receive
+    ([:frame f] (do ((get display :draw) f) (attach--display-loop peer session display)))
+    ([:bye] nil)
+    ([:nodedown ~peer] nil)
+    ([:down _ _ _] nil)
+    (:close (send session [:detach]))
+    (m (do (send session [:key m]) (attach--display-loop peer session display)))))
+
+(defn attach-display (spec display &optional cookie)
+  "Attach `display` — any `ui-run` frontend map, e.g. `(gui-display)` (a native window)
+— to a `ui-run` app served by `spec` (\"name\", or \"name@host:port\"). The GUI analogue
+of `attach` (which is terminal-only): the daemon runs the app, this client paints the
+frames it pushes to `display` and ships back its input, until the app quits or the link
+drops. Because window input and daemon frames share this process's mailbox, one receive
+loop (`attach--display-loop`) serves both. Connects *before* entering the display, so a
+refused / wrong-cookie / bad-spec error surfaces without stranding a window; the display
+is always torn down (`:leave`) on exit. `cookie` defaults to `(node-cookie)`."
+  (do
+    (node-start (attach--gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
+    (let (peer (connect spec))
+      (monitor-node peer)
+      ((get display :enter))
+      (try
+        (let ([cols rows] ((get display :size))
+              session (attach--handshake peer cols rows))
+          (when session (do (monitor session) (attach--display-loop peer session display)))
+          ((get display :leave)))
+        (catch e (do ((get display :leave)) (throw e)))))))
+
+;; ---- shared session (many frontends, ONE model — collaborative) --------------
+;; `serve` gives each client its OWN model (independent sessions). `serve-shared` runs a
+;; SINGLE `ui-run` and fans its frames to every attached client while merging all their
+;; input into the one loop — so everyone edits the same buffers and sees each other's
+;; edits live (the daemon-`make-frame`/collaborative model). The shape is `display-broadcast`
+;; made dynamic: a **hub** process holds the changing client set + the latest frame, the
+;; session's display `:draw`s to the hub (which fans out) and `:poll`s the merged key stream.
+;;
+;; This slice shares ONE cursor (the single model's point): every frontend shows the same
+;; point. Distinct per-participant cursors (each user their own caret/selection) need
+;; edit-surviving **markers** in `std/buffer` + point moved off the buffer onto a
+;; participant — deferred (see the myedit `docs/remote-multiplayer-plan.md`, Slice 2c, and
+;; `docs/actor-architecture.md`). Live resize is deferred as for `serve`.
+
+(defn shared--hub (clients frame size)
+  "The fan-out hub for a shared session: the changing set of attached client pids, the
+latest `frame`, and the session `size`. `[:add pid]` adds a client (seeding it with the
+current frame, if any); `[:remove pid]` drops one; `[:frame f]` stores + broadcasts to
+every client; `[:size reply]` replies `[:hub-size c r]`; `[:shutdown]` tells all clients to
+close (`[:bye]`). Tail-recursive; one hub per shared session."
+  (receive
+    ([:add pid] (do (when frame (send pid [:frame frame]))
+                  (shared--hub (cons pid clients) frame size)))
+    ([:remove pid] (shared--hub (remove (fn (p) (= p pid)) clients) frame size))
+    ([:frame f] (do (doseq (p clients) (send p [:frame f])) (shared--hub clients f size)))
+    ([:size reply] (do (send reply [:hub-size (first size) (second size)]) (shared--hub clients frame size)))
+    ([:shutdown] (doseq (p clients) (send p [:bye])))))
+
+(defn shared--hub-size (hub)
+  "Query `hub` for the shared session's `[cols rows]` (a local round-trip), falling back to
+`[80 24]` if it doesn't answer promptly. Selective on `[:hub-size …]`, so it never eats the
+`[:key …]` inputs also queued on the session's mailbox."
+  (do (send hub [:size (self)])
+    (receive ([:hub-size c r] [c r]) (after 200 [80 24]))))
+
+(defn shared--display (hub)
+  "The `ui-run` display for a shared session: `:draw` ships each frame to `hub` (fanned to
+every client); `:poll` returns the next `[:key k]` any client shipped (all clients' input
+merges through the session's one mailbox, so edits serialize with no conflict); `:size`
+asks the hub; `:leave` shuts the hub (and thus every client) down."
+  {:enter (fn () nil)
+   :leave (fn () (send hub [:shutdown]))
+   :size (fn () (shared--hub-size hub))
+   :draw (fn (f) (send hub [:frame f]))
+   :poll (fn (ms) (receive ([:key k] k) (after ms nil)))})
+
+(defn serve-shared--manager (session hub)
+  "The session manager for a SHARED session: every client attaches to the SAME running
+`session`. On `[:attach client …]`, add the client to `hub` and tell it the shared session
+pid (so it ships keys there); monitor it so its death drops it from the hub. Tail-recursive."
+  (receive
+    ([:attach client cols rows]
+      (do (monitor client)
+        (send hub [:add client])
+        (send client [:attached session])
+        (serve-shared--manager session hub)))
+    ([:down _ client _] (do (send hub [:remove client]) (serve-shared--manager session hub)))
+    (_ (serve-shared--manager session hub))))
+
+(defn serve-shared (model view update)
+  "Serve a SINGLE shared `ui-run` session to many frontends — collaborative editing: all
+clients attach to ONE `model` and see each other's edits live (contrast `serve`, a fresh
+independent model per client). Spawns the hub, the shared session (`ui-run` over
+`shared--display`), and the manager, and registers the manager under `serve-name`. Clients
+attach with the same `attach` / `attach-display` (the client side is identical — it just
+ships keys and paints frames; whether the daemon is per-client or shared is transparent).
+All clients share ONE cursor this slice; see the module note for the per-participant-cursor
+deferral. Returns the manager pid."
+  (let (hub (spawn (shared--hub () nil [80 24]))
+        session (spawn (ui-run model view update (shared--display hub))))
+    (register serve-name (spawn (serve-shared--manager session hub)))))
