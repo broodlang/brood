@@ -435,6 +435,25 @@ pub fn receive_match(
                 // running). The capture path that suspends above is flipped back by
                 // `run_one` on resume instead.
                 set_self_status(&ctx, ST_RUNNING);
+                // An `(exit …)` may have woken us (its `cv.notify_one`) rather than a
+                // message. There's no coroutine to suspend and no `run_one` boundary to
+                // check `kill_pending` for a blocked receive, so do it here — but only in
+                // a real scheduler-run green process (`in_capture_run`), where a top-level
+                // body driver exists to convert the unwinding `Control::Kill` into process
+                // death. On the root / file-runner thread there's no such driver, so a
+                // `Control::Kill` would just leak as an error; that thread isn't a killable
+                // process anyway, so leave it to re-scan/re-block (the pre-existing
+                // behaviour). Unwind with `Control::Kill` — untrappable through the
+                // enclosing `try`/`%isolate`/HOF — which `vm_run_bc` turns into
+                // `VmOutcome::Killed`, retiring the process with the reason still in
+                // `state.kill`. (Both a hard `:kill` and a soft `(exit pid reason)` die
+                // here; the reason distinguishes them at death.)
+                if crate::process::in_capture_run()
+                    && ctx.mailbox.kill_pending.load(Ordering::Relaxed)
+                {
+                    heap.truncate_roots(rbase);
+                    return Err(LispError::kill_signal());
+                }
             }
             Err(e) => {
                 // A control signal (suspend) keeps the in-progress receive's persisted
@@ -516,6 +535,20 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
     let st = crate::core::sync::lock(&ctx.mailbox.state);
     if st.queue.len() > i {
         return; // a message arrived between the scan and here — re-scan
+    }
+    // Don't block if an `(exit …)` is already pending — but only inside a real
+    // scheduler-run green process (`in_capture_run`), where a top-level body driver
+    // exists to turn the unwinding `Control::Kill` into process death. On the root /
+    // file-runner thread there's no such driver (a `Control::Kill` would just leak as
+    // an error), and that thread isn't a killable process, so it keeps the old
+    // behaviour: block normally, ignoring `kill_pending`. `exit` sets `kill_pending`
+    // *before* it takes this state lock (in `wake_parked`), so a kill that fully
+    // completed before we got here is visible now under the lock — without this check
+    // its `cv.notify_one()` would have been lost (no waiter yet) and we'd block forever.
+    // The caller (`receive_match`) re-checks and unwinds; serialised with `exit` by
+    // this same lock, so no kill slips in between the check and the wait.
+    if crate::process::in_capture_run() && ctx.mailbox.kill_pending.load(Ordering::Relaxed) {
+        return;
     }
     set_self_status(ctx, ST_WAITING);
     let _dirty = crate::process::dirty_block();

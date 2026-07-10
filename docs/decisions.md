@@ -8360,3 +8360,93 @@ real project catches `(let (port 8080) (cond (string? port) …))` end-to-end.
 unused-let lint) for a materially more useful lint, with the surface-vs-generated
 risk handled entirely at the *binding* (eligibility), never at the guard. Leaves
 the sig-param path and every soundness invariant intact.
+
+## ADR-132 — `Control::Kill`: `(exit …)` reaches a process blocked in a native-nested `receive`
+
+**Status:** accepted, shipped 2026-07-10.
+
+**Context.** A `receive` reached through a **native frame** — inside a `try`/`%isolate`
+or a HOF callback (`map`, `fold`, …) — is *native-nested*: its continuation can't be
+captured across the native boundary, so instead of the state-capture park it **blocks
+the worker thread** on the mailbox condvar (`wait_for_message`, the §7.4 dirty-scheduler
+carve-out). `(exit pid reason)` only ever roused a **green waiter** (a parked, captured
+continuation) via `wake_parked`; a cv-blocked receiver has no green waiter, so `exit`
+did nothing to it and the block path had **no `kill_pending` check**. Result: an exit —
+even an untrappable `:kill` — was deferred **indefinitely**; the target only died if some
+unrelated message later happened to wake the cv. Because `(try (receive …) (catch …))`
+is an idiomatic supervision shape, this was a real liveness hole (found + repro'd during
+the 2026-07-10 house-cleaning sweep). The `exit`/`scan_mailbox` comments even claimed a
+"`receive_match` loop-top `kill_pending` check" that did not exist.
+
+**Decision.** Add a second `Control` variant, **`Control::Kill`** (the enum was
+`Suspend`-only), that rides the error channel like `Suspend` — so `try`/`%try`/`%isolate`
+**re-raise** it (`is_control`), never catch it (an exit signal is not a catchable throw)
+— and unwinds the native stack untrappably. The reason is **not** carried in the signal:
+it stays in the mailbox (`state.kill`), read at death by `handle_capture_outcome`, exactly
+as the loop-top hard-kill path already did. Three cooperating pieces:
+
+1. **`exit` wakes a cv-blocked receiver.** When `wake_parked` returns `None` (no green
+   waiter), `exit` now `cv.notify_one()`s — mirroring `deliver`'s message-wake path.
+2. **The block path checks the flag and unwinds.** `wait_for_message` bails without
+   blocking if `kill_pending` is already set (closing the lost-wakeup race: `request_kill`
+   publishes `kill_pending` *before* it takes the state lock, so a kill that completed
+   before we waited is visible under the lock), and `receive_match` returns
+   `Err(Control::Kill)` on wake.
+3. **Only the top-level driver converts it.** `vm_run_bc`'s error handler turns a
+   `Control::Kill` into `VmOutcome::Killed` **only when `capture`** (the top-level body
+   driver of a scheduler-run green process); a **nested** `vm_apply` run (a `map`/`try`
+   callback) re-raises so the kill keeps unwinding to the top-level driver — otherwise it
+   hit the "nested vm_apply does no kill capture" `unreachable!`. Symmetrically, the block
+   check itself is gated on `in_capture_run()`, so it fires only where a driver exists to
+   convert it: on the **root / file-runner thread** (e.g. the `nest test` collector's
+   native-nested receive under `%isolate`) a `Control::Kill` would just leak as an
+   empty-message error, and that thread isn't a killable process, so it keeps the old
+   block-and-ignore behaviour.
+
+Both a hard `:kill` and a soft `(exit pid reason)` now die at a native-nested receive; the
+reason in `state.kill` distinguishes them at death, matching the capturing-receive path
+(`park_on_receive`). A native-nested receive with a *matching* message still completes
+normally (the message wins this round; a pending soft exit is honoured at the next
+receive, as for a capturing receive) and an `(after …)` timeout still fires.
+
+**Consequences.** The idiomatic `try`-around-`receive` supervision pattern is now
+killable, closing the liveness hole. The `Control` channel gains one variant but no new
+special form or user-facing surface. The root/file-runner stays un-killable-via-exit (an
+acknowledged, pre-existing edge — it owns no `run_one` to retire it). Verified: hard+soft
+× try-nested + HOF-nested + normal-message + timeout; 8/8 `exit_test`, race-checked,
+GC-stress clean, full suite + `nest test` (2695) green.
+
+## ADR-133 — `|…|` bar-quoted symbols and keywords for round-trip printing
+
+**Status:** accepted, shipped 2026-07-10.
+
+**Context.** The printer upholds a round-trip invariant — `(read (pr-str x)) == x` — for
+strings (it re-escapes control chars) and floats (`inf`/`nan` reserved words). But a
+**symbol or keyword** whose name isn't a clean atom token broke it. `(symbol "a b")`,
+`(symbol "")`, `(symbol "123")`, `(keyword "")` — all reachable via the `symbol`/`keyword`
+builtins, which intern any string — printed as `a b` / (empty) / `123` / `:`, which re-read
+as *multiple tokens* / EOF / the **number** `123` / the symbol `:`. Keywords built from
+arbitrary strings (JSON keys, data-derived names) are the common real case.
+
+**Decision.** Add Common-Lisp-style **`|…|` bar-quoting**: a `|…|` token is a symbol whose
+name is the (un-escaped) body; `:|…|` is the keyword form. Inside the bars, `\|` and `\\`
+escape a literal bar/backslash; any other `\X` is literal `X`. The printer emits bars
+**only when needed** — a name that is empty, holds whitespace/a delimiter/`|`/`\`, or (for
+a symbol) would classify as a number / reserved word / keyword / the lone `.` dotted-pair
+separator; a clean name still prints bare (`hello`, `:my-key`, `1+`). Non-readable output
+(`str`/`print`) always emits the raw name — bars are a *reader* device, not for display.
+A single `Scanner::scan_bar_body` backs all three tokenizers — the **reader**, the tooling
+**CST** (`cst.rs`), and **`scan-tokens`** (the highlighter/formatter stream) — so they can't
+disagree on where a bar-quoted token runs (the ADR-025 "one source of truth" rule). Safe
+to add because no existing Brood source uses `|` as a symbol character (all `|` occurrences
+are in strings/comments).
+
+**Consequences.** Every symbol and keyword now round-trips through `pr-str`/`read`,
+including the pathological spellings — important for a self-editing editor that serializes
+values. The language gains one lexical form (no special form, no evaluator change). This
+is deliberately more than the strictly-minimal design (ADR-011 would defer a power
+feature), taken because the round-trip *invariant* the printer already claims was
+genuinely broken for keyword-from-string, a real use. See also the sibling reader change
+the same day: number-shaped tokens now need genuine numeric intent (a digit + valid sign
+positions), so `++`/`--`/`...`/`1+`/`2+3` read as symbols and the reader agrees with the
+`scan_atom_kind` tooling classifier.

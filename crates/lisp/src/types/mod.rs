@@ -945,7 +945,7 @@ impl Ty {
                             if !Ty::of(Tag::Keyword).is_subtype(&b.0) {
                                 return false;
                             }
-                            for (_k, (vty, _opt)) in fields.iter() {
+                            for (vty, _opt) in fields.values() {
                                 if !vty.is_subtype(&b.1) {
                                     return false;
                                 }

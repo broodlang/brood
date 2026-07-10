@@ -128,6 +128,16 @@ pub enum Control {
     Suspend {
         deadline: Option<std::time::Instant>,
     },
+    /// An `(exit pid reason)` reached a process **blocked** in a native-nested
+    /// `receive` (one behind a `try`/`%isolate`/HOF native frame, which blocks the
+    /// worker on the mailbox condvar rather than capturing — the §7.4 carve-out).
+    /// The block path can't capture a continuation, so it unwinds untrappably instead:
+    /// this rides the error channel like `Suspend`, so `try`/`%try` **re-raise** it
+    /// (never catch — an exit signal isn't a catchable throw), and `vm_run_bc` turns
+    /// it into `VmOutcome::Killed`. The exit *reason* is not carried here — it stays in
+    /// the mailbox (`state.kill`), read by `handle_capture_outcome` at death, exactly
+    /// as the loop-top hard-kill path does.
+    Kill,
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +283,19 @@ impl LispError {
     /// The `receive`-on-empty suspend control signal (ADR-100 §7). See [`Control`].
     pub fn suspend(deadline: Option<std::time::Instant>) -> Self {
         LispError::control(Control::Suspend { deadline })
+    }
+
+    /// The untrappable kill control signal — an `(exit …)` interrupting a process
+    /// blocked in a native-nested `receive`. See [`Control::Kill`].
+    pub fn kill_signal() -> Self {
+        LispError::control(Control::Kill)
+    }
+
+    /// Is this the [`Control::Kill`] signal? `vm_run_bc` uses it to turn an unwinding
+    /// kill into a `VmOutcome::Killed` (retire with the mailbox's pending reason)
+    /// rather than an error-crash.
+    pub fn is_kill_signal(&self) -> bool {
+        matches!(self.control, Some(Control::Kill))
     }
 
     /// Is this a [`Control`] signal (a suspend) rather than a real error? Error-handling

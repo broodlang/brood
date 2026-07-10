@@ -21,7 +21,8 @@ Empty sequences raise unless documented otherwise.
   (fold (fn (acc x) (+ acc (* (- x m) (- x m)))) 0 xs))
 
 (defn variance (xs)
-  "The population variance (divided by n) of `xs`. Raises on an empty or 1-element sequence."
+  "The population variance (divided by n) of `xs`. Raises on an empty sequence;
+a 1-element sequence has population variance 0.0."
   (let (n (count xs))
     (when (< n 1) (error "stats/variance: empty sequence"))
     (let (m (mean xs))

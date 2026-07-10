@@ -95,14 +95,16 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   syntax/      reader.rs (text -> Value), scanner.rs, printer.rs, and the tooling
                CST (atom.rs / cst.rs / scope.rs)
   eval/        mod.rs (evaluator — a `'tail: loop` for tail calls + special forms),
-               compile.rs (the closure-compiling VM — the default engine, ADR-076).
-                 Major sections of compile.rs (10K lines):
-                 - IR types: PrimOp/PrimOp1, ConstVal, Node, CompiledArm/Closure, Chunk/Inst
-                 - Compiler front-end: compile_arm, compile_node, emit_node (AST → IR → bytecode)
-                 - exec_chunk: the bytecode interpreter inner loop (Stage 1, call-free arms)
-                 - dispatch: the VM arm dispatcher (handles Call/SelfCall, IC, JIT fast path)
-                 - vm_run_bc: the outer VM trampoline (tail-call loop, frame save/restore)
-                 - jit_lower_arm / jit_lower_arm_inner: Cranelift JIT lowering (feature = "jit")
+               compile/ (the closure-compiling VM — the default engine, ADR-076),
+               split into three files:
+                 - ir.rs — IR types: PrimOp/PrimOp1, ConstVal, Node, CompiledArm/Closure, Chunk/Inst
+                 - mod.rs — the compiler front-end (compile_arm, compile_node, emit_node:
+                   AST → IR → bytecode), exec_chunk (the bytecode interpreter inner loop,
+                   Stage 1 call-free arms), dispatch (the VM arm dispatcher: Call/SelfCall,
+                   IC, JIT fast path), and vm_run_bc (the outer VM trampoline: tail-call
+                   loop, frame save/restore)
+                 - jit_lower.rs — jit_lower_arm / jit_lower_arm_inner: Cranelift JIT lowering
+                   (feature = "jit")
                macros.rs (quasiquote, macroexpand, the compile pass + pattern lowering)
   types/       mod.rs (Ty/GradualTy set-theoretic lattice), check.rs + check/
                (advisory checker)
@@ -118,7 +120,7 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                scheduler, timer): spawn/send/receive/monitor
   dist.rs + dist/   distributed nodes (handshake, heartbeat, wire) — ADR-033/034
   net.rs       thin non-blocking TCP socket mechanism (ADR-062); Brood policy is
-               the external brood-net package
+               the in-tree `std/net/*` library
   bundle.rs    single-binary app bundling (ADR-038); gui.rs the GUI frontend (ADR-046)
   error.rs     LispError / LispResult / source Pos
   lib.rs       the `Interp` entry point; bundles std/prelude.blsp
@@ -129,14 +131,15 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          prelude.blsp + bare core (io, file, set, regex, json,
                          fuzzy, format, task, log); the editor/display framework
                          `std/editor/*` (buffer, display, ui, keymap, face,
-                         highlight, lineedit, pane, layers, ansi, serve); `std/proc/hatch`;
-                         the toolchain `std/tool/*` — grouped on disk but BARE
-                         module names (test, project, package, docs, grammar, mcp,
-                         observer, proctree, repl, sexp, reload). The net *library* (`net/*`)
-                         and `proc/supervisor` were lifted into the brood-net /
-                         brood-supervisor packages (Move 2) — but the Rust socket
-                         *mechanism* stays in-tree (`crates/lisp/src/net.rs`, ADR-062);
-                         only the Brood policy moved out. The REPL is Brood too
+                         highlight, lineedit, pane, layers, ansi, serve); the process
+                         framework `std/proc/*` (`gen`, `supervisor`); the net *library*
+                         `std/net/*` (`http`, `sse`, `tcp`); the toolchain `std/tool/*`
+                         — grouped on disk but BARE module names (test, project, package,
+                         docs, grammar, mcp, observer, proctree, repl, sexp, reload). The
+                         net library and `proc/supervisor` were briefly externalized (Move 2)
+                         then re-bundled in-tree (ADR-097, batteries-included default);
+                         the Rust socket *mechanism* stays in-tree too
+                         (`crates/lisp/src/net.rs`, ADR-062). The REPL is Brood too
                          (`std/tool/repl.blsp`, ADR-048); the binaries bootstrap
                          into `(repl-run)`.
 docs/                    architecture, language, roadmap, decisions, devlog
@@ -416,7 +419,7 @@ The later milestones are already underway (vertical-slice style, ADR-045/046):
 `std/editor/display.blsp` render-op vocabulary + `term-*` primitives + the `nest observe`
 process viewer; **M4 server/daemon** — distributed nodes (TCP, location-transparent
 `send`, monitors, closure-shipping, HMAC handshake) plus a userland
-`brood-supervisor/src/proc/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
+`std/proc/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
 roadmap/ADR-039). The editor app itself already exists as the separate
 **`brood-edit`** project (a `nest` project consuming this language + `std/editor/*`);
 it's not part of Brood's own roadmap. Still ahead here: server-mode socket serving

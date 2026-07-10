@@ -115,26 +115,32 @@ redundant slashes. An absolute path starts with the `\"/\"` component."
 `\"a/b/../c\"` → `\"a/c\"`;  `\"/a/b/../../c\"` → `\"/c\"`."
   (let (absolute (starts-with? p "/")
         parts    (filter (fn (s) (not (or (= s "") (= s ".")))) (string-split p "/"))
-        resolved (normalize--reduce parts nil))
+        resolved (normalize--reduce parts nil absolute))
     (cond
       (nil? resolved) (if absolute "/" ".")
       absolute        (str "/" (path--glue (first resolved) (rest resolved)))
       else            (path--glue (first resolved) (rest resolved)))))
 
-(defn normalize--reduce (parts stack)
+(defn normalize--reduce (parts stack absolute)
   (if (nil? parts) (reverse stack)
     (let (p (first parts))
       (cond
+        ;; `..` pops a resolved segment off the stack
         (and (= p "..") (not (nil? stack)) (not (= (first stack) "..")))
-          (normalize--reduce (rest parts) (rest stack))
+          (normalize--reduce (rest parts) (rest stack) absolute)
+        ;; `..` that would climb above an absolute root is discarded — there is no
+        ;; parent of `/`. (For a relative path it is kept, so `a/../..` → `..`.)
+        (and (= p "..") absolute (nil? stack))
+          (normalize--reduce (rest parts) stack absolute)
         else
-          (normalize--reduce (rest parts) (cons p stack))))))
+          (normalize--reduce (rest parts) (cons p stack) absolute)))))
 
 ;; ---- relative-to ------------------------------------------------------------
 
 (defn relative-to (p base)
-  "Express absolute path `p` relative to absolute `base`. Returns `p` unchanged
-if the two share no common prefix."
+  "Express absolute path `p` relative to absolute `base` — the common prefix is
+dropped and one `..` is emitted per remaining `base` component, so a fully
+divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../../x/y`)."
   (let (p-parts    (filter (fn (s) (not (= s ""))) (string-split p "/"))
         base-parts (filter (fn (s) (not (= s ""))) (string-split base "/")))
     (relative--strip p-parts base-parts)))

@@ -81,11 +81,60 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
     (json--num-end s (inc i) n)
     i))
 
+;; Strict JSON number validation (RFC 8259): `string->number` is lenient (it accepts
+;; a leading `+` and leading zeros — `+5`, `01`), which JSON forbids. We munch the
+;; token loosely with `json--num-end`, then validate it against the grammar
+;;   number = [-] int [frac] [exp],  int = 0 | [1-9] digit*
+;;   frac = . digit+,  exp = [eE] [+-]? digit+
+;; before handing it to `string->number`.
+(defn json--digits-run (tok i n)  ; consume zero or more digits
+  (if (and (< i n) (json--digit? (char-at tok i))) (json--digits-run tok (inc i) n) i))
+
+(defn json--int-end (tok i n)
+  "Index after the integer part at `i`, or nil. A lone `0`, or `[1-9]` then digits —
+no leading zeros."
+  (cond
+    (>= i n) nil
+    (= (char-at tok i) "0") (inc i)                        ; lone 0 (leading-zero check below)
+    (json--digit? (char-at tok i)) (json--digits-run tok (inc i) n)
+    :else nil))
+
+(defn json--frac-end (tok i n)
+  "Index after an optional `.digit+` fraction at `i`; `i` unchanged if none; nil if a
+`.` isn't followed by a digit."
+  (if (and (< i n) (= (char-at tok i) "."))
+    (if (and (< (inc i) n) (json--digit? (char-at tok (inc i))))
+      (json--digits-run tok (+ i 2) n)
+      nil)
+    i))
+
+(defn json--exp-end (tok i n)
+  "Index after an optional `[eE][+-]?digit+` exponent at `i`; `i` unchanged if none;
+nil if malformed."
+  (if (and (< i n) (or (= (char-at tok i) "e") (= (char-at tok i) "E")))
+    (let (j (if (and (< (inc i) n) (includes? "+-" (char-at tok (inc i)))) (+ i 2) (inc i)))
+      (if (and (< j n) (json--digit? (char-at tok j)))
+        (json--digits-run tok (inc j) n)
+        nil))
+    i))
+
+(defn json--strict-number? (tok)
+  "True iff `tok` is a strict JSON number (rejects a leading `+` and leading zeros)."
+  (let (n (string-length tok)
+        i (if (and (> n 0) (= (char-at tok 0) "-")) 1 0)
+        i (json--int-end tok i n))
+    (and i
+      (let (i (json--frac-end tok i n))
+        (and i
+          (let (i (json--exp-end tok i n))
+            (and i (= i n))))))))   ; the grammar must consume the whole token
+
 (defn json--number (s i n)
   (let (end (json--num-end s i n)
-        tok (substring s i end)
-        v (string->number tok))
-    (if (nil? v) (error "json: invalid number '" tok "' at index " i) [v end])))
+        tok (substring s i end))
+    (if (json--strict-number? tok)
+      [(string->number tok) end]
+      (error "json: invalid number '" tok "' at index " i))))
 
 ;; -- strings --
 (defn json--hex-val (c) (index-of json--hex-digits (lower c)))  ; "a"→10, "0"→0, …

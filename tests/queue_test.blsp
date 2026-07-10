@@ -83,4 +83,10 @@
     (let (pq (-> (queue/pq-new)
                  (queue/pq-insert 1 :x)
                  (queue/pq-insert 1 :y)))
-      (assert= 2 (queue/pq-size pq)))))
+      (assert= 2 (queue/pq-size pq))))
+  (test "equal priorities pop in insertion order (stable / FIFO)"
+    (let (pq (-> (queue/pq-new)
+                 (queue/pq-insert 1 :a)
+                 (queue/pq-insert 1 :b)
+                 (queue/pq-insert 1 :c)))
+      (assert= [:a :b :c] (into [] (queue/pq-to-list pq))))))

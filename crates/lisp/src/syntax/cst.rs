@@ -193,6 +193,10 @@ impl<'a> Cst<'a> {
             }
             Some('"') => self.string(start),
             Some('#') => self.hash(start),
+            // `|…|` bar-quoted symbol / `:|…|` keyword — the round-trip form for a
+            // symbol/keyword whose name isn't a clean token (matches the reader).
+            Some('|') => self.bar(start, NodeKind::Symbol),
+            Some(':') if self.s.peek_after() == Some('|') => self.bar(start, NodeKind::Keyword),
             // A stray close delimiter is an error token; resume after it.
             Some(')') | Some(']') | Some('}') => {
                 self.s.bump();
@@ -367,6 +371,21 @@ impl<'a> Cst<'a> {
             crate::syntax::scanner::StringScan::BadEscape { .. } => {
                 self.leaf(NodeKind::Error, start)
             }
+        }
+    }
+
+    /// A `|…|` bar-quoted symbol, or `:|…|` keyword (`kind` says which). The leaf
+    /// span covers the whole `|…|` / `:|…|`; an unterminated bar is a tolerant
+    /// `Error` node, like every CST error. Mirrors the reader so the CST and reader
+    /// agree on where a bar-quoted token runs.
+    fn bar(&mut self, start: usize, kind: NodeKind) -> Node {
+        if matches!(kind, NodeKind::Keyword) {
+            self.s.bump(); // ':'
+        }
+        self.s.bump(); // opening '|'
+        match self.s.scan_bar_body(None) {
+            crate::syntax::scanner::BarScan::Closed => self.leaf(kind, start),
+            crate::syntax::scanner::BarScan::Unterminated => self.leaf(NodeKind::Error, start),
         }
     }
 

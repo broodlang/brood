@@ -23,6 +23,32 @@
     (assert= (json-parse "   true  ") true)
     (assert= (json-parse "\n\t [1] \n") [1])))
 
+(describe "json-parse — strict number grammar (RFC 8259)"
+  (test "valid numbers parse"
+    (assert= (json-parse "0") 0)
+    (assert= (json-parse "-0") 0)
+    (assert= (json-parse "0.5") 0.5)
+    (assert= (json-parse "123") 123)
+    (assert= (json-parse "1E+3") 1000.0)
+    (assert= (json-parse "1.5e-2") 0.015))
+  (test "a leading + is rejected (string->number would accept it)"
+    (is (json--errs? "+5"))
+    (is (json--errs? "+.5")))
+  (test "leading zeros are rejected"
+    (is (json--errs? "01"))
+    (is (json--errs? "-01"))
+    (is (json--errs? "00")))
+  (test "a bare leading/trailing dot is rejected"
+    (is (json--errs? ".5"))
+    (is (json--errs? "1.")))
+  (test "an empty exponent is rejected"
+    (is (json--errs? "1e"))
+    (is (json--errs? "1e+")))
+  (test "strict rules hold inside arrays and objects"
+    (assert= (json-parse "[0, -1.5, 1e2]") [0 -1.5 100.0])
+    (is (json--errs? "[01]"))
+    (is (json--errs? "{\"a\": +1}"))))
+
 (describe "json-parse — strings + escapes"
   (test "a plain string"
     (assert= (json-parse "\"hello\"") "hello")

@@ -56,6 +56,13 @@ pub enum StringScan {
     },
 }
 
+/// Result of [`Scanner::scan_bar_body`] — a `|…|` bar-quoted symbol/keyword body.
+/// The closing `|` was found (`pos` just past it), or EOF arrived first.
+pub enum BarScan {
+    Closed,
+    Unterminated,
+}
+
 impl<'a> Scanner<'a> {
     pub fn new(src: &'a str) -> Self {
         // Build the line-start table in one byte-walk. `\n` covers Unix and
@@ -193,6 +200,36 @@ impl<'a> Scanner<'a> {
             self.pos += c.len_utf8();
         }
         &self.src[start..self.pos]
+    }
+
+    /// Walk past the body of a `|…|` bar-quoted symbol/keyword. Assumes `pos` is
+    /// just past the opening `|`. When `out` is `Some`, the decoded name is appended
+    /// (`\|`→`|`, `\\`→`\`, and `\X`→X for any other `X` — the printer only ever emits
+    /// the first two, so this just keeps hand-written input tolerant); when `None` the
+    /// body is skipped (the CST only needs the span). On `Closed`, `pos` is past the
+    /// closing `|`; on `Unterminated`, `pos` is at EOF. Bar-quoting is what lets a
+    /// symbol/keyword built from an arbitrary string (`(symbol "a b")`, `(keyword "")`)
+    /// round-trip through `pr-str`/`read`.
+    pub fn scan_bar_body(&mut self, mut out: Option<&mut String>) -> BarScan {
+        loop {
+            match self.bump() {
+                None => return BarScan::Unterminated,
+                Some('|') => return BarScan::Closed,
+                Some('\\') => match self.bump() {
+                    None => return BarScan::Unterminated,
+                    Some(c) => {
+                        if let Some(buf) = out.as_deref_mut() {
+                            buf.push(c);
+                        }
+                    }
+                },
+                Some(c) => {
+                    if let Some(buf) = out.as_deref_mut() {
+                        buf.push(c);
+                    }
+                }
+            }
+        }
     }
 
     /// Is the `.` at the cursor a lone dotted-pair separator (followed by a

@@ -4409,6 +4409,14 @@ fn exec_chunk(
                     None => match dispatch(heap, callee, argv, true, cur_env) {
                         Ok(s) => s,
                         Err(e) if e.is_control() => {
+                            // A `Control::Kill` (an `(exit …)` interrupted a native-nested
+                            // `receive` that then unwound past this call) is re-raised
+                            // untouched — don't rewind, don't capture here. `vm_run_bc`'s
+                            // error handler converts it to `VmOutcome::Killed` at the
+                            // top-level driver (a nested run keeps unwinding).
+                            if e.is_kill_signal() {
+                                return Err(e);
+                            }
                             // State-capture suspend (ADR-100 §8): a clean `receive`
                             // raised `Control::Suspend` through the `%receive` native.
                             // Rewind `ip` to re-run THIS call on resume (re-scan the
@@ -4419,7 +4427,7 @@ fn exec_chunk(
                             *ip -= 1;
                             let deadline = match &e.control {
                                 Some(crate::error::Control::Suspend { deadline }) => *deadline,
-                                None => None,
+                                Some(crate::error::Control::Kill) | None => None,
                             };
                             return Ok(ChunkExit::Suspend { deadline });
                         }
@@ -4598,10 +4606,8 @@ fn exec_chunk(
                             None => e.to_value_map(heap),
                         };
                         heap.set_root_at(base + bind_slot, caught);
-                        match exec_value(heap, handler_node, base, genv) {
-                            Ok(v) => heap.push_root(v),
-                            Err(e) => return Err(e),
-                        }
+                        let hv = exec_value(heap, handler_node, base, genv)?;
+                        heap.push_root(hv);
                     }
                 }
             }
@@ -5196,6 +5202,16 @@ fn vm_run_bc(
             }
             Err(e) => {
                 unwind(heap);
+                // A `Control::Kill` that unwound untrappably through a `try`/`%isolate`/HOF
+                // (an `(exit …)` reaching a native-nested `receive`) retires the process
+                // with its pending reason, rather than crashing it as an uncaught error.
+                // Only the **top-level** body driver (`capture`) may produce a `Killed`
+                // outcome — a nested `vm_apply` run can't cross the native boundary with an
+                // outcome, so it re-raises (like `Suspend`) and the kill keeps unwinding to
+                // the top-level driver, which converts it there.
+                if capture && e.is_kill_signal() {
+                    return Ok(VmOutcome::Killed);
+                }
                 return Err(e);
             }
         }

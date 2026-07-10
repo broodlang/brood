@@ -258,7 +258,10 @@ pub(super) fn range_reduce(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
                     );
                 }
             }
-            i += step;
+            i = match i.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
         return Ok(Value::int(int_acc));
     }
@@ -315,7 +318,10 @@ pub(super) fn range_reduce_slow(
                 None => step_call(heap, acc)?,
             };
             acc_r = heap.advance_root(acc_r, next);
-            i += step;
+            i = match i.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
         Ok(heap.read_root(acc_r))
     })
@@ -674,7 +680,10 @@ pub(super) fn string_join(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             }
             first = false;
             let _ = write!(s, "{i}");
-            i += step;
+            i = match i.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
         return Ok(heap.alloc_string(&s));
     }
@@ -839,6 +848,24 @@ pub(super) fn string_span_until(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
 /// `number`; anything else is a plain `symbol`. The head-position special-form vs call
 /// distinction is left to the consumer (it needs the surrounding `(`).
 
+/// Scan a `|…|` bar body from `from` (just past the opening `|`) to just past the
+/// closing `|` — honouring `\|`/`\\` escapes — or to `n` if unterminated. Shared by
+/// the two `scan-tokens` bar arms (symbol and keyword).
+fn scan_bar(chars: &[char], n: usize, from: usize) -> usize {
+    let mut j = from;
+    while j < n {
+        match chars[j] {
+            '\\' => j += 2,
+            '|' => {
+                j += 1;
+                break;
+            }
+            _ => j += 1,
+        }
+    }
+    j.min(n)
+}
+
 pub(super) fn scan_atom_kind(t: &str) -> &'static str {
     if t.starts_with(':') || t == "nil" || t == "true" || t == "false" {
         "keyword"
@@ -898,6 +925,11 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
             }
             '(' | '[' | '{' => (start + 1, "open"),
             ')' | ']' | '}' => (start + 1, "close"),
+            // `|…|` bar-quoted symbol / `:|…|` keyword — one token, scanned to the
+            // closing bar (honouring `\|`/`\\`), so a space inside doesn't split it.
+            // Mirrors the reader/CST so the token stream agrees with what parses.
+            '|' => (scan_bar(&chars, n, i + 1), "symbol"),
+            ':' if i + 1 < n && chars[i + 1] == '|' => (scan_bar(&chars, n, i + 2), "keyword"),
             _ => {
                 let mut j = i;
                 while j < n && !is_delim(chars[j]) {
@@ -1295,9 +1327,15 @@ pub(super) fn char_to_int(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 
 pub(super) fn int_to_char(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let n = expect_int(heap, "int->char", arg(args, 0))?;
-    let c = char::from_u32(n as u32).ok_or_else(|| {
-        LispError::runtime(format!("int->char: {} is not a valid Unicode codepoint", n))
-    })?;
+    // Guard the u32 range *before* the cast: `n as u32` would silently truncate a
+    // value outside [0, u32::MAX] and could alias a valid codepoint (returning the
+    // wrong char) instead of erroring.
+    let c = u32::try_from(n)
+        .ok()
+        .and_then(char::from_u32)
+        .ok_or_else(|| {
+            LispError::runtime(format!("int->char: {} is not a valid Unicode codepoint", n))
+        })?;
     let mut buf = [0u8; 4];
     Ok(heap.alloc_string(c.encode_utf8(&mut buf)))
 }

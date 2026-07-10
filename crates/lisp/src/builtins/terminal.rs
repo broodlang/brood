@@ -662,7 +662,11 @@ pub(super) fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
             Some([d(0)?, d(1)?, d(2)?])
         }
         6 => {
-            let p = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+            // Index the bytes (like the 3-nibble case) rather than `&h[i..i+2]`: a
+            // 6-*byte* `h` can hold a multi-byte char (`#a€bc`), and slicing at a
+            // non-char-boundary panics. A non-ASCII byte just fails `to_digit` → `None`.
+            let d = |i: usize| (b[i] as char).to_digit(16);
+            let p = |i: usize| Some((d(i)? * 16 + d(i + 1)?) as u8);
             Some([p(0)?, p(2)?, p(4)?])
         }
         _ => None,
@@ -1351,6 +1355,20 @@ mod gui_face_tests {
         assert!(f.italic);
         assert!(f.underline);
         assert_eq!(f.family, Some(mono));
+    }
+
+    // A `#rrggbb`/`#rgb` hex colour parses; a 6-*byte* string holding a multi-byte
+    // char must NOT panic on a non-char-boundary slice (it just isn't valid hex).
+    #[test]
+    fn parse_hex_color_handles_multibyte_without_panic() {
+        use super::parse_hex_color;
+        assert_eq!(parse_hex_color("#ff00aa"), Some([0xff, 0x00, 0xaa]));
+        assert_eq!(parse_hex_color("#f0a"), Some([0xff, 0x00, 0xaa]));
+        // `#a€bc` after the `#` is 6 bytes (a, €=3, b, c) — the old `&h[0..2]` sliced
+        // mid-codepoint and panicked; now it's cleanly None.
+        assert_eq!(parse_hex_color("#a\u{20ac}bc"), None);
+        assert_eq!(parse_hex_color("#\u{e9}\u{e9}\u{e9}"), None); // "ééé" = 6 bytes
+        assert_eq!(parse_hex_color("#gggggg"), None);
     }
 
     // A non-map (or nil) face is the default face: no colours, no flags, no family.

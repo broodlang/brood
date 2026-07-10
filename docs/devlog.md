@@ -3223,3 +3223,121 @@ inc-2 marked NO-GO, leaf inlining + the bigger heap-walk-tiering gap logged as
 to-try). To be done as a fresh focused effort. **Net code change this session: zero**
 — the value is ruling out a known-failed lever before wasting the build, and the
 correctly-aimed pivot.
+
+## 2026-07-10 — House-cleaning sweep: seven bugs fixed, one scheduler liveness bug found (deferred)
+
+A broad "clean house" pass. Baseline was already pristine — full suite green
+(769/769), zero build/clippy warnings, `nest check` clean, no TODO/FIXME, no flaky
+tests (distribution 3×, GC-stress concurrency all clean). So the sweep went semantic,
+fanning out reader/kernel/std/process/editor bug-hunts. Fixed:
+
+- **Markers stranded across undo/redo** (`std/editor/buffer.blsp`). `buffer--snapshot`/
+  `buffer--restore` carried only `{:rope :point :mark}`, so undo reverted the text but
+  left `:markers` frozen at their post-edit positions (only re-clamped to length on
+  read). Fix: snapshot/restore `:markers` too — like `point`/`mark`, restored wholesale
+  rather than re-derived — preserving the marker-less-buffer invariant. +3 regression
+  tests.
+- **Range index-math i64 overflow → host panic** (`core/heap.rs`, `builtins/sequences.rs`).
+  `range_len` overflowed its i64 span (`(count (range i64::MAX))` panicked); five range
+  walkers stepped an unguarded `i += step` that overflowed on the final step
+  (`reduce`/`join`/`range_to_vec`/hash). Fix: compute `range_len` in i128 + saturate;
+  `checked_add`→break in every walker. +2 regression blocks in `arithmetic_edge_test`.
+- **`int->char` silent truncation** (`builtins/sequences.rs`). `n as u32` truncated an
+  out-of-range codepoint, aliasing a valid char (`(int->char (+ 65 2^32))` → "A")
+  instead of erroring. Fix: `u32::try_from` guard before `from_u32`.
+- **`path/normalize` kept `..` above absolute root** (`std/path.blsp`). `(normalize "/..")`
+  → `/..` (should be `/`); the reducer didn't know it was absolute. Fix: thread the
+  `absolute` flag and drop a `..` that hits an empty stack (relative paths still keep
+  leading `..`). +2 regression tests.
+- **`queue/pq` ties popped LIFO** (`std/queue.blsp`). `<=` inserted equal-priority items
+  ahead of existing ones. Fix: strict `<` → stable/FIFO ties; documented + regression test.
+- **Two wrong docstrings** — `stats/variance` (claimed it raises on a 1-element seq; it
+  correctly returns 0.0) and `path/relative-to` (claimed "returns p unchanged with no
+  common prefix"; it correctly emits `../..`). Docstrings corrected to match behavior.
+- **Stale `CLAUDE.md`** — `eval/compile.rs` (now the `eval/compile/{mod,ir,jit_lower}.rs`
+  split), the removed `std/proc/hatch` (now `proc/{gen,supervisor}`), and the
+  "net/supervisor are external packages" narrative (re-bundled in-tree by ADR-097).
+
+**Found but deferred — a real scheduler liveness bug: `(exit pid :kill)` cannot kill a
+process blocked in a native-nested `receive`** (i.e. a `receive` reached through `try`/
+`%isolate`/a HOF, so it blocks the worker on `mailbox.cv` instead of capturing). `exit`
+only wakes via `wake_parked` (the green-waiter slot, empty here) and never
+`cv.notify_one()`; and the block path (`wait_for_message`/`receive_match`) has no
+`kill_pending` check. Confirmed with a clean repro: a plain parked `receive` dies on
+`:kill`, but `(try (receive …) (catch …))` with an empty mailbox ignores the kill
+indefinitely. The `exit`/`scan_mailbox` comments claiming a "`receive_match` loop-top
+`kill_pending` check" are stale — no such check exists. **Not patched here** because a
+correct fix is cross-subsystem surgery in the runtime's most delicate code: there is no
+`Control::Kill` signal (the `Control` enum is `Suspend`-only), so unwinding a
+native-nested receive untrappably through `try` needs a new control signal handled at
+`vm_run_bc` + the tree-walker + `run_one`, plus waking the cv from `exit` — and it needs
+concurrency stress verification. Deserves its own focused, reviewed effort, not a rushed
+patch buried in a cleanup batch. Repro saved.
+
+Also surfaced, left as **language-design calls** (not bugs to patch unilaterally):
+number-shaped tokens `++`/`--`/`...`/`1+`/`2+3` raise "malformed number" instead of
+reading as symbols (the deliberate loud-failure policy over-captures conventional
+identifiers, and diverges from the tooling `scan_atom_kind` classifier); symbols/keywords
+built from arbitrary strings via `(symbol "…")` don't round-trip through `pr-str`/`read`
+(no `|…|` escaping); the JSON parser accepts `+5`/`01` (over-lenient vs strict JSON).
+
+## 2026-07-10 — House-cleaning, part 2: the deferred bug + all three design calls fixed
+
+Followed up the earlier sweep by fixing everything it had flagged-but-deferred.
+
+- **Scheduler: `(exit …)` can now kill a process blocked in a native-nested `receive`**
+  (behind a `try`/`%isolate`/HOF, the §7.4 worker-block carve-out) — **ADR-132**. Previously such a
+  process ignored the exit forever — `exit` only woke the green-waiter slot and the block
+  path had no kill check. Added a `Control::Kill` signal (the `Control` enum was
+  `Suspend`-only): `exit` now `cv.notify_one()`s a cv-blocked receiver (mirroring
+  `deliver`), `wait_for_message` bails when `kill_pending` is already set (closes the
+  lost-wakeup race — `request_kill` publishes the flag before taking the state lock),
+  and `receive_match` unwinds with `Control::Kill` on wake. It rides the error channel
+  untrappably (`try`/`%try`/`%isolate` re-raise `is_control`), and `vm_run_bc` turns it
+  into `VmOutcome::Killed`, retiring the process with the reason still in `state.kill`
+  (both hard `:kill` and soft exit; the reason distinguishes them). Verified: try-nested
+  + HOF-nested, hard + soft, normal-message-still-delivered, `after`-timeout-still-fires;
+  8/8 exit tests, 12× race-checked, GC-stress clean. Corrected the stale `exit`/
+  `scan_mailbox` comments that claimed a "`receive_match` loop-top kill check." Two
+  refinements surfaced running the full suite: (1) only the **top-level** body driver
+  (`capture`) may turn a `Control::Kill` into `VmOutcome::Killed` — a nested `vm_apply`
+  run (a `map`/`try` callback) re-raises so the kill keeps unwinding, else it hit the
+  "nested vm_apply does no kill capture" `unreachable!`; (2) the block-path kill check is
+  gated on `in_capture_run()` so it fires only inside a scheduler-run green process (where
+  a driver exists to convert it) — on the root / file-runner thread (e.g. the `nest test`
+  collector's native-nested receive under `%isolate`) a `Control::Kill` would just leak as
+  an empty-message error, and that thread isn't a killable process, so it keeps the old
+  block-and-ignore behaviour.
+- **Reader: `++`/`--`/`...`/`1+`/`2+3` read as symbols, not "malformed number" errors.**
+  `numeric_shape` now requires genuine numeric intent — a digit present AND every `+`/`-`
+  in a valid sign position (leading, or right after `e`/`E`) — so conventional identifiers
+  fall through to symbol while real typos (`1e`, `1.2.3`, `1e+`) still fail loudly. This
+  also reconciles the reader with the `scan_atom_kind` tooling classifier (they now agree).
+- **Printer/reader: `|…|` bar-quoted symbols + `:|…|` keywords** (**ADR-133**) — the round-trip form for
+  a symbol/keyword whose name isn't a clean token (`(symbol "a b")`, `(keyword "")`,
+  `(symbol "123")`, empty, `.`). `pr-str` emits bars only when needed (never for clean
+  names); `str`/`print` stay raw. A shared `scan_bar_body` on the scanner backs the reader,
+  the tooling CST, and `scan-tokens`, so all three agree on where a bar token runs.
+  `(read (pr-str x)) == x` now holds for every symbol/keyword. Documented in `language.md`.
+- **JSON: strict number grammar** (RFC 8259). `string->number` accepted a leading `+` and
+  leading zeros; `json--strict-number?` now validates the munged token against
+  `[-] (0|[1-9]digit*) (.digit+)? ([eE][+-]?digit+)?`, rejecting `+5`/`01`/`1.`/`.5`/`1e`
+  while keeping `0`/`-5`/`0.5`/`1e10`/`1E+3` and array/object contexts.
+
+All four shipped with regression tests (exit, reader-malformed round-trip, json strict,
+plus the existing tooling suites). `nest check` zero warnings, clippy clean. Recorded as
+**ADR-132** (`Control::Kill`) and **ADR-133** (`|…|` bar-quoting).
+
+A follow-up verification pass (adversarial review + fresh-territory hunt) turned up two
+more crash-on-malformed-input bugs, both fixed:
+- **`bundle.rs` `mounted()`** did an unchecked `u64` add/sub on the attacker-controlled
+  archive-len from a bundle footer — a crafted `alen` near `u64::MAX` overflowed (panic
+  under debug-assertions; a wrapped seek + ~16 EiB `vec!` capacity-overflow panic in
+  release) instead of the documented "degrade to not-a-bundle." Mirrored the sibling
+  `footer()`'s `checked_add`-then-guard. +unit test.
+- **`terminal.rs` `parse_hex_color`** sliced `&h[i..i+2]` on a 6-*byte* string, panicking
+  when a multi-byte char (`#a€bc`) put a non-char-boundary at the slice — reachable from a
+  user face map. Switched to byte indexing like the 3-nibble case (non-ASCII → clean None).
+  +unit test. (The dist `wire.rs`/`handshake.rs` framing + `bundle.rs` `footer()`/
+  `parse_archive` were audited and are sound: length caps, `checked_add`, constant-time
+  MAC, depth/peer caps.)

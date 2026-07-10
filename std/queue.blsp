@@ -92,14 +92,17 @@
   (count pq))
 
 (defn pq-insert (pq priority value)
-  "Return a priority queue with `[priority value]` inserted (min priority at front)."
+  "Return a priority queue with `[priority value]` inserted (min priority at front).
+Stable: among equal priorities, earlier inserts pop first (FIFO)."
   (pq--sorted-insert pq priority value))
 
 (defn pq--sorted-insert (pq pri val)
   (cond
     (nil? pq)
     (list [pri val])
-    (<= pri (first (first pq)))
+    ;; strict `<` so a new item stops *after* existing equal-priority items —
+    ;; keeping ties in insertion order (FIFO) rather than popping newest-first.
+    (< pri (first (first pq)))
     (cons [pri val] pq)
     else
     (cons (first pq) (pq--sorted-insert (rest pq) pri val))))

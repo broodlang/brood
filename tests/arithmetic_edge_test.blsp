@@ -69,3 +69,28 @@
     (assert= (quot -17 5) -3)
     (assert= (rem -17 5) -2)
     (assert= (rem 17 -5) 2)))
+
+(describe "range index math near i64 bounds (no host overflow panic)"
+  ;; `range-len` is O(1) and once overflowed its i64 span; the range walkers stepped
+  ;; the counter with an unguarded `i += step` that overflowed on the final step.
+  (test "count of a full 0..MAX range is MAX (O(1), no overflow)"
+    (assert= (count (range I64-MAX)) I64-MAX))
+  (test "count of a range wider than i64 saturates instead of panicking"
+    (assert= (count (range -5000000000000000000 5000000000000000000)) I64-MAX))
+  (test "reduce over a range ending at MAX steps past the top without overflow"
+    ;; two elements: MAX-1000 and (MAX-1000)+1000 would be MAX (excluded), so just one
+    (assert= (reduce + 0 (range (- I64-MAX 1) I64-MAX 1000)) (- I64-MAX 1)))
+  (test "join over a range ending at MAX doesn't overflow the walker"
+    (assert= (join "," (range (- I64-MAX 1) I64-MAX 1000)) (str (- I64-MAX 1))))
+  (test "materialising a range near MAX terminates cleanly"
+    (assert= (into [] (range (- I64-MAX 2) I64-MAX 1)) [(- I64-MAX 2) (- I64-MAX 1)])))
+
+(describe "int->char guards the codepoint range (no silent truncation)"
+  (test "a valid codepoint round-trips"
+    (assert= (int->char 65) "A"))
+  (test "a value above u32::MAX raises instead of truncating to an aliased char"
+    (assert-error (int->char (+ 65 4294967296))))
+  (test "a value above the Unicode max raises"
+    (assert-error (int->char 1114112)))
+  (test "a negative codepoint raises"
+    (assert-error (int->char -1))))

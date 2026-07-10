@@ -419,7 +419,24 @@
     (let (b (buffer-marker-set (make-buffer "abcdef") :m 5))
       (assert= (buffer-marker (delete-char (goto-char b 0) 6) :m) 0)))  ; whole buffer gone
   (test "a marker-less buffer stays marker-less across edits (no :markers key added)"
-    (assert= (buffer-markers (insert (make-buffer "abc") "x")) {})))
+    (assert= (buffer-markers (insert (make-buffer "abc") "x")) {}))
+  (test "markers survive undo — reverting an insert returns the marker to its old spot"
+    (let (b (buffer-marker-set (make-buffer "hello") :m 3)   ; the 2nd 'l'
+          ins (insert (goto-char b 0) "XY"))                  ; "XYhello", :m -> 5
+      (assert= (buffer-marker ins :m) 5)
+      (assert= (buffer-text (undo ins)) "hello")
+      (assert= (buffer-marker (undo ins) :m) 3)))
+  (test "markers survive redo — undo then redo restores the shifted position"
+    (let (b (buffer-marker-set (make-buffer "hello") :m 3)
+          ins (insert (goto-char b 0) "XY")
+          redone (undo (undo ins)))                           ; undo, then undo-the-undo = redo
+      (assert= (buffer-text redone) "XYhello")
+      (assert= (buffer-marker redone :m) 5)))
+  (test "undo of a delete restores a marker the delete had collapsed"
+    (let (b (buffer-marker-set (make-buffer "hello world") :m 8)  ; "r"
+          del (delete-char (goto-char b 6) 4))                     ; delete [6,10) -> :m collapses to 6
+      (assert= (buffer-marker del :m) 6)
+      (assert= (buffer-marker (undo del) :m) 8))))
 
 ;; The push side of buffers-as-processes: subscribers get the new projection on every edit.
 (defn buf-relay-loop (bp tag report)

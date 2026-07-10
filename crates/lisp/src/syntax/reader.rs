@@ -201,7 +201,38 @@ impl<'a> Parser<'a> {
             }
             '"' => self.read_string(),
             '#' => self.read_hash(),
+            // `|…|` bar-quoted symbol, and `:|…|` bar-quoted keyword — the round-trip
+            // form the printer emits for a symbol/keyword whose name isn't a clean
+            // token (holds whitespace/delimiters, is empty, or would read back as a
+            // number/keyword/`nil`). A bare `:` before `|` is the keyword marker.
+            '|' => self.read_bar_symbol(false),
+            ':' if self.s.peek_after() == Some('|') => self.read_bar_symbol(true),
             _ => self.read_atom(),
+        }
+    }
+
+    /// Read a `|…|` bar-quoted symbol (or, when `keyword`, a `:|…|` keyword). `pos` is
+    /// on the `|` (or the `:` for a keyword). The body decodes `\|`/`\\`; an unclosed
+    /// bar is a clean parse error.
+    fn read_bar_symbol(&mut self, keyword: bool) -> Result<Value, LispError> {
+        let start = self.s.pos();
+        if keyword {
+            self.s.bump(); // ':'
+        }
+        self.s.bump(); // opening '|'
+        let mut name = String::new();
+        match self.s.scan_bar_body(Some(&mut name)) {
+            crate::syntax::scanner::BarScan::Closed => {
+                if keyword {
+                    Ok(value::kw(&name))
+                } else {
+                    Ok(value::sym(&name))
+                }
+            }
+            crate::syntax::scanner::BarScan::Unterminated => Err(self.err_at(
+                self.s.pos_at(start),
+                "unterminated |…| bar-quoted symbol".to_string(),
+            )),
         }
     }
 

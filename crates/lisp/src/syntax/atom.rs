@@ -124,9 +124,12 @@ pub fn is_delimiter(c: char) -> bool {
 
 /// The numeric shape of a token, computed in one pass over its characters.
 struct NumericShape {
-    /// Passes the cheap pre-filter for `f64::parse` — starts with a digit, or a
-    /// sign/dot followed by more, and holds only number-ish characters. Plain
-    /// symbols like `-` or `...` are *not* numeric.
+    /// Passes the cheap pre-filter for `f64::parse` — genuine numeric intent: it
+    /// leads with a digit / sign / dot, contains **at least one digit**, holds only
+    /// number-ish characters, and every `+`/`-` sits in a valid sign position
+    /// (leading, or right after an `e`/`E`). Conventional identifiers like `-`,
+    /// `++`, `--`, `...`, `1+`, `2+3` are *not* numeric — they read as symbols; only
+    /// a real (possibly-malformed) number like `1e`/`1.2.3`/`1e+` is `numeric`.
     numeric: bool,
     /// Has a `.`, `e`, or `E` — i.e. a fractional or exponent part, so it's
     /// float-shaped rather than integer-shaped. Only meaningful when `numeric`.
@@ -153,16 +156,28 @@ fn numeric_shape(token: &str) -> NumericShape {
     let mut numeric = first_ok;
     // A leading `.` is itself a fractional marker.
     let mut has_fraction_or_exp = first == '.';
-    // The remaining chars must all be number-ish; note any fraction/exponent.
+    // Genuine numeric intent needs a digit somewhere — else `++`/`--`/`...`/`.e`/`+.`
+    // are symbols, not malformed numbers (the leading sign/dot alone doesn't make a
+    // number). And a `+`/`-` past the first char is only a number character right
+    // after an exponent marker (`1e+5`); anywhere else (`1+`, `2+3`, `1-`) it means
+    // the token is a symbol. `prev` tracks the preceding char to enforce that.
+    let mut has_digit = first.is_ascii_digit();
+    let mut prev = first;
     for c in chars {
         match c {
-            '0'..='9' | '-' | '+' => {}
+            '0'..='9' => has_digit = true,
+            '+' | '-' => {
+                if prev != 'e' && prev != 'E' {
+                    numeric = false;
+                }
+            }
             '.' | 'e' | 'E' => has_fraction_or_exp = true,
             _ => numeric = false,
         }
+        prev = c;
     }
     NumericShape {
-        numeric,
+        numeric: numeric && has_digit,
         has_fraction_or_exp,
     }
 }

@@ -2389,10 +2389,14 @@ impl Heap {
     /// The number of elements a range yields. O(1).
     pub fn range_len(&self, id: VecId) -> i64 {
         let (lo, hi, step) = self.range_parts(id);
-        // step is non-zero and the range is non-empty by construction.
+        // step is non-zero and the range is non-empty by construction. Compute in
+        // i128: a wide range (e.g. i64::MIN..i64::MAX) overflows an i64 span even
+        // though its element count is meaningful. Saturate on the way back — a range
+        // longer than i64::MAX can't be materialised anyway.
+        let (lo, hi, step) = (lo as i128, hi as i128, step as i128);
         let span = if step > 0 { hi - lo } else { lo - hi };
         let mag = step.abs();
-        (span + mag - 1) / mag
+        (((span + mag - 1) / mag).min(i64::MAX as i128)) as i64
     }
 
     /// Materialise a range's elements into a `Vec<Value>` of `Int`s — the slow
@@ -2403,7 +2407,11 @@ impl Heap {
         let mut i = lo;
         while if step > 0 { i < hi } else { i > hi } {
             out.push(Value::int(i));
-            i += step;
+            // The final step near i64::MIN/MAX would overflow; the loop is done anyway.
+            i = match i.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
         out
     }
@@ -4266,7 +4274,10 @@ impl Heap {
                 let mut i = lo;
                 while if step > 0 { i < hi } else { i > hi } {
                     self.hash_value_into(Value::int(i), h);
-                    i += step;
+                    i = match i.checked_add(step) {
+                        Some(v) => v,
+                        None => break,
+                    };
                 }
                 0xFFu8.hash(h);
                 self.hash_value_into(Value::nil(), h);

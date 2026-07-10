@@ -15,6 +15,11 @@
 (defn ex-spin () (ex-spin))  ; tight CPU loop — only a hard :kill (preempt) catches it
 (defn ex-park () (receive (x x)))  ; parks forever on an empty mailbox
 (defn ex-echo () (receive (m (ex-echo))))  ; a receive loop (one iteration per message)
+;; native-nested receives — a `receive` reached through a native frame (`try`/HOF), so
+;; it BLOCKS the worker on the mailbox condvar instead of capturing (§7.4). An exit must
+;; still reach it (unwind with `Control::Kill`); the `catch` must NOT swallow the signal.
+(defn ex-park-try () (try (receive (x x)) (catch e :caught)))
+(defn ex-park-map () (map (fn (_) (receive (x x))) [1]))
 
 (defn ex-down-reason (p m)
   ; wait for p's :down, return its reason. Liveness — every caller asserts a real
@@ -49,6 +54,25 @@
       (assert= (ex-down-reason p m) :kill)
       (exit p :kill)  ; already dead — must not error or hang
       (is true))))
+
+(describe "exit reaches a native-nested receive (the worker-block path)"
+  ;; The reason arriving as the :down (not :normal, not :caught) proves the exit
+  ;; reached the blocked receive AND the enclosing `catch` did not swallow it.
+  (test "hard :kill reaches a receive nested in try"
+    (let (p (spawn (ex-park-try)) m (monitor p))
+      (sleep 30)
+      (exit p :kill)
+      (assert= (ex-down-reason p m) :kill)))
+  (test "soft exit reaches a receive nested in try, with its reason (catch does not run)"
+    (let (p (spawn (ex-park-try)) m (monitor p))
+      (sleep 30)
+      (exit p :shutdown)
+      (assert= (ex-down-reason p m) :shutdown)))
+  (test "hard :kill reaches a receive nested in a HOF callback"
+    (let (p (spawn (ex-park-map)) m (monitor p))
+      (sleep 30)
+      (exit p :kill)
+      (assert= (ex-down-reason p m) :kill))))
 
 ;; ---- mass force-unwind: kill many parked processes concurrently --------------
 (defn ex-spawn-parked (n acc)

@@ -940,17 +940,30 @@ pub fn exit(pid: u64, reason: Message) {
         None => return, // already dead / never existed
     };
     mailbox.request_kill(reason);
-    // If the target is parked in `receive` it isn't running, so it'll never reach a
-    // `tick` (preempt) or re-enter `receive` on its own. Wake it by re-queueing it —
-    // exactly how `send`/the timer wake a parked process — and it self-kills at
-    // `receive_match`'s loop-top `kill_pending` check, on whichever worker runs it.
-    // Taking the waiter (via the shared `wake_parked` — the same step
-    // `deliver`/`wake_for_timeout` use) under the state lock serialises with
-    // `run_one`'s park: either we take an already-parked process here, or `run_one`
-    // sees `kill_pending` and retires it instead of parking (exactly one wins).
+    // If the target is waiting in `receive` it isn't running, so it'll never reach a
+    // `tick` (preempt) or re-enter `receive` on its own — we must rouse it. Two waiting
+    // shapes, woken the same way `deliver` wakes them for a message:
+    //   * a **green waiter** (a captured, parked continuation): `wake_parked` re-queues
+    //     it, and `park_on_receive` retires it on `kill_pending` when it runs.
+    //   * a **cv-blocked** native-nested `receive` (or the root thread): no green waiter,
+    //     so `wake_parked` is `None` and we `cv.notify_one()` (the `else` below); it wakes
+    //     in `wait_for_message`, and `receive_match` unwinds with `Control::Kill`.
+    // Taking the waiter under the state lock serialises with `run_one`'s park: either we
+    // take an already-parked process here, or `run_one` sees `kill_pending` and retires it
+    // instead of parking (exactly one wins). `request_kill` publishes `kill_pending`
+    // *before* this lock, so a `wait_for_message` that locks after us sees it and won't
+    // block through a lost `notify`.
     let parked = wake_parked(&mut crate::core::sync::lock(&mailbox.state));
     if let Some(proc) = parked {
         wake_enqueue(proc); // a wake (to deliver the kill) — may migrate the process
+    } else {
+        // No green waiter to re-queue — the target may instead be **blocked on the
+        // mailbox condvar** in a native-nested `receive` (behind a `try`/`%isolate`/HOF,
+        // the §7.4 carve-out) or the root thread. Notify the cv exactly as `deliver`
+        // does for a message, so the blocked receiver wakes, sees `kill_pending`, and
+        // unwinds with `Control::Kill` (`wait_for_message` / `receive_match`). Without
+        // this the kill would sit until some unrelated message happened to arrive.
+        mailbox.cv.notify_one();
     }
 }
 

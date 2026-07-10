@@ -85,7 +85,15 @@
   (test "already clean"
     (assert= "a/b/c" (path/normalize "a/b/c")))
   (test "empty becomes ."
-    (assert= "." (path/normalize "a/.."))))
+    (assert= "." (path/normalize "a/..")))
+  (test ".. above an absolute root is discarded (no parent of /)"
+    (assert= "/" (path/normalize "/.."))
+    (assert= "/" (path/normalize "/a/../.."))
+    (assert= "/a" (path/normalize "/../../a"))
+    (assert= "/" (path/normalize "/a/b/../../..")))
+  (test "a relative path still keeps leading .. (only the absolute root clamps)"
+    (assert= ".." (path/normalize "a/../.."))
+    (assert= "../x" (path/normalize "a/../../x"))))
 
 (describe "path/relative-to"
   (test "child path"

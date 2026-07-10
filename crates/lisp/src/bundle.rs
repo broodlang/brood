@@ -168,12 +168,18 @@ pub fn mounted() -> &'static Option<Bundle> {
         let mut foot = [0u8; FOOTER_LEN];
         f.read_exact(&mut foot).ok()?;
         let alen = decode_footer(&foot)?;
-        if len < FOOTER_LEN as u64 + alen {
+        // `alen` is attacker-controlled (the last 8 footer bytes of a file handed to
+        // us). Compute the total with `checked_add` and guard `len < total` BEFORE the
+        // subtraction — exactly as `footer()` does — so a crafted `alen` near `u64::MAX`
+        // degrades to "not a bundle" instead of overflowing the add / underflowing the
+        // sub (a panic under debug-assertions, a wrapped giant seek + ~16 EiB `vec!`
+        // capacity-overflow panic in release). The module contract is graceful, not panic.
+        let total = (FOOTER_LEN as u64).checked_add(alen)?;
+        if len < total {
             return None;
         }
         // Real bundle — read just the archive bytes (not the base binary).
-        f.seek(SeekFrom::Start(len - FOOTER_LEN as u64 - alen))
-            .ok()?;
+        f.seek(SeekFrom::Start(len - total)).ok()?;
         let mut archive = vec![0u8; alen as usize];
         f.read_exact(&mut archive).ok()?;
         parse_archive(&archive)
@@ -253,6 +259,19 @@ mod tests {
     fn plain_binary_is_not_a_bundle() {
         assert!(footer(b"not a bundle, just ordinary bytes here").is_none());
         assert!(footer(b"tiny").is_none());
+    }
+
+    #[test]
+    fn crafted_overflow_footer_degrades_gracefully() {
+        // A valid magic+version but an archive-len near u64::MAX must not overflow the
+        // footer math — it degrades to "not a bundle", never a panic / 16-EiB `vec!`
+        // capacity-overflow. `mounted()` shares this `checked_add`-then-guard shape.
+        let mut file = b"some base binary bytes".to_vec();
+        file.extend_from_slice(MAGIC);
+        file.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        // alen so large that `FOOTER_LEN + alen` overflows u64.
+        file.extend_from_slice(&(u64::MAX - 3).to_le_bytes());
+        assert!(footer(&file).is_none());
     }
 
     #[test]

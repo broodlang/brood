@@ -64,10 +64,10 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push('"');
         }
         ValueRef::Float(f) => out.push_str(&format_float(f)),
-        ValueRef::Sym(s) => out.push_str(symbol_name_ref(s)),
+        ValueRef::Sym(s) => write_symbol(out, symbol_name_ref(s), readable, false),
         ValueRef::Keyword(s) => {
             out.push(':');
-            out.push_str(symbol_name_ref(s));
+            write_symbol(out, symbol_name_ref(s), readable, true);
         }
         ValueRef::Str(id) => {
             let s = heap.string(id);
@@ -255,6 +255,51 @@ fn format_float(f: f64) -> String {
         s
     } else {
         format!("{}.0", s)
+    }
+}
+
+/// Emit a symbol/keyword `name` (the keyword's `:` is written by the caller),
+/// bar-quoting it as `|…|` when `readable` and the bare name wouldn't read back as
+/// the same symbol/keyword. Non-readable output (`print`/`str`) always emits the raw
+/// name — bars are a *reader* round-trip device, not for human display.
+fn write_symbol(out: &mut String, name: &str, readable: bool, keyword: bool) {
+    if readable && symbol_needs_bars(name, keyword) {
+        out.push('|');
+        for c in name.chars() {
+            if c == '|' || c == '\\' {
+                out.push('\\'); // the two chars the bar reader treats as escapes
+            }
+            out.push(c);
+        }
+        out.push('|');
+    } else {
+        out.push_str(name);
+    }
+}
+
+/// Would the bare `name` fail to read back as this same symbol/keyword? Symbols and
+/// keywords built from arbitrary strings (`(symbol "a b")`, `(keyword "")`) can hold
+/// spellings that aren't a clean atom token — those need `|…|` bars to round-trip.
+fn symbol_needs_bars(name: &str, keyword: bool) -> bool {
+    use crate::syntax::atom::{classify, is_delimiter, AtomKind};
+    // Not a single clean atom token: empty, or holding whitespace / a delimiter / the
+    // bar-escape chars themselves. True for both symbols and keywords.
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|c| is_delimiter(c) || c == '|' || c == '\\')
+    {
+        return true;
+    }
+    if keyword {
+        // `:name` reads back as this keyword for any clean, non-empty name — even a
+        // numeric-looking one (`:123` is the keyword `123`) — so nothing more to check.
+        false
+    } else {
+        // A lone `.` is the dotted-pair separator inside a list, not a symbol; and a
+        // name that classifies as anything but a plain symbol (a number, `nil`/`true`/
+        // `false`/`inf`/`nan`, or a `:`-led keyword) would read back as that value.
+        name == "." || !matches!(classify(name), AtomKind::Symbol)
     }
 }
 

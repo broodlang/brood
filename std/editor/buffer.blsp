@@ -343,8 +343,13 @@ strictly before `before`, or nil if there is none. The backward counterpart of
 ;; A snapshot excludes the history fields so snapshots don't nest and grow geometrically.
 
 (defn buffer--snapshot (buf)
-  "The restorable edit state of `buf` — just `{:rope :point :mark}` (no history)."
-  {:rope (get buf :rope) :point (get buf :point) :mark (get buf :mark)})
+  "The restorable edit state of `buf` — `{:rope :point :mark}` (no history), plus `:markers`
+when the buffer has any. Markers are snapshot-restored like `point`/`mark` (not re-derived),
+so undo/redo return them to their recorded positions instead of stranding them at the
+post-edit spot. A marker-less buffer omits the key, staying identical to before markers."
+  (let (base {:rope (get buf :rope) :point (get buf :point) :mark (get buf :mark)}
+        m (get buf :markers))
+    (if m (assoc base :markers m) base)))
 
 (defn amalgamate-undo (buf)
   "Make the **next** editing op amalgamate into the current undo group rather than start
@@ -377,8 +382,14 @@ bound — editing ops on the result record nothing, so undo stays a no-op. Like 
   (assoc buf :undo-disabled true :undo () :pending-undo ()))
 
 (defn buffer--restore (buf snap)
-  "Restore the `{:rope :point :mark}` of `snap` into `buf`, keeping `buf`'s history."
-  (assoc buf :rope (get snap :rope) :point (get snap :point) :mark (get snap :mark)))
+  "Restore the `{:rope :point :mark}` (and `:markers`) of `snap` into `buf`, keeping `buf`'s
+history. Markers are restored to the snapshot's recorded positions; a snapshot with no
+markers drops the key so a marker-less state stays marker-less."
+  (let (b (assoc buf :rope (get snap :rope) :point (get snap :point) :mark (get snap :mark))
+        m (get snap :markers))
+    (cond m (assoc b :markers m)
+          (get b :markers) (dissoc b :markers)
+          :else b)))
 
 (defn undo-start (buf)
   "Begin a fresh undo run: point `:pending-undo` at the whole `:undo` history. Because
