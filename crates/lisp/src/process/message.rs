@@ -523,3 +523,134 @@ fn closure_from_message(heap: &mut Heap, c: &ClosureMsg) -> Value {
     });
     Value::func(id)
 }
+
+// ---- inbound IO chunk decoding (proc/net readers) ----
+
+/// Decode one inbound IO chunk into the payload to deliver, carrying an incomplete
+/// trailing UTF-8 sequence across reads so a multi-byte character split at a
+/// read-buffer (64 KiB) boundary is not mangled.
+///
+/// - **Binary mode** (`binary == true`): byte-faithful. Any bytes held in `carry`
+///   from a prior text-mode read are flushed *ahead of* `chunk` into one `bytes`
+///   payload, so flipping to binary mid-stream never drops or reorders bytes.
+/// - **Text mode** (`binary == false`): `carry ++ chunk` is split at the longest
+///   valid-UTF-8 prefix. The valid prefix is delivered as a string; a genuinely
+///   invalid byte in the *middle* is passed through `from_utf8_lossy` (→ U+FFFD),
+///   exactly as the old per-chunk decode did; only an *incomplete trailing*
+///   sequence — a valid multi-byte start whose continuation bytes haven't arrived
+///   yet — is held back in `carry` for the next read. That carry is bounded to ≤3
+///   bytes: a lone continuation or over-long lead byte is a hard error
+///   (`error_len().is_some()`), not "incomplete", so it is emitted immediately
+///   rather than accumulated (no unbounded-growth DoS from a stream of `0x80`s).
+///
+/// Returns `None` when a text-mode chunk contributed only continuation bytes to an
+/// as-yet-incomplete character — nothing to deliver yet.
+pub(crate) fn chunk_payload(carry: &mut Vec<u8>, chunk: &[u8], binary: bool) -> Option<Message> {
+    if binary {
+        if carry.is_empty() {
+            return Some(Message::Bytes(SharedBlob::new(chunk)));
+        }
+        let mut v = std::mem::take(carry);
+        v.extend_from_slice(chunk);
+        return Some(Message::Bytes(SharedBlob::new(&v)));
+    }
+    let mut work = std::mem::take(carry);
+    work.extend_from_slice(chunk);
+    let valid = match std::str::from_utf8(&work) {
+        Ok(_) => work.len(),
+        // Incomplete trailing sequence → carry the tail, deliver the valid prefix.
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        // A genuine invalid sequence in the middle → deliver the whole chunk lossily
+        // (as the previous per-chunk `from_utf8_lossy` did) and carry nothing.
+        Err(_) => work.len(),
+    };
+    *carry = work.split_off(valid);
+    (!work.is_empty()).then(|| Message::Str(String::from_utf8_lossy(&work).into_owned()))
+}
+
+/// Flush any bytes still held in `carry` at end-of-stream. In text mode a leftover
+/// carry is a genuinely truncated final character (the stream ended mid-sequence),
+/// so it is delivered lossily (→ U+FFFD). Binary mode never carries, so this is a
+/// no-op there. Returns `None` when nothing is buffered.
+pub(crate) fn chunk_flush(carry: &mut Vec<u8>) -> Option<Message> {
+    (!carry.is_empty()).then(|| {
+        let v = std::mem::take(carry);
+        Message::Str(String::from_utf8_lossy(&v).into_owned())
+    })
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::{chunk_flush, chunk_payload, Message};
+
+    /// Pull the delivered string out of a text-mode payload.
+    fn text(m: Option<Message>) -> Option<String> {
+        m.map(|m| match m {
+            Message::Str(s) => s,
+            _ => panic!("expected a Str payload"),
+        })
+    }
+
+    /// Pull the delivered bytes out of a binary-mode payload.
+    fn raw(m: Option<Message>) -> Vec<u8> {
+        match m {
+            Some(Message::Bytes(b)) => b.as_bytes().to_vec(),
+            _ => panic!("expected a Bytes payload"),
+        }
+    }
+
+    #[test]
+    fn ascii_passes_straight_through() {
+        let mut carry = Vec::new();
+        assert_eq!(text(chunk_payload(&mut carry, b"hello", false)).as_deref(), Some("hello"));
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn a_multibyte_char_split_across_two_reads_is_reassembled() {
+        // "é" is 0xC3 0xA9; split it across the chunk boundary.
+        let mut carry = Vec::new();
+        // First read ends mid-character: deliver the valid prefix, carry the tail.
+        assert_eq!(text(chunk_payload(&mut carry, b"ab\xc3", false)).as_deref(), Some("ab"));
+        assert_eq!(carry, vec![0xc3]);
+        // Second read completes it: no U+FFFD anywhere.
+        assert_eq!(text(chunk_payload(&mut carry, b"\xa9cd", false)).as_deref(), Some("écd"));
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn a_4byte_emoji_dribbled_one_byte_at_a_time_survives() {
+        // "🦀" (U+1F980) = F0 9F A6 80.
+        let mut carry = Vec::new();
+        assert_eq!(text(chunk_payload(&mut carry, b"\xf0", false)), None);
+        assert_eq!(text(chunk_payload(&mut carry, b"\x9f", false)), None);
+        assert_eq!(text(chunk_payload(&mut carry, b"\xa6", false)), None);
+        assert_eq!(carry.len(), 3); // carry never exceeds 3 bytes
+        assert_eq!(text(chunk_payload(&mut carry, b"\x80", false)).as_deref(), Some("🦀"));
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn a_genuinely_invalid_byte_is_lossy_now_not_carried_forever() {
+        // 0xFF is never a valid UTF-8 byte: replace it immediately, don't accumulate.
+        let mut carry = Vec::new();
+        assert_eq!(text(chunk_payload(&mut carry, b"a\xffb", false)).as_deref(), Some("a\u{fffd}b"));
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn binary_mode_is_byte_faithful_and_flushes_a_text_carry() {
+        let mut carry = vec![0xc3]; // a partial char left over from text mode
+        // Flipping to binary flushes the carry ahead of the new bytes, verbatim.
+        assert_eq!(raw(chunk_payload(&mut carry, &[0x28, 0xff], true)), vec![0xc3, 0x28, 0xff]);
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn flush_delivers_a_truncated_final_char_lossily() {
+        let mut carry = vec![0xf0, 0x9f]; // stream ended mid-emoji
+        assert_eq!(text(chunk_flush(&mut carry)).as_deref(), Some("\u{fffd}"));
+        assert!(carry.is_empty());
+        assert!(chunk_flush(&mut carry).is_none()); // nothing left
+    }
+}

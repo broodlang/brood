@@ -317,20 +317,17 @@ Memory-safety / host-panic fixes first, then DoS hardening, then cleanup.
   only): depth counter for `expr_ty`/`check_into`, `catch_unwind` around the
   whole worker `run_one`, RAII guard for `check_file`'s panic path,
   `net.rs` binary-safe reads (blocked on a bytes Value type).
-- **Byte-faithful I/O for `proc`/`net` (a bytes Value kind, or a per-spawn bytes
-  mode).** Both the subprocess (`proc.rs`, ADR-104) and socket (`net.rs`, ADR-062)
-  readers deliver each chunk via `from_utf8_lossy`, so a multi-byte char split across
-  a read-buffer (64 KiB) boundary is mangled — and, because that changes the byte
-  count, it can desync a byte-length-framed protocol for a single frame larger than
-  one read. Surfaced concretely by myedit's LSP client (`src/lsp.blsp`): it frames
-  byte-accurately with `string->utf8-bytes`, so it's correct for the common
-  small/medium response (rust-analyzer completions work end to end), but a *fully*
-  faithful client wants the reader to hand up **raw bytes**, not a lossy string. The
-  clean fix reuses the existing byte-vector convention (`string->utf8-bytes` /
-  `utf8-bytes->string`, vectors of 0–255): deliver `[:proc h bytevec]` (a per-spawn
-  bytes mode) rather than introducing a whole bytes Value kind. Deferred until a
-  byte-framed protocol needs >64 KiB faithfulness; the common case is unaffected.
-  **(In progress 2026-07-10 — picked up as the first stability item below.)**
+- ✅ **Byte-faithful I/O for `proc`/`net`** — **done** (two parts). (1) A
+  first-class **`bytes` value kind** + `#b"…"` literals + Elixir-style byte matching
+  shipped 2026-06-28 (commits `b84e223`/`733f00c`); `tcp-set-binary`/`proc-set-binary`
+  switch a stream to **binary mode**, delivering inbound data as a byte-faithful
+  `bytes` value and accepting one on send — the "hand up raw bytes" fix this item
+  asked for. (2) The **text-mode** residual (a valid multi-byte UTF-8 char split
+  across a 64 KiB read boundary was mangled by a per-chunk `from_utf8_lossy`) was
+  fixed 2026-07-10: every reader (plaintext socket, TLS client, TLS server, proc
+  stdout/stderr) now carries an incomplete trailing UTF-8 sequence across reads
+  (`process::chunk_payload`), so valid UTF-8 reassembles exactly regardless of
+  chunking, and only a genuinely non-UTF-8 run becomes U+FFFD.
 
 ### Stability backlog (2026-07-10)
 
@@ -339,10 +336,9 @@ A stability sweep (roadmap + devlog + source) found the core is clean — zero
 (scheduler races, use-after-GC, the multigen GC hang) all root-caused and closed.
 The remaining items are robustness, not open bugs:
 
-1. 🟡 **Byte-faithful I/O for `proc`/`net`** — the one concrete correctness bug
-   (multi-byte char split across a 64 KiB read boundary is mangled by
-   `from_utf8_lossy`, can desync a length-framed protocol). Design + workaround
-   above. *In progress.*
+1. ✅ **Byte-faithful I/O for `proc`/`net`** — **done** (see the resolved item
+   above): the `bytes` value + binary mode (2026-06-28) plus the text-mode
+   UTF-8 read-boundary carry fix (2026-07-10) close it in both directions.
 2. ⬜ **Continuous fuzzing (`cargo-fuzz`).** The recent hardening crashes
    (`bundle.rs` u64 overflow, `terminal.rs` `parse_hex_color` non-char-boundary
    slice, reader/JSON grammar gaps) were all found by *hand-hunting* malformed

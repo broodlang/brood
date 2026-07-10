@@ -19,24 +19,21 @@
 //! runtime's processes; not node-portable.
 //!
 //! **TEXT MODE (default) vs BINARY MODE.** A stream is created in *text mode*:
-//! inbound bytes are delivered as a Brood string (`Message::Str`) via
-//! `from_utf8_lossy`, so any byte sequence that isn't valid UTF-8 is **silently
-//! corrupted** (each bad run becomes U+FFFD) and outbound `tcp-send` writes the
-//! string's UTF-8. That's right for text protocols (HTTP headers, line protocols;
-//! the distributed-node handshake is on its *own* codec) and unsafe for binary
-//! ones (raw images, compressed/encrypted streams, length-prefixed binary framing).
+//! inbound bytes are delivered as a Brood string (`Message::Str`). Valid UTF-8 is
+//! preserved exactly — the reader carries an incomplete trailing sequence across
+//! reads (via [`chunk_payload`]), so a multi-byte character straddling a 64 KiB
+//! read boundary is reassembled rather than mangled — and only a genuinely
+//! non-UTF-8 byte run becomes U+FFFD. Outbound `tcp-send` writes the string's
+//! UTF-8. That's right for text protocols (HTTP headers, line protocols; the
+//! distributed-node handshake is on its *own* codec) and lossy for binary ones
+//! (raw images, compressed/encrypted streams, length-prefixed binary framing).
 //!
 //! `tcp-set-binary` switches a socket to *binary mode*, which is byte-faithful in
-//! both directions without a new value kind: Brood strings are sequences of Unicode
-//! codepoints, so we use the **Latin-1 subset** (codepoints 0–255) as a one-byte-
-//! per-codepoint byte carrier. Inbound, each received byte becomes codepoint b
-//! (no UTF-8 interpretation); outbound, `tcp-send` writes each codepoint 0–255 as
-//! one raw byte (and errors on a codepoint > 255). That's enough for WebSocket
-//! framing (control bytes ≥ 0x80, length-prefixed binary frames): the caller
-//! UTF-8-encodes any text payload into this byte-string form itself. A general
-//! bytes/blob value kind is still a separate, larger language-surface decision
-//! (see CLAUDE.md / `docs/types.md`); this is the pragmatic seam until then.
-//! See `tcp_data_msg` and `set_binary`.
+//! both directions: inbound `[:tcp …]` data is a first-class **`bytes`** value (no
+//! UTF-8 interpretation), and outbound `tcp-send` accepts a `bytes` value (or a
+//! text-mode string). Enough for WebSocket framing, database wire protocols, or any
+//! length-prefixed binary stream. See `tcp_data_msg`, `set_binary`, and the `bytes`
+//! type.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -53,7 +50,9 @@ use rustls::{
 };
 
 use crate::core::value;
-use crate::process::{spawn_io_source, MailboxSink, Message, SubscriberHandle};
+use crate::process::{
+    chunk_flush, chunk_payload, spawn_io_source, MailboxSink, Message, SubscriberHandle,
+};
 
 enum Sock {
     /// A connected stream — the write/close handle, plus the reader's retarget
@@ -194,23 +193,12 @@ fn shutdown_sock(sock: Option<Sock>) {
 
 // ---- message builders (off-heap; symbols are a global interner) ----
 
-/// Build the `[:tcp sock data]` message for an inbound chunk.
-///
-/// BINARY-UNSAFE: `data` is forced through `from_utf8_lossy`, so any non-UTF-8
-/// bytes are **silently replaced** with U+FFFD — the delivered string is *not*
-/// byte-faithful for binary payloads. This is a known limitation of the text-only
-/// socket mechanism (see the module doc): Brood has no arbitrary-bytes value kind
-/// to carry raw bytes, and adding one is a language-surface decision, not a fix
-/// to make here. Lossless for valid UTF-8 (text protocols); lossy otherwise.
-fn tcp_data_msg(id: u64, bytes: &[u8], binary: bool) -> Message {
-    let payload = if binary {
-        // Binary mode: a first-class `bytes` value — byte-faithful, no Latin-1
-        // string carrier. `tcp-send` accepts a `bytes` value the same way.
-        Message::Bytes(crate::core::blob::SharedBlob::new(bytes))
-    } else {
-        // Text mode (default): a UTF-8 string, lossy for non-UTF-8 (see module doc).
-        Message::Str(String::from_utf8_lossy(bytes).into_owned())
-    };
+/// Wrap a decoded [`chunk_payload`] result in the `[:tcp sock data]` message. The
+/// text/binary decode and the UTF-8 carry-across-reads live in `chunk_payload`;
+/// this just tags the payload with the socket. Text mode delivers a UTF-8 string
+/// (byte-faithful for valid UTF-8, U+FFFD only for a genuinely non-UTF-8 run);
+/// binary mode delivers a first-class `bytes` value.
+fn tcp_data_msg(id: u64, payload: Message) -> Message {
     Message::Vector(vec![
         Message::Keyword(value::intern("tcp")),
         Message::Socket(id),
@@ -247,13 +235,22 @@ fn start_reader(
     spawn_io_source(subscriber, "brood-tcp-reader", move |sink| {
         let mut rd = reader;
         let mut buf = [0u8; 65536];
+        let mut carry: Vec<u8> = Vec::new();
         loop {
             match rd.read(&mut buf) {
                 Ok(0) => {
+                    if let Some(p) = chunk_flush(&mut carry) {
+                        sink.emit(tcp_data_msg(id, p));
+                    }
                     sink.emit(tcp_closed_msg(id));
                     break;
                 }
-                Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n], binary.load(Ordering::Acquire))),
+                Ok(n) => {
+                    let bin = binary.load(Ordering::Acquire);
+                    if let Some(p) = chunk_payload(&mut carry, &buf[..n], bin) {
+                        sink.emit(tcp_data_msg(id, p));
+                    }
+                }
                 Err(_) => {
                     sink.emit(tcp_closed_msg(id));
                     break;
@@ -596,17 +593,26 @@ fn tls_exchange(
     tls.write_all(request.as_bytes())?;
     tls.flush()?;
     let mut buf = [0u8; 65536];
+    let mut carry: Vec<u8> = Vec::new();
     loop {
         match tls.read(&mut buf) {
             Ok(0) => break,
-            // TLS is a one-shot request socket with no binary toggle: keep the
-            // text-mode (UTF-8-lossy) delivery it has always used.
-            Ok(n) => sink.emit(tcp_data_msg(id, &buf[..n], false)),
+            // TLS is a one-shot request socket with no binary toggle: text-mode
+            // delivery (byte-faithful for valid UTF-8, carrying a split multi-byte
+            // char across records via `chunk_payload`).
+            Ok(n) => {
+                if let Some(p) = chunk_payload(&mut carry, &buf[..n], false) {
+                    sink.emit(tcp_data_msg(id, p));
+                }
+            }
             // Many servers drop the connection without a TLS close_notify; treat
             // that as the end of the response, not an error.
             Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e),
         }
+    }
+    if let Some(p) = chunk_flush(&mut carry) {
+        sink.emit(tcp_data_msg(id, p));
     }
     Ok(())
 }
@@ -762,6 +768,8 @@ fn tls_server_loop(
     let _ = tcp.set_read_timeout(Some(POLL));
     let _ = tcp.set_write_timeout(Some(WRITE_TIMEOUT));
     let mut peer_closed = false;
+    // Text-mode UTF-8 carry across TLS records (see `chunk_payload`).
+    let mut carry: Vec<u8> = Vec::new();
     loop {
         if !alive.load(Ordering::Relaxed) {
             break;
@@ -819,11 +827,10 @@ fn tls_server_loop(
                             }
                         }
                         if got > 0 {
-                            sink.emit(tcp_data_msg(
-                                id,
-                                &buf[..got],
-                                binary.load(Ordering::Acquire),
-                            ));
+                            let bin = binary.load(Ordering::Acquire);
+                            if let Some(p) = chunk_payload(&mut carry, &buf[..got], bin) {
+                                sink.emit(tcp_data_msg(id, p));
+                            }
                         }
                     }
                     if io.peer_has_closed() {
@@ -838,6 +845,11 @@ fn tls_server_loop(
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(_) => break,
         }
+    }
+    // Deliver any incomplete trailing UTF-8 bytes held from the last inbound record
+    // (text mode) — a truncated final character, delivered lossily.
+    if let Some(p) = chunk_flush(&mut carry) {
+        sink.emit(tcp_data_msg(id, p));
     }
     // Graceful exit: flush any plaintext queued just before close — `tcp-send` then
     // `tcp-close` (e.g. a `Connection: close` / error / timeout response) sets `alive`

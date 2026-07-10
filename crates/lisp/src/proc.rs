@@ -29,16 +29,16 @@
 //! this runtime's processes; not node-portable (the id names an OS process on this
 //! host — the dist wire codec rejects it).
 //!
-//! **Text mode (default) is BINARY-UNSAFE; flip to binary mode for raw bytes.**
-//! By default inbound bytes are delivered as a Brood string via `from_utf8_lossy`:
-//! any byte run that isn't valid UTF-8 is **silently replaced** with U+FFFD —
-//! fine for text protocols (JSON-RPC over stdio, line protocols), wrong for binary
-//! ones. `proc-set-binary` switches a child to **binary mode** (mirroring the
-//! socket's `tcp-set-binary`): inbound `[:proc …]`/`[:proc-err …]` data is then a
-//! Latin-1 byte-string (one codepoint 0–255 per byte received) and `proc-send`
-//! writes each codepoint as one raw byte — byte-faithful both directions. Brood
-//! still has no arbitrary-bytes value kind, so the byte-string carrier is the
-//! convention (see `crate::net`).
+//! **Text mode (default) vs binary mode.** By default inbound bytes are delivered
+//! as a Brood string: valid UTF-8 is preserved exactly (a multi-byte character
+//! split across a read boundary is reassembled — the reader carries an incomplete
+//! trailing sequence to the next read via [`chunk_payload`]), and only a genuinely
+//! non-UTF-8 byte run is replaced with U+FFFD. Fine for text protocols (JSON-RPC
+//! over stdio, line protocols); for a child speaking a binary protocol,
+//! `proc-set-binary` switches it to **binary mode** (mirroring the socket's
+//! `tcp-set-binary`): inbound `[:proc …]`/`[:proc-err …]` data is then a
+//! byte-faithful first-class `bytes` value and `proc-send` accepts `bytes` too
+//! (see `crate::net` and the `bytes` type).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -48,7 +48,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::core::value;
-use crate::process::{spawn_io_source, Message};
+use crate::process::{chunk_flush, chunk_payload, spawn_io_source, Message};
 
 /// A live child process: the write half (its stdin) plus a shared handle to the
 /// `Child` itself, used to reap (`wait`) and to `kill`. The stdout/stderr read
@@ -79,20 +79,10 @@ fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Proc>> {
 
 // ---- message builders (off-heap; symbols are a global interner) ----
 
-/// Build a `[:proc handle data]` (stdout) or `[:proc-err handle data]` (stderr)
-/// message for an inbound chunk.
-///
-/// Text mode forces `bytes` through `from_utf8_lossy` (lossless for UTF-8,
-/// lossy otherwise); binary mode maps each byte to its Latin-1 codepoint (0–255)
-/// for a byte-faithful carrier — see the module doc and `net::tcp_data_msg`.
-fn data_msg(tag: &str, id: u64, bytes: &[u8], binary: bool) -> Message {
-    let payload = if binary {
-        // Binary mode: a first-class `bytes` value — byte-faithful, no Latin-1
-        // carrier (mirrors net::tcp_data_msg). `proc-send` accepts bytes too.
-        Message::Bytes(crate::core::blob::SharedBlob::new(bytes))
-    } else {
-        Message::Str(String::from_utf8_lossy(bytes).into_owned())
-    };
+/// Wrap a decoded [`chunk_payload`] result in a `[:proc handle data]` (stdout) or
+/// `[:proc-err handle data]` (stderr) message. The text/binary decode and the
+/// UTF-8 carry-across-reads live in `chunk_payload`; this just tags the payload.
+fn data_msg(tag: &str, id: u64, payload: Message) -> Message {
     Message::Vector(vec![
         Message::Keyword(value::intern(tag)),
         Message::Subprocess(id),
@@ -125,10 +115,21 @@ fn start_pipe_reader<R: Read + Send + 'static>(
     spawn_io_source(subscriber, "brood-proc-reader", move |sink| {
         let mut rd = src;
         let mut buf = [0u8; 65536];
+        let mut carry: Vec<u8> = Vec::new();
         loop {
             match rd.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => sink.emit(data_msg(tag, id, &buf[..n], binary.load(Ordering::Acquire))),
+                Ok(0) => {
+                    if let Some(p) = chunk_flush(&mut carry) {
+                        sink.emit(data_msg(tag, id, p));
+                    }
+                    break;
+                }
+                Ok(n) => {
+                    let bin = binary.load(Ordering::Acquire);
+                    if let Some(p) = chunk_payload(&mut carry, &buf[..n], bin) {
+                        sink.emit(data_msg(tag, id, p));
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -152,15 +153,21 @@ fn start_stdout_reader(
     spawn_io_source(subscriber, "brood-proc-stdout", move |sink| {
         let mut rd = out;
         let mut buf = [0u8; 65536];
+        let mut carry: Vec<u8> = Vec::new();
         loop {
             match rd.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => sink.emit(data_msg(
-                    "proc",
-                    id,
-                    &buf[..n],
-                    binary.load(Ordering::Acquire),
-                )),
+                Ok(0) => {
+                    if let Some(p) = chunk_flush(&mut carry) {
+                        sink.emit(data_msg("proc", id, p));
+                    }
+                    break;
+                }
+                Ok(n) => {
+                    let bin = binary.load(Ordering::Acquire);
+                    if let Some(p) = chunk_payload(&mut carry, &buf[..n], bin) {
+                        sink.emit(data_msg("proc", id, p));
+                    }
+                }
                 Err(_) => break,
             }
         }

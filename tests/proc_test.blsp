@@ -8,6 +8,19 @@
 
 (defmodule proc-test (:use test))
 
+;; Helpers for the UTF-8 read-boundary regression test below. Both are tail-recursive.
+(defn proc-test--grow (s n)
+  "Double `s` (a string of 3-byte chars) until it is at least `n` long."
+  (if (>= (count s) n) s (proc-test--grow (str s s) n)))
+
+(defn proc-test--drain (p want acc)
+  "Concatenate inbound [:proc …] chunks from `p` until they reassemble `want`
+   (or a 3 s lull ends the stream — a corrupt reassembly then fails the ="
+  (if (= acc want)
+    acc
+    (receive ([:proc ~p d] (proc-test--drain p want (str acc d)))
+             (after 3000 acc))))
+
 (describe "proc: handle + type-of"
   :isolated
   (test "proc-spawn returns a distinct :subprocess handle"
@@ -87,6 +100,22 @@
     (let (p (proc-spawn "sh" ["-c" "printf %s \"$MYVAR\""] {:env {"MYVAR" "hello"}}))
       (let (out (receive ([:proc ~p d] d) (after 5000 :timeout)))
         (assert= out "hello")
+        (proc-close p)))))
+
+(describe "proc: text mode reassembles a multi-byte char split across a read boundary"
+  :isolated
+  ;; Regression guard for the UTF-8 chunk-boundary fix. The reader's buffer is
+  ;; 64 KiB and 65536 is not a multiple of 3, so a run of 3-byte characters
+  ;; (え = E3 81 88) is GUARANTEED to have a character straddling the first read
+  ;; boundary. Before the carry-across-reads fix the split char was mangled into
+  ;; U+FFFD by a per-chunk from_utf8_lossy; now the reader carries the incomplete
+  ;; tail into the next read, so the echoed payload reassembles exactly.
+  (test "a >64 KiB run of 3-byte chars round-trips through `cat` uncorrupted"
+    (let (payload (proc-test--grow "え" 70000)
+          p (proc-spawn "cat" []))
+      (proc-send p payload)
+      (let (got (proc-test--drain p payload ""))
+        (assert= got payload)               ; no U+FFFD anywhere
         (proc-close p)))))
 
 (describe "proc: the handle crosses processes"

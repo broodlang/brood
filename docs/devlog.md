@@ -3341,3 +3341,40 @@ more crash-on-malformed-input bugs, both fixed:
   +unit test. (The dist `wire.rs`/`handshake.rs` framing + `bundle.rs` `footer()`/
   `parse_archive` were audited and are sound: length caps, `checked_add`, constant-time
   MAC, depth/peer caps.)
+
+## 2026-07-10 — CI back to green + text-mode UTF-8 read-boundary carry (byte-faithful I/O closed)
+
+Two fixes from a stability sweep of the language.
+
+- **Red `main` → green: right-sized the Ackermann JIT torture case.** CI was failing
+  on `unbox_torture_test › multi-arg non-tail recursion (Ackermann)` — a **timeout**,
+  not a correctness bug (full suite passes locally). `ack(3,10)` is ~45M calls peaking
+  at recursion depth ~8189, well past the JIT's 1400-frame depth cliff, so it grinds on
+  the slow boxed-drain deopt path: ~4 s locally but >120 s on a slow shared CI runner,
+  hard-killed at the per-test cap. The prior `:isolated` marker (`ab8d916`) treated
+  *contention*, which isn't the cost here. `ack(3,10)` adds **no** code-path coverage
+  over `ack(3,8)` — same multi-arg non-tail recursion, same depth-cliff deopt — so it
+  was dropped in favour of `ack(3,6)` (in-worker, depth 509 < cliff) + `ack(3,8)`
+  (crosses the cliff → boxed drain): identical coverage, ~16× less wall-clock. 125 ms,
+  12/12. CI green (`daad66e` → run passed).
+
+- **Byte-faithful `proc`/`net` I/O — closed the text-mode residual.** The `bytes`
+  value + binary mode (shipped 2026-06-28, `b84e223`/`733f00c`) already handed up raw
+  bytes for byte-framed protocols. The remaining gap was **text mode**: each reader
+  decoded its 64 KiB chunk with a standalone `from_utf8_lossy`, so a *valid* multi-byte
+  UTF-8 character (emoji/CJK) split across a read boundary was mangled into U+FFFD even
+  for perfectly valid UTF-8. Fixed with one shared helper, `process::chunk_payload`
+  (+`chunk_flush`): in text mode it splits `carry ++ chunk` at the longest valid-UTF-8
+  prefix, delivers that, and carries only an *incomplete trailing* sequence (≤3 bytes;
+  a lone continuation / over-long lead is a hard error → flushed immediately, so no
+  unbounded-growth DoS) to the next read; a genuinely invalid mid-run stays lossy as
+  before. Binary mode flushes any text-mode carry ahead of the bytes, so a mid-stream
+  `set-binary` never drops or reorders bytes. Routed **all five** readers through it:
+  plaintext socket, TLS client (`tls_exchange`), TLS server (`tls_server_loop`), and
+  proc stdout + stderr. The now-stale "Latin-1 carrier / no bytes value" module docs in
+  `net.rs`/`proc.rs` were corrected. Tests: 6 deterministic unit tests on
+  `chunk_payload` (reassembly, one-byte-at-a-time dribble, invalid-byte lossy, binary
+  faithfulness, flush) + an end-to-end proc test (`cat` echoes a >64 KiB run of 3-byte
+  chars — 65536 % 3 ≠ 0 *guarantees* a boundary-straddling char, so it fails without the
+  carry and passes with it). Green: bytes 23/23, proc 10/10, http 20/20, tcp 5/5,
+  slurp_bytes 9/9, scram_bytes 8/8; clippy clean. Roadmap item marked done.
