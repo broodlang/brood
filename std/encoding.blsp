@@ -15,37 +15,44 @@ For pure ASCII input the string and byte forms agree."))
 
 ;; ---- hex --------------------------------------------------------------------
 
-(def encoding--hex-lower "0123456789abcdef")
-(def encoding--hex-upper "0123456789ABCDEF")
+;; Hex digits as ASCII code points, indexed 0–15. Encoding accumulates output code
+;; points into a list (O(1) cons per byte) and UTF-8-decodes the whole list once at the
+;; end. Building the string with `str` per byte instead is O(n²) — each append recopies
+;; the entire growing accumulator, which is unusably slow for large payloads.
+(def encoding--hex-lower-codes [48 49 50 51 52 53 54 55 56 57 97 98 99 100 101 102])
+(def encoding--hex-upper-codes [48 49 50 51 52 53 54 55 56 57 65 66 67 68 69 70])
 
-(defn encoding--hex-encode-bytes (bytes alphabet acc)
-  (if (empty? bytes)
-    acc
-    (let (b (first bytes)
+(defn encoding--hex-encode-loop (bs codes acc)
+  (if (empty? bs)
+    (reverse acc)
+    (let (b (first bs)
           hi (quot b 16)
           lo (rem b 16))
-      (encoding--hex-encode-bytes
-        (rest bytes)
-        alphabet
-        (str acc (char-at alphabet hi) (char-at alphabet lo))))))
+      (encoding--hex-encode-loop
+        (rest bs)
+        codes
+        (cons (nth codes lo) (cons (nth codes hi) acc))))))
+
+(defn encoding--hex-encode-codes (bs codes)
+  (utf8-bytes->string (encoding--hex-encode-loop (seq bs) codes nil)))
 
 (defn hex-encode (s)
   "Encode string `s` as lowercase hexadecimal (each UTF-8 byte → 2 hex chars)."
-  (encoding--hex-encode-bytes (seq (string->utf8-bytes s)) encoding--hex-lower ""))
+  (encoding--hex-encode-codes (string->utf8-bytes s) encoding--hex-lower-codes))
 
 (defn hex-encode-upper (s)
   "Encode string `s` as uppercase hexadecimal (each UTF-8 byte → 2 hex chars)."
-  (encoding--hex-encode-bytes (seq (string->utf8-bytes s)) encoding--hex-upper ""))
+  (encoding--hex-encode-codes (string->utf8-bytes s) encoding--hex-upper-codes))
 
 (defn hex-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
 lowercase hexadecimal. The byte-faithful counterpart of `hex-encode`, which first
 UTF-8-encodes a string."
-  (encoding--hex-encode-bytes (seq bytes) encoding--hex-lower ""))
+  (encoding--hex-encode-codes bytes encoding--hex-lower-codes))
 
 (defn hex-encode-bytes-upper (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as uppercase hexadecimal."
-  (encoding--hex-encode-bytes (seq bytes) encoding--hex-upper ""))
+  (encoding--hex-encode-codes bytes encoding--hex-upper-codes))
 
 (def encoding--hex-val
   {"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7
