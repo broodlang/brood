@@ -57,7 +57,14 @@ process's mailbox. `:size` is the `[cols rows]` the client reported at attach (l
 resize is deferred — re-attach to resize). `:leave` tells the client to restore its
 terminal (`[:bye]`). A `[:detach]` from the client, or a monitor `[:down …]` (the
 client died or the link dropped), returns `:close` — which `ui-run` treats as an
-immediate quit, tearing the session down."
+immediate quit, tearing the session down.
+
+Any OTHER mailbox message is returned as app input, matching the local displays
+(`gui-display`/`*term-display*` poll the whole mailbox): a served app's async event
+bus — spawned-task replies, buffer-process pushes (`[:buffer-updated …]`), redirected
+output — reaches its `update` exactly as it would locally. Without the pass-through
+those messages would strand in the session's mailbox (a selective receive never
+consumes them), leaving a served app deaf to everything but keys."
   {:enter (fn () nil)
     ; the *client* owns the real terminal, not us
     :leave
@@ -71,6 +78,7 @@ immediate quit, tearing the session down."
       (receive ([:key k] k)
         ([:detach] :close)
         ([:down _ _ _] :close)  ; client process died / link net-split
+        (m m)  ; anything else is async app input — the event bus, as local displays deliver it
         (after ms nil)))})  ; nil ⇒ ui-run treats it as :tick (re-render)
 
 ;; ---- daemon side -------------------------------------------------------------
@@ -282,12 +290,18 @@ close (`[:bye]`). Tail-recursive; one hub per shared session."
   "The `ui-run` display for a shared session: `:draw` ships each frame to `hub` (fanned to
 every client); `:poll` returns the next `[:key k]` any client shipped (all clients' input
 merges through the session's one mailbox, so edits serialize with no conflict); `:size`
-asks the hub; `:leave` shuts the hub (and thus every client) down."
+asks the hub; `:leave` shuts the hub (and thus every client) down. As with
+`remote-display`, any other mailbox message is returned as async app input (the event
+bus) — except a stale `[:hub-size …]` reply that outlived its `shared--hub-size` window,
+which is dropped (a nil ⇒ tick) rather than leaked to the app."
   {:enter (fn () nil)
    :leave (fn () (send hub [:shutdown]))
    :size (fn () (shared--hub-size hub))
    :draw (fn (f) (send hub [:frame f]))
-   :poll (fn (ms) (receive ([:key k] k) (after ms nil)))})
+   :poll (fn (ms) (receive ([:key k] k)
+                    ([:hub-size _ _] nil)  ; a :size reply past its 200ms window — drop, tick
+                    (m m)  ; anything else is async app input — the event bus
+                    (after ms nil)))})
 
 (defn serve-shared--manager (session hub)
   "The session manager for a SHARED session: every client attaches to the SAME running

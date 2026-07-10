@@ -8,13 +8,15 @@
 (defmodule serve-test (:use test) (:use editor/serve) (:use editor/display) (:use editor/ui))
 
 ;; A tiny served app: a counter. `"+"` increments, `"q"` quits; the view paints the
-;; count. Each client gets a fresh model from `mk`.
+;; count. An async `[:note n]` event (a non-key mailbox message — the event-bus shape)
+;; sets the count directly. Each client gets a fresh model from `mk`.
 (defn mk () {:n 0})
 (defn vw (m c r) [(text 0 0 (str "n=" (get m :n)))])
 (defn up (m input c r)
   (cond
     (= input "+") (assoc m :n (+ (get m :n) 1))
     (= input "q") (assoc m :done true)
+    (and (vector? input) (= (first input) :note)) (assoc m :n (nth input 1))
     :else m))
 
 ;; The text string of a frame's first `[:text row col s]` op — what the app rendered.
@@ -199,5 +201,34 @@
       (assert= ((get d :poll) 500) "z")
       (send (self) [:detach])
       (assert= ((get d :poll) 500) :close)
+      ;; any OTHER mailbox message passes through as async app input (the event bus) —
+      ;; a served app's task replies / buffer pushes reach update, as on a local display
+      (send (self) [:note 9])
+      (assert= ((get d :poll) 500) [:note 9])
       ;; nothing waiting ⇒ nil after the timeout (ui-run treats it as :tick)
-      (assert= ((get d :poll) 1) nil))))
+      (assert= ((get d :poll) 1) nil)))
+
+  (test "an async (non-key) mailbox message reaches a served app's update — the event bus"
+    ;; The editor pattern: a spawned task / buffer process sends `[:tag …]` straight to the
+    ;; ui-run process's mailbox and update folds it. On a served session those messages land
+    ;; in the SESSION's mailbox; remote-display's :poll must deliver them (not strand them).
+    (let (mgr (spawn (editor/serve/serve--manager mk vw up)))
+      (send mgr [:attach (self) 80 24])
+      (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
+        (is (not (= session :no-attach)))
+        (assert= (frame-text (receive ([:frame f] f) (after 2000 :none))) "n=0")
+        ;; not a [:key …] — an async event, as a buffer push or task reply would arrive
+        (send session [:note 42])
+        (assert= (frame-text (receive ([:frame f] f) (after 2000 :none))) "n=42"))))
+
+  (test "an async mailbox message reaches a SHARED session's update too"
+    (let (me (self)
+          hub (spawn (editor/serve/shared--hub () nil [80 24]))
+          session (spawn (ui-run (mk) vw up (editor/serve/shared--display hub)))
+          mgr (spawn (editor/serve/serve-shared--manager session hub)))
+      (let (_a (spawn (shared-client mgr me))
+            aid (receive ([:cready c] c) (after 2000 :none)))
+        (is (not (= aid :none)))
+        (assert= (receive ([:cframe _ t] t) (after 2000 :none)) "n=0")
+        (send session [:note 7])
+        (assert= (receive ([:cframe _ t] t) (after 2000 :none)) "n=7")))))
