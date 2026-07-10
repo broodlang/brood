@@ -3063,3 +3063,48 @@ source.
 **Verified.** `tests/record_test.blsp` (9 tests incl. a cross-process round-trip) green;
 `(special-forms)` includes `defrecord`; the `deftype` stub now points at it; `nest check`
 clean; full `make test` green.
+
+## 2026-07-10 — Checker now flags a wrong-type `sig` argument at the call site
+
+Closed the gap the `defrecord` entry above flagged: the static checker *did* argument-type-check
+call sites (the ADR-110 gating-"B1" arg check has been in `walk.rs` for a while), but the check
+was **dead inside a `defmodule`** — so no real program ever hit it. Pass 2.5 keyed user `(sig …)`
+declarations under the **bare** name, while a call head resolves to the module-**qualified**
+`ns/name`, so the two never matched and the sig silently never seeded. Now `(point "a" 4)` with a
+typed constructor — and any `(sig f (int -> int))` + `(f "hello")` — is flagged at the call site.
+
+**Three fixes** in `types/check.rs` pass 2.5:
+- **Qualify user sig names.** New `qualify_decl_name` runs each parsed `(sig …)` name through
+  `macros::qualify_name(file_ns, name)` (guarded by `is_file_global`, so a bare root-namespace sig
+  still keys bare) — the same qualification `defn` heads already get. `register_declared_sig`
+  applies it across all four sig shapes (`parse_sig_decl` / `_with_vars` / `_overload` / `_value`).
+- **Recover macro-emitted sigs.** `defrecord`'s `(sig …)` forms live *inside* macroexpansion, but
+  pass 2.5 reads un-expanded text. `collect_register_sig_forms` walks the **expanded** forms for
+  `(%register-sig 'name 'type)` (the expansion `sig` lowers to) and rebuilds a `(sig name type)`
+  for the checker — so a record constructor's per-field arg types are enforced statically too.
+
+**Enabling the arg check surfaced three pre-existing false positives, all fixed properly** (not
+by muting the check):
+- **`(list T)` includes `nil`.** `Ty::list_of` masks to the `SEQ_BITS` (Pair|Vector) by lattice
+  design — the empty list is `nil`. `relax_param_for_arg` (walk.rs) re-adds `Nil` to a list-typed
+  param *for the membership test only* (the message still reports the declared type), so
+  `(sum-list nil)` against `((list int) -> int)` no longer misfires.
+- **A record param drops its optional fields for the arg test.** The record-shape subtype relation is
+  conservative — a literal `{name}` isn't a subtype of `{name, age?}` even though the value satisfies
+  it (the optional `age` is just absent) — so requiring the optional field's *declaration* false-flags
+  a valid arg. `relax_param_for_arg` keeps only the *required* fields, so a missing/wrong-typed
+  required field is still caught (a guard-refined record still flows a real conflict into a call — the
+  `path_narrowing_refines_base_record_type_into_calls` capability), while an omitted optional passes.
+- **A `& rest` binder is `list<elem>`, not `elem`.** `check_fn_seeded` was seeding the rest param as
+  the sig's rest *element* type, so `(defn f (& xs) (reduce + 0 xs))` typed `xs` as `int` and then
+  flagged `(reduce … xs)`. New `params_form_has_rest` + `Ty::list_of` seeding fixes it.
+
+**New suppression category `:type-mismatch`** for `(check-allow …)` — a `sig`-declared return/argument
+a negative test *deliberately* violates (proving the `sig!` runtime contract throws) opts out, the
+same escape hatch `:non-tail-recursion` / `:unreachable-clause` already provide. `contract_test.blsp`'s
+`c-bad-ret` (which returns a string under an `(int -> int)` sig on purpose) uses it — that warning is
+now *correct*, since the qualification fix made the sig actually attach.
+
+**Verified.** New Rust tests (`sig_call_site_wrong_literal_arg_is_flagged`,
+`check_allow_type_mismatch_suppresses_call_and_return_lints`) green; `nest check` clean across
+`std/` + `tests/` (isolated worktree, 0 warnings); full `make test` green.

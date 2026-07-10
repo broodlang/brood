@@ -139,6 +139,94 @@ fn is_require_form(heap: &Heap, form: Value) -> bool {
     false
 }
 
+/// Qualify a `(sig …)` declaration's target name to the file's namespace, the way
+/// the resolve pass qualifies a def head — but only with the same *positive
+/// evidence* the resolver requires: the file actually defines `ns/name` (recorded
+/// as a file-global in pass 2). A name the file doesn't define (an imported/prelude
+/// name), an already-`ns/`-qualified name, or an ambient `*earmuffed*` name is left
+/// as written, so it still matches the bare/qualified head the call resolves to.
+fn qualify_decl_name(ctx: &Ctx, file_ns: Option<&str>, name: Symbol) -> Symbol {
+    match file_ns {
+        Some(ns) => {
+            let qualified = crate::eval::macros::qualify_name(ns, name);
+            if ctx.is_file_global(qualified) {
+                qualified
+            } else {
+                name
+            }
+        }
+        None => name,
+    }
+}
+
+/// Parse `form` as any of the four `(sig …)` declaration shapes (arrow, arrow with
+/// type-variables, overload, or non-arrow value type) and record it in `ctx` under
+/// the namespace-qualified name ([`qualify_decl_name`]). Shared by pass 2.5's two
+/// sources — the un-expanded top-level `(sig …)` forms and the `(sig …)` forms
+/// reconstructed from `%register-sig` in the expanded tree.
+fn register_declared_sig(heap: &Heap, ctx: &mut Ctx, file_ns: Option<&str>, form: Value) {
+    if let Some((name, sig)) = annot::parse_sig_decl(heap, form) {
+        let qn = qualify_decl_name(ctx, file_ns, name);
+        ctx.add_declared_sig(qn, sig);
+    }
+    if let Some((name, sv)) = annot::parse_sig_decl_with_vars(heap, form) {
+        let qn = qualify_decl_name(ctx, file_ns, name);
+        ctx.add_declared_sig_with_vars(qn, sv);
+    }
+    // An overloaded sig — `(and (int -> int) (bool -> bool))` — has no single `Sig`,
+    // so `parse_sig_decl` above yields nothing for it; record it separately (ADR-116).
+    if let Some((name, sigs)) = annot::parse_sig_decl_overload(heap, form) {
+        let qn = qualify_decl_name(ctx, file_ns, name);
+        ctx.add_declared_overload(qn, sigs);
+    }
+    // Non-arrow `(sig x T)` value-type declarations — consumed by the gradual-
+    // assignment check on `(def x …)` (the first `GradualTy` consumer).
+    if let Some((name, ty)) = annot::parse_value_sig_decl(heap, form) {
+        let qn = qualify_decl_name(ctx, file_ns, name);
+        ctx.add_declared_value_ty(qn, ty);
+    }
+}
+
+/// Recover `(sig name type)` forms from the *expanded* tree. Each `(sig …)` — hand-
+/// written or emitted by a macro like `defrecord` — lowers to `(%register-sig 'name
+/// 'type)`; this walks into `(do …)` blocks (what those macros wrap their output in)
+/// and, for each `%register-sig`, rebuilds the equivalent `(sig name type)` form so
+/// [`register_declared_sig`] can parse it with the ordinary sig parsers. Building the
+/// form needs `&mut Heap`; GC is blocked for the whole check, so the pushed handles
+/// stay live.
+fn collect_register_sig_forms(heap: &mut Heap, form: Value, out: &mut Vec<Value>) {
+    let Ok(items) = heap.list_to_vec(form) else {
+        return;
+    };
+    let Some(&Value::Sym(head)) = items.first() else {
+        return;
+    };
+    if crate::core::value::symbol_is(head, kw::DO) {
+        for &it in &items[1..] {
+            collect_register_sig_forms(heap, it, out);
+        }
+        return;
+    }
+    if crate::core::value::symbol_is(head, "%register-sig") && items.len() == 3 {
+        // items[1] = (quote name), items[2] = (quote type)
+        if let (Some(name), Some(ty)) = (unwrap_quote(heap, items[1]), unwrap_quote(heap, items[2]))
+        {
+            let sig_head = crate::core::value::sym("sig");
+            let rebuilt = heap.list(vec![sig_head, name, ty]);
+            out.push(rebuilt);
+        }
+    }
+}
+
+/// The inner form of `(quote X)` → `X`; `None` for anything else.
+fn unwrap_quote(heap: &Heap, form: Value) -> Option<Value> {
+    let items = heap.list_to_vec(form).ok()?;
+    match items.as_slice() {
+        [Value::Sym(h), inner] if crate::core::value::symbol_is(*h, kw::QUOTE) => Some(*inner),
+        _ => None,
+    }
+}
+
 /// A namespace header — `(defmodule …)` (checked on the *un-expanded* form, before
 /// its `(:use …)` clauses lower away). The checker evaluates it so the header's
 /// `(require …)`/`%refer`/`%in-ns` run — populating the import table — and a
@@ -464,28 +552,38 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     for &form in &expanded {
         collect_def_names(heap, form, &mut ctx);
     }
-    // Pass 2.5: collect `(sig name (… -> …))` declarations from the *un-expanded*
-    // forms (the `sig` macro expands to nil, so the declaration is gone in
-    // `expanded` — same reason the hygiene lint reads un-expanded forms). These
-    // become the authoritative signatures the call-check consults first.
+    // Pass 2.5: collect `(sig name (… -> …))` declarations — the authoritative
+    // signatures the call-check consults first. Two sources, both fed through the
+    // same parsers + namespace-qualification (`register_declared_sig`):
+    //
+    //  (a) the *un-expanded* top-level `(sig …)` forms — a hand-written declaration
+    //      (the `sig` macro's own output is dropped from the analysed tree, so the
+    //      un-expanded form is where a plain top-level sig is legible); and
+    //  (b) every `(%register-sig 'name 'type)` in the *expanded* tree — which is
+    //      what BOTH a `(sig …)` and a *macro-emitted* sig lower to. `defrecord`
+    //      expands to `(sig …)` forms nested in its `(do …)`, invisible to (a) (which
+    //      only sees the `(defrecord …)` head); (b) recovers them. Idempotent overlap
+    //      with (a) for a hand-written sig — the second register is a no-op.
+    //
+    // The declared name is qualified to the file's namespace exactly as the resolve
+    // pass qualifies a def head and the call site — `(sig g …)` inside `(defmodule
+    // ns …)` keys the sig under `ns/g`, matching the `ns/g` the walk resolves the
+    // call head to. Without this a module-local sig was silently dropped (keyed bare
+    // `g` while the call resolved to `ns/g`), so no user `(sig …)` in a module ever
+    // reached the call-argument check.
+    let file_ns_name: Option<String> = file_ns.map(value::symbol_name);
     for &form in &forms {
-        if let Some((name, sig)) = annot::parse_sig_decl(heap, form) {
-            ctx.add_declared_sig(name, sig);
-        }
-        if let Some((name, sv)) = annot::parse_sig_decl_with_vars(heap, form) {
-            ctx.add_declared_sig_with_vars(name, sv);
-        }
-        // An overloaded sig — `(and (int -> int) (bool -> bool))` — has no
-        // single `Sig`, so `parse_sig_decl` above yields nothing for it;
-        // record it separately (ADR-116).
-        if let Some((name, sigs)) = annot::parse_sig_decl_overload(heap, form) {
-            ctx.add_declared_overload(name, sigs);
-        }
-        // Non-arrow `(sig x T)` value-type declarations — consumed by the
-        // gradual-assignment check on `(def x …)` (the first `GradualTy` consumer).
-        if let Some((name, ty)) = annot::parse_value_sig_decl(heap, form) {
-            ctx.add_declared_value_ty(name, ty);
-        }
+        register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
+    }
+    // Reconstruct a `(sig name type)` form from each `%register-sig` in the expanded
+    // tree (building forms needs `&mut heap`, so collect first, register after — GC
+    // is blocked for the whole check, so the handles stay live).
+    let mut macro_sig_forms: Vec<Value> = Vec::new();
+    for &form in &expanded {
+        collect_register_sig_forms(heap, form, &mut macro_sig_forms);
+    }
+    for &form in &macro_sig_forms {
+        register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
     }
     // Pass 2.7: infer a current value type for an *undeclared* global defined
     // exactly once by `(def g <non-fn-expr>)` (Gap A — docs/type-gating.md). The
@@ -3159,6 +3257,77 @@ mod tests {
             w.iter()
                 .any(|m| m.contains("g: declared return type int") && m.contains("\"hello\"")),
             "a string-literal body vs an int return must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn sig_call_site_wrong_literal_arg_is_flagged() {
+        // A literal argument whose type is disjoint from the parameter's
+        // declared `(sig …)` type is flagged at the call site (the precise `⊆`
+        // path — a string literal where an int is wanted).
+        let w = file_warnings(r#"(sig f (int -> int)) (defn f (x) x) (f "hello")"#);
+        assert!(
+            w.iter()
+                .any(|m| m.contains("f: argument 1 expects int")
+                    && m.contains("\"hello\"")),
+            "a string literal passed where int is declared must warn: {w:?}"
+        );
+        // A correct literal, and a dynamic (non-literal) argument, must not warn.
+        for src in [
+            "(sig g (int -> int)) (defn g (x) x) (g 1)",
+            "(sig h (int -> int)) (defn h (x) x) (defn use-h (y) (h y))",
+        ] {
+            let w = file_warnings(src);
+            assert!(
+                w.iter().all(|m| !m.contains("argument 1 expects")),
+                "a consistent/dynamic argument must not warn ({src}): {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn record_arg_missing_optional_field_does_not_warn() {
+        // A record value that omits an *optional* field is a valid argument — the
+        // arg-check relaxes the param to its required fields only, so the missing
+        // `:age` (declared `(optional int)`) never misfires.
+        let decl = "(sig f ((record :name string :age (optional int)) -> int)) (defn f (r) 0)";
+        for good in ["(f {:name \"Ada\"})", "(f {:name \"Ada\" :age 30})"] {
+            let w = file_warnings(&format!("{decl} {good}"));
+            assert!(
+                w.iter().all(|m| !m.contains("argument 1 expects")),
+                "a record arg omitting an optional field must not warn ({good}): {w:?}"
+            );
+        }
+        // But a wrong-typed *required* field is still caught (the sound part the
+        // optional-drop preserves).
+        let w = file_warnings(&format!("{decl} (f {{:name 42}})"));
+        assert!(
+            w.iter().any(|m| m.contains("f: argument 1 expects")),
+            "a record arg with a wrong-typed required field must warn: {w:?}"
+        );
+    }
+
+    #[test]
+    fn check_allow_type_mismatch_suppresses_call_and_return_lints() {
+        // `(check-allow :type-mismatch …)` opts a deliberately-wrong subtree out
+        // of BOTH the call-site argument lint and the declared-return lint —
+        // the negative-test escape hatch (a `sig!` runtime contract is what the
+        // wrapped code actually exercises).
+        let w = file_warnings(
+            r#"(sig f (int -> int)) (defn f (x) x) (check-allow :type-mismatch (f "hello"))"#,
+        );
+        assert!(
+            w.iter().all(|m| !m.contains("argument 1 expects")),
+            "check-allow :type-mismatch must suppress the call-site arg lint: {w:?}"
+        );
+        // The sig stays at top level (pass 2.5 reads sigs from top-level forms);
+        // only the deliberately-wrong defn is wrapped — the contract_test shape.
+        let w = file_warnings(
+            r#"(sig g (int -> int)) (check-allow :type-mismatch (defn g (x) "nope"))"#,
+        );
+        assert!(
+            w.iter().all(|m| !m.contains("return type")),
+            "check-allow :type-mismatch must suppress the return-type lint: {w:?}"
         );
     }
 

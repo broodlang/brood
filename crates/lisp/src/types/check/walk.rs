@@ -181,6 +181,38 @@ fn is_debug_only_primitive(nm: &str) -> bool {
     matches!(nm, "%blob-ptr" | "%blob-strong-count" | "%force-panic")
 }
 
+/// Relax a parameter type for the call-argument membership test, in the two places
+/// the type lattice deliberately under-approximates — so the advisory arg-check never
+/// misfires on a value that is in fact valid:
+///  - a **record-shape** parameter (`(record …)`) drops its **optional** fields,
+///    keeping only the required ones. The shape-subtype relation is conservative: a
+///    literal `{name}` isn't a subtype of `{name, age?}` even though the value
+///    satisfies it (the optional `age` is simply absent), so requiring the optional
+///    field's *declaration* would false-flag a valid argument. Dropping optionals
+///    keeps the sound part — a missing or wrong-typed *required* field is still caught
+///    (so a guard-refined record still flows a real conflict into the call).
+///  - a **`list<T>`** parameter also admits the empty list, which the lattice stores
+///    as the separate `nil` tag (`Ty::list_of` is `pair`-only by design), so a `nil`
+///    argument — the empty list — is consistent with it.
+fn relax_param_for_arg(param: &Ty) -> Ty {
+    use crate::types::Tag;
+    let mut p = param.clone();
+    if let Some(fields) = p.record_fields() {
+        if fields.values().any(|(_, required)| !*required) {
+            let required_only: std::collections::BTreeMap<_, _> = fields
+                .iter()
+                .filter(|(_, (_, required))| *required)
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            p = Ty::record_of(required_only);
+        }
+    }
+    if p.contains_tag(Tag::Pair) && p.elem_ty().is_some() {
+        p = p.union(Ty::of(Tag::Nil));
+    }
+    p
+}
+
 /// Does `sig`'s arity accept exactly `argc` arguments — its fixed params, plus
 /// any `&optional` slots, plus an unbounded `&rest` tail?
 fn sig_accepts_argc(sig: &crate::types::Sig, argc: usize) -> bool {
@@ -231,6 +263,8 @@ fn lint_allow_mask(category: Option<Value>) -> u8 {
         super::ctx::SUPPRESS_NON_TAIL
     } else if value::symbol_is(k, "unreachable-clause") {
         super::ctx::SUPPRESS_UNREACHABLE
+    } else if value::symbol_is(k, "type-mismatch") {
+        super::ctx::SUPPRESS_TYPE_MISMATCH
     } else {
         0
     }
@@ -790,7 +824,15 @@ pub(super) fn check_into(
                 // the dynamic reading a bare NEVER would else read as
                 // disjoint-from-everything).
                 let g = gradual_of(heap, arg, ctx);
-                if !g.bound.is_never() && !g.clone().consistent_with(param.clone()) {
+                // Relax the parameter for the membership test in the two places the
+                // lattice deliberately under-approximates (see `relax_param_for_arg`),
+                // so the advisory check never misfires; the original `param` is still
+                // what the message reports.
+                let param_relaxed = relax_param_for_arg(&param);
+                if !g.bound.is_never()
+                    && !g.clone().consistent_with(param_relaxed)
+                    && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                {
                     let msg = format!(
                         "{}: argument {} expects {}, got {} ({})",
                         name_of(s),
@@ -929,6 +971,9 @@ fn check_fn_seeded(
         return;
     };
     let params = fn_params(heap, params_form);
+    // Whether the param list ends in a `& rest` binder (always the last binder). Its
+    // seeded type differs — the binder collects the variadic args into a *list*.
+    let has_rest = params_form_has_rest(heap, params_form);
     // The closure's actual param count must fall inside the declared sig's
     // arity range for seeding to make sense: at least `params.len()`
     // required, at most `params.len() + optional.len()` unless it has a
@@ -944,6 +989,18 @@ fn check_fn_seeded(
         // widen with `nil` and seed it as a plain (not sig-authoritative)
         // type, so a defensive `(nil? p)` in the body is never mistaken for
         // dead code the way an exact required-param contract would be.
+        // The `& rest` binder (always last) collects the variadic arguments into a
+        // list, so its type is `list<rest-elem>` — not the element type the sig's
+        // rest position carries. Seeding it as the bare element type was a false-
+        // positive source: `(defn f (& xs) (reduce + 0 xs))` with `(sig f (& int ->
+        // …))` would type `xs` as `int` and then flag `(reduce … xs)` for passing an
+        // int where a sequence is wanted. Bind it plainly (not sig-authoritative) so
+        // no dead-clause lint keys off it.
+        if has_rest && i + 1 == params.len() {
+            let rest_ty = sig.and_then(|s| s.rest.clone()).map(Ty::list_of);
+            scope = scope.bind(p, rest_ty);
+            continue;
+        }
         let is_optional_pos =
             sig.is_some_and(|s| i >= s.params.len() && i < s.params.len() + s.optional.len());
         match sig.and_then(|s| s.param(i)) {
@@ -971,7 +1028,9 @@ fn check_fn_seeded(
     if let Some(s) = sig {
         if let Some(&ret_form) = items[body_start..].last() {
             let g = gradual_of(heap, ret_form, &scope);
-            if !g.consistent_with(s.ret.clone()) {
+            if !g.consistent_with(s.ret.clone())
+                && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+            {
                 let who = name
                     .map(|n| format!("{}: ", name_of(n)))
                     .unwrap_or_default();
@@ -1338,6 +1397,19 @@ fn check_defn(heap: &Heap, items: &[Value], ctx: &Ctx, out: &mut Vec<(Option<Pos
 /// `&` / `&optional` themselves are markers, not binders, so they're filtered
 /// out. The result is *just* what would be in scope — used to seed `Ctx`
 /// without false-flagging the inner body's references.
+/// Does this parameter list end in a `& rest` tail? (The `&`/`&rest` marker; a
+/// bare-symbol binder follows it.) Used to seed the rest binder as `list<elem>`.
+fn params_form_has_rest(heap: &Heap, form: Value) -> bool {
+    let items = match form {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil | Value::Pair(_) => list_items(heap, form).unwrap_or_default(),
+        _ => return false,
+    };
+    items.iter().any(|&it| {
+        matches!(it, Value::Sym(s) if value::symbol_is(s, kw::AMP) || value::symbol_is(s, kw::AMP_REST))
+    })
+}
+
 fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
     let items = match form {
         Value::Vector(id) => heap.vector(id).to_vec(),

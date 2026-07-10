@@ -261,15 +261,18 @@ for variadic tails."
 ;; checker runs, so a `;;`-directive can't reach it; this macro expands to a
 ;; marker (`%lint-allow`) that survives macroexpansion and that `nest check`
 ;; reads. A pure runtime no-op — it just yields the wrapped body's value.
-;; Recognised categories: `:non-tail-recursion`, `:unreachable-clause`. Wraps one
-;; or many forms (top-level defns or an inner expression). See docs/type-annotations.md.
+;; Recognised categories: `:non-tail-recursion`, `:unreachable-clause`,
+;; `:type-mismatch` (a `sig`-declared return/argument the body deliberately
+;; violates — e.g. a negative test proving a `sig!` runtime contract throws).
+;; Wraps one or many forms (top-level defns or an inner expression).
+;; See docs/type-annotations.md.
 (defn %lint-allow (category value)
   "Identity on `value` — the runtime side of `check-allow` (a checker marker)."
   value)
 (defmacro check-allow (category & body)
   "Suppress an advisory checker lint over the wrapped forms. `category` is a
-keyword: `:non-tail-recursion` or `:unreachable-clause`. A runtime no-op; the
-marker is read only by the type checker (`nest check`)."
+keyword: `:non-tail-recursion`, `:unreachable-clause`, or `:type-mismatch`. A
+runtime no-op; the marker is read only by the type checker (`nest check`)."
   `(%lint-allow ~category (do ~@body)))
 
 ;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------

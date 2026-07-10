@@ -8176,11 +8176,14 @@ and was never at risk).
 `SPECIAL_FORMS` highlight list; tests in `tests/record_test.blsp`). This ADR
 settled the map-first-vs-records question the roadmap deferred "pending an ADR"
 and scoped the work; the build stayed exactly this small — zero new core.
-Note (verified at build time): the *static* checker does not flag a literal
-wrong-type argument at a call site for **any** `sig` (record or hand-written), so
-per-field type enforcement lands via the return-type flow and `BROOD_CONTRACTS=1`
-runtime contracts rather than a call-site arg lint; the typo-safety win (undefined
-accessor) works statically, cross-file included. Revisits, but does **not** reverse, the standing "model data with
+Update (2026-07-10): the *static* checker **now flags** a literal wrong-type
+argument at a `sig` call site, records included — `(point "a" 4)` against a typed
+constructor is a static warning. The arg check itself pre-existed (ADR-110 gating
+"B1") but was dead inside a `defmodule` (pass 2.5 keyed user sigs bare while call
+heads resolve qualified); the fix qualifies user sig names and recovers
+macro-emitted (`defrecord`) sigs from the expanded forms. So per-field type
+enforcement is now *static* too, on top of the return-type flow and
+`BROOD_CONTRACTS=1` runtime contracts. See the 2026-07-10 devlog entry. Revisits, but does **not** reverse, the standing "model data with
 plain maps" stance (the `eval/mod.rs` helpful-error stub for
 `defrecord`/`deftype`).
 

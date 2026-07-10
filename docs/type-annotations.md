@@ -276,7 +276,12 @@ directive is a form:
 
 (assert= (check-allow :unreachable-clause (match 1 (1 :first) (1 :second) (_ :z)))
          :first)
-```
+
+;; A negative test that deliberately violates its own `sig` — proving the `sig!`
+;; runtime contract throws — opts the static return/argument lint out.
+(check-allow :type-mismatch
+  (defn c-bad-ret (x) "not an int"))
+(sig! c-bad-ret (int -> int))
 
 `check-allow` is a prelude macro that expands to a `(%lint-allow :category (do …))`
 marker. That marker **survives macroexpansion** (which is what the checker walks)
@@ -287,8 +292,10 @@ returns its value. It wraps one form or many.
 The checker reads the marker: `recursion.rs` skips a `:non-tail-recursion`-tagged
 subtree entirely, and a `SUPPRESS_*` bit (see `check/ctx.rs`) threads down the walk
 so `check_if`'s redundant-clause lint declines inside an `:unreachable-clause`
-scope. Recognised categories today: **`:non-tail-recursion`** and
-**`:unreachable-clause`**. An unrecognised category suppresses nothing — a typo is a
+scope. Recognised categories today: **`:non-tail-recursion`**,
+**`:unreachable-clause`**, and **`:type-mismatch`** (a `sig`-declared return or
+call-site argument the wrapped code deliberately violates). An unrecognised
+category suppresses nothing — a typo is a
 no-op that still lints, never a silent blanket opt-out. This is what lets
 `nest check` stay at **zero** warnings project-wide without weakening any lint.
 

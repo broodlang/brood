@@ -185,6 +185,12 @@ pub(super) fn unify_term(term: &SigTerm, ty: Ty, subst: &mut HashMap<u32, Ty>) {
 /// in `walk.rs` / `recursion.rs`.
 pub(super) const SUPPRESS_NON_TAIL: u8 = 1 << 0;
 pub(super) const SUPPRESS_UNREACHABLE: u8 = 1 << 1;
+/// A declared-vs-actual type mismatch the checker would otherwise warn on: a
+/// `sig`-typed function whose body yields a type disjoint from its declared
+/// return, or a literal call-site argument disjoint from the parameter's
+/// declared type. Deliberately-wrong code under test (a negative test proving a
+/// `sig!` runtime contract throws) suppresses it with `(check-allow :type-mismatch …)`.
+pub(super) const SUPPRESS_TYPE_MISMATCH: u8 = 1 << 2;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).
