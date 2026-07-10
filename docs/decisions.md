@@ -8170,10 +8170,17 @@ and was never at risk).
 
 ## ADR-130 — `defrecord` is pure prelude sugar over closed maps, not a new `Value` kind
 
-**Status:** accepted (direction); **not yet built** — this ADR settles the
-map-first-vs-records question the roadmap deferred "pending an ADR" and scopes
-the work; implementation is a follow-up slice, gated per ADR-011 on it staying
-this small. Revisits, but does **not** reverse, the standing "model data with
+**Status:** accepted and **implemented** 2026-07-10 (`std/prelude.blsp`
+`defrecord` macro + helpers; the `eval/mod.rs` `defrecord` stub removed, leaving
+`deftype`/`definterface`/`reify` pointing at it; `defrecord` added to the
+`SPECIAL_FORMS` highlight list; tests in `tests/record_test.blsp`). This ADR
+settled the map-first-vs-records question the roadmap deferred "pending an ADR"
+and scoped the work; the build stayed exactly this small — zero new core.
+Note (verified at build time): the *static* checker does not flag a literal
+wrong-type argument at a call site for **any** `sig` (record or hand-written), so
+per-field type enforcement lands via the return-type flow and `BROOD_CONTRACTS=1`
+runtime contracts rather than a call-site arg lint; the typo-safety win (undefined
+accessor) works statically, cross-file included. Revisits, but does **not** reverse, the standing "model data with
 plain maps" stance (the `eval/mod.rs` helpful-error stub for
 `defrecord`/`deftype`).
 

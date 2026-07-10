@@ -3022,3 +3022,44 @@ parallel-allocation lock fix (`67c2ec2`), and `transients.md` (rewritten 2026-06
 binders need no checker change. Targeted suites green: `suite_test` 64/64, `pattern_matching_test`
 112/112, `mcp_test` 5/5, `file_test` 18/18 (incl. the concurrent-append race). Full `make test`
 green.
+
+## 2026-07-10 — `defrecord` implemented (ADR-130) — pure prelude sugar over maps, zero new core
+
+Built the `defrecord` slice ADR-130 scoped. It came in at exactly zero new core, as the ADR
+predicted: no `Value`, no `Tag`, no special form, no builtin.
+
+**The macro** (`std/prelude.blsp`). `(defrecord point (x y))` expands to a positional
+constructor `(defn point (x y) {:x x :y y})` plus one accessor per field `(defn point-x (p)
+(get p :x))`. The constructor body is built with `(zipmap field-keywords field-syms)` — which
+produces a `{:x x :y y}` map *literal* whose values are the field symbols; because an unquoted
+map literal evaluates its values (verified), the constructor evaluates the args at call time.
+A field may be `(name type)`; when **every** field is typed, `(sig …)` forms are emitted too —
+`(sig point (int int -> (record :x int :y int)))` for the constructor and `(sig point-x
+((record :x int) -> int))` per accessor — lowering to the record types that shipped in ADR-115.
+
+**Why the accessors are the point:** `(point-witdh p)` is an undefined-function reference the
+checker flags; `(get p :witdh)` is forever silent. So the sugar buys typo-safety at zero cost.
+Records *are* maps, so `assoc`/`merge`/`=`/pattern-match/`send` all keep working and there is
+no `point?` predicate (structural, not nominal — ADR-130).
+
+**Also:** removed `defrecord` from the `eval/mod.rs` unknown-form hint (it now covers only
+`deftype`/`definterface`/`reify`, and points them at `defrecord`); added `defrecord` to the
+`SPECIAL_FORMS` highlight list (`kw::DEFRECORD`), so grammar/LSP/treesit colour it from the one
+source.
+
+**Two findings while building** (both recorded, neither a blocker):
+- **Cross-file needs no scanner change.** The worry was that the native def-head scanner
+  (`scan-source-extract`) doesn't macroexpand, so a record's constructor/accessor names might
+  not resolve from another file. Tested with a 2-file `nest` project: the accessors resolve
+  *and* a typo'd accessor is flagged cross-file — the checker resolves record names via loaded
+  globals, not just the raw scan. So the def-head lists were left untouched.
+- **The static checker doesn't arg-type-check any `sig` at call sites.** `(point "a" 4)` with
+  the typed constructor is *not* flagged — but neither is a hand-written `(sig f (int -> int))`
+  + `(f "a")`, so this is the checker's existing behaviour, not a `defrecord` gap. Per-field
+  type enforcement therefore lands via return-type flow and `BROOD_CONTRACTS=1` runtime
+  contracts (verified: under contracts, `(point "a" 4)` is rejected). The typo-safety win is
+  fully static. Noted in ADR-130's status.
+
+**Verified.** `tests/record_test.blsp` (9 tests incl. a cross-process round-trip) green;
+`(special-forms)` includes `defrecord`; the `deftype` stub now points at it; `nest check`
+clean; full `make test` green.

@@ -202,6 +202,33 @@ primitives; the internal representation is an insertion-ordered association
 vector, which can be swapped for a hash-array-mapped trie later without any
 surface change.
 
+### Records
+
+`defrecord` names a map shape. It is **sugar over a plain map** — there is no new
+value kind and no nominal type: a record *is* a map, so every map operation above
+still applies. `(defrecord point (x y))` defines a positional constructor and one
+accessor per field:
+
+```lisp
+(defrecord point (x y))
+(def p (point 3 4))      ; => {:x 3 :y 4}   — a plain immutable map
+(point-x p)              ; => 3             — accessor, one per field
+(assoc p :x 9)           ; => {:x 9 :y 4}   — update with ordinary map ops
+(= (point 1 2) {:x 1 :y 2})   ; => true     — structural equality, records ARE maps
+```
+
+The accessors are the reason to reach for it: `(point-x p)` names the field, and a
+typo `(point-witdh p)` is a call to an **undefined function** — caught by `nest
+check` and at runtime — whereas `(get p :witdh)` silently returns `nil`. Because a
+record is just a map, there is no `point?` predicate (records are structural, not
+nominal) and functional update is plain `assoc`/`merge`.
+
+A field may carry a type — `(defrecord point ((x int) (y int)))` — and when every
+field is typed, `(sig …)` declarations are emitted for the constructor and
+accessors, so the advisory checker (and `BROOD_CONTRACTS=1` runtime contracts) see
+the field types. See [ADR-130](decisions.md) and `docs/types.md` for the record
+type `(record :k T …)` this lowers to.
+
 ## Sets
 
 There is no kernel set kind yet. A **set** is an opt-in library (`(:use set)` to

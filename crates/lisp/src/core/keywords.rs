@@ -29,6 +29,7 @@ pub const DEF: &str = "def";
 pub const DEFN: &str = "defn";
 pub const DEFMACRO: &str = "defmacro";
 pub const DEFDYN: &str = "defdyn";
+pub const DEFRECORD: &str = "defrecord";
 pub const DEFMODULE: &str = "defmodule";
 pub const FN: &str = "fn";
 pub const LAMBDA: &str = "lambda";

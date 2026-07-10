@@ -1120,8 +1120,9 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
             "Brood collections are persistent and immutable — there are no \
              transients; `conj`/`assoc`/`dissoc`/`into` return fresh values."
         }
-        "defrecord" | "deftype" | "definterface" | "reify" => {
-            "Brood has no records/types — model data with plain maps. For \
+        "deftype" | "definterface" | "reify" => {
+            "Brood has no `deftype`/`definterface`/`reify` — for a named, \
+             optionally-typed record use `defrecord` (sugar over a plain map); for \
              polymorphism, use `defprotocol`/`defimpl` (the `protocol` module), or \
              dispatch with `match`/`cond`."
         }

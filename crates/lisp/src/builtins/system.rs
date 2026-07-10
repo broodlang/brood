@@ -1461,6 +1461,7 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::DEFMACRO,
     kw::DEFN,
     kw::DEFDYN,
+    kw::DEFRECORD,
     kw::DEFMODULE,
     kw::WHEN,
     kw::UNLESS,

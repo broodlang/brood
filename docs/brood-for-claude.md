@@ -68,6 +68,13 @@ Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (def *flag* true)                                   ; global; def re-binds (hot reload)
 (defdyn *log-level* :info)                          ; dynamic variable
 (binding (*log-level* :debug) (do-thing))           ; scoped rebind
+
+(defrecord point (x y))                             ; a record IS a map: sugar, no new type
+(point 3 4)                                         ; => {:x 3 :y 4}  (positional constructor)
+(point-x (point 3 4))                               ; => 3  (accessor per field; a typo is a
+                                                    ;        checker-caught undefined-fn, not silent nil)
+;; update with plain assoc/merge; no `point?` predicate (records are structural).
+;; Typed fields emit sigs: (defrecord point ((x int) (y int)))
 ```
 
 A `fn`/`defn` body of several forms is an **implicit `do`**: each is evaluated
@@ -234,6 +241,7 @@ x                bind x; a repeated x is an equality constraint (non-linear)
 (p1 p2 ...)      list of exact length
 (p1 & rest)      head(s) + tail
 [p1 p2 ...]      vector of exact length (the tuple / tagged-data idiom)
+{:keys [a b]}    map — bind a,b to (:a m),(:b m); {:keys [a] :or {a 0}} defaults absent keys
 ```
 
 ```lisp

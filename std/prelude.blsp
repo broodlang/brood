@@ -2011,6 +2011,60 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 ;; (intersperse x coll) — alias for the existing `interpose`.
 (def intersperse interpose)
 
+;; ---- records: named, optionally-typed maps (defrecord — ADR-130) ------------
+;; A record is a plain immutable map with a positional constructor and one
+;; accessor per field. `(defrecord point (x y))` defines:
+;;   (defn point   (x y) {:x x :y y})   ; constructor, named after the record
+;;   (defn point-x (p)   (get p :x))    ; accessor per field
+;;   (defn point-y (p)   (get p :y))
+;; The accessors are the point: `(point-x p)` names the field, and a typo
+;; `(point-witdh p)` is an undefined-function error the checker catches — where
+;; `(get p :witdh)` silently returns nil. Records ARE maps (no new Value or tag),
+;; so update with `assoc`/`merge` and compare structurally; there is no `point?`
+;; predicate (records are structural, not nominal — ADR-130).
+;;
+;; A field may carry a type: `(defrecord point ((x int) (y int)))`. When *every*
+;; field is typed, `sig`s are emitted too — the constructor's `(record …)` return
+;; type and each accessor's field type — so the advisory checker gets field-type
+;; and field-presence checking from the existing record-type machinery (ADR-115).
+
+;; A field spec is a bare `name` (untyped) or `(name type)` (typed).
+(defn defrecord--fname (f) (if (pair? f) (first f) f))
+(defn defrecord--ftype (f) (if (pair? f) (second f) nil))
+(defn defrecord--acc-sym (rec fld) (symbol (str (name rec) "-" (name fld))))
+
+;; The `(sig …)` forms for an all-typed record: the constructor arrow, then one
+;; accessor arrow per field. Built as plain data — `sig` reads the un-expanded type.
+(defn defrecord--sigs (rec fields)
+  (let (ftypes (map defrecord--ftype fields)
+        rec-ty (cons 'record (mapcat (fn (f) (list (keyword (name (defrecord--fname f)))
+                                                   (defrecord--ftype f)))
+                                     fields))
+        ctor   (list 'sig rec (append ftypes (list '-> rec-ty))))
+    (cons ctor
+          (map (fn (f)
+                 (let (fnm (defrecord--fname f))
+                   (list 'sig (defrecord--acc-sym rec fnm)
+                         (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
+                               '-> (defrecord--ftype f)))))
+               fields))))
+
+(defmacro defrecord (rec fields)
+  "Define record `rec` with `fields` — a positional constructor `(rec …)` building
+an immutable map, plus a `rec-field` accessor per field. A field is a bare symbol
+or `(field type)`; when every field is typed, type signatures are emitted for the
+constructor and accessors. Records are plain maps: build with the constructor,
+update with `assoc`/`merge`, compare structurally (there is no `rec?` predicate)."
+  (let (fnames (map defrecord--fname fields)
+        fkws   (map (fn (n) (keyword (name n))) fnames)
+        ctor   `(defn ~rec (~@fnames) ~(zipmap fkws fnames))
+        accs   (map (fn (f)
+                      (let (fnm (defrecord--fname f))
+                        `(defn ~(defrecord--acc-sym rec fnm) (r) (get r ~(keyword (name fnm))))))
+                    fields)
+        sigs   (if (every? pair? fields) (defrecord--sigs rec fields) nil))
+    `(do ~ctor ~@accs ~@sigs nil)))
+
 ;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
 (defn min-by (f coll)
   "The item in `coll` for which `(f item)` is smallest. Errors on empty input."

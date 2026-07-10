@@ -49,18 +49,19 @@ session `nest` (12 scheduler workers).
     non-atomic read-modify-write) as a `spit-append` alias — now atomic and O(1).
     `file_test.blsp` covers it, including a 40-process concurrent-append race.
 
-  **Deferred → design settled by ADR, implementation is a follow-up slice:**
-  - 🟡 **`defrecord` macro + per-field `sig`** (the review's top cross-axis pick) —
-    the ADR is written (**ADR-130**): `defrecord` is **pure prelude sugar over
-    closed maps** — a `defmacro` in `std/` expanding to a positional constructor +
-    one accessor per field, with an optional per-field `sig` that lowers to the
-    *existing* `(record …)` type (ADR-115; closed-record ⊆ `map<keyword, any>`
-    landed in `132bb2a`). No new `Value`/`Tag`/special form/Rust; records *are*
-    maps at runtime, so immutability and every map op are untouched. Accessors kill
-    the `(get m :key)` tax *and* make typos an undefined-function error the checker
-    already catches. Status: accepted (direction), **not yet built** — the
-    remaining work is the prelude macro + deleting the `eval/mod.rs` stub +
-    updating the LSP/grammar keyword lists.
+  **Deferred → design settled by ADR, then built:**
+  - ✅ **`defrecord` macro + per-field `sig`** (the review's top cross-axis pick) —
+    **ADR-130, implemented 2026-07-10.** `defrecord` is **pure prelude sugar over
+    closed maps** — a `defmacro` in `std/prelude.blsp` expanding to a positional
+    constructor + one accessor per field, with an optional per-field `sig` that
+    lowers to the *existing* `(record …)` type (ADR-115). No new `Value`/`Tag`/
+    special form/Rust; records *are* maps at runtime, so immutability and every map
+    op are untouched. Accessors kill the `(get m :key)` tax *and* make a typo an
+    undefined-function error the checker catches (verified cross-file). Delivered:
+    the macro + helpers, the `eval/mod.rs` stub removed (`deftype`/etc. now point
+    at `defrecord`), `defrecord` in the `SPECIAL_FORMS` highlight list (grammar/LSP/
+    treesit), `tests/record_test.blsp`. No cross-file scanner change was needed —
+    the checker resolves record names via loaded globals.
   - ⬜ **JIT float specialisation** — deferred as ordinary perf tuning (partial
     scaffolding already in `compile/mod.rs`, "type-specialize float arms"); gated
     on a concrete hot float workload, not this triage.
