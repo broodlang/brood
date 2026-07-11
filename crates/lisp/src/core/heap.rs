@@ -541,16 +541,6 @@ impl VecStore {
         }
     }
 
-    /// Heap bytes held *outside* the slab slot (the spilled `Vec`'s buffer), for
-    /// the byte-footprint accounting in [`slab_bytes`]. Inline vectors own none.
-    #[inline]
-    fn spilled_bytes(&self) -> usize {
-        match self {
-            VecStore::Spill(v) => v.capacity() * std::mem::size_of::<Value>(),
-            VecStore::Inline { .. } => 0,
-        }
-    }
-
     // ---- Byte layout for the JIT's inline element read (jit_lower.rs) ----
     // A `#[repr(u8)]` enum is laid out per RFC 2195 as a union of repr(C)
     // variant-structs, each prefixed by the u8 discriminant. So for the `Inline`
@@ -648,14 +638,22 @@ fn slab_live_count(s: &Slabs) -> usize {
 }
 
 /// Byte-weighted footprint of a [`Slabs`] (`Σ slab.len() * size_of::<elem>`) —
-/// the slab arrays themselves, not nested/shared content (inner vectors, string
-/// bytes, `Arc`-shared ropes). A comparative figure, not exact RSS. Counts
-/// `natives` too (unlike [`slab_live_count`]). Backs [`Heap::local_bytes`].
+/// the slab arrays themselves, not nested/shared content (inner spilled vectors,
+/// string bytes, `Arc`-shared ropes/blobs). A comparative figure, not exact RSS.
+/// Counts `natives` too (unlike [`slab_live_count`]). Backs [`Heap::local_bytes`].
+///
+/// **O(1)** — every term is `slab.len() * size_of::<elem>`, no per-element walk.
+/// This matters: [`Heap::local_bytes`] is republished on every `receive` park, and
+/// an earlier `Σ vectors.spilled_bytes()` term (walking every VecStore) made it
+/// O(heap) — ~50% of a tight message-passing loop. Excluding spilled buffers also
+/// squares the code with this doc's "not nested/shared content" contract; a
+/// process with large spilled vectors under-reports `:memory` by their buffer
+/// bytes, acceptable for a comparative observability figure (the hard memory cap
+/// uses the global allocator counter, not this).
 fn slab_bytes(s: &Slabs) -> usize {
     use std::mem::size_of;
     s.pairs.len() * size_of::<(Value, Value)>()
         + s.vectors.len() * size_of::<VecStore>()
-        + s.vectors.iter().map(VecStore::spilled_bytes).sum::<usize>()
         + s.maps.len() * size_of::<MapNode>()
         + s.strings.len() * size_of::<LocalString>()
         + s.bigints.len() * size_of::<num_bigint::BigInt>()
