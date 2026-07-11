@@ -3429,3 +3429,46 @@ Result: **N=10 000 spawn 45 s → 1.9 s**, correct checksums, flat scaling
 `runtime_collector` (20) + `runtime_drain` (1) green under plain release **and**
 the debug-assertion epoch tripwire; spawn checksums correct under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. clippy + rustfmt clean.
+
+## 2026-07-11 — Closure creation caches its parsed template (ping-pong ~7.5%)
+
+With the scheduler direct-handoff (236b71f) having removed the futex/context-switch
+cost, green↔green ping-pong (500k round-trips, 2.13 s vs Elixir 0.57 s) is now
+*entirely* userspace. Profiling (`perf`, clean release + debuginfo) found the
+standout waste: every `receive` rebuilds its matcher closure `(fn (msg) …)`, and the
+VM's `Inst::MakeClosure` re-ran `eval::make_closure` → `list_to_vec` + `parse_params`
++ pass-through analysis over the **immutable** `fn_rest` AST on *every* creation
+(~1 M times in the loop). `parse_params` was 1.7 %, and re-walking the RUNTIME
+`fn_rest` cons list drove `code_gen_pinned` (the per-deref Arc pin) to 3.0 %.
+
+Fix — **memoise the parsed closure template per `MakeClosure` site.** New
+`ClosureTemplate { arms, doc }` (value.rs) is the parse-once result: a pure function
+of the AST, only the captured env varies per instance. `make_closure` split into
+`parse_closure_template` (parse + pass-through analysis) and `build_closure`
+(clone arms + attach env). `make_closure_cached` (the two VM `MakeClosure` exec
+sites) keys a per-process cache (`Heap::closure_tpl_cache`) by the `fn_rest`
+`PairId`. Invalidation *mirrors `code_gen_pinned` exactly* — a RUNTIME `gen_version`
+bump (the only event that relocates the AST handles the arms hold) clears the map —
+so a hit is provably current-generation and correctness reduces to code_gen_pinned's
+established contract. **Only a RUNTIME `fn_rest` is cached** (a LOCAL slot can be
+reused by a minor GC without bumping gen_version); a LOCAL/PRELUDE key falls back to
+a plain parse. `SymbolHasher` (a `PairId` hashes as one u64) keeps the per-creation
+lookup off SipHash; pass-through is precomputed into the template so
+`alloc_closure_pre` skips the re-analysis.
+
+Result: `parse_params` / `list_to_vec` / `compute_passthrough` gone from the hot
+profile, `code_gen_pinned` 3.0 % → 0.43 %. **Green↔green ping-pong 2.13 s → 1.97 s
+(~7.5 %)**, ~3.7× → ~3.45× vs Elixir. fib / nqueens / spawn flat (no
+closure-in-loop). Full suite (777 Rust + Brood) green incl. the dev-profile GC
+tripwire; new `vm_closures_test` cases (a *fresh* capturing + multi-arity closure
+built per iteration, cross-process fan-out) pass under both engines and under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. The residual per-instance arm-`Vec`
+clone/drop (~4.8 %) needs `Closure.arms: Arc<[ClosureArm]>` to remove (it touches the
+GC's in-place arm-handle rewrite — deferred). rustfmt clean.
+
+Aside (pre-existing, unrelated — confirmed on the pre-change HEAD binary): the
+**tree-walker** (`BROOD_VM=0`) hangs on any cross-process `spawn`+`receive` inside a
+`:isolated` test block. Its legacy engine predates the VM's capture-suspend
+green-process receive (ADR-100 §8.4); `make test` runs the default VM engine, so
+this is never surfaced there. Noted, not fixed (out of scope — the tree-walker is
+being phased out per ADR-076).

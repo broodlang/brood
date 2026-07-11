@@ -964,6 +964,20 @@ impl Closure {
     }
 }
 
+/// The parse-once result of a `(fn …)` literal: everything about a closure that
+/// is a pure function of its (immutable) AST — the arity arms and the docstring —
+/// with each arm's [`Passthrough`] already analysed. Only the captured environment
+/// varies between instantiations, so this is cached per `MakeClosure` site and
+/// cloned to build each closure, sparing the per-creation re-parse of the param
+/// lists and the RUNTIME-AST walk (`parse_params`/`list_to_vec`). Keyed and
+/// invalidated exactly like [`crate::core::heap::Heap::code_gen_pinned`]'s cache —
+/// a bump of the RUNTIME `gen_version` (the only event that moves the AST handles
+/// the arms hold) drops it. See `eval::make_closure_cached`.
+pub struct ClosureTemplate {
+    pub arms: Vec<ClosureArm>,
+    pub doc: Option<String>,
+}
+
 /// Signature of a builtin: already-evaluated args, the call-site environment,
 /// and the heap (to read/allocate values and call back into `eval`).
 pub type NativeFnPtr = fn(&[Value], EnvId, &mut Heap) -> LispResult;

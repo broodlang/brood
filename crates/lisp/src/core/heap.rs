@@ -45,8 +45,9 @@ use crate::core::blob::{SharedBlob, SHARED_BLOB_THRESHOLD};
 use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
-    BigIntId, BytesId, Closure, ClosureArm, ClosureId, DecimalId, EnvId, MapId, NativeFn, NativeId,
-    PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL, PRELUDE, RUNTIME,
+    BigIntId, BytesId, Closure, ClosureArm, ClosureId, ClosureTemplate, DecimalId, EnvId, MapId,
+    NativeFn, NativeId, PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL,
+    PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
@@ -928,6 +929,11 @@ pub type SymbolMap<V> = HashMap<Symbol, V, std::hash::BuildHasherDefault<SymbolH
 /// stock `SipHash` was pure per-call overhead (perf #2).
 pub type VmCacheMap<V> = HashMap<VmCacheKey, V, std::hash::BuildHasherDefault<SymbolHasher>>;
 
+/// The [`Heap::lookup_closure_template`] cache map: `fn_rest` [`PairId`] → parsed
+/// [`ClosureTemplate`], on the fast [`SymbolHasher`] (a `PairId` writes one `u64`).
+type ClosureTemplateMap =
+    HashMap<PairId, Arc<ClosureTemplate>, std::hash::BuildHasherDefault<SymbolHasher>>;
+
 pub struct RuntimeCode {
     /// The **two** code generations (ADR-091 Erlang-style 2-generation collector).
     /// New code (`def`/`promote`) lands in `gens[current_gen]`; the *other* slot
@@ -1334,6 +1340,25 @@ pub struct Heap {
     /// time). `gen_cache_ver` starts at `u64::MAX` so the first read always populates.
     gen_cache: [RefCell<Option<Arc<CodeSlabs>>>; 2],
     gen_cache_ver: [Cell<u64>; 2],
+    /// **Per-process parse cache for `(fn …)` literals**, keyed by the `MakeClosure`
+    /// site's `fn_rest` AST handle. Building a closure re-parses its param
+    /// lists/optionals/doc and walks the (RUNTIME) body cons list on every creation —
+    /// pure waste in a closure-in-a-loop (a `receive` matcher, a per-frame callback),
+    /// since the parse is a function of the fixed AST. This memoises the parsed
+    /// [`ClosureTemplate`], so creation drops to cloning the arm `Vec` out of it + env
+    /// attach — the re-parse, RUNTIME-AST walk, and pass-through analysis are gone. (The
+    /// per-instance arm-`Vec` clone/drop is the remaining cost; sharing the arms via an
+    /// `Arc<[ClosureArm]>` in `Closure` would remove it too, but touches the GC's in-place
+    /// arm rewrite — deferred.) Invalidated exactly like [`gen_cache`](Self::gen_cache): the arms hold RUNTIME
+    /// AST handles, which move only on a `gen_version` bump (Stage-4 free / compaction),
+    /// so a version change clears the whole map (`closure_tpl_ver` starts at `u64::MAX`
+    /// so the first use populates). `RefCell`: the `Heap` is single-threaded (one worker
+    /// owns a process at a time); `Arc` (not `Rc`) so the `Heap` stays `Send` across the
+    /// worker migration a process undergoes. Uses [`SymbolHasher`] — a `PairId` hashes as a
+    /// single `u64`, so the lookup (once per closure creation) takes its bijective
+    /// `write_u64` fast path instead of stock `SipHash`.
+    closure_tpl_cache: RefCell<ClosureTemplateMap>,
+    closure_tpl_ver: Cell<u64>,
     /// This process's global scope. For a real runtime this is [`EnvId::GLOBAL`]
     /// (routing to `runtime.globals`); for the prelude *builder* it's a real
     /// local root frame (so the prelude can be evaluated, then frozen).
@@ -1912,6 +1937,8 @@ impl Heap {
             old: Slabs::default(),
             gen_cache: [RefCell::new(None), RefCell::new(None)],
             gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
+            closure_tpl_cache: RefCell::new(ClosureTemplateMap::default()),
+            closure_tpl_ver: Cell::new(u64::MAX),
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
@@ -1969,6 +1996,8 @@ impl Heap {
             old: Slabs::default(),
             gen_cache: [RefCell::new(None), RefCell::new(None)],
             gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
+            closure_tpl_cache: RefCell::new(ClosureTemplateMap::default()),
+            closure_tpl_ver: Cell::new(u64::MAX),
             prelude,
             runtime,
             global: EnvId::local(0),
@@ -3502,6 +3531,15 @@ impl Heap {
         ClosureId::local_gen(idx, self.local_epoch)
     }
 
+    /// Like [`alloc_closure`](Self::alloc_closure) but for a closure whose arms already
+    /// carry their computed [`Passthrough`] — as a [`ClosureTemplate`]-built one does —
+    /// so it skips the per-creation pass-through re-analysis (a RUNTIME-body walk). The
+    /// hot closure-creation path (`make_closure_cached`).
+    pub fn alloc_closure_pre(&mut self, c: Closure) -> ClosureId {
+        let idx = alloc_slot!(self, closures, c);
+        ClosureId::local_gen(idx, self.local_epoch)
+    }
+
     /// Analyse whether `arm` is a pure pass-through wrapper — a single body form
     /// `(head p_i p_j …)` with no `&optional`/`&` rest, `head` an ordinary
     /// function reference (not a special form, not one of the arm's own params),
@@ -3512,7 +3550,7 @@ impl Heap {
     /// to this closure, as in `(defn hog () (hog))` — is detected and broken at the
     /// redirect site, since the closure's own global name isn't known here; see the
     /// redirect loops in `eval::eval` and `compile::dispatch`.)
-    fn compute_passthrough(&self, arm: &ClosureArm) -> Option<Passthrough> {
+    pub(crate) fn compute_passthrough(&self, arm: &ClosureArm) -> Option<Passthrough> {
         if !arm.optionals.is_empty() || arm.rest.is_some() || arm.body.len() != 1 {
             return None;
         }
@@ -4094,6 +4132,28 @@ impl Heap {
                 .as_ref()
                 .expect("gen cache populated on the version miss above"),
         )
+    }
+
+    /// Look up the parsed [`ClosureTemplate`] for a `MakeClosure` site's `fn_rest`
+    /// handle, gen-synced exactly like [`code_gen_pinned`](Self::code_gen_pinned): a
+    /// `gen_version` bump (the only event that relocates the RUNTIME AST handles the
+    /// arms carry) clears the whole cache first, so any hit is current-generation.
+    /// `None` on a miss — the caller parses once and calls [`store_closure_template`].
+    pub(crate) fn lookup_closure_template(&self, key: PairId) -> Option<Arc<ClosureTemplate>> {
+        let ver = self.runtime.gen_version.load(Ordering::Acquire);
+        if self.closure_tpl_ver.get() != ver {
+            self.closure_tpl_cache.borrow_mut().clear();
+            self.closure_tpl_ver.set(ver);
+            return None;
+        }
+        self.closure_tpl_cache.borrow().get(&key).cloned()
+    }
+
+    /// Memoise a freshly-parsed [`ClosureTemplate`] under its `fn_rest` key. Call only
+    /// right after a [`lookup_closure_template`] miss (which synced the version this
+    /// creation), so the insert lands against the current generation.
+    pub(crate) fn store_closure_template(&self, key: PairId, tpl: Arc<ClosureTemplate>) {
+        self.closure_tpl_cache.borrow_mut().insert(key, tpl);
     }
 
     pub fn pair(&self, id: PairId) -> (Value, Value) {

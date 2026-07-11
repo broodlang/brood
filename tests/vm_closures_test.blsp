@@ -40,6 +40,25 @@
     (let (g (fn (y) (dbl (dbl y))))
       (g n))))
 
+;; The VM memoises each `(fn …)` literal's *parsed arms* (params/body/doc) per
+;; MakeClosure site and rebuilds only the captured env per instance. So a closure
+;; literal built *afresh on every iteration* must still capture that iteration's
+;; binding — the cache shares the immutable arms, never the env. Drives enough
+;; iterations to churn GC and (via `(fn (x) (+ x i))` each lap) exercise the cache
+;; hot path a million-plus times across the suite.
+(defn sum-fresh (i n acc)
+  (if (= i n) acc
+    (let (f (fn (x) (+ x i)))           ; SAME literal each lap; capture differs
+      (sum-fresh (+ i 1) n (+ acc (f 0))))))
+
+;; same, but the fresh per-lap closure is *multi-arity* — proves both arms are
+;; cached and dispatched correctly while only the env is rebuilt each lap.
+(defn sum-fresh-multi (i n acc)
+  (if (= i n) acc
+    (let (g (fn ((a) (+ a i))           ; arity-1 arm
+               ((a b) (+ a b i))))      ; arity-2 arm, both capture `i`
+      (sum-fresh-multi (+ i 1) n (+ acc (g 1) (g 1 1))))))
+
 (describe "local-capturing closures"
   (test "captures a parameter"
     (assert= ((make-adder 5) 3) 8)
@@ -69,7 +88,17 @@
 
   (test "capture of a finalized letrec helper from the body"
     (assert= (quad 5) 20)
-    (assert= (quad 0) 0)))
+    (assert= (quad 0) 0))
+
+  (test "a fresh closure literal per iteration captures that iteration's binding"
+    ;; (f 0) = i, so Σ i for i in 0..n. n=10000 → 10000*9999/2 = 49995000.
+    (assert= (sum-fresh 0 10000 0) 49995000)
+    (assert= (sum-fresh 0 1 0) 0))
+
+  (test "a fresh multi-arity closure per iteration dispatches and captures right"
+    ;; per lap: (g 1)=1+i and (g 1 1)=2+i, so Σ (3+2i) for i in 0..n = n²+2n.
+    ;; n=1000 → 1002000.
+    (assert= (sum-fresh-multi 0 1000 0) 1002000)))
 
 ;; ---- across processes --------------------------------------------------------
 ;; A closure sent between processes is deep-copied: its captured env is flattened
@@ -94,6 +123,17 @@
 (defn cc-sum (got total acc)
   (if (= got total) acc (cc-sum (+ got 1) total (+ acc (receive (v v))))))
 
+;; each worker builds a fresh capturing closure on every loop iteration (exercising
+;; its *own* per-process template cache) and reports the summed result — proving the
+;; cache is per-process and correct while many workers churn closures concurrently.
+(defn cc-loop-worker (parent k)
+  (send parent (sum-fresh 0 k 0)))
+
+(defn cc-spawn-loopers (parent ks)
+  (when (not (empty? ks))
+    (spawn (cc-loop-worker parent (first ks)))
+    (cc-spawn-loopers parent (rest ks))))
+
 (describe "capturing closures across processes"
   :isolated
 
@@ -110,4 +150,10 @@
   (test "fan-out: many workers each build and apply their own capture"
     ;; worker i computes (i + 100); Σ for i in 1..20 = 210 + 2000 = 2210
     (cc-spawn-builders (self) (range 1 21) 100)
-    (assert= (cc-sum 0 20 0) 2210)))
+    (assert= (cc-sum 0 20 0) 2210))
+
+  (test "fan-out: many workers each churn fresh closures in a loop concurrently"
+    ;; worker k reports Σ i for i in 0..k = k(k-1)/2. For k in 100,200,…,500:
+    ;; 4950 + 19900 + 44850 + 79800 + 124750 = 274250.
+    (cc-spawn-loopers (self) [100 200 300 400 500])
+    (assert= (cc-sum 0 5 0) 274250)))

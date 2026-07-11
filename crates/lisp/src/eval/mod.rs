@@ -14,7 +14,9 @@ use smallvec::SmallVec;
 
 use crate::core::heap::{Heap, Root, SymbolMap};
 use crate::core::keywords as kw;
-use crate::core::value::{self, Closure, ClosureId, EnvId, NativeId, Symbol, Value, ValueRef};
+use crate::core::value::{
+    self, Closure, ClosureId, ClosureTemplate, EnvId, NativeId, Symbol, Value, ValueRef,
+};
 use crate::error::{LispError, LispResult};
 
 /// Truthiness: only `nil` and `false` are falsy.
@@ -1292,16 +1294,72 @@ pub(crate) fn make_closure(
     rest: Value,
     env: EnvId,
 ) -> LispResult {
-    let parts = heap.list_to_vec(rest)?;
-    // A closure defined at the global (parent-less) scope captures the env
-    // symbolically (`None`), so it works in any process; otherwise it captures
-    // its specific enclosing scope.
+    let tpl = parse_closure_template(heap, rest)?;
+    Ok(build_closure(heap, name, &tpl, env))
+}
+
+/// The hot closure-creation path: same as [`make_closure`] with `name = None`, but the
+/// parsed [`ClosureTemplate`] is memoised per `MakeClosure` site (keyed by the `fn_rest`
+/// AST handle) so a closure built in a loop — a `receive` matcher, a per-frame callback —
+/// skips re-parsing its param lists and re-walking the (RUNTIME) body cons list on every
+/// creation. Each creation is then just the arm clone + env attach. The cache is
+/// gen-invalidated (see [`Heap::lookup_closure_template`]); a `fn_rest` with no stable
+/// handle key (never happens for a real `(fn …)` — its cdr is a pair) falls back to a
+/// plain parse.
+pub(crate) fn make_closure_cached(heap: &mut Heap, rest: Value, env: EnvId) -> LispResult {
+    // Cache only a RUNTIME `fn_rest` handle: the cache is invalidated by the RUNTIME
+    // `gen_version` (see `Heap::lookup_closure_template`), which tracks *only* RUNTIME
+    // relocation. A LOCAL handle's slot can be reused for a different object by a minor
+    // GC without bumping that version, so a LOCAL (or PRELUDE) key isn't safe to key on —
+    // parse it directly. Every VM `MakeClosure` site's `fn_rest` is an immovable RUNTIME
+    // sub-form, so this is the fast path in practice.
+    let key = match rest.as_pair() {
+        Some(p) if p.region() == crate::core::value::RUNTIME => p,
+        _ => {
+            let tpl = parse_closure_template(heap, rest)?;
+            return Ok(build_closure(heap, None, &tpl, env));
+        }
+    };
+    if let Some(tpl) = heap.lookup_closure_template(key) {
+        return Ok(build_closure(heap, None, &tpl, env));
+    }
+    let tpl = std::sync::Arc::new(parse_closure_template(heap, rest)?);
+    heap.store_closure_template(key, std::sync::Arc::clone(&tpl));
+    Ok(build_closure(heap, None, &tpl, env))
+}
+
+/// Instantiate a closure from a parsed [`ClosureTemplate`]: clone its arms/doc, attach
+/// the captured environment, and intern. A closure defined at the global (parent-less)
+/// scope captures the env symbolically (`None`), so it works in any process; otherwise
+/// it captures its specific enclosing scope. The arms already carry their `passthrough`,
+/// so this uses [`Heap::alloc_closure_pre`] (no re-analysis).
+fn build_closure(
+    heap: &mut Heap,
+    name: Option<Symbol>,
+    tpl: &ClosureTemplate,
+    env: EnvId,
+) -> Value {
     let captured = if heap.is_global(env) { None } else { Some(env) };
+    let id = heap.alloc_closure_pre(Closure {
+        name,
+        arms: tpl.arms.clone(),
+        doc: tpl.doc.clone(),
+        env: captured,
+    });
+    Value::func(id)
+}
+
+/// Parse a `(fn …)` form's cdr (`rest`) into a reusable [`ClosureTemplate`] — the arity
+/// arms (each with its `passthrough` analysed) and docstring. A pure function of the
+/// (immutable) AST, independent of the capturing environment, so it is memoised per site
+/// by [`make_closure_cached`]. Pattern clauses were lowered to `match*` by the compile
+/// pass, so only plain *arity* clauses reach here.
+fn parse_closure_template(heap: &Heap, rest: Value) -> Result<ClosureTemplate, LispError> {
+    let parts = heap.list_to_vec(rest)?;
 
     // Multi-arity? An optional leading docstring, then every remaining form a
-    // `(param-list body…)` *arity* clause (pattern clauses were lowered to
-    // `match*` by the compile pass, so they never reach here). Each clause
-    // becomes a `ClosureArm`, dispatched by argument count at call time.
+    // `(param-list body…)` *arity* clause. Each clause becomes a `ClosureArm`,
+    // dispatched by argument count at call time.
     let (lead_doc, clause_forms): (Option<Value>, &[Value]) =
         match parts.first().map(|v| v.unpack()) {
             Some(ValueRef::Str(_)) if parts.len() > 1 => (Some(parts[0]), &parts[1..]),
@@ -1320,21 +1378,17 @@ pub(crate) fn make_closure(
         for &clause in clause_forms {
             let cparts = heap.list_to_vec(clause)?;
             let (params, optionals, rest_param) = parse_params(heap, cparts[0])?;
-            arms.push(value::ClosureArm {
+            let mut arm = value::ClosureArm {
                 params,
                 optionals,
                 rest: rest_param,
                 body: cparts[1..].to_vec(),
-                passthrough: None, // filled by `alloc_closure`
-            });
+                passthrough: None,
+            };
+            arm.passthrough = heap.compute_passthrough(&arm);
+            arms.push(arm);
         }
-        let id = heap.alloc_closure(Closure {
-            name,
-            arms,
-            doc,
-            env: captured,
-        });
-        return Ok(Value::func(id));
+        return Ok(ClosureTemplate { arms, doc });
     }
 
     // Single-arity: `parts[0]` is the param list, `parts[1..]` the body.
@@ -1355,10 +1409,18 @@ pub(crate) fn make_closure(
         }
         _ => None,
     };
-    let id = heap.alloc_closure(Closure::single(
-        name, params, optionals, rest_param, body, doc, captured,
-    ));
-    Ok(Value::func(id))
+    let mut arm = value::ClosureArm {
+        params,
+        optionals,
+        rest: rest_param,
+        body,
+        passthrough: None,
+    };
+    arm.passthrough = heap.compute_passthrough(&arm);
+    Ok(ClosureTemplate {
+        arms: vec![arm],
+        doc,
+    })
 }
 
 /// A parsed parameter list: required params, `&optional` params with their

@@ -2835,7 +2835,7 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
                 }
                 frame
             };
-            let closure = crate::eval::make_closure(heap, None, fn_rest.load(), env)?;
+            let closure = crate::eval::make_closure_cached(heap, fn_rest.load(), env)?;
             // Direct `letrec` self-recursion: bind the binder name to the closure
             // we just built, in the closure's own captured env. The recursive call
             // then resolves through that env (uncached — a local-capturing frame
@@ -4573,7 +4573,7 @@ fn exec_chunk(
                     frame
                 };
                 heap.truncate_roots(n - ncap); // drop the capture values
-                let closure = crate::eval::make_closure(heap, None, fn_rest.load(), env)?;
+                let closure = crate::eval::make_closure_cached(heap, fn_rest.load(), env)?;
                 // Direct `letrec` self-recursion: bind the binder name to the closure
                 // in its own captured env (the env↔closure cycle the tracing GC owns).
                 if let Some(name) = self_name {
