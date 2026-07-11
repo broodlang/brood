@@ -80,7 +80,7 @@ jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "de
 # its vendored C parser and lights up `:ruby` in `tree-sitter-parse`. Add a
 # language = a `treesit-<lang>` feature here + one cfg'd arm in `src/treesit.rs`.
 # (Dynamic runtime grammar loading — no compile-time enum at all — is the planned
-# end state; see docs/roadmap.md.)
+# end state; see ROADMAP.md.)
 treesit = ["dep:tree-sitter"]
 treesit-ruby = ["treesit", "dep:tree-sitter-ruby"]
 treesit-elixir = ["treesit", "dep:tree-sitter-elixir"]

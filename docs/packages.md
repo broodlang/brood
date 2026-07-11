@@ -3,7 +3,7 @@
 > Status: **done** (ADR-037; v1 scope). Design captured here ahead of M2 because
 > the decisions (manifest shape, cache layout, conflict policy) cross-cut
 > project management and the upcoming editor plugin story. Landed in vertical
-> slices — see [`roadmap.md`](roadmap.md):
+> slices — see [`ROADMAP.md`](../ROADMAP.md):
 >
 > - **Slice 0 — done (2026-05-29):** manifest `:dependencies` parsing; the
 >   `(project …)` form is now a *quoting macro* (bare symbols in manifests).

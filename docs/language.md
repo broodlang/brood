@@ -1,7 +1,7 @@
 # Brood language reference (v0.1)
 
 This describes the language **as implemented today**. Anything not listed here
-does not exist yet — see [roadmap.md](roadmap.md) for what's coming (dynamic
+does not exist yet — see [ROADMAP.md](../ROADMAP.md) for what's coming (dynamic
 variables, a tracing GC, …).
 
 Brood is a dynamically-typed, **immutable** **Lisp-1** (one namespace for

@@ -10,7 +10,7 @@
 
 ## Problem
 
-`docs/roadmap.md` flagged this as **"the single biggest expressiveness gap"**
+`ROADMAP.md` flagged this as **"the single biggest expressiveness gap"**
 in the type checker: a function whose return type depends on which "clause"
 matched its argument — the classic overloaded-function shape:
 

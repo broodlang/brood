@@ -293,7 +293,7 @@ frontend (and an optional native GUI window), demoed end-to-end by `nest observe
 `std/editor/*` framework. Still ahead here: full server/daemon serving and a **web
 frontend**.
 
-The full plan is in [`docs/roadmap.md`](docs/roadmap.md).
+The full plan is in [`ROADMAP.md`](ROADMAP.md).
 
 ## Project layout
 
@@ -311,7 +311,7 @@ docs/          architecture, language reference, roadmap, decisions, dev log
 - [docs/architecture.md](docs/architecture.md) — the design and the "one runtime
   that can also be a server" approach
 - [docs/language.md](docs/language.md) — the language reference
-- [docs/roadmap.md](docs/roadmap.md) — milestones and status
+- [ROADMAP.md](ROADMAP.md) — milestones and status
 - [docs/decisions.md](docs/decisions.md) — why the key choices were made
 - [docs/devlog.md](docs/devlog.md) — chronological work log
 

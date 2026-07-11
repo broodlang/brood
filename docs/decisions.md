@@ -2446,7 +2446,7 @@ a prelude predicate over `type-of`, and `Ty::tested_by` narrows on it.
 
 **References.** ADR-006 (mechanism/policy split), ADR-026 (immutability), ADR-005
 relaxation (runtime-substrate crates), ADR-011 (ship the simple form),
-[`roadmap.md`](roadmap.md) M2, [`types.md`](types.md) compatibility contract.
+[`ROADMAP.md`](../ROADMAP.md) M2, [`types.md`](types.md) compatibility contract.
 
 ## ADR-046 — The display/input seam: a frontend is a protocol of render-op data
 
@@ -2513,7 +2513,7 @@ lives behind the scheduler registry).
 **References.** ADR-006 (mechanism/policy), ADR-045 (the rope, the other editor
 substrate), ADR-005 relaxation (runtime-substrate crates), ADR-011 (ship the
 simple form), ADR-043 (the root-vs-worker thread + stack model),
-[`architecture.md`](architecture.md) (the seam), [`roadmap.md`](roadmap.md) M3.
+[`architecture.md`](architecture.md) (the seam), [`ROADMAP.md`](../ROADMAP.md) M3.
 
 ## ADR-047 — Native multi-arity closure dispatch
 
@@ -2581,7 +2581,7 @@ common small call. `+` stays Brood; `(+ a b)` is now ~one env frame instead of
 lists are lists; Erlang-style same-arity pattern dispatch), ADR-002 (`Rc`→`gc-arena`,
 why heap construction stays funnelled), CLAUDE.md "Dogfood first; optimize only by
 building the language up", [`language.md`](language.md) (`fn`/`defn` clauses),
-[`roadmap.md`](roadmap.md) M1 ("Memory reclamation" — the cumulative-memory story
+[`ROADMAP.md`](../ROADMAP.md) M1 ("Memory reclamation" — the cumulative-memory story
 multi-arity helps but doesn't fully solve).
 
 ## ADR-048 — Self-hosted REPL (the read-eval-print loop in Brood)
@@ -2990,7 +2990,7 @@ re-doing the node wire codec for nothing.
 **References.** ADR-046 (the display seam / observer this extends), ADR-051
 (`process-info`, the send-able snapshot maps), ADR-034 (the node handshake/cookie),
 ADR-006 (mechanism in Rust, the agent + loop are Brood), `std/observer.blsp`,
-`docs/roadmap.md` M3.
+`ROADMAP.md` M3.
 
 ## ADR-054 — Generational handles: a debug tripwire for use-after-GC
 
@@ -3049,7 +3049,7 @@ LOCAL deref.
 ADR-035 (the disabled mark-sweep this helps revive), ADR-026 (immutability — but
 `letrec` cycles mean we still need tracing, not pure refcounting),
 [`docs/memory-review.md`](memory-review.md) (the full memory model review + the
-staged GC plan), [`roadmap.md`](roadmap.md) M1.
+staged GC plan), [`ROADMAP.md`](../ROADMAP.md) M1.
 
 ## ADR-055 — Stage B: automatic copying collection at the eval safepoint
 
@@ -3110,7 +3110,7 @@ The "everything moves" footgun was closed at its (few, enumerable) sites:
 ADR-035 (the disabled mark-sweep this replaces), ADR-016 (the arena reset it
 supersedes under GC), ADR-026 (immutability — no write barriers; but `letrec`
 cycles), [`docs/memory-review.md`](memory-review.md) (the full plan + the fork),
-[`roadmap.md`](roadmap.md) M1. Stage C (generational nursery) deferred.
+[`ROADMAP.md`](../ROADMAP.md) M1. Stage C (generational nursery) deferred.
 
 ## ADR-056 — A windowed (GUI) frontend + mouse input, on the same display seam
 
@@ -3203,7 +3203,7 @@ and a new render-op-protocol input shape, with zero change to the frame protocol
 **References.** ADR-046 (the display/input seam this extends — and whose mouse
 deferral this closes), ADR-011 (ship the simple form), ADR-006 (drawing/I-O as a
 Rust-primitive category), ADR-043 (root-vs-worker thread + finite-poll model),
-[`roadmap.md`](roadmap.md) M3.
+[`ROADMAP.md`](../ROADMAP.md) M3.
 
 ## ADR-058 — Automatic GC reaches every entry path; `(hibernate)` removed
 
@@ -3321,7 +3321,7 @@ We extend it to GUI input, and adopt it as the rule for blocking work generally.
 removes), ADR-046 (the display/input seam; predicted async-input-to-mailbox),
 ADR-043 (root-vs-worker thread + finite-poll model), ADR-033/034 (the dist
 reader-thread → mailbox precedent),
-[`roadmap.md`](roadmap.md) M3/M4.
+[`ROADMAP.md`](../ROADMAP.md) M3/M4.
 
 ## ADR-060 — Sets are a library over maps; the `#{…}` literal is deferred
 
@@ -3359,7 +3359,7 @@ features" (ADR-011):
   lands.
 
 **References.** ADR-006 (write the language in the language), ADR-011 (defer power
-features), ADR-040 (CHAMP map the set rides on), [`roadmap.md`](roadmap.md)
+features), ADR-040 (CHAMP map the set rides on), [`ROADMAP.md`](../ROADMAP.md)
 (deferred-features list).
 
 ## ADR-061 — Collect at any eval depth via an operand stack
@@ -5211,7 +5211,7 @@ net, the `webserver` example. The takeaway (an ADR-085 refinement): the
 detachable app framework — so `editor/*` stays bundled until/unless the REPL +
 observer are themselves repackaged (gated on a real consumer, ADR-011). The
 editor *app* already lives outside the binary (`brood-edit`). Tracked in
-`roadmap.md`.
+`ROADMAP.md`.
 
 ## ADR-086 — GUI keys are press/release transitions, not an OS-repeat flood
 
@@ -6254,7 +6254,7 @@ green. The near-term follow-ups (`send-after`/`send-interval` timers, a
 pid-returning synchronous `remote-spawn`, a `terminate`-style worker-cleanup
 convention) and the larger deferred items (`gen_statem`, an Elixir-style
 `Registry`/`pg`, an `Application` behaviour, rollback-on-failure supervisor
-startup) are tracked in [roadmap.md](roadmap.md).
+startup) are tracked in [ROADMAP.md](../ROADMAP.md).
 
 ## ADR-100 — Full process migration is a stepping-VM change, not a corosensei swap; fresh-only stealing is the migration-free partial
 
@@ -6384,7 +6384,7 @@ double-click-word / triple-click-line — independent of timers but part of the 
 **Status:** accepted (architecture, 2026-06-07). Implementation gated on bytecode
 lowering + editor workload profile (ADR-096 prerequisites). Full design in
 [`vm-perf-and-jit-runway.md`](vm-perf-and-jit-runway.md) §6. Staged roadmap in
-[`roadmap.md`](roadmap.md) (JIT tier-1 entries under the VM section).
+[`ROADMAP.md`](../ROADMAP.md) (JIT tier-1 entries under the VM section).
 
 **Context.** ADR-096 deferred actual JIT codegen until three gates pass: (a) the
 VM is bytecode-based, (b) a real editor workload profile names interpretive
@@ -7127,8 +7127,7 @@ none can go stale. (Not *purely* acyclic: closures capture environments and `def
 introduce cycles/old→young edges — exactly the corner the one remembered set covers — so RC would
 need a cycle collector; plain mark-sweep would not.) The question is what throughput that costs.
 
-**Measurements** (this machine, clean `--release --features jit`, min of 6; full data archived in
-`docs/benchmarks/2026-06-28*-gc-cost.md`). Method: A/B each workload **GC-on** vs **GC suppressed**
+**Measurements** (this machine, clean `--release --features jit`, min of 6). Method: A/B each workload **GC-on** vs **GC suppressed**
 (`BROOD_GC_FLOOR=500M` → 0 collections), so the delta is the *current copying collector's* cost.
 Survivor rate = `copied / (copied + reclaimed)` from `(gc-stats)`.
 
@@ -7280,7 +7279,7 @@ type can now depend on which arm's domain a call's argument provably matches —
 distinct known arrows silently widened to "any function", discarding both. No new
 grammar: reuses the already-shipped `(and …)` conjunctive-type syntax. Advisory
 throughout — contract #5 holds. Refines the Step 5+ staircase alongside ADR-078
-(arrow/element/map_kv) and ADR-115 (records); closes the item `docs/roadmap.md`
+(arrow/element/map_kv) and ADR-115 (records); closes the item `ROADMAP.md`
 flagged as **"the single biggest expressiveness gap"**.
 
 **Context.** ADR-078 explicitly deferred this when it chose `Ty` as a
@@ -7688,7 +7687,7 @@ surfaced exactly the one true-positive finding above and nothing else.
 so the reload-conflict resolution is on paper before implementation starts, per
 ADR-011 (gated on this being picked up as the next slice of type-system work).
 
-**Context.** `docs/roadmap.md`'s Elixir-parity gap list previously marked
+**Context.** `ROADMAP.md`'s Elixir-parity gap list previously marked
 *pervasive static soundness/gating* as something Brood deliberately won't
 pursue (✋), reasoning that gating on global `def`/`defn` types must conflict
 with Erlang-style hot reload (ADR-013: a `def` rebinds a global unconditionally

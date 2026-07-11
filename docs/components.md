@@ -256,8 +256,8 @@ before working in any Rust component:
   project runner from the repo root.
 - **`tests/**/*_test.blsp`** — the in-language suite (pattern matching, modules,
   the main `suite_test.blsp`), discovered by `nest test` / the runner.
-- **`crates/lisp/benches/eval.rs`** — `divan` microbenchmarks; archived by
-  `scripts/bench.sh` (see [the benchmarks dir](benchmarks/)).
+- **`crates/lisp/benches/eval.rs`** — `divan` microbenchmarks; each run archived
+  to `docs/benchmarks/<UTC-timestamp>.md` by `scripts/bench.sh`.
 
 ---
 

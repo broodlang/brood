@@ -1,6 +1,6 @@
 # TODO
 
-Running scratch list of work to pick up. Promote items to `docs/roadmap.md` /
+Running scratch list of work to pick up. Promote items to `ROADMAP.md` /
 an ADR once they're committed to. Newest section at the top.
 
 ## check-project O(n²) — resolve imports without re-eval/re-compile (scoped 2026-07-03)

@@ -13,13 +13,13 @@ modern, Emacs-like editor… runnable locally as a fast native app and **remotel
 as a server** for other editor frontends," and M4 names the target directly:
 *"the same runtime listens on a socket and serves the M3 protocol,"* *"remote
 editor instances attach (**the Emacs `--daemon` / `emacsclient` model**),"* *"one
-core, multiple attached frontends"* (`roadmap.md:441`).
+core, multiple attached frontends"* (`ROADMAP.md`).
 
 Name-addressed Unix sockets *are* the emacsclient model for the local case:
 `nest run --name foobar` ≈ `emacs --daemon=foobar`, `(connect "foobar")` ≈
 `emacsclient -s foobar` — and Emacs uses exactly this `$XDG_RUNTIME_DIR`/`/tmp`
 per-user socket convention. It also lands squarely on two guiding principles
-(`roadmap.md:453`):
+(`ROADMAP.md`):
 
 - **"The frontend is a protocol — local-native and remote are the same code path
   with different transports."** The `Stream { Tcp | Unix }` seam below is a
@@ -28,7 +28,7 @@ per-user socket convention. It also lands squarely on two guiding principles
   [Rust vs. Brood](#rust-vs-brood-adr-006) below.
 
 **Immediate beneficiary:** the M3 observer's remote-attach already rides the dist
-node link (`nest observe --connect name@host:port --cookie …`, `roadmap.md:366`).
+node link (`nest observe --connect name@host:port --cookie …`, `ROADMAP.md`).
 With this it becomes `nest observe --connect foobar` with the cookie auto-resolved
 — the first consumer, today, before the editor exists.
 
@@ -252,7 +252,7 @@ rather than the in-language suite.
   or the module split above?
 - **Dual listen** — should a node serve *both* a local Unix socket (for
   same-box frontends) and a TCP/TLS endpoint (for remote attach) at once? The
-  emacsclient/daemon end-state in M4 (`roadmap.md:441-444`) ultimately *wants*
+  emacsclient/daemon end-state in M4 (`ROADMAP.md`) ultimately *wants*
   this — one editor core, local frontends by name + remote frontends over the
   network. The current plan defers it (arity-1 = Unix, addr = TCP) per ADR-011
   and "every milestone usable," shipping the single-transport forms first. Worth

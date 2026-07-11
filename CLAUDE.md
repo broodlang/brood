@@ -10,7 +10,7 @@ Brood is a small dynamic **Lisp implemented in Rust**. Its purpose is to be the
 language a modern, Emacs-like, self-editing, remotely-hostable text editor is
 written in. Today the repo is the **language core**; the editor, display
 protocol, and server come later. Read `docs/` before making non-trivial changes
-— especially `docs/architecture.md`, `docs/roadmap.md`, and `docs/decisions.md`.
+— especially `docs/architecture.md`, `ROADMAP.md`, and `docs/decisions.md`.
 
 Brood source files carry the **`.blsp`** extension — a contraction of *Brood
 Lisp* (`.lisp` was dropped because it collides with Emacs' `lisp-mode`). Any
@@ -50,7 +50,7 @@ Concretely:
 - This applies to upcoming pieces too. The **CLI/REPL, the editor commands,
   keymaps, and UI should ultimately be Brood**, with Rust only hosting the
   thinnest necessary substrate. (The REPL is Rust today as a bootstrap; moving
-  it into Brood is a goal — see `docs/roadmap.md`.)
+  it into Brood is a goal — see `ROADMAP.md`.)
 - A Rust builtin is an admission that the language can't yet express something.
   Treat each one as a candidate to later replace with Brood once the language
   is capable enough.
@@ -387,7 +387,7 @@ co-author trailer, overriding any default that would append one.
    `docs/devlog.md`. The crash-dump tooling below still targets genuine SIGSEGVs —
    e.g. a use-after-GC blow-up — not this case.)
 3. Update `docs/language.md` (it documents the language *as implemented*).
-4. Tick it off in `docs/roadmap.md`; add a dated entry to `docs/devlog.md`.
+4. Tick it off in `ROADMAP.md`; add a dated entry to `docs/devlog.md`.
 5. If it reflects a real design choice, record an ADR in `docs/decisions.md`.
 
 ## Known next steps (see roadmap)

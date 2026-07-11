@@ -1,228 +1,322 @@
-# ROADMAP — Stage 1: a full, functional Lisp
+# ROADMAP
 
-**Goal of Stage 1:** Brood stands on its own as a *practical, general-purpose
-dynamic Lisp* — you could write real programs in it without ever mentioning the
-editor. (The editor, display protocol, server, and web frontend are Stage 2+ —
-see [`docs/roadmap.md`](docs/roadmap.md) for the full M1–M5 arc. This file is the
-detailed Stage-1 completeness checklist.)
+Brood is the **language and runtime** for a modern, Emacs-like editor — a fast
+native app locally, a server for remote instances. **The editor app itself is a
+separate project — [`brood-edit`](../brood-edit) — and it already exists**; it
+consumes this language and the `std/editor/*` framework. Brood's job here is the
+language core, runtime, and that framework. We get there in milestones (M1–M5),
+each shippable and useful on its own.
 
 Guiding constraints (see `CLAUDE.md`): keep the **language core small** — prefer
-adding a primitive function or a prelude macro over a new special form — and
-write as much as possible *in Brood itself*. Tags below: **[kernel]** = needs
-new Rust; **[Brood]** = can be written in the prelude.
+adding a primitive function or a prelude macro over a new special form — and write
+as much as possible *in Brood itself*. Tags: **[kernel]** = needs new Rust;
+**[Brood]** = can be written in the prelude.
+
+Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverted
+
+> This is the single canonical roadmap. Deep design lives in the per-topic docs
+> under [`docs/`](docs/) (ADRs in [`docs/decisions.md`](docs/decisions.md), a
+> dated history in [`docs/devlog.md`](docs/devlog.md)).
 
 ---
 
-## Done
+## Active work — dated findings & backlogs
 
-- ✅ Reader: lists, vectors, atoms, keywords, strings, `'`/`` ` ``/`~`/`~@`, comments
-- ✅ Tree-walking evaluator with **proper tail calls**; lexical scope; closures; Lisp-1
-- ✅ Special forms: `quote if when unless cond do def fn lambda let let* and or quasiquote defmacro` (no `set!`/`while` — data is immutable, loops are recursion; ADR-026)
-- ✅ **Macros**: `defmacro`, quasiquote, `macroexpand`/`macroexpand-1`, `gensym`
-- ✅ Functions: `defn`, `&optional` (defaults), `& rest`; strict arity
-- ✅ Numbers: i64 + f64, overflow-checked `+ - * /`, `mod`/`rem`, comparisons
-- ✅ Lists/sequences: `cons first rest map filter reduce fold reverse append count nth last …`
-- ✅ Vectors as a data type (`vector` / `vector-ref` / `vector-length`)
-- ✅ Equality (`=`), truthiness, predicates
-- ✅ Self-hosting: `eval`, `read-string`, `load`, `apply`
-- ✅ **Error handling**: `throw` / `try` / `catch` / `error`
-- ✅ REPL (line editing, history) + file runner
+### Findings from hatch (2026-07-11)
 
-The native kernel is **70 primitives** — see [`docs/primitives.md`](docs/primitives.md).
+Three runtime/language items surfaced while eliminating a whole *class* of O(n²)
+bugs in [`hatch`](../hatch) (the Brood web framework). Every one was the same
+shape — `(str acc x)` / `(bytes-concat acc x)` accumulated in a per-read loop,
+quadratic in the read count — and every fix was the same manual idiom (cons onto a
+list, `reverse` + `join` once), written five times across the HTTP/WebSocket stack
+(body drain, head reader, chunked de-chunk, WS reassembly, live-view render). These
+would retire the bug class at the language level. See hatch's
+[`docs/tcp-http-audit.md`](../hatch/docs/tcp-http-audit.md) §16–§17.
+
+- ⬜ **Iolists — the highest-leverage one.** Let the I/O + join builtins
+  (`tcp-send`, `spit`/`append-bytes`, `join`, `str`, `bytes-concat`) accept
+  *arbitrarily nested lists of strings/bytes*, flattened only at the write boundary
+  — the Erlang/Elixir model, a natural fit given Brood's process/`receive` core.
+  You'd describe the structure (`[status-line headers "\r\n\r\n" [s0 d0 s1 …]]`)
+  and nothing is copied until the socket writes it flattened. Makes the correct
+  thing the default and deletes the whole accumulation bug class. **[kernel]**
+  flatten-on-write in the I/O builtins + teach `join`/`str`/`bytes-concat` to
+  accept nesting.
+- ⬜ **`bytes`-native HTTP/WebSocket parsing (kill the carrier-string bridge).**
+  `bytes` is now a first-class value (`byte-at`/`subbytes`/`bytes-index-of`/…), but
+  the string parsers predate it, so every socket read does
+  `(str buf (bytes->carrier chunk))` — a Latin-1 "carrier string", one codepoint
+  per byte. That conversion is *why* the read buffer is a `(str)`-accumulated string
+  (the O(n²) source), and the text/binary mode-flip it forces is what caused the
+  original U+FFFD live-nav bug. Give `bytes` a fuller search/slice surface, then port
+  the parsers. **[kernel]** a few more `bytes` primitives, then **[Brood]** port the
+  parsers. (This is the "one bad abstraction", narrowed now that `bytes` exists.)
+- ⬜ **A growable read buffer (or `bytes` transient).** The input-side twin of
+  iolists: an append buffer that freezes to immutable `bytes` on read would make the
+  request head reader, chunked drain, and WS frame gather trivially O(n) — no manual
+  list+`join`, no length-drain gymnastics. **[kernel]** a transient/builder value +
+  freeze.
+- ⬜ Smaller ergonomic wins (all cheap): **`mapv`/`filterv`** (vector-returning
+  variants — `map`/`filter`/`fold` return lists, so hatch littered `(into [] (map …))`
+  wherever a vector was needed); making the **`foo--private` convention
+  link-checked** rather than a runtime unbound-symbol surprise (it bit a cross-module
+  call during the hatch work); and either fixing or erroring on **`let`
+  vector-destructure of a list value**.
+
+### Findings from brood-life profiling (2026-06-13)
+
+The four-axis language review from optimising `brood-life` (a GUI Game of Life) was
+triaged proposal-by-proposal and the accepted items shipped 2026-07-09 (`clamp`,
+`as->`, `{:keys …}`/`:or` map destructuring, lazy seq-view fusion, `read-string`
+trailing-form drop, and more), alongside two allocation/GC bug fixes (transient
+corruption, allocation serialisation). One item stays deferred:
+
+- ⬜ **JIT float specialisation** — ordinary perf tuning (partial scaffolding in
+  `compile/mod.rs`, "type-specialize float arms"); gated on a concrete hot float
+  workload, not a completeness gap.
+
+### Stability backlog (2026-07-10)
+
+- ⬜ **Continuous fuzzing (`cargo-fuzz`)** — libFuzzer targets for the
+  highest-risk untrusted-input parsers: the **reader/scanner**, **JSON**, the **dist
+  wire framing** (`dist/wire.rs`), and the **bundle footer/archive** (`bundle.rs`).
+  Highest long-term leverage for keeping the kernel stable as it grows.
+- ⬜ **Host-panic hardening (audit residue)** — adversarial input can still panic
+  the Rust host: no recursion-depth counter on `expr_ty`/`check_into` (checker stack
+  overflow on deeply-nested types), no `catch_unwind` around the worker `run_one`,
+  no RAII guard on `check_file`'s panic path.
 
 ---
 
-## Remaining for a "full functional Lisp"
+## Done — the foundation
 
-### Tier 1 — core gaps (needed before we'd call the language *complete*)
+Compressed; per-item history is in [`docs/devlog.md`](docs/devlog.md) and
+[`docs/archive/`](docs/archive/), decisions in
+[`docs/decisions.md`](docs/decisions.md).
 
-- ✅ **Maps / associative data** (ADR-030) — immutable `{ }` literals +
-  `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?`/`map?`. Insertion-ordered,
-  any value as a structurally-compared key, order-independent `=`; every op
-  returns a fresh map. **[kernel]** a `Value::Map` + small `map-*` primitives +
-  reader `{ }`; the surface is **[Brood]** (`std/prelude.blsp`). Internal rep is
-  an association vector — swappable for a HAMT later with no surface change.
-- ✅ **String library** — `substring`, `string-split`, `join`, `replace`,
-  `index-of`, `string-contains?`, `upper`/`lower`, `string->number`/
-  `number->string`, `char-at`/`string->list`/`list->string`, `trim`/`triml`/
-  `trimr`, `blank?`. **[kernel]** only `upper`/`lower` (Unicode case folding) and
-  `string->number` (strict parse-or-nil) genuinely need Rust; everything else is
-  **[Brood]** over `substring`/`string-length`/`str` (`std/prelude.blsp`). Chars
-  are 1-char strings (no distinct char type — deferred); indices are char-based.
-- ✅ **Math library** — `floor ceil round quot pow sqrt`, `even?`/`odd?`,
-  variadic `min`/`max`. **[kernel]** is just `floor` (the one irreducible
-  Float→Int crossing); **everything else is [Brood]** over `floor`/`rem`/`/`/`*`
-  (`ceil`=−floor(−x), `quot` exact over `rem`, `pow` recursive, `sqrt` Newton's).
-  `floor`/`ceil`/`round` return an int; `sqrt` is an approximate float.
-- ✅ **Sequence library** — `range take drop take-while drop-while sort sort-by
-  some? every? find zip partition` (plus the existing `member?`). All **[Brood]**;
-  `sort`/`sort-by` are a stable merge sort, every builder tail-recursive.
-- ✅ **Dynamic variables** — `defdyn` / `binding` for config-style vars
-  (`*print-depth*` etc.). Lisp special vars: rebind for a dynamic extent,
-  restore on exit (even on throw); **per-process** (not inherited across `spawn`).
-  **[kernel]** is tiny — a per-process binding stack in the `Heap` + the
-  `%declare-dynamic`/`%binding`/`dynamic?` primitives; **[Brood]** the `defdyn`/
-  `binding` macros (no new special form — the `try`/`catch` precedent).
+- **Stage 1 — a full functional Lisp.** Reader (lists/vectors/atoms/keywords,
+  quasiquote); tree-walking evaluator with proper tail calls, lexical scope,
+  closures, Lisp-1; macros (`defmacro`, quasiquote, `macroexpand`, `gensym`);
+  `defn`/`&optional`/`& rest`; i64+f64 with overflow-checked arithmetic; immutable
+  maps + `{ }` literals (ADR-030); the string, math, and sequence libraries;
+  dynamic variables (`defdyn`/`binding`, per-process); pattern matching across
+  `match`/`let`/`fn` (ADR-021/022) incl. `{:keys …}`/`:or`; `case`,
+  `dotimes`/`dolist`, `letrec`; error handling (`throw`/`try`/`catch`/`error`) with
+  source locations; modules (`provide`/`require`, `foo--private`, ADR-019); the
+  project model + parallel test runner (ADR-020); reducible lazy `range` and
+  transducers.
+- **Concurrency — green processes on all cores** (`docs/concurrency.md`).
+  `spawn`/`send`/`receive`/`self` with per-process `Send` heaps and copy-on-send;
+  green M:N scheduling on a worker pool (corosensei, ADR-018); shared code region
+  for cross-process hot reload (ADR-013/014); closures sent between processes and
+  across nodes (ADR-033); reduction-counted preemption (ADR-027); selective
+  `receive` + `(after ms …)` timeouts.
+- **Types — set-theoretic gradual typing** (ADR-078 and follow-ons). Function
+  arrows, element/parametric types, structural combinators, narrowing, singleton/
+  literal types, map K/V, records/shapes, tuples; the sound half of local inference;
+  `(sig …)` contracts + `BROOD_CONTRACTS=1`; the full-soundness-vs-hot-reload
+  mechanism (re-check per reload, ADR-123/124/125). LSP tiers 0–2 + a
+  dev-ergonomics pass.
+- **Execution — closure-compiling VM + tier-1 JIT.** The VM is the default engine
+  (ADR-076); a Cranelift template JIT (ADR-101) is a default cargo feature (integer
+  arithmetic, fused Prim2, hot-reload epoch guard, in-native inline caches).
+- **M2 — editor data model.** Rope substrate (ADR-045); buffer model;
+  buffers-as-values; evaluate-the-Lisp-I'm-editing; per-process memory reclamation.
+- **M3 — display protocol + native frontend.** Serialisable render-op protocol
+  (ADR-046); input events; in-process terminal frontend; per-op/per-window fonts
+  (ADR-079); `nest observe` (inline + remote, ADR-053); telemetry core
+  (`std/telemetry.blsp`, ADR-106); resilient `ui-run`.
+- **M4 — server / daemon mode.** TCP sockets (ADR-062); TLS *client*/HTTPS;
+  distributed nodes (`name@host`, cookies, encryption ADR-089, dual-listen, mesh
+  join); userland supervision + a real `gen_server`; an ETS-style in-memory table
+  store; `std/task`.
 
-### Tier 2 — important ergonomics
+Runtime housekeeping still open:
 
-- ✅ **Pattern matching** (ADR-021) — Erlang/Elixir-style, one Brood compiler
-  reused at every binding site (`match`, `let`, `fn`). Subsumes the two below:
-  - ✅ **Destructuring** in `let`/`fn` — sequences/tuples, refutable binds,
-    multi-clause `fn`, pattern params. **[Brood]**, lowered in the compile pass
-    (ADR-022).
-  - ✅ **`case`** — just `match` with literal patterns.
-- ✅ **Loop macros** (`dotimes`, `dolist`) — lean tail-recursive Brood macros
-  for the side-effecting iteration case (`doseq` stays for the destructuring /
-  filter case). **[Brood]**
-- ✅ **`letrec` / local mutual recursion** — a new special form alongside
-  `let`/`let*`. Plain-symbol targets only; every name visible in every RHS
-  (the bindings frame pre-defines each name to `nil` so closures built during
-  the bind phase capture the scope and resolve names lazily). **[kernel]** small.
-- ✅ **Symbol/keyword tools** — `symbol` and `keyword` (lenient constructors
-  over string/symbol/keyword input — Rust); `symbol->string` and
-  `string->symbol` (strict named conversions — Brood); `name` was already in.
-  **[kernel]** is the two constructors; **[Brood]** is the strict wrappers.
-- ✅ **File I/O** — `slurp`/`spit` (read/write a whole file as a string), beyond
-  `load`. **[kernel]** small. (The module work below also adds the fs-reflection
-  primitives `file-exists?` / `list-dir` / `cwd`.)
-- ✅ **Modules** — Emacs-flat `provide`/`require` + `*load-path*`, `foo--private`
-  convention; load-once by feature, embedded std modules baked in. **[kernel]**
-  small (`file-exists?`/`dir?`/`list-dir`/`cwd`/`name`/`eval-string`/`%builtin-module`)
-  + **[Brood]** (the require logic). ADR-019.
-- ✅ **Project model + test runner** — convention over configuration (`src/` =
-  source on `*load-path*`, `tests/**/*_test.blsp` = tests); a `project.blsp`
-  manifest declares identity and overrides paths only when needed. `brood test`
-  discovers, loads register-only, and calls `run-tests` once; `brood new <name>`
-  scaffolds a project (`spit`/`make-dir`). Mostly **[Brood]** + CLI dispatch. ADR-020.
+- ⬜ **Tracing GC for mid-eval / never-returning loops.** Arena-reset at top-level
+  boundaries shipped (ADR-016); a general tracing collector still needs scannable
+  roots (coupled with the explicit-value-stack VM step). **[kernel]**, sizable.
+- ⬜ **Work-stealing scheduler.** Gated on the `Send` per-process heaps + tracing
+  GC above; the root-cause of the earlier scheduler race and the invariants any
+  reintroduction must honour are in [`docs/concurrency-v2.md`](docs/concurrency-v2.md).
 
-### Tier 3 — robustness & quality
+---
 
-- 🟡 **Memory reclamation** — `Send` arena handles replaced `Rc` (done). Step 1:
-  **arena reset at top-level boundaries** (ADR-016) — `eval_str`/REPL truncate the
-  LOCAL heap after each form, bounding long sessions (~712 MB→~78 MB in a demo).
-  Still ⬜: a general tracing GC for mid-eval / never-returning loops, which needs
-  scannable roots (the explicit-value-stack VM step 4b also needs — coupled).
-  **[kernel]** (sizable).
-- ✅ **Source locations in errors** — the reader already stamped every list
-  pair via `set_form_pos`; the gap was *runtime* errors carrying only the
-  enclosing top-level form's position (a 50-line `defn` showed line 1 on a
-  misuse on line 47). The eval loop's error-propagation path is now annotated
-  with the innermost combination's position via `LispError::or_form_pos`
-  (non-overwriting, so inner wins), and macroexpand-all carries positions
-  through to rebuilt list forms. Diagnostics from inside `when`/`let`/`if`/
-  arg-position calls now point at the failing line, not the enclosing
-  top-level. Promoted closure bodies (RUNTIME pairs) still have no
-  position metadata — an error inside a `(def`'d fn reports the call site, not
-  the line inside the body; a stack trace closes that gap (M2+).
-- ✅ **Native test library** — `std/test.blsp`: ExUnit / `mix test`-style
-  `describe` / `test` (plus `deftest`), `is` / `assert=` / `assert-error` /
-  `error-of` / `run-tests`, written in Brood. **Parallel by default** (each test a
-  process), with `:serial` / `:isolated` opt-outs; **share-safe tallying** (no
-  shared mutable counters — required now that processes share globals). Loaded via
-  `(require 'test)` (embedded). `tests/suite.blsp` uses it; run via
-  `./bin/cli tests/suite.blsp` and `cargo test`. ADR-015, `docs/testing.md`. **[Brood]**
+## What's next — by area
 
-### Adjacent to Stage 1 (designed; lands as the project work catches up)
+### Language core & types
 
-- 🟡 **Package manager** (ADR-037, [`docs/packages.md`](docs/packages.md)) —
-  third-party Brood deps via git URLs, project-local `_deps/` cache, lock
-  file for reproducibility. Designed early *because it changes project
-  management* (`*load-path*` extension, auto-fetch in `nest test`/`run`/
-  `check`, lock-file commit policy); landing the design before M2 keeps the
-  editor's plugin story from inventing its own one-off loader. **[Brood]**
-  policy in `std/package.blsp`; **[kernel]** primitives are tiny
-  (`%git-clone` / `%git-resolve-ref` / `%sha256` / `%http-get`). Slices:
-  ✅ **0** (2026-05-29) manifest `:dependencies` + `(project …)` quoting macro;
-  ✅ **1** (2026-05-29) `:path` deps end-to-end (`%sha256` + Brood tree-hashing,
-  transitive resolution, lock-file I/O, `ensure-deps` load-path integration);
-  ⬜ **2** `:git` deps; ⬜ **3** the verbs + auto-fetch.
-- ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` produces a
-  self-contained `app` executable (append-to-binary: zip of project +
-  `_deps/` appended to a pre-built `brood`, magic-footer record, runtime
-  detects on startup). Explicitly **deferred**: no value to the project's
-  current loop, lands when the editor (M3/M4) actually needs end-user
+- ⬜ **Merely-wider inference case** — a body typed exactly `number` (int ∪ float)
+  declared `int`, e.g. `(/ x 2)`; can't be pinned without occurrence/range analysis
+  and flagging it would false-positive on int-valued runs (ADR-011).
+- ⬜ **Parameter-type inference from arbitrary body usage** across branches — needs
+  guard-aware dominance analysis; stays out until false-positive-clean (ADR-011).
+  (The sound tiers of `infer_sig` already ship.)
+- ⬜ **First-class set kernel piece** — a `#{…}` reader literal + printing + a
+  distinct `set?`/`Tag::Set`; the `(require 'set)` library already shipped (ADR-060).
+- ⬜ **Unbounded stream generation** (`iterate` / infinite producers) — lazy
+  seq-view fusion already shipped (ADR-111); picks up when an editor feature needs it.
+- 🟡 **`std/` curation + frameworks sequencing** (ADR-085/097) — `std/` curated and
+  hierarchical module names shipped; the model is batteries-included (frameworks ship
+  in the default install, not fetched). ⬜ Next: a future GUI framework ships bundled
+  too; gated on the first real consumer.
+- ⬜ **Native interop — WASM components** (ADR-071, [`docs/interop.md`](docs/interop.md))
+  — a package ships native code as a `:native` WASM component built from source at
+  fetch time, hash-pinned in the lock, cached under `_deps/`, instantiated sandboxed
+  via embedded `wasmtime`; a `use-native` macro (WIT-driven) binds exports. Needs the
+  package manager and the M4 blocking-offload pool first; realistically lands during
+  M2+ editor-plugin work.
+
+### VM & JIT
+
+- ⬜ **Fix the `let`-self-ref `send` divergence** — a VM `let`-self-ref closure
+  isn't structurally self-referential, so `send` accepts it where the tree-walker
+  rejects it (a correctness gap + differential blind spot).
+- ⬜ **Route remaining native higher-order callbacks** (`try`/`binding`/`apply`/
+  `isolate`) through the VM like `%range-reduce` — blocked on the fix above.
+- ⬜ **JIT Stage 4 — RUNTIME compaction survival** (ADR-091) — a constant-pool
+  indirection table (ADR-096 §4.C) lets `runtime_collect` rewrite handles without
+  invalidating machine code.
+- ⬜ **Leaf-callee inlining** (the real call-heavy lever) — splice a small
+  non-recursive callee's body into the caller so `(add1 n)` in a hot loop needs no
+  call/frame/dispatch. Infra (`shift_slots`/`build_inlined_body`) exists; hot-reload
+  safety is free via `compile_epoch`. Measure-first behind `BROOD_JIT_LEAF_INLINE`;
+  a fresh focused effort ([`docs/jit-tier2.md`](docs/jit-tier2.md) §7).
+- ⬜ **Layer-2 computed-goto dispatch** (`std::arch::asm!`, x86-64, `#[cfg]`-gated,
+  pure-Rust fallback) — only if profiling still shows dispatch overhead. Additive.
+- ⬜ **Heap-walking benchmark gap** — `bintree`/`nqueens` run interpreted (~39×/187×
+  behind Elixir); structure-walking bodies bail the JIT subset. Gated on the
+  allocation-elimination work ([`docs/allocation-elimination.md`](docs/allocation-elimination.md));
+  higher ceiling than the call-dispatch levers — profile before the next JIT push.
+
+### Tooling & errors
+
+- ⬜ **`nest format --changed`** — whole-tree `nest format` reformats untouched
+  files; add a git-aware narrower scope.
+- 🟡 **LSP** — tiers 0–2 ship; still next: incremental sync; range/delta semantic
+  tokens; **finer finding spans** (arity/type findings anchor to the call head, not
+  the offending argument — wants `Pos` threaded through `types/check.rs`'s walk); and
+  a **create-missing-`defn`** code action.
+- 🟡 **Errors that teach (LLM-native)** ([`docs/llm-native.md`](docs/llm-native.md))
+  — first instances landed; more to do: reader-level hints for Clojure/Scheme syntax
+  the lexer mis-parses (`(let ((a 1)) …)`, `#{…}`/`#(…)`), the
+  `brood.explain-error`/`brood.find-pattern` MCP tools, an intent→idiom cookbook, and
+  folding each new repeat mistake into the rule-of-three.
+- ⬜ **MCP tooling** — a streaming/progress-notification tier for long-running tool
+  output; exposing GC/process *traces* (not just snapshots); tightening the write
+  sandbox against symlink escapes (a `canonicalize` primitive).
+
+### Editor (M2) & display (M3)
+
+- ⬜ **Major/minor modes** — how a buffer selects which keymaps are active.
+- ⬜ **Mouse / resize input events** — deferred until a feature needs them.
+- ⬜ **GPU-window frontend** — a later additive path speaking the same display
+  protocol; arbitrary per-px buffer sizing rides with it.
+- 🟡 **Telemetry** (ADR-106) — core landed; still to fold in: kernel-internal event
+  *sources* (GC collections, scheduler spawn/exit/preempt, dist node up/down — a Rust
+  emit seam); unifying `gc-stats`/`vm-stats`/`process-info` snapshots behind the
+  stream so `nest observe` + `nest mcp` consume it; `defevent` + checker-validated
+  event schemas; built-in aggregators (counter/gauge/summary/histogram) + sampling;
+  and the location-transparent remote tier over the dist link.
+
+### Server / daemon (M4)
+
+- ⬜ **Inbound (server-side) TLS** — rustls streams don't split read/write across
+  threads; plus a **`mio` reactor** for socket scale.
+- ⬜ **OTP near-term** (additive, pure Brood or a thin dist seam, gated on a need):
+  **`send-after`/`send-interval`** timers; a synchronous **`remote-spawn` returning
+  the child pid** (makes cross-node supervision turnkey); a **`terminate`-style
+  worker-cleanup convention** on `[:$stop]`.
+- ⬜ **OTP deferred** (ADR-011, gated on a real consumer): **`gen_statem`** state
+  machines; an Elixir-style **`Registry`**/via-tuples + **process groups (`pg`)**; an
+  **`Application`** behaviour; **synchronous, ordered, rollback-on-failure** supervisor
+  startup + per-child intensity counting + child `type`/`significant`/`auto_shutdown`
+  metadata.
+- ⬜ **Dist refinements** (ADR-011): exact propagated exit reason for a *non-trapping*
+  linked peer (reports `:kill` today); a `terminate/2` hook on hard kill; **long-name
+  FQDN resolution** (a long name is passed explicitly today, no resolver); Windows
+  Unix-socket transport.
+
+### Packaging & ecosystem
+
+- 🟡 **Package manager** (ADR-037, [`docs/packages.md`](docs/packages.md)) — `:path`
+  deps end-to-end ✅; ⬜ **`:git` deps** (slice 2); ⬜ **the verbs + auto-fetch**
+  (slice 3). **[kernel]** primitives are tiny (`%git-*`/`%sha256`/`%http-get`).
+- ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of
+  project + `_deps/` to a pre-built `brood`; deferred until the editor needs end-user
   distribution.
+- ⬜ **`nest release`** — a self-extracting filesystem for runtime data files, a
+  static-musl default, and `.deb`/`cargo install` packaging of the *runtime* (open
+  until a real consumer needs it).
+- 🟡 **tree-sitter grammar + GitHub recognition** — editor grammars (`nest grammar`,
+  ADR-092), the `tree-sitter-brood` parser, and `brood-vscode` all ship; ⬜ **publish
+  it** (editor bindings/CI) and file the ⬜ **`github/linguist` PR** (gated on `.blsp`
+  adoption across many repos). Today a `.gitattributes` Clojure stopgap.
 
-### Out of scope for Stage 1 (deferred, additive later)
+---
 
-- `&key` named arguments (designed — ADR-011), supplied-p flags
+## Design notes (context for the above)
+
+### Types — goal & the hot-reload constraint
+
+The target is Elixir's sound, gating, whole-program checker for the *interior* of
+code, kept compatible with Erlang-style hot reload for *globals and module
+boundaries*. Globals stay `dynamic()` because hot reload rebinds them via `def`, so a
+type proven at check time can be falsified by a later reload; what *can* be gated is
+everything local — `let`/`fn`-param bindings, call arity and argument types, `match`
+coverage, `sig!` contracts — while global `def`/`defn` types, inter-module flow, and
+global-fn return types stay advisory. Slogan: *Elixir's checker for the interior,
+Erlang's late binding for globals and module boundaries.* The full-soundness-vs-reload
+mechanism has shipped (re-check per reload rather than prove once — ADR-123/124/125);
+the "checking never rejects a runnable program" invariant in `CLAUDE.md` and
+[`docs/types.md`](docs/types.md) contract #5 needs revising now that it has.
+
+### Telemetry — what we improve over Erlang's `:telemetry`
+
+Async-by-default delivery (handlers run off the emitting process); events as data
+with a declared schema (`defevent`, checker-validated) rather than bare atoms; an
+immutable, process-backed handler registry; location-transparency over the dist link;
+and built-in metric aggregation (counter/gauge/summary/histogram) + sampling — folding
+today's ad-hoc `gc-stats`/`vm-stats`/`process-info` instrumentation behind one stream.
+
+---
+
+## Cross-cutting open questions (revisit, don't build yet)
+
+- **Shipping a runtime binary** — a self-extracting filesystem for data files,
+  static-musl default, `.deb`/`cargo install` (see `nest release` above); open until a
+  real consumer needs it.
+- **Publishing the grammar** — the `github/linguist` PR isn't filable day-one; it's
+  gated on `.blsp` adoption across hundreds of repos.
+
+---
+
+## Killed directions (don't retry)
+
+- ❌ **Kernel-supervised processes** (ADR-039) — reverted 2026-05-29; it was the bulk
+  of the multi-thread scheduler race surface. Userland supervision replaces it;
+  named-spawn is intentionally not delivered in the kernel.
+- ❌ **JIT Stage 3, Increment 2** (in-IR frame setup + `call_indirect`) — NO-GO,
+  confirmed twice. The call-heavy win is leaf inlining, not cheapening the call itself.
+
+---
+
+## Out of scope (deferred, additive later)
+
+- `&key` named arguments (designed — ADR-011) and supplied-p flags
 - Hygienic macros / `macroexpand-all`
 - Bignums / rationals (i64 + f64 is enough for now)
-- **Namespaces** / per-module isolation — flat Emacs-style `provide`/`require` is
-  *in scope* (Tier 2, ADR-019); true per-file namespaces stay deferred (a later,
-  additive Brood macro layer if ever needed)
-- Characters as a distinct type
+- True per-file **namespaces** — flat Emacs-style `provide`/`require` is in scope
+  (ADR-019); real namespace isolation stays a later, additive Brood macro layer
+- Characters as a distinct type (chars are 1-char strings)
 
 ---
 
-## Parallel track — concurrency (green processes on all cores)
+## Guiding principles
 
-A major *core* effort that runs **alongside** the language work above — design in
-[`docs/concurrency.md`](docs/concurrency.md). Erlang-*style* green processes
-scheduled across all cores, share-nothing, message-passing; lean (no
-supervision / preemption / live-migration in v1).
-
-Strategy: start simple and let the language keep adopting features in parallel.
-Language gaps above are mostly **[Brood]**, so they don't deepen the evaluator
-and don't conflict with the concurrency work. Concurrency lands in phases:
-
-- ✅ `spawn` / `send` / `receive` / `self` + message passing (`process.rs`) — each
-  process is an OS thread with its own heap; messages are copied between heaps
-  (step 4a). Real parallelism + isolation.
-- ✅ `Send` per-process heaps (done in step 2/3); global symbol interner
-- ✅ **Green M:N on a worker pool** via stackful coroutines (`corosensei`) — each
-  process is a coroutine that **suspends** at `receive` (not blocks); a pool of
-  ≈`nproc` worker threads (a setting, `-j` overrides) runs them. Spawn is cheap;
-  OS threads bounded; the old `Gate` deadlock is gone. ADR-018, `docs/scheduler.md`.
-- ✅ **Shared code** (Erlang-style: share defs, isolate data) — a runtime's inner
-  processes share one mutable code region + global table (`Arc<RuntimeCode>`), so
-  a `def` reaches a running spawned process on its next lookup (cross-process hot
-  reload, no restart); separate runtimes stay independent. Spawn is cheap (no
-  prelude reload). Region-tagged handles (LOCAL/PRELUDE/RUNTIME), append-only code
-  via `boxcar`. ADR-013/014, `docs/shared-code.md`.
-- ✅ **Send functions between processes / across nodes** (ADR-033 closure-as-data
-  path, complete). Within a runtime: top-level fns are shared handles; `spawn` /
-  `send` of a local closure go through `closure_to_message` / `closure_from_message`,
-  which copy the closure's body forms + the *free locals* it actually references
-  (not the whole frame chain); free globals re-resolve on the receiver. Across
-  nodes: the `M_CLOSURE` wire codec in `dist.rs` (was a `return Err("not
-  supported yet")` stub, now a full encode/decode of every `ClosureMsg` field)
-  ships the same `Message::Closure` over TCP. End-to-end verified by
-  `lambda_ships_across_nodes_and_runs` in `crates/cli/tests/distribution.rs`: a
-  closure with a captured free local crosses to a peer, runs there against the
-  peer's prelude, and the result comes back through `send`.
-- ✅ **Reduction-counted preemption** (fairness) — `eval`'s loop decrements a
-  per-worker budget (≈2000) and the process yields its worker at zero, so a
-  CPU-bound process can't monopolise a core. Scheduling is now preemptively fair.
-  ADR-027, `docs/scheduler.md` stage 4.
-- ✅ **Selective `receive` + timeouts** — `receive` takes pattern clauses (the
-  `match` grammar) + an optional `(after ms …)`; scans the mailbox, runs the first
-  match, leaves the rest queued. Green processes are woken at the deadline by a
-  timer thread; timeouts are catchable (`throw` in the `after` body → `try`/`catch`).
-  A Brood macro over a `%receive` primitive. ADR-027, `docs/pattern-matching.md`.
-- ⬜ later: work-stealing; supervision / links / monitors / registered names —
-  both were *removed* to fix the KI-1 scheduler race; the root-cause analysis and
-  the invariants any reintroduction must honour are in
-  [`docs/concurrency-v2.md`](docs/concurrency-v2.md)
-- ⬜ **Distribution across nodes** (future, kept in mind) — link named runtimes
-  over TCP; pids carry node identity; `send`/`spawn` stay location-transparent.
-  Falls out of share-nothing + copy-on-send (the network is a longer copy). See
-  `concurrency.md` → "Distribution across nodes".
-
-The Tier-3 **tracing GC** is shared with this track: `Send` per-process heaps are
-what unlock full work-stealing, so concurrency pulls the GC work earlier.
-
-## Suggested order
-
-1. ✅ **Maps** (Tier 1) — done (ADR-030); unblocks structured data *and* a
-   structured error value.
-2. **Strings + Math** (Tier 1) — the two libraries every real program reaches for.
-3. **Sequence library** (Tier 1, mostly Brood) — cheap, high value.
-4. ✅ **Dynamic variables** (Tier 1) — done (`defdyn`/`binding`, per-process).
-5. ✅ **Symbol/keyword tools, `case`, file I/O, `letrec`, `dotimes`/`dolist`** (Tier 2) — done.
-6. **Tracing GC** (Tier 3) — do before long-lived editor sessions (Stage 2).
-7. Destructuring, source locations, test helpers as they pull their weight.
-
-When every Tier 1 box is ticked, Brood is a Lisp you can write real programs in
-— Stage 1 complete, and we turn to the editor.
+1. **Policy in Brood, mechanism in Rust.** Prefer a primitive + a prelude macro over
+   a new special form; write as much as possible in Brood itself.
+2. **The frontend is a protocol.** The display seam is serialisable render-ops, so a
+   terminal, a GPU window, or a remote client are all just consumers.
+3. **Every milestone is usable on its own** — the language stands without the editor,
+   the editor without the server.

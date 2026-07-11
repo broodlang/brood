@@ -2,9 +2,8 @@
 
 > **Status (2026-06-07): round 1 SHIPPED (items 1–5); item 6 (defer-set shrink)
 > done in round 2 — see the Round 2 note below.**
-> Archived runs: baseline `docs/benchmarks/2026-06-06T10-45-03Z.md`, final
-> `docs/benchmarks/2026-06-06T12-48-07Z.md` (same machine, commit `19d06b3` +
-> the round's working tree). VM medians, 100 samples:
+> Measured on this machine at commit `19d06b3` + the round's working tree.
+> VM medians, 100 samples:
 >
 > | bench (VM) | before | after | Δ |
 > |---|---|---|---|

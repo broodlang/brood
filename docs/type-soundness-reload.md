@@ -15,7 +15,7 @@ behavior this section was describing as future work.
 
 ## The problem
 
-`docs/roadmap.md`'s type-system section previously framed whole-program static
+`ROADMAP.md`'s type-system section previously framed whole-program static
 soundness — gating on global `def`/`defn` types, not just local bindings — as
 something Brood **won't** pursue, because it looked like it must conflict with
 Erlang-style hot reload (ADR-013: a `def` rebinds a global at runtime,

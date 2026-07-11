@@ -313,7 +313,7 @@ it — the global-immutability simplicity is worth a lot.
      maps via the new path in many `spawn`ed processes, `send` them across
      per-process heaps (proving `to_message`/`promote` round-trip the result),
      fan-in and compare. Run the suite green under `BROOD_GC_STRESS=1`.
-5. Docs: tick `docs/roadmap.md`; dated `docs/devlog.md` entry; promote this note
+5. Docs: tick `ROADMAP.md`; dated `docs/devlog.md` entry; promote this note
    to an ADR in `docs/decisions.md` once Phase 1 lands (it records the
    "internal-transient, not user-facing" decision against ADR-026/006).
 

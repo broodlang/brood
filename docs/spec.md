@@ -337,4 +337,4 @@ version:
 - **A first-class set type + `#{…}` literal** — the `set` library ships
   (sets-over-maps, ADR-060); a distinct `Tag::Set` + reader literal is deferred.
 
-See [roadmap.md](roadmap.md) for sequencing.
+See [ROADMAP.md](../ROADMAP.md) for sequencing.
