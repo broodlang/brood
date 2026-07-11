@@ -1856,7 +1856,9 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "  (:alias repo)\n"
     "  (:alias query)\n"
     "  (:alias pg)\n"
-    "  (:alias web/repo))\n"
+    "  ;; `web/repo` aliases to `repo` by default, colliding with store's `repo` above —\n"
+    "  ;; give it an explicit `:as` name.\n"
+    "  (:alias web/repo :as web-repo))\n"
     "\n"
     "(def *repo* nil)\n"
     "\n"
@@ -1867,7 +1869,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "\n"
     "(defn start (opts)\n"
     "  \"Open the Postgres pool, migrate the messages table, and warm up the connections.\"\n"
-    "  (def *repo* (web/repo/start (pg/adaptor) opts [messages-schema])))\n"
+    "  (def *repo* (web-repo/start (pg/adaptor) opts [messages-schema])))\n"
     "\n"
     "(defn all-messages ()\n"
     "  \"All messages, oldest first (id ASC).\"\n"
@@ -1921,9 +1923,60 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "  \"Start the HTTP listener on `(port)`.\"\n"
     "  (server/start (port) adapter (live/live-dispatcher) {}))\n"))
 
+(defn project--hatch-errors-template (_nm)
+  (str "(defmodule web/errors\n"
+    "  \"The app's error pages, in one place. `error-meta` maps a status code to a\n"
+    "  `[title blurb]`; edit or add a clause to override a page. `error-response` builds a\n"
+    "  standalone page (for errors the endpoint raises — a 500 crash, a 504 timeout) and\n"
+    "  `themed` re-skins a real upstream response (e.g. the router's 404) while keeping its\n"
+    "  headers, so a 401 challenge or a redirect Location survives.\"\n"
+    "  (:use web/template :only [html])\n"
+    "  (:use web/layout))\n"
+    "\n"
+    "(defn error-meta (code)\n"
+    "  \"`[title blurb]` for error `code`, or nil for a non-error (2xx/3xx).\"\n"
+    "  (match code\n"
+    "    (400 [\"Bad request\" \"The request couldn't be understood.\"])\n"
+    "    (401 [\"Sign-in required\" \"You need to sign in to view this page.\"])\n"
+    "    (403 [\"Forbidden\" \"You don't have access to this page.\"])\n"
+    "    (404 [\"Page not found\" \"That page doesn't exist or may have moved.\"])\n"
+    "    (500 [\"Something went wrong\" \"An unexpected error occurred.\"])\n"
+    "    (504 [\"Request timed out\" \"The request took too long and was stopped.\"])\n"
+    "    (_ (if (>= code 400) [\"Error\" \"Something went wrong.\"] nil))))\n"
+    "\n"
+    "(defn error-node (code title blurb)\n"
+    "  \"The Hiccup for an error page, through the shared layout.\"\n"
+    "  (layout (str code \" — \" title)\n"
+    "    [:div {:class \"text-center py-16\"}\n"
+    "      [:h1 {:class \"text-7xl font-bold text-primary\"} (str code)]\n"
+    "      [:p {:class \"text-2xl mt-4 mb-2\"} title]\n"
+    "      [:p {:class \"opacity-70 mb-8\"} blurb]\n"
+    "      [:a {:href \"/\" :class \"btn btn-primary\"} \"Back home\"]]))\n"
+    "\n"
+    "(defn error-body (code)\n"
+    "  \"Rendered HTML for error `code`, or nil if `code` isn't an error page.\"\n"
+    "  (let (m (error-meta code))\n"
+    "    (when m (html (error-node code (first m) (second m))))))\n"
+    "\n"
+    "(def error--html-headers {:content-type \"text/html; charset=utf-8\"})\n"
+    "\n"
+    "(defn error-response (code)\n"
+    "  \"A standalone error response map for `code` (500 crash, 504 timeout), or nil.\"\n"
+    "  (let (body (error-body code))\n"
+    "    (when body {:status code :headers error--html-headers :body body})))\n"
+    "\n"
+    "(defn themed (resp)\n"
+    "  \"Re-skin an upstream `resp`'s body with the app's error page when its status is an\n"
+    "  error, keeping its headers; 2xx/3xx pass through unchanged.\"\n"
+    "  (let (body (error-body (get resp :status)))\n"
+    "    (if body\n"
+    "      (assoc resp :body body\n"
+    "        :headers (merge (get resp :headers {}) error--html-headers))\n"
+    "      resp)))\n"))
+
 (defn project--hatch-layout-template (nm)
-  (str "(defmodule web/layout \"Shared HTML page shell — Tailwind + daisyUI via CDN.\"\n"
-    "  (:use web/template))\n"
+  (str "(defmodule web/layout \"Shared HTML page shell — Tailwind + daisyUI via CDN.\n"
+    "  Returns plain Hiccup; the caller (web/page / web/errors) renders it.\")\n"
     "\n"
     "(defn layout (title & children)\n"
     "  [:html {:data-theme \"light\"}\n"
@@ -2060,6 +2113,132 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
     "      (is (> (index-of html \"Ada\") -1))\n"
     "      (is (> (index-of html \"Hello!\") -1)))))\n"))
 
+;; --- `web-api` template: minimal Hatch JSON API (no live, no database) -------
+;; A JSON-over-HTTP starter: the router dispatches to handlers that return JSON
+;; via web/live/encode. No WebSocket/live layer, no store dep — the smallest
+;; runnable Hatch app. `nest run` starts it; hit GET /api/health to smoke it.
+;;
+;; Files generated (in addition to the shared manifest + docs):
+;;   project.blsp (overwritten with just the hatch dep)
+;;   src/main.blsp           — entry point: logger + HTTP
+;;   src/web/endpoint.blsp   — HTTP listener (no ws-handler); JSON 500/504
+;;   src/web/routes.blsp     — the JSON routes
+;;   src/web/api.blsp        — the JSON handlers
+;;   tests/main_test.blsp
+;;   tests/web/api_test.blsp
+
+(defn project--web-api-manifest-template (nm)
+  (str ";; " nm " — a Hatch JSON API.\n"
+    ";;\n"
+    ";; Serves JSON at GET /api/health and GET|POST /api/echo. No live layer, no database.\n"
+    ";; Swap the :path dep for a :git dep when targeting a published release.\n"
+    "(project\n"
+    "  :name \"" nm "\"\n"
+    "  :version \"0.1.0\"\n"
+    "  :dependencies [[hatch :path \"../hatch\"]]\n"
+    "  :format-plugins [hatch])\n"))
+
+(defn project--web-api-main-template (nm)
+  (str "(defmodule main \"Entry point for " nm ".\"\n"
+    "  (:use web/endpoint :only [serve])\n"
+    "  (:use web/application :only [start default-logger-opts]))\n"
+    "\n"
+    "(defn main ()\n"
+    "  \"Start logging, boot the endpoint, and park.\"\n"
+    "  (start\n"
+    "    {:logger   (default-logger-opts)\n"
+    "     :children [(fn () (serve))]}))\n"))
+
+(defn project--web-api-endpoint-template (_nm)
+  (str "(defmodule web/endpoint \"HTTP endpoint: bridges raw requests through the router.\"\n"
+    "  (:alias http/server)\n"
+    "  (:alias web/conn)\n"
+    "  (:alias web/routes)\n"
+    "  (:alias task))\n"
+    "\n"
+    "; Hard deadline per request — kills a wedged handler and returns 504.\n"
+    "(def *handler-timeout-ms* 30000)\n"
+    "\n"
+    "(def json-headers {:content-type \"application/json\"})\n"
+    "\n"
+    "(defn error-json (status message)\n"
+    "  \"A bare JSON error body — no template layer for an API.\"\n"
+    "  {:status status :headers json-headers\n"
+    "   :body (str \"{\\\"error\\\":\\\"\" message \"\\\"}\")})\n"
+    "\n"
+    "(defn adapter (request)\n"
+    "  \"Bridge an http/server request through the router to a response, under a timeout.\"\n"
+    "  (let (conn (conn/build request)\n"
+    "        h (task/task\n"
+    "            (fn () (conn/conn->response (routes/app-router conn)))\n"
+    "            {:timeout *handler-timeout-ms*}))\n"
+    "    (receive\n"
+    "      ([:task-done ~h resp] resp)\n"
+    "      ([:task-error ~h _msg] (error-json 500 \"internal server error\"))\n"
+    "      ([:task-timeout ~h] (error-json 504 \"request timed out\")))))\n"
+    "\n"
+    "(defn port ()\n"
+    "  \"Serve on $HATCH_PORT if set and numeric, else 5000.\"\n"
+    "  (or (string->number (or (getenv \"HATCH_PORT\") \"\")) 5000))\n"
+    "\n"
+    "(defn serve ()\n"
+    "  \"Start the HTTP listener on `(port)` — no ws-handler, so no live layer.\"\n"
+    "  (server/start (port) adapter))\n"))
+
+(defn project--web-api-routes-template (_nm)
+  (str "(defmodule web/routes \"JSON API routes.\"\n"
+    "  (:use web/router)\n"
+    "  (:alias web/api))\n"
+    "\n"
+    "(defrouter app-router\n"
+    "  (get \"/\" web/api/index)\n"
+    "  (get \"/api/health\" web/api/health)\n"
+    "  (get \"/api/echo\" web/api/echo)\n"
+    "  (post \"/api/echo\" web/api/echo))\n"))
+
+(defn project--web-api-handlers-template (nm)
+  (str "(defmodule web/api\n"
+    "  \"JSON API handlers. Each returns a JSON response built from `web/live/encode`\n"
+    "  (Hatch's wire JSON encoder — maps, vectors, strings, numbers, bools, nil).\"\n"
+    "  (:use web/conn)\n"
+    "  (:alias web/live))\n"
+    "\n"
+    "(defn json (conn value)\n"
+    "  \"Encode `value` to JSON and send it as an application/json 200.\"\n"
+    "  (json-resp conn (web/live/encode value)))\n"
+    "\n"
+    "(defn index (conn)\n"
+    "  \"GET / — a tiny service descriptor.\"\n"
+    "  (json conn {:name \"" nm "\" :endpoints [\"/api/health\" \"/api/echo\"]}))\n"
+    "\n"
+    "(defn health (conn)\n"
+    "  \"GET /api/health — a liveness probe.\"\n"
+    "  (json conn {:status \"ok\"}))\n"
+    "\n"
+    "(defn echo (conn)\n"
+    "  \"GET|POST /api/echo — echo the `msg` param back. web/conn merges query and JSON\n"
+    "  body into :params, so `?msg=hi` and a `{\\\"msg\\\":\\\"hi\\\"}` body both work.\"\n"
+    "  (json conn {:echo (or (param conn \"msg\") \"\")}))\n"))
+
+(defn project--web-api-test-template (_nm)
+  (str ";; Route tests through the web/test harness — no running server needed.\n"
+    "(defmodule web-api-test\n"
+    "  (:use test)\n"
+    "  (:use web/test)\n"
+    "  (:alias web/routes))\n"
+    "\n"
+    "(describe \"api\"\n"
+    "  (test \"GET /api/health returns ok\"\n"
+    "    (let (resp (request web/routes/app-router \"GET\" \"/api/health\"))\n"
+    "      (is (= (status resp) 200))\n"
+    "      (is (body-contains? resp \"ok\"))))\n"
+    "  (test \"GET /api/echo echoes the msg param\"\n"
+    "    (let (resp (request web/routes/app-router \"GET\" \"/api/echo\" {:params {\"msg\" \"hi\"}}))\n"
+    "      (is (= (status resp) 200))\n"
+    "      (is (body-contains? resp \"hi\"))))\n"
+    "  (test \"unknown route 404s\"\n"
+    "    (is (= (status (request web/routes/app-router \"GET\" \"/nope\")) 404))))\n"))
+
 ;; (new-project "foobar") — scaffold ./foobar with a runnable two-module
 ;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
 ;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
@@ -2068,7 +2247,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; .claude/skills/writing-brood skill, so the project is self-contained for
 ;; AI-assisted editing. Errors on a bad name; an existing folder is reused (its
 ;; scaffold files overwritten), not rejected.
-(def *project-templates* ["default" "tui-loop" "gen" "editor" "gui" "hatch"])
+(def *project-templates* ["default" "tui-loop" "gen" "editor" "gui" "hatch" "web-api"])
 
 ;; Write the template-specific src/ + tests/ files; return the list of relative
 ;; paths written (for the summary). The shared files (manifest, CLAUDE.md, guide,
@@ -2111,6 +2290,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
                        (spit (path-join src-dir "db.blsp") (project--hatch-db-template actual-name))
                        (spit (path-join src-dir "db-setup.blsp") (project--hatch-db-setup-template actual-name))
                        (spit (path-join web-dir "endpoint.blsp") (project--hatch-endpoint-template actual-name))
+                       (spit (path-join web-dir "errors.blsp") (project--hatch-errors-template actual-name))
                        (spit (path-join web-dir "layout.blsp") (project--hatch-layout-template actual-name))
                        (spit (path-join web-dir "routes.blsp") (project--hatch-routes-template actual-name))
                        (spit (path-join views-dir "home.blsp") (project--hatch-home-template actual-name))
@@ -2119,11 +2299,28 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
                        (spit (path-join tests-views-dir "messages_test.blsp") (project--hatch-messages-test-template actual-name))
                        [(str nm "/src/main.blsp") (str nm "/src/db.blsp")
                          (str nm "/src/db-setup.blsp")
-                         (str nm "/src/web/endpoint.blsp") (str nm "/src/web/layout.blsp")
+                         (str nm "/src/web/endpoint.blsp") (str nm "/src/web/errors.blsp")
+                         (str nm "/src/web/layout.blsp")
                          (str nm "/src/web/routes.blsp")
                          (str nm "/src/web/views/home.blsp") (str nm "/src/web/views/messages.blsp")
                          (str nm "/tests/main_test.blsp")
                          (str nm "/tests/web/views/messages_test.blsp")])
+    (= tmpl "web-api") (let (web-dir (path-join src-dir "web")
+                            tests-web-dir (path-join tests-dir "web"))
+                        (make-dir web-dir)
+                        (make-dir tests-web-dir)
+                        (spit (path-join nm "project.blsp") (project--web-api-manifest-template actual-name))
+                        (spit (path-join src-dir "main.blsp") (project--web-api-main-template actual-name))
+                        (spit (path-join web-dir "endpoint.blsp") (project--web-api-endpoint-template actual-name))
+                        (spit (path-join web-dir "routes.blsp") (project--web-api-routes-template actual-name))
+                        (spit (path-join web-dir "api.blsp") (project--web-api-handlers-template actual-name))
+                        (spit (path-join tests-dir "main_test.blsp") (project--hatch-main-test-template actual-name))
+                        (spit (path-join tests-web-dir "api_test.blsp") (project--web-api-test-template actual-name))
+                        [(str nm "/src/main.blsp")
+                          (str nm "/src/web/endpoint.blsp") (str nm "/src/web/routes.blsp")
+                          (str nm "/src/web/api.blsp")
+                          (str nm "/tests/main_test.blsp")
+                          (str nm "/tests/web/api_test.blsp")])
     else (do
            (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
            (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))
@@ -2134,7 +2331,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
              (str nm "/tests/hello_test.blsp")])))
 
 (defn new-project (nm &optional template)
-  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), or `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps; run `nest run --main db-setup` once to create the database, then `nest run` to start). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
+  "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps; run `nest run --main db-setup` once to create the database, then `nest run` to start), or `\"web-api\"` (a minimal Hatch JSON API — no live layer, no database; requires hatch as a sibling path dep; `nest run` to start). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
   ;; the project name is then the cwd's basename. Both forms — `nest new .` and
   ;; `nest new foobar` — *overwrite* existing scaffold files rather than

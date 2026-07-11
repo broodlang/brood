@@ -88,8 +88,9 @@ enum Cmd {
 
         /// Starter template: `default` (a main+hello pair), `tui-loop` (a
         /// tail-recursive animation loop, pairs with `nest run --for`), `gen`
-        /// (a stateful gen_server-style process), or `http-server` (a basic web
-        /// app over std/net/http). An unknown name lists the full set.
+        /// (a stateful gen_server-style process), `editor`/`gui` (ui-run apps),
+        /// `hatch` (a full Postgres-backed Hatch web app), or `web-api` (a
+        /// minimal Hatch JSON API). An unknown name lists the full set.
         #[arg(long = "template", short = 't', value_name = "NAME")]
         template: Option<String>,
     },

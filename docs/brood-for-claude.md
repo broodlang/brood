@@ -763,7 +763,8 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 `nest new <name>` scaffolds this default `main`+`hello` pair. Other `--template`
 options scaffold starter shapes you'd otherwise hand-write: `tui-loop` (a
 tail-recursive animation loop, pairs with `nest run --for`), `gen` (a stateful
-gen_server-style process), `http-server` (a minimal web app), `editor` (a tiny
+gen_server-style process), `hatch` (a full Postgres-backed Hatch web app),
+`web-api` (a minimal Hatch JSON API, no live layer or database), `editor` (a tiny
 text editor on `ui-run`), and `gui` (a windowed `ui-run` app — see *Interactive
 apps* above; needs a `--features gui` build).
 
