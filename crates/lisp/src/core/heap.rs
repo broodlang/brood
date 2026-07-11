@@ -125,12 +125,12 @@ macro_rules! region_ref {
                 }
                 PRELUDE => SlabRef::direct(&self.prelude.slabs.$field[id.index()]),
                 RUNTIME => {
-                    let guard = self.runtime.code_gen(id.code_gen());
-                    let r: &$t = guard.$field.get(id.index()).expect($what);
+                    let pin = self.code_gen_pinned(id.code_gen());
+                    let r: &$t = pin.$field.get(id.index()).expect($what);
                     let ptr = r as *const $t;
-                    // SAFETY: `ptr` points into `guard`'s CodeSlabs (stable `boxcar`
-                    // address), kept alive by the guard moved into the `SlabRef`.
-                    unsafe { SlabRef::guarded(guard, ptr) }
+                    // SAFETY: `ptr` points into `pin`'s CodeSlabs (stable `boxcar`
+                    // address), kept alive by the `Arc` moved into the `SlabRef`.
+                    unsafe { SlabRef::pinned(pin, ptr) }
                 }
                 _ => unreachable!("invalid handle region"),
             }
@@ -755,23 +755,28 @@ struct CodeSlabs {
 
 /// A borrow into a slab, valid for as long as the wrapper is held. It is either a
 /// **direct** `&self`-borrow (LOCAL / PRELUDE, or a compaction-time RUNTIME read) or
-/// a **guarded** borrow into an ArcSwap-managed RUNTIME generation, where the held
-/// [`Guard`] keeps that generation's slab alive so a concurrent Stage-4 free
+/// a **pinned** borrow into an ArcSwap-managed RUNTIME generation, where the held
+/// `Arc<CodeSlabs>` keeps that generation's slab alive so a concurrent Stage-4 free
 /// ([`Heap::free_runtime_gen`], ADR-091) can swap the slab out without invalidating
 /// an in-flight read. `Deref`s to `T`, so call sites use it exactly like `&T`.
+///
+/// The RUNTIME pin is a plain `Arc` clone obtained from a per-process **version-gated
+/// cache** ([`Heap::code_gen_pinned`]) rather than a fresh `ArcSwap::load` guard per
+/// deref: the latter's hybrid-strategy load dominated global-data-heavy hot loops (a
+/// read of a `def`'d matrix element in `matmul` derefs a RUNTIME handle, ~16 M times).
 pub struct SlabRef<'a, T: ?Sized> {
     /// Keeps the RUNTIME generation's `Arc<CodeSlabs>` alive while borrowed; `None`
     /// for a direct borrow. Never read directly — held purely so its `Drop` (the
     /// Arc release) runs no earlier than the pointer's last use.
-    _guard: Option<Guard<Arc<CodeSlabs>>>,
-    /// Points into the borrowed slot — a direct `&'a T`, or into the slab the guard
-    /// pins. Valid for the wrapper's whole lifetime either way.
+    _pin: Option<Arc<CodeSlabs>>,
+    /// Points into the borrowed slot — a direct `&'a T`, or into the slab the pin
+    /// keeps alive. Valid for the wrapper's whole lifetime either way.
     ptr: *const T,
     _life: std::marker::PhantomData<&'a T>,
 }
 
 // SAFETY: `SlabRef` is a plain shared borrow (a `&T` plus, optionally, the `Arc`
-// that keeps `T` alive). It is `Send`/`Sync` exactly when `&T` is — the guard is an
+// that keeps `T` alive). It is `Send`/`Sync` exactly when `&T` is — the pin is an
 // `Arc` clone (already `Send`+`Sync` for our `CodeSlabs`), and the raw pointer only
 // ever yields shared `&T` access.
 unsafe impl<T: ?Sized + Sync> Sync for SlabRef<'_, T> {}
@@ -782,32 +787,32 @@ impl<'a, T: ?Sized> SlabRef<'a, T> {
     #[inline]
     fn direct(r: &'a T) -> Self {
         SlabRef {
-            _guard: None,
+            _pin: None,
             ptr: r as *const T,
             _life: std::marker::PhantomData,
         }
     }
-    /// A guarded borrow into the ArcSwap generation `guard` pins.
+    /// A pinned borrow into a RUNTIME generation the `pin` `Arc` keeps alive.
     ///
-    /// SAFETY: `ptr` must point into the `CodeSlabs` held alive by `guard` (obtained
-    /// from `&*guard`), so it stays valid for the wrapper's whole lifetime.
+    /// SAFETY: `ptr` must point into the `CodeSlabs` held alive by `pin` (obtained
+    /// from `&*pin`), so it stays valid for the wrapper's whole lifetime.
     #[inline]
-    unsafe fn guarded(guard: Guard<Arc<CodeSlabs>>, ptr: *const T) -> Self {
+    unsafe fn pinned(pin: Arc<CodeSlabs>, ptr: *const T) -> Self {
         SlabRef {
-            _guard: Some(guard),
+            _pin: Some(pin),
             ptr,
             _life: std::marker::PhantomData,
         }
     }
-    /// Re-project the borrow to a part of `T` (e.g. a field), carrying the same guard
-    /// so the underlying slab stays pinned. Like `Ref::map`.
+    /// Re-project the borrow to a part of `T` (e.g. a field), carrying the same pin
+    /// so the underlying slab stays alive. Like `Ref::map`.
     #[inline]
     pub(crate) fn map<U: ?Sized>(self, f: impl FnOnce(&T) -> &U) -> SlabRef<'a, U> {
         // SAFETY: `self.ptr` is valid (invariant of `SlabRef`); the projected `&U`
-        // points within the same slab the guard (moved below) keeps alive.
+        // points within the same slab the pin (moved below) keeps alive.
         let ptr = f(unsafe { &*self.ptr }) as *const U;
         SlabRef {
-            _guard: self._guard,
+            _pin: self._pin,
             ptr,
             _life: std::marker::PhantomData,
         }
@@ -945,6 +950,17 @@ pub struct RuntimeCode {
     /// Index (0 or 1) of the current code generation — read at `promote`/collect,
     /// never on the hot read path (the handle carries its own generation).
     current_gen: AtomicUsize,
+    /// Monotonic version of the `gens` **`Arc` identities**, bumped only when a slot's
+    /// `Arc<CodeSlabs>` is *replaced* — a Stage-4 free or a compaction store, both rare
+    /// (never on the `def`/`promote`/append hot path, which mutates a loaded slab's
+    /// `boxcar` in place without swapping the `Arc`). It gates the per-process pinned
+    /// read cache ([`Heap::code_gen_pinned`]): a RUNTIME deref clones the *cached* `Arc`
+    /// when this version is unchanged, avoiding the `ArcSwap::load` hybrid-strategy cost
+    /// that dominated global-data-heavy hot loops. An aging flip changes `current_gen`
+    /// but not either slot's `Arc`, so it deliberately does **not** bump this — a cached
+    /// pin stays valid across it (a handle carries its own generation index). `Relaxed`
+    /// suffices: the cache re-`load_full`s on any change, which republishes the `Arc`.
+    gen_version: AtomicU64,
     /// The global bindings (prelude + user `def`s). Read on every global lookup,
     /// written on `def` (the only mutation). The values point into PRELUDE or RUNTIME.
     globals: RwLock<SymbolMap<Value>>,
@@ -1125,6 +1141,7 @@ impl Default for RuntimeCode {
                 ArcSwap::from_pointee(CodeSlabs::default()),
             ],
             current_gen: AtomicUsize::new(0),
+            gen_version: AtomicU64::new(0),
             globals: RwLock::new(SymbolMap::default()),
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
@@ -1159,11 +1176,6 @@ impl RuntimeCode {
     #[inline]
     fn cur_code(&self) -> Guard<Arc<CodeSlabs>> {
         self.gens[self.cur_gen()].load()
-    }
-    /// A guard on generation `g`'s slabs. Derefs to `&CodeSlabs`.
-    #[inline]
-    fn code_gen(&self, g: usize) -> Guard<Arc<CodeSlabs>> {
-        self.gens[g].load()
     }
     // Append a value into the *current* code generation and mint a handle tagged
     // with that generation, so a read later resolves the right slab (2-generation
@@ -1213,6 +1225,7 @@ impl RuntimeCode {
                 ArcSwap::from_pointee(CodeSlabs::default()),
             ],
             current_gen: AtomicUsize::new(0),
+            gen_version: AtomicU64::new(0),
             globals: RwLock::new(globals),
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
@@ -1312,6 +1325,17 @@ pub struct Heap {
     old: Slabs,
     prelude: Arc<SharedCode>,
     runtime: Arc<RuntimeCode>,
+    /// **Per-process pinned-read cache for the RUNTIME generations.** A RUNTIME handle
+    /// deref must pin `gens[g]`'s `Arc<CodeSlabs>` (so a concurrent Stage-4 free can't drop
+    /// it mid-read), but taking a fresh `ArcSwap::load` guard per deref dominated
+    /// global-data-heavy hot loops. Instead each slot caches the last-loaded `Arc` plus the
+    /// [`RuntimeCode::gen_version`] it was loaded at; [`code_gen_pinned`](Self::code_gen_pinned)
+    /// clones the cached `Arc` (a single refcount bump) when the version is unchanged and
+    /// only `load_full`s on a real generation replacement (Stage-4 free / compaction store —
+    /// rare). `RefCell`/`Cell`: the `Heap` is single-threaded (one worker owns a process at a
+    /// time). `gen_cache_ver` starts at `u64::MAX` so the first read always populates.
+    gen_cache: [RefCell<Option<Arc<CodeSlabs>>>; 2],
+    gen_cache_ver: [Cell<u64>; 2],
     /// This process's global scope. For a real runtime this is [`EnvId::GLOBAL`]
     /// (routing to `runtime.globals`); for the prelude *builder* it's a real
     /// local root frame (so the prelude can be evaluated, then frozen).
@@ -1888,6 +1912,8 @@ impl Heap {
         Heap {
             local: Slabs::default(),
             old: Slabs::default(),
+            gen_cache: [RefCell::new(None), RefCell::new(None)],
+            gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
@@ -1943,6 +1969,8 @@ impl Heap {
         Heap {
             local: Slabs::default(),
             old: Slabs::default(),
+            gen_cache: [RefCell::new(None), RefCell::new(None)],
+            gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
             prelude,
             runtime,
             global: EnvId::local(0),
@@ -4042,6 +4070,34 @@ impl Heap {
 
     // ===== Accessors — read LOCAL/PRELUDE/RUNTIME values =======================
 
+    /// Pin RUNTIME generation `g`'s `Arc<CodeSlabs>` for a read, via the per-process
+    /// version-gated cache ([`gen_cache`](Self::gen_cache)). Returns a cheap `Arc` clone
+    /// (one refcount bump) when the generation's identity is unchanged since this process
+    /// last read it, and `load_full`s only on a real replacement — a Stage-4 free or a
+    /// compaction store, both rare and both bumping [`RuntimeCode::gen_version`]. This
+    /// replaces the per-deref `ArcSwap::load` guard whose hybrid-strategy cost dominated
+    /// global-data-heavy hot loops (a `def`'d matrix element read in `matmul` derefs a
+    /// RUNTIME handle ~16 M times). Soundness: the returned `Arc` pins the slab exactly as
+    /// the old guard did, so a concurrent free can't drop it mid-read; and reading a stale
+    /// cached `Arc` is impossible to observe wrongly — a generation is freed only once every
+    /// process (this one included) has reported clean of it (ADR-091), so this process holds
+    /// no live handle into a generation whose `Arc` it might still have cached.
+    #[inline]
+    fn code_gen_pinned(&self, g: usize) -> Arc<CodeSlabs> {
+        let ver = self.runtime.gen_version.load(Ordering::Acquire);
+        if self.gen_cache_ver[g].get() != ver {
+            // First read, or generation `g`'s `Arc` was replaced — reload and re-stamp.
+            *self.gen_cache[g].borrow_mut() = Some(self.runtime.gens[g].load_full());
+            self.gen_cache_ver[g].set(ver);
+        }
+        Arc::clone(
+            self.gen_cache[g]
+                .borrow()
+                .as_ref()
+                .expect("gen cache populated on the version miss above"),
+        )
+    }
+
     pub fn pair(&self, id: PairId) -> (Value, Value) {
         match id.region() {
             LOCAL if id.is_old() => {
@@ -4054,8 +4110,7 @@ impl Heap {
             }
             PRELUDE => self.prelude.slabs.pairs[id.index()],
             RUNTIME => *self
-                .runtime
-                .code_gen(id.code_gen())
+                .code_gen_pinned(id.code_gen())
                 .pairs
                 .get(id.index())
                 .expect("runtime pair handle"),
@@ -4084,14 +4139,15 @@ impl Heap {
         project: impl FnOnce(&CodeSlabs) -> &T,
     ) -> SlabRef<'_, T> {
         // A generation can be **freed concurrently** by the multi-process collector while
-        // other processes run (ADR-091), so load the `gens[g]` slab through its `ArcSwap`
-        // guard: moving the guard into the `SlabRef` defers the freed `Arc`'s drop until
-        // this borrow ends.
-        let guard = self.runtime.code_gen(g);
-        let ptr = project(&guard) as *const T;
-        // SAFETY: `ptr` points into `guard`'s `CodeSlabs` (stable `boxcar` address);
-        // the guard moved into the `SlabRef` keeps that slab alive for the borrow.
-        unsafe { SlabRef::guarded(guard, ptr) }
+        // other processes run (ADR-091), so the `SlabRef` must pin `gens[g]`'s `Arc<CodeSlabs>`
+        // to defer the freed `Arc`'s drop until this borrow ends. The `Arc` comes from the
+        // per-process version-gated cache ([`code_gen_pinned`]) — a cheap clone when the
+        // generation is unchanged — not a fresh `ArcSwap::load` guard per deref.
+        let pin = self.code_gen_pinned(g);
+        let ptr = project(&pin) as *const T;
+        // SAFETY: `ptr` points into `pin`'s `CodeSlabs` (stable `boxcar` address);
+        // the `Arc` moved into the `SlabRef` keeps that slab alive for the borrow.
+        unsafe { SlabRef::pinned(pin, ptr) }
     }
 
     /// Resolve a string handle to a `&str`. Hand-written (not via the
@@ -5821,6 +5877,10 @@ impl Heap {
         // Drop the whole generation: store a fresh empty slab; the old `Arc` releases
         // when the last (already none, by the drain) reader guard does.
         self.runtime.gens[old_gen].store(Arc::new(CodeSlabs::default()));
+        // Replaced `gens[old_gen]`'s `Arc` — bump the pinned-read cache version so every
+        // process re-`load_full`s instead of cloning its now-stale cached `Arc` (Release,
+        // after the store, so a consumer that sees the new version also sees the new slab).
+        self.runtime.gen_version.fetch_add(1, Ordering::Release);
         // Invalidate the version-stamped caches (global_ic, call/global ICs, JIT)…
         self.runtime.version.fetch_add(1, Ordering::Relaxed);
         // …and the handle-keyed vm_cache (via free_epoch) across every process.
@@ -6554,6 +6614,9 @@ impl Heap {
         {
             let rt = Arc::get_mut(&mut self.runtime).unwrap();
             rt.gens[cur].store(Arc::new(new));
+            // Replaced `gens[cur]`'s `Arc` (compaction) — bump the pinned-read cache version
+            // so the next read reloads instead of cloning the stale pre-compaction `Arc`.
+            rt.gen_version.fetch_add(1, Ordering::Release);
             rt.version.fetch_add(1, Ordering::Relaxed);
             // Drop the shared JIT-code cache: compaction rewrites closure ids, so its
             // `(id, argc)` keys no longer denote the same closures. The version bump
