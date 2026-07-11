@@ -1015,7 +1015,35 @@ pub(super) fn enqueue(proc: Box<Process>) {
 /// **dirty** block — it reads busy (its `run_one` hasn't returned) and `assign_worker`
 /// excludes it, so the woken process is moved off it. (Preempt re-enqueue uses plain
 /// [`enqueue`] instead, to keep a hot process local.)
+/// `BROOD_NO_HANDOFF=1` disables the direct-handoff wake policy in [`wake_enqueue`]
+/// (reverts to waking the woken process's home worker). Cached — read once.
+fn handoff_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("BROOD_NO_HANDOFF").is_some())
+}
+
 pub(super) fn wake_enqueue(mut proc: Box<Process>) {
+    // Direct handoff (BEAM-style, the message-passing latency win): when a *running
+    // worker* wakes a process — the overwhelmingly common case is a `send` that readies
+    // a parked receiver — enqueue it onto THIS worker's own run queue instead of waking
+    // the receiver's (parked) home worker. The dominant message shape is
+    // send-then-block (`(send q …)` immediately followed by `(receive …)`): running `q`
+    // next on the same worker turns a cross-thread futex wake + OS context switch (~2 per
+    // ping-pong round-trip, ~40% of wall in `sys`) into a userspace green-process switch.
+    // `notify_one` on our own cv is a no-op (we're running, not parked), and the worker
+    // loop drains its queue before parking, so `q` runs the moment our process yields.
+    // Work-stealing still rebalances a genuinely parallel fan-out (an idle peer steals),
+    // and reduction preemption bounds how long `q` waits if we DON'T block. The
+    // root/timer threads (no `CURRENT_WORKER`) fall through to the load-based path.
+    // `BROOD_NO_HANDOFF=1` opts out (the A/B / safety lever), reverting to the
+    // wake-the-home-worker policy.
+    if !handoff_disabled() {
+        if let Some(cur) = CURRENT_WORKER.with(|c| c.get()) {
+            proc.worker_id = cur;
+            enqueue(proc);
+            return;
+        }
+    }
     if WORKER_BUSY[proc.worker_id].load(Ordering::Relaxed) {
         let new_wid = assign_worker();
         if new_wid != proc.worker_id {
