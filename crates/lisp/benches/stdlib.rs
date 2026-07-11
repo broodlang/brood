@@ -434,19 +434,6 @@ mod stats {
             ),
         );
     }
-
-    /// `frequencies` over `n` numbers with 10 distinct keys.
-    #[divan::bench(args = [100, 1_000])]
-    fn frequencies(bencher: divan::Bencher, n: usize) {
-        bench_prog(
-            bencher,
-            format!(
-                "(require 'stats) \
-                 (def xs (map (fn (x) (rem x 10)) (range {n}))) \
-                 (stats/frequencies xs)"
-            ),
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

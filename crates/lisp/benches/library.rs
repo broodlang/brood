@@ -56,52 +56,15 @@ mod sequence {
         );
     }
 
-    /// Same workload as `pipeline`, expressed as a transducer chain — `xmap`
-    /// and `xfilter` fuse with the reducer into one pass over `range`, with no
-    /// intermediate lists. Paired with `pipeline` to show the fusion win.
+    /// Same workload as `pipeline`, expressed as the lazy fusing surface —
+    /// `lmap` and `lfilter` threaded with `->>` fuse into one seq-view whose
+    /// transducer folds straight over `range`, with no intermediate lists.
+    /// Paired with the eager `pipeline` to show the fusion win.
     #[divan::bench(args = [1_000, 10_000])]
-    fn transduce_pipeline(bencher: divan::Bencher, n: usize) {
+    fn pipeline_fused(bencher: divan::Bencher, n: usize) {
         bench_prog(
             bencher,
-            format!("(transduce (comp (xmap (fn (x) (* x x))) (xfilter even?)) + 0 (range {n}))"),
-        );
-    }
-
-    /// Same workload as `mapcat`, fused via `xmapcat` — feeds each expanded
-    /// list's items straight into the reducer, no per-element intermediate.
-    #[divan::bench(args = [1_000, 10_000])]
-    fn transduce_mapcat(bencher: divan::Bencher, n: usize) {
-        bench_prog(
-            bencher,
-            format!(
-                "(transduce (xmapcat (fn (x) (list x x))) (fn (acc _) (+ acc 1)) 0 (range {n}))"
-            ),
-        );
-    }
-
-    /// Same workload as `transduce_short_circuit` but expressed eagerly: the
-    /// filter must run against every item of the n-long mapped list (no way to
-    /// stop early). Paired with the transducer version to show the
-    /// `xtake-while` / `reduced` short-circuit win.
-    #[divan::bench(args = [10_000, 100_000])]
-    fn pipeline_no_short_circuit(bencher: divan::Bencher, n: usize) {
-        bench_prog(
-            bencher,
-            format!("(reduce + 0 (filter (fn (x) (< x 1000)) (map (fn (x) (* x x)) (range {n}))))"),
-        );
-    }
-
-    /// Short-circuiting transducer: `xtake-while` returns `reduced` once
-    /// squares cross the threshold, so the driver halts and the rest of the
-    /// n-long input is never touched. Should be ~constant time regardless of
-    /// `n` (only ~32 items processed before the first square ≥ 1000).
-    #[divan::bench(args = [10_000, 100_000])]
-    fn transduce_short_circuit(bencher: divan::Bencher, n: usize) {
-        bench_prog(
-            bencher,
-            format!(
-                "(transduce (comp (xmap (fn (x) (* x x))) (xtake-while (fn (x) (< x 1000)))) + 0 (range {n}))"
-            ),
+            format!("(->> (range {n}) (lmap (fn (x) (* x x))) (lfilter even?) (reduce + 0))"),
         );
     }
 }
