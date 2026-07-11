@@ -97,12 +97,13 @@ pub(super) struct Mailbox {
     /// Run-status (`ST_*`) for `process-info`, written at scheduler transitions.
     pub(super) status: AtomicU8,
     /// The owning process's LOCAL heap footprint in bytes, republished each time
-    /// it enters `receive` (`Heap::local_bytes`). Registry-reachable for
-    /// `process-info`'s `:memory`; bump-allocated, so it reflects allocation since
-    /// the last arena reset / collection, not a tracing-GC live set.
+    /// it *parks* in `receive` (`Heap::local_bytes` — off the fast message-ready
+    /// path, which recomputing an O(heap) walk there dominated). Registry-reachable
+    /// for `process-info`'s `:memory`; bump-allocated, so it reflects allocation
+    /// since the last arena reset / collection, not a tracing-GC live set.
     pub(super) mem: AtomicUsize,
     /// The owning process's cumulative GC-collection count (`Heap::gc_counters().0`),
-    /// republished alongside `mem` on each `receive`. Lets the observer flag a
+    /// republished alongside `mem` when it parks in `receive`. Lets the observer flag a
     /// process that's churning memory (many collections) vs. a quiet one. Backs
     /// `process-info`'s `:collections`.
     pub(super) gc_runs: AtomicU64,
@@ -398,12 +399,13 @@ pub fn receive_match(
             ))
         }
     };
-    // Republish this process's LOCAL footprint and mark it running (the root never
-    // goes through `run_one`, so this is where its status flips back from waiting).
-    ctx.mailbox.mem.store(heap.local_bytes(), Ordering::Relaxed);
-    ctx.mailbox
-        .gc_runs
-        .store(heap.gc_counters().0, Ordering::Relaxed);
+    // Mark this process running (the root never goes through `run_one`, so this is
+    // where its status flips back from waiting). The LOCAL-footprint figure for
+    // `process-info`'s `:memory` is republished only at the *park* point below, not
+    // here: `local_bytes` is an O(heap) slab walk, and recomputing it on every
+    // fast-path receive (message already waiting) dominated message-passing
+    // throughput (~25% of a ping-pong loop). A running process is inspected as
+    // `:running`; the figure only needs to be current while it's parked.
     set_self_status(&ctx, ST_RUNNING);
     // `matcher` and `on_timeout` are needed across every loop iteration, but
     // `eval::apply` (the matcher) can now collect at ANY eval depth (ADR-061),
@@ -446,6 +448,14 @@ pub fn receive_match(
                         return Ok(on_timeout);
                     }
                 }
+                // About to park (no clause matched, and no timeout has fired): republish
+                // this process's LOCAL footprint + GC count so an observer's `process-info`
+                // reads a current `:memory`/GC figure for the *waiting* process — the state
+                // it's most likely inspected in. Kept off the fast (message-ready) path above.
+                ctx.mailbox.mem.store(heap.local_bytes(), Ordering::Relaxed);
+                ctx.mailbox
+                    .gc_runs
+                    .store(heap.gc_counters().0, Ordering::Relaxed);
                 // State-capture path (ADR-100 §8): a clean no-match in a green process
                 // (`in_capture_run`) becomes a *suspend control signal* returned to the
                 // scheduler instead of blocking the worker. Record the scan position (so
@@ -535,6 +545,14 @@ fn scan_mailbox(
     rbase: usize,
     i: &mut usize,
 ) -> Result<Option<Value>, LispError> {
+    // Resolve the matcher to its compiled VM arm lazily, on the FIRST queued candidate:
+    // each candidate then runs the pattern dispatch through the bytecode VM / JIT
+    // fast-frame — the same fast closure-call path `fold`/`map`/`reduce` use for their
+    // step fn — instead of the tree-walking `eval::apply` (~10× slower per ADR-076). The
+    // matcher is a fixed-arity-1 `(fn (msg) …)`; `None` (not a plain VM closure) leaves
+    // the scan on the general path. Lazy so an empty-mailbox scan (the common suspend
+    // entry — no candidate to match) pays nothing. `Some(None)` = resolved-to-unusable.
+    let mut hof: Option<Option<crate::eval::compile::HofArm>> = None;
     loop {
         // (A hard `:kill` is caught at the VM driver's loop top; a soft exit at the
         // `park_on_receive` boundary — not here, since there's no coroutine to suspend.)
@@ -550,7 +568,21 @@ fn scan_mailbox(
         match candidate {
             Some(v) => {
                 let matcher = heap.root_at(rbase);
-                let thunk = eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?;
+                if hof.is_none() {
+                    hof = Some(crate::eval::compile::hof_resolve(heap, matcher, 1));
+                }
+                // Apply the matcher via the VM / JIT fast-frame when it resolved to a plain
+                // arm, falling back to the tree-walking `eval::apply` otherwise (or when
+                // `hof_apply_step` deopts on an identity miss — e.g. a mid-scan GC relocated
+                // the matcher). Same semantics either way: returns the clause body thunk on
+                // a match, a non-`Fn` value on no-match.
+                let thunk = match hof.as_ref().unwrap() {
+                    Some(h) => match crate::eval::compile::hof_apply_step(heap, h, matcher, &[v]) {
+                        Some(r) => r?,
+                        None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?,
+                    },
+                    None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?,
+                };
                 if matches!(thunk, Value::Fn(_)) {
                     // Matched — remove exactly this message and hand the body thunk
                     // *back* (don't run it here). The `receive` macro applies it in
