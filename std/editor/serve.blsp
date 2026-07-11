@@ -99,31 +99,40 @@ participant's name from."
       (send (self) [:client-opts opts]))
     (ui-run (make-model) view update (remote-display client cols rows))))
 
-(defn serve--manager (make-model view update)
+(defn serve--manager (make-model view update &optional sessions)
   "The session manager loop (registered under `serve-name`): on each `[:attach client
 cols rows]` / `[:attach client cols rows opts]`, spawn an independent session for that
 client (`opts` — the client's identity map — defaults to `{}` for an old-style attach).
-Tail-recursive, so it serves any number of clients over its lifetime."
-  (receive
-    ([:attach client cols rows] (do
-                                  (spawn (serve--session client
-                                           cols
-                                           rows
-                                           {}
-                                           make-model
-                                           view
-                                           update))
-                                  (serve--manager make-model view update)))
-    ([:attach client cols rows opts] (do
-                                       (spawn (serve--session client
-                                                cols
-                                                rows
-                                                opts
-                                                make-model
-                                                view
-                                                update))
-                                       (serve--manager make-model view update)))
-    (_ (serve--manager make-model view update))))
+Live sessions are tracked (monitored; pruned on `[:down …]`) so `[:shutdown from r]` —
+the `serve-stop` message — can end every one of them: each killed session's client sees
+its monitor fire and closes cleanly. Tail-recursive."
+  (let (ss (or sessions ()))
+    (receive
+      ([:attach client cols rows]
+        (let (s (spawn (serve--session client cols rows {} make-model view update)))
+          (monitor s)
+          (serve--manager make-model view update (cons s ss))))
+      ([:attach client cols rows opts]
+        (let (s (spawn (serve--session client cols rows opts make-model view update)))
+          (monitor s)
+          (serve--manager make-model view update (cons s ss))))
+      ([:down _ p _] (serve--manager make-model view update (remove (fn (x) (= x p)) ss)))
+      ([:shutdown from r]
+        (do (doseq (s ss) (exit s :kill))
+          (send from [:reply r (count ss)])))
+      (_ (serve--manager make-model view update ss)))))
+
+(defn serve-stop (&optional mgr)
+  "Stop serving: kill every live session (each client's monitor fires and its window
+closes) and end the manager — `mgr`, or the one registered under `serve-name`.
+Returns the number of sessions ended, nil when nothing was serving, `:no-reply` on a
+wedged manager. The counterpart of `serve`."
+  (let (pid (or mgr (whereis serve-name)))
+    (if (nil? pid)
+      nil
+      (let (r (ref))
+        (send pid [:shutdown (self) r])
+        (receive ([:reply ~r v] v) (after 2000 :no-reply))))))
 
 (defn serve (make-model view update)
   "Serve a `ui-run` app from THIS runtime to attaching frontends (ADR-090). `make-model`
@@ -349,6 +358,11 @@ it from the hub. Tail-recursive."
         (send client [:attached session])
         (serve-shared--manager session hub)))
     ([:down _ client _] (do (send hub [:remove client]) (serve-shared--manager session hub)))
+    ;; serve-stop: tell every client goodbye (the hub fans [:bye]), end the session
+    ([:shutdown from r]
+      (do (send hub [:shutdown])
+        (exit session :kill)
+        (send from [:reply r 1])))
     (_ (serve-shared--manager session hub))))
 
 (defn serve-shared (model view update)

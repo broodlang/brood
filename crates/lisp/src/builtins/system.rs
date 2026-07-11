@@ -2100,7 +2100,13 @@ pub(super) fn isolate(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     // can't hang the run.
     let spawned: std::collections::HashSet<u64> = crate::process::list_local_pids()
         .into_iter()
-        .filter(|p| !before.contains(p))
+        // Never reap the CALLER: the root's mailbox registers lazily (its first
+        // `receive`), so a root that had never received before this isolate ran
+        // shows up as a "newcomer" — and the reap would exit-kill the very process
+        // running the isolate. That kill was silently ignored for as long as
+        // exit signals couldn't reach a natively-nested receive; now that they can
+        // (Control::Killed), it would abort the whole run.
+        .filter(|p| !before.contains(p) && *p != crate::process::self_pid())
         .collect();
     if !spawned.is_empty() {
         let kill = crate::process::Message::Keyword(crate::core::value::intern(
