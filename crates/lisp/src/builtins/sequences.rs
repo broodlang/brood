@@ -1252,6 +1252,44 @@ pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(Value::int(idx))
 }
 
+/// `(%str-splice-diff old new)` — the minimal single splice `[lo hi repl]` that
+/// turns `old` into `new`: replace `old[lo, hi)` (0-based CHAR indices) with the
+/// string `repl`. The common prefix and suffix are trimmed off (the suffix never
+/// overlaps the prefix), so the span is minimal; equal strings give `[n n ""]`.
+/// One native byte-level pass snapped to char boundaries. Genuinely needs Rust:
+/// this runs per keystroke on every process-hosted editor buffer (the myedit
+/// flip), where the pure-Brood per-char scan (fn call + `char-at` per char) cost
+/// ~40 ms/keystroke on a 300-line buffer — ~100× this pass.
+pub(super) fn str_splice_diff(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let old = expect_string(heap, "%str-splice-diff", arg(args, 0))?;
+    let new = expect_string(heap, "%str-splice-diff", arg(args, 1))?;
+    let ob = old.as_bytes();
+    let nb = new.as_bytes();
+    // Common byte prefix, snapped BACK to a char boundary in both (a boundary in
+    // one is a boundary in the other: the prefixes are byte-identical).
+    let mut p = ob.iter().zip(nb.iter()).take_while(|(a, b)| a == b).count();
+    while p > 0 && !old.is_char_boundary(p) {
+        p -= 1;
+    }
+    // Common byte suffix over the remainders (capped so it can't overlap the
+    // prefix), snapped FORWARD (shrunk) to a char boundary in both.
+    let max_suf = (ob.len() - p).min(nb.len() - p);
+    let mut s = ob
+        .iter()
+        .rev()
+        .zip(nb.iter().rev())
+        .take(max_suf)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while s > 0 && !(old.is_char_boundary(ob.len() - s) && new.is_char_boundary(nb.len() - s)) {
+        s -= 1;
+    }
+    let lo = old[..p].chars().count() as i64;
+    let hi = lo + old[p..ob.len() - s].chars().count() as i64;
+    let repl = heap.alloc_string(&new[p..nb.len() - s]);
+    Ok(heap.alloc_vector(vec![Value::int(lo), Value::int(hi), repl]))
+}
+
 /// `(string-split s sep)` — split `s` into a list of substrings on each occurrence
 /// of `sep`, in one O(n) pass. An empty separator splits `s` into its individual
 /// characters (1-char strings). Mirrors the semantics of the former pure-Brood

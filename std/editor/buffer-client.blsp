@@ -50,33 +50,15 @@ seed always applies); compute minimal splices with `text-splice`."
 
 ;; ---- the single positional splice diff ---------------------------------------
 
-(defn client--prefix-len (a b i)
-  "The length of the common prefix of strings `a` and `b`, scanning from index `i`."
-  (if (and (< i (string-length a)) (< i (string-length b))
-        (= (char-at a i) (char-at b i)))
-    (client--prefix-len a b (inc i))
-    i))
-
-(defn client--suffix-len (a b limit k)
-  "The length of the common suffix of `a` and `b`, capped at `limit` (so it never
-overlaps a prefix already counted). Scans inward from the end, `k` chars matched so far."
-  (if (and (< k limit)
-        (= (char-at a (- (string-length a) 1 k))
-          (char-at b (- (string-length b) 1 k))))
-    (client--suffix-len a b limit (inc k))
-    k))
-
 (defn text-splice (old new)
   "The single positional splice `[lo hi repl]` that turns string `old` into `new`:
 replace `old[lo, hi)` with `repl`. `lo`/`hi` bound the minimal changed span (shared
 prefix + suffix trimmed off), so `(replace-region buf lo hi repl)` reproduces `new`.
 Equal strings give a no-op `[n n \"\"]`. The whole edit expressed positionally, so it
-lands correctly at the process no matter where other participants' points are."
-  (let (lo (client--prefix-len old new 0)
-        maxsuf (min (- (string-length old) lo) (- (string-length new) lo))
-        suf (client--suffix-len old new maxsuf 0)
-        hi (- (string-length old) suf))
-    [lo hi (substring new lo (- (string-length new) suf))]))
+lands correctly at the process no matter where other participants' points are.
+Native (`%str-splice-diff`, one O(n) pass) — this runs per keystroke on every
+hosted buffer, where a per-char Brood scan cost ~40 ms on a 300-line file."
+  (%str-splice-diff old new))
 
 (defn splice-noop? (splice)
   "True when `splice` (`[lo hi repl]`) changes nothing — an empty range and empty
