@@ -1320,12 +1320,39 @@ pub(crate) fn make_closure_cached(heap: &mut Heap, rest: Value, env: EnvId) -> L
             return Ok(build_closure(heap, None, &tpl, env));
         }
     };
-    if let Some(tpl) = heap.lookup_closure_template(key) {
-        return Ok(build_closure(heap, None, &tpl, env));
+    // A **capture-free** closure (`env == GLOBAL`: no lexical captures, no self-name — it
+    // late-binds globals but captures nothing) is a *constant*, fully determined by its
+    // `fn_rest`. Re-building and re-`promote`ing an identical one every evaluation — a `spawn`
+    // thunk in a fan-out — piles up RUNTIME garbage the collector must reclaim. So build +
+    // promote it **once** to a stable RUNTIME handle and reuse it. Late binding is preserved
+    // (globals still resolve live through `EnvId::GLOBAL`); the enclosing form's hot reload
+    // changes `fn_rest` → a fresh key, and a RUNTIME relocation bumps `gen_version` → the cache
+    // clears.
+    //
+    // **Promote only on the *second* sighting** (gated on the template already being cached, our
+    // "seen before" signal). A literal evaluated once — the overwhelmingly common `(def f (fn
+    // …))` right-hand side — then stays a plain LOCAL closure and flows into `def`'s own
+    // promote-and-dedup untouched, so an identical redefinition still dedups (no spurious RUNTIME
+    // version). Only a literal in a loop pays the one-time promote, on its way to reuse.
+    let is_const = env == crate::core::value::EnvId::GLOBAL;
+    if is_const {
+        if let Some(c) = heap.lookup_const_closure(key) {
+            return Ok(c);
+        }
     }
-    let tpl = std::sync::Arc::new(parse_closure_template(heap, rest)?);
-    heap.store_closure_template(key, std::sync::Arc::clone(&tpl));
-    Ok(build_closure(heap, None, &tpl, env))
+    let (closure, seen_before) = if let Some(tpl) = heap.lookup_closure_template(key) {
+        (build_closure(heap, None, &tpl, env), true)
+    } else {
+        let tpl = std::sync::Arc::new(parse_closure_template(heap, rest)?);
+        heap.store_closure_template(key, std::sync::Arc::clone(&tpl));
+        (build_closure(heap, None, &tpl, env), false)
+    };
+    if is_const && seen_before {
+        let promoted = heap.promote(closure);
+        heap.store_const_closure(key, promoted);
+        return Ok(promoted);
+    }
+    Ok(closure)
 }
 
 /// Instantiate a closure from a parsed [`ClosureTemplate`]: clone its arms/doc, attach

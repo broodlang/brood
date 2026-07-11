@@ -950,6 +950,10 @@ pub type VmCacheMap<V> = HashMap<VmCacheKey, V, std::hash::BuildHasherDefault<Sy
 type ClosureTemplateMap =
     HashMap<PairId, Arc<ClosureTemplate>, std::hash::BuildHasherDefault<SymbolHasher>>;
 
+/// The [`Heap::lookup_const_closure`] cache map: a capture-free `(fn …)` literal's
+/// `fn_rest` [`PairId`] → the **promoted RUNTIME closure handle** built for it once.
+type ConstClosureMap = HashMap<PairId, Value, std::hash::BuildHasherDefault<SymbolHasher>>;
+
 pub struct RuntimeCode {
     /// The **two** code generations (ADR-091 Erlang-style 2-generation collector).
     /// New code (`def`/`promote`) lands in `gens[current_gen]`; the *other* slot
@@ -1375,6 +1379,18 @@ pub struct Heap {
     /// `write_u64` fast path instead of stock `SipHash`.
     closure_tpl_cache: RefCell<ClosureTemplateMap>,
     closure_tpl_ver: Cell<u64>,
+    /// **Capture-free closure constant cache.** A `(fn …)` literal with no lexical captures
+    /// and no self-name is a *constant* — its `env` is [`EnvId::GLOBAL`], so it late-binds
+    /// globals but captures nothing, and every evaluation would otherwise rebuild an
+    /// identical closure and (for a `spawn` thunk) re-`promote` it into the RUNTIME region,
+    /// piling up garbage the collector must reclaim. This memoises the closure built **once**
+    /// and promoted to a stable RUNTIME handle, so re-evaluating the literal returns the same
+    /// handle — no alloc, no re-promote (`(spawn (worker))` in a fan-out drops ~7×). Keyed and
+    /// invalidated exactly like [`closure_tpl_cache`](Self::closure_tpl_cache): the handle is a
+    /// RUNTIME value that moves only on a `gen_version` bump, so a version change clears the
+    /// map (`closure_const_ver` starts at `u64::MAX` so the first use populates).
+    closure_const_cache: RefCell<ConstClosureMap>,
+    closure_const_ver: Cell<u64>,
     /// This process's global scope. For a real runtime this is [`EnvId::GLOBAL`]
     /// (routing to `runtime.globals`); for the prelude *builder* it's a real
     /// local root frame (so the prelude can be evaluated, then frozen).
@@ -1961,6 +1977,8 @@ impl Heap {
             gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
             closure_tpl_cache: RefCell::new(ClosureTemplateMap::default()),
             closure_tpl_ver: Cell::new(u64::MAX),
+            closure_const_cache: RefCell::new(ConstClosureMap::default()),
+            closure_const_ver: Cell::new(u64::MAX),
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
@@ -2021,6 +2039,8 @@ impl Heap {
             gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
             closure_tpl_cache: RefCell::new(ClosureTemplateMap::default()),
             closure_tpl_ver: Cell::new(u64::MAX),
+            closure_const_cache: RefCell::new(ConstClosureMap::default()),
+            closure_const_ver: Cell::new(u64::MAX),
             prelude,
             runtime,
             global: EnvId::local(0),
@@ -4178,6 +4198,28 @@ impl Heap {
     /// creation), so the insert lands against the current generation.
     pub(crate) fn store_closure_template(&self, key: PairId, tpl: Arc<ClosureTemplate>) {
         self.closure_tpl_cache.borrow_mut().insert(key, tpl);
+    }
+
+    /// Look up the memoised **promoted RUNTIME closure** for a capture-free `(fn …)`
+    /// literal's `fn_rest` key (see [`closure_const_cache`](Self::closure_const_cache)),
+    /// gen-synced like [`lookup_closure_template`]: a `gen_version` bump clears the map, so
+    /// any hit is a current-generation handle. `None` on a miss — the caller builds +
+    /// promotes once and calls [`store_const_closure`].
+    pub(crate) fn lookup_const_closure(&self, key: PairId) -> Option<Value> {
+        let ver = self.runtime.gen_version.load(Ordering::Acquire);
+        if self.closure_const_ver.get() != ver {
+            self.closure_const_cache.borrow_mut().clear();
+            self.closure_const_ver.set(ver);
+            return None;
+        }
+        self.closure_const_cache.borrow().get(&key).copied()
+    }
+
+    /// Memoise a capture-free closure's promoted RUNTIME handle under its `fn_rest` key.
+    /// Call only right after a [`lookup_const_closure`] miss (which synced the version), so
+    /// the insert lands against the current generation.
+    pub(crate) fn store_const_closure(&self, key: PairId, closure: Value) {
+        self.closure_const_cache.borrow_mut().insert(key, closure);
     }
 
     pub fn pair(&self, id: PairId) -> (Value, Value) {

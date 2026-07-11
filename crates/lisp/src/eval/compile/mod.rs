@@ -423,9 +423,50 @@ fn compile_try_catch(heap: &Heap, items: &[Value], scope: &mut Scope) -> Option<
     })
 }
 
+/// Every symbol that appears anywhere in `body` (an over-approximation of its free
+/// variables — it also includes bound/quoted/param symbols, which is harmless: capturing
+/// an enclosing lexical the body never actually reads only wastes a slot, never changes
+/// behaviour). [`compile_captures`] uses it to capture **only** the enclosing lexicals the
+/// body could reference, instead of snapshotting the *whole* scope. That's what lets a
+/// closure like `(fn () (worker))` (which mentions only the global `worker`) come out
+/// **capture-free** — the precondition for the constant-closure fast path
+/// ([`crate::eval::make_closure_cached`]) that stops a `spawn` fan-out re-promoting an
+/// identical thunk every call. Iterative (an explicit worklist) so a deep body can't
+/// overflow the compiler's stack.
+fn body_symbols(heap: &Heap, body: Value) -> std::collections::HashSet<Symbol> {
+    let mut out = std::collections::HashSet::new();
+    let mut work = vec![body];
+    while let Some(v) = work.pop() {
+        match v.unpack() {
+            ValueRef::Sym(s) => {
+                out.insert(s);
+            }
+            ValueRef::Pair(p) => {
+                let (h, t) = heap.pair(p);
+                work.push(h);
+                work.push(t);
+            }
+            ValueRef::Vector(vid) => work.extend(heap.vector(vid).iter().copied()),
+            ValueRef::Map(mid) => heap.fold_entries(mid, &mut |k, val| {
+                work.push(k);
+                work.push(val);
+            }),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// frame parent. Returns `None` (defer) if a capture would read a not-yet-finalized
-/// `letrec` slot, which a value snapshot can't express.
-fn compile_captures(scope: &Scope) -> Option<(Vec<(Symbol, Node)>, Option<Symbol>)> {
+/// `letrec` slot, which a value snapshot can't express. `referenced` is the set of
+/// symbols the closure body mentions (see [`body_symbols`]); an enclosing lexical is
+/// captured only if it appears there — capturing the entire scope otherwise both wastes
+/// slots and (fatally for the constant-closure fast path) makes an unused-capture closure
+/// look non-constant.
+fn compile_captures(
+    scope: &Scope,
+    referenced: &std::collections::HashSet<Symbol>,
+) -> Option<(Vec<(Symbol, Node)>, Option<Symbol>)> {
     let mut seen: Vec<Symbol> = Vec::new();
     let mut caps: Vec<(Symbol, Node)> = Vec::new();
     let mut self_name: Option<Symbol> = None;
@@ -435,6 +476,12 @@ fn compile_captures(scope: &Scope) -> Option<(Vec<(Symbol, Node)>, Option<Symbol
             continue;
         }
         seen.push(sym);
+        // Capture only lexicals the body could reference. An unreferenced binder is
+        // dropped here — no wasted slot, and (crucially) an *unsafe* `letrec` binder the
+        // body never touches no longer forces the whole closure to defer.
+        if !referenced.contains(&sym) {
+            continue;
+        }
         if scope.is_unsafe(slot) {
             // An in-progress `letrec` binder. If it's the very binder this `(fn …)`
             // is the RHS of (direct self-recursion — `scope.letrec_self`), the
@@ -456,6 +503,9 @@ fn compile_captures(scope: &Scope) -> Option<(Vec<(Symbol, Node)>, Option<Symbol
             continue;
         }
         seen.push(sym);
+        if !referenced.contains(&sym) {
+            continue;
+        }
         caps.push((sym, Node::Global(sym)));
     }
     Some((caps, self_name))
@@ -507,7 +557,11 @@ fn compile_make_closure(heap: &Heap, form: Value, scope: &Scope) -> Option<Node>
     } else {
         return None;
     };
-    let (captures, self_name) = compile_captures(scope)?;
+    // Capture only the enclosing lexicals this closure's body could reference (over-
+    // approximated by every symbol appearing in `fn_rest` — its params + body), not the
+    // whole scope. `fn_rest` is the immovable RUNTIME `(params . body)`, so the walk is safe.
+    let referenced = body_symbols(heap, fn_rest);
+    let (captures, self_name) = compile_captures(scope, &referenced)?;
     Some(Node::MakeClosure {
         fn_rest: ConstVal::new(fn_rest),
         captures: captures.into_boxed_slice(),
