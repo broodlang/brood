@@ -643,6 +643,17 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                    (do (buffer--push subs v nb) (buffer--serve nb subs v rec))))
       ([:edit f origin] (let (nb (f buf) v (inc version))
                           (do (buffer--push subs v nb origin) (buffer--serve nb subs v rec))))
+      ;; A read-then-decide edit in ONE round-trip: `f` returns `[new-buf value]` — the
+      ;; buffer is replaced AND the extracted value (killed text, a popped mark, …) goes
+      ;; back to the caller, totally ordered with every other edit (no read-modify-write
+      ;; race against a concurrent splice). The kill-region shape: delete the region and
+      ;; get the deleted text back, atomically. Same closure-edit caveats as `:edit`
+      ;; (invisible to the transform ring; `value` must be non-rope).
+      ([:edit-reply f origin from r]
+        (let ([nb value] (f buf) v (inc version))
+          (do (send from [:reply r value])
+            (buffer--push subs v nb origin)
+            (buffer--serve nb subs v rec))))
       ;; A structured edit: the change arrives as DATA (a positional splice), so the push
       ;; can carry the DELTA — {:splice [lo hi repl] :markers … :participants …} — instead
       ;; of each subscriber's full projection. O(change), not O(document): the seam that
@@ -733,6 +744,28 @@ tagged with it, so subscribers can recognise their own edit coming back (see
   (if (nil? origin)
     (send bp [:edit f])
     (send bp [:edit f origin])))
+
+(defn buffer-edit-reply (bp f &optional origin)
+  "Apply `f` — a `buffer -> [new-buf value]` fn — inside buffer process `bp` and have
+the extracted `value` sent back: the READ-THEN-DECIDE edit (kill-region's shape —
+delete the region *and* learn what was deleted) as one atomic, totally-ordered
+round-trip; no concurrent splice can land between the read and the write. `value`
+must be non-rope (the rope never leaves the process); `origin` tags the push as for
+`buffer-edit`. Asynchronous — returns a ref `r`; the caller receives `[:reply r
+value]` (or use `buffer-edit-value` to block for it)."
+  (let (r (ref))
+    (send bp [:edit-reply f origin (self) r])
+    r))
+
+(defn buffer-edit-value (bp f &optional origin (timeout 5000))
+  "`buffer-edit-reply`, blocking for the extracted value: apply `f` (`buffer ->
+[new-buf value]`) in buffer process `bp` and return `value`. Throws after `timeout`
+ms (default 5000) — the bounded-sync form for callers that need the answer to
+proceed (an interactive command deciding on what it read)."
+  (let (r (buffer-edit-reply bp f origin))
+    (receive
+      ([:reply ~r v] v)
+      (after timeout (error "buffer-edit-value: no reply after " timeout "ms")))))
 
 ;; ---- splice transforms: concurrent edits without a CRDT ----------------------
 ;; Two participants typing inside one round-trip window each compute a splice against

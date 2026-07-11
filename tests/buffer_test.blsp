@@ -378,6 +378,32 @@
       (assert= (buffer-query bp buffer-text) "hello\nworld\n")
       (assert= (delete-buffer bp) :stopped)))
 
+  ;; The read-then-decide edit: one closure returns [new-buf value] — the buffer is
+  ;; replaced AND the caller learns what it read/removed, atomically ordered with
+  ;; every other edit. The kill-region shape (delete the region, get its text back).
+  (test "buffer-edit-value: delete a span and get its text back in one round-trip"
+    (let (bp (spawn-buffer (make-buffer "hello world")))
+      (assert= (buffer-edit-value bp
+                 (fn (b) [(delete-char (goto-char b 0) 6)
+                          (substring (buffer-text b) 0 6)]))
+        "hello ")
+      (assert= (buffer-query bp buffer-text) "world")
+      (stop-buffer bp)))
+
+  (test "buffer-edit-reply is totally ordered with a splice sent just before it"
+    (let (bp (spawn-buffer (make-buffer "ab")))
+      (buffer-splice bp 2 2 "cd" nil)                  ; async — but same-sender ordered
+      (assert= (buffer-edit-value bp (fn (b) [b (buffer-text b)])) "abcd")
+      (stop-buffer bp)))
+
+  (test "an edit-reply's push carries its origin (the echo-suppression tag)"
+    (let (bp (spawn-buffer (make-buffer "x")))
+      (subscribe-buffer bp buffer-text)
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))      ; drain the seed
+      (buffer-edit-value bp (fn (b) [(insert b "!") :done]) :me)
+      (assert= (receive ([:buffer-updated _bp _ _ o] o) (after 2000 :none)) :me)
+      (stop-buffer bp)))
+
   ;; :io-write is a structured splice: subscribers get the O(line) DELTA, not their
   ;; full projection — a streamed log buffer stays cheap however large it grows.
   (test "[:io-write] pushes an end-append splice delta to subscribers"
