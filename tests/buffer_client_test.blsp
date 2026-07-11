@@ -30,6 +30,15 @@
     (assert= (text-splice "abc" "Xbc") [0 1 "X"])
     (assert= (text-splice "abc" "abX") [2 3 "X"])))
 
+(describe "text-apply-splice — a string holder applies fold actions"
+  (test "insert / delete / replace on a plain string"
+    (assert= (text-apply-splice "hello" [5 5 "!"]) "hello!")
+    (assert= (text-apply-splice "hello" [0 2 ""]) "llo")
+    (assert= (text-apply-splice "hello" [1 4 "XYZ"]) "hXYZo"))
+  (test "round-trips text-splice: old + its splice = new"
+    (let (old "the quick brown fox" new "the slow brown foxes")
+      (assert= (text-apply-splice old (text-splice old new)) new))))
+
 ;; ---- view-parts ---------------------------------------------------------------
 
 (describe "view-parts — the three wire shapes"
