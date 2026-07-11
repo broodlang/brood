@@ -613,7 +613,7 @@ subscriber verbatim, bypassing projections: one small value, fanned as-is."
   (doseq (s subs)
     (send (get s :pid) [:buffer-updated (self) version view origin])))
 
-(defn buffer--serve (buf subs version)
+(defn buffer--serve (buf subs version &optional recent)
   "The receive loop of a buffer process over its immutable `buf`, tracking `subs` (subscriber
 `{:pid :proj}` records) and a monotonic `version`. `:edit`/`:io-write` apply a change, bump
 the version, and **push** the new projection to every subscriber — the collaboration seam:
@@ -623,57 +623,80 @@ seeded with the current state at once, and monitored); `:stop` ends. The rope ne
 this process — pushes and replies carry only derived, non-rope values (`proj`/`f` must
 return such).
 
+`recent` is the ring of the last 64 APPLIED splices (`[version lo hi replen]`,
+newest first) — what a based `[:splice … base]` transforms over. Content changed by
+CLOSURE edits is invisible to the ring, so on a transform-collaborated buffer,
+content changes should arrive as splices (closure edits are for markers/metadata).
+
 **Subscriber lifecycle:** every subscriber is monitored, so a dead one (crash, detach, link
 drop) is removed rather than lingering. A marker keyed by the dead subscriber's *pid* is
 deleted too — the convention for transient per-subscriber state (a participant's cursor on a
 shared buffer: key your marker by your pid and it is cleaned up with you) — and when that
 changed the buffer, survivors get a push (they see the cursor vanish)."
-  (receive
-    ([:edit f] (let (nb (f buf) v (inc version))
-                 (do (buffer--push subs v nb) (buffer--serve nb subs v))))
-    ([:edit f origin] (let (nb (f buf) v (inc version))
-                        (do (buffer--push subs v nb origin) (buffer--serve nb subs v))))
-    ;; A structured edit: the change arrives as DATA (a positional splice), so the push
-    ;; can carry the DELTA — {:splice [lo hi repl] :markers … :participants …} — instead
-    ;; of each subscriber's full projection. O(change), not O(document): the seam that
-    ;; makes collaborative typing on a large buffer cheap. Structured ops push this light
-    ;; view to EVERY subscriber regardless of its projection (document accordingly);
-    ;; closure edits (:edit) and the seed keep the full projection contract.
-    ([:splice lo hi repl origin]
-      (let (nb (replace-region buf lo hi repl) v (inc version))
-        (do (buffer--push-view subs v
-              {:splice [lo hi repl] :markers (buffer-markers nb)
-               :participants (get nb :participants {})}
-              origin)
-          (buffer--serve nb subs v))))
-    ;; A cursor move as data: no text change at all — the push carries markers + names
-    ;; only, so presence traffic on a large document never ships its text.
-    ([:marker-set id pos origin]
-      (let (nb (buffer-marker-set buf id pos) v (inc version))
-        (do (buffer--push-view subs v
-              {:markers (buffer-markers nb) :participants (get nb :participants {})}
-              origin)
-          (buffer--serve nb subs v))))
-    ([:io-write s] (let (nb (insert (end-of-buffer buf) s) v (inc version))
-                     (do (buffer--push subs v nb) (buffer--serve nb subs v))))
-    ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version)))
-    ([:subscribe pid proj]
-      (do (monitor pid)
-        (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf)) nil])
-        (buffer--serve buf (cons {:pid pid :proj proj} subs) version)))
-    ([:unsubscribe pid] (buffer--serve buf (remove (fn (s) (= (get s :pid) pid)) subs) version))
-    ([:down _ pid _]
-      (let (ns (remove (fn (s) (= (get s :pid) pid)) subs)
-            ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
-            ;; or by a vector containing it (e.g. [pid :mark] — its selection anchor)
-            nb (fold (fn (b k) (buffer-marker-delete b k))
-                 buf
-                 (filter (fn (k) (or (= k pid) (and (vector? k) (member? pid k))))
-                   (keys (buffer-markers buf)))))
-        (if (= nb buf)
-          (buffer--serve buf ns version)  ; no marker for it — just drop the subscriber
-          (let (v (inc version)) (do (buffer--push ns v nb) (buffer--serve nb ns v))))))
-    ([:stop from r] (send from [:reply r :stopped]))))
+  (let (rec (or recent ()))
+    (receive
+      ([:edit f] (let (nb (f buf) v (inc version))
+                   (do (buffer--push subs v nb) (buffer--serve nb subs v rec))))
+      ([:edit f origin] (let (nb (f buf) v (inc version))
+                          (do (buffer--push subs v nb origin) (buffer--serve nb subs v rec))))
+      ;; A structured edit: the change arrives as DATA (a positional splice), so the push
+      ;; can carry the DELTA — {:splice [lo hi repl] :markers … :participants …} — instead
+      ;; of each subscriber's full projection. O(change), not O(document): the seam that
+      ;; makes collaborative typing on a large buffer cheap. Structured ops push this light
+      ;; view to EVERY subscriber regardless of its projection (document accordingly);
+      ;; closure edits (:edit) and the seed keep the full projection contract.
+      ([:splice lo hi repl origin]
+        (let (nb (replace-region buf lo hi repl) v (inc version))
+          (do (buffer--push-view subs v
+                {:splice [lo hi repl] :markers (buffer-markers nb)
+                 :participants (get nb :participants {})}
+                origin)
+            (buffer--serve nb subs v
+              (take 64 (cons [v lo hi (string-length repl)] rec))))))
+      ;; A BASED splice: computed against `base`, so first TRANSFORM it over every
+      ;; splice applied since (the `rec` ring, oldest-first over the window) — two
+      ;; people typing in different places inside one round-trip window both land
+      ;; where they meant to. The push carries the splice AS APPLIED.
+      ([:splice lo hi repl origin base]
+        (let (since (reverse (take-while (fn (e) (> (first e) base)) rec))
+              [tlo thi trepl] (splice-transform-all [lo hi repl]
+                                (map (fn (e) [(nth e 1) (nth e 2) (nth e 3)]) since))
+              nb (replace-region buf tlo thi trepl)
+              v (inc version))
+          (do (buffer--push-view subs v
+                {:splice [tlo thi trepl] :markers (buffer-markers nb)
+                 :participants (get nb :participants {})}
+                origin)
+            (buffer--serve nb subs v
+              (take 64 (cons [v tlo thi (string-length trepl)] rec))))))
+      ;; A cursor move as data: no text change at all — the push carries markers + names
+      ;; only, so presence traffic on a large document never ships its text.
+      ([:marker-set id pos origin]
+        (let (nb (buffer-marker-set buf id pos) v (inc version))
+          (do (buffer--push-view subs v
+                {:markers (buffer-markers nb) :participants (get nb :participants {})}
+                origin)
+            (buffer--serve nb subs v rec))))
+      ([:io-write s] (let (nb (insert (end-of-buffer buf) s) v (inc version))
+                       (do (buffer--push subs v nb) (buffer--serve nb subs v rec))))
+      ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version rec)))
+      ([:subscribe pid proj]
+        (do (monitor pid)
+          (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf)) nil])
+          (buffer--serve buf (cons {:pid pid :proj proj} subs) version rec)))
+      ([:unsubscribe pid] (buffer--serve buf (remove (fn (s) (= (get s :pid) pid)) subs) version rec))
+      ([:down _ pid _]
+        (let (ns (remove (fn (s) (= (get s :pid) pid)) subs)
+              ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
+              ;; or by a vector containing it (e.g. [pid :mark] — its selection anchor)
+              nb (fold (fn (b k) (buffer-marker-delete b k))
+                   buf
+                   (filter (fn (k) (or (= k pid) (and (vector? k) (member? pid k))))
+                     (keys (buffer-markers buf)))))
+          (if (= nb buf)
+            (buffer--serve buf ns version rec)  ; no marker for it — just drop the subscriber
+            (let (v (inc version)) (do (buffer--push ns v nb) (buffer--serve nb ns v rec))))))
+      ([:stop from r] (send from [:reply r :stopped])))))
 
 (defn spawn-buffer (buf)
   "Spawn a process that owns a copy of `buf` and serves edits/queries; return its
@@ -696,14 +719,51 @@ tagged with it, so subscribers can recognise their own edit coming back (see
     (send bp [:edit f])
     (send bp [:edit f origin])))
 
-(defn buffer-splice (bp lo hi repl &optional origin)
+;; ---- splice transforms: concurrent edits without a CRDT ----------------------
+;; Two participants typing inside one round-trip window each compute a splice against
+;; text the other's edit hasn't reached yet. For DISJOINT spans the fix is exact and
+;; tiny: shift the later splice by the earlier one's length delta (operational
+;; transformation's easy half). Ambiguous cases — spans that touch or overlap — are
+;; left to the caller's policy (the buffer process falls back to an authoritative
+;; placement; a client falls back to resyncing from the process).
+
+(defn splice-disjoint? (a b)
+  "Whether splices `a`/`b` (`[lo hi …]`) touch nothing in common — STRICTLY apart, so
+even boundary-touching (an insert exactly at the other's edge) counts as ambiguous."
+  (or (< (nth a 1) (nth b 0)) (> (nth a 0) (nth b 1))))
+
+(defn splice-transform (splice applied)
+  "Transform `splice` `[lo hi repl]` — computed against text that did NOT yet contain
+`applied` `[alo ahi alen]` (a replace of `[alo, ahi)` by `alen` chars) — so it lands
+correctly on the text that DOES. Disjoint-before shifts by `applied`'s length delta;
+disjoint-after is untouched; an overlap degrades to inserting `repl` just after
+`applied`'s replacement (the deterministic authoritative choice — the span it meant
+to delete no longer exists as written)."
+  (let ([lo hi repl] splice
+        [alo ahi alen] applied
+        delta (- alen (- ahi alo)))
+    (cond
+      (<= ahi lo) [(+ lo delta) (+ hi delta) repl]
+      (>= alo hi) splice
+      :else (let (p (+ alo alen)) [p p repl]))))
+
+(defn splice-transform-all (splice applieds)
+  "`splice` transformed over each of `applieds` in order (oldest first)."
+  (fold (fn (sp a) (splice-transform sp a)) splice applieds))
+
+(defn buffer-splice (bp lo hi repl &optional origin base)
   "Replace `[lo, hi)` with `repl` inside buffer process `bp` — the structured-edit
 counterpart of `buffer-edit` for a change already expressed positionally. Because the
 change is data, the resulting push carries only the DELTA (`{:splice … :markers …
 :participants …}`) instead of each subscriber's full projection — O(change) per
 keystroke on a shared buffer, whatever the document's size. `origin` tags the push as
-for `buffer-edit`. Asynchronous — returns nil."
-  (send bp [:splice lo hi repl origin]))
+for `buffer-edit`. With `base` (the version this splice was computed against), the
+process TRANSFORMS it over every splice applied since (`splice-transform`) before
+applying — so two people typing in different places inside one round-trip window both
+land exactly where they meant to, no CRDT. Asynchronous — returns nil."
+  (if (nil? base)
+    (send bp [:splice lo hi repl origin])
+    (send bp [:splice lo hi repl origin base])))
 
 (defn buffer-marker-move (bp id pos &optional origin)
   "Set marker `id` to `pos` inside buffer process `bp`, pushing only `{:markers …

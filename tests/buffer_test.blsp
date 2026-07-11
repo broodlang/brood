@@ -498,6 +498,27 @@
         ["hi!?" :me-the-editor])
       (stop-buffer bp)))
 
+  (test "splice-transform: disjoint concurrent splices merge exactly (both orders)"
+    ;; the pure transform: B computed before A landed shifts by A's length delta
+    (assert= (splice-transform [5 5 "Y"] [0 0 1]) [6 6 "Y"])   ; A inserted 1 char before B
+    (assert= (splice-transform [1 2 "z"] [5 7 0]) [1 2 "z"])   ; A strictly after B — untouched
+    (assert= (splice-transform [8 9 ""] [2 5 1]) [6 7 ""])     ; delete shifted by (1 - 3)
+    ;; overlap degrades to inserting after the applied replacement (authoritative)
+    (assert= (splice-transform [3 6 "q"] [2 8 4]) [6 6 "q"])
+    ;; strictness: touching spans are NOT disjoint (ambiguous → caller policy)
+    (is (splice-disjoint? [0 2 ""] [3 5 ""]))
+    (is (not (splice-disjoint? [0 3 ""] [3 5 ""]))))
+
+  (test "concurrent based splices at the process: both land where they meant to"
+    ;; A and B both edit \"hello\" at version 0, inside one round-trip window.
+    ;; A prepends \"X\" (arrives first); B appends \"Y\" at offset 5 — computed
+    ;; before X existed. With base-version transforms both land exactly.
+    (let (bp (spawn-buffer (make-buffer "hello")))
+      (buffer-splice bp 0 0 "X" :a 0)
+      (buffer-splice bp 5 5 "Y" :b 0)   ; stale offsets: would give \"XhellYo\" untransformed
+      (assert= (buffer-query bp buffer-text) "XhelloY")
+      (stop-buffer bp)))
+
   (test "buffer-splice / buffer-marker-move push DELTAS — the document never ships"
     (let (bp (spawn-buffer (make-buffer "hello")))
       (subscribe-buffer bp buffer-text)
