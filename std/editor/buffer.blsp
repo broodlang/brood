@@ -590,7 +590,9 @@ the resulting buffer."
 ;; A buffer process is also a first-class **`io` sink**: it answers `[:io-write s]`
 ;; by appending `s` (the same message `std/io`'s `process-port` and thus `std/log`'s
 ;; `process-backend` send), so `(add-backend (process-backend a-buffer-pid))` streams
-;; log output straight into a buffer — async, share-nothing, no glue.
+;; log output straight into a buffer — async, share-nothing, no glue. The append is
+;; applied as a structured SPLICE (delta push, transform-ring recorded), so a streamed
+;; log line costs its subscribers O(line) and never invalidates concurrent based splices.
 
 (defn buffer--push (subs version buf &optional origin)
   "Notify every subscriber of an edit: send each its `[:buffer-updated <bufpid> version
@@ -615,18 +617,20 @@ subscriber verbatim, bypassing projections: one small value, fanned as-is."
 
 (defn buffer--serve (buf subs version &optional recent)
   "The receive loop of a buffer process over its immutable `buf`, tracking `subs` (subscriber
-`{:pid :proj}` records) and a monotonic `version`. `:edit`/`:io-write` apply a change, bump
-the version, and **push** the new projection to every subscriber — the collaboration seam:
-two panes or sessions subscribed to one buffer both see every edit. `:get` replies a derived
-view synchronously; `:subscribe`/`:unsubscribe` manage the push set (a new subscriber is
-seeded with the current state at once, and monitored); `:stop` ends. The rope never leaves
-this process — pushes and replies carry only derived, non-rope values (`proj`/`f` must
-return such).
+`{:pid :proj}` records) and a monotonic `version`. `:edit` applies a change, bumps the
+version, and **pushes** the new projection to every subscriber — the collaboration seam:
+two panes or sessions subscribed to one buffer both see every edit. `:io-write` is an
+end-append expressed as a structured splice (delta push, ring-recorded). `:get` replies a
+derived view synchronously; `:subscribe`/`:unsubscribe` manage the push set (a new
+subscriber is seeded with the current state at once, and monitored); `:stop` ends. The
+rope never leaves this process — pushes and replies carry only derived, non-rope values
+(`proj`/`f` must return such).
 
 `recent` is the ring of the last 64 APPLIED splices (`[version lo hi replen]`,
-newest first) — what a based `[:splice … base]` transforms over. Content changed by
-CLOSURE edits is invisible to the ring, so on a transform-collaborated buffer,
-content changes should arrive as splices (closure edits are for markers/metadata).
+newest first) — what a based `[:splice … base]` transforms over. Every content path
+records in the ring except CLOSURE edits, which are invisible to it — so on a
+transform-collaborated buffer, content changes should arrive as splices or `:io-write`
+(closure edits are for markers/metadata).
 
 **Subscriber lifecycle:** every subscriber is monitored, so a dead one (crash, detach, link
 drop) is removed rather than lingering. A marker keyed by the dead subscriber's *pid* is
@@ -677,8 +681,19 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                 {:markers (buffer-markers nb) :participants (get nb :participants {})}
                 origin)
             (buffer--serve nb subs v rec))))
-      ([:io-write s] (let (nb (insert (end-of-buffer buf) s) v (inc version))
-                       (do (buffer--push subs v nb) (buffer--serve nb subs v rec))))
+      ;; An appended line is a positional splice like any other: apply it at end-of-buffer,
+      ;; RECORD it in the ring (a based splice computed before the append still transforms
+      ;; correctly over it), and push the DELTA — so a log-backed buffer is as cheap to
+      ;; subscribe to as a collaborative one (O(line), not O(document), per line).
+      ([:io-write s]
+        (let (n (buffer-length buf)
+              nb (replace-region buf n n s)
+              v (inc version))
+          (do (buffer--push-view subs v
+                {:splice [n n s] :markers (buffer-markers nb)
+                 :participants (get nb :participants {})}
+                nil)
+            (buffer--serve nb subs v (take 64 (cons [v n n (string-length s)] rec))))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version rec)))
       ([:subscribe pid proj]
         (do (monitor pid)

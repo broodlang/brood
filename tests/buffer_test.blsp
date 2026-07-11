@@ -378,6 +378,27 @@
       (assert= (buffer-query bp buffer-text) "hello\nworld\n")
       (assert= (delete-buffer bp) :stopped)))
 
+  ;; :io-write is a structured splice: subscribers get the O(line) DELTA, not their
+  ;; full projection — a streamed log buffer stays cheap however large it grows.
+  (test "[:io-write] pushes an end-append splice delta to subscribers"
+    (let (bp (spawn-buffer (make-buffer "ab")))
+      (subscribe-buffer bp buffer-text)
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))      ; drain the seed
+      (send bp [:io-write "cd"])
+      (let (view (receive ([:buffer-updated _bp _ v _] v) (after 2000 :none)))
+        (assert= (get view :splice) [2 2 "cd"]))
+      (stop-buffer bp)))
+
+  ;; …and it is RECORDED in the transform ring: a based splice computed before the
+  ;; append transforms over it, so a log line landing mid-round-trip can't misplace
+  ;; a concurrent edit (an insert at the old end lands after the appended line).
+  (test "a based splice computed before an [:io-write] transforms over the append"
+    (let (bp (spawn-buffer (make-buffer "ab")))
+      (send bp [:io-write "cd"])                       ; v1: "abcd"
+      (buffer-splice bp 2 2 "X" nil 0)                 ; computed at v0 against "ab": insert at its end
+      (assert= (buffer-query bp buffer-text) "abcdX")  ; shifted past the append, not "abXcd"
+      (stop-buffer bp)))
+
   ;; The point of it all: a std/log process-backend streams log lines into a buffer
   ;; process, no glue. Flush the logger (a query after the casts) before asserting,
   ;; since logging is fire-and-forget.
