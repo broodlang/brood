@@ -626,9 +626,13 @@ subscriber is seeded with the current state at once, and monitored); `:stop` end
 rope never leaves this process — pushes and replies carry only derived, non-rope values
 (`proj`/`f` must return such).
 
-`recent` is the ring of the last 64 APPLIED splices (`[version lo hi replen]`,
-newest first) — what a based `[:splice … base]` transforms over. Every content path
-records in the ring except CLOSURE edits, which are invisible to it — so on a
+`recent` is the ring of the last 64 APPLIED splices (`[version lo hi replen origin]`,
+newest first) — what a based `[:splice … base]` transforms over. A based splice is
+transformed only over entries from OTHER origins: the sender's own earlier splices
+are already part of the basis its positions were computed against (its local copy
+applied them first — local-apply-first), so transforming over them would double-shift
+a second keystroke sent before the first's echo folded. Every content path records
+in the ring except CLOSURE edits, which are invisible to it — so on a
 transform-collaborated buffer, content changes should arrive as splices or `:io-write`
 (closure edits are for markers/metadata).
 
@@ -639,8 +643,9 @@ shared buffer: key your marker by your pid and it is cleaned up with you) — an
 changed the buffer, survivors get a push (they see the cursor vanish)."
   (let (rec (or recent ()))
     (receive
-      ([:edit f] (let (nb (f buf) v (inc version))
-                   (do (buffer--push subs v nb) (buffer--serve nb subs v rec))))
+      ;; one arm for both tagged and untagged closure edits (origin nil when untagged)
+      ;; — buffer--serve must stay at ≤12 receive arms: the 13th falls off a compile
+      ;; cliff (+75% wall, +85% peak across the buffer suite; kernel issue, reported)
       ([:edit f origin] (let (nb (f buf) v (inc version))
                           (do (buffer--push subs v nb origin) (buffer--serve nb subs v rec))))
       ;; A read-then-decide edit in ONE round-trip: `f` returns `[new-buf value]` — the
@@ -667,15 +672,19 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                  :participants (get nb :participants {})}
                 origin)
             (buffer--serve nb subs v
-              (take 64 (cons [v lo hi (string-length repl)] rec))))))
+              (take 64 (cons [v lo hi (string-length repl) origin] rec))))))
       ;; A BASED splice: computed against `base`, so first TRANSFORM it over every
       ;; splice applied since (the `rec` ring, oldest-first over the window) — two
       ;; people typing in different places inside one round-trip window both land
-      ;; where they meant to. The push carries the splice AS APPLIED.
+      ;; where they meant to. Entries from the SAME origin are skipped: the sender's
+      ;; local copy already contained them when it computed these positions
+      ;; (local-apply-first), so shifting over them again would land a pipelined
+      ;; second keystroke one column too far. The push carries the splice AS APPLIED.
       ([:splice lo hi repl origin base]
         (let (since (reverse (take-while (fn (e) (> (first e) base)) rec))
+              foreign (filter (fn (e) (or (nil? origin) (not (= (nth e 4 nil) origin)))) since)
               [tlo thi trepl] (splice-transform-all [lo hi repl]
-                                (map (fn (e) [(nth e 1) (nth e 2) (nth e 3)]) since))
+                                (map (fn (e) [(nth e 1) (nth e 2) (nth e 3)]) foreign))
               nb (replace-region buf tlo thi trepl)
               v (inc version))
           (do (buffer--push-view subs v
@@ -683,7 +692,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                  :participants (get nb :participants {})}
                 origin)
             (buffer--serve nb subs v
-              (take 64 (cons [v tlo thi (string-length trepl)] rec))))))
+              (take 64 (cons [v tlo thi (string-length trepl) origin] rec))))))
       ;; A cursor move as data: no text change at all — the push carries markers + names
       ;; only, so presence traffic on a large document never ships its text.
       ([:marker-set id pos origin]
@@ -704,8 +713,16 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                 {:splice [n n s] :markers (buffer-markers nb)
                  :participants (get nb :participants {})}
                 nil)
-            (buffer--serve nb subs v (take 64 (cons [v n n (string-length s)] rec))))))
+            (buffer--serve nb subs v (take 64 (cons [v n n (string-length s) nil] rec))))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version rec)))
+      ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
+      ;; its copy after an ambiguous collision needs the text AND the version it
+      ;; corresponds to in ONE reply, or edits applied between its query and the
+      ;; answer replay onto the rebuilt copy (their queued pushes pass the version
+      ;; check) and double themselves.
+      ([:sync proj from r]
+        (do (send from [:reply r [version (proj buf)]])
+          (buffer--serve buf subs version rec)))
       ([:subscribe pid proj]
         (do (monitor pid)
           (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf)) nil])
@@ -741,9 +758,7 @@ name/file/point/mark) and rebuilds the rope inside the new process. Drive it wit
 With `origin` (any value — conventionally the sender's pid), the resulting push is
 tagged with it, so subscribers can recognise their own edit coming back (see
 `buffer--push` — the echo-suppression seam). Asynchronous — returns nil."
-  (if (nil? origin)
-    (send bp [:edit f])
-    (send bp [:edit f origin])))
+  (send bp [:edit f origin]))
 
 (defn buffer-edit-reply (bp f &optional origin)
   "Apply `f` — a `buffer -> [new-buf value]` fn — inside buffer process `bp` and have
@@ -840,11 +855,25 @@ processes may subscribe to one buffer — that is what lets several sessions see
   "Stop the calling process receiving `[:buffer-updated …]` pushes from buffer process `bp`."
   (send bp [:unsubscribe (self)]))
 
+(defn buffer-sync (bp proj &optional (timeout 2000))
+  "An ATOMIC `[version view]` snapshot of buffer process `bp` through projection
+`proj` — the resync primitive: unlike `buffer-query`, the reply pairs the view with
+the version it corresponds to, so a client rebuilding its copy can set its link
+version to exactly the snapshot and let queued pushes sort themselves (≤ snapshot →
+stale-dropped, > → applied once). `:no-reply` after `timeout` ms (a dead process —
+the caller's monitor will deal with it)."
+  (let (r (ref))
+    (send bp [:sync proj (self) r])
+    (receive ([:reply ~r v] v) (after timeout :no-reply))))
+
 (defn stop-buffer (bp)
-  "Stop buffer process `bp` (it leaves its loop). Synchronous; returns :stopped."
+  "Stop buffer process `bp` (it leaves its loop). Synchronous; returns :stopped —
+or :no-reply after 2s (an already-dead process: sending [:stop] to a corpse would
+otherwise park the caller forever, e.g. killing a buffer whose process just
+crashed, before the [:down] has been folded)."
   (let (r (ref))
     (send bp [:stop (self) r])
-    (receive ([:reply ~r v] v))))
+    (receive ([:reply ~r v] v) (after 2000 :no-reply))))
 
 ;; ---- create / delete (the buffer-process lifecycle) -------------------------
 

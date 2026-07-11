@@ -77,7 +77,11 @@ consumes them), leaving a served app deaf to everything but keys."
     (fn (ms)
       (receive ([:key k] k)
         ([:detach] :close)
-        ([:down _ _ _] :close)  ; client process died / link net-split
+        ;; only THE CLIENT's death closes the session — the session process may
+        ;; monitor other things (a collab app monitors every hosted buffer process,
+        ;; whose [:down …] must reach its update as app input for rehost/reshare,
+        ;; not tear the session down)
+        ([:down _ ~client _] :close)  ; client process died / link net-split
         (m m)  ; anything else is async app input — the event bus, as local displays deliver it
         (after ms nil)))})  ; nil ⇒ ui-run treats it as :tick (re-render)
 

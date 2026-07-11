@@ -404,6 +404,35 @@
       (assert= (receive ([:buffer-updated _bp _ _ o] o) (after 2000 :none)) :me)
       (stop-buffer bp)))
 
+  ;; PIPELINED same-origin splices: keystroke 2 is sent before keystroke 1's echo
+  ;; folds, so both carry the same base — but the sender's local copy already
+  ;; contained splice 1 when it computed splice 2's positions (local-apply-first),
+  ;; so the ring transform must SKIP same-origin entries or the second lands one
+  ;; column too far (server "axbycd" vs the typist's "axybcd" — the double-shift).
+  (test "a based splice is not transformed over the sender's own earlier splices"
+    (let (bp (spawn-buffer (make-buffer "abcd")))
+      (buffer-splice bp 1 1 "x" :me 0)              ; local: "axbcd"
+      (buffer-splice bp 2 2 "y" :me 0)              ; local: "axybcd", echo1 not yet folded
+      (assert= (buffer-query bp buffer-text) "axybcd")
+      ;; …while a DIFFERENT origin's stale-based splice still transforms over :me's
+      (buffer-splice bp 1 1 "Z" :other 0)           ; computed against "abcd" → shifts past x,y
+      (assert= (buffer-query bp buffer-text) "axyZbcd")
+      (stop-buffer bp)))
+
+  (test "buffer-sync pairs the view with its version atomically"
+    (let (bp (spawn-buffer (make-buffer "ab")))
+      (buffer-splice bp 2 2 "c" nil)
+      (let ([v txt] (buffer-sync bp buffer-text))
+        (assert= v 1)
+        (assert= txt "abc"))
+      (stop-buffer bp)))
+
+  (test "stop-buffer on an already-dead process returns :no-reply, not a hang"
+    (let (bp (spawn-buffer (make-buffer "x")))
+      (exit bp :kill)
+      (sleep 50)
+      (assert= (stop-buffer bp) :no-reply)))
+
   ;; :io-write is a structured splice: subscribers get the O(line) DELTA, not their
   ;; full projection — a streamed log buffer stays cheap however large it grows.
   (test "[:io-write] pushes an end-append splice delta to subscribers"
