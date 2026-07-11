@@ -122,6 +122,11 @@ Compressed; per-item history is in [`docs/devlog.md`](docs/devlog.md) and
   arithmetic, fused Prim2, hot-reload epoch guard, in-native inline caches).
 - **M2 — editor data model.** Rope substrate (ADR-045); buffer model;
   buffers-as-values; evaluate-the-Lisp-I'm-editing; per-process memory reclamation.
+  Collaboration seam (2026-07): buffer *processes* with subscriptions + versioned
+  delta pushes, edit-surviving markers (presence cursors ride them, pid-keyed
+  cleanup on subscriber death), structured `buffer-splice`/`buffer-marker-move`,
+  and concurrent-splice **transforms** (`splice-transform` — exact merges for
+  disjoint edits, no CRDT) — what brood-edit's multiplayer editing runs on.
 - **M3 — display protocol + native frontend.** Serialisable render-op protocol
   (ADR-046); input events; in-process terminal frontend; per-op/per-window fonts
   (ADR-079); `nest observe` (inline + remote, ADR-053); telemetry core
@@ -129,7 +134,10 @@ Compressed; per-item history is in [`docs/devlog.md`](docs/devlog.md) and
 - **M4 — server / daemon mode.** TCP sockets (ADR-062); TLS *client*/HTTPS;
   distributed nodes (`name@host`, cookies, encryption ADR-089, dual-listen, mesh
   join); userland supervision + a real `gen_server`; an ETS-style in-memory table
-  store; `std/task`.
+  store; `std/task`. `std/editor/serve` (ADR-090): the daemon/emacsclient seam —
+  per-client and shared sessions, attach identity, async event pass-through,
+  `serve-stop` — plus the exit-signal hardening it forced (ADR-132; pid identity
+  across `node-start`).
 
 Runtime housekeeping still open:
 
