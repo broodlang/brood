@@ -1,7 +1,7 @@
 ;; Module system + path/string helpers (ADR-019). Register-only — discovered and
 ;; run by `brood test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(defmodule modules-test (:use test))
+(defmodule modules-test (:use test) (:use file))  ; file: the require-race fixtures
 
 (describe "strings: substring & affixes"
   (test "substring is char-indexed"
@@ -38,4 +38,43 @@
     (assert= (require 'test) (list "test"))
     ; variadic now: a list of names
     (assert= (require 'test 'docs) (list "test" "docs")))
-  (test "require of a missing module raises" (assert-error (require 'no-such-module-xyz))))
+  (test "require of a missing module raises" (assert-error (require 'no-such-module-xyz)))
+
+  ;; The partial-load race: `defmodule` used to provide its feature at the TOP of the
+  ;; file, so a require racing another process's load returned while the module was
+  ;; half-evaluated — the caller's very next `mod/fn` call hit unbound. Now a load in
+  ;; flight is tracked in *features-loading*; a concurrent requirer WAITS for the
+  ;; loader's end-of-file provide. Wide module (400 defs) to keep the window open.
+  (test "concurrent (require 'mod) from many processes never sees a half-loaded module"
+    (let (path "/tmp/reqrace-mod.blsp"
+          src (str "(defmodule reqrace-mod)\n"
+                (join "\n" (map (fn (i) (str "(def v" i " " i ")")) (range 400)))
+                "\n(defn ready () :ok)\n")
+          saved-path *load-path*
+          me (self))
+      (write-file path src)
+      (def *load-path* (cons "/tmp" *load-path*))
+      (doseq (k (range 8))
+        (spawn (send me [:req-race
+                          (try (do (require 'reqrace-mod) (reqrace-mod/ready))
+                            (catch e [:err (error-message e)]))])))
+      (let (results (map (fn (_) (receive ([:req-race r] r) (after 10000 :timeout)))
+                      (range 8)))
+        (def *load-path* saved-path)
+        (delete-file path)
+        (is (every? (fn (r) (= r :ok)) results)))))
+
+  ;; The circular-require contract survives the fix: a module being loaded that
+  ;; (directly or via :use) requires itself back must NOT deadlock or reload — the
+  ;; loader pid matches the in-flight marker, so the inner require returns at once.
+  (test "a circular require inside one file's own load returns immediately"
+    (let (path "/tmp/reqcirc-mod.blsp"
+          ;; the module requires ITSELF mid-file — the degenerate cycle
+          src "(defmodule reqcirc-mod)\n(require 'reqcirc-mod)\n(defn ok () :yes)\n"
+          saved-path *load-path*)
+      (write-file path src)
+      (def *load-path* (cons "/tmp" *load-path*))
+      (require 'reqcirc-mod)
+      (def *load-path* saved-path)
+      (delete-file path)
+      (assert= (reqcirc-mod/ok) :yes))))

@@ -2691,6 +2691,14 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ; names (strings) of features already loaded
 (def *load-path* (list "."))
 ; directories searched for <name>.blsp
+(def *features-loading* {})
+; feature key → loader pid for loads IN FLIGHT. Set before a load begins so (a) a
+; CIRCULAR require inside that same load returns immediately (the contract
+; `defmodule`'s top-of-file provide used to supply), and (b) a CONCURRENT require
+; from another process WAITS for the load to finish instead of returning while the
+; module is half-evaluated — the partial-load race: `require` returned, the caller
+; called `mod/fn`, unbound. (Surfaced as a once-in-several-runs editor test flake
+; the moment two test processes raced an inline `(require 'proctree)`.)
 
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
 (defn provide (mod)
@@ -2772,6 +2780,14 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; docstring and `provide`s the feature (the load-once key). A `(:use bar)` clause
 ;; refers `bar`'s public names bare; `(:use baz :refer [a b])` refers just `a`/`b`.
 ;; Put it first; one per file. e.g. (defmodule observer "process viewer" (:use display)).
+;; defmodule's top-of-file provide — but ONLY when no `require` is driving the load.
+;; Under require, the feature is provided when the WHOLE file has evaluated
+;; (require--force); providing here, before the module's defs exist, is exactly the
+;; window a concurrent requirer used to slip through. A direct `(load "x.blsp")`
+;; (no require in flight) keeps the immediate provide it always had.
+(defn defmodule--provide (key)
+  (if (contains? *features-loading* key) key (provide key)))
+
 (defmacro defmodule (mod & more)
   "Declare module/namespace `mod` and compile the rest of the file into it —
 definitions become `mod/name`; bare references resolve there, then through
@@ -2782,7 +2798,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
         clauses (if (string? (first more)) (rest more) more))
     `(do
        (def *module-docs* (assoc *module-docs* ~key ~doc))
-       (provide ~key)
+       (defmodule--provide ~key)
        (%in-ns '~mod)
        ~@(defmodule--use-forms clauses)
        ~@(defmodule--alias-forms clauses))))
@@ -2798,19 +2814,52 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
     (file-exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
     else (require--find filename (rest dirs))))
 
-;; Load one feature once: return immediately if already loaded, else evaluate its
-;; embedded source (a baked-in std module) or the first <foo>.blsp found on
-;; *load-path*, then record it. Errors if it can't be found.
+;; The raw load of feature `key`: evaluate its embedded source (a baked-in std
+;; module) or the first <key>.blsp found on *load-path*, then record it. No
+;; loading-bookkeeping — callers manage *features-loading*. Errors if not found.
+(defn require--force (key)
+  (let (src (%builtin-module key))
+    (if src
+      (do (%load-string src) (provide key))
+      (let (path (require--find (str key ".blsp") *load-path*))
+        (if path
+          (do (load path) (provide key))
+          (error "require: cannot find module '" key "'"))))
+    key))
+
+;; Wait (5ms ticks, ~`n` of them) for another process's in-flight load of `key`;
+;; if it never completes — the loader died or its load threw, leaving a stale
+;; marker — take the load over ourselves (re-evaluating a module is idempotent:
+;; same source, same defs). `sleep`, not a bare receive: waiting must not eat a
+;; queued mailbox message.
+(defn require--await (key n)
+  (cond
+    (member? key *features*) key
+    (> n 0) (do (sleep 5) (require--await key (dec n)))
+    :else (require--force key)))
+
+;; Load one feature once. CONCURRENT-SAFE: `require` returning means the module's
+;; defs exist — a require that races another process's load of the same feature
+;; waits for that load to complete rather than trusting a top-of-file provide
+;; (the old partial-load race). A circular require inside one file's own load
+;; still returns immediately (the loader pid matches).
 (defn require-one (mod)
-  "Load a single feature `mod` once (a no-op if already loaded); returns its name."
+  "Load a single feature `mod` once (a no-op if already loaded); returns its name.
+Safe under concurrency: never returns while another process is mid-load of `mod` —
+it waits for that load to finish (a half-evaluated module is never observable)."
   (let (key (name mod))
-    (if (member? key *features*)
-      key
-      (let (src (%builtin-module key))
-        (if src
-          (do (%load-string src) (provide key))
-          (let (path (require--find (str key ".blsp") *load-path*))
-            (if path (do (load path) (provide key)) (error "require: cannot find module '" key "'"))))))))
+    (cond
+      (member? key *features*) key
+      ;; OUR OWN in-flight load of `key` requiring it back (a :use cycle): proceed —
+      ;; the classic load-once contract for circular requires
+      (= (get *features-loading* key) (self)) key
+      ;; someone else is mid-load: wait for their provide (never see a partial module)
+      (contains? *features-loading* key) (require--await key 1000)
+      :else
+      (do (def *features-loading* (assoc *features-loading* key (self)))
+        (require--force key)
+        (def *features-loading* (dissoc *features-loading* key))
+        key))))
 
 ;; (require 'a 'b …) — load each feature once, left to right. Returns the names.
 (defn require (& mods)
