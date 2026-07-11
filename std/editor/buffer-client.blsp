@@ -1,0 +1,177 @@
+;; std/editor/buffer-client.blsp — the CLIENT half of the buffer-process protocol.
+;;
+;; Design notes (the *why*; the *what* is in the docstrings below):
+;;  - `editor/buffer`'s actor shell (`spawn-buffer` / `buffer--serve`) is the SERVER
+;;    half of a two-party protocol: it owns the authoritative text, serializes edits,
+;;    and pushes `[:buffer-updated pid version view origin]` to subscribers. This
+;;    module is the OTHER half — the state a subscriber keeps about one hosted
+;;    document (a *link*) and the pure fold that turns each push into an action on
+;;    the subscriber's own local copy. Together they make "a document lives in a
+;;    process; any number of holders track it by deltas" a std capability (ADR-134).
+;;  - The fold is the subtle, load-bearing piece: echo suppression (your own edit
+;;    coming back must NOT rebuild content — the local copy may already be ahead of
+;;    it), transform of a foreign splice over your in-flight ones (two parties typing
+;;    in different places inside one round-trip merge exactly — the client-side
+;;    mirror of the server's `recent`-ring transform), pending remap, and the
+;;    ambiguous-collision fallback (resync from the process, the always-correct
+;;    authority). It was proven in myedit's collab layer and extracted here.
+;;  - `link-fold` is PURE — it never touches a process. It returns the new link and
+;;    an ACTION for the caller to apply to whatever holds its local copy (an editor's
+;;    buffer pool, a registry's text mirror, a test's string). Sending (`link-
+;;    propagate`) is the one side-effecting entry point.
+;;  - Content crosses as positional SPLICES, never ropes and never closures — closure
+;;    edits are invisible to the server's transform ring (see `buffer--serve`), so a
+;;    transform-collaborated document must keep content changes structured.
+
+(defmodule editor/buffer-client
+  "Track a buffer PROCESS (`editor/buffer` `spawn-buffer`) from the subscribing side:
+a *link* — `{:proc <pid> :me <own-id> :version <int> :pending (<[lo hi replen]>…)}`
+— plus the two operations the protocol needs.
+
+Outbound, `link-propagate` turns a local text change into a based positional splice
+(`buffer-splice` + the link's version) and counts it in `:pending` (in flight until
+its echo returns). Inbound, `link-fold` folds one `[:buffer-updated proc version view
+origin]` push into the link and tells the caller what to do with its LOCAL copy:
+
+    [link' action], action ∈
+      :stale          — old/duplicate version: ignore the push entirely
+      :noop           — nothing to apply (your own echo; a cursor-only delta)
+      [:splice [lo hi repl]] — apply this splice (already transformed over your
+                        in-flight edits) to your local text
+      :resync         — ambiguous concurrent collision: refetch the authoritative
+                        text (e.g. `(buffer-query (get link :proc) buffer-text)`)
+      [:text s]       — a full-text view (a closure edit / the seed): rebuild your
+                        copy from `s` if it differs
+
+The fold is pure (no sends, no receives) — the merge matrix is testable with
+hand-fed pushes. Start a link with `link-init` (version -1, so the subscription
+seed always applies); compute minimal splices with `text-splice`."
+  (:use editor/buffer))  ; buffer-splice, splice-disjoint?, splice-transform(-all)
+
+;; ---- the single positional splice diff ---------------------------------------
+
+(defn client--prefix-len (a b i)
+  "The length of the common prefix of strings `a` and `b`, scanning from index `i`."
+  (if (and (< i (string-length a)) (< i (string-length b))
+        (= (char-at a i) (char-at b i)))
+    (client--prefix-len a b (inc i))
+    i))
+
+(defn client--suffix-len (a b limit k)
+  "The length of the common suffix of `a` and `b`, capped at `limit` (so it never
+overlaps a prefix already counted). Scans inward from the end, `k` chars matched so far."
+  (if (and (< k limit)
+        (= (char-at a (- (string-length a) 1 k))
+          (char-at b (- (string-length b) 1 k))))
+    (client--suffix-len a b limit (inc k))
+    k))
+
+(defn text-splice (old new)
+  "The single positional splice `[lo hi repl]` that turns string `old` into `new`:
+replace `old[lo, hi)` with `repl`. `lo`/`hi` bound the minimal changed span (shared
+prefix + suffix trimmed off), so `(replace-region buf lo hi repl)` reproduces `new`.
+Equal strings give a no-op `[n n \"\"]`. The whole edit expressed positionally, so it
+lands correctly at the process no matter where other participants' points are."
+  (let (lo (client--prefix-len old new 0)
+        maxsuf (min (- (string-length old) lo) (- (string-length new) lo))
+        suf (client--suffix-len old new maxsuf 0)
+        hi (- (string-length old) suf))
+    [lo hi (substring new lo (- (string-length new) suf))]))
+
+(defn splice-noop? (splice)
+  "True when `splice` (`[lo hi repl]`) changes nothing — an empty range and empty
+replacement. A pure-movement command (point moved, text unchanged) yields this, so
+no edit is sent."
+  (let ([lo hi repl] splice)
+    (and (= lo hi) (= repl ""))))
+
+;; ---- the wire-view normalizer -------------------------------------------------
+
+(defn view-parts (view)
+  "Normalize a push `view` to `{:text :splice :cursors :names}`. Three wire shapes:
+the presence triple `[text markers names]` (closure edits and the seed), a DELTA map
+`{:splice [lo hi repl]? :markers … :participants …}` (structured `buffer-splice` /
+`buffer-marker-move` / `[:io-write]` ops — O(change), the document never ships), or a
+bare text string (plain projections, tests)."
+  (cond
+    (map? view) {:text nil
+                 :splice (get view :splice)
+                 :cursors (or (get view :markers) {})
+                 :names (or (get view :participants) {})}
+    (vector? view) {:text (nth view 0) :splice nil :cursors (nth view 1) :names (nth view 2)}
+    :else {:text view :splice nil :cursors {} :names {}}))
+
+;; ---- the link -----------------------------------------------------------------
+
+(defn link-init (proc me)
+  "A fresh link to buffer process `proc`, identifying our own edits by `me` (any
+value — conventionally the subscribing process's pid, matching the `origin` we tag
+outbound edits with). Version -1, so the subscription's seed push always applies."
+  {:proc proc :me me :version -1 :pending ()})
+
+(defn link-propagate (link old-text new-text)
+  "Send the local text change `old-text` → `new-text` to the link's process as a
+based positional splice — tagged with `:me` (our echo comes back recognizable) and
+based on `:version` (the process transforms it over anything applied since) — and
+count it in `:pending` (in flight until `link-fold` pops it on the echo). Returns
+the link (unchanged when the texts are equal — pure movement sends nothing)."
+  (let (splice (text-splice old-text new-text))
+    (if (splice-noop? splice)
+      link
+      (let ([lo hi repl] splice)
+        (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
+        (assoc link :pending
+          (concat (or (get link :pending) ()) (list [lo hi (string-length repl)])))))))
+
+(defn link-fold (link version view origin)
+  "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns
+`[link' action]` — the advanced link and what the caller should do with its LOCAL
+copy of the document (see the module doc for the action vocabulary).
+
+The merge matrix, in order: a stale/duplicate `version` is ignored outright. A push
+whose `origin` is our own `:me` is OUR edit coming back — the local copy already
+applied it (and may be ahead of it, mid-fast-typing), so content is never rebuilt
+from it: the matching `:pending` splice is popped and the version bumps (`:noop`).
+A foreign SPLICE that is strictly apart from every in-flight splice of ours merges
+exactly: it is transformed over them (`splice-transform-all` — the same function the
+process uses on ours) into the `[:splice …]` to apply, and the pendings are remapped
+over it, as the process will when they arrive after it. A foreign splice that
+touches a span one of ours also touched is genuinely ambiguous → `:pending` resets
+and the caller must `:resync` from the process. A full-text view (closure edits, the
+seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
+  (if (<= version (or (get link :version) -1))
+    [link :stale]
+    (let (vp (view-parts view)
+          text (get vp :text)
+          splice (get vp :splice)
+          me (get link :me)
+          own? (and (not (nil? origin)) (= origin me))
+          pending (or (get link :pending) ())
+          ;; a foreign splice can merge exactly iff it's strictly apart from every
+          ;; in-flight splice of ours; touching/overlapping is ambiguous → resync
+          mergeable? (and splice
+                       (or (empty? pending)
+                         (every? (fn (p) (splice-disjoint? splice p)) pending)))
+          npending (cond
+                     (and own? splice) (rest pending)   ; our echo — first in, first home
+                     (and splice mergeable? (not own?))
+                     ;; remap our in-flight splices over the foreign one, as the
+                     ;; process will when they arrive after it
+                     (map (fn (p)
+                            (let ([plo phi plen] p
+                                  [flo fhi frepl] splice
+                                  [nlo nhi _] (splice-transform [plo phi ""]
+                                                [flo fhi (string-length frepl)]))
+                              [nlo nhi plen]))
+                       pending)
+                     (and splice (not own?)) ()          ; ambiguous → resync resets
+                     :else pending)
+          nlink (assoc link :version version :pending npending))
+      (cond
+        own? [nlink :noop]
+        (and splice mergeable?)
+        [nlink [:splice (splice-transform-all splice
+                          (map (fn (p) (let ([plo phi plen] p) [plo phi plen])) pending))]]
+        splice [nlink :resync]
+        (nil? text) [nlink :noop]
+        :else [nlink [:text text]]))))

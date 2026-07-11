@@ -8449,3 +8449,42 @@ genuinely broken for keyword-from-string, a real use. See also the sibling reade
 the same day: number-shaped tokens now need genuine numeric intent (a digit + valid sign
 positions), so `++`/`--`/`...`/`1+`/`2+3` read as symbols and the reader agrees with the
 `scan_atom_kind` tooling classifier.
+
+## ADR-134 — `editor/buffer-client`: the client half of the buffer-process protocol
+
+**Status:** accepted, shipped 2026-07-11.
+
+**Context.** `editor/buffer`'s actor shell (`spawn-buffer` / `buffer--serve`) defines the
+SERVER half of a two-party protocol: the process owns the authoritative text, serializes
+edits, keeps the `recent` transform ring, and pushes `[:buffer-updated pid version view
+origin]` to subscribers. The other half — what a subscriber must keep per hosted document
+and how it folds each push into its local copy — lived only in myedit (`src/collab.blsp`),
+though it is the subtle, load-bearing part: echo suppression (your own edit's round-trip
+must not clobber newer local keystrokes), transforming a foreign splice over your
+in-flight ones (the client-side mirror of the server's ring — how two parties typing in
+different places inside one round-trip merge exactly, no CRDT), pending-splice remap, and
+the ambiguous-collision resync fallback. myedit's actor endgame (its ROADMAP §E.2) hosts
+EVERY buffer as a process, and its collab registry needs the same fold to keep a
+crash-recovery text mirror — three consumers of one protocol client.
+
+**Decision.** Extract the client half into **`std/editor/buffer-client`**: a *link* record
+(`{:proc :me :version :pending}`, `link-init`), `link-propagate` (local text change →
+based `buffer-splice` tagged `:me`, counted in `:pending`), and `link-fold` — a PURE
+`(link version view origin) → [link' action]` state machine with the action vocabulary
+`:stale | :noop | [:splice [lo hi repl]] | :resync | [:text s]`. The caller applies the
+action to whatever holds its local copy (an editor's buffer pool, a registry's mirror, a
+test's string); the fold itself never touches a process, so the whole merge matrix is
+testable with hand-fed pushes. `text-splice` (the minimal positional diff) and
+`view-parts` (the three wire shapes) move here from myedit with it. NOT extracted: a
+generic versioned-projection/pubsub module — the server's subscription list is ~30 lines
+with exactly one implementation; the protocol split, not a pubsub framework, is the
+reusable seam.
+
+**Consequences.** "A document lives in a process; any number of holders track it by
+deltas" is now a std capability usable outside the editor (a log tailer, a config
+watcher, a test harness). myedit's collab layer rebases onto it unchanged in behavior,
+and its every-buffer-hosted flip and registry crash-recovery build on the same fold —
+policy stays in the app, protocol lives beside its server half. Content must cross as
+splices (`link-propagate`), never closure edits, on any transform-collaborated buffer —
+the ring-invisibility caveat `buffer--serve` documents (closure edits remain for
+markers/metadata).

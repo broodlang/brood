@@ -1,0 +1,121 @@
+;; The CLIENT half of the buffer-process protocol (ADR-134): the link record +
+;; the pure `link-fold` merge matrix — echo suppression, disjoint concurrent
+;; merges (both orders), pending remap, ambiguous-collision resync, stale-version
+;; drop — plus `text-splice` and the process round-trip via `link-propagate`.
+;; The fold is pure, so the matrix runs on hand-fed pushes: no process needed
+;; until the final :isolated round-trip block.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs).
+
+(defmodule buffer-client-test
+  (:use test)
+  (:use editor/buffer)
+  (:use editor/buffer-client))
+
+;; ---- text-splice --------------------------------------------------------------
+
+(describe "text-splice — the minimal positional diff"
+  (test "an insertion"
+    (assert= (text-splice "hello" "hel-XY-lo") [3 3 "-XY-"]))
+  (test "a deletion"
+    (assert= (text-splice "hello world" "held") [3 10 ""]))
+  (test "a replacement bounds the changed span only"
+    (assert= (text-splice "aaa bbb ccc" "aaa XYZ ccc") [4 7 "XYZ"]))
+  (test "equal strings are a no-op splice"
+    (let (sp (text-splice "same" "same"))
+      (is (splice-noop? sp))
+      (assert= sp [4 4 ""])))
+  (test "a change at position 0 and at the end"
+    (assert= (text-splice "abc" "Xbc") [0 1 "X"])
+    (assert= (text-splice "abc" "abX") [2 3 "X"])))
+
+;; ---- view-parts ---------------------------------------------------------------
+
+(describe "view-parts — the three wire shapes"
+  (test "a delta map"
+    (assert= (view-parts {:splice [1 2 "x"] :markers {:a 1} :participants {:a "al"}})
+      {:text nil :splice [1 2 "x"] :cursors {:a 1} :names {:a "al"}}))
+  (test "the presence triple"
+    (assert= (view-parts ["txt" {:a 1} {:a "al"}])
+      {:text "txt" :splice nil :cursors {:a 1} :names {:a "al"}}))
+  (test "a bare string projection"
+    (assert= (view-parts "txt")
+      {:text "txt" :splice nil :cursors {} :names {}})))
+
+;; ---- link-fold: the merge matrix ------------------------------------------------
+;; Hand-fed pushes against a hand-built link — every branch of the fold, no process.
+
+(defn fresh (&optional pending)
+  (assoc (link-init :proc :me) :version 0 :pending (or pending ())))
+
+(describe "link-fold — stale, seed, echo"
+  (test "a stale/duplicate version is ignored outright"
+    (let ([l a] (link-fold (fresh) 0 {:splice [0 0 "x"]} :other))
+      (assert= a :stale)
+      (assert= (get l :version) 0)))          ; link untouched
+  (test "the seed (version -1 link) applies as a full-text view"
+    (let ([l a] (link-fold (link-init :proc :me) 0 ["doc" {} {}] nil))
+      (assert= a [:text "doc"])
+      (assert= (get l :version) 0)))
+  (test "our own echo is a version bump — content never rebuilt, pending popped"
+    (let ([l a] (link-fold (fresh (list [3 3 1])) 1 {:splice [3 3 "x"]} :me))
+      (assert= a :noop)
+      (assert= (get l :version) 1)
+      (assert= (get l :pending) ())))
+  (test "our own closure-edit echo leaves pending alone"
+    (let ([l a] (link-fold (fresh (list [3 3 1])) 1 ["doc" {} {}] :me))
+      (assert= a :noop)
+      (assert= (get l :pending) (list [3 3 1])))))
+
+(describe "link-fold — foreign splices"
+  (test "a foreign splice with nothing in flight applies as-is"
+    (let ([l a] (link-fold (fresh) 1 {:splice [5 5 "Y"]} :other))
+      (assert= a [:splice [5 5 "Y"]])
+      (assert= (get l :version) 1)))
+  (test "disjoint concurrent merge: theirs after ours shifts past our insert"
+    ;; we inserted 1 char at 0 (in flight); they inserted at 5 (computed before ours)
+    (let ([l a] (link-fold (fresh (list [0 0 1])) 1 {:splice [5 5 "Y"]} :other))
+      (assert= a [:splice [6 6 "Y"]])          ; transformed over our pending insert
+      (assert= (get l :pending) (list [0 0 1]))))  ; ours before theirs — unmoved
+  (test "disjoint concurrent merge: theirs before ours remaps our pending forward"
+    ;; we have an insert in flight at 8; they inserted 2 chars at 0
+    (let ([l a] (link-fold (fresh (list [8 8 1])) 1 {:splice [0 0 "ab"]} :other))
+      (assert= a [:splice [0 0 "ab"]])         ; theirs lands where it meant to
+      (assert= (get l :pending) (list [10 10 1]))))  ; ours shifted by their insert
+  (test "an ambiguous same-span collision resets pending and asks for a resync"
+    (let ([l a] (link-fold (fresh (list [3 5 1])) 1 {:splice [4 6 "zz"]} :other))
+      (assert= a :resync)
+      (assert= (get l :pending) ())))
+  (test "a cursor-only delta advances the version and touches no content"
+    (let ([l a] (link-fold (fresh (list [3 3 1])) 1 {:markers {:p 4}} :other))
+      (assert= a :noop)
+      (assert= (get l :version) 1)
+      (assert= (get l :pending) (list [3 3 1])))))  ; still in flight
+
+;; ---- the round-trip against a real buffer process --------------------------------
+
+(describe "link round-trip over a spawned buffer"
+  :isolated
+
+  (test "propagate → echo folds as :noop; a foreign edit folds as a splice"
+    (let (bp (spawn-buffer (make-buffer "hello")))
+      (subscribe-buffer bp buffer-text)
+      ;; seed
+      (let ([l0 a0] (receive ([:buffer-updated _bp v w o] (link-fold (link-init bp (self)) v w o))
+                      (after 2000 [:none :none])))
+        (assert= a0 [:text "hello"])
+        ;; our own edit: propagate, then its echo comes back suppressed
+        (let (l1 (link-propagate l0 "hello" "hello!"))
+          (assert= (count (get l1 :pending)) 1)
+          (let ([l2 a2] (receive ([:buffer-updated _bp v w o] (link-fold l1 v w o))
+                          (after 2000 [:none :none])))
+            (assert= a2 :noop)                          ; echo suppressed
+            (assert= (get l2 :pending) ())
+            ;; a foreign edit (unknown origin): folds to an applicable splice
+            (buffer-splice bp 0 0 ">" :someone-else)
+            (let ([l3 a3] (receive ([:buffer-updated _bp v w o] (link-fold l2 v w o))
+                            (after 2000 [:none :none])))
+              (assert= a3 [:splice [0 0 ">"]])
+              (assert= (buffer-query bp buffer-text) ">hello!")))))
+      (stop-buffer bp))))

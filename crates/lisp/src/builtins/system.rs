@@ -789,6 +789,13 @@ const CORE_MODULES: &[(&str, &str)] = &[
         "editor/buffer",
         include_str!("../../../../std/editor/buffer.blsp"),
     ),
+    // The CLIENT half of the buffer-process protocol (ADR-134): the link record
+    // + the pure push fold (echo suppression, splice transform over in-flight
+    // edits, resync fallback) a subscriber uses to track a hosted document.
+    (
+        "editor/buffer-client",
+        include_str!("../../../../std/editor/buffer-client.blsp"),
+    ),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer
