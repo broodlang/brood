@@ -1679,9 +1679,11 @@ runtime isn't a node yet."
   (let (lst (last clauses))
     (if (and (pair? lst) (= (first lst) 'after))
       [(but-last clauses) (second lst) `(fn () ~@(rest (rest lst)))]
-      ;; no `after`: ms nil (wait forever) and a do-nothing timeout thunk, so the
-      ;; on-timeout slot is always a fn (the `((%receive …))` wrap applies it).
-      [clauses nil `(fn () nil)])))
+      ;; no `after`: ms nil (wait forever) and NO timeout thunk. `%receive` only ever
+      ;; returns the on-timeout value when a deadline fires (`ms` non-nil), so with
+      ;; `ms` nil it's provably dead — passing `nil` skips allocating a throwaway
+      ;; `(fn () nil)` on every timeout-less receive (the common case).
+      [clauses nil nil])))
 
 (defmacro receive (& clauses)
   "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message."
