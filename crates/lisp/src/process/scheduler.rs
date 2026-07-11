@@ -1602,9 +1602,16 @@ pub fn live_pids() -> Vec<u64> {
 /// The eval / VM safepoint's cooperative RUNTIME-drain report (ADR-091 Stage 3c):
 /// this process reports whether it still references the draining generation. Called
 /// only when [`Heap::drain_active`](crate::core::heap::Heap::drain_active) already
-/// returned true, so it's off the hot path. A process with no ctx (not in the live
-/// set) is skipped.
+/// returned true. **Throttled** to 1/`DRAIN_REPORT_STRIDE` safepoints via
+/// [`Heap::drain_report_due`]: while a drain lingers, a fan-out re-reports on nearly
+/// every frame, almost all cheap no-op cell-hits whose cost is the redundant contended
+/// shared-atomic loads — the residual `spawn` collector overhead. Only this safepoint path
+/// throttles; the parked-process inspector and the drain-completion tests call
+/// `report_gen_liveness` directly. A process with no ctx (not in the live set) is skipped.
 pub fn report_drain_liveness(heap: &Heap) {
+    if !heap.drain_report_due() {
+        return;
+    }
     if let Some(pid) = current_pid() {
         heap.report_gen_liveness(pid);
     }

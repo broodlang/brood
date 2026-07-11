@@ -355,6 +355,22 @@ fn rt_gc_floor() -> usize {
 /// `rt_drain_tick` field for why (the pinned-generation scan storm).
 const RT_DRAIN_SCAN_STRIDE: u32 = 64;
 
+/// How often a process runs its **per-safepoint drain self-report** while a generation drain
+/// is armed: once every `DRAIN_REPORT_STRIDE` safepoints, not every frame. During a `spawn`
+/// fan-out the drain lingers (workers pin it until they exit), so every worker reaches the
+/// report on nearly every safepoint — ~9 M calls for 10 k workers, 99.9 % of them no-op
+/// re-confirmations by an already-acked process. Each call re-reads the shared `drain_epoch`
+/// (periodically written as drains re-arm → its cache line bounces → a coherence miss), so at
+/// that volume it dominated the residual `spawn` collector overhead. The throttle is a
+/// per-heap `Cell` tick (no shared read), so a skipped frame costs nothing. Sound: a process
+/// that turns clean acks within a stride (drain completes ≤ stride safepoints later) and an
+/// exiting one is accounted at once by `drain_note_exit`. To keep completion prompt, the
+/// process that *arms* a drain resets its own tick (see [`Heap::begin_gen_drain`]) so it
+/// reports on its very next frame. Throttles ONLY the safepoint path
+/// ([`crate::process::report_drain_liveness`]); the parked-process inspector and the
+/// drain-completion tests call `report_gen_liveness` directly and stay unthrottled.
+const DRAIN_REPORT_STRIDE: u32 = 64;
+
 /// How often a process already found **dirty via Phase 2** (a RUNTIME handle embedded in
 /// its LOCAL heap data) re-runs that O(heap) walk in the drain self-report, vs. reporting
 /// its cached stale-dirty verdict: once every `P2_REVALIDATE_STRIDE` safepoints of the
@@ -1602,6 +1618,12 @@ pub struct Heap {
     /// fresh drain bumps the epoch (≠ the cached value) so the process re-reports. Plain
     /// `Cell`: the `Heap` is single-threaded.
     acked_drain_epoch: Cell<u64>,
+    /// Per-heap safepoint tick throttling the drain self-report to 1/[`DRAIN_REPORT_STRIDE`]
+    /// (see the const). Plain `Cell` (the `Heap` is single-threaded), read/written with no
+    /// shared atomic so a throttled frame is nearly free; a miscount only shifts *when* a
+    /// report fires, never its correctness. Reset by [`begin_gen_drain`](Self::begin_gen_drain)
+    /// on the arming process so its first report is prompt.
+    drain_report_tick: Cell<u32>,
     /// **Phase-2 dirty re-validation throttle** for the drain self-report. When the private
     /// probe finds this process dirty via Phase 2 (a RUNTIME handle embedded in its LOCAL
     /// heap data — see `runtime_gen_referenced_private`), it records the drain epoch here and
@@ -1970,6 +1992,7 @@ impl Heap {
             seen_free_epoch: Cell::new(0),
             rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
+            drain_report_tick: Cell::new(0),
             p2_dirty_epoch: Cell::new(u64::MAX),
             p2_dirty_tick: Cell::new(0),
             live_vm_arms: Vec::new(),
@@ -2029,6 +2052,7 @@ impl Heap {
             seen_free_epoch: Cell::new(0),
             rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
+            drain_report_tick: Cell::new(0),
             p2_dirty_epoch: Cell::new(u64::MAX),
             p2_dirty_tick: Cell::new(0),
             live_vm_arms: Vec::new(),
@@ -6296,6 +6320,13 @@ impl Heap {
             rt.drain_acked.store(0, Ordering::Relaxed);
         }
         rt.drain_active.store(true, Ordering::Release);
+        // Arm the arming process's self-report to fire on its very next safepoint (rather than
+        // up to a stride later), so a drain it starts completes promptly — the drain-completion
+        // path drives progress off this process. Other processes fire within a stride, which is
+        // ample for a lingering fan-out. `wrapping_sub(1)` so the next `drain_report_due` tick
+        // lands on a stride boundary.
+        self.drain_report_tick
+            .set(DRAIN_REPORT_STRIDE.wrapping_sub(1));
         epoch
     }
 
@@ -6379,6 +6410,20 @@ impl Heap {
     /// is armed. Called at the eval safepoint and just before a process parks
     /// (Stage 3c wires those); safe to call from any of the runtime's processes
     /// (each writes only its own pid's entry, under the shared lock).
+    /// Should this safepoint run its drain self-report? Advances the per-heap tick and returns
+    /// true once every [`DRAIN_REPORT_STRIDE`] frames — a `Cell` read/write, **no shared
+    /// atomic**, so a throttled frame is nearly free. See the const for why every-frame
+    /// reporting dominated a lingering-drain fan-out and why throttling is sound. The arming
+    /// process resets this tick in [`begin_gen_drain`](Self::begin_gen_drain) so completion
+    /// stays prompt. The caller ([`crate::process::report_drain_liveness`]) has already
+    /// established a drain is armed.
+    #[inline]
+    pub fn drain_report_due(&self) -> bool {
+        let t = self.drain_report_tick.get().wrapping_add(1);
+        self.drain_report_tick.set(t);
+        t.is_multiple_of(DRAIN_REPORT_STRIDE)
+    }
+
     pub fn report_gen_liveness(&self, pid: u64) {
         let rt = &self.runtime;
         if !rt.drain_active.load(Ordering::Acquire) {
