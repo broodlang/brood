@@ -41,6 +41,52 @@ pub(super) const ST_RUNNABLE: u8 = 0;
 pub(super) const ST_RUNNING: u8 = 1;
 pub(super) const ST_WAITING: u8 = 2;
 
+/// How many processes are currently **parked** (`ST_WAITING`) across the whole
+/// runtime. Maintained by [`set_status`] on every `ST_WAITING`-boundary crossing
+/// (and decremented by `deregister` for a process killed while parked). It lets the
+/// RUNTIME-drain coordinator's parked-process inspector ([`super::scheduler::
+/// report_parked_liveness`]) skip its O(all-processes) `REGISTRY` scan entirely when
+/// nothing is parked — the common case during a `spawn` fan-out, where workers
+/// compute-and-exit without ever parking. Without this gate that whole-registry scan
+/// (under the global `REGISTRY` lock, on every throttled drain-advance of every one of
+/// thousands of live workers) serialized into an O(processes²) lock storm that made a
+/// fan-out under a lingering drain regress ~300×. Relaxed: it only *gates* an
+/// optimization — an over-count merely runs a scan that finds nothing (correct, slower),
+/// and every genuine park increments it before the parked process can matter, so it never
+/// under-counts a process that needs inspecting.
+static PARKED: AtomicUsize = AtomicUsize::new(0);
+
+/// Currently-parked process count — see [`PARKED`]. O(1) relaxed load.
+pub(super) fn parked_count() -> usize {
+    PARKED.load(Ordering::Relaxed)
+}
+
+/// Set a mailbox's run-status, keeping the global [`PARKED`] count in step. Every
+/// status transition funnels through here so a `ST_WAITING`-boundary crossing (in
+/// either direction) adjusts the counter exactly once. The `swap` reads the true prior
+/// status even under a race, so concurrent transitions can't double-count.
+pub(super) fn set_status(mb: &Mailbox, new: u8) {
+    let old = mb.status.swap(new, Ordering::Relaxed);
+    match (old == ST_WAITING, new == ST_WAITING) {
+        (false, true) => {
+            PARKED.fetch_add(1, Ordering::Relaxed);
+        }
+        (true, false) => {
+            PARKED.fetch_sub(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+/// Drop a mailbox's parked accounting when it leaves the registry (a process killed
+/// while parked never runs a status transition back out of `ST_WAITING`). Idempotent:
+/// swaps the status to `ST_RUNNABLE` via [`set_status`], so a second call is a no-op.
+pub(super) fn clear_parked(mb: &Mailbox) {
+    if mb.status.load(Ordering::Relaxed) == ST_WAITING {
+        set_status(mb, ST_RUNNABLE);
+    }
+}
+
 /// A process's mailbox. Guarded by one mutex so the "check empty → park" and
 /// "deliver → wake" handshakes stay race-free (see `receive_match`/`send`/`run_one`).
 pub(super) struct Mailbox {
@@ -651,7 +697,7 @@ pub fn process_reductions(pid: u64) -> Option<u64> {
 /// Set the run-status of the *current* process (used by `receive_match` for the
 /// root, which never goes through `run_one`).
 fn set_self_status(ctx: &Ctx, status: u8) {
-    ctx.mailbox.status.store(status, Ordering::Relaxed);
+    set_status(&ctx.mailbox, status);
 }
 
 #[cfg(test)]

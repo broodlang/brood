@@ -354,6 +354,16 @@ fn rt_gc_floor() -> usize {
 /// `rt_drain_tick` field for why (the pinned-generation scan storm).
 const RT_DRAIN_SCAN_STRIDE: u32 = 64;
 
+/// How often a process already found **dirty via Phase 2** (a RUNTIME handle embedded in
+/// its LOCAL heap data) re-runs that O(heap) walk in the drain self-report, vs. reporting
+/// its cached stale-dirty verdict: once every `P2_REVALIDATE_STRIDE` safepoints of the
+/// current drain epoch. Bounds a data-pinned process's per-safepoint report to 1/stride of
+/// the full-heap walk — without it a big-heap pinning process (e.g. the root over a growing
+/// message backlog) re-walks its whole heap every safepoint, quadratic (the ~300× `spawn`
+/// fan-out regression). Sound: a stale-dirty verdict only delays completion, and a process
+/// that turns clean re-validates within a stride. See `runtime_gen_referenced_private`.
+const P2_REVALIDATE_STRIDE: u32 = 64;
+
 /// Live old-gen object count below which a **major** collection never fires —
 /// the old-gen counterpart of [`gc_floor`]. Crucially this is **not** zeroed by
 /// `BROOD_GC_STRESS`: stress makes *minor* collection fire at every safepoint
@@ -1019,6 +1029,19 @@ pub struct RuntimeCode {
     drain_active: AtomicBool,
     drain_gen: AtomicUsize,
     drain_epoch: AtomicU64,
+    /// **O(1) drain-completion gate (ADR-091).** A running count of *distinct*
+    /// processes that have reported clean for the current drain epoch (reset to 0
+    /// by `begin_gen_drain`, bumped once per new ack in `report_gen_liveness`). The
+    /// process layer's `old_gen_drained` compares it to the live-process count as a
+    /// cheap gate: while `drain_acked < live` some process still pins the generation,
+    /// so it skips the O(live-process) parked-liveness registry scan + mailbox-lock
+    /// sweep entirely — the whole cost of a lingering drain (a `spawn` fan-out where
+    /// every child's body pins the draining gen made this ~300× at scale). It only
+    /// grows within an epoch (an acked process that later exits is not decremented),
+    /// which is sound: the count can only *over*-report completion, and the actual
+    /// free is still gated by the authoritative `gen_drained` scan below the gate —
+    /// so a stale count can at worst run the scan a bit early (never free early).
+    drain_acked: AtomicU64,
     /// RUNTIME-churn dirty bit: set true whenever a closure is minted into the
     /// current code generation (`promote_closure` — i.e. every `def`/`spawn`/
     /// hot-reload `promote`). The eval safepoint reads it to decide whether the
@@ -1113,6 +1136,7 @@ impl Default for RuntimeCode {
             rt_dirty: AtomicBool::new(true),
             drain_gen: AtomicUsize::new(0),
             drain_epoch: AtomicU64::new(0),
+            drain_acked: AtomicU64::new(0),
             drain_acks: RwLock::new(HashMap::new()),
             free_epoch: AtomicU64::new(0),
             aging: AtomicBool::new(false),
@@ -1200,6 +1224,7 @@ impl RuntimeCode {
             rt_dirty: AtomicBool::new(true),
             drain_gen: AtomicUsize::new(0),
             drain_epoch: AtomicU64::new(0),
+            drain_acked: AtomicU64::new(0),
             drain_acks: RwLock::new(HashMap::new()),
             free_epoch: AtomicU64::new(0),
             aging: AtomicBool::new(false),
@@ -1530,6 +1555,15 @@ pub struct Heap {
     /// fresh drain bumps the epoch (≠ the cached value) so the process re-reports. Plain
     /// `Cell`: the `Heap` is single-threaded.
     acked_drain_epoch: Cell<u64>,
+    /// **Phase-2 dirty re-validation throttle** for the drain self-report. When the private
+    /// probe finds this process dirty via Phase 2 (a RUNTIME handle embedded in its LOCAL
+    /// heap data — see `runtime_gen_referenced_private`), it records the drain epoch here and
+    /// re-runs that O(heap) walk only every [`P2_REVALIDATE_STRIDE`] safepoints, reporting a
+    /// cheap stale-dirty verdict in between. Reset to `u64::MAX` (an epoch that never matches)
+    /// when the probe next finds it clean. `p2_dirty_tick` counts safepoints within the epoch.
+    /// Plain `Cell`s: the `Heap` is single-threaded.
+    p2_dirty_epoch: Cell<u64>,
+    p2_dirty_tick: Cell<u32>,
     /// The compiled arms **currently executing** on this process's stack — a stack
     /// pushed by `compile::vm_apply` (and the top-level `run`) on entry, the top
     /// updated on a tail-call into a different arm, popped on return. `runtime_collect`
@@ -1885,6 +1919,8 @@ impl Heap {
             seen_free_epoch: Cell::new(0),
             rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
+            p2_dirty_epoch: Cell::new(u64::MAX),
+            p2_dirty_tick: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -1938,6 +1974,8 @@ impl Heap {
             seen_free_epoch: Cell::new(0),
             rt_drain_tick: Cell::new(0),
             acked_drain_epoch: Cell::new(0),
+            p2_dirty_epoch: Cell::new(u64::MAX),
+            p2_dirty_tick: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -5845,31 +5883,120 @@ impl Heap {
     /// the generation is a handle it captured *privately* before the migration, which
     /// this probe still catches.
     fn runtime_gen_referenced_private(&self, gen: usize) -> bool {
-        self.runtime_gen_referenced_impl(gen, false)
+        // An empty generation slot is trivially dead — the common case.
+        if self.runtime.gens[gen].load().is_empty() {
+            return false;
+        }
+        let mut visited: HashSet<(usize, usize)> = HashSet::new();
+        let mut visited_env: HashSet<(usize, usize)> = HashSet::new();
+        let mut work: Vec<Value> = Vec::new();
+        let mut env_work: Vec<EnvId> = Vec::new();
+
+        // Phase 1 (cheap: private roots + live arms) always runs — a process that
+        // *becomes* clean by dropping a root re-reports clean at its very next safepoint.
+        if self.seed_phase1_and_walk(
+            gen,
+            false,
+            &mut work,
+            &mut env_work,
+            &mut visited,
+            &mut visited_env,
+        ) {
+            return true;
+        }
+
+        // Phase 2 (expensive: the whole LOCAL heap) is **throttled once it has found this
+        // process dirty for the current drain epoch**. A process pinned by a RUNTIME handle
+        // embedded in its LOCAL data (e.g. a large live message backlog carrying a
+        // closure-as-data) is dirty until that data dies; without throttling it re-walks its
+        // entire O(heap) graph on *every* safepoint for the whole epoch — quadratic, and the
+        // dominant cost of a `spawn` fan-out under a lingering drain (a ~300× regression:
+        // the root, dirty via Phase 2 over a growing 65k-cell heap, re-walked it tens of
+        // thousands of times in one epoch). Re-validating only every `P2_REVALIDATE_STRIDE`
+        // safepoints bounds that to 1/stride. Sound: a stale-dirty verdict only *delays*
+        // drain completion (never fabricates a clean ack), and a process that becomes clean
+        // re-validates within a stride. Only Phase-2 dirtiness arms the throttle — a process
+        // dirty via Phase 1 (running old-gen code) never sets it, so the cheap re-check above
+        // still reports its transition to clean immediately (the drain-completion tests rely
+        // on that promptness). The epoch key resets the throttle when a new drain arms.
+        let epoch = self.runtime.drain_epoch.load(Ordering::Relaxed);
+        if self.p2_dirty_epoch.get() == epoch {
+            let t = self.p2_dirty_tick.get().wrapping_add(1);
+            self.p2_dirty_tick.set(t);
+            if !t.is_multiple_of(P2_REVALIDATE_STRIDE) {
+                return true; // stale-dirty: skip the O(heap) re-walk this safepoint
+            }
+        }
+        let dirty = self.seed_phase2_and_walk(
+            gen,
+            &mut work,
+            &mut env_work,
+            &mut visited,
+            &mut visited_env,
+        );
+        if dirty {
+            // Arm / keep the re-validation throttle for this epoch.
+            if self.p2_dirty_epoch.get() != epoch {
+                self.p2_dirty_epoch.set(epoch);
+                self.p2_dirty_tick.set(0);
+            }
+        } else {
+            // Clean via Phase 2 — disarm so a later re-dirty re-walks at once. (Belt-and-
+            // braces: the caller acks a clean process, and the ack `Cell` then short-circuits
+            // this whole probe for the rest of the epoch.)
+            self.p2_dirty_epoch.set(u64::MAX);
+        }
+        dirty
     }
 
+    /// The authoritative reachability probe used by the drain-completion / free path
+    /// ([`runtime_gen_referenced`]): both phases, seeding the shared globals + `(sig …)`
+    /// roots too, and **never throttled** — it decides an actual free, so it always walks.
     fn runtime_gen_referenced_impl(&self, gen: usize, include_shared: bool) -> bool {
         // An empty generation slot is trivially dead — the common case (normal runs
         // never age, so `gens[1]` stays empty and this short-circuits).
         if self.runtime.gens[gen].load().is_empty() {
             return false;
         }
-
         // `visited` keys on (gen, index): the two generations share one index space,
         // so a bare slab index would conflate gen-0 #5 with gen-1 #5.
         let mut visited: HashSet<(usize, usize)> = HashSet::new();
         let mut visited_env: HashSet<(usize, usize)> = HashSet::new();
         let mut work: Vec<Value> = Vec::new();
         let mut env_work: Vec<EnvId> = Vec::new();
+        self.seed_phase1_and_walk(
+            gen,
+            include_shared,
+            &mut work,
+            &mut env_work,
+            &mut visited,
+            &mut visited_env,
+        ) || self.seed_phase2_and_walk(
+            gen,
+            &mut work,
+            &mut env_work,
+            &mut visited,
+            &mut visited_env,
+        )
+    }
 
-        // === Phase 1 — the CHEAP roots, walked to fixpoint first with an early exit. ===
-        // The private roots and live VM arms are O(process stack + arm count); the local
-        // heap (Phase 2) is O(heap size). A drain's overwhelmingly common pin is a process
-        // *running* old-gen code — its live arm sits here — so checking these first lets a
-        // pinning process's per-safepoint report short-circuit without paying the O(heap)
-        // seed at all. (The two-batch split is semantics-preserving: same seed set, same
-        // transitive rule; Phase 2 only runs when Phase 1 didn't already find the gen.)
-
+    /// **Phase 1** of the RUNTIME-generation reachability probe — the CHEAP roots, walked
+    /// to fixpoint with an early exit. The private roots and live VM arms are O(process
+    /// stack + arm count); the local heap ([`seed_phase2_and_walk`]) is O(heap size). A
+    /// drain's overwhelmingly common pin is a process *running* old-gen code — its live arm
+    /// sits here — so checking these first lets a pinning process's per-safepoint report
+    /// short-circuit without paying the O(heap) seed at all. The two-batch split is
+    /// semantics-preserving: same seed set, same transitive rule; the shared `visited` sets
+    /// carry across so Phase 2 never re-walks Phase 1's graph.
+    fn seed_phase1_and_walk(
+        &self,
+        gen: usize,
+        include_shared: bool,
+        work: &mut Vec<Value>,
+        env_work: &mut Vec<EnvId>,
+        visited: &mut HashSet<(usize, usize)>,
+        visited_env: &mut HashSet<(usize, usize)>,
+    ) -> bool {
         // --- Shared roots: globals + declared `(sig …)` type-exprs. Skipped by the
         // private probe (the drain self-report) — see `runtime_gen_referenced_private`. ---
         if include_shared {
@@ -5897,21 +6024,22 @@ impl Heap {
                 v
             });
         }
-        if self.walk_reaches_gen(
-            gen,
-            &mut work,
-            &mut env_work,
-            &mut visited,
-            &mut visited_env,
-        ) {
-            return true;
-        }
+        self.walk_reaches_gen(gen, work, env_work, visited, visited_env)
+    }
 
-        // === Phase 2 — the LOCAL heap (both generations): immutable data can embed a
-        // captured RUNTIME closure handle — the one place the shared-root walk can't
-        // reach. Only reached when the cheap roots didn't already pin the gen. Every cell
-        // is seeded directly (a LOCAL handle is never gen-tagged RUNTIME, so the walk only
-        // ever follows RUNTIME sub-handles). ---
+    /// **Phase 2** of the RUNTIME-generation reachability probe — the LOCAL heap (both
+    /// generations): immutable data can embed a captured RUNTIME closure handle, the one
+    /// place the shared-root walk can't reach. Only worth running when the cheap roots
+    /// (Phase 1) didn't already pin the gen. Every cell is seeded directly (a LOCAL handle
+    /// is never gen-tagged RUNTIME, so the walk only ever follows RUNTIME sub-handles).
+    fn seed_phase2_and_walk(
+        &self,
+        gen: usize,
+        work: &mut Vec<Value>,
+        env_work: &mut Vec<EnvId>,
+        visited: &mut HashSet<(usize, usize)>,
+        visited_env: &mut HashSet<(usize, usize)>,
+    ) -> bool {
         for slabs in [&self.local, &self.old] {
             for (a, b) in slabs.pairs.iter() {
                 work.push(*a);
@@ -5942,13 +6070,7 @@ impl Heap {
                 }
             }
         }
-        self.walk_reaches_gen(
-            gen,
-            &mut work,
-            &mut env_work,
-            &mut visited,
-            &mut visited_env,
-        )
+        self.walk_reaches_gen(gen, work, env_work, visited, visited_env)
     }
 
     /// Drive the transitive reachability walk over the seeded `work`/`env_work` lists to
@@ -6046,10 +6168,15 @@ impl Heap {
         let rt = &self.runtime;
         rt.drain_gen.store(old_gen, Ordering::Relaxed);
         let epoch = rt.drain_epoch.fetch_add(1, Ordering::Relaxed) + 1;
-        rt.drain_acks
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        {
+            // Clear the ack table AND reset the O(1) completion counter to 0 under the
+            // SAME write lock, so a concurrent `report_gen_liveness` insert+increment
+            // (also under this lock) can't interleave between the two and leave a live
+            // ack uncounted — an undercount would hold the gate shut and leak the gen.
+            let mut acks = rt.drain_acks.write().unwrap_or_else(|e| e.into_inner());
+            acks.clear();
+            rt.drain_acked.store(0, Ordering::Relaxed);
+        }
         rt.drain_active.store(true, Ordering::Release);
         epoch
     }
@@ -6073,6 +6200,34 @@ impl Heap {
     #[inline]
     pub fn drain_active(&self) -> bool {
         self.runtime.drain_active.load(Ordering::Acquire)
+    }
+
+    /// The O(1) drain-completion gate's ack count (see the `drain_acked` field) —
+    /// distinct processes that have reported clean for the current drain epoch. The
+    /// process layer compares it against the live-process count to skip the
+    /// authoritative parked scan while the drain clearly can't be complete. Relaxed:
+    /// a racy read only mistimes the scan, never the free.
+    #[inline]
+    pub fn drain_acked_count(&self) -> u64 {
+        self.runtime.drain_acked.load(Ordering::Relaxed)
+    }
+
+    /// Account a process exit against the O(1) drain-completion gate: if the exiting
+    /// process had acked the current epoch, drop its ack so `drain_acked` keeps
+    /// meaning "distinct *live* processes that reported clean". Without this the count
+    /// would drift above the live set under churn (many short-lived clean processes)
+    /// and force the authoritative scan on every check. A no-op when no drain is armed.
+    /// Sound regardless: the count only gates *when* the scan runs, never the free.
+    pub fn drain_note_exit(&self, pid: u64) {
+        let rt = &self.runtime;
+        if !rt.drain_active.load(Ordering::Acquire) {
+            return;
+        }
+        let epoch = rt.drain_epoch.load(Ordering::Relaxed);
+        let mut acks = rt.drain_acks.write().unwrap_or_else(|e| e.into_inner());
+        if acks.remove(&pid) == Some(epoch) {
+            rt.drain_acked.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     /// Has the RUNTIME region grown (a closure minted via `promote_closure`) since
@@ -6120,21 +6275,19 @@ impl Heap {
         // closures into the receiver's current generation). So a clean ack needn't be
         // re-earned each safepoint — this bounds a process to one liveness walk per drain.
         //
-        // The check is two-tiered: a **local** `Cell` first (no lock — the common path
-        // when a drain lingers because some other process pins the generation, so *this*
-        // process spends the whole run already-clean), then the **shared** ack table
-        // (which also catches an ack written on this pid's behalf by the parked-process
-        // inspector while it was suspended). Caching the shared hit locally means each
-        // subsequent frame is a `Cell` read, not a `drain_acks` read lock.
+        // A single **local** `Cell` read, no lock. It subsumes the shared `drain_acks`
+        // table: this heap's `Cell` is set on *every* ack of `epoch` — whether by this
+        // process's own safepoint OR by the parked-process inspector calling this on the
+        // heap's behalf while it was suspended (the inspector runs on the quiescent parked
+        // heap and sets the same `Cell`). So `drain_acks[pid] == epoch` ⟺ this `Cell` ==
+        // epoch; reading the shared table here would be pure redundant work — and, taken on
+        // *every* safepoint of *every* process that pins the draining generation until it
+        // exits (a `spawn` worker whose body lives in the drained generation), that
+        // per-frame `drain_acks` **read lock** — contended across the whole worker pool —
+        // was what dominated a fan-out drain (the multi-process spawn regression). Dropping
+        // it leaves only the private probe below, which is O(this process's own state).
         if self.acked_drain_epoch.get() == epoch {
             return;
-        }
-        {
-            let acks = rt.drain_acks.read().unwrap_or_else(|e| e.into_inner());
-            if acks.get(&pid) == Some(&epoch) {
-                self.acked_drain_epoch.set(epoch);
-                return;
-            }
         }
         let gen = rt.drain_gen.load(Ordering::Relaxed);
         // Use the **private** reachability probe (this process's own roots / local heap /
@@ -6151,10 +6304,16 @@ impl Heap {
         // generation: a handle it captured privately before the migration.
         let clean = !self.runtime_gen_referenced_private(gen);
         if clean {
-            rt.drain_acks
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(pid, epoch);
+            {
+                let mut acks = rt.drain_acks.write().unwrap_or_else(|e| e.into_inner());
+                // Count this ack toward the O(1) completion gate exactly once per epoch.
+                // Under the write lock so a concurrent self-report / parked-inspector for
+                // the same pid can't double-count. `insert` returns the prior value: a new
+                // clean ack (prior != this epoch) bumps `drain_acked`.
+                if acks.insert(pid, epoch) != Some(epoch) {
+                    rt.drain_acked.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             // Cache the clean ack locally so subsequent frames short-circuit at the
             // `Cell` check above without re-taking the `drain_acks` read lock.
             self.acked_drain_epoch.set(epoch);
@@ -6164,8 +6323,7 @@ impl Heap {
         // at epoch start, so there is nothing to remove — simply not acking already pins
         // the generation. The former `acks.remove(&pid)` here was a no-op that still took
         // the `drain_acks` *write* lock on every safepoint of every still-pinning process:
-        // P-way writer serialization (measured as the dominant residual cost once the
-        // scan is throttled — a churny multi-process drain). Sound by clean-stays-clean
+        // P-way writer serialization (a churny multi-process drain). Sound by clean-stays-clean
         // (ADR-091): post-migrate no process can newly acquire an old-gen handle, so a
         // process that ever acked clean never becomes dirty again and needs no removal; a
         // fresh drain bumps the epoch and clears the table, so no stale ack survives.

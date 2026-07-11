@@ -3378,3 +3378,54 @@ Two fixes from a stability sweep of the language.
   chars — 65536 % 3 ≠ 0 *guarantees* a boundary-straddling char, so it fails without the
   carry and passes with it). Green: bytes 23/23, proc 10/10, http 20/20, tcp 5/5,
   slurp_bytes 9/9, scram_bytes 8/8; clippy clean. Roadmap item marked done.
+
+## 2026-07-10 — Multigen RUNTIME GC: fix the ~300× spawn-scaling regression
+
+Making the 2-generation RUNTIME collector unconditional (ADR-091) surfaced a
+cliff on spawn-heavy workloads: the `spawn` benchmark (fan out N processes,
+each `fib(15)` → `send`) went **140 ms → 45 s** once the RUNTIME region crosses
+`BROOD_RT_GC_FLOOR` (default 4096). Suspicious signature: **worse at N=10 000
+(45 s) than N=50 000 (1 s)**, and CPU pegged at **~113 %** (one core), 49 s of
+user time — i.e. a *single-threaded* quadratic, not a lock storm.
+
+Chased it with sampled instrumentation (`perf` was blind — the hot frames are
+Cranelift JIT native code with no symbols). The drain self-report
+(`report_gen_liveness` → `runtime_gen_referenced_private`) has two phases: Phase 1
+walks the process's cheap private roots + live VM arms; **Phase 2 walks the
+process's *entire* LOCAL heap** to catch a RUNTIME closure handle embedded in
+immutable data. A process pinned by such a handle is *dirty*, never acks, and so
+re-runs the walk on every safepoint. Instrumentation nailed it: `pid=1` (the
+root), `epoch=1` (a *single* drain epoch — not many), `dirty=true`, re-walking a
+heap that grew 27 k → 65 k cells **80 000+ times** — O(heap × safepoints),
+quadratic. (10 k cycles the drain to completion and keeps re-walking; 50 k
+saturates the 2-versions-max backpressure and freezes the drain, so it's *faster*.)
+
+Fix — **throttle the Phase-2 re-walk** (`heap.rs`): once the private probe finds a
+process dirty via Phase 2 for a drain epoch, it records `(p2_dirty_epoch,
+p2_dirty_tick)` and reports its cached stale-dirty verdict, re-validating with the
+full O(heap) walk only every `P2_REVALIDATE_STRIDE` (64) safepoints. Sound: a
+stale-dirty verdict only ever *delays* completion (the process stays pinned) —
+never fabricates a clean ack, so a referenced generation is never freed early; the
+authoritative free path (`gen_drained`, un-throttled) still guards the actual
+reclaim. **Phase 1 stays un-throttled**, so a process that turns clean by dropping
+a root reports it at its very next safepoint (the drain-completion unit tests rely
+on that promptness). Refactored the fused probe into `seed_phase1_and_walk` /
+`seed_phase2_and_walk` so the private path can throttle Phase 2 while the
+authoritative `runtime_gen_referenced_impl` runs both unconditionally.
+
+Companion hardening (defends a *different* O(processes²) path — a many-parked
+server under a drain): the drain-completion gate in `old_gen_drained` is now O(1)
+— `drain_acked + parked_count < live` bails before the parked-process inspector
+runs, since running workers that still pin the gen keep it un-completable anyway;
+and `report_parked_liveness` early-returns on a new global **parked counter**
+(`PARKED` in `mailbox.rs`, maintained by a single `set_status` choke point on every
+`ST_WAITING`-boundary crossing, squared up by `deregister`'s `clear_parked` for a
+process killed while parked). Also dropped a now-redundant per-safepoint
+`drain_acks` **read lock** in `report_gen_liveness` (the ack `Cell` already
+subsumes it).
+
+Result: **N=10 000 spawn 45 s → 1.9 s**, correct checksums, flat scaling
+(10 k 1.9 s / 20 k 1.5 s / 50 k 1.0 s). Full suite (777 Rust + 2699 Brood) green;
+`runtime_collector` (20) + `runtime_drain` (1) green under plain release **and**
+the debug-assertion epoch tripwire; spawn checksums correct under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. clippy + rustfmt clean.

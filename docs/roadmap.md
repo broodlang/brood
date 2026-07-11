@@ -353,11 +353,30 @@ The remaining items are robustness, not open bugs:
    on `expr_ty`/`check_into` (checker stack overflow on deeply-nested types), no
    `catch_unwind` around the worker `run_one`, no RAII guard on `check_file`'s
    panic path.
-4. ⬜ **Promote the multigen RUNTIME GC to default (after a soak).** It's
-   hang-free and at suite-parity throughput as of 2026-07-09 but still opt-in
-   (`BROOD_RT_MULTIGEN=1`); a long-uptime process pinning old code can't reclaim
-   the shared code region under the default. Making it default (once a soak
-   confirms no regression) directly improves the editor/daemon long-running case.
+4. ✅ **Multigen RUNTIME GC spawn-scaling regression — fixed (2026-07-10).** The
+   multigen collector is now **unconditional** (ADR-091, `09fd96a`) — the old
+   `BROOD_RT_MULTIGEN` opt-out flag/env read is gone. Making it always-on had
+   surfaced a severe regression on spawn-heavy workloads: the `spawn` benchmark
+   (fan out N processes) went **140 ms → 45 s (~300×)** once the RUNTIME region
+   crosses the `BROOD_RT_GC_FLOOR` (default 4096) — a sharp cliff (N≤4000: ~0.1 s;
+   N=8000: ~47 s), and, tellingly, *worse* at 10 k than 50 k. Real root cause (not
+   the O(live-processes) scan first suspected): the per-safepoint drain self-report
+   walks the reporting process's **entire LOCAL heap** in Phase 2 (to catch a RUNTIME
+   closure embedded in immutable data). A process pinned by such a handle in a large,
+   growing heap — here the root, over a 65 k-cell message backlog — never acks and
+   so re-walks that O(heap) graph on *every* safepoint of the drain epoch: quadratic,
+   and single-threaded (CPU pegged at ~113 %). Fix: **throttle the Phase-2 re-walk**
+   — once a process is found dirty via Phase 2 for an epoch, report its cached
+   stale-dirty verdict and re-validate only every `P2_REVALIDATE_STRIDE` (64)
+   safepoints (sound: a stale-dirty verdict only delays completion, never frees a
+   referenced gen; Phase 1 stays un-throttled so a process turning clean reports it
+   at once). Companion hardening: the drain-completion gate is now O(1)
+   (`acked + parked_count < live` skips the parked-process inspector while running
+   workers still pin the gen), and the parked-inspector scan is gated on a global
+   parked counter. Result: **10 k spawn 45 s → 1.9 s**, correct checksums, flat
+   scaling; full suite + drain tests green under `BROOD_GC_STRESS`/`GC_VERIFY` and
+   the debug-assertion epoch tripwire. (Found 2026-07-10 via the cross-language
+   benchmark refresh.)
 
 ---
 

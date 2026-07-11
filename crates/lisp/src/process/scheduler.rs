@@ -35,7 +35,10 @@ use crate::error::LispError;
 use crate::process::keywords as pk;
 
 use super::links;
-use super::mailbox::{wake_parked, Mailbox, REGISTRY, ST_RUNNABLE, ST_RUNNING};
+use super::mailbox::{
+    clear_parked, parked_count, set_status, wake_parked, Mailbox, REGISTRY, ST_RUNNABLE,
+    ST_RUNNING, ST_WAITING,
+};
 use super::message::Message;
 use super::monitor;
 
@@ -880,7 +883,7 @@ fn proc_descr(pid: u64) -> String {
 /// watchers via the dist layer (an ordinary `send` to a remote pid, which
 /// routes over the link). Same `[:down …]` shape in both cases — the
 /// receiver code on the wire side is unchanged from local.
-fn deregister(pid: u64, reason: Message) {
+fn deregister(pid: u64, reason: Message, heap: &Heap) {
     // The three tables are taken **sequentially**, not nested: REGISTRY first,
     // released, then NAMES, released, then MONITORS. `add_monitor` and
     // `spawn_or_get` take REGISTRY *nested* inside MONITORS / NAMES
@@ -889,10 +892,21 @@ fn deregister(pid: u64, reason: Message) {
     // lock while reaching for REGISTRY. Don't introduce a function that
     // holds REGISTRY while taking NAMES or MONITORS, or this becomes a
     // genuine ordering hazard.
-    crate::core::sync::lock(&REGISTRY).remove(&pid);
+    let mailbox = crate::core::sync::lock(&REGISTRY).remove(&pid);
+    // A process killed (link/monitor/`exit`) while parked never runs a status
+    // transition back out of `ST_WAITING`, so square up the global parked count here —
+    // else `parked_count` leaks upward and `report_parked_liveness` keeps scanning.
+    if let Some(mb) = &mailbox {
+        clear_parked(mb);
+    }
     // Balances the `live_process_inc` in `spawn` (see the process-count-aware
     // `gc_floor`). `deregister` runs exactly once per spawned green process.
     crate::core::heap::live_process_dec();
+    // Keep the O(1) drain-completion gate's ack count meaning "live processes that
+    // acked clean": if this process had acked the current epoch, drop its ack now
+    // that it's out of the live set (after the REGISTRY remove above, so the two
+    // stay consistent). A no-op when no drain is armed.
+    heap.drain_note_exit(pid);
     // Close any sockets this process still owns (an OS-process model: fds are
     // reclaimed on exit). Done before `notify_peers` below, so a linked supervisor
     // that restarts a dead listener finds its port already being freed. A process
@@ -972,12 +986,12 @@ pub fn exit(pid: u64, reason: Message) {
 /// locality); a *woken-from-park* process may migrate instead — see [`wake_enqueue`].
 pub(super) fn enqueue(proc: Box<Process>) {
     let wid = proc.worker_id;
-    proc.mailbox.status.store(ST_RUNNABLE, Ordering::Relaxed); // queued, awaiting a worker turn
-                                                               // Count it as stealable runnable work (the `try_steal` fast-path hint). Balanced by
-                                                               // the single decrement in `run_one` when it's pulled to run (by its owner or a thief).
-                                                               // SeqCst (not Relaxed) so the dirty-block / drainer exhaustion checks reliably observe
-                                                               // this newly-queued work in the same total order as their `LIVE_EXECUTORS` updates —
-                                                               // the guarantee that work is never stranded with no live executor (see `dirty_block`).
+    set_status(&proc.mailbox, ST_RUNNABLE); // queued, awaiting a worker turn
+                                            // Count it as stealable runnable work (the `try_steal` fast-path hint). Balanced by
+                                            // the single decrement in `run_one` when it's pulled to run (by its owner or a thief).
+                                            // SeqCst (not Relaxed) so the dirty-block / drainer exhaustion checks reliably observe
+                                            // this newly-queued work in the same total order as their `LIVE_EXECUTORS` updates —
+                                            // the guarantee that work is never stranded with no live executor (see `dirty_block`).
     STEALABLE.fetch_add(1, Ordering::SeqCst);
     let (lock, cv) = &WORKERS[wid];
     crate::core::sync::lock(lock).push_back(proc);
@@ -1257,7 +1271,7 @@ fn run_one(mut proc: Box<Process>) {
     // Pulled to run: the single `STEALABLE` decrement site, paired with the increment in
     // `enqueue`, whether its owner drained it or a thief stole it.
     STEALABLE.fetch_sub(1, Ordering::Relaxed);
-    mailbox.status.store(ST_RUNNING, Ordering::Relaxed); // about to resume on this worker
+    set_status(&mailbox, ST_RUNNING); // about to resume on this worker
 
     // Pure diagnostics (`peak_threads()`): no invariant needs a total order with other
     // atomics, so `Relaxed` is enough on this per-quantum path.
@@ -1316,7 +1330,11 @@ fn handle_capture_outcome(
     use crate::eval::compile::VmOutcome;
     match outcome {
         Ok(Ok(VmOutcome::Done(_))) => {
-            deregister(proc.pid, Message::Keyword(value::intern(pk::NORMAL)));
+            deregister(
+                proc.pid,
+                Message::Keyword(value::intern(pk::NORMAL)),
+                &proc.heap,
+            );
         }
         Ok(Ok(VmOutcome::Suspended(s))) => {
             // Store the parked continuation in the process, then park (the
@@ -1338,7 +1356,7 @@ fn handle_capture_outcome(
                 .kill
                 .take()
                 .unwrap_or_else(|| Message::Keyword(value::intern(pk::KILLED)));
-            deregister(proc.pid, reason);
+            deregister(proc.pid, reason, &proc.heap);
         }
         Ok(Err(e)) => {
             // An uncaught throw/error killed the process (Erlang let-it-crash).
@@ -1347,11 +1365,15 @@ fn handle_capture_outcome(
                 Message::Keyword(value::intern(pk::ERROR)),
                 Message::Str(e.to_string()),
             ]);
-            deregister(proc.pid, reason);
+            deregister(proc.pid, reason, &proc.heap);
         }
         Err(_) => {
             eprintln!("process {} panicked", proc_descr(proc.pid));
-            deregister(proc.pid, Message::Keyword(value::intern(pk::KILLED)));
+            deregister(
+                proc.pid,
+                Message::Keyword(value::intern(pk::KILLED)),
+                &proc.heap,
+            );
         }
     }
 }
@@ -1370,7 +1392,7 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
             .take()
             .unwrap_or_else(|| Message::Keyword(value::intern(pk::KILLED)));
         drop(st);
-        deregister(proc.pid, reason);
+        deregister(proc.pid, reason, &proc.heap);
         // `proc` dropped here → its captured continuation + LOCAL heap are freed.
     } else if st.queue.len() > st.scanned {
         // A message raced in during the park — resume instead of parking. This is a
@@ -1575,15 +1597,32 @@ pub fn report_drain_liveness(heap: &Heap) {
 ///
 /// [`report_gen_liveness`]: crate::core::heap::Heap::report_gen_liveness
 fn report_parked_liveness() {
-    // Snapshot (pid, mailbox) first — never hold REGISTRY across a per-mailbox lock (the
-    // crate lock discipline). The parked process's heap is quiescent (no worker owns it)
-    // and shares the runtime `Arc`, so its `report_gen_liveness` writes the shared drain
-    // ack map on its own behalf.
-    let entries: Vec<(u64, Arc<Mailbox>)> = crate::core::sync::lock(&REGISTRY)
+    // Nothing parked → nothing to inspect. An O(1) global-counter load ([`parked_count`])
+    // that lets us skip the O(all-processes) `REGISTRY` walk below entirely. This is the
+    // common case under a lingering fan-out drain — the workers compute-and-exit without
+    // ever parking — where re-walking every live process (under the global `REGISTRY`
+    // lock) on each throttled drain-advance of every worker was the O(processes²) lock
+    // storm behind the ~300× `spawn` regression.
+    if parked_count() == 0 {
+        return;
+    }
+    // Snapshot the **parked** processes only: filter on the lock-free `status` cell
+    // (`ST_WAITING`) while holding REGISTRY — a cheap atomic load per entry — and clone
+    // just those. This is what makes a lingering fan-out drain affordable: a running
+    // process (the overwhelming majority during a `spawn` fan-out) never has its mailbox
+    // *state* locked here, so the O(all-processes) mailbox-lock storm that made `spawn`
+    // regress ~300× becomes O(parked) locks + O(all) cheap atomic reads. A racy status
+    // read is harmless: a process that parks/unparks right at the check is re-inspected
+    // on the next attempt (or self-reports once running). Never hold REGISTRY across a
+    // per-mailbox lock (the crate lock discipline) — hence the collect. A parked
+    // process's heap is quiescent (no worker owns it) and shares the runtime `Arc`, so
+    // its `report_gen_liveness` writes the shared drain ack map on its own behalf.
+    let parked: Vec<(u64, Arc<Mailbox>)> = crate::core::sync::lock(&REGISTRY)
         .iter()
+        .filter(|(_, mb)| mb.status.load(Ordering::Relaxed) == ST_WAITING)
         .map(|(pid, mb)| (*pid, Arc::clone(mb)))
         .collect();
-    for (pid, mailbox) in entries {
+    for (pid, mailbox) in parked {
         let state = crate::core::sync::lock(&mailbox.state);
         if let Some(proc) = state.waiter.as_ref() {
             proc.heap.report_gen_liveness(pid);
@@ -1600,8 +1639,33 @@ fn report_parked_liveness() {
 /// Also drives [`report_parked_liveness`] first, so a parked-but-clean process (which
 /// can't report for itself) doesn't block the drain — Erlang `check_process_code`-style.
 pub fn old_gen_drained(heap: &Heap) -> bool {
-    if heap.drain_active() {
-        report_parked_liveness();
+    if !heap.drain_active() {
+        return false;
+    }
+    // Two-stage O(1) gate, then the authoritative walk. The subtle ordering point is that
+    // the parked-process inspector ([`report_parked_liveness`]) must **not** run until every
+    // *running* process has already acked clean — otherwise, during a `spawn` fan-out where
+    // thousands of running workers pin the draining generation (each never acks until it
+    // exits), its O(all-processes) `REGISTRY` walk runs on every throttled drain-advance of
+    // every worker: an O(processes²) lock storm (the ~300× regression). The running workers
+    // alone keep the drain un-completable, so inspecting parked processes then is pure waste.
+    //
+    // `acked` counts processes that reported clean; `parked_count()` counts those suspended
+    // (which can't self-ack — they need the inspector). If `acked + parked < live`, at least
+    // one *running* process still hasn't acked (so still pins the generation) — bail before
+    // any scan; it'll self-ack at its own safepoint. Only once the sole holdouts are parked
+    // do we inspect them, then fold their acks into the authoritative `gen_drained` walk.
+    // Both counts are O(1) relaxed loads; over-counting the sum (a parked process that
+    // already acked is in both) only opens the gate an inspection early — `gen_drained`
+    // below still guards the actual free, so a racy count never frees a referenced gen.
+    let live = crate::core::sync::lock(&REGISTRY).len() as u64;
+    if heap.drain_acked_count() + (parked_count() as u64) < live {
+        return false;
+    }
+    // The only holdouts are parked — inspect them so they can ack, then re-gate.
+    report_parked_liveness();
+    if heap.drain_acked_count() < live {
+        return false;
     }
     heap.gen_drained(&live_pids())
 }
