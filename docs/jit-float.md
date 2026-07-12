@@ -144,3 +144,108 @@ tests pass. (Two jit unit tests — `jit_lowers_an_arm_ending_in_a_tail_call`,
 `jit_tier_compiles_a_hot_arm_then_runs_native` — fail, but they **already fail at the base
 commit `b9e2173`** with `--features jit`: pre-existing, not from this work.) **Not merged to
 `main`** — no benchmark win in the current safe state.
+
+---
+
+# Float-across-calls — design (2026-07-12, `nbody` 43× vs Elixir)
+
+The float codegen above (unboxed `f64` SSA, `as_f64`, `emit_float_arith`, `box_float`)
+**landed on main** and put `mandelbrot` at Elixir parity — a *self-tail* pure-`f64` loop
+runs native. The remaining big float gap is **`nbody` (43× Elixir; 8× slower than
+CPython)**, and it is a *different* problem: nbody has **no** pure-float self-tail loop.
+
+## Why nbody doesn't lower today (measured)
+
+`bench/brood/nbody.blsp`: bodies are a `(list [x y z vx vy vz m] …)`; each step calls
+`advance-body i` → `newvel b i 0 vx vy vz` (a tail loop over `j`) and reads state via
+`(f b i k)` = `(nth (nth b i) k)`. So the hot arms are:
+
+- **Mixed-type args.** `newvel b i j vx vy vz` mixes a **handle** (`b`), **ints** (`i j`),
+  and **floats** (`vx vy vz`). `arm_scalar_kind` requires a *uniform* Int-only or
+  Float-only arm (one register type for every arg/slot), so it bails → boxed path. Same
+  for `momentum`, `kinetic`, `advance-body`.
+- **Call-mediated.** Even boxed, these arms **call other arms/prims** (`f`, `nth`,
+  `newvel`, `sqrt`). Those calls go through `brood_rt_call_slow` / `jit_dispatch_call`
+  (the profile's 6%): the JIT boxes each arg to a `Value` word, hands off to the runtime
+  which sets up a VM frame, and the callee re-reads boxed slots (`as_f64` tag-check if
+  it too is JIT'd). **Every float crossing an arm boundary is boxed then re-unboxed.**
+- The profitability gate (`jit_lower_arm`, added for the earlier nbody *regression*) then
+  keeps the non-tail callers (`advance-body`, `offset`) on the VM entirely, because
+  JIT'ing a boxed call-mediated float arm is *slower* than the VM. So nbody is ~fully
+  interpreted, one `Value::Float` construct per arithmetic op (floats are inline, not
+  heap — so the cost is call overhead + interpreter dispatch, not allocation; confirmed
+  by profile: `exec_chunk` 29%, call machinery `dispatch`/`push_frame`/`vm_cache_arm`/
+  `jit_dispatch_call` ≈ 35%).
+
+**So the fix is a typed cross-arm calling convention**: a JIT'd arm calling another arm
+must pass `f64` args in `f64` registers (and `i64`/handle in `i64`), not boxed `Value`s —
+and the two arms must be **mixed-type** (per-slot typing), not uniform-scalar.
+
+## Plan — two layers
+
+### Layer A — mixed-type (per-slot) arms
+
+Generalise the uniform `Scalar` to a **per-slot type vector** `SlotTy ∈ {Int, Float,
+Handle}` (`Handle` = a boxed `Value` word, i64, read/passed verbatim — covers `b`, and any
+value the arm only *threads* without arithmetic). Source of truth: the **tier-time slot
+profile** already snapshotted in `jit_tier` (`tag(roots[base+i])`), extended to every slot
+the body defines (a float result stored to a `let` slot marks it Float). Soundness stays
+**per-read** (`as_f64`/`as_int` tag-check + deopt), so a mistyped profile can't miscompile
+— it deopts. The worker/arm signature becomes per-slot-typed; self-recursion passes each
+arg in its slot's register type. This alone lets `newvel`/`momentum`/`kinetic` keep floats
+unboxed **within the arm and across self-recursion** — but not yet across *other* calls.
+
+### Layer B — typed JIT→JIT call ABI (the actual nbody win)
+
+Give each JIT'd arm a second **native entry** `brood_jit_native_<id>(a0..an: typed, …) ->
+typed` alongside the boxed wrapper. When arm A (JIT'd) emits a `Call`/`SelfCall` to arm B
+**and B has a known typed native entry with matching arg types**, emit a *direct native
+call* passing unboxed typed args, skipping `brood_rt_call_slow` and all boxing. Requires:
+
+1. **A compile-time callee-signature registry.** Keyed by `(callee arm id / global sym,
+   argc)` → the arg/return `SlotTy` vector the native entry expects. Populated when an arm
+   is JIT'd; a `Call` to a not-yet-registered / type-mismatched callee falls back to the
+   boxed `brood_rt_call_slow` path (always correct). Late binding: a `def` that reshapes a
+   callee invalidates via the existing `global_epoch` (a stale registry entry → the guard
+   below deopts).
+2. **Entry-guard the native entry.** Since a native call trusts the callee's arg types, the
+   *boxed* wrapper (reached from the VM / a mismatched caller) must guard: the native entry
+   assumes typed args; the boxed entry unboxes-with-tag-check then tail-calls the native
+   entry. A caller that can't prove types uses the boxed entry.
+3. **GC / deopt safety across the native call.** Today the runtime dispatch is the GC
+   safepoint + deopt boundary. A direct native call must (a) keep no live boxed handle in a
+   caller register across it that GC could move (float/int args are values, not handles —
+   safe; a `Handle` arg is a boxed word that *could* be a moving LOCAL handle → must be
+   spilled to the frame slot the runtime already roots, then reloaded, OR the callee must
+   root it on entry), and (b) propagate deopt/overflow/kill sentinels up the native chain
+   the way the self-worker's `ovf` ptr does.
+
+## Milestones (each independently testable, each keeps main green)
+
+1. **M1 — per-slot `SlotTy` + mixed-type self-worker.** Generalise `arm_scalar_kind` →
+   `arm_slot_types() -> Option<Vec<SlotTy>>`; thread it through `jit_lower_i64_arm`
+   (rename → `jit_lower_scalar_arm`). Gate: mandelbrot/loop/collatz/fib **exact-bit +
+   no-regression**; a mixed self-recursive arm (a reduced `newvel` with `nth` stubbed to a
+   passed float) lowers. No nbody win yet.
+2. **M2 — typed native entry + registry, self-calls only.** Emit the native entry; route a
+   JIT'd arm's **self**-`Call` through it (self type is trivially known). Gate: the
+   self-recursive float arms stop boxing across recursion (verify via `BROOD_JIT_DUMP_IR`).
+3. **M3 — cross-arm typed calls.** The registry + direct native call for `Call` to *another*
+   JIT'd arm. This is where `advance-body → newvel`, `f → nth` unbox. Relax the
+   profitability gate for arms whose calls are all typed-native. **Expected nbody win.**
+4. **M4 — Handle-arg rooting + the GC gauntlet.** `b` (a list handle) crossing native
+   calls: spill-and-reroot. `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1` on nbody must be
+   clean; `breakagetests` 37/37.
+
+## Correctness gauntlet (miscompile = the worst bug class here)
+
+- Every scalar benchmark exact-bit vs `BROOD_VM=0` (`mandelbrot`, `nbody`, `matmul`,
+  `collatz`, `fib`, `loop`, `sort`, `nqueens`), plus `differential engines_agree_on_corpus`.
+- A `def` reshaping a callee mid-run deopts cleanly (epoch + entry guard).
+- `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1` + `BROOD_JIT_VERIFY=1` clean on nbody.
+- Full suite + `make suite` (`brood_suite_passes`) green; `breakagetests` 37/37.
+
+**Risk/size:** M1–M2 are contained; **M3 is the deep ABI change** (a new native-call path
+in the codegen + a cross-arm registry). Do it on a branch/worktree; do **not** merge a
+half-ABI to main. The earlier float branch shows how a single wrong tag/coercion or a
+control-flow edge silently miscompiles or hangs — bisect with `BROOD_JIT_DUMP_IR` per arm.
