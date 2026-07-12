@@ -3761,6 +3761,262 @@ pub(crate) fn run_process_body(
     }
 }
 
+// ---- the top-level program, run as a green process (ADR-135) --------------------
+
+/// The one-shot slot the **root program process** publishes its terminal outcome to,
+/// and the main (root) thread blocks on. `Ok(())` = every top-level form ran to
+/// completion; `Err(msg)` = a top-level form raised (the message is already tagged
+/// `FILE:LINE:COL:`). A program that never returns (a top-level server that suspends
+/// forever in `receive`) simply never publishes — the root thread blocks indefinitely,
+/// exactly as it did when it ran the program itself.
+pub struct ProgramExit {
+    slot: std::sync::Mutex<Option<Result<(), String>>>,
+    cv: std::sync::Condvar,
+}
+
+impl ProgramExit {
+    pub fn new() -> Arc<Self> {
+        Arc::new(ProgramExit {
+            slot: std::sync::Mutex::new(None),
+            cv: std::sync::Condvar::new(),
+        })
+    }
+
+    fn publish(&self, r: Result<(), String>) {
+        let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            *g = Some(r);
+            self.cv.notify_all();
+        }
+    }
+
+    /// Block the calling (root) thread until the program publishes its outcome.
+    pub fn wait(&self) -> Result<(), String> {
+        let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        while g.is_none() {
+            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        g.clone().expect("published above")
+    }
+}
+
+/// The driving state of a [`Process`](crate::process) whose body is a whole top-level
+/// program (ADR-135). The forms are pinned on the process heap's root stack
+/// (`[root_base, root_base+count)`), re-fetched by index each step so a collection
+/// between forms relocates them safely (as `load`/`eval_source` root their tail). The
+/// namespace/forward-ref frame is installed once into the heap (which travels with the
+/// process across suspends), so it persists without being re-derived.
+pub struct ProgramState {
+    root_base: usize,
+    count: usize,
+    positions: Vec<Pos>,
+    cursor: usize,
+    file: Option<String>,
+    started: bool,
+    /// When the current form is a `(def name rhs)` whose `rhs` is being run on the capture
+    /// path (so it can `receive`), this holds `name` — the value the finished RHS is bound
+    /// to. Persists across a suspend (the RHS parked mid-`receive`), so the resume knows to
+    /// bind before advancing. `None` for a non-`def` form (run whole).
+    def_name: Option<Value>,
+    exit: Arc<ProgramExit>,
+}
+
+impl ProgramState {
+    /// Build the driver for a program whose `forms` were already read (positioned) into
+    /// `heap` and pushed as roots at `root_base` (contiguously, in order).
+    pub fn new(
+        root_base: usize,
+        positions: Vec<Pos>,
+        file: Option<String>,
+        exit: Arc<ProgramExit>,
+    ) -> Self {
+        ProgramState {
+            root_base,
+            count: positions.len(),
+            positions,
+            cursor: 0,
+            file,
+            started: false,
+            def_name: None,
+            exit,
+        }
+    }
+}
+
+/// Wrap a (RUNTIME-promoted) top-level `form` as a 0-arg thunk `(fn () form)` so it runs
+/// through the capturing body driver ([`run_process_body`]). The thunk handle is LOCAL,
+/// but its body form is a RUNTIME pair, so [`cache_key`] keys it (by the body handle) and
+/// [`compiled_arm_for`] compiles it onto the VM capture path — the property that makes a
+/// `receive` anywhere inside the form park-and-capture instead of blocking the worker.
+fn build_program_thunk(heap: &mut Heap, form: Value) -> Value {
+    let id = heap.alloc_closure(crate::core::value::Closure::single(
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+        vec![form],
+        None,
+        None, // global scope — top-level forms capture nothing
+    ));
+    Value::func(id)
+}
+
+/// Drive a program process one quantum (ADR-135): finish the in-flight form's resumed
+/// continuation, then compile+run each remaining top-level form in order. A `Suspended`/
+/// `Preempted` from any form is returned **unchanged** — the loop unwinds, the cursor
+/// lives in `prog`, and the next entry resumes mid-form via the stored continuation — so
+/// a top-level `receive` park-captures like any green process. A form error is **caught**
+/// and published to the exit slot, and the process retires `:normal` (no spurious
+/// "process died" from the scheduler); the root thread reads the real outcome.
+pub(crate) fn run_program_body(
+    heap: &mut Heap,
+    prog: &mut ProgramState,
+    resume: Option<Suspended>,
+) -> Result<VmOutcome, LispError> {
+    let root = heap.global();
+    // First entry: install the file + root namespace + forward-ref pre-scan into the heap
+    // (persists across suspends, since the heap travels with the process).
+    if !prog.started {
+        prog.started = true;
+        heap.set_current_file(prog.file.clone());
+        heap.set_compile_ns(None);
+        let forms: Vec<Value> = (0..prog.count)
+            .map(|i| heap.root_at(prog.root_base + i))
+            .collect();
+        let known = if crate::eval::macros::file_opens_ns(heap, &forms) {
+            crate::eval::macros::scan_def_names(heap, &forms)
+        } else {
+            std::collections::HashSet::new()
+        };
+        heap.set_ns_known_names(known);
+        heap.set_imports(std::collections::HashMap::new());
+    }
+
+    // Resume the form the process was suspended/preempted inside, if any.
+    if let Some(s) = resume {
+        let pos = prog.positions[prog.cursor];
+        match run_process_body(heap, Value::nil(), Some(s)).map_err(|e| e.or_pos(pos)) {
+            Ok(VmOutcome::Done(v)) => {
+                if let Err(e) = prog.finish_form(heap, v).map_err(|e| e.or_pos(pos)) {
+                    return Ok(prog.crash(e));
+                }
+            }
+            Ok(other) => return Ok(other),
+            Err(e) => return Ok(prog.crash(e)),
+        }
+    }
+
+    // Run each remaining form fresh: compile it (so an earlier `defmacro` is already in
+    // effect), then run its receive-bearing part on the capture driver.
+    while prog.cursor < prog.count {
+        let pos = prog.positions[prog.cursor];
+        let form = heap.root_at(prog.root_base + prog.cursor);
+        heap.note_definition(form, pos);
+        let step = (|| -> Result<VmOutcome, LispError> {
+            let expanded = crate::eval::macros::compile(heap, form, root)?;
+            heap.note_definition(expanded, pos);
+            // A top-level `(def name rhs)` runs its RHS on the capture path and binds after
+            // (`def` is a special form the VM won't body-compile, so wrapping the whole form
+            // would defer to the tree-walker, whose `receive` blocks the worker instead of
+            // parking — the very thing this process exists to avoid). Any other form (a bare
+            // call, a `let`, an expression) runs whole. `def_name` records the pending bind
+            // so it survives a suspend mid-RHS.
+            let body = match def_rhs(heap, expanded) {
+                Some((name, rhs)) => {
+                    prog.def_name = Some(name);
+                    rhs
+                }
+                None => {
+                    prog.def_name = None;
+                    expanded
+                }
+            };
+            let promoted = heap.promote(body);
+            let thunk = build_program_thunk(heap, promoted);
+            run_process_body(heap, thunk, None)
+        })()
+        .map_err(|e| e.or_pos(pos));
+        match step {
+            Ok(VmOutcome::Done(v)) => {
+                if let Err(e) = prog.finish_form(heap, v).map_err(|e| e.or_pos(pos)) {
+                    return Ok(prog.crash(e));
+                }
+            }
+            Ok(other) => return Ok(other), // suspended / preempted mid-form (def_name persists)
+            Err(e) => return Ok(prog.crash(e)),
+        }
+    }
+
+    prog.exit.publish(Ok(()));
+    Ok(VmOutcome::Done(Value::nil()))
+}
+
+impl ProgramState {
+    /// A form finished with value `v`: if it was a `(def name rhs)` whose RHS we ran, bind
+    /// `name` to `v` now (reusing the full `def` semantics — naming, promote-to-shared,
+    /// reload diagnostics); either way advance to the next form.
+    fn finish_form(&mut self, heap: &mut Heap, v: Value) -> Result<(), LispError> {
+        if let Some(name) = self.def_name.take() {
+            bind_def(heap, name, v)?;
+        }
+        self.cursor += 1;
+        Ok(())
+    }
+
+    /// A top-level form raised: publish the located message to the root thread and retire
+    /// the process `:normal` (it handled its own crash), so the scheduler prints nothing.
+    fn crash(&self, e: LispError) -> VmOutcome {
+        let msg = format!("{}", e.located());
+        let msg = match &self.file {
+            Some(f) if !msg.contains(f.as_str()) => format!("{}: {}", f, msg),
+            _ => msg,
+        };
+        self.exit.publish(Err(msg));
+        VmOutcome::Done(Value::nil())
+    }
+}
+
+/// If `form` is `(def name rhs)` (name a symbol, exactly one value), return `(name, rhs)`
+/// so the driver can run `rhs` capturably and bind after. `None` for anything else — a
+/// `(def name)` with no value, a `def` with a bad shape (handled by the normal `def`
+/// error), or any non-`def` form.
+fn def_rhs(heap: &Heap, form: Value) -> Option<(Value, Value)> {
+    if !matches!(form.unpack(), ValueRef::Pair(_)) {
+        return None;
+    }
+    let parts = heap.list_to_vec(form).ok()?;
+    if parts.len() == 3
+        && matches!(parts[0].unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::DEF))
+        && matches!(parts[1].unpack(), ValueRef::Sym(_))
+    {
+        Some((parts[1], parts[2]))
+    } else {
+        None
+    }
+}
+
+/// Bind `name` to the already-computed value `v` with the full `def` semantics, by
+/// re-evaluating `(def name (quote v))` on the tree-walker — a trivial form (the RHS is a
+/// literal, so it neither compiles-to-VM nor `receive`s), which reuses `def`'s naming,
+/// promote-into-shared-RUNTIME, and reload diagnostics rather than re-implementing them.
+fn bind_def(heap: &mut Heap, name: Value, v: Value) -> Result<(), LispError> {
+    let g = heap.global();
+    let base = heap.roots_len();
+    heap.push_root(name);
+    heap.push_root(v);
+    let v = heap.root_at(base + 1);
+    let quote = heap.list(vec![value::sym(kw::QUOTE), v]);
+    heap.push_root(quote);
+    let name = heap.root_at(base);
+    let quote = heap.root_at(base + 2);
+    let form = heap.list(vec![value::sym(kw::DEF), name, quote]);
+    heap.push_root(form);
+    let form = heap.root_at(base + 3);
+    let r = crate::eval::eval(heap, form, g);
+    heap.truncate_roots(base);
+    r.map(|_| ())
+}
+
 /// Lower a compiled `Node` body to a [`Chunk`], or `None` if it uses any node
 /// outside Stage 1's vocabulary (`Call`/`SelfCall`/`MakeClosure`, or a `Const` with
 /// a movable RUNTIME handle). `None` is always safe — the arm runs on `exec_node`.

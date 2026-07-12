@@ -3473,6 +3473,48 @@ green-process receive (ADR-100 §8.4); `make test` runs the default VM engine, s
 this is never surfaced there. Noted, not fixed (out of scope — the tree-walker is
 being phased out per ADR-076).
 
+## 2026-07-12 — The top-level program is a green process (ADR-135): ping-pong 6.5 → 3.3 µs/RT
+
+Chasing the message-passing latency gap vs Elixir/BEAM. Real baseline (1M round-trips,
+startup subtracted): **Brood ~6.5 µs/RT vs Elixir ~0.5 µs/RT, ~13×**. `strace` showed the
+smoking gun — **~4.4 futex syscalls per round-trip** (180k erroring), i.e. *not* the
+"entirely userspace" path the direct-handoff was supposed to give. Two causes, both fixed.
+
+1. **`enqueue` fired a wake syscall even handing to the current worker.** `Condvar::notify_one`
+   is an unconditional `futex_wake` on Linux; the running worker can't be parked on its own
+   cv while it's executing the `enqueue`, so that wake is provably useless. Skip it when
+   `proc.worker_id == CURRENT_WORKER`. Green↔green ping-pong: 202k futex → ~400 over 100k RT.
+   (Shipped separately; a general win for supervisors / gen-servers / any in-worker messaging.)
+
+2. **The benchmark's driver ran as the *root process on the main thread*** — a privileged
+   thread that blocks on its mailbox condvar in `receive` and can't do userspace handoff, so
+   every leg crossed the main↔worker boundary via futex. Fixed structurally: **the whole
+   top-level program now runs as one ordinary green process** (ADR-135, "everything is a
+   process", the BEAM model). The main thread spawns it, blocks once on a result slot, and
+   translates the outcome to an exit code.
+
+Implementation notes worth keeping:
+- **One process, driven form-by-form** (`run_program_body`), so `(self)` is a single stable
+  pid across every top-level form (a per-form process would hand each form a different self,
+  breaking `(def me (self))` … `(send me …)` — the ring benchmark relies on exactly this).
+  A `Suspended`/`Preempted` from any form returns up unchanged; the cursor lives in the
+  `Process`, so a top-level `receive` park-captures like any green process.
+- **`def` had to be split.** The VM won't body-compile a `def` (a special form), so wrapping
+  `(def done (ping 0))` as `(fn () …)` silently deferred to the tree-walker, whose `receive`
+  *blocks* — the program deadlocked-slow at the old futex rate. The driver now runs a
+  `(def name rhs)`'s **rhs** on the capture path and binds after (`bind_def` re-evaluates the
+  trivial `(def name (quote v))` to reuse `def`'s naming / promote-to-shared / reload
+  semantics). This was the difference between 6.5s and 3.3s at 1M — found by A/B'ing a
+  bare-`(main)` driver (already fast) against the `def`-wrapped one.
+
+Result: the actual `pingpong.blsp` benchmark **6.5s → 3.3s at 1M RT (~13× → ~6.6× vs Elixir)**,
+futex 416k → 370; `ring.blsp` 1M hops in ~2.1s. The residual gap is intrinsic to Brood's
+design (immutable-data per-message allocation, heap-captured migratable continuations,
+per-process heap-isolated message copies) — not traded away. Correctness held across: defn/
+def/expr/ns forms, top-level macro-then-use, multi-file shared defs, `def`-with-receive-RHS,
+let-it-crash workers, background children, empty/value programs, clean error→exit-1. REPL and
+`--test` paths are untouched (they keep the main-thread evaluator). Full suite 777/777 green.
+
 ## 2026-07-12 — Kill an O(n²) landmine in `string->list` (and the `(str acc …)` / `char-at`-scan family)
 
 Chasing the last-place wider-range benchmarks (`../brood-benchmarks`: json super-linear,

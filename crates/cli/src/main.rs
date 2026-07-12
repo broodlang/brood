@@ -285,13 +285,17 @@ fn run_files(interp: &mut Interp, files: &[String]) {
         if !no_check_env() {
             check_one_file(interp, path, &src, CheckSink::Stderr);
         }
-        if let Err(e) = brood::cli_support::eval_file(interp, path, &src) {
+        // Run the whole program as one green process (ADR-135): a top-level driver
+        // talking to a spawned worker then uses the userspace direct-handoff path (no
+        // per-message cross-thread futex) and its top-level `receive`s park-and-capture,
+        // instead of the root thread blocking on its mailbox condvar.
+        if let Err(msg) = interp.run_program(&src, Some(path.clone())) {
             // Restore the terminal first: a TUI program that entered raw mode and
             // then threw never reached its `term-raw-leave`, and `process::exit`
             // skips Drop guards. Without this the shell is left wedged in raw mode
             // after an erroring full-screen run.
             brood::builtins::restore_terminal_on_exit();
-            report_error(&e.or_file(path.clone()));
+            eprintln!("{}", msg);
             std::process::exit(1);
         }
     }

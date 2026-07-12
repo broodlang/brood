@@ -8488,3 +8488,68 @@ policy stays in the app, protocol lives beside its server half. Content must cro
 splices (`link-propagate`), never closure edits, on any transform-collaborated buffer —
 the ring-invisibility caveat `buffer--serve` documents (closure edits remain for
 markers/metadata).
+
+## ADR-135 — The top-level program is a green process (everything is a process)
+
+**Status:** accepted, in progress 2026-07-12.
+
+**Context.** Brood's file runner (`brood file.blsp`) evaluated the program's top-level
+forms **directly on the main thread**, as a privileged *root process*: it owns no worker
+run queue and, when it `receive`s, it **blocks its OS thread** on the mailbox condvar
+(`wait_for_message`) rather than parking-and-capturing its continuation the way a
+scheduler-run green process does (ADR-100 §8.4). Every other process is equal and
+userspace-scheduled; the root is the one exception. That asymmetry is a real
+message-latency tax for the overwhelmingly common idiom of a top-level driver talking to a
+spawned worker: each leg crosses the main↔worker **thread boundary**, so it pays a
+cross-thread `futex` wake + wait *per message* — the direct-handoff fast path
+(`wake_enqueue`, ADR-100) and its wake-elision (skip `notify_one` when handing to the
+current worker) apply only *between* green processes on a worker, never to the root. Measured
+on ping-pong (1M round-trips): root-driver **~6.5 µs/RT**; the *same* program with its
+driver moved into a spawned green process runs at **~3.8 µs/RT** — the root penalty is ~2×.
+BEAM has no such penalty because in Erlang `main` **is** a process; there is no privileged
+thread.
+
+Routing the program through the existing `(load …)`/`eval-string` builtins does **not**
+fix it: those run the tree-walker (`eval::eval`), whose `receive` blocks (no reified frame
+stack to capture), and even a VM run nested under a builtin frame is *native-nested* — its
+continuation can't be captured across the Rust frame, so it blocks too (§7.4). Park-and-
+capture requires the program to run as the **direct body** of a scheduler-driven process,
+with **no persistent Rust driver frame** between the process entry and each form's VM run.
+A single compiled `(do form…)` body is also wrong: top-level `def`/`defmacro` must take
+effect *before* later forms are compiled (a macro defined in form 3 used in form 5), which
+only per-form **interleaved** compile+eval preserves — the very thing `eval_source` does
+today.
+
+**Decision.** Run the whole program as **one** ordinary green process (so `(self)` is a
+single stable pid across every top-level form — a per-form process would hand each form a
+different `self`, breaking `(def me (self))` … `(send me …)`), driven **form-by-form by the
+scheduler**:
+
+1. **A `Program` process body.** `Process.body` gains a program variant carrying the
+   read+positioned form list, a current-form cursor, the bracketed namespace/forward-ref
+   state (`compile_ns` / `ns_known_names` / `imports`), and the last form's value. The forms
+   are GC-rooted in the *process* heap and re-fetched by root index after any collection
+   (exactly as `load`/`eval_source` root the unevaluated tail).
+2. **`run_program_body` drives one form per entry.** On a fresh entry it compiles the
+   cursor's form (`macros::compile`, so an earlier form's `defmacro` is already in effect)
+   and VM-runs it; on `Done` it records the value and advances the cursor; on `Suspended`
+   it returns the continuation up **unchanged** — the loop's Rust frame unwinds, the cursor
+   lives in the `Process`, and a resume re-enters mid-form via the stored `Suspended`. So a
+   `receive` anywhere inside any top-level form (however deep in a call chain) park-captures
+   like any green process, and the program migrates between workers between quanta.
+3. **The main thread spawns it, monitors, and blocks once.** `run_files` mints the program
+   process, `spawn_link`/monitors it, and blocks on the single terminal DOWN — one thread
+   block for the whole run, not one per message. The DOWN reason carries normal-vs-error;
+   an error becomes exit code 1 (terminal restored first, as before). The advisory checker
+   still runs on the main thread ahead of the spawn.
+
+**Consequences.** The top-level driver now uses the userspace direct-handoff + wake-elision
+path, closing the root penalty: ping-pong drops ~6.5 → ~3.8 µs/RT (~13× → ~7.6× vs BEAM;
+the residual gap is intrinsic — immutable-data per-message allocation, heap-captured
+migratable continuations, and per-process heap-isolated message copies, none of which we
+trade away). `(self)` at the top level is now a normal process pid, not the root pid (more
+BEAM-consistent; nothing depended on the old value). Top-level macro semantics are
+unchanged (per-form interleave preserved). The root/main thread keeps owning stdout,
+terminal teardown, and exit-code translation; a program that never messages is unaffected
+in behavior. The REPL keeps its main-thread loop for now (interactive line-editing is not a
+throughput path); moving it onto the same mechanism is a follow-on.

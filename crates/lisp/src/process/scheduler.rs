@@ -56,8 +56,14 @@ pub(super) struct Process {
     pub(super) worker_id: usize,
     /// This process's LOCAL data heap — travels with it across workers.
     heap: Heap,
-    /// The 0-arg body thunk (a shared-runtime `Fn` handle, valid in `heap`).
+    /// The 0-arg body thunk (a shared-runtime `Fn` handle, valid in `heap`). Unused
+    /// (`nil`) when `program` is set — a whole-program root process (ADR-135).
     body: Value,
+    /// Set for the **root program process** (ADR-135): drives the top-level forms one at
+    /// a time instead of a single body thunk, so `(self)` is one stable pid across the
+    /// whole program and a top-level `receive` park-captures. `None` for an ordinary
+    /// `spawn`ed process.
+    program: Option<Box<crate::eval::compile::ProgramState>>,
     /// The parked/preempted VM continuation, or `None` if not yet started.
     resume: Option<Box<crate::eval::compile::Suspended>>,
     /// The output-capture stack snapshot (the process carries it — no coroutine holds a
@@ -1461,7 +1467,11 @@ impl Process {
     /// is then free to move/park/re-queue `self` on the outcome.
     fn drive(&mut self) -> Result<crate::eval::compile::VmOutcome, LispError> {
         let resume = self.resume.take().map(|b| *b);
-        crate::eval::compile::run_process_body(&mut self.heap, self.body, resume)
+        match self.program.as_mut() {
+            // The root program process (ADR-135): drive the top-level forms.
+            Some(prog) => crate::eval::compile::run_program_body(&mut self.heap, prog, resume),
+            None => crate::eval::compile::run_process_body(&mut self.heap, self.body, resume),
+        }
     }
 
     /// Stash a captured continuation back into the process before it parks or re-queues
@@ -1581,10 +1591,72 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
         worker_id,
         heap: child,
         body: f,
+        program: None,
         resume: None,
         capture: inherited_capture,
     }));
     Ok(pid)
+}
+
+/// Launch the whole top-level program as a single green process (ADR-135) and return the
+/// [`ProgramExit`] the caller (the root/main thread) blocks on. `src`/`file` are the
+/// program source; `heap` is the caller's heap, used only to borrow the shared
+/// prelude/runtime regions (the program runs in its **own** LOCAL heap that shares them,
+/// so its `def`s land in the shared runtime globals exactly as any process's do). The
+/// forms are read into that heap and pinned on its root stack for the program's life.
+///
+/// Unlike `eval_source` on the root thread, the program now runs on a worker in capture
+/// mode: a top-level driver talking to a spawned worker uses the userspace direct-handoff
+/// path (no per-message cross-thread futex), and a top-level `receive` parks-and-captures.
+pub fn spawn_root_program(
+    heap: &Heap,
+    src: &str,
+    file: Option<String>,
+) -> Result<Arc<crate::eval::compile::ProgramExit>, LispError> {
+    let prelude = heap.prelude_arc();
+    let runtime = heap.runtime_arc();
+    let mut child = Heap::with_regions(prelude, runtime);
+    child.set_global(EnvId::GLOBAL);
+
+    // Read the program into the child heap and pin every form on its root stack — the
+    // driver re-fetches each by index so a collection between forms relocates them safely.
+    let forms =
+        crate::syntax::reader::read_all_positioned(&mut child, src).map_err(|e| match &file {
+            Some(f) => e.or_file(f.clone()),
+            None => e,
+        })?;
+    let root_base = child.roots_len();
+    let mut positions = Vec::with_capacity(forms.len());
+    for (form, pos) in &forms {
+        child.push_root(*form);
+        positions.push(*pos);
+    }
+
+    let exit = crate::eval::compile::ProgramExit::new();
+    let prog =
+        crate::eval::compile::ProgramState::new(root_base, positions, file, Arc::clone(&exit));
+
+    // Register the process exactly as `spawn_impl` does (minus the body-thunk promote): a
+    // mailbox in the REGISTRY, the live-process gauge, no parent (it's the root program).
+    let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+    SPAWNED.fetch_add(1, Ordering::SeqCst);
+    crate::core::heap::live_process_inc();
+    let mailbox = Mailbox::new();
+    crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
+
+    ensure_workers();
+    let worker_id = pick_spawn_worker();
+    enqueue(Box::new(Process {
+        pid,
+        mailbox,
+        worker_id,
+        heap: child,
+        body: Value::nil(),
+        program: Some(Box::new(prog)),
+        resume: None,
+        capture: Vec::new(),
+    }));
+    Ok(exit)
 }
 
 /// `(self)` — this process's pid.

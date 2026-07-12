@@ -153,6 +153,19 @@ impl Interp {
         }
     }
 
+    /// Run a whole top-level program (`brood file.blsp`) as a single green process
+    /// (ADR-135), blocking this (root) thread until it finishes. Unlike [`eval_source`],
+    /// which runs the forms on the root thread — where a top-level `receive` blocks the
+    /// OS thread and every message to a spawned worker crosses a thread boundary — the
+    /// program runs on a worker in capture mode, so it uses the userspace direct-handoff
+    /// path and its top-level `receive`s park-and-capture. `file` tags errors with a
+    /// path. Returns `Err(message)` if a top-level form raised (message pre-located).
+    pub fn run_program(&mut self, src: &str, file: Option<String>) -> Result<(), String> {
+        let exit = process::spawn_root_program(&self.heap, src, file)
+            .map_err(|e| e.located().to_string())?;
+        exit.wait()
+    }
+
     /// Read every form in `src`, evaluate each against the global environment,
     /// and return the value of the last.
     pub fn eval_str(&mut self, src: &str) -> Result<Value, LispError> {
