@@ -64,20 +64,28 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;; returns `[value next-index]`. Whitespace is skipped between tokens. Tail
 ;; recursion + accumulators throughout; `error` on anything malformed.
 
+;; The parser indexes a CODE-POINT VECTOR (built once in `json-parse`), not the raw
+;; string. `char-at` on a UTF-8 string is O(i), so calling it at every position made
+;; parsing O(n^2); vector `nth` is O(1), so the parser is O(n). `s` in every parser
+;; helper below is that char vector.
 (defn json--at (s i n)
   "The char at `i`, or \"\" at/after the end (so callers never index past `n`)."
-  (if (< i n) (char-at s i) ""))
+  (if (< i n) (nth s i) ""))
+
+(defn json--slice (s i end)
+  "The chars [i, end) of the code-point vector `s`, joined back into a string."
+  (apply str (subvec s i end)))
 
 (defn json--ws? (c) (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
 
 (defn json--skip-ws (s i n)
-  (if (and (< i n) (json--ws? (char-at s i))) (json--skip-ws s (inc i) n) i))
+  (if (and (< i n) (json--ws? (nth s i))) (json--skip-ws s (inc i) n) i))
 
 (defn json--digit? (c) (includes? "0123456789" c))
 
 ;; -- numbers --
 (defn json--num-end (s i n)
-  (if (and (< i n) (or (json--digit? (char-at s i)) (includes? "-+.eE" (char-at s i))))
+  (if (and (< i n) (or (json--digit? (nth s i)) (includes? "-+.eE" (nth s i))))
     (json--num-end s (inc i) n)
     i))
 
@@ -131,7 +139,7 @@ nil if malformed."
 
 (defn json--number (s i n)
   (let (end (json--num-end s i n)
-        tok (substring s i end))
+        tok (json--slice s i end))
     (if (json--strict-number? tok)
       [(string->number tok) end]
       (error "json: invalid number '" tok "' at index " i))))
@@ -141,10 +149,10 @@ nil if malformed."
 
 (defn json--hex4 (s i)
   "The int value of the four hex digits at `i` (a `\\uXXXX` body)."
-  (+ (* 4096 (json--hex-val (char-at s i)))
-    (* 256 (json--hex-val (char-at s (+ i 1))))
-    (* 16 (json--hex-val (char-at s (+ i 2))))
-    (json--hex-val (char-at s (+ i 3)))))
+  (+ (* 4096 (json--hex-val (nth s i)))
+    (* 256 (json--hex-val (nth s (+ i 1))))
+    (* 16 (json--hex-val (nth s (+ i 2))))
+    (json--hex-val (nth s (+ i 3)))))
 
 (defn json--unicode (s i n)
   "A `\\uXXXX` escape body starting at `i` (after the `u`): decode one BMP code
@@ -155,7 +163,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
     (let (hi (json--hex4 s i))
       (if (and (>= hi 55296) (<= hi 56319))
         ; D800..DBFF: high surrogate
-        (if (and (<= (+ i 10) n) (= (substring s (+ i 4) (+ i 6)) "\\u"))
+        (if (and (<= (+ i 10) n) (= (json--slice s (+ i 4) (+ i 6)) "\\u"))
           (let (lo (json--hex4 s (+ i 6))
                 cp (+ 65536 (* 1024 (- hi 55296)) (- lo 56320)))
             [(json--cp->string cp) (+ i 10)])
@@ -195,7 +203,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
 ;; -- literals --
 (defn json--lit (s i n word val)
   (let (end (+ i (string-length word)))
-    (if (and (<= end n) (= (substring s i end) word))
+    (if (and (<= end n) (= (json--slice s i end) word))
       [val end]
       (error "json: invalid literal at index " i))))
 
@@ -262,7 +270,8 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
 a vector, string → string, number → int/float, true/false → bool, null → nil. Errors
 on malformed input or trailing content. Pure."
-  (let (n (string-length s)
+  (let (s (into [] (string->list s))   ; index a code-point vector (O(1) nth), not the
+        n (count s)                     ; raw UTF-8 string (char-at is O(i) → O(n^2) parse)
         i (json--skip-ws s 0 n))
     (if (>= i n)
       (error "json: empty input")

@@ -56,11 +56,9 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 
 (defn count-newlines (s)
   "How many `\\n` characters appear in string `s`."
-  (count-newlines--at s 0 (string-length s) 0))
-(defn count-newlines--at (s i n acc)
-  (if (= i n)
-    acc
-    (count-newlines--at s (inc i) n (if (= (substring s i (inc i)) "\n") (inc acc) acc))))
+  ;; Native O(n) split. A per-char `(substring s i (inc i))` loop is O(n^2) —
+  ;; `substring` walks to char boundary `i` each call.
+  (dec (count (string-split s "\n"))))
 
 ;; (`string-repeat` is the prelude's — it used to be redefined here with an
 ;; accumulator that did `(str acc s)` each step (O(total length²)); the prelude's

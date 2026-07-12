@@ -3472,3 +3472,42 @@ Aside (pre-existing, unrelated — confirmed on the pre-change HEAD binary): the
 green-process receive (ADR-100 §8.4); `make test` runs the default VM engine, so
 this is never surfaced there. Noted, not fixed (out of scope — the tree-walker is
 being phased out per ADR-076).
+
+## 2026-07-12 — Kill an O(n²) landmine in `string->list` (and the `(str acc …)` / `char-at`-scan family)
+
+Chasing the last-place wider-range benchmarks (`../brood-benchmarks`: json super-linear,
+base64 1.3 GB RSS). The base64/json fixes had been rewritten to index a **code-point
+vector** — `(into [] (string->list s))` + O(1) `nth` — to escape `char-at`'s O(i) UTF-8
+walk. But the benchmarks stayed quadratic. Root cause, found by bisection:
+
+- **`string->list` was itself O(n²).** It built each char with `(substring s i (inc i))`,
+  and `substring` walks to char boundary `i` each call — so `(into [] (string->list s))`
+  was O(n²) to *construct*, silently defeating the whole char-vector rewrite. Reimplemented
+  over the native `string-split s ""` (one O(n) `chars()` pass). This one line is the big
+  win — it fixes json parse, base64/hex, and every caller of `string->list`.
+- **`(reduce … (bytes-value))` was O(n²).** `fold`/`reduce`/`map` walk with `first`/`rest`,
+  and `(rest bytes)` **copies** all-but-first byte — O(n) per step. Fixed generally in
+  `seq` (prelude): a `bytes` value is realised to a list once via `bytes->list`, so every
+  sequence op over bytes is O(n). (base64 decode-sum: 1.37 GB → 96 MB.)
+
+Then swept the same two anti-patterns — per-char `char-at`/`substring` scans, and
+`(str acc …)` accumulation (each `str` copies the whole accumulator) — across `std/`:
+- **`std/csv.blsp`** — parser now indexes a code-point vector (`nth`, not `char-at`), and
+  a field is a reversed char-list joined once (was `(str field-acc c)` per char).
+- **`std/net/tcp.blsp` + `std/net/http.blsp`** — `tcp-drain*` and `http--collect` cons the
+  TCP chunks and `(apply str (reverse …))` once at close (was `(str acc d)` per chunk,
+  O(body²) on a large response). (The request-read path was already chunk-listed.)
+- **`std/url.blsp`** — `percent-encode`/`percent-decode`/`query-encode` accumulate pieces
+  in a reversed list and scan a code-point vector.
+- **`std/format.blsp`** — `count-newlines` via native `string-split` (was per-char `substring`).
+
+Results: json 2000 **2.5 s → 0.93 s**, 5000 **12.7 s → 2.36 s** (was O(n²), now ~linear);
+base64 50k **1.39 s / 1.3 GB → 0.25 s / 106 MB**; csv-parse now ~linear. Full suite
+(777 Rust + Brood) green; `nest check` zero warnings; rustfmt clean.
+
+Deliberately **not** touched (low value / high risk): the `std/format.blsp` pretty-printer
+(`render--*` interleaves `(str acc …)` with `(string-length acc)` alignment reads, and it
+formats bounded per-form source), the prelude `format`/`datetime` format-string loops
+(short format strings), and the `std/editor/*` + `std/tool/sexp.blsp` `char-at` buffer
+scanners (large, sensitive surface; assess whether they scan ropes or extracted strings
+before converting).

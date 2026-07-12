@@ -40,21 +40,23 @@
   "Encode a single byte `b` as a %XX string (uppercase hex)."
   (str "%" (char-at url--hex-upper (quot b 16)) (char-at url--hex-upper (rem b 16))))
 
+;; `acc` is the emitted pieces in reverse; `percent-encode` joins once. `(str acc …)`
+;; per byte rebuilt the whole accumulator each step — O(n^2) over a long input.
 (defn url--encode-bytes (bytes acc)
   "Encode a list of byte ints, emitting unreserved ASCII codepoints as-is and
-encoding everything else as %XX. Accumulates into `acc`."
+encoding everything else as %XX. Accumulates pieces into the reversed list `acc`."
   (if (empty? bytes)
     acc
     (let (b (first bytes))
       (url--encode-bytes
         (rest bytes)
-        (str acc (if (url--unreserved? b) (int->char b) (url--byte->pct b)))))))
+        (cons (if (url--unreserved? b) (int->char b) (url--byte->pct b)) acc)))))
 
 (defn percent-encode (s)
   "Percent-encode string `s` for use in a URL path or query component. Every byte
 that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 %XX (uppercase hex). Multi-byte UTF-8 sequences are encoded byte-by-byte."
-  (url--encode-bytes (seq (string->utf8-bytes s)) ""))
+  (apply str (reverse (url--encode-bytes (seq (string->utf8-bytes s)) nil))))
 
 ;; ---- percent-decoding -------------------------------------------------------
 
@@ -64,17 +66,19 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
    "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
    "A" 10 "B" 11 "C" 12 "D" 13 "E" 14 "F" 15})
 
+;; `s` is a CODE-POINT VECTOR (built once in `percent-decode`), so char access is
+;; O(1) `nth` — `char-at` on the raw UTF-8 string is O(i), making the scan O(n^2).
 (defn url--pct-decode-loop (s i n acc)
-  "Decode percent-encoded string `s` (length `n`), accumulating decoded bytes into `acc`."
+  "Decode percent-encoded code-point vector `s` (length `n`), accumulating decoded bytes into `acc`."
   (if (>= i n)
     (utf8-bytes->string (reverse acc))
-    (let (c (char-at s i))
+    (let (c (nth s i))
       (if (= c "%")
         (if (>= (+ i 2) n)
           ;; Incomplete %XX — emit the % literally as a byte
           (url--pct-decode-loop s (+ i 1) n (cons (char->int c) acc))
-          (let (hi (get url--hex-val (char-at s (+ i 1)))
-                lo (get url--hex-val (char-at s (+ i 2))))
+          (let (hi (get url--hex-val (nth s (+ i 1)))
+                lo (get url--hex-val (nth s (+ i 2))))
             (if (and hi lo)
               (url--pct-decode-loop s (+ i 3) n (cons (+ (* hi 16) lo) acc))
               ;; Not a valid %XX — emit the % literally and re-process
@@ -86,29 +90,32 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 (defn percent-decode (s)
   "Decode percent-encoded sequences in `s`, returning the original string.
 Invalid or incomplete %XX sequences are passed through as-is."
-  (url--pct-decode-loop s 0 (string-length s) nil))
+  (let (v (into [] (string->list s)))
+    (url--pct-decode-loop v 0 (count v) nil)))
 
 ;; ---- query string encoding --------------------------------------------------
 ;;
 ;; application/x-www-form-urlencoded: space → +, rest percent-encoded (same
 ;; unreserved set). Keys and values are percent-encoded individually.
 
+;; Reversed piece list, joined once by `url--query-encode-str` (see url--encode-bytes).
 (defn url--qenc-bytes (bytes acc)
   (if (empty? bytes)
     acc
     (let (b (first bytes))
       (url--qenc-bytes
         (rest bytes)
-        (str acc
+        (cons
           (cond
             (url--unreserved? b) (int->char b)
             (= b 32)             "+"
-            else                 (url--byte->pct b)))))))
+            else                 (url--byte->pct b))
+          acc)))))
 
 (defn url--query-encode-str (s)
   "Encode a single key or value for use in a query string: unreserved chars
 pass through, space becomes +, all other bytes become %XX."
-  (url--qenc-bytes (seq (string->utf8-bytes s)) ""))
+  (apply str (reverse (url--qenc-bytes (seq (string->utf8-bytes s)) nil))))
 
 (defn url--pairs->query (pairs acc first?)
   "Encode a list of `[key value]` pairs as a query string."
@@ -118,7 +125,7 @@ pass through, space becomes +, all other bytes become %XX."
           k  (url--query-encode-str (first kv))
           v  (url--query-encode-str (second kv))
           sep (if first? "" "&"))
-      (url--pairs->query (rest pairs) (str acc sep k "=" v) false))))
+      (url--pairs->query (rest pairs) (cons (str sep k "=" v) acc) false))))
 
 (defn query-encode (params)
   "Encode a map of string→string (or keyword→string) params as a
@@ -130,7 +137,7 @@ pass through, space becomes +, all other bytes become %XX."
                                    (str (first kv)))
                                  (str (second kv))))
                          (map-pairs params))))
-    (url--pairs->query pairs "" true)))
+    (apply str (reverse (url--pairs->query pairs nil true)))))
 
 ;; ---- query string decoding --------------------------------------------------
 

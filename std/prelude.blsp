@@ -71,10 +71,16 @@
 ;; `type-of`, `map-pairs`) because `fold` calls it before the `map?` predicate /
 ;; `cond` macro are available.
 (defn seq (coll)
-  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
+  "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; a bytes value becomes its list of ints; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
   (if (range? coll) (%range->list coll)
     (if (seqview? coll) (%seqview-realize coll)
-      (if (%eq (type-of coll) :map) (map-pairs coll) coll))))
+      (let (t (type-of coll))
+        ;; A `bytes` value is realised to a list ONCE here: without this, fold/map/
+        ;; filter/reduce would walk it with `first`/`rest`, and `(rest bytes)` copies
+        ;; all-but-the-first byte — O(n) per step, O(n^2) total (a 50k-byte reduce
+        ;; spiked ~1.3 GB RSS). `bytes->list` is a single O(n) native pass.
+        (if (%eq t :map) (map-pairs coll)
+          (if (%eq t :bytes) (bytes->list coll) coll))))))
 (def entries map-pairs)
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
@@ -2327,11 +2333,13 @@ iterating for side effects."
   "The textual form of number `n` — the inverse of `string->number`."
   (str n))
 
-(defn string->list--acc (s i acc)
-  (if (< i 0) acc (string->list--acc s (dec i) (cons (substring s i (inc i)) acc))))
 (defn string->list (s)
   "The characters of `s` as a list of 1-char strings."
-  (string->list--acc s (dec (string-length s)) nil))
+  ;; One native O(n) `chars()` pass. A pure-Brood `(substring s i (inc i))` loop
+  ;; is O(n^2) — `substring` walks to char boundary `i` each call — which silently
+  ;; makes every `(into [] (string->list s))` code-point vector O(n^2) to build
+  ;; (it defeated the json/base64 char-indexing rewrites; see docs/devlog.md).
+  (string-split s ""))
 
 (defn list->string (cs)
   "Concatenate a list of strings (e.g. from `string->list`) into one string."

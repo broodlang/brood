@@ -67,15 +67,16 @@ UTF-8-encodes a string."
 (defn encoding--hex-decode-loop (s i n acc)
   (if (>= i n)
     (reverse acc)
-    (let (hi (get encoding--hex-val (char-at s i))
-          lo (get encoding--hex-val (char-at s (+ i 1))))
+    (let (hi (get encoding--hex-val (nth s i))
+          lo (get encoding--hex-val (nth s (+ i 1))))
       (if (and hi lo)
         (encoding--hex-decode-loop s (+ i 2) n
           (cons (+ (* hi 16) lo) acc))
         :invalid))))
 
 (defn encoding--hex-decode-bytelist (s)
-  (let (n (string-length s))
+  (let (s (into [] (string->list s))   ; char vector: O(1) nth, not char-at O(i)
+        n (count s))
     (if (= (rem n 2) 0)
       (encoding--hex-decode-loop s 0 n nil)
       :invalid)))
@@ -97,55 +98,63 @@ binary payload (digests, salts, wire bytes)."
 (def encoding--b64-std  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
 (def encoding--b64-url  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
-;; Encode a list of byte integers to base64 using the given 64-char alphabet.
-(defn encoding--b64-encode (bytes alpha)
-  (encoding--b64-enc-loop bytes alpha ""))
+;; Code-point vectors for the two alphabets (all ASCII), so the encoder conses
+;; ASCII byte codes and builds the string ONCE with utf8-bytes->string — like
+;; hex-encode. The old `(str acc …)` per 3-byte group was O(n^2) (each str copies
+;; the whole accumulator) and spiked peak RSS on large inputs.
+(def encoding--b64-std-codes (into [] (map char->int (string->list encoding--b64-std))))
+(def encoding--b64-url-codes (into [] (map char->int (string->list encoding--b64-url))))
+(def encoding--b64-pad 61)   ; the code point of "="
 
-(defn encoding--b64-enc-loop (bytes alpha acc)
+;; Encode a byte sequence to base64 using the given 64-entry code-point vector.
+(defn encoding--b64-encode (bytes codes)
+  (utf8-bytes->string (encoding--b64-enc-loop (seq bytes) codes nil)))
+
+(defn encoding--b64-enc-loop (bytes codes acc)
   (if (empty? bytes)
-    acc
+    (reverse acc)
     (let (b1   (first bytes)
           rest1 (rest bytes))
       (if (empty? rest1)
         ;; 1-byte tail: 2 chars + "=="
-        (let (c1 (char-at alpha (quot b1 4))
-              c2 (char-at alpha (* (rem b1 4) 16)))
-          (str acc c1 c2 "=="))
+        (reverse (cons encoding--b64-pad
+                 (cons encoding--b64-pad
+                 (cons (nth codes (* (rem b1 4) 16))
+                 (cons (nth codes (quot b1 4)) acc)))))
         (let (b2    (first rest1)
               rest2  (rest rest1))
           (if (empty? rest2)
             ;; 2-byte tail: 3 chars + "="
-            (let (c1 (char-at alpha (quot b1 4))
-                  c2 (char-at alpha (+ (* (rem b1 4) 16) (quot b2 16)))
-                  c3 (char-at alpha (* (rem b2 16) 4)))
-              (str acc c1 c2 c3 "="))
+            (reverse (cons encoding--b64-pad
+                     (cons (nth codes (* (rem b2 16) 4))
+                     (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
+                     (cons (nth codes (quot b1 4)) acc)))))
             ;; full 3-byte group → 4 chars
-            (let (b3 (first rest2)
-                  c1 (char-at alpha (quot b1 4))
-                  c2 (char-at alpha (+ (* (rem b1 4) 16) (quot b2 16)))
-                  c3 (char-at alpha (+ (* (rem b2 16) 4) (quot b3 64)))
-                  c4 (char-at alpha (rem b3 64)))
-              (encoding--b64-enc-loop (rest rest2) alpha
-                (str acc c1 c2 c3 c4)))))))))
+            (let (b3 (first rest2))
+              (encoding--b64-enc-loop (rest rest2) codes
+                (cons (nth codes (rem b3 64))
+                (cons (nth codes (+ (* (rem b2 16) 4) (quot b3 64)))
+                (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
+                (cons (nth codes (quot b1 4)) acc))))))))))))
 
 (defn base64-encode (s)
   "Encode string `s` as standard Base64 (RFC 4648, `+/` alphabet, `=` padding)."
-  (encoding--b64-encode (seq (string->utf8-bytes s)) encoding--b64-std))
+  (encoding--b64-encode (string->utf8-bytes s) encoding--b64-std-codes))
 
 (defn base64-url-encode (s)
   "Encode string `s` as URL-safe Base64 (RFC 4648 §5, `-_` alphabet, `=` padding)."
-  (encoding--b64-encode (seq (string->utf8-bytes s)) encoding--b64-url))
+  (encoding--b64-encode (string->utf8-bytes s) encoding--b64-url-codes))
 
 (defn base64-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
 standard Base64. The byte-faithful counterpart of `base64-encode`, which first
 UTF-8-encodes a string — so a byte ≥ 0x80 encodes as one byte, not its two-byte
 UTF-8 form."
-  (encoding--b64-encode (seq bytes) encoding--b64-std))
+  (encoding--b64-encode bytes encoding--b64-std-codes))
 
 (defn base64-url-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as URL-safe Base64."
-  (encoding--b64-encode (seq bytes) encoding--b64-url))
+  (encoding--b64-encode bytes encoding--b64-url-codes))
 
 ;; Reverse lookup map: base64 char → 6-bit value (shared for both alphabets
 ;; because -/_ only differ from +// in the last two positions).
@@ -161,8 +170,8 @@ UTF-8 form."
 ;; input. As with hex, `:invalid` (not nil) keeps an empty valid input distinct
 ;; from a failure; the public wrappers map `:invalid` → nil.
 (defn encoding--b64-decode (s vals)
-  (let (s    (replace s "=" "")        ; strip padding
-        n    (string-length s)
+  (let (s    (into [] (string->list (replace s "=" "")))  ; char vector: O(1) nth
+        n    (count s)                 ; (char-at on the raw string is O(i) → O(n^2) decode)
         tail (rem n 4))
     (if (= tail 1)
       :invalid                         ; 1 leftover char is always invalid
@@ -172,20 +181,20 @@ UTF-8 form."
   (if (>= i n)
     (reverse acc)
     (let (remaining (- n i)
-          v1 (get vals (char-at s i))
-          v2 (if (>= remaining 2) (get vals (char-at s (+ i 1))) nil))
+          v1 (get vals (nth s i))
+          v2 (if (>= remaining 2) (get vals (nth s (+ i 1))) nil))
       (if (not (and v1 v2))
         :invalid
         (let (acc (cons (+ (* v1 4) (quot v2 16)) acc))
           (if (= remaining 2)
             (reverse acc)
-            (let (v3 (get vals (char-at s (+ i 2))))
+            (let (v3 (get vals (nth s (+ i 2))))
               (if (not v3)
                 :invalid
                 (let (acc (cons (+ (* (rem v2 16) 16) (quot v3 4)) acc))
                   (if (= remaining 3)
                     (reverse acc)
-                    (let (v4 (get vals (char-at s (+ i 3))))
+                    (let (v4 (get vals (nth s (+ i 3))))
                       (if (not v4)
                         :invalid
                         (let (acc (cons (+ (* (rem v3 4) 64) v4) acc))

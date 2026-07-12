@@ -26,17 +26,19 @@ helper. Policy is Brood; only the syscalls are Rust.")
 
 (defn tcp-drain (sock)
   "Receive `[:tcp sock data]` messages for `sock`, concatenating the chunks, until `[:tcp-closed sock]`; return the full string. For request/response protocols where the peer closes when its reply is complete (e.g. HTTP/1.0). Must be called by the socket's owning process."
-  (tcp--drain-acc sock ""))
+  (tcp--drain-acc sock nil))
 
+;; `acc` is the chunks in reverse; join once at close. `(str acc d)` per chunk
+;; rebuilt the whole accumulator each message — O(total^2) over a large response.
 (defn tcp--drain-acc (sock acc)
-  (receive ([:tcp ~sock d] (tcp--drain-acc sock (str acc d)))
-    ([:tcp-closed ~sock] acc)))
+  (receive ([:tcp ~sock d] (tcp--drain-acc sock (cons d acc)))
+    ([:tcp-closed ~sock] (apply str (reverse acc)))))
 
 (defn tcp-drain-timeout (sock ms)
   "Like `tcp-drain`, but give up after `ms` milliseconds of silence and return whatever was collected (tagged `[:timeout acc]` vs `[:closed acc]` so the caller can tell)."
-  (tcp--drain-to sock "" ms))
+  (tcp--drain-to sock nil ms))
 
 (defn tcp--drain-to (sock acc ms)
-  (receive ([:tcp ~sock d] (tcp--drain-to sock (str acc d) ms))
-    ([:tcp-closed ~sock] [:closed acc])
-    (after ms [:timeout acc])))
+  (receive ([:tcp ~sock d] (tcp--drain-to sock (cons d acc) ms))
+    ([:tcp-closed ~sock] [:closed (apply str (reverse acc))])
+    (after ms [:timeout (apply str (reverse acc))])))

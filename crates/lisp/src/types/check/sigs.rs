@@ -200,7 +200,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     put("char-at", Sig::new(vec![str_ty, int], str_ty));
     // String/list conversions: recursive helpers or `apply`.
-    //   string->list           — calls string->list--acc (recursive).
+    //   string->list           — (string-split s "").
     //   list->string           — (apply str cs).
     //   string-codepoints      — (into [] (map char->int (string->list s))).
     //   string-from-codepoints — (apply str (map int->char cs)).

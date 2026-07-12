@@ -336,9 +336,11 @@ socket is registered *passive* (no reader until the worker calls
      :body body}))
 
 ;; Collect the response delivered as messages until close; [:ok body] or [:error msg].
+;; `acc` is the chunks in reverse; join once at close. `(str acc d)` per chunk was
+;; O(body^2) over a large response body.
 (defn http--collect (sock acc)
-  (receive ([:tcp ~sock d] (http--collect sock (str acc d)))
-    ([:tcp-closed ~sock] [:ok acc])
+  (receive ([:tcp ~sock d] (http--collect sock (cons d acc)))
+    ([:tcp-closed ~sock] [:ok (apply str (reverse acc))])
     ([:tcp-error ~sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
 
@@ -372,7 +374,7 @@ JSON API, not arbitrary multi-byte payloads.)"
         sock (if (= (get u :scheme) "https")
                (tls-request (get u :host) (get u :port) req)
                (let (s (tcp-connect (get u :host) (get u :port))) (tcp-send s req) s)))
-    (let (result (http--collect sock ""))
+    (let (result (http--collect sock nil))
       (if (= (first result) :error)
         {:status 0 :error (second result) :headers {} :body ""}
         (parse-response (second result))))))
