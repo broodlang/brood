@@ -63,6 +63,48 @@ would retire the bug class at the language level. See hatch's
   call during the hatch work); and either fixing or erroring on **`let`
   vector-destructure of a list value**.
 
+### Elixir-parity performance gaps (2026-07-12)
+
+Benchmarked brood ÷ **Elixir** per row (`../brood-benchmarks`). Elixir is *also*
+immutable + GC'd + boxed-float + actor-based, so **every gap here is an
+implementation deficiency, not an "immutability tax"** — the bar is "match an
+immutable peer," and BEAM proves each is reachable. Ranked by ratio; `[kernel]`
+unless noted. (`regex`/`json`/`base64` are excluded as gaps here — Elixir wins those
+with native C libraries against our by-design pure-Brood code; narrowing pure-Brood
+codec speed is a separate, lower-priority track.)
+
+- ⬜ **`nbody` — 43× (float math across call chains).** Boxed-float arithmetic spread
+  across `newvel`/`advance-body` recursion; the unboxing JIT only covers tight
+  self-loops, and the profitability gate keeps these call-mediated arms on the VM
+  (interpreted, one boxed float alloc per op). Needs the JIT to keep floats unboxed
+  **across calls** (inline the small numeric helpers, or an f64-register calling
+  convention). Highest single ratio; hardest. **[kernel/JIT]**
+- ⬜ **`errors-deep` — 26× (throw/unwind cost).** 50-frame non-tail `descend` then
+  `throw`, ×50k. Diagnose whether the throw unwinds via the VM or defers to the
+  tree-walker, and whether `%try` setup allocates per-iteration. Likely a concrete
+  inefficiency, not a tuning grind — good early target. **[kernel]**
+- ⬜ **`sieve` — 22× (Table deep-copy per op).** Brood's `Table` deep-copies keys/values
+  in and out on every `get`/`put` (cross-process safety), pure waste for a
+  single-process sieve of scalar keys. Skip the copy for scalar/immutable values, or
+  when the table is provably single-owner. **[kernel]**
+- ⬜ **`nqueens` — 15× (backtracking allocation).** List/closure allocation per branch;
+  overlaps the HOF-fold and allocation paths. **[kernel]**
+- ⬜ **`ackermann` — 14× (non-tail double recursion).** Interpreted — the JIT covers
+  fib's non-tail *single* recursion but not this shape. Extend JIT recursion coverage.
+  **[kernel/JIT]**
+- ⬜ **`ring` / `pingpong` — 8× / 6× (residual message machinery).** Already cut from
+  ~13× (ADR-135 + wake elision); the remainder is per-message `to_message`/`from_message`
+  copy + continuation capture/restore. Trim the copy for small scalar messages; shrink
+  the capture. **[kernel]**
+- ⬜ **`bintree` — 7.5× (GC / allocation pressure).** Build+walk trees; per-node alloc +
+  minor-GC throughput vs BEAM. **[kernel]**
+- ⬜ **`loop` — 6× (raw iteration overhead).** A JIT'd int tail loop is still ~7×/iter
+  vs BEAM (i64 worker engages but gives only ~12%). Per-iteration overhead: overflow-
+  checked add, reduction/safepoint tick, frame reset. Incremental JIT-tuning grind (BEAM
+  has a 25-yr lead) — expect small wins. **[kernel/JIT]**
+- ⬜ **`persistent-map` — 5.2× (CHAMP vs BEAM HAMT).** Read-modify-write churn; smallest
+  gap. Node-alloc / path-copy constant factors. **[kernel]**
+
 ### Findings from brood-life profiling (2026-06-13)
 
 The four-axis language review from optimising `brood-life` (a GUI Game of Life) was

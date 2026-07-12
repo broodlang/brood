@@ -39,11 +39,18 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
+/// One structural-hash bucket: the (key-clone, value-clone) pairs sharing a hash. Almost
+/// always length 1 — a genuine hash collision is rare — so the single entry is stored
+/// **inline** (`SmallVec<[_; 1]>`), saving a per-entry heap allocation. For a table with a
+/// million distinct scalar keys (a `sieve`) that is a million `Vec` allocations avoided:
+/// less RSS, less allocator churn, one fewer pointer-chase per `get`/`put`.
+type Bucket = smallvec::SmallVec<[(Message, Message); 1]>;
+
 /// One shared store: `hash → bucket of (key-clone, value-clone)`. A bucket holds the
 /// (rare) structural-hash collisions; equality within it is resolved against the
 /// caller's heap so it matches Brood's `=` exactly.
 struct Store {
-    data: Mutex<HashMap<u64, Vec<(Message, Message)>>>,
+    data: Mutex<HashMap<u64, Bucket>>,
 }
 
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<Store>>>> =
