@@ -249,3 +249,27 @@ call* passing unboxed typed args, skipping `brood_rt_call_slow` and all boxing. 
 in the codegen + a cross-arm registry). Do it on a branch/worktree; do **not** merge a
 half-ABI to main. The earlier float branch shows how a single wrong tag/coercion or a
 control-flow edge silently miscompiles or hangs — bisect with `BROOD_JIT_DUMP_IR` per arm.
+
+## Grounding correction (2026-07-12, measured with `BROOD_JIT_DUMP_IR`)
+
+Verified against the real IR: **nbody's own arms (`newvel`, `advance-body`, `drive`,
+`momentum`) do NOT lower at all** — the dump shows only the *prelude* helpers they call
+(`nth-list`, `fold`, `range`, `seqview?`, …) getting JIT'd. So nbody is VM-interpreting its
+own arms and calling into JIT'd prelude code with a **boxed** handoff each time.
+
+This **re-orders the plan**: the scalar self-worker (M1/M2 above) is *orthogonal* to nbody —
+its arms are call-mediated + `MakeVector`-returning (`[vx vy vz]`), which the pure-scalar
+worker never handles. **The whole nbody win lives in the general path** (`jit_lower_arm_inner`):
+
+1. **Get nbody's arms to lower first.** Find why `newvel`/`advance-body`/`drive` bail
+   `chunk_in_jit_subset` / the profitability gate (nested `(nth (nth b i) k)`, `cond`→nested
+   `if`, `MakeVector` return). Enabling them (they already have float-arith codegen from the
+   landed work) is the prerequisite — without it there is nothing to pass floats *between*.
+2. **Then the typed cross-arm ABI (Layer B / M3 above)** so those now-lowered arms pass
+   `f64` args to each other and to prelude helpers unboxed. Relax the profitability gate for
+   arms whose calls are all typed-native.
+
+Net: **start at the general path, not the scalar worker.** Milestone re-order: M1' = *make
+nbody's arms lower* (diagnose+enable the bail), M2' = typed native entry for the general
+path, M3' = cross-arm typed calls + gate relaxation. Branch: `perf/jit-float-calls`
+(worktree `../brood-jit-float`).
