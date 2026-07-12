@@ -383,6 +383,40 @@ pub(crate) fn jit_lower_arm(
             return Some(p);
         }
     }
+    // Profitability gate: **call-mediated boxed work does not win natively.** The general
+    // lowering only beats the bytecode VM when it keeps hot values *unboxed* — an inline
+    // small-vector read (`VectorRef`/`MakeVector`, bintree) or a register-carried self-tail
+    // loop (loop/collatz/mandelbrot; the unboxed-`i64`/float worker already returned above).
+    // An arm whose values flow through function calls and heap reads gains nothing: it must
+    // box/unbox a `Value` around each op *and* pay native-entry + FFI-callback + deopt cost,
+    // which the VM does without. This is `nbody`'s shape (`f`=`(nth (nth b i) k)`, plus
+    // `newvel`/`potential`/`advance-body`'s `f64` arith over `f` calls), where tiering
+    // measurably **regressed** the benchmark ~15-20%. So bail — keep it on the (faster) VM —
+    // when the arm makes a non-tail call and offers no unboxing signal:
+    //   * no `VectorRef`/`MakeVector` (rules bintree/matmul back in — they lower and win), and
+    //   * no self-tail loop, UNLESS the profile shows a `Float` slot (a recursive `f64`
+    //     accumulator like `newvel`, whose floats still arrive boxed from calls — no win),
+    // while a self-tail loop over *non-float* boxed values (`fold--loop`, so `reduce`/`pipeline`)
+    // is preserved.
+    if let Some(chunk) = arm.chunk.as_ref() {
+        let code = &chunk.code;
+        let has_inline_vec = code.iter().any(|i| {
+            matches!(
+                i,
+                Inst::MakeVector(_)
+                    | Inst::Prim2 { op: PrimOp::VectorRef, .. }
+                    | Inst::Prim2SlotSlot { op: PrimOp::VectorRef, .. }
+                    | Inst::Prim2SlotInt { op: PrimOp::VectorRef, .. }
+            )
+        });
+        let has_self_loop = code.iter().any(|i| matches!(i, Inst::SelfCall { .. }));
+        let has_float_slot = slot_tags
+            .iter()
+            .any(|&t| t == crate::core::value::Tag::Float as u8);
+        if non_tail_call_count(code) >= 1 && !has_inline_vec && (!has_self_loop || has_float_slot) {
+            return None;
+        }
+    }
     jit_lower_arm_inner(jit, arm, slot_tags, None)
 }
 
