@@ -63,7 +63,9 @@ captures, or backreferences yet."
   (let (neg (= (regex--peek pcs i) "^")
         start (if neg (inc i) i)
         [chars nxt] (regex--set-chars pcs start (list)))
-    [{:t :set :neg neg :chars chars} nxt]))
+    ;; Store members as a STRING so membership is a native `string-contains?` (one
+    ;; Rust scan) instead of `some?` walking a list of 1-char strings per input char.
+    [{:t :set :neg neg :chars (apply str chars)} nxt]))
 
 (defn regex--atom (pcs i)
   "Parse one atom at `i`; returns [atom next]."
@@ -110,6 +112,20 @@ captures, or backreferences yet."
   "Parse `pattern` into its list of top-level branches."
   (first (regex--alt (apply vector (string->list pattern)) 0)))
 
+;; A pattern is almost always a literal reused across many match calls (a loop, a
+;; filter), so memoise the parse: pattern string -> branch AST. Re-parsing a literal
+;; on every `matches?`/`match?` was ~half the cost of a match-in-a-loop workload. The
+;; cache is a Table (the one mutable structure), keyed by the pattern string.
+(def regex--cache (table))
+(defn regex--compile (pattern)
+  "The parsed branch list for `pattern`, memoised across calls."
+  (let (hit (table-get regex--cache pattern))
+    (if (nil? hit)
+      (let (ast (regex--parse pattern))
+        (table-put regex--cache pattern ast)
+        ast)
+      hit)))
+
 ;; ---- match: CPS backtracking over the AST -----------------------------------
 ;; Each matcher takes the char vector `cs`, its length `n`, a position `i`, and a
 ;; continuation `k` (`(i') -> bool`: does the rest of the pattern match from `i'`).
@@ -122,9 +138,9 @@ captures, or backreferences yet."
 
 (defn regex--class-match? (k c)
   (cond
-    (= k :digit) (regex--member? (string->list "0123456789") c)
-    (= k :space) (regex--member? (string->list " \t\n\r") c)
-    (= k :word) (or (regex--letter? c) (regex--member? (string->list "0123456789") c) (= c "_"))
+    (= k :digit) (string-contains? "0123456789" c)
+    (= k :space) (string-contains? " \t\n\r" c)
+    (= k :word) (or (regex--letter? c) (string-contains? "0123456789" c) (= c "_"))
     :else false))
 
 (defn regex--atom-match (a cs n i k)
@@ -137,7 +153,7 @@ captures, or backreferences yet."
       ; the rest need a char
       (= t :lit) (if (= (nth cs i) (get a :c)) (k (inc i)) false)
       (= t :any) (k (inc i))
-      (= t :set) (let (m (regex--member? (get a :chars) (nth cs i)))
+      (= t :set) (let (m (string-contains? (get a :chars) (nth cs i)))
                    (if (if (get a :neg) (not m) m) (k (inc i)) false))
       (= t :class) (if (regex--class-match? (get a :k) (nth cs i)) (k (inc i)) false)
       :else false)))
@@ -182,9 +198,9 @@ captures, or backreferences yet."
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
 start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix."
   (let (cs (apply vector (string->list s)))
-    (regex--search (regex--parse pattern) cs (count cs) 0)))
+    (regex--search (regex--compile pattern) cs (count cs) 0)))
 
 (defn matches? (pattern s)
   "True if `pattern` matches the **entire** string `s` (anchored both ends)."
   (let (cs (apply vector (string->list s)))
-    (regex--alt-match (regex--parse pattern) cs (count cs) 0 (fn (i) (= i (count cs))))))
+    (regex--alt-match (regex--compile pattern) cs (count cs) 0 (fn (i) (= i (count cs))))))
