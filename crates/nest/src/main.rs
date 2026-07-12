@@ -630,7 +630,17 @@ fn cmd_run(
         // `src/` is on `*load-path*` (the file can `(require 'foo)` other
         // project modules), but *don't* eager-load every source — otherwise a
         // file under `src/` would run twice (once via the walker, once via the
-        // explicit `load`). Outside a project, plain `brood <file>`.
+        // explicit run). Outside a project, plain `brood <file>`.
+        //
+        // Non-wrap: run the file as its own green process (ADR-135, via
+        // `%run-program-file`) so it matches `brood FILE` — a top-level driver
+        // talking to a spawned worker uses the userspace direct-handoff path and
+        // top-level `receive`s park-and-capture, instead of `load`'s inline
+        // tree-walk (which blocks the thread on a top-level receive). The
+        // `--watch`/`--for` (`wrap`) path embeds `run_form` inside a `(%spawn …)`;
+        // a nested program-process spawn+block would native-nest, so it keeps the
+        // inline `load` there.
+        Some(path) if !wrap => brood::introspect::call_form("%run-program-file", &[path]),
         Some(path) => brood::introspect::call_form("load", &[path]),
     };
     // `--main module/fn` overrides the manifest's `:main` for this run only.

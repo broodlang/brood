@@ -8551,5 +8551,9 @@ trade away). `(self)` at the top level is now a normal process pid, not the root
 BEAM-consistent; nothing depended on the old value). Top-level macro semantics are
 unchanged (per-form interleave preserved). The root/main thread keeps owning stdout,
 terminal teardown, and exit-code translation; a program that never messages is unaffected
-in behavior. The REPL keeps its main-thread loop for now (interactive line-editing is not a
-throughput path); moving it onto the same mechanism is a follow-on.
+in behavior. `nest run FILE` routes through the same path via a `%run-program-file`
+primitive (mechanism the language can't express from within a closure — per-form capture
+driving), so a project run gets the fast path too; project setup runs first on the main
+thread and its `*load-path*` `def` is a shared global the program process sees. The
+`--watch`/`--for` wrap (which already spawns the program under a monitor) and the REPL keep
+their existing paths for now — moving them onto the mechanism is a follow-on.

@@ -576,6 +576,39 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     result
 }
 
+/// `(%run-program-file "path")` — run a program **file** as its own green process
+/// (ADR-135) and block until it finishes, returning nil (or raising if a top-level form
+/// did). Unlike `load` — which tree-walks the file's forms inline, so a top-level
+/// `receive` blocks the caller's thread — this drives the file as a real process on a
+/// worker in capture mode: a top-level driver talking to a spawned worker uses the
+/// userspace direct-handoff path, and top-level `receive`s park-and-capture. It shares
+/// this runtime's globals/`*load-path*`, so a preceding `project-setup` (which `def`s the
+/// path) is visible to the file's `(require …)`. `nest run FILE` routes here so a run
+/// script gets the same fast path as `brood FILE`.
+pub(super) fn run_program_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "%run-program-file", arg(args, 0))?;
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("%run-program-file: cannot read {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    let exit = crate::process::spawn_root_program(heap, &src, Some(path.clone()))
+        .map_err(|e| e.or_file(path.clone()))?;
+    match exit.wait() {
+        Ok(()) => Ok(Value::nil()),
+        // The program raised. The message is already `FILE:LINE:COL:`-tagged by the
+        // program driver, so print it and exit 1 exactly as `brood FILE` does (run_files)
+        // rather than returning an error the caller would re-decorate with a meaningless
+        // position inside the generated run script. Restore the terminal first (a TUI that
+        // threw before its `term-leave` would otherwise wedge the shell); `process::exit`
+        // skips Drop, so do it explicitly — the same no-op-unless-raw call the CLI makes.
+        Err(msg) => {
+            crate::builtins::restore_terminal_on_exit();
+            eprintln!("{}", msg);
+            std::process::exit(1);
+        }
+    }
+}
+
 /// `(eval-string "src")` — read and evaluate every form in a string against the
 /// global environment. Inherits the current namespace (ADR-065): the REPL evaluates
 /// each entry through here, so a `(ns foo)` typed at the REPL sticks to later

@@ -1574,6 +1574,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%run-program-file",
+        Arity::exact(1),
+        Sig::new(vec![string], any),
+        run_program_file,
+    );
+    def(
+        heap,
         "reload-defs",
         Arity::exact(1),
         Sig::new(vec![string], nil_ty),
@@ -2585,6 +2592,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tree-sitter-forget", &["key"], "Drop every cached incremental tree for integer buffer id `key` (all languages); returns the count dropped. Call when a buffer closes so tree-sitter-reparse's cache can't grow unbounded."),
     ("eval-string", &["s"], "Read and evaluate every form in string s (the string analogue of load)."),
     ("load", &["path"], "Read and evaluate every form in the file at path."),
+    ("%run-program-file", &["path"], "Run the program file at `path` as its own green process (ADR-135) and block until it finishes; nil, or raises if a top-level form did. Unlike `load` (which tree-walks inline, so a top-level `receive` blocks the caller), the file runs on a worker in capture mode — top-level `receive`s park-and-capture and message-passing uses the userspace direct-handoff path. Shares this runtime's globals/`*load-path*`. `nest run FILE` routes here."),
     ("reload-defs", &["path"], "Re-evaluate only the def-style top-level forms in `path` (def, defn, defmacro, defmodule, defdyn, …) — skipping other top-level calls. Used by file watchers to refresh code without re-running side-effecting top-level calls like a `(main-loop)`. Returns nil."),
     ("apply", &["f", "&", "args"], "Call f with the leading args plus the final list argument spliced in as trailing args."),
     ("name", &["x"], "The spelling of a symbol or keyword as a string (no leading colon)."),
