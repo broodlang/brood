@@ -956,6 +956,13 @@ impl Closure {
     /// accepts `argc` (an arity error). A single-arity closure always returns its
     /// sole arm when `argc` fits.
     pub fn select_arm(&self, argc: usize) -> Option<&ClosureArm> {
+        // Fast path: a single-arity closure — the overwhelming majority. Skip the
+        // filter + `max_by_key` iterator machinery (a measurable slice of call-heavy
+        // code like `nbody` — one arm-select per call). A direct arity check on the
+        // lone arm is identical in result.
+        if let [only] = self.arms.as_slice() {
+            return if only.accepts(argc) { Some(only) } else { None };
+        }
         self.arms
             .iter()
             .filter(|a| a.accepts(argc))
