@@ -995,7 +995,18 @@ pub(super) fn enqueue(proc: Box<Process>) {
     STEALABLE.fetch_add(1, Ordering::SeqCst);
     let (lock, cv) = &WORKERS[wid];
     crate::core::sync::lock(lock).push_back(proc);
-    cv.notify_one();
+    // Elide the wake syscall when we're enqueueing onto the very worker running THIS
+    // thread (the direct-handoff case: a `send` readying a receiver, run next on our own
+    // queue). `Condvar::notify_one` is an unconditional `futex_wake` syscall on Linux, but
+    // the current worker can't be parked on its own cv while it's here executing the
+    // enqueue — it will drain its own queue before it ever parks. On a `send`-then-`receive`
+    // ping-pong this removes ~1 futex syscall per message (measured ~2/round-trip → ~0).
+    // Any OTHER worker that might steal this process wakes via its own cv / steal-backoff,
+    // not ours, so the elision is invisible to them.
+    let on_current_worker = CURRENT_WORKER.with(|c| c.get()) == Some(wid);
+    if !on_current_worker {
+        cv.notify_one();
+    }
     // If no executor is live to run this (every fixed worker is dirty-blocked), spawn an
     // on-demand drainer. Closes the window the per-block check can't see: work woken (a
     // timer fire, a cross-worker wake) *after* the last executor already blocked.

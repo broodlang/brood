@@ -404,9 +404,18 @@ pub(crate) fn jit_lower_arm(
             matches!(
                 i,
                 Inst::MakeVector(_)
-                    | Inst::Prim2 { op: PrimOp::VectorRef, .. }
-                    | Inst::Prim2SlotSlot { op: PrimOp::VectorRef, .. }
-                    | Inst::Prim2SlotInt { op: PrimOp::VectorRef, .. }
+                    | Inst::Prim2 {
+                        op: PrimOp::VectorRef,
+                        ..
+                    }
+                    | Inst::Prim2SlotSlot {
+                        op: PrimOp::VectorRef,
+                        ..
+                    }
+                    | Inst::Prim2SlotInt {
+                        op: PrimOp::VectorRef,
+                        ..
+                    }
             )
         });
         let has_self_loop = code.iter().any(|i| matches!(i, Inst::SelfCall { .. }));
