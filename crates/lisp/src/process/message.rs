@@ -308,7 +308,7 @@ fn closure_to_message(
     let mut captured = Vec::new();
     if let Some(env) = cl.env {
         let mut mentioned = std::collections::HashSet::new();
-        for arm in &cl.arms {
+        for arm in cl.arms.iter() {
             for &form in &arm.body {
                 collect_symbols(heap, form, &mut mentioned);
             }
@@ -325,7 +325,7 @@ fn closure_to_message(
 
     // Deep-copy each arm's `&optional` defaults and body (code-as-data).
     let mut arms = Vec::with_capacity(cl.arms.len());
-    for arm in &cl.arms {
+    for arm in cl.arms.iter() {
         let optionals = arm
             .optionals
             .iter()

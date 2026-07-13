@@ -1415,7 +1415,10 @@ fn parse_closure_template(heap: &Heap, rest: Value) -> Result<ClosureTemplate, L
             arm.passthrough = heap.compute_passthrough(&arm);
             arms.push(arm);
         }
-        return Ok(ClosureTemplate { arms, doc });
+        return Ok(ClosureTemplate {
+            arms: arms.into(),
+            doc,
+        });
     }
 
     // Single-arity: `parts[0]` is the param list, `parts[1..]` the body.
@@ -1445,7 +1448,7 @@ fn parse_closure_template(heap: &Heap, rest: Value) -> Result<ClosureTemplate, L
     };
     arm.passthrough = heap.compute_passthrough(&arm);
     Ok(ClosureTemplate {
-        arms: vec![arm],
+        arms: std::sync::Arc::from([arm]),
         doc,
     })
 }
@@ -1537,6 +1540,12 @@ fn name_value(heap: &mut Heap, val: Value, name: Symbol) -> Value {
     }
     let mut c = heap.closure(id).clone();
     c.name = Some(name);
+    // `clone()` above *shares* the arms `Arc` with the original closure. Give the
+    // named copy its OWN arms: the shared-arms invariant (a shared arms holds only
+    // RUNTIME handles, so the minor-flush skips it) must not be violated by a pair of
+    // live LOCAL closures sharing one arms — the original may still be rooted when the
+    // next collection runs. Restores the pre-`Arc` deep-copy behaviour; def-time only.
+    c.arms = c.arms.iter().cloned().collect();
     let fresh = heap.alloc_closure(c);
     match val.unpack() {
         ValueRef::Macro(_) => Value::macro_(fresh),

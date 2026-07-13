@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, RwLock};
 
 use smallvec::SmallVec;
 
@@ -912,7 +912,18 @@ pub struct Closure {
     pub name: Option<Symbol>,
     /// Arity clauses, dispatched by argument count (always ≥ 1). A single-arity
     /// function has one arm; see [`ClosureArm`].
-    pub arms: Vec<ClosureArm>,
+    ///
+    /// **Shared behind an `Arc`** so building a closure from a parsed
+    /// [`ClosureTemplate`] (`eval::build_closure`) is a refcount bump, not a deep
+    /// clone of the arm `Vec` — every closure created in a loop (a `receive`
+    /// matcher, a per-frame callback) reuses one immutable arms allocation. The GC
+    /// rewrites arm handles in place through `Arc::get_mut` (unique) / `Arc::make_mut`
+    /// (shared, only on the rare RUNTIME compaction); a *shared* arms only ever holds
+    /// RUNTIME handles (it comes solely from the RUNTIME-keyed template cache), which
+    /// a minor collection never relocates — so the frequent minor-flush path skips a
+    /// shared arms entirely. See `eval::make_closure_cached` and the flush/compaction
+    /// sites in `heap.rs`.
+    pub arms: Arc<[ClosureArm]>,
     /// The docstring: a leading string literal in the `fn`/`defn` body, when
     /// more body follows it (a lone string is the return value, not docs — the
     /// CL/Elisp rule). Read by `(doc f)`; powers hover / signature help. See
@@ -937,14 +948,14 @@ impl Closure {
     ) -> Self {
         Closure {
             name,
-            arms: vec![ClosureArm {
+            arms: Arc::from([ClosureArm {
                 params,
                 optionals,
                 rest,
                 body,
                 // Filled by `Heap::alloc_closure` once the closure is interned.
                 passthrough: None,
-            }],
+            }]),
             doc,
             env,
         }
@@ -960,7 +971,7 @@ impl Closure {
         // filter + `max_by_key` iterator machinery (a measurable slice of call-heavy
         // code like `nbody` — one arm-select per call). A direct arity check on the
         // lone arm is identical in result.
-        if let [only] = self.arms.as_slice() {
+        if let [only] = &self.arms[..] {
             return if only.accepts(argc) { Some(only) } else { None };
         }
         self.arms
@@ -981,7 +992,9 @@ impl Closure {
 /// a bump of the RUNTIME `gen_version` (the only event that moves the AST handles
 /// the arms hold) drops it. See `eval::make_closure_cached`.
 pub struct ClosureTemplate {
-    pub arms: Vec<ClosureArm>,
+    /// Shared arms, so `build_closure` hands each instance an `Arc::clone` of this
+    /// exact allocation (the whole point of the cache) rather than a fresh copy.
+    pub arms: Arc<[ClosureArm]>,
     pub doc: Option<String>,
 }
 

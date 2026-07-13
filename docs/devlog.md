@@ -3553,3 +3553,37 @@ formats bounded per-form source), the prelude `format`/`datetime` format-string 
 (short format strings), and the `std/editor/*` + `std/tool/sexp.blsp` `char-at` buffer
 scanners (large, sensitive surface; assess whether they scan ropes or extracted strings
 before converting).
+
+## 2026-07-13 — Share closure arms behind an `Arc` (`ring` 2.02 → 1.50 s, ping-pong ~18%)
+
+Attacking the message-latency gap (`../brood-benchmarks` `ring`: 200 procs × 5000 laps =
+1M hops, ~7.4× Elixir; `pingpong`: 100k round-trips). Profiling put ~13% of `ring` in
+per-`receive` **matcher-closure churn**: the `receive` macro expands to
+`((%receive (fn (msg) …) …))`, so every message builds a fresh closure — and each build
+deep-cloned the arm `Vec` (params/optionals/body) out of the template cache, plus the
+matching alloc/free/memmove traffic that fed the GC.
+
+Fix: `Closure.arms` and `ClosureTemplate.arms` are now `Arc<[ClosureArm]>`, so
+`build_closure` hands each instance an `Arc::clone` of the cached template's arms — a
+refcount bump, not a copy. The GC rewrites arm handles in place: `Arc::get_mut` on the
+unique-owner paths (the hot **minor flush** and `alloc_closure` pass-through fill) and
+`Arc::make_mut` on the two rare relocating paths (prelude freeze, RUNTIME compaction).
+
+The correctness argument that makes this safe under the moving collector: a *shared* arms
+can come **only** from the RUNTIME-keyed template cache, so it holds only RUNTIME handles —
+which a minor collection never relocates. Therefore the minor-flush hot path can `get_mut`
+and **skip a shared arms entirely** (nothing to flush, no un-sharing clone), and only the
+rare def-churn compaction needs `make_mut` (the same `gen_version` bump that drives
+compaction also invalidates the template cache, so fresh closures re-share afterward).
+One latent trap fixed: `Closure::clone` now shallow-shares the `Arc`, so `name_value`
+(the `defn` naming copy) must deep-copy the arms — otherwise two live LOCAL closures could
+share one arms and defeat the skip invariant.
+
+Verified: full suite **777/777** green (incl. the 115 s in-language `brood_suite_passes`),
+doc-tests pass, rustfmt clean, `cargo clippy -p brood` clean on the touched files. GC
+stress (`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`): the compaction + shared-arms and
+`name_value`-churn stress cases pass, plus `vm_closures` 13/13. Perf (clean release-fast
+binary): `ring` **2.02 → ~1.50 s (~26%)**, `pingpong` **0.34 → ~0.28 s (~18%)** — the win
+is bigger than the 13% churn because killing the arm-`Vec` clone/drop also cuts the
+allocation/GC pressure that fed it. Files: `core/value.rs`, `eval/mod.rs`, `core/heap.rs`,
+`process/message.rs`.

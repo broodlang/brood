@@ -2159,7 +2159,10 @@ impl Heap {
             }
         }
         for c in &mut slabs.closures {
-            for arm in c.arms.iter_mut() {
+            // Prelude closures are built from LOCAL/PRELUDE `fn_rest` (never cached —
+            // the template cache is RUNTIME-keyed), so their arms are unique here and
+            // `make_mut` never clones; it's used for robustness, not sharing.
+            for arm in std::sync::Arc::make_mut(&mut c.arms).iter_mut() {
                 for f in arm.body.iter_mut() {
                     *f = to_prelude(*f);
                 }
@@ -3566,9 +3569,15 @@ impl Heap {
         // and a message-rebuilt one) flows through here. promote/freeze copy the
         // result verbatim, so it never has to be re-derived per call (see
         // `eval::passthrough_arm` and `ClosureArm::passthrough`).
-        for arm in &mut c.arms {
-            if arm.passthrough.is_none() {
-                arm.passthrough = self.compute_passthrough(arm);
+        // Unique arms (the case here — a freshly-built or message-rebuilt closure):
+        // fill each arm's pass-through in place. A *shared* arms (from the template
+        // cache) already had its pass-through computed once at parse time, so there is
+        // nothing to do — and `get_mut` correctly declines to mutate the shared alloc.
+        if let Some(arms) = Arc::get_mut(&mut c.arms) {
+            for arm in arms.iter_mut() {
+                if arm.passthrough.is_none() {
+                    arm.passthrough = self.compute_passthrough(arm);
+                }
             }
         }
         let idx = alloc_slot!(self, closures, c);
@@ -5694,7 +5703,7 @@ impl Heap {
                 ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => {
                     if visited.insert(id.index()) {
                         let cl = self.closure(id);
-                        for arm in &cl.arms {
+                        for arm in cl.arms.iter() {
                             work.extend(arm.body.iter().copied());
                             work.extend(arm.optionals.iter().map(|(_, d)| *d));
                         }
@@ -6295,7 +6304,7 @@ impl Heap {
                     }
                     if visited.insert((id.code_gen(), id.index())) {
                         let cl = self.closure(id);
-                        for arm in &cl.arms {
+                        for arm in cl.arms.iter() {
                             work.extend(arm.body.iter().copied());
                             work.extend(arm.optionals.iter().map(|(_, d)| *d));
                         }
@@ -7998,7 +8007,7 @@ impl Heap {
                             )
                         {
                             let cl = &slabs.closures[id.index()];
-                            for arm in &cl.arms {
+                            for arm in cl.arms.iter() {
                                 for &f in &arm.body {
                                     work.push(W::V(f, id.0));
                                 }
@@ -8625,17 +8634,19 @@ fn flush_nursery_old_refs(
                 nursery.closures[i].env = Some(flush_env(old_src, dest, fwd, env));
             }
         }
-        for arm_idx in 0..nursery.closures[i].arms.len() {
-            let n_opt = nursery.closures[i].arms[arm_idx].optionals.len();
-            for k in 0..n_opt {
-                let v = nursery.closures[i].arms[arm_idx].optionals[k].1;
-                nursery.closures[i].arms[arm_idx].optionals[k].1 =
-                    flush_value(old_src, dest, fwd, v);
-            }
-            let n_body = nursery.closures[i].arms[arm_idx].body.len();
-            for k in 0..n_body {
-                let v = nursery.closures[i].arms[arm_idx].body[k];
-                nursery.closures[i].arms[arm_idx].body[k] = flush_value(old_src, dest, fwd, v);
+        // A *shared* arms comes only from the RUNTIME-keyed template cache, so every
+        // handle it holds is RUNTIME — which a minor collection never relocates. So
+        // there is nothing to flush and `get_mut` correctly skips it (no un-sharing
+        // clone on the hot minor-GC path). Only a *unique* arms can hold LOCAL
+        // handles that this collection moved, and those we rewrite in place.
+        if let Some(arms) = std::sync::Arc::get_mut(&mut nursery.closures[i].arms) {
+            for arm in arms.iter_mut() {
+                for (_, d) in arm.optionals.iter_mut() {
+                    *d = flush_value(old_src, dest, fwd, *d);
+                }
+                for f in arm.body.iter_mut() {
+                    *f = flush_value(old_src, dest, fwd, *f);
+                }
             }
         }
     }
@@ -9147,7 +9158,7 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
     }
     for i in 0..nc {
         if let Some(cl) = s.closures.get(i).unwrap().get() {
-            for arm in &cl.arms {
+            for arm in cl.arms.iter() {
                 if !arm.body.iter().all(|&f| ok(f)) || !arm.optionals.iter().all(|&(_, d)| ok(d)) {
                     return false;
                 }
@@ -9204,7 +9215,13 @@ fn rewrite_local_rt_handles(
         }
     }
     for cl in s.closures.iter_mut() {
-        for arm in cl.arms.iter_mut() {
+        // Compaction relocates RUNTIME code, so a closure's arm handles — which point
+        // *into* RUNTIME whenever they're shared (the template cache) — must be
+        // rewritten. `make_mut` rewrites a unique arms in place and clones a shared one
+        // (un-sharing that closure). Unlike the minor-flush hot path this is fine: a
+        // RUNTIME compaction is rare (def-churn only), and the template cache is
+        // invalidated by the same `gen_version` bump, so fresh closures re-share after.
+        for arm in std::sync::Arc::make_mut(&mut cl.arms).iter_mut() {
             for f in arm.body.iter_mut() {
                 *f = flush_rt_value(old, new, fwd, *f);
             }
@@ -9689,7 +9706,8 @@ mod gen_handle_tests {
                 rest: None,
                 body: vec![],
                 passthrough: None,
-            }],
+            }]
+            .into(),
             doc: None,
             env: None,
         };
@@ -9737,7 +9755,8 @@ mod gen_handle_tests {
                 rest: None,
                 body: vec![keeper], // OLD string in body
                 passthrough: None,
-            }],
+            }]
+            .into(),
             doc: None,
             env: None,
         };
@@ -10011,7 +10030,8 @@ mod gen_handle_tests {
                 rest: None,
                 body: vec![keeper],
                 passthrough: None,
-            }],
+            }]
+            .into(),
             doc: None,
             env: None,
         };
