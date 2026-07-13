@@ -505,7 +505,14 @@ pub(crate) fn arm_i64_eligible(arm: &CompiledArm) -> bool {
 #[cfg(feature = "jit")]
 fn i64_has_self_call(node: &Node) -> bool {
     match node {
+        // A *non-tail* self-call is the "genuinely recursive, wins from a register frame" signal.
         Node::Call { .. } => true,
+        // A tail self-call is a loop, NOT the recursion signal — so `SelfCall` itself doesn't
+        // count (a pure-tail-recursive int fn like `loop`/`collatz` must stay on the faster
+        // self-tail-loop path, not divert to this recursive worker). But we DO recurse into its
+        // args, because a genuine non-tail `Call` can be nested there — Ackermann's inner
+        // `(ack m (- k 1))` sits inside the outer tail `(ack (- m 1) …)`'s arguments.
+        Node::SelfCall { args, .. } => args.iter().any(i64_has_self_call),
         Node::If(a, b, c) => i64_has_self_call(a) || i64_has_self_call(b) || i64_has_self_call(c),
         Node::Prim2 { a, b, .. } => i64_has_self_call(a) || i64_has_self_call(b),
         Node::LetBind { binds, body } => {
@@ -524,7 +531,15 @@ fn i64_has_self_call(node: &Node) -> bool {
 /// / `jit_force_vm`). Without that switch, a deep non-tail recursion would deopt-and-re-tier
 /// per level — a ~100× thrash.
 #[cfg(feature = "jit")]
-const I64_DEPTH_LIMIT: i64 = 1400;
+// Sized for the real stack, not the old (removed, ADR-100) coroutine stacks the `1400` was for:
+// a green process — including the top-level program — now runs on the 16 MiB worker-thread stack
+// (`WORKER_STACK_BYTES`) with a ~12 MiB budget. A register-worker frame is tiny (measured: a
+// simple 1-arg worker recurses past depth 290 000 — ~55 B/frame — before the guard page; a
+// spill-heavier arm like Ackermann is a few ×), so 32 768 leaves a >2× stack margin even at a
+// pessimistic ~200 B/frame while covering deep non-tail int recursion (Ackermann's ~4 k peak) that
+// the old cap forced onto the ~4× slower boxed path. Beyond it, the depth-bail still switches the
+// arm to the boxed path (which drains via heap frames), so a genuine runaway raises a clean error.
+const I64_DEPTH_LIMIT: i64 = 32768;
 
 /// Functions (by defining-`defn` name) that a depth-bail proved are too deeply recursive for the
 /// register worker — they run the boxed path instead (which drains gracefully). Process-global
@@ -632,6 +647,16 @@ fn i64_value_ok(
         } => {
             args.len() == nargs
                 && matches!(&**callee, Node::Global(s) | Node::GlobalIc { sym: s, .. } if *s == self_sym)
+                && args
+                    .iter()
+                    .all(|a| i64_value_ok(a, self_sym, nargs, bound, kind))
+        }
+        // A tail self-call (`SelfCall`) — always to self with exactly `nargs` args (its `compile_arm`
+        // gate rules out `&optional`/`&rest`). Lowered like a non-tail self-`Call`: the register
+        // worker recurses natively (no tail-loop), so a mixed tail+non-tail recursion (Ackermann)
+        // rides registers instead of falling to the boxed path. Each arg must be in-subset.
+        Node::SelfCall { args, .. } => {
+            args.len() == nargs
                 && args
                     .iter()
                     .all(|a| i64_value_ok(a, self_sym, nargs, bound, kind))
@@ -849,7 +874,11 @@ fn lower_i64_value(
             b.switch_to_block(merge);
             b.use_var(rv)
         }
-        Node::Call { args, .. } => {
+        // Both a non-tail self-`Call` (fib's argument-position recursion) and a tail `SelfCall`
+        // (Ackermann's cond-branch recursion) lower the same way here: the register worker has no
+        // tail-loop, so a tail call recurses natively just like a non-tail one (bounded by the
+        // depth cap → deopt). `SelfCall` always targets self with exactly `nargs` args.
+        Node::Call { args, .. } | Node::SelfCall { args, .. } => {
             // A self-call (checker-verified: `nargs` args, head == self). Register calling
             // convention: pass the args + depth+1 + the sentinel; no boxing / roots-staging /
             // fast-link dispatch. Lower every arg BEFORE the call (they read `params`, which the

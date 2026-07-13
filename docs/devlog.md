@@ -3587,3 +3587,39 @@ binary): `ring` **2.02 → ~1.50 s (~26%)**, `pingpong` **0.34 → ~0.28 s (~18%
 is bigger than the 13% churn because killing the arm-`Vec` clone/drop also cuts the
 allocation/GC pressure that fed it. Files: `core/value.rs`, `eval/mod.rs`, `core/heap.rs`,
 `process/message.rs`.
+
+## 2026-07-13 — Unboxed-i64 worker covers tail self-calls: `ackermann` 4.0 → 0.36 s (7/7 → 3/7)
+
+Chasing the last-place benchmarks (`../brood-benchmarks`). Ruled out four of the five 7/7 rows as
+structural (regex is driver-loop-bound not matcher-bound — its parse is already cached, so the FRONTIER
+note was stale; sieve/nbody/persistent-map are intrinsic immutable-model costs). Tried the fast-hasher
+first (SipHash→a splitmix64-finalized in-house mixer for `hash_value`): correct, but **reverted** — a
+lookup microbench showed hashing is <5 % of a map op (dispatch + CHAMP alloc dominate), so it didn't
+clear the "demonstrable broad win" bar.
+
+Then **profiled** `ackermann` instead of guessing: 98 % in `brood_jit_arm_8` — it was already JIT'd, just
+on the **boxed** path, not the unboxed-i64 register worker that took `fib` 227→54 ms. Traced why: the i64
+worker's subset checker (`i64_has_self_call` / `i64_value_ok`) and lowering only recognized `Node::Call`
+(a *non-tail*, argument-position self-call, like `fib`'s). Ackermann's recursion is in **tail** position
+→ `Node::SelfCall`, which the subset never matched, so `ack` fell to the boxed path. Secondary blocker:
+`I64_DEPTH_LIMIT = 1400` was stale — sized for the removed (ADR-100) coroutine stacks; a green process,
+incl. the top-level program, now runs on the 16 MiB worker-thread stack, and `ack`'s ~4093 non-tail
+depth overflowed 1400 and depth-bailed to boxed anyway.
+
+Fix (pure kernel, `eval/compile/jit_lower.rs`):
+- `i64_has_self_call` recurses *into* a `SelfCall`'s args (to find a genuinely-recursive nested `Call` —
+  Ackermann's inner `(ack m (- k 1))` lives inside the outer tail `(ack (- m 1) …)`) but a bare
+  `SelfCall` doesn't itself count, so a **pure-tail** int recursion (`loop`/`collatz`) still stays on
+  the faster self-tail-loop path, not this recursive worker.
+- `i64_value_ok` accepts `SelfCall` (validates `nargs` in-subset args); `lower_i64_value` lowers it
+  identically to a self `Call` (the worker has no tail-loop — a tail call recurses natively, bounded by
+  the depth cap → deopt).
+- `I64_DEPTH_LIMIT` 1400 → 32768 — stack-safe (measured ~55 B/frame; >2× margin at a pessimistic
+  ~200 B/frame on the 12 MiB budget), covering deep non-tail int recursion the old cap punted to boxed.
+
+Result: `ackermann` **4.02 → 0.36 s (~11×)**, now on `brood_jit_i64w_8` — by compute (~0.33 s) it's
+**7/7 → 3/7**, past Node/Clojure/Ruby/Python, behind only .NET and Elixir. Broad, not one-off: any mixed
+tail+non-tail int recursion now rides registers. Full suite **777/777** (incl. the 4-engine differential
+fuzzer); 4 engines agree bit-for-bit on `ack`/a second mixed shape; no regression on any JIT row
+(loop/collatz slightly *faster* — more depth stays on the fast path); runaway 5 M-deep recursion still
+raises a **clean error, not SIGSEGV** (depth-bail → boxed drain). rustfmt clean.
