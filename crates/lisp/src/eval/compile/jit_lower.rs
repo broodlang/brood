@@ -88,40 +88,6 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
 }
 
-/// True if the arm is eligible for register-carry of loop-carried integer params.
-/// In a pure-arithmetic self-tail loop (no non-tail Calls, no handle-producing ops), every
-/// param slot at the `SelfCall` back-edge is always `Value::Int`. We can carry those i64s
-/// in Cranelift `Variable`s instead of boxing to `roots` every iteration: reads skip the
-/// per-access tag-check + address arithmetic + two memory ops. The `roots` stores at
-/// `SelfCall` are kept (for deopt correctness); only reads change.
-#[cfg(feature = "jit")]
-fn int_carry_eligible(code: &[Inst]) -> bool {
-    code.iter().any(|i| matches!(i, Inst::SelfCall { .. }))
-        && !code.iter().any(|i| {
-            matches!(
-                i,
-                Inst::Call { tail: false, .. }
-                    | Inst::Prim1 {
-                        op: PrimOp1::First | PrimOp1::Rest,
-                        ..
-                    }
-                    | Inst::MakeVector(_)
-                    | Inst::Prim2 {
-                        op: PrimOp::Cons,
-                        ..
-                    }
-                    | Inst::Prim2SlotSlot {
-                        op: PrimOp::Cons,
-                        ..
-                    }
-                    | Inst::Prim2SlotInt {
-                        op: PrimOp::Cons,
-                        ..
-                    }
-            )
-        })
-}
-
 /// Count of non-tail Brood→Brood calls in `code` — the shape that needs a handle spill
 /// (≥2) and drives the spill-reserve / lowering gates.
 #[cfg(feature = "jit")]
@@ -177,10 +143,12 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
             in_subset_op(op)
         }
-        // A 2-element vector literal `[a b]` — lowered via `brood_rt_make_vector2`,
-        // the same bump-allocate path as `cons`. Only arity 2 (bintree's `make`);
-        // wider literals bail (they'd need a roots-staging variadic helper).
-        Inst::MakeVector(n) => *n == 2,
+        // A vector literal `[a …]`. Arity 2 (bintree's `make`) lowers via the inline
+        // `brood_rt_make_vector2`; a wider literal (nbody's `[vx vy vz]` / 7-body
+        // rebuild) stages its elements into a Cranelift stack slot and calls the
+        // variadic `brood_rt_make_vector_n`. Capped at 32 so the per-site staging slot
+        // stays small (a huge literal in a hot arm is unheard-of; it bails to the VM).
+        Inst::MakeVector(n) => *n <= 32,
         _ => false,
     })
 }
@@ -1654,6 +1622,18 @@ fn jit_lower_arm_inner(
     let makevec2_id = m
         .declare_function("brood_rt_make_vector2", Linkage::Import, &makevec2_sig)
         .ok()?;
+    // brood_rt_make_vector_n(heap, out, elems: *const Value, n) — builds an n-element
+    // vector from `n` `Value`s the JIT staged contiguously at `elems` (a stack slot it
+    // owns). The variadic `MakeVector(n != 2)` path; `alloc_vector` never collects, so
+    // the staged bytes stay live across the call (same discipline as make_vector2).
+    let mut makevecn_sig = m.make_signature();
+    makevecn_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    makevecn_sig.params.push(AbiParam::new(ptr_ty)); // out
+    makevecn_sig.params.push(AbiParam::new(ptr_ty)); // elems
+    makevecn_sig.params.push(AbiParam::new(types::I64)); // n
+    let makevecn_id = m
+        .declare_function("brood_rt_make_vector_n", Linkage::Import, &makevecn_sig)
+        .ok()?;
     // brood_rt_gc_safepoint(heap): collect if due (bounds the nursery for cons loops).
     let mut sp_sig = m.make_signature();
     sp_sig.params.push(AbiParam::new(ptr_ty));
@@ -1806,32 +1786,39 @@ fn jit_lower_arm_inner(
     // anything else (vector, nil, handle) is excluded — TAG_VEC would deopt on every call.
     let profile_tag_int = crate::core::value::Tag::Int as u8;
     let profile_tag_float_carry = crate::core::value::Tag::Float as u8;
-    let carry_vars: Vec<(Variable, bool)> = {
-        let candidate = if int_carry_eligible(code) {
-            code.iter()
-                .filter_map(|i| {
-                    if let Inst::SelfCall { argc } = i {
-                        Some(*argc)
-                    } else {
-                        None
-                    }
-                })
-                .max()
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        if candidate > 0
-            && (0..candidate).all(|k| {
-                let t = slot_tags.get(k).copied();
-                t == Some(profile_tag_int) || t == Some(profile_tag_float_carry)
+    // Per-slot: `Some((var, is_float))` carries param slot `k` in a Cranelift Variable;
+    // `None` leaves it on the frame (a handle/vector/nil slot — GC-relocatable, so it
+    // must stay rooted). A *pure* scalar self-tail loop (`loop`/`collatz`/`mandelbrot`)
+    // carries every slot (all `Some`) — bit-identical to the prior all-or-nothing path.
+    // The generalisation (Layer A) is that a **call-mediated** self-recursive arm mixing
+    // a handle with scalars — nbody's `newvel b:handle i:int j:int vx/vy/vz:float` — now
+    // carries just its scalar slots instead of bailing entirely, keeping those floats
+    // unboxed across the self-recursion. Sound because a scalar in a register is invisible
+    // to (and unmoved by) GC across a call safepoint, and a deopt always restarts the arm
+    // from the frame's last-SelfCall iteration inputs (the `roots` stores are kept), which
+    // the entry tag-check re-validates. The per-read `as_f64`/`load_slot_int` tag-check
+    // still guards a mistyped profile → deopt, so this can never miscompile.
+    let carry_vars: Vec<Option<(Variable, bool)>> = {
+        let has_self_call = code.iter().any(|i| matches!(i, Inst::SelfCall { .. }));
+        let max_argc = code
+            .iter()
+            .filter_map(|i| {
+                if let Inst::SelfCall { argc } = i {
+                    Some(*argc)
+                } else {
+                    None
+                }
             })
-        {
-            (0..candidate)
-                .map(|k| {
-                    let is_float = slot_tags.get(k).copied() == Some(profile_tag_float_carry);
-                    let ty = if is_float { types::F64 } else { types::I64 };
-                    (b.declare_var(ty), is_float)
+            .max()
+            .unwrap_or(0);
+        if has_self_call && max_argc > 0 {
+            (0..max_argc)
+                .map(|k| match slot_tags.get(k).copied() {
+                    Some(t) if t == profile_tag_int => Some((b.declare_var(types::I64), false)),
+                    Some(t) if t == profile_tag_float_carry => {
+                        Some((b.declare_var(types::F64), true))
+                    }
+                    _ => None,
                 })
                 .collect()
         } else {
@@ -1849,6 +1836,7 @@ fn jit_lower_arm_inner(
     let vobase_ref = m.declare_func_in_func(vobase_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
     let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
+    let makevecn_ref = m.declare_func_in_func(makevecn_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     #[cfg(debug_assertions)]
     let dbg_staging_ref = m.declare_func_in_func(dbg_staging_id, b.func);
@@ -2150,7 +2138,11 @@ fn jit_lower_arm_inner(
     // Initialize register-carry variables from roots (first iteration). Each param slot k is
     // tag-checked (Int or Float, per is_float) once at entry; subsequent iterations read
     // `use_var(carry_vars[k].0)` directly. Float slots are bitcast i64→f64.
-    for (k, &(var, is_float)) in carry_vars.iter().enumerate() {
+    for (k, entry) in carry_vars.iter().enumerate() {
+        let (var, is_float) = match *entry {
+            Some(x) => x,
+            None => continue, // handle/vector slot: stays on the frame, not register-carried
+        };
         let rb = b.use_var(rb_var);
         let idx = b.ins().iadd_imm(base, k as i64);
         let off = b.ins().imul_imm(idx, STRIDE);
@@ -2206,7 +2198,7 @@ fn jit_lower_arm_inner(
     // re-`def_var`s on the back-edge. `use_var` gives the current iteration's value without
     // any memory access or branch.
     let load_slot_int = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
-        if let Some(&(var, false)) = carry_vars.get(k as usize) {
+        if let Some((var, false)) = carry_vars.get(k as usize).copied().flatten() {
             return b.use_var(var);
         }
         let roots_base = b.use_var(rb_var);
@@ -2598,7 +2590,7 @@ fn jit_lower_arm_inner(
         match op {
             Op::Float(v) => v,
             Op::Slot(k) => {
-                if let Some(&(var, true)) = carry_vars.get(k) {
+                if let Some((var, true)) = carry_vars.get(k).copied().flatten() {
                     return b.use_var(var);
                 }
                 if let Some(v) = slot_f64_cache.borrow().get(k).copied().flatten() {
@@ -3392,21 +3384,61 @@ fn jit_lower_arm_inner(
                     }
                 }
                 Inst::MakeVector(n) => {
-                    // Only arity 2 reaches here (gated by `chunk_in_jit_subset`); bail
-                    // defensively otherwise. Same bump-allocate path as `cons`: read both
-                    // operands as words (source order — `a` deeper, `b` on top), allocate.
-                    if *n != 2 {
-                        return None;
+                    let n = *n;
+                    if n == 2 {
+                        // Arity-2 fast path: the same bump-allocate as `cons` via the
+                        // inline `alloc_vector2` (no temp `Vec`). Read both operands as
+                        // words (source order — `a` deeper, `b` on top), allocate.
+                        let (b_op, a_op) = (stack.pop()?, stack.pop()?);
+                        let aw = read_words(&mut b, a_op);
+                        let bw = read_words(&mut b, b_op);
+                        let h = call_handle(
+                            &mut b,
+                            makevec2_ref,
+                            &[aw[0], aw[1], aw[2], bw[0], bw[1], bw[2]],
+                        );
+                        stack.push(h);
+                    } else {
+                        // Variadic `[e0 … e{n-1}]` (nbody's `[vx vy vz]` / 7-body rebuild).
+                        // Pop the `n` operands (pushed in source order: e0 deepest, e{n-1}
+                        // on top), box each to a `Value` word-triple, and store it into a
+                        // per-site Cranelift stack slot (`n × STRIDE` bytes) the JIT owns.
+                        // Then call `brood_rt_make_vector_n(heap, out, stage, n)`, which
+                        // `alloc_vector`s (never collects) — so the staged bytes stay live
+                        // across the call. Read the fresh handle back out of `out_slot`.
+                        let mut ops = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            ops.push(stack.pop()?);
+                        }
+                        ops.reverse(); // ops[i] = element i, in source order
+                        let stage = b.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            STRIDE as u32 * n as u32,
+                            3,
+                        ));
+                        for (i, op) in ops.into_iter().enumerate() {
+                            let w = read_words(&mut b, op);
+                            let off = i as i32 * STRIDE as i32;
+                            b.ins().stack_store(w[0], stage, off);
+                            b.ins()
+                                .stack_store(w[1], stage, off + PAYLOAD_OFFSET as i32);
+                            b.ins()
+                                .stack_store(w[2], stage, off + PAYLOAD_OFFSET as i32 + 8);
+                        }
+                        let stage_addr = b.ins().stack_addr(ptr_ty, stage, 0);
+                        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        let n_val = b.ins().iconst(types::I64, n as i64);
+                        b.ins()
+                            .call(makevecn_ref, &[heap, out_addr, stage_addr, n_val]);
+                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let w1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let w2 =
+                            b.ins()
+                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        stack.push(Op::Handle(w0, w1, w2));
                     }
-                    let (b_op, a_op) = (stack.pop()?, stack.pop()?);
-                    let aw = read_words(&mut b, a_op);
-                    let bw = read_words(&mut b, b_op);
-                    let h = call_handle(
-                        &mut b,
-                        makevec2_ref,
-                        &[aw[0], aw[1], aw[2], bw[0], bw[1], bw[2]],
-                    );
-                    stack.push(h);
                 }
                 Inst::Prim2 { op, map, .. } => {
                     // Operands were pushed in source order: `aa` (deeper) is source 0,
@@ -3725,9 +3757,11 @@ fn jit_lower_arm_inner(
                     // avoids parallel-assignment issues with cross-slot references.
                     if !carry_vars.is_empty() {
                         let rb2 = b.use_var(rb_var);
-                        for (k, (&op, &(var, is_float))) in
-                            ops.iter().zip(carry_vars.iter()).enumerate()
-                        {
+                        for (k, (&op, entry)) in ops.iter().zip(carry_vars.iter()).enumerate() {
+                            let (var, is_float) = match *entry {
+                                Some(x) => x,
+                                None => continue, // handle slot: only the frame store above applies
+                            };
                             if is_float {
                                 let f = match op {
                                     Op::Float(v) => v,

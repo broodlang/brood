@@ -3623,3 +3623,42 @@ tail+non-tail int recursion now rides registers. Full suite **777/777** (incl. t
 fuzzer); 4 engines agree bit-for-bit on `ack`/a second mixed shape; no regression on any JIT row
 (loop/collatz slightly *faster* — more depth stays on the fast path); runaway 5 M-deep recursion still
 raises a **clean error, not SIGSEGV** (depth-bail → boxed drain). rustfmt clean.
+
+## 2026-07-14 — nbody 6.65 → 1.67 s (~4×): bodies list→vector + variadic MakeVector JIT + selective float carry
+
+`nbody` was **7/7 (dead last, ~40× Elixir)**. The design plan (`jit-float.md`
+§Float-across-calls) assumed the gap was boxed floats across call chains. It wasn't —
+the dominant cost was the **data structure**. The benchmark stored the 5 bodies in a
+`(list …)`, so `(f b i k)` = `(nth (nth b i) k)` did an **O(i) linked-list walk**,
+re-walked on every field read. Every *other* language's port uses an O(1)-indexed
+container (Node/Ruby/.NET arrays, Elixir a **tuple** `elem(b,i)`), so Brood's list was
+a mis-transcription. A Brood **vector** is the faithful equivalent.
+
+Three changes, in order of impact:
+1. **Benchmark fix (`bench/brood/nbody.blsp`, brood-benchmarks): bodies `(list …)` → a
+   vector.** Pure O(1) indexing — **6.40 → 1.94 s on the VM alone** (~3.3×), checksum
+   unchanged (`-169078071`). A fairness correction, not a language change.
+2. **Variadic `MakeVector(n)` JIT lowering** (`jit_lower.rs` + `jit/mod.rs`). Was capped
+   at `n == 2` (bintree's `[a b]`); a wider literal (nbody's `[vx vy vz]` / 7-body
+   rebuild) bailed the whole arm. Now the `n` elements are boxed into a per-site Cranelift
+   stack slot and built by a new `brood_rt_make_vector_n(heap, out, elems, n)` helper —
+   `alloc_vector` only *grows* the slab (never collects), so the staged bytes can't go
+   stale mid-call (same discipline as `make_vector2`). `newvel`/`advance-body`/`momentum`
+   now lower.
+3. **Selective per-slot register carry** (`jit_lower.rs`). The float-carry machinery
+   required *every* self-call arg slot to be Int/Float; nbody's `newvel`
+   (`b:handle i:int j:int vx/vy/vz:float`) has a handle slot → it bailed entirely. Carry
+   is now **per-slot** (`Vec<Option<(Variable,bool)>>`): scalar slots ride registers, the
+   handle slot stays on the (rooted) frame. Sound — a scalar in a register is invisible to
+   GC across a call safepoint, and a deopt always restarts from the frame's last-SelfCall
+   inputs (the `roots` stores are kept; the per-read tag-check guards a mistyped profile →
+   deopt). Subsumes the old all-scalar `int_carry_eligible` path bit-identically (removed).
+
+On the vector benchmark the JIT (2+3) adds ~14% over the VM (**1.94 → 1.67 s**). Net
+**6.65 → 1.67 s (~4×)**, nbody **7/7 → ~11× Elixir** (off last place). Verified: jit
+28/28, differential `engines_agree_on_corpus` 2/2, every scalar/HOF bench bit-identical
+to `BROOD_VM=0`, nbody exact at N=50000, warning-free build.
+
+Still ahead: **Layer B** (typed cross-arm float ABI — unboxed f64 across `Call`
+boundaries) is now a *larger* fraction of the reduced runtime and remains the deep
+future win (`jit-float.md`). Branch `perf/jit-nbody-float`.
