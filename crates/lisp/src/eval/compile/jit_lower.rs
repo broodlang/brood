@@ -1346,6 +1346,14 @@ fn jit_lower_arm_inner(
             .map(|k| slot_tags.get(k).copied() == Some(profile_tag_float))
             .collect(),
     );
+    // Is this arm float-context (any profiled Float param)? Used to optimistically route
+    // arithmetic on an `Op::Handle` operand (a type-erased vector/`nth` read — nbody's
+    // `(- (nth bi 0) (nth bj 0))`) through the *float* path instead of the integer default.
+    // `as_f64` tag-checks the handle is `Float` and deopts otherwise, so this can never
+    // miscompile — a wrong guess just deopts (the same outcome as today's int-path
+    // `as_int`-on-a-float). When the guess is right the result is `Op::Float`, which
+    // `store_op` marks float, so the whole `(nth …)`-fed arithmetic chain stays unboxed.
+    let has_float_slot = slot_tags.iter().any(|&t| t == profile_tag_float);
     // Per-slot "holds a `Value::Bool`" flag — the boolean analogue of `slot_float`, but
     // seeded all-false: a bool is rarely a loop *param*, and the case that matters is a
     // let-binder, e.g. `(and X Y)` → `(let (g X) (if g Y g))` storing a comparison result
@@ -2613,7 +2621,20 @@ fn jit_lower_arm_inner(
                 );
                 b.ins().bitcast(types::F64, MemFlagsData::new(), bits)
             }
-            Op::Int(_) | Op::Bool(_) | Op::Handle(..) | Op::HoistedVec { .. } => {
+            Op::Handle(w0, w1, _) => {
+                // A type-erased boxed `Value` (a `nth`/vector read, a call result) used as a
+                // float: tag-check `Float` and extract its payload bits, else deopt (the VM
+                // then runs the arm with the real type). Mirrors the `Op::Slot` path but on
+                // words already in registers. This is what lets `(nth v k)`-fed float
+                // arithmetic stay native instead of deopting on the int-path `as_int`.
+                let tagb = b.ins().band_imm(w0, 0xff);
+                let is_f = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_FLOAT as i64);
+                let cont = b.create_block();
+                b.ins().brif(is_f, cont, &[], deopt, &[]);
+                b.switch_to_block(cont);
+                b.ins().bitcast(types::F64, MemFlagsData::new(), w1)
+            }
+            Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } => {
                 b.ins().jump(deopt, &[]);
                 let dead = b.create_block();
                 b.switch_to_block(dead);
@@ -2632,14 +2653,25 @@ fn jit_lower_arm_inner(
         }
     };
     // Float arith / comparison. Arith → `Op::Float`; a comparison → an `i8` boxed as a
-    // Bool (`Op::Int`, exactly like the integer compares). `/` and the integer-only ops
-    // aren't lowered for floats → `None` bails the arm to the VM.
+    // Bool (`Op::Int`, exactly like the integer compares). The integer-only ops
+    // (`rem`/`quot`) and `=` aren't lowered for floats → `None` bails the arm to the VM.
     let emit_float_arith = |b: &mut FunctionBuilder, op: PrimOp, x, y| -> Option<Op> {
         use cranelift_codegen::ir::condcodes::FloatCC;
         Some(match op {
             PrimOp::Add => Op::Float(b.ins().fadd(x, y)),
             PrimOp::Sub => Op::Float(b.ins().fsub(x, y)),
             PrimOp::Mul => Op::Float(b.ins().fmul(x, y)),
+            PrimOp::Div => {
+                // Brood float `/` raises on a zero divisor (matches the VM — `(/ x 0.0)`
+                // errors), so guard `y == 0.0` and deopt (the VM then raises); otherwise
+                // `fdiv`. `fcmp Equal 0.0` catches +0.0 and -0.0 alike.
+                let zero = b.ins().f64const(0.0);
+                let is_zero = b.ins().fcmp(FloatCC::Equal, y, zero);
+                let cont = b.create_block();
+                b.ins().brif(is_zero, deopt, &[], cont, &[]);
+                b.switch_to_block(cont);
+                Op::Float(b.ins().fdiv(x, y))
+            }
             PrimOp::Lt => Op::Int(b.ins().fcmp(FloatCC::LessThan, x, y)),
             PrimOp::Le => Op::Int(b.ins().fcmp(FloatCC::LessThanOrEqual, x, y)),
             // `=` is NOT lowered for floats: Brood `=` is *structural*, so a Float
@@ -2849,9 +2881,16 @@ fn jit_lower_arm_inner(
                 VS::JIT_TAG_OFF,
             );
             let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
-            let c3 = b.create_block();
-            b.ins().brif(is_inline, c3, &[], deopt, &[]);
-            b.switch_to_block(c3);
+            let inline_blk = b.create_block();
+            let heap_blk = b.create_block();
+            // The two storage layouts converge here with the element's 3 words.
+            let ivr_done = b.create_block();
+            b.append_block_param(ivr_done, types::I64);
+            b.append_block_param(ivr_done, types::I64);
+            b.append_block_param(ivr_done, types::I64);
+            b.ins().brif(is_inline, inline_blk, &[], heap_blk, &[]);
+            // Inline (`INLINE_VEC_CAP`-or-fewer elements): read straight from the slab slot.
+            b.switch_to_block(inline_blk);
             // Bounds: idx < len (len is the inline element count, a u8).
             let lenb = b.ins().load(
                 types::I8,
@@ -2881,7 +2920,51 @@ fn jit_lower_arm_inner(
                 elem,
                 PAYLOAD_OFFSET as i32 + 8,
             );
-            Op::Handle(r0, r1, r2)
+            b.ins().jump(
+                ivr_done,
+                &[
+                    BlockArg::Value(r0),
+                    BlockArg::Value(r1),
+                    BlockArg::Value(r2),
+                ],
+            );
+            // Heap-backed (a >`INLINE_VEC_CAP` vector — e.g. nbody's 7-element body
+            // vectors): a constant-index `(nth v k)` used to deopt here (the whole arm fell
+            // to the VM every read). Instead read via the general `brood_rt_vector_ref`
+            // helper, which handles any storage and only errors on a bad index (→ deopt).
+            b.switch_to_block(heap_blk);
+            let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+            let it = b.ins().iconst(types::I64, TAG_INT as i64);
+            let iv = b.ins().iconst(types::I64, idx);
+            let iz = b.ins().iconst(types::I64, 0);
+            let hc = b.ins().call(
+                vref_ref,
+                &[heap, out_addr, vec[0], vec[1], vec[2], it, iv, iz],
+            );
+            let hstatus = b.inst_results(hc)[0];
+            let hok = b.create_block();
+            b.ins().brif(hstatus, deopt, &[], hok, &[]);
+            b.switch_to_block(hok);
+            let h0 = b.ins().stack_load(types::I64, out_slot, 0);
+            let h1 = b
+                .ins()
+                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            let h2 = b
+                .ins()
+                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            b.ins().jump(
+                ivr_done,
+                &[
+                    BlockArg::Value(h0),
+                    BlockArg::Value(h1),
+                    BlockArg::Value(h2),
+                ],
+            );
+            b.switch_to_block(ivr_done);
+            let w0 = b.block_params(ivr_done)[0];
+            let w1 = b.block_params(ivr_done)[1];
+            let w2 = b.block_params(ivr_done)[2];
+            Op::Handle(w0, w1, w2)
         };
 
     // For each leader, which of its operand-stack block params carry a boolean (so the
@@ -3489,9 +3572,19 @@ fn jit_lower_arm_inner(
                             let h = vector_ref(&mut b, vec, idx);
                             stack.push(h);
                         }
-                    } else if op_is_float(aa_op) || op_is_float(bb_op) {
-                        // Float arith/compare (an operand is a float). `pick` selects f64
-                        // values the same as i64.
+                    } else if op_is_float(aa_op)
+                        || op_is_float(bb_op)
+                        || (has_float_slot
+                            && matches!(op, PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div)
+                            && (matches!(aa_op, Op::Handle(..)) || matches!(bb_op, Op::Handle(..))))
+                    {
+                        // Float arith/compare (an operand is a float, or — in a float-context
+                        // arm — a type-erased `Op::Handle` optimistically treated as float,
+                        // e.g. `(- (nth bi 0) (nth bj 0))`). `as_f64` tag-checks each `Handle`
+                        // is `Float` and deopts otherwise, so a wrong guess is safe (a deopt,
+                        // not a miscompile); a right guess yields `Op::Float`, which `store_op`
+                        // marks float so the rest of the chain stays unboxed. `pick` selects
+                        // f64 values the same as i64.
                         let aa = as_f64(&mut b, aa_op);
                         let bb = as_f64(&mut b, bb_op);
                         let x = pick(aa, bb, map[0]);

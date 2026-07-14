@@ -3662,3 +3662,36 @@ to `BROOD_VM=0`, nbody exact at N=50000, warning-free build.
 Still ahead: **Layer B** (typed cross-arm float ABI — unboxed f64 across `Call`
 boundaries) is now a *larger* fraction of the reduced runtime and remains the deep
 future win (`jit-float.md`). Branch `perf/jit-nbody-float`.
+
+## 2026-07-14 — nbody 1.25 → 0.82 s (JIT now earns its keep): fix vector-read + float-handle deopts
+
+After the list→vector + bind-once benchmark fixes (6.65 → 1.25 s), the JIT was
+**net-neutral** (jit ≈ no-jit ≈ 1.39 s). `BROOD_DEOPT_TRACE` instrumentation showed
+`newvel` and `advance-body` **deopting on ~every call** (~250k each, ≈498k total) — the
+JIT ran native, bailed partway, and finished on the VM. Two root causes, both fixed:
+
+1. **Vector reads of a >2-element vector deopted.** `INLINE_VEC_CAP = 2`, so nbody's
+   **7-element** body vectors are heap-backed, and `inline_vec_ref` (constant-index
+   `(nth v k)`) deopted on the non-`Inline` discriminant — every field read fell to the
+   VM. Fix: on the non-inline branch, fall back to the general `brood_rt_vector_ref`
+   helper (handles any storage; only errors on a bad index) instead of deopting. Keeps the
+   fast inline path for `bintree`'s 2-element nodes.
+2. **Float arithmetic on a vector-read `Handle` deopted.** `(nth v k)` yields an
+   `Op::Handle` (type-erased); `op_is_float(Handle)` is `false`, so `(- (nth bi 0)
+   (nth bj 0))` took the *integer* path → `as_int(Handle)` tag-checks `Int` → it's a
+   `Float` → deopt. Fix: `as_f64(Op::Handle)` now tag-checks `Float` and extracts (deopt
+   only if genuinely not float); in a float-context arm (`has_float_slot`), `Handle`-operand
+   arithmetic routes to the float path. A wrong guess is a deopt, never a miscompile; a
+   right guess yields `Op::Float`, which `store_op` marks float so the rest of the chain
+   stays unboxed. Also implemented float `/` in `emit_float_arith` (was `None`→bail; guard
+   a zero divisor → deopt, matching the VM's `(/ x 0.0)` error).
+
+Result: `newvel` now runs **fully native** (deopts 498k → 249k; VM `prim2_inline` 36M →
+5.2M as that arithmetic moved to native). nbody **1.25 → ~0.82 s** — **6.65 → 0.82 s
+overall (~8×)**, from ~40× Elixir to ~5×. Verified: full in-language suite **2730/2730**,
+jit 28/28, differential fuzzer 2/2, all 13 numeric benches bit-identical to `BROOD_VM=0`,
+`BROOD_GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY` clean on nbody, `bintree` unregressed, fmt clean.
+Residual: `advance-body` still deopts (~249k) — it has no float *param*, so the
+`has_float_slot` gate misses it; catching it needs a float-context signal that survives
+`(nth …)`/call-return type erasure (cross-arm return typing or a float-global-aware gate),
+without regressing int-vector arms (matmul/nqueens) — deferred. Branch `perf/jit-nbody-float`.
