@@ -608,6 +608,24 @@ fn i64_cmp_op(op: PrimOp) -> bool {
     matches!(op, PrimOp::Lt | PrimOp::Le | PrimOp::Eq)
 }
 
+/// Is this `Call` a `(throw <expr>)` on the **global** `throw` (not shadowed by the arm's
+/// own name)? The i64 worker lowers it as: evaluate the payload in registers, then a
+/// `brood_rt_i64_throw` callback that parks the error (or deopts if `throw` was redefined —
+/// late binding wins) + the sentinel unwind. This is what lets an error-raising deep
+/// recursion (`errors-deep`'s `descend`) keep its register worker instead of falling back
+/// to the interpreted frame-build path.
+#[cfg(feature = "jit")]
+fn i64_throw_call<'a>(callee: &Node, args: &'a [Node], self_sym: Symbol) -> Option<&'a Node> {
+    match callee {
+        Node::Global(s) | Node::GlobalIc { sym: s, .. }
+            if *s != self_sym && *s == crate::core::value::intern("throw") && args.len() == 1 =>
+        {
+            Some(&args[0])
+        }
+        _ => None,
+    }
+}
+
 /// Non-mutating check: is `node` a value-position expression in the i64 worker's subset?
 /// (int `Const`, param `Local(0)`, int arith `Prim2`, a single-arg self-`Call`, or an `If`
 /// whose cond is a comparison and whose branches are values.) Anything else bails the whole
@@ -638,6 +656,15 @@ fn i64_value_ok(
             i64_cond_ok(c, self_sym, nargs, bound, kind)
                 && i64_value_ok(t, self_sym, nargs, bound, kind)
                 && i64_value_ok(e, self_sym, nargs, bound, kind)
+        }
+        // `(throw <payload>)` — accepted in ANY position (tail or not; it never returns).
+        // The payload must be in-subset for this worker's scalar (an int payload for an Int
+        // worker, float for Float), so the register value can box straight into the error.
+        Node::Call { callee, args, .. }
+            if i64_throw_call(callee, args, self_sym)
+                .is_some_and(|p| i64_value_ok(p, self_sym, nargs, bound, kind)) =>
+        {
+            true
         }
         Node::Call {
             callee,
@@ -701,14 +728,17 @@ fn i64_cond_ok(
 /// Shared context threaded through the i64 worker's recursive lowering.
 #[cfg(feature = "jit")]
 struct I64Ctx {
-    kind: Scalar, // Int (i64) or Float (f64) — selects const/arith/cmp/box lowering
+    kind: Scalar,     // Int (i64) or Float (f64) — selects const/arith/cmp/box lowering
+    self_sym: Symbol, // the arm's own defn name (distinguishes a self-call from a `throw` call)
     self_ref: cranelift_codegen::ir::FuncRef,
+    throw_ref: cranelift_codegen::ir::FuncRef, // brood_rt_i64_throw (park error / deopt)
     params: Vec<cranelift_codegen::ir::Value>, // the arm's `nargs` params (`Local(k)`)
     // `let` binder slots → their SSA variable (index = frame slot; `None` for a param slot).
     // A `Local(k)` with `k >= nargs` reads `use_var(slot_vars[k])`; a `LetBind` `def_var`s it.
     slot_vars: Vec<Option<cranelift_frontend::Variable>>,
     depth: cranelift_codegen::ir::Value, // this activation's depth
     ovf: cranelift_codegen::ir::Value,   // *mut u8 overflow sentinel
+    heap: cranelift_codegen::ir::Value,  // *mut Heap — only used by the throw callback
     poisoned: cranelift_codegen::ir::Block, // shared unwind target (returns 0)
 }
 
@@ -850,9 +880,16 @@ fn lower_i64_value(
             }
             lower_i64_value(b, cx, body)
         }
-        // `do`: pure here, so the value is just the last form's (the checker validated the rest
-        // are in-subset; skipping them is sound — no side effects, no bindings).
-        Node::Do(xs) => lower_i64_value(b, cx, xs.last().expect("non-empty do")),
+        // `do`: lower EVERY form, not just the last — the subset is pure except `throw`,
+        // whose side effect (raising) must fire from a non-final position too. The dead
+        // pure values cost nothing (Cranelift DCEs them).
+        Node::Do(xs) => {
+            let mut last = None;
+            for x in xs.iter() {
+                last = Some(lower_i64_value(b, cx, x));
+            }
+            last.expect("non-empty do")
+        }
         Node::If(c, t, e) => {
             let cond = lower_i64_cond(b, cx, c);
             let then_b = b.create_block();
@@ -874,6 +911,34 @@ fn lower_i64_value(
             b.switch_to_block(merge);
             b.use_var(rv)
         }
+        // `(throw <payload>)` (checker-verified via `i64_throw_call`): evaluate the payload in
+        // registers, then the callback parks the thrown error (returning sentinel 3) — or 1
+        // (deopt) if `throw` was redefined, so late binding stays exact — and the worker unwinds
+        // through `poisoned` like an overflow. The dead continuation block keeps the
+        // value-position contract (this node never produces a value at runtime).
+        Node::Call { callee, args, .. } if i64_throw_call(callee, args, cx.self_sym).is_some() => {
+            let payload = i64_throw_call(callee, args, cx.self_sym).expect("checked throw");
+            let x = lower_i64_value(b, cx, payload);
+            let bits = match cx.kind {
+                Scalar::Int => x,
+                Scalar::Float => b.ins().bitcast(types::I64, MemFlagsData::new(), x),
+            };
+            let isf = b
+                .ins()
+                .iconst(types::I64, (cx.kind == Scalar::Float) as i64);
+            let call = b.ins().call(cx.throw_ref, &[cx.heap, bits, isf]);
+            let sentinel = b.inst_results(call)[0];
+            let s8 = b.ins().ireduce(types::I8, sentinel);
+            b.ins().store(MemFlagsData::trusted(), s8, cx.ovf, 0);
+            b.ins().jump(cx.poisoned, &[]);
+            let dead = b.create_block();
+            b.switch_to_block(dead);
+            b.seal_block(dead);
+            match cx.kind {
+                Scalar::Int => b.ins().iconst(types::I64, 0),
+                Scalar::Float => b.ins().f64const(0.0),
+            }
+        }
         // Both a non-tail self-`Call` (fib's argument-position recursion) and a tail `SelfCall`
         // (Ackermann's cond-branch recursion) lower the same way here: the register worker has no
         // tail-loop, so a tail call recurses natively just like a non-tail one (bounded by the
@@ -887,6 +952,7 @@ fn lower_i64_value(
                 args.iter().map(|a| lower_i64_value(b, cx, a)).collect();
             call_args.push(b.ins().iadd_imm(cx.depth, 1));
             call_args.push(cx.ovf);
+            call_args.push(cx.heap);
             let call = b.ins().call(cx.self_ref, &call_args);
             let r = b.inst_results(call)[0];
             // If the callee (or a deeper level, or a depth-cap bail) set the sentinel, unwind
@@ -969,19 +1035,22 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
     let sty = kind.clif(); // i64 or f64 — the worker's arg/result register type
     let body = &arm.body;
     let nargs = arm.nrequired;
+    let self_sym = arm.dbg_name?; // present — arm_scalar_kind already required it
 
     const STRIDE: i64 = std::mem::size_of::<Value>() as i64;
     let m = jit.module();
     let ptr_ty = m.target_config().pointer_type();
     let seq = JIT_ARM_SEQ.fetch_add(1, Ordering::Relaxed);
 
-    // Signatures. Worker: (a0..a_{nargs-1}: sty, depth: i64, ovf: *mut u8) -> sty.
+    // Signatures. Worker: (a0..a_{nargs-1}: sty, depth: i64, ovf: *mut u8, heap: *mut Heap) -> sty.
+    // `heap` rides along untouched except by a `throw` lowering (its callback parks the error).
     let mut wsig = m.make_signature();
     for _ in 0..nargs {
         wsig.params.push(AbiParam::new(sty)); // an arg (i64 or f64)
     }
     wsig.params.push(AbiParam::new(types::I64)); // depth (always i64)
     wsig.params.push(AbiParam::new(ptr_ty)); // ovf ptr
+    wsig.params.push(AbiParam::new(ptr_ty)); // heap ptr (throw callback only)
     wsig.returns.push(AbiParam::new(sty));
     let worker_id = m
         .declare_function(&format!("brood_jit_i64w_{seq}"), Linkage::Export, &wsig)
@@ -1003,6 +1072,15 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
     let ovp_id = m
         .declare_function("brood_rt_i64_overflow_ptr", Linkage::Import, &ptr_sig)
         .ok()?;
+    // The throw callback: (heap, payload_bits, is_float) -> sentinel (3 = error parked, 1 = deopt).
+    let mut throw_sig = m.make_signature();
+    throw_sig.params.push(AbiParam::new(ptr_ty));
+    throw_sig.params.push(AbiParam::new(types::I64));
+    throw_sig.params.push(AbiParam::new(types::I64));
+    throw_sig.returns.push(AbiParam::new(types::I64));
+    let throw_id = m
+        .declare_function("brood_rt_i64_throw", Linkage::Import, &throw_sig)
+        .ok()?;
 
     // ---- Worker ----
     {
@@ -1011,6 +1089,7 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         let mut fbctx = FunctionBuilderContext::new();
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         let self_ref = m.declare_func_in_func(worker_id, b.func);
+        let throw_ref = m.declare_func_in_func(throw_id, b.func);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
@@ -1019,6 +1098,7 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
             (0..nargs).map(|k| b.block_params(entry)[k]).collect();
         let depth = b.block_params(entry)[nargs];
         let ovf = b.block_params(entry)[nargs + 1];
+        let heap = b.block_params(entry)[nargs + 2];
         let poisoned = b.create_block();
         // Depth cap → set sentinel + unwind (native-stack guard).
         let deep = b.create_block();
@@ -1056,11 +1136,14 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         }
         let cx = I64Ctx {
             kind,
+            self_sym,
             self_ref,
+            throw_ref,
             params,
             slot_vars,
             depth,
             ovf,
+            heap,
             poisoned,
         };
         let result = lower_i64_value(&mut b, &cx, body);
@@ -1138,6 +1221,7 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         let d0 = b.ins().iconst(types::I64, 0);
         wargs.push(d0);
         wargs.push(ovf);
+        wargs.push(heap);
         let wc = b.ins().call(worker_ref, &wargs);
         let r = b.inst_results(wc)[0];
         let o = b.ins().load(types::I8, MemFlagsData::trusted(), ovf, 0);
@@ -1147,19 +1231,31 @@ fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) -> Option<*co
         b.seal_block(doneb);
         b.seal_block(bailb);
         // Sentinel nonzero → clear it, then split: 2 = depth-bail (outcome 5, `jit_tier` switches
-        // this fn to the boxed path), 1 = overflow (outcome 1, VM recomputes with BigInt).
+        // this fn to the boxed path), 3 = thrown error (outcome 3 — the error is already parked
+        // in `jit_pending_error` by `brood_rt_i64_throw`), 1 = overflow (outcome 1, VM recomputes
+        // with BigInt).
         b.switch_to_block(bailb);
         let z1 = b.ins().iconst(types::I8, 0);
         b.ins().store(MemFlagsData::trusted(), z1, ovf, 0);
         let is_depth = b.ins().icmp_imm(IntCC::Equal, o, 2);
         let depthb = b.create_block();
-        let ovb = b.create_block();
-        b.ins().brif(is_depth, depthb, &[], ovb, &[]);
+        let notdepthb = b.create_block();
+        b.ins().brif(is_depth, depthb, &[], notdepthb, &[]);
         b.seal_block(depthb);
-        b.seal_block(ovb);
+        b.seal_block(notdepthb);
         b.switch_to_block(depthb);
         let o5 = b.ins().iconst(types::I64, 5);
         b.ins().return_(&[o5]);
+        b.switch_to_block(notdepthb);
+        let is_err = b.ins().icmp_imm(IntCC::Equal, o, 3);
+        let errb = b.create_block();
+        let ovb = b.create_block();
+        b.ins().brif(is_err, errb, &[], ovb, &[]);
+        b.seal_block(errb);
+        b.seal_block(ovb);
+        b.switch_to_block(errb);
+        let o3 = b.ins().iconst(types::I64, 3);
+        b.ins().return_(&[o3]);
         b.switch_to_block(ovb);
         let o1b = b.ins().iconst(types::I64, 1);
         b.ins().return_(&[o1b]);

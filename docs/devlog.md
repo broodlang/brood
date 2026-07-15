@@ -3623,3 +3623,36 @@ tail+non-tail int recursion now rides registers. Full suite **777/777** (incl. t
 fuzzer); 4 engines agree bit-for-bit on `ack`/a second mixed shape; no regression on any JIT row
 (loop/collatz slightly *faster* — more depth stays on the fast path); runaway 5 M-deep recursion still
 raises a **clean error, not SIGSEGV** (depth-bail → boxed drain). rustfmt clean.
+
+## 2026-07-15 — Register worker learns `throw`: `errors-deep` 0.28 → 0.07 s (~4×, 5/7 → ~2/7)
+
+`errors-deep` (throw from 50 non-tail frames, catch at the top, ×50k) looked like "unwind
+cost" but wasn't: ablation showed throw+catch with **zero** frames between is ~free, and the
+cost scaled linearly at ~96 ns per frame — with `BROOD_PERF_STATS` showing `jit_native=0`
+and 2.6 M interpreted `call_ic_hit`s. The real cause: **the `throw` call knocked `descend`
+out of the unboxed-i64 register worker's subset**, so all 2.5 M frames were *built* on the
+interpreted VM call protocol (the noraise twin runs the worker: 0.06 s). The unwind itself
+was always cheap.
+
+Fix (kernel, `jit_lower.rs` + `jit/mod.rs`): the i64/f64 register worker now lowers
+`(throw <scalar-expr>)` — evaluate the payload in registers, call a new
+`brood_rt_i64_throw(heap, bits, is_float)` callback, store the returned sentinel, and unwind
+through the existing `poisoned` block. Sentinel **3** = the callback verified the global
+`throw` still binds the builtin, boxed the immediate payload (`Value::Int`/`Float` — never a
+heap handle, so GC-safe by construction), and parked the error in `jit_pending_error`; the
+wrapper maps it to **outcome 3** (both `jit_tier` call sites already propagate a parked
+error). Sentinel **1** = a user *redefined* `throw` → no park, plain deopt: the VM re-runs
+the (pure-up-to-the-throw) arm and calls the redefinition — late binding stays exact, checked
+per throw at runtime, not frozen at compile. The worker gained a `heap` param (rides along
+untouched except by the throw callback); `do` lowering now emits **every** form, not just the
+last, so a non-final `(do (throw x) …)` still raises (pure dead values DCE away).
+
+Result: `errors-deep` **0.28 → 0.07 s** (compute ~40 ms — past Ruby/Node/Python, behind only
+Elixir's 4.4 ms). Verified: 3 engines agree on the benchmark; payload identity across the
+native unwind (int + float workers); non-final-`do` throws fire; 40 k-deep recursion
+depth-bails to boxed and still catches; redefining `throw` after the arm is hot gives the
+tree-walker's exact answer (827). New `:serial` cases in `tests/jit_throw_catch_test.blsp`.
+Full suite 776/777 + the one failure (`remote-spawn-sync: no reply`) reproduced as a
+CPU-starvation flake — it passes alone in 14.5 s vs the 127 s it took under the fully
+parallel run. No regression on the other i64-worker rows (fib/ackermann/collatz/loop flat
+in a binary-verified A/B). rustfmt + `nest check` clean.
