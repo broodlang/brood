@@ -3936,3 +3936,36 @@ calls, no per-frame zeroing): batch arg staging (one stack-slot FFI instead of
 `brood_rt_push` × argc), a flat per-site native-pointer cell to kill the IC RefCell
 borrow, and skipping the nil-fill for definitely-assigned frames. Each is a measured
 10–20 ns; none taken yet.
+
+## 2026-07-15 — The big one, rungs 2–4: batch staging, native flat cell, memset frames
+
+Three more cuts on the native-code call path, on top of the morning's IC fast path:
+
+**Batch arg staging (BEAM X-register style).** A call from JIT'd code staged each
+operand with its own `brood_rt_push` FFI (argc round-trips, each with a capacity
+check). Now every operand is written to a per-site staging STACK SLOT with plain
+stores and staged onto `roots` with ONE `brood_rt_push_n` (reserve + memcpy). The
+elided-head tail-call case prepends the IC-resolved callee at slot 0.
+
+**Native flat cell.** The IR-readable `FastLink` mirror now carries builtin callees:
+`nslots == u32::MAX` marks a native link whose `code` field holds the `NativeFnPtr`
+bits (arity pre-validated for the site's exact argc at publish, so the hot path has
+no arity check). The Track B hit block branches on the marker: a native hit calls
+`brood_rt_call_native_fl(heap, out, func, stage_ptr, argc)` — the trampoline reads
+the args straight from the staging slot, no `env_get`, no dispatch, no IC borrow.
+The roots-staged copies anchor the arg values for any GC the native triggers
+(matching the VM's operands-stay-rooted discipline) and the trampoline drops them
+on return. Published from `jit_dispatch_call`'s native fill/hit paths; invalidated
+by the same epoch/sym/argc guards as Brood links.
+
+**Memset frame fill.** `extend_roots_to_nil` — the frame nil-fill on every call in
+both engines — was `Vec::resize`'s per-slot 24-byte clone loop; all-zero bytes are
+a valid `Value` (`Nil`), so it's now one `write_bytes`. (The "skip the fill via
+definite-assignment" idea is unsound as stated: `roots` is traced to its length, so
+unfilled slots would feed stale garbage to the GC. The memset is the safe version.)
+
+Cumulative microbench (10M calls from a JIT'd loop, vs this morning's baseline):
+`string-length` 55 → **34 ns**, `char->int` 75 → **52 ns**, `str`-heavy loop
+2.03 → **1.50 s** (−26%), 3-arg Brood→Brood 0.54 → 0.47 s. Full gauntlet (21 rows)
+3-engine bit-identical; GC-stress + `BROOD_JIT_VERIFY` clean on the call-heavy rows
+(the staging discipline changed — this was the load-bearing check); suite 777/777.

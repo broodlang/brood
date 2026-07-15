@@ -5485,7 +5485,31 @@ impl Heap {
     /// (hot) call path. `len` must be ≥ the current length (frames only grow here).
     pub fn extend_roots_to_nil(&mut self, len: usize) {
         debug_assert!(len >= self.roots.len());
-        self.roots.resize(len, Value::nil());
+        let old = self.roots.len();
+        self.roots.reserve(len - old);
+        // SAFETY: all-zero bytes are a valid `Value` (`Nil` is discriminant 0; the
+        // payload/padding bytes are ignored for it), so one `write_bytes` replaces
+        // `resize`'s per-slot 24-byte clone loop — this is the frame nil-fill on the
+        // hottest path in the runtime (every call frame, both VM and JIT fast-link).
+        unsafe {
+            std::ptr::write_bytes(self.roots.as_mut_ptr().add(old), 0, len - old);
+            self.roots.set_len(len);
+        }
+    }
+
+    /// Append `n` `Value`s from `src` onto `roots` in one reserve+copy — the batch
+    /// form of [`Self::push_root`] for the JIT's call staging (one FFI + one memcpy
+    /// instead of `brood_rt_push` × argc).
+    ///
+    /// # Safety
+    /// `src` must point to `n` valid, initialized `Value`s (the JIT's per-site
+    /// staging stack slot, written just before the call).
+    #[cfg(feature = "jit")]
+    pub(crate) unsafe fn push_roots_n(&mut self, src: *const Value, n: usize) {
+        let old = self.roots.len();
+        self.roots.reserve(n);
+        std::ptr::copy_nonoverlapping(src, self.roots.as_mut_ptr().add(old), n);
+        self.roots.set_len(old + n);
     }
 
     /// Raw base pointer of the operand-stack/`roots` buffer, for JIT'd code to index
@@ -7261,6 +7285,34 @@ impl Heap {
             };
         }
         Some((code as *const u8, active_ns, *env))
+    }
+
+    /// Publish a NATIVE (builtin) callee into the IR-readable [`FastLink`] mirror:
+    /// `code` = the `NativeFnPtr` bits, `nslots == u32::MAX` is the native marker the
+    /// IR branches on (a Brood link's `nslots` is a real frame size, never MAX). The
+    /// caller pre-validates arity for exactly this `argc`, so the IR-side trampoline
+    /// needs no arity check; the epoch/sym/argc guards invalidate it exactly like a
+    /// Brood link (a `def` bumps the epoch → miss → re-resolve).
+    #[cfg(feature = "jit")]
+    pub(crate) fn vm_fast_link_publish_native(
+        &self,
+        site: u32,
+        sym: Symbol,
+        argc: u32,
+        epoch: u64,
+        func: u64,
+    ) {
+        if let Some(slot) = self.vm_fast_links.borrow_mut().get_mut(site as usize) {
+            *slot = FastLink {
+                epoch,
+                code: func,
+                env: 0,
+                nslots: u32::MAX,
+                sym,
+                argc,
+                _pad: 0,
+            };
+        }
     }
 
     /// Base pointer + length of the IR-readable [`FastLink`] mirror, for the JIT to read a

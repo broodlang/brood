@@ -6471,6 +6471,14 @@ pub(crate) fn jit_dispatch_call(
                 // resolve): the whole call is one arity-checked fn-pointer call.
                 Some((v, None)) if !over_cap => {
                     if let ValueRef::Native(nid) = v.unpack() {
+                        // Reaching here means the IR's flat-cell fast path missed (cold
+                        // site, cleared table, or new epoch) — republish so the next call
+                        // stays entirely in IR (arity pre-validated for this argc).
+                        let nat = heap.native(nid);
+                        if nat.arity.accepts(argc) && !value::is_dynamic(head) {
+                            let func = nat.func as u64;
+                            heap.vm_fast_link_publish_native(site, head, argc as u32, epoch, func);
+                        }
                         call_native_direct!(nid)
                     }
                     None
@@ -6513,6 +6521,19 @@ pub(crate) fn jit_dispatch_call(
                                         fast: std::cell::Cell::new(None),
                                     },
                                 );
+                                // Flat-cell publish: the IR's next call at this site goes
+                                // straight to the fn pointer (arity pre-validated here).
+                                let nat = heap.native(nid);
+                                if nat.arity.accepts(argc) {
+                                    let func = nat.func as u64;
+                                    heap.vm_fast_link_publish_native(
+                                        site,
+                                        head,
+                                        argc as u32,
+                                        epoch,
+                                        func,
+                                    );
+                                }
                             }
                             call_native_direct!(nid)
                         }

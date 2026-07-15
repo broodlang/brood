@@ -1805,7 +1805,7 @@ fn jit_lower_arm_inner(
     for _ in 0..3 {
         push_sig.params.push(AbiParam::new(types::I64)); // the operand's 3 words
     }
-    let push_id = m
+    let _push_id = m
         .declare_function("brood_rt_push", Linkage::Import, &push_sig)
         .ok()?;
     let mut glob_sig = m.make_signature();
@@ -1836,6 +1836,28 @@ fn jit_lower_arm_inner(
     callslow_sig.returns.push(AbiParam::new(types::I64)); // status
     let callslow_id = m
         .declare_function("brood_rt_call_slow", Linkage::Import, &callslow_sig)
+        .ok()?;
+    // brood_rt_push_n(heap, src, n): batch-stage `n` Values from the call site's
+    // staging stack slot onto roots — one FFI + memcpy instead of push × argc.
+    let mut pushn_sig = m.make_signature();
+    pushn_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    pushn_sig.params.push(AbiParam::new(ptr_ty)); // src
+    pushn_sig.params.push(AbiParam::new(types::I64)); // n
+    pushn_sig.returns.push(AbiParam::new(types::I64));
+    let pushn_id = m
+        .declare_function("brood_rt_push_n", Linkage::Import, &pushn_sig)
+        .ok()?;
+    // brood_rt_call_native_fl(heap, out, func, args, argc): direct builtin call for
+    // a native flat-cell hit (nslots == u32::MAX) — no roots staging at all.
+    let mut natfl_sig = m.make_signature();
+    natfl_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    natfl_sig.params.push(AbiParam::new(ptr_ty)); // out
+    natfl_sig.params.push(AbiParam::new(types::I64)); // func bits
+    natfl_sig.params.push(AbiParam::new(ptr_ty)); // args ptr
+    natfl_sig.params.push(AbiParam::new(types::I32)); // argc
+    natfl_sig.returns.push(AbiParam::new(types::I64));
+    let natfl_id = m
+        .declare_function("brood_rt_call_native_fl", Linkage::Import, &natfl_sig)
         .ok()?;
     // Track B / Technique A — the in-IR fast call path. brood_rt_fastlink_base(heap,
     // out_len: *mut u64) -> *const FastLink: base + length of the IR-readable fast-link
@@ -1998,10 +2020,11 @@ fn jit_lower_arm_inner(
     // read_words — they perturbed codegen and masked the bug they were chasing).
     #[cfg(debug_assertions)]
     let _dbg_check_slot_ref = m.declare_func_in_func(dbg_check_slot_id, b.func);
-    let push_ref = m.declare_func_in_func(push_id, b.func);
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
+    let pushn_ref = m.declare_func_in_func(pushn_id, b.func);
+    let natfl_ref = m.declare_func_in_func(natfl_id, b.func);
     let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
@@ -3395,11 +3418,23 @@ fn jit_lower_arm_inner(
                     for &op in &ops {
                         worded.push(read_words(&mut b, op));
                     }
+                    // ---- Batch staging (BEAM X-register style) ----
+                    // All operands are written into a per-site staging STACK SLOT with
+                    // plain stores (no FFI, no roots realloc), then staged onto `roots`
+                    // with ONE `brood_rt_push_n` — and a native flat-cell hit below skips
+                    // the roots staging entirely (the trampoline reads the slot directly).
+                    // Layout: [callee?][arg0..arg_{argc-1}], 24 bytes each, third word
+                    // zeroed (a whole-Value copy must carry all three words).
+                    let stage_cap = (n_ops + 1) as u32; // +1: a tail elided head prepends
+                    let stage_ss = b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        STRIDE as u32 * stage_cap,
+                        3,
+                    ));
                     // For a free-global tail call, jit_dispatch_tail reads [callee, args…]
                     // from roots — but the elided head is never staged. Resolve it via the
-                    // global IC and stage it now, before the args. Arg words are already in
-                    // `worded` (read above, before any push) so no slot reads follow.
-                    if *tail && head.is_some() {
+                    // global IC and put it at slot 0, args after.
+                    let arg_base: i32 = if *tail && head.is_some() {
                         let sym_v2 = b.ins().iconst(types::I32, call_head as i64);
                         let site_v2 = b.ins().iconst(types::I32, call_site as i64);
                         let out_a = b.ins().stack_addr(ptr_ty, out_slot, 0);
@@ -3415,13 +3450,29 @@ fn jit_lower_arm_inner(
                         let cw2 =
                             b.ins()
                                 .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-                        b.ins().call(push_ref, &[heap, cw0, cw1, cw2]);
+                        b.ins().stack_store(cw0, stage_ss, 0);
+                        b.ins().stack_store(cw1, stage_ss, PAYLOAD_OFFSET as i32);
+                        b.ins()
+                            .stack_store(cw2, stage_ss, PAYLOAD_OFFSET as i32 + 8);
+                        1
+                    } else {
+                        0
+                    };
+                    for (i, w) in worded.iter().enumerate() {
+                        let off = (arg_base + i as i32) * STRIDE as i32;
+                        b.ins().stack_store(w[0], stage_ss, off);
+                        b.ins()
+                            .stack_store(w[1], stage_ss, off + PAYLOAD_OFFSET as i32);
+                        b.ins()
+                            .stack_store(w[2], stage_ss, off + PAYLOAD_OFFSET as i32 + 8);
                     }
-                    // Stage `[callee, arg0 .. arg_{argc-1}]` (the VM's `Inst::Call` layout
-                    // that `brood_rt_call_slow` / `jit_dispatch_tail` read back).
-                    for w in &worded {
-                        b.ins().call(push_ref, &[heap, w[0], w[1], w[2]]);
-                    }
+                    let stage_ptr = b.ins().stack_addr(ptr_ty, stage_ss, 0);
+                    let stage_n = b.ins().iconst(types::I64, (arg_base as i64) + n_ops as i64);
+                    // Stage onto roots (`[callee?, args…]`, the VM's `Inst::Call` layout
+                    // `brood_rt_call_slow` / `jit_dispatch_tail` / fast_frame read back).
+                    // The native flat-cell path re-reads the slot instead, but staging
+                    // unconditionally here keeps every fallback path's contract intact.
+                    b.ins().call(pushn_ref, &[heap, stage_ptr, stage_n]);
                     if *tail {
                         // Tail position: the staged call *is* this arm's result (TCO). It
                         // ends the block — nothing may remain on the operand stack below it
@@ -3537,7 +3588,11 @@ fn jit_lower_arm_inner(
                         let ident_ok = b.ins().band(sym_ok, argc_ok);
                         b.ins().brif(ident_ok, hit, &[], miss, &[]);
 
-                        // hit: read (code, nslots, env) and run the fast frame.
+                        // hit: read (code, nslots, env). `nslots == u32::MAX` marks a
+                        // NATIVE flat cell (a builtin callee, arity pre-validated at
+                        // publish): call the fn pointer directly on the staging slot —
+                        // no frame, no env_get, no dispatch. Otherwise run the Brood
+                        // fast frame exactly as before.
                         b.switch_to_block(hit);
                         let code_v = b.ins().load(
                             types::I64,
@@ -3551,6 +3606,23 @@ fn jit_lower_arm_inner(
                             slot_ptr,
                             fl_nslots_off,
                         );
+                        let is_native = b.ins().icmp_imm(IntCC::Equal, nslots_v, u32::MAX as i64);
+                        let nat_blk = b.create_block();
+                        let brood_blk = b.create_block();
+                        b.ins().brif(is_native, nat_blk, &[], brood_blk, &[]);
+
+                        // Native flat cell: one trampoline call; the staged roots copies
+                        // anchor the args for any GC inside (the trampoline drops them).
+                        b.switch_to_block(nat_blk);
+                        let nfc = b
+                            .ins()
+                            .call(natfl_ref, &[heap, out_addr, code_v, stage_ptr, argc_v]);
+                        let nst = b.inst_results(nfc)[0];
+                        let rbc_n = b.ins().call(rb_ref, &[heap]);
+                        b.def_var(rb_var, b.inst_results(rbc_n)[0]);
+                        b.ins().brif(nst, error, &[], cont, &[]);
+
+                        b.switch_to_block(brood_blk);
                         let env_v =
                             b.ins()
                                 .load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);

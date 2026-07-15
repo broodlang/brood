@@ -100,6 +100,11 @@ impl Jit {
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
+        builder.symbol("brood_rt_push_n", brood_rt_push_n as *const u8);
+        builder.symbol(
+            "brood_rt_call_native_fl",
+            brood_rt_call_native_fl as *const u8,
+        );
         builder.symbol("brood_rt_global", brood_rt_global as *const u8);
         builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
@@ -723,6 +728,67 @@ pub unsafe extern "C" fn brood_rt_global_epoch_ptr(heap: *mut Heap) -> *const u6
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_i64_overflow_ptr(heap: *mut Heap) -> *mut u8 {
     &mut (*heap).jit_i64_overflow as *mut bool as *mut u8
+}
+
+/// Batch arg staging: append `n` staged `Value`s (from the call site's staging
+/// stack slot) onto `roots` in one reserve+memcpy — replacing `brood_rt_push` ×
+/// argc on every Brood→Brood / slow-dispatch call from JIT'd code.
+///
+/// # Safety
+/// `heap` must be live; `src` must point to `n` valid `Value`s (written by the
+/// emitting arm just before this call, with no intervening safepoint).
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_push_n(
+    heap: *mut Heap,
+    src: *const crate::core::value::Value,
+    n: i64,
+) -> i64 {
+    (*heap).push_roots_n(src, n as usize);
+    0
+}
+
+/// Direct builtin call from the IR fast-link path (the native flat cell): `func`
+/// is the `NativeFnPtr` bits published by `vm_fast_link_publish_native` (arity
+/// pre-validated for exactly this argc at publish), `args` the call site's staging
+/// stack slot. No roots staging, no `env_get`, no dispatch — one fn-pointer call.
+/// The args live in non-GC-visible stack memory: sound under the existing native
+/// contract (a native receives unrooted copies — today's `SmallVec` argv has the
+/// identical exposure — and must root anything it holds across its own evals).
+/// Status: 0 = done (`*out` holds the result), 1 = error parked in
+/// `jit_pending_error`.
+///
+/// # Safety
+/// `heap` live; `out` writable; `func` a valid `NativeFnPtr`; `args` points to
+/// `argc` valid `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_call_native_fl(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    func: u64,
+    args: *const crate::core::value::Value,
+    argc: u32,
+) -> i64 {
+    let h = &mut *heap;
+    let f: crate::core::value::NativeFnPtr = std::mem::transmute(func as usize);
+    let slice = std::slice::from_raw_parts(args, argc as usize);
+    let env = h.read_root_env(h.jit_call_env);
+    // The emitting arm batch-staged these argc args onto `roots` too (uniform with
+    // every fallback path) — they anchor the arg values for any GC the native
+    // triggers, exactly like the VM keeps call operands rooted during dispatch.
+    // No callee frame consumes them here, so drop them once the native returns.
+    let base = h.roots_len() - argc as usize;
+    let r = f(slice, env, h);
+    h.truncate_roots(base);
+    match r {
+        Ok(v) => {
+            *out = v;
+            0
+        }
+        Err(e) => {
+            h.jit_pending_error = Some(e);
+            1
+        }
+    }
 }
 
 /// Base pointer of the operand-stack/`roots` buffer. JIT'd code calls this once at
