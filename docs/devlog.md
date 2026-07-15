@@ -4101,7 +4101,7 @@ already had the carry fast path; the point is that keeping `roots` authoritative
 every iteration is the safer invariant and costs ~nothing. **Don't re-chase frame
 stores** — profile a genuinely allocation- or FFI-bound benchmark instead.
 
-## 2026-07-15 — Regex's dead `(:use editor/buffer)`: the last 7/7 falls, 578 → ~310 ms (one line)
+## 2026-07-15 — Regex's dead `(:use editor/buffer)`: 578 → ~301 ms wall, RSS 182 → 65 MB (one line)
 
 Right after the frame-stores dead end, took its own advice — *measure the benchmark,
 don't assume* — on `regex`, the sole surviving last-of-seven (578 ms). Bisected the
@@ -4113,11 +4113,17 @@ cost and it was **none of** the matcher, the per-call compile (cached — a stri
 buffer's public defns against the whole file: zero hits). A pure dead dependency,
 paid once per process at startup. Deleted the one line.
 
-Result: `require 'regex` 0.32 → **0.03 s**; the benchmark 0.578 → **~0.31 s** — past
-clojure (477 ms), so regex goes **7/7 → 6/7**. That was the *last* dead-last row: the
-07-14/15 sweep is complete, no benchmark is last-of-seven anymore. Verified: regex
-suite 14/14; 3-engine (JIT / NO_JIT / tree-walk) bit-identical on the benchmark; the
-checked-but-**kept** deps (sexp genuinely uses `buffer-text`/`goto-char`/… ; leave it).
+Result: `require 'regex` 0.32 → **0.03 s**; the benchmark **wall 0.578 → 0.301 s**,
+**peak RSS 182 → 65 MB**. **Correction (measured, not assumed):** this does NOT move
+regex off 7/7. The suite ranks by **compute = wall − startup**, and clojure/elixir boot
+a JVM/BEAM (330/190 ms) that gets subtracted — their regex *wall* is 477/197 ms but
+their *compute* is only 144/10 ms. Brood's regex compute fell **547 → 270 ms (−50 %)**
+— the whole `editor/buffer` load was in compute (the `startup` row is a bare program,
+so a `require`d module's load counts as work) — but clojure's native regex compute
+(144 ms) is still faster, so **regex stays 7/7 by compute** (the gap closed ~3.8× → 1.9×,
+and any program that `require`s regex now boots ~290 ms sooner). Verified: regex suite
+14/14; 3-engine (JIT / NO_JIT / tree-walk) bit-identical; the checked-but-**kept** deps
+(sexp genuinely uses `buffer-text`/`goto-char`/… ; leave it).
 Follow-on noted, not chased: **editor/buffer itself loads in 0.33 s for 862 lines** —
 json's 396 load in ~0, so large-module load time is superlinear/pathological and would
 speed up real editor + `nest` startup broadly. The general lesson: a benchmark's wall
