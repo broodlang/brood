@@ -93,6 +93,10 @@ impl Jit {
         builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
         builder.symbol("brood_rt_cons", brood_rt_cons as *const u8);
         builder.symbol("brood_rt_make_vector2", brood_rt_make_vector2 as *const u8);
+        builder.symbol(
+            "brood_rt_make_vector_n",
+            brood_rt_make_vector_n as *const u8,
+        );
         builder.symbol("brood_rt_car", brood_rt_car as *const u8);
         builder.symbol("brood_rt_cdr", brood_rt_cdr as *const u8);
         builder.symbol("brood_rt_push", brood_rt_push as *const u8);
@@ -360,6 +364,35 @@ pub unsafe extern "C" fn brood_rt_make_vector2(
     let a = words_to_val(a0, a1, a2);
     let b = words_to_val(b0, b1, b2);
     *out = h.alloc_vector2(a, b);
+}
+
+/// Build an `n`-element vector from `n` `Value`s staged contiguously at `elems`
+/// (the JIT wrote each element's 3 words into a stack slot it owns), writing the
+/// fresh vector to `*out`. The variadic generalisation of [`brood_rt_make_vector2`]
+/// for a wider `[a b c …]` literal (`Inst::MakeVector(n)`, `n != 2`) — nbody's
+/// `[vx vy vz]` / 7-body rebuild. A fixed Cranelift signature can't take `n×3`
+/// words, so the elements come by pointer instead of by register-triple.
+///
+/// Like `make_vector2`, `alloc_vector` only *grows* the LOCAL vector slab (an
+/// `alloc_slot!` push — never collects), so the staged elements can't go stale
+/// during the call and need no extra rooting beyond the bytes at `elems`.
+///
+/// # Safety
+/// `heap`/`out` live; `elems` points at `n` consecutive, fully-initialised `Value`s.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_make_vector_n(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    elems: *const crate::core::value::Value,
+    n: i64,
+) {
+    let h = &mut *heap;
+    let n = n as usize;
+    let mut items = Vec::with_capacity(n);
+    for i in 0..n {
+        items.push(std::ptr::read(elems.add(i)));
+    }
+    *out = h.alloc_vector(items);
 }
 
 /// `first` of a `Value` (by word-triple), writing its car to `*out`. The JIT **tag-checks

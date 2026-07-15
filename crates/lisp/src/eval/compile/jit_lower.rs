@@ -88,40 +88,6 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
 }
 
-/// True if the arm is eligible for register-carry of loop-carried integer params.
-/// In a pure-arithmetic self-tail loop (no non-tail Calls, no handle-producing ops), every
-/// param slot at the `SelfCall` back-edge is always `Value::Int`. We can carry those i64s
-/// in Cranelift `Variable`s instead of boxing to `roots` every iteration: reads skip the
-/// per-access tag-check + address arithmetic + two memory ops. The `roots` stores at
-/// `SelfCall` are kept (for deopt correctness); only reads change.
-#[cfg(feature = "jit")]
-fn int_carry_eligible(code: &[Inst]) -> bool {
-    code.iter().any(|i| matches!(i, Inst::SelfCall { .. }))
-        && !code.iter().any(|i| {
-            matches!(
-                i,
-                Inst::Call { tail: false, .. }
-                    | Inst::Prim1 {
-                        op: PrimOp1::First | PrimOp1::Rest,
-                        ..
-                    }
-                    | Inst::MakeVector(_)
-                    | Inst::Prim2 {
-                        op: PrimOp::Cons,
-                        ..
-                    }
-                    | Inst::Prim2SlotSlot {
-                        op: PrimOp::Cons,
-                        ..
-                    }
-                    | Inst::Prim2SlotInt {
-                        op: PrimOp::Cons,
-                        ..
-                    }
-            )
-        })
-}
-
 /// Count of non-tail Brood→Brood calls in `code` — the shape that needs a handle spill
 /// (≥2) and drives the spill-reserve / lowering gates.
 #[cfg(feature = "jit")]
@@ -177,10 +143,12 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
             in_subset_op(op)
         }
-        // A 2-element vector literal `[a b]` — lowered via `brood_rt_make_vector2`,
-        // the same bump-allocate path as `cons`. Only arity 2 (bintree's `make`);
-        // wider literals bail (they'd need a roots-staging variadic helper).
-        Inst::MakeVector(n) => *n == 2,
+        // A vector literal `[a …]`. Arity 2 (bintree's `make`) lowers via the inline
+        // `brood_rt_make_vector2`; a wider literal (nbody's `[vx vy vz]` / 7-body
+        // rebuild) stages its elements into a Cranelift stack slot and calls the
+        // variadic `brood_rt_make_vector_n`. Capped at 32 so the per-site staging slot
+        // stays small (a huge literal in a hot arm is unheard-of; it bails to the VM).
+        Inst::MakeVector(n) => *n <= 32,
         _ => false,
     })
 }
@@ -1378,6 +1346,14 @@ fn jit_lower_arm_inner(
             .map(|k| slot_tags.get(k).copied() == Some(profile_tag_float))
             .collect(),
     );
+    // Is this arm float-context (any profiled Float param)? Used to optimistically route
+    // arithmetic on an `Op::Handle` operand (a type-erased vector/`nth` read — nbody's
+    // `(- (nth bi 0) (nth bj 0))`) through the *float* path instead of the integer default.
+    // `as_f64` tag-checks the handle is `Float` and deopts otherwise, so this can never
+    // miscompile — a wrong guess just deopts (the same outcome as today's int-path
+    // `as_int`-on-a-float). When the guess is right the result is `Op::Float`, which
+    // `store_op` marks float, so the whole `(nth …)`-fed arithmetic chain stays unboxed.
+    let has_float_slot = slot_tags.iter().any(|&t| t == profile_tag_float);
     // Per-slot "holds a `Value::Bool`" flag — the boolean analogue of `slot_float`, but
     // seeded all-false: a bool is rarely a loop *param*, and the case that matters is a
     // let-binder, e.g. `(and X Y)` → `(let (g X) (if g Y g))` storing a comparison result
@@ -1654,6 +1630,18 @@ fn jit_lower_arm_inner(
     let makevec2_id = m
         .declare_function("brood_rt_make_vector2", Linkage::Import, &makevec2_sig)
         .ok()?;
+    // brood_rt_make_vector_n(heap, out, elems: *const Value, n) — builds an n-element
+    // vector from `n` `Value`s the JIT staged contiguously at `elems` (a stack slot it
+    // owns). The variadic `MakeVector(n != 2)` path; `alloc_vector` never collects, so
+    // the staged bytes stay live across the call (same discipline as make_vector2).
+    let mut makevecn_sig = m.make_signature();
+    makevecn_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    makevecn_sig.params.push(AbiParam::new(ptr_ty)); // out
+    makevecn_sig.params.push(AbiParam::new(ptr_ty)); // elems
+    makevecn_sig.params.push(AbiParam::new(types::I64)); // n
+    let makevecn_id = m
+        .declare_function("brood_rt_make_vector_n", Linkage::Import, &makevecn_sig)
+        .ok()?;
     // brood_rt_gc_safepoint(heap): collect if due (bounds the nursery for cons loops).
     let mut sp_sig = m.make_signature();
     sp_sig.params.push(AbiParam::new(ptr_ty));
@@ -1806,32 +1794,39 @@ fn jit_lower_arm_inner(
     // anything else (vector, nil, handle) is excluded — TAG_VEC would deopt on every call.
     let profile_tag_int = crate::core::value::Tag::Int as u8;
     let profile_tag_float_carry = crate::core::value::Tag::Float as u8;
-    let carry_vars: Vec<(Variable, bool)> = {
-        let candidate = if int_carry_eligible(code) {
-            code.iter()
-                .filter_map(|i| {
-                    if let Inst::SelfCall { argc } = i {
-                        Some(*argc)
-                    } else {
-                        None
-                    }
-                })
-                .max()
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        if candidate > 0
-            && (0..candidate).all(|k| {
-                let t = slot_tags.get(k).copied();
-                t == Some(profile_tag_int) || t == Some(profile_tag_float_carry)
+    // Per-slot: `Some((var, is_float))` carries param slot `k` in a Cranelift Variable;
+    // `None` leaves it on the frame (a handle/vector/nil slot — GC-relocatable, so it
+    // must stay rooted). A *pure* scalar self-tail loop (`loop`/`collatz`/`mandelbrot`)
+    // carries every slot (all `Some`) — bit-identical to the prior all-or-nothing path.
+    // The generalisation (Layer A) is that a **call-mediated** self-recursive arm mixing
+    // a handle with scalars — nbody's `newvel b:handle i:int j:int vx/vy/vz:float` — now
+    // carries just its scalar slots instead of bailing entirely, keeping those floats
+    // unboxed across the self-recursion. Sound because a scalar in a register is invisible
+    // to (and unmoved by) GC across a call safepoint, and a deopt always restarts the arm
+    // from the frame's last-SelfCall iteration inputs (the `roots` stores are kept), which
+    // the entry tag-check re-validates. The per-read `as_f64`/`load_slot_int` tag-check
+    // still guards a mistyped profile → deopt, so this can never miscompile.
+    let carry_vars: Vec<Option<(Variable, bool)>> = {
+        let has_self_call = code.iter().any(|i| matches!(i, Inst::SelfCall { .. }));
+        let max_argc = code
+            .iter()
+            .filter_map(|i| {
+                if let Inst::SelfCall { argc } = i {
+                    Some(*argc)
+                } else {
+                    None
+                }
             })
-        {
-            (0..candidate)
-                .map(|k| {
-                    let is_float = slot_tags.get(k).copied() == Some(profile_tag_float_carry);
-                    let ty = if is_float { types::F64 } else { types::I64 };
-                    (b.declare_var(ty), is_float)
+            .max()
+            .unwrap_or(0);
+        if has_self_call && max_argc > 0 {
+            (0..max_argc)
+                .map(|k| match slot_tags.get(k).copied() {
+                    Some(t) if t == profile_tag_int => Some((b.declare_var(types::I64), false)),
+                    Some(t) if t == profile_tag_float_carry => {
+                        Some((b.declare_var(types::F64), true))
+                    }
+                    _ => None,
                 })
                 .collect()
         } else {
@@ -1849,6 +1844,7 @@ fn jit_lower_arm_inner(
     let vobase_ref = m.declare_func_in_func(vobase_id, b.func);
     let cons_ref = m.declare_func_in_func(cons_id, b.func);
     let makevec2_ref = m.declare_func_in_func(makevec2_id, b.func);
+    let makevecn_ref = m.declare_func_in_func(makevecn_id, b.func);
     let sp_ref = m.declare_func_in_func(sp_id, b.func);
     #[cfg(debug_assertions)]
     let dbg_staging_ref = m.declare_func_in_func(dbg_staging_id, b.func);
@@ -2150,7 +2146,11 @@ fn jit_lower_arm_inner(
     // Initialize register-carry variables from roots (first iteration). Each param slot k is
     // tag-checked (Int or Float, per is_float) once at entry; subsequent iterations read
     // `use_var(carry_vars[k].0)` directly. Float slots are bitcast i64→f64.
-    for (k, &(var, is_float)) in carry_vars.iter().enumerate() {
+    for (k, entry) in carry_vars.iter().enumerate() {
+        let (var, is_float) = match *entry {
+            Some(x) => x,
+            None => continue, // handle/vector slot: stays on the frame, not register-carried
+        };
         let rb = b.use_var(rb_var);
         let idx = b.ins().iadd_imm(base, k as i64);
         let off = b.ins().imul_imm(idx, STRIDE);
@@ -2206,7 +2206,7 @@ fn jit_lower_arm_inner(
     // re-`def_var`s on the back-edge. `use_var` gives the current iteration's value without
     // any memory access or branch.
     let load_slot_int = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
-        if let Some(&(var, false)) = carry_vars.get(k as usize) {
+        if let Some((var, false)) = carry_vars.get(k as usize).copied().flatten() {
             return b.use_var(var);
         }
         let roots_base = b.use_var(rb_var);
@@ -2598,7 +2598,7 @@ fn jit_lower_arm_inner(
         match op {
             Op::Float(v) => v,
             Op::Slot(k) => {
-                if let Some(&(var, true)) = carry_vars.get(k) {
+                if let Some((var, true)) = carry_vars.get(k).copied().flatten() {
                     return b.use_var(var);
                 }
                 if let Some(v) = slot_f64_cache.borrow().get(k).copied().flatten() {
@@ -2621,7 +2621,20 @@ fn jit_lower_arm_inner(
                 );
                 b.ins().bitcast(types::F64, MemFlagsData::new(), bits)
             }
-            Op::Int(_) | Op::Bool(_) | Op::Handle(..) | Op::HoistedVec { .. } => {
+            Op::Handle(w0, w1, _) => {
+                // A type-erased boxed `Value` (a `nth`/vector read, a call result) used as a
+                // float: tag-check `Float` and extract its payload bits, else deopt (the VM
+                // then runs the arm with the real type). Mirrors the `Op::Slot` path but on
+                // words already in registers. This is what lets `(nth v k)`-fed float
+                // arithmetic stay native instead of deopting on the int-path `as_int`.
+                let tagb = b.ins().band_imm(w0, 0xff);
+                let is_f = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_FLOAT as i64);
+                let cont = b.create_block();
+                b.ins().brif(is_f, cont, &[], deopt, &[]);
+                b.switch_to_block(cont);
+                b.ins().bitcast(types::F64, MemFlagsData::new(), w1)
+            }
+            Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } => {
                 b.ins().jump(deopt, &[]);
                 let dead = b.create_block();
                 b.switch_to_block(dead);
@@ -2640,14 +2653,25 @@ fn jit_lower_arm_inner(
         }
     };
     // Float arith / comparison. Arith → `Op::Float`; a comparison → an `i8` boxed as a
-    // Bool (`Op::Int`, exactly like the integer compares). `/` and the integer-only ops
-    // aren't lowered for floats → `None` bails the arm to the VM.
+    // Bool (`Op::Int`, exactly like the integer compares). The integer-only ops
+    // (`rem`/`quot`) and `=` aren't lowered for floats → `None` bails the arm to the VM.
     let emit_float_arith = |b: &mut FunctionBuilder, op: PrimOp, x, y| -> Option<Op> {
         use cranelift_codegen::ir::condcodes::FloatCC;
         Some(match op {
             PrimOp::Add => Op::Float(b.ins().fadd(x, y)),
             PrimOp::Sub => Op::Float(b.ins().fsub(x, y)),
             PrimOp::Mul => Op::Float(b.ins().fmul(x, y)),
+            PrimOp::Div => {
+                // Brood float `/` raises on a zero divisor (matches the VM — `(/ x 0.0)`
+                // errors), so guard `y == 0.0` and deopt (the VM then raises); otherwise
+                // `fdiv`. `fcmp Equal 0.0` catches +0.0 and -0.0 alike.
+                let zero = b.ins().f64const(0.0);
+                let is_zero = b.ins().fcmp(FloatCC::Equal, y, zero);
+                let cont = b.create_block();
+                b.ins().brif(is_zero, deopt, &[], cont, &[]);
+                b.switch_to_block(cont);
+                Op::Float(b.ins().fdiv(x, y))
+            }
             PrimOp::Lt => Op::Int(b.ins().fcmp(FloatCC::LessThan, x, y)),
             PrimOp::Le => Op::Int(b.ins().fcmp(FloatCC::LessThanOrEqual, x, y)),
             // `=` is NOT lowered for floats: Brood `=` is *structural*, so a Float
@@ -2857,9 +2881,16 @@ fn jit_lower_arm_inner(
                 VS::JIT_TAG_OFF,
             );
             let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
-            let c3 = b.create_block();
-            b.ins().brif(is_inline, c3, &[], deopt, &[]);
-            b.switch_to_block(c3);
+            let inline_blk = b.create_block();
+            let heap_blk = b.create_block();
+            // The two storage layouts converge here with the element's 3 words.
+            let ivr_done = b.create_block();
+            b.append_block_param(ivr_done, types::I64);
+            b.append_block_param(ivr_done, types::I64);
+            b.append_block_param(ivr_done, types::I64);
+            b.ins().brif(is_inline, inline_blk, &[], heap_blk, &[]);
+            // Inline (`INLINE_VEC_CAP`-or-fewer elements): read straight from the slab slot.
+            b.switch_to_block(inline_blk);
             // Bounds: idx < len (len is the inline element count, a u8).
             let lenb = b.ins().load(
                 types::I8,
@@ -2889,7 +2920,51 @@ fn jit_lower_arm_inner(
                 elem,
                 PAYLOAD_OFFSET as i32 + 8,
             );
-            Op::Handle(r0, r1, r2)
+            b.ins().jump(
+                ivr_done,
+                &[
+                    BlockArg::Value(r0),
+                    BlockArg::Value(r1),
+                    BlockArg::Value(r2),
+                ],
+            );
+            // Heap-backed (a >`INLINE_VEC_CAP` vector — e.g. nbody's 7-element body
+            // vectors): a constant-index `(nth v k)` used to deopt here (the whole arm fell
+            // to the VM every read). Instead read via the general `brood_rt_vector_ref`
+            // helper, which handles any storage and only errors on a bad index (→ deopt).
+            b.switch_to_block(heap_blk);
+            let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+            let it = b.ins().iconst(types::I64, TAG_INT as i64);
+            let iv = b.ins().iconst(types::I64, idx);
+            let iz = b.ins().iconst(types::I64, 0);
+            let hc = b.ins().call(
+                vref_ref,
+                &[heap, out_addr, vec[0], vec[1], vec[2], it, iv, iz],
+            );
+            let hstatus = b.inst_results(hc)[0];
+            let hok = b.create_block();
+            b.ins().brif(hstatus, deopt, &[], hok, &[]);
+            b.switch_to_block(hok);
+            let h0 = b.ins().stack_load(types::I64, out_slot, 0);
+            let h1 = b
+                .ins()
+                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+            let h2 = b
+                .ins()
+                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+            b.ins().jump(
+                ivr_done,
+                &[
+                    BlockArg::Value(h0),
+                    BlockArg::Value(h1),
+                    BlockArg::Value(h2),
+                ],
+            );
+            b.switch_to_block(ivr_done);
+            let w0 = b.block_params(ivr_done)[0];
+            let w1 = b.block_params(ivr_done)[1];
+            let w2 = b.block_params(ivr_done)[2];
+            Op::Handle(w0, w1, w2)
         };
 
     // For each leader, which of its operand-stack block params carry a boolean (so the
@@ -3392,21 +3467,61 @@ fn jit_lower_arm_inner(
                     }
                 }
                 Inst::MakeVector(n) => {
-                    // Only arity 2 reaches here (gated by `chunk_in_jit_subset`); bail
-                    // defensively otherwise. Same bump-allocate path as `cons`: read both
-                    // operands as words (source order — `a` deeper, `b` on top), allocate.
-                    if *n != 2 {
-                        return None;
+                    let n = *n;
+                    if n == 2 {
+                        // Arity-2 fast path: the same bump-allocate as `cons` via the
+                        // inline `alloc_vector2` (no temp `Vec`). Read both operands as
+                        // words (source order — `a` deeper, `b` on top), allocate.
+                        let (b_op, a_op) = (stack.pop()?, stack.pop()?);
+                        let aw = read_words(&mut b, a_op);
+                        let bw = read_words(&mut b, b_op);
+                        let h = call_handle(
+                            &mut b,
+                            makevec2_ref,
+                            &[aw[0], aw[1], aw[2], bw[0], bw[1], bw[2]],
+                        );
+                        stack.push(h);
+                    } else {
+                        // Variadic `[e0 … e{n-1}]` (nbody's `[vx vy vz]` / 7-body rebuild).
+                        // Pop the `n` operands (pushed in source order: e0 deepest, e{n-1}
+                        // on top), box each to a `Value` word-triple, and store it into a
+                        // per-site Cranelift stack slot (`n × STRIDE` bytes) the JIT owns.
+                        // Then call `brood_rt_make_vector_n(heap, out, stage, n)`, which
+                        // `alloc_vector`s (never collects) — so the staged bytes stay live
+                        // across the call. Read the fresh handle back out of `out_slot`.
+                        let mut ops = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            ops.push(stack.pop()?);
+                        }
+                        ops.reverse(); // ops[i] = element i, in source order
+                        let stage = b.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            STRIDE as u32 * n as u32,
+                            3,
+                        ));
+                        for (i, op) in ops.into_iter().enumerate() {
+                            let w = read_words(&mut b, op);
+                            let off = i as i32 * STRIDE as i32;
+                            b.ins().stack_store(w[0], stage, off);
+                            b.ins()
+                                .stack_store(w[1], stage, off + PAYLOAD_OFFSET as i32);
+                            b.ins()
+                                .stack_store(w[2], stage, off + PAYLOAD_OFFSET as i32 + 8);
+                        }
+                        let stage_addr = b.ins().stack_addr(ptr_ty, stage, 0);
+                        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        let n_val = b.ins().iconst(types::I64, n as i64);
+                        b.ins()
+                            .call(makevecn_ref, &[heap, out_addr, stage_addr, n_val]);
+                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let w1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let w2 =
+                            b.ins()
+                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        stack.push(Op::Handle(w0, w1, w2));
                     }
-                    let (b_op, a_op) = (stack.pop()?, stack.pop()?);
-                    let aw = read_words(&mut b, a_op);
-                    let bw = read_words(&mut b, b_op);
-                    let h = call_handle(
-                        &mut b,
-                        makevec2_ref,
-                        &[aw[0], aw[1], aw[2], bw[0], bw[1], bw[2]],
-                    );
-                    stack.push(h);
                 }
                 Inst::Prim2 { op, map, .. } => {
                     // Operands were pushed in source order: `aa` (deeper) is source 0,
@@ -3457,9 +3572,19 @@ fn jit_lower_arm_inner(
                             let h = vector_ref(&mut b, vec, idx);
                             stack.push(h);
                         }
-                    } else if op_is_float(aa_op) || op_is_float(bb_op) {
-                        // Float arith/compare (an operand is a float). `pick` selects f64
-                        // values the same as i64.
+                    } else if op_is_float(aa_op)
+                        || op_is_float(bb_op)
+                        || (has_float_slot
+                            && matches!(op, PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div)
+                            && (matches!(aa_op, Op::Handle(..)) || matches!(bb_op, Op::Handle(..))))
+                    {
+                        // Float arith/compare (an operand is a float, or — in a float-context
+                        // arm — a type-erased `Op::Handle` optimistically treated as float,
+                        // e.g. `(- (nth bi 0) (nth bj 0))`). `as_f64` tag-checks each `Handle`
+                        // is `Float` and deopts otherwise, so a wrong guess is safe (a deopt,
+                        // not a miscompile); a right guess yields `Op::Float`, which `store_op`
+                        // marks float so the rest of the chain stays unboxed. `pick` selects
+                        // f64 values the same as i64.
                         let aa = as_f64(&mut b, aa_op);
                         let bb = as_f64(&mut b, bb_op);
                         let x = pick(aa, bb, map[0]);
@@ -3725,9 +3850,11 @@ fn jit_lower_arm_inner(
                     // avoids parallel-assignment issues with cross-slot references.
                     if !carry_vars.is_empty() {
                         let rb2 = b.use_var(rb_var);
-                        for (k, (&op, &(var, is_float))) in
-                            ops.iter().zip(carry_vars.iter()).enumerate()
-                        {
+                        for (k, (&op, entry)) in ops.iter().zip(carry_vars.iter()).enumerate() {
+                            let (var, is_float) = match *entry {
+                                Some(x) => x,
+                                None => continue, // handle slot: only the frame store above applies
+                            };
                             if is_float {
                                 let f = match op {
                                     Op::Float(v) => v,
