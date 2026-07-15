@@ -205,14 +205,27 @@ backreferences yet."
 ;; cache is a Table (the one mutable structure), keyed by the pattern string.
 (def regex--cache (table))
 (defn regex--compile (pattern)
-  "The compiled NFA + its lazy-DFA transition memo for `pattern`, memoised across calls."
+  "The compiled NFA + everything pattern-constant, memoised across calls (the
+Erlang `re:compile` discipline: pay it once per pattern, never per match call):
+  :memo      the lazy DFA — (state-set, char) -> next state-set, filled on demand;
+  :matchbit  the accept state's bit (so accept tests are plain `bit-and`);
+  :startfull the full eps-closure of {start} at position 0 for a NON-empty input
+             (`^` fires, `$` doesn't — position-independent for every n > 0);
+  :startmid  the split-only closure of {start} (the search loop's injection set);
+  :exitmemo  accept-closure memo — final set -> boolean (for n > 0 the exit
+             closure depends only on the set, so it caches exactly)."
   (let (hit (table-get regex--cache pattern))
     (if (nil? hit)
       (let (nfa (regex--nfa (regex--parse pattern))
-            ;; `:memo` is the lazy DFA: (state-set, char) -> next state-set, filled
-            ;; on demand during matching and shared across every call for this pattern.
-            obj {:states (get nfa :states) :start (get nfa :start)
-                 :match (get nfa :match) :memo (table)})
+            states (get nfa :states)
+            start (get nfa :start)
+            m (count states)
+            startbit (bit-shift-left 1 start)
+            obj {:states states :start start :match (get nfa :match)
+                 :matchbit (bit-shift-left 1 (get nfa :match))
+                 :startfull (regex--eps-close states startbit 0 1 m)
+                 :startmid (regex--eps-close-mid states startbit m)
+                 :memo (table) :exitmemo (table)})
         (table-put regex--cache pattern obj)
         obj)
       hit)))
@@ -305,65 +318,97 @@ backreferences yet."
             acc))
         acc))))
 
-(defn regex--delta (states memo m set c)
-  "The DFA transition: split-closed successor of `set` on char `c`, memoised in
-`memo`. First hit computes it (an NFA step + closure); every repeat is one lookup.
-The key packs the set bitset and the char code into one integer."
-  (let (key (+ (* set 2097152) (char->int c))
-        hit (table-get memo key))
-    (if (nil? hit)
-      (let (nxt (regex--eps-close-mid states (regex--step states set c 0 m 0) m))
-        (table-put memo key nxt)
-        nxt)
-      hit)))
+;; The string is converted ONCE per match call to a vector of integer char codes,
+;; so the per-char loop below is pure integer/prim work: `(nth codes i)` (a
+;; vector-ref prim), the packed memo key `(+ (* set 2097152) code)` (int arith),
+;; `table-get` (a table prim), and the self tail call. No per-char Brood→Brood
+;; call and no `char->int` call — which is what lets the whole loop JIT-tier.
+(defn regex--codes (s)
+  "The chars of `s` as a vector of integer codepoints."
+  (apply vector (map char->int (string->list s))))
+
+(defn regex--delta-slow (states memo m set code)
+  "The DFA-transition MISS path: compute the split-closed successor of `set` on
+char-code `code` (an NFA step + closure over the char), memoise it, return it.
+Runs once per distinct (set, char) — every repeat is the loop's one `table-get`."
+  (let (c (int->char code)
+        nxt (regex--eps-close-mid states (regex--step states set c 0 m 0) m))
+    (table-put memo (+ (* set 2097152) code) nxt)
+    nxt))
+
+;; Accept test at the end of input (position n > 0): full eps-closure of the final
+;; set (`$` fires, `^` doesn't), then the matchbit test — memoised per SET in
+;; `exitmemo`, so after warmup the loop's exit is one `table-get`. The closure is
+;; computed with the (1, 1) position sentinel: for ANY n > 0, `i == n` makes `:eol`
+;; fire and `:bol` not — exactly what (i=1, n=1) reproduces.
+(defn regex--exit-slow (states exitmemo m matchbit set)
+  (let (r (not (= 0 (bit-and (regex--eps-close states set 1 1 m) matchbit))))
+    (table-put exitmemo set r)
+    r))
 
 ;; anchored (matches?): the whole string must be consumed ending in `:match`.
-;; Per char is one `regex--delta` lookup; `^` fires in the start closure, `$` in
-;; the accept closure (both full `regex--eps-close`, run once each).
-(defn regex--run-anchored-loop (states memo m match cs n i set)
+;; Per char: one memo lookup (+ the rare miss computing it). Everything
+;; pattern-constant (start closure, match bit) arrives precomputed from
+;; `regex--compile`; the exit closure comes from `exitmemo`. The loop body is
+;; pure prims (vector-ref, int arith, table-get) + the self tail call.
+(defn regex--exit (obj states m matchbit set)
+  "End-of-input accept test: the memoised exit closure, computing on first sight."
+  (let (r (table-get (get obj :exitmemo) set))
+    (if (nil? r) (regex--exit-slow states (get obj :exitmemo) m matchbit set) r)))
+
+(defn regex--run-anchored-loop (obj states memo m matchbit codes n i set)
   (if (= i n)
-    (regex--bit? (regex--eps-close states set n n m) match)
+    (regex--exit obj states m matchbit set)
     (if (= set 0)
       false
-      (regex--run-anchored-loop states memo m match cs n (inc i)
-        (regex--delta states memo m set (nth cs i))))))
-
-(defn regex--run-anchored (states memo m start match cs n)
-  (regex--run-anchored-loop states memo m match cs n 0
-    (regex--eps-close states (bit-shift-left 1 start) 0 n m)))
+      (let (nxt (table-get memo (+ (* set 2097152) (nth codes i))))
+        (regex--run-anchored-loop obj states memo m matchbit codes n (+ i 1)
+          (if (nil? nxt) (regex--delta-slow states memo m set (nth codes i)) nxt))))))
 
 ;; unanchored search (match?): inject the (split-closed) start state at every
-;; position so a match may begin anywhere; `^` fires only in the initial full
-;; closure (position 0), `$` only in the accept closure at position n.
-(defn regex--run-search-loop (states memo m startmid match cs n i set)
-  (if (regex--bit? set match)
+;; position so a match may begin anywhere; `^` fires only in the start closure
+;; (position 0), `$` only in the exit closure at position n.
+(defn regex--run-search-loop (obj states memo m startmid matchbit codes n i set)
+  (if (not (= 0 (bit-and set matchbit)))
     true
     (if (>= i n)
-      (regex--bit? (regex--eps-close states set n n m) match)
-      (regex--run-search-loop states memo m startmid match cs n (inc i)
-        (bit-or (regex--delta states memo m set (nth cs i)) startmid)))))
-
-(defn regex--run-search (states memo m start match cs n)
-  (regex--run-search-loop states memo m
-    (regex--eps-close-mid states (bit-shift-left 1 start) m)
-    match cs n 0
-    (regex--eps-close states (bit-shift-left 1 start) 0 n m)))
+      (regex--exit obj states m matchbit set)
+      (let (nxt (table-get memo (+ (* set 2097152) (nth codes i))))
+        (regex--run-search-loop obj states memo m startmid matchbit codes n (+ i 1)
+          (bit-or
+            (if (nil? nxt) (regex--delta-slow states memo m set (nth codes i)) nxt)
+            startmid))))))
 
 ;; ---- public entry points ----------------------------------------------------
+;; The n == 0 edge (empty input) is the one case where the precomputed closures
+;; are wrong (`$` fires at position 0 too), so it recomputes both closures live.
+
+(defn regex--empty-input? (obj)
+  "Does the pattern match the empty string? (Both anchors fire at position 0.)"
+  (let (states (get obj :states)
+        m (count states)
+        set (regex--eps-close states (bit-shift-left 1 (get obj :start)) 0 0 m))
+    (not (= 0 (bit-and set (get obj :matchbit))))))
 
 (defn match? (pattern s)
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
 start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix."
   (let (obj (regex--compile pattern)
         states (get obj :states)
-        cs (apply vector (string->list s)))
-    (regex--run-search states (get obj :memo) (count states)
-      (get obj :start) (get obj :match) cs (count cs))))
+        codes (regex--codes s)
+        n (count codes))
+    (if (= n 0)
+      (regex--empty-input? obj)
+      (regex--run-search-loop obj states (get obj :memo) (count states)
+        (get obj :startmid) (get obj :matchbit) codes n 0 (get obj :startfull)))))
 
 (defn matches? (pattern s)
   "True if `pattern` matches the **entire** string `s` (anchored both ends)."
   (let (obj (regex--compile pattern)
         states (get obj :states)
-        cs (apply vector (string->list s)))
-    (regex--run-anchored states (get obj :memo) (count states)
-      (get obj :start) (get obj :match) cs (count cs))))
+        codes (regex--codes s)
+        n (count codes))
+    (if (= n 0)
+      (regex--empty-input? obj)
+      (regex--run-anchored-loop obj states (get obj :memo) (count states)
+        (get obj :matchbit) codes n 0 (get obj :startfull)))))

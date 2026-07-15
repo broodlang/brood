@@ -1364,7 +1364,7 @@ fn jit_lower_arm_inner(
 ) -> Option<*const u8> {
     use crate::core::heap::VecStore as VS;
     use crate::core::value::jit_layout::{
-        PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_PAIR, TAG_VECTOR,
+        PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR, TAG_SYM, TAG_VECTOR,
     };
     use cranelift_codegen::ir::{
         condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlagsData, StackSlotData,
@@ -3013,6 +3013,58 @@ fn jit_lower_arm_inner(
             .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
         Op::Handle(w0, w1, w2)
     };
+    // Runtime-dispatched `=` on materialised operands — the codegen twin of the VM's
+    // keyword/symbol fast path in `prim2_inline_exec`. Cases, by runtime tags:
+    //   * Int × Int → payload compare (the same two tag-checks the old int path paid);
+    //   * either side Sym/Keyword → interned identity: equal iff tags equal AND ids
+    //     equal (a keyword/symbol equals nothing but its same-tag same-id self — never
+    //     numerically coerced, so `(= :a 1)`/`(= :a 'a)` are correctly false);
+    //   * anything else (floats, bignums, structural values) → deopt: the VM owns
+    //     numeric coercion and deep equality.
+    // This is what keeps keyword-dispatching arms (`(= (get st :t) :split)` — the regex
+    // NFA walkers, any tagged-map code) running native instead of deopting per compare.
+    let eq_dispatch = |b: &mut FunctionBuilder,
+                       wa: [cranelift_codegen::ir::Value; 3],
+                       wb: [cranelift_codegen::ir::Value; 3]|
+     -> cranelift_codegen::ir::Value {
+        let ta = b.ins().band_imm(wa[0], 0xff);
+        let tb = b.ins().band_imm(wb[0], 0xff);
+        let done = b.create_block();
+        b.append_block_param(done, types::I8);
+        // Int × Int?
+        let a_int = b.ins().icmp_imm(IntCC::Equal, ta, TAG_INT as i64);
+        let b_int = b.ins().icmp_imm(IntCC::Equal, tb, TAG_INT as i64);
+        let both_int = b.ins().band(a_int, b_int);
+        let intb = b.create_block();
+        let not_int = b.create_block();
+        b.ins().brif(both_int, intb, &[], not_int, &[]);
+        b.switch_to_block(intb);
+        let ieq = b.ins().icmp(IntCC::Equal, wa[1], wb[1]);
+        b.ins().jump(done, &[BlockArg::Value(ieq)]);
+        // Either side an interned immediate (Sym=5 / Keyword=6)?
+        b.switch_to_block(not_int);
+        let a_sym = b.ins().icmp_imm(IntCC::Equal, ta, TAG_SYM as i64);
+        let a_kw = b.ins().icmp_imm(IntCC::Equal, ta, TAG_KEYWORD as i64);
+        let b_sym = b.ins().icmp_imm(IntCC::Equal, tb, TAG_SYM as i64);
+        let b_kw = b.ins().icmp_imm(IntCC::Equal, tb, TAG_KEYWORD as i64);
+        let a_in = b.ins().bor(a_sym, a_kw);
+        let b_in = b.ins().bor(b_sym, b_kw);
+        let either = b.ins().bor(a_in, b_in);
+        let kwb = b.create_block();
+        b.ins().brif(either, kwb, &[], deopt, &[]);
+        b.switch_to_block(kwb);
+        let tags_eq = b.ins().icmp(IntCC::Equal, ta, tb);
+        // A Sym/Keyword payload is a u32 — the HIGH half of the payload word is
+        // undefined padding (Rust doesn't zero it, and word-copies carry it along),
+        // so compare only the low 32 bits or equal interned ids can compare unequal.
+        let ida = b.ins().band_imm(wa[1], 0xFFFF_FFFFi64);
+        let idb = b.ins().band_imm(wb[1], 0xFFFF_FFFFi64);
+        let ids_eq = b.ins().icmp(IntCC::Equal, ida, idb);
+        let keq = b.ins().band(tags_eq, ids_eq);
+        b.ins().jump(done, &[BlockArg::Value(keq)]);
+        b.switch_to_block(done);
+        b.block_params(done)[0]
+    };
     // Inline read of `(nth v <const idx>)` for a LOCAL small (inline) vector, the
     // analog of the pair `first`/`rest` inline. Fetches the vector-slab base
     // *per read* (a trivial FFI, not the hoist used for pairs) so it is safe even
@@ -3773,6 +3825,17 @@ fn jit_lower_arm_inner(
                             let h = vector_ref(&mut b, vec, idx);
                             stack.push(h);
                         }
+                    } else if matches!(op, PrimOp::Eq)
+                        && !op_is_float(aa_op)
+                        && !op_is_float(bb_op)
+                        && (matches!(aa_op, Op::Handle(..) | Op::Slot(_))
+                            || matches!(bb_op, Op::Handle(..) | Op::Slot(_)))
+                    {
+                        // `=` with a type-erased operand: runtime-dispatched equality
+                        // (int×int payload compare / interned-immediate identity / deopt).
+                        let wa = read_words(&mut b, aa_op);
+                        let wb = read_words(&mut b, bb_op);
+                        stack.push(Op::Int(eq_dispatch(&mut b, wa, wb)));
                     } else if op_is_float(aa_op)
                         || op_is_float(bb_op)
                         || (has_float_slot
@@ -3904,6 +3967,17 @@ fn jit_lower_arm_inner(
                             let h = vector_ref(&mut b, vec, idx);
                             stack.push(h);
                         }
+                    } else if matches!(op, PrimOp::Eq)
+                        && !op_is_float(Op::Slot(*slot_a))
+                        && !op_is_float(Op::Slot(*slot_b))
+                    {
+                        // `(= slot slot)` — runtime-dispatched equality (see eq_dispatch):
+                        // int×int costs the same two tag-checks as the old int-only path,
+                        // and keyword/symbol operands now compare inline instead of
+                        // deopting the whole arm.
+                        let wa = read_words(&mut b, Op::Slot(*slot_a));
+                        let wb = read_words(&mut b, Op::Slot(*slot_b));
+                        stack.push(Op::Int(eq_dispatch(&mut b, wa, wb)));
                     } else if op_is_float(Op::Slot(*slot_a)) || op_is_float(Op::Slot(*slot_b)) {
                         // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`).
                         let sa = as_f64(&mut b, Op::Slot(*slot_a));

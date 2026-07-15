@@ -3872,3 +3872,43 @@ stored-nil vs Empty, count bookkeeping, all three migration triggers, incr acros
 migration + its type error, snapshot); 22-case dense edge script; **redefining
 `table-put`/`table-has?` after the loops are hot dispatches the redefinition on both
 engines** (epoch guard exact); GC-stress clean on sieve+regex.
+
+## 2026-07-15 — Regex compiles harder (re:compile discipline) + the JIT learns keyword `=`
+
+Finishing the `regex` dead-last work. Two layers, one found-bug:
+
+**1. `std/regex.blsp`, the Erlang `re:compile` discipline** — everything pattern-constant
+moves into the compiled object, nothing is recomputed per match call: `:matchbit` (the
+accept bit, so accept tests are plain `bit-and`), `:startfull` (the full start closure —
+position-independent for every n > 0), `:startmid` (the search injection set), and
+`:exitmemo` (accept-closure memo: final set → boolean, computed with the (1,1) position
+sentinel). The input converts once to a vector of int codepoints (`regex--codes`), so the
+per-char loop is pure prims — vector-ref, int arith, `table-get` — plus the self tail
+call; the n = 0 edge (both anchors fire at position 0) recomputes live. The old
+per-char-`Call` `regex--delta` is gone (miss path → `regex--delta-slow`).
+
+**2. The JIT learns interned-immediate `=` (`eq_dispatch`).** Deopt-tracing showed the NFA
+walkers deopting on **every keyword compare** (`(= (get st :t) :split)` — 600 k deopt+
+re-runs): the `Eq` lowering was int-only. New runtime-dispatched equality on a
+type-erased operand: Int×Int → payload compare (the same two tag-checks the old path
+paid), either side Sym/Keyword → interned identity (tags equal AND ids equal — a
+keyword equals nothing but its same-tag same-id self, never numerically coerced),
+anything else → deopt (the VM owns numeric coercion and structural equality). New
+`TAG_SYM`/`TAG_KEYWORD` in `jit_layout`, pinned by the layout test. This is a *general*
+win — keyword dispatch over tagged maps is idiomatic Brood everywhere (`pipeline`
+0.07 → 0.06 s came along for free).
+
+**The found-bug (caught by the suite, JIT-only):** a Sym/Keyword payload is a `u32` — the
+HIGH half of the payload word is **undefined padding**, so the first `eq_dispatch` cut
+compared garbage and equal keywords could compare unequal (7 sexp paredit tests failed
+under JIT, passed under `BROOD_NO_JIT=1`). Fix: mask both ids to the low 32 bits. A
+reminder that any new word-level compare of a sub-word payload needs the mask.
+
+`regex` **0.65 → 0.59 s** local. Honest bottom line: still 7/7 — the remaining ~0.45 s is
+the *benchmark harness loop* (interpreted `go` with calls, ~0.33 s) + the per-call codes
+conversion (~0.10 s), i.e. the cross-arm call ceiling, not the matcher (long-string
+matching is now memo-lookup-bound). The next general lever is making Brood→Brood calls
+from native code cheap — a kernel project of its own. Suite 777/777; 3 engines
+bit-identical across the gauntlet; fmt + `nest check` clean. (Mid-run the disk filled —
+7 scratch worktrees × multi-GB `target/`s; reclaimed ~32 GB by deleting their build
+artifacts. The worktrees themselves are merged and disposable.)

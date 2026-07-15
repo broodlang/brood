@@ -1107,6 +1107,12 @@ pub(crate) mod jit_layout {
     /// note on why `Value`'s tags differ from `Tag`'s). The float JIT tag-checks a slot's
     /// discriminant against this before reading its `f64` payload. Pinned by the layout test.
     pub const TAG_FLOAT: u8 = 4;
+    /// `Value::Sym`'s discriminant (`… Float=4, Sym=5, Keyword=6`). The JIT's `=`
+    /// lowering compares interned immediates (symbol/keyword identity) inline —
+    /// the codegen twin of the VM's keyword fast path. Pinned by the layout test.
+    pub const TAG_SYM: u8 = 5;
+    /// `Value::Keyword`'s discriminant — see `TAG_SYM`. Pinned by the layout test.
+    pub const TAG_KEYWORD: u8 = 6;
     /// `Value::Pair`'s discriminant. Note this is **not** `Tag::Pair` (7): `Value` has an
     /// extra `BigInt` after `Int` (folded into `int` by `Tag`) *and* a `Rope` before
     /// `Pair`, so `Value`'s discriminants run `… Int=2, BigInt=3, Float=4, …, Str=7,
@@ -1214,6 +1220,32 @@ mod jit_layout_tests {
             vbytes[0],
             jit_layout::TAG_VECTOR,
             "Value::Vector discriminant drifted"
+        );
+        // `Value::Sym` / `Value::Keyword` discriminants must match `TAG_SYM` /
+        // `TAG_KEYWORD` (the JIT's inline interned-immediate `=`); a reorder breaks them.
+        let sy = Value::Sym(0);
+        let sybytes = unsafe {
+            std::slice::from_raw_parts(
+                &sy as *const Value as *const u8,
+                std::mem::size_of::<Value>(),
+            )
+        };
+        assert_eq!(
+            sybytes[0],
+            jit_layout::TAG_SYM,
+            "Value::Sym discriminant drifted"
+        );
+        let kw = Value::Keyword(0);
+        let kwbytes = unsafe {
+            std::slice::from_raw_parts(
+                &kw as *const Value as *const u8,
+                std::mem::size_of::<Value>(),
+            )
+        };
+        assert_eq!(
+            kwbytes[0],
+            jit_layout::TAG_KEYWORD,
+            "Value::Keyword discriminant drifted"
         );
         // `Value::Bool`'s discriminant must match `TAG_BOOL` (the JIT boxes a comparison
         // result as a Bool, not an Int); a variant reorder breaks it.
