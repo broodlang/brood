@@ -94,6 +94,13 @@ pub enum PrimOp1 {
     IsNil,
     IsPair,
     IsEmpty,
+    // Prelude `sqrt` (special-cased in `resolve_prim1`, like `nth` → `VectorRef`):
+    // the wrapper guards negatives (error) and zero (0.0), so the inline covers ONLY
+    // x > 0 — one IEEE `fsqrt` in the JIT, `f64::sqrt` in the VM (identical, both
+    // correctly rounded) — and every other shape falls back to dispatching the real
+    // wrapper. This is nbody's 2M-calls-per-run `(sqrt dsq)` without the per-call
+    // wrapper activation (whose error branch keeps its own arm off the JIT).
+    Sqrt,
 }
 
 impl PrimOp1 {

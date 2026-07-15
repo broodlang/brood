@@ -1367,8 +1367,8 @@ fn jit_lower_arm_inner(
         PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR, TAG_SYM, TAG_VECTOR,
     };
     use cranelift_codegen::ir::{
-        condcodes::IntCC, types, AbiParam, BlockArg, InstBuilder, MemFlagsData, StackSlotData,
-        StackSlotKind,
+        condcodes::{FloatCC, IntCC},
+        types, AbiParam, BlockArg, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind,
     };
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
     use cranelift_module::{Linkage, Module};
@@ -3774,6 +3774,67 @@ fn jit_lower_arm_inner(
                             // After the guard: is_nil is 1 for nil, 0 for pair — exactly
                             // the boolean result we want.
                             stack.push(Op::Int(is_nil));
+                        }
+                        PrimOp1::Sqrt => {
+                            // Prelude `sqrt`, x > 0 only: one IEEE `fsqrt` (correctly
+                            // rounded — identical to the wrapper's `f64::sqrt`). Zero,
+                            // negatives (the wrapper's error), NaN, and non-float shapes
+                            // deopt so the VM dispatches the real wrapper.
+                            match operand {
+                                Op::Float(v) => {
+                                    let zero = b.ins().f64const(0.0);
+                                    let pos = b.ins().fcmp(FloatCC::GreaterThan, v, zero);
+                                    let cont = b.create_block();
+                                    b.ins().brif(pos, cont, &[], deopt, &[]);
+                                    b.switch_to_block(cont);
+                                    stack.push(Op::Float(b.ins().sqrt(v)));
+                                }
+                                Op::Int(v) if b.func.dfg.value_type(v) == types::I64 => {
+                                    let pos = b.ins().icmp_imm(IntCC::SignedGreaterThan, v, 0);
+                                    let cont = b.create_block();
+                                    b.ins().brif(pos, cont, &[], deopt, &[]);
+                                    b.switch_to_block(cont);
+                                    let f = b.ins().fcvt_from_sint(types::F64, v);
+                                    stack.push(Op::Float(b.ins().sqrt(f)));
+                                }
+                                _ => {
+                                    // Type-erased (slot / call result): runtime tag
+                                    // dispatch — Float > 0 → fsqrt; Int > 0 → convert +
+                                    // fsqrt; anything else → deopt.
+                                    let [w0, w1, _] = read_words(&mut b, operand);
+                                    let tagb = b.ins().band_imm(w0, 0xff);
+                                    let done = b.create_block();
+                                    b.append_block_param(done, types::F64);
+                                    let is_f =
+                                        b.ins().icmp_imm(IntCC::Equal, tagb, TAG_FLOAT as i64);
+                                    let fblk = b.create_block();
+                                    let not_f = b.create_block();
+                                    b.ins().brif(is_f, fblk, &[], not_f, &[]);
+                                    b.switch_to_block(fblk);
+                                    let fv = b.ins().bitcast(types::F64, MemFlagsData::new(), w1);
+                                    let zero = b.ins().f64const(0.0);
+                                    let posf = b.ins().fcmp(FloatCC::GreaterThan, fv, zero);
+                                    let fok = b.create_block();
+                                    b.ins().brif(posf, fok, &[], deopt, &[]);
+                                    b.switch_to_block(fok);
+                                    let fr = b.ins().sqrt(fv);
+                                    b.ins().jump(done, &[BlockArg::Value(fr)]);
+                                    b.switch_to_block(not_f);
+                                    let is_i = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
+                                    let iblk = b.create_block();
+                                    b.ins().brif(is_i, iblk, &[], deopt, &[]);
+                                    b.switch_to_block(iblk);
+                                    let posi = b.ins().icmp_imm(IntCC::SignedGreaterThan, w1, 0);
+                                    let iok = b.create_block();
+                                    b.ins().brif(posi, iok, &[], deopt, &[]);
+                                    b.switch_to_block(iok);
+                                    let fi = b.ins().fcvt_from_sint(types::F64, w1);
+                                    let ir = b.ins().sqrt(fi);
+                                    b.ins().jump(done, &[BlockArg::Value(ir)]);
+                                    b.switch_to_block(done);
+                                    stack.push(Op::Float(b.block_params(done)[0]));
+                                }
+                            }
                         }
                     }
                 }

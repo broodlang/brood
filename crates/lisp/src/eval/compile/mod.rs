@@ -677,6 +677,17 @@ pub fn prim_apply_int_step(op: PrimOp, a: i64, b: i64) -> Option<i64> {
 /// are bound directly to their natives. Read against the live global env, so a
 /// redefinition simply doesn't match.
 fn resolve_prim1(heap: &Heap, h: Symbol) -> Option<PrimOp1> {
+    // The canonical prelude `sqrt` (same discipline as `nth` in `resolve_prim`): only
+    // the untouched PRELUDE closure inlines — a user `(def sqrt …)` rebinds to a
+    // non-PRELUDE value, so the inline cleanly disables (and the epoch guard
+    // re-validates on any redefinition). The inline handles ONLY x > 0; zero,
+    // negatives (the wrapper's error), NaN, and bignums dispatch the real wrapper.
+    if value::symbol_is(h, "sqrt") {
+        return match heap.env_get(heap.global(), h)?.unpack() {
+            ValueRef::Fn(id) if id.region() == crate::core::value::PRELUDE => Some(PrimOp1::Sqrt),
+            _ => None,
+        };
+    }
     match heap.env_get(heap.global(), h)?.unpack() {
         ValueRef::Native(id) => PrimOp1::from_native_name(&heap.native(id).name),
         _ => None,
@@ -1951,13 +1962,13 @@ fn node_touches_heap(node: &Node) -> bool {
         } => true,
         Node::Prim3 { .. } => true,
         // `first`/`rest` (car/cdr) dereference a pair handle — heap reads.
-        // `nil?`/`pair?` are tag-only checks — no heap dereference.
+        // `nil?`/`pair?` are tag-only checks; `sqrt` is pure float math.
         Node::Prim1 {
             op: PrimOp1::First | PrimOp1::Rest,
             ..
         } => true,
         Node::Prim1 {
-            op: PrimOp1::IsNil | PrimOp1::IsPair | PrimOp1::IsEmpty,
+            op: PrimOp1::IsNil | PrimOp1::IsPair | PrimOp1::IsEmpty | PrimOp1::Sqrt,
             ..
         } => false,
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
@@ -4655,6 +4666,22 @@ fn exec_chunk(
                             crate::perf_bump!(prim1_inline);
                             heap.truncate_roots(n - 1);
                             heap.push_root(Value::boolean(false));
+                            continue;
+                        }
+                        // `sqrt`, x > 0 only: `f64::sqrt` is IEEE correctly-rounded —
+                        // identical to the wrapper's `%f64-sqrt`. Zero/negative/NaN/
+                        // BigInt fall through to dispatch the real wrapper (its error
+                        // and 0.0 cases, bit-identical).
+                        (PrimOp1::Sqrt, ValueRef::Float(f)) if f > 0.0 => {
+                            crate::perf_bump!(prim1_inline);
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(Value::Float(f.sqrt()));
+                            continue;
+                        }
+                        (PrimOp1::Sqrt, ValueRef::Int(i)) if i > 0 => {
+                            crate::perf_bump!(prim1_inline);
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(Value::Float((i as f64).sqrt()));
                             continue;
                         }
                         _ => {}

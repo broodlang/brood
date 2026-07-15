@@ -3969,3 +3969,24 @@ Cumulative microbench (10M calls from a JIT'd loop, vs this morning's baseline):
 2.03 → **1.50 s** (−26%), 3-arg Brood→Brood 0.54 → 0.47 s. Full gauntlet (21 rows)
 3-engine bit-identical; GC-stress + `BROOD_JIT_VERIFY` clean on the call-heavy rows
 (the staging discipline changed — this was the load-bearing check); suite 777/777.
+
+## 2026-07-15 — `sqrt` inlines as `fsqrt`: nbody 0.74 → 0.54 s (kills the last coin-flip 7/7)
+
+The fresh harness run left two dead-last rows: `regex` (real) and `nbody` — last by
+**0.5%** against Python, flipping run to run. The roadmap's deferred sqrt lever settles
+it: nbody's ~2M `(sqrt dsq)` calls each paid a Brood→Brood call INTO an interpreted
+wrapper (the prelude `sqrt` guards negatives with an `error` call, which keeps its own
+tiny arm off the JIT — the gate bails a no-loop arm with a call).
+
+`PrimOp1::Sqrt`, special-cased in `resolve_prim1` on the untouched PRELUDE `sqrt`
+closure (the `nth` → `VectorRef` discipline — a user redefinition cleanly disables it,
+epoch-guarded). The inline covers ONLY x > 0: one IEEE `fsqrt` in the JIT (with an
+`Op::Float`/`Op::Int` register path and a runtime tag-dispatch path for type-erased
+operands), `f64::sqrt` in the VM exec arm — both correctly rounded, bit-identical to
+the wrapper's `%f64-sqrt`. Zero, negatives (the wrapper's error), NaN, and bignums
+deopt/fall back to dispatching the real wrapper, so semantics are untouched.
+
+nbody **0.74 → 0.54 s** (≈520 ms compute vs Python's ~715 — decisively 6/7 now; only
+`regex` remains last-of-seven). Checksum bit-identical on all three engines; sqrt edge
+script green (0 → 0.0, negative → error, int operands, redefinition-after-hot wins on
+the hot loop); GC-stress clean; 16-row gauntlet 3-engine identical; suite 777/777.
