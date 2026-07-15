@@ -3696,6 +3696,38 @@ Residual: `advance-body` still deopts (~249k) — it has no float *param*, so th
 `(nth …)`/call-return type erasure (cross-arm return typing or a float-global-aware gate),
 without regressing int-vector arms (matmul/nqueens) — deferred. Branch `perf/jit-nbody-float`.
 
+## 2026-07-14 — Regex compiles to a lazy DFA (`regex` 1.03 → 0.69 s; catastrophic patterns now linear)
+
+`std/regex.blsp` matched by walking the AST with a **CPS backtracker** — every step
+allocated a fresh continuation closure, and a pathological pattern (`(a*)*b`) backtracked
+exponentially. "Compile it like Erlang does" (the roadmap lever, the user's ask): the parse
+was already memoised, but *matching* re-interpreted the tree. Now the pattern compiles once
+(memoised) to a **Thompson NFA** — a flat vector of states (`:char`/`:split`/`:bol`/`:eol`/
+`:match`) built functionally, with `*`/`+` back-edges reserved-then-`assoc`'d in — and is
+simulated closure-free.
+
+First cut (NFA + integer-bitset state sets, `bit-or`/`bit-shift`/`bit-positions`) was
+**correct but 3.4× *slower*** (3.3 s): the per-char simulation was call-bound — 28 M Brood
+calls for 20 k matches (`vm-perf`), because scanning live states with a helper call per state
+(and a `reduce` lambda + `bit-positions` vector allocated every char) is far more work than
+the old greedy inner loop. The fix that actually won is a **lazy DFA**: memoise each
+`(state-set, char) → next-set` transition (split-closure only, so it's position-independent —
+`^`/`$` fire only in the full closure run once at the start/accept boundaries) in a `Table`
+living in the compiled object. After warmup every character is a single `table-get`, not a
+~30-call NFA scan.
+
+Result: `regex` **1.03 → 0.69 s** on this machine (~1.5× overall; the *matcher* portion
+~0.70 → 0.33 s, ~2.1×), checksum 10000, all 14 tests + 19 added edge cases green (incl.
+`(a*)*b` on 24 `a`s — **linear now, not exponential**), full suite **777/777**, `nest check`
+clean. Pure Brood, no new kernel primitive — the dogfood-correct "compile" the roadmap asked
+for. **Does not clear 7/7**, and honestly can't from `regex.blsp` alone: the benchmark's
+caller loop contains the `matches?` call so it never JIT-tiers (~0.33 s of the 0.69 s is the
+interpreted `go` loop), and each `delta` still pays the `Table`-get overhead (the same
+registry-lock + `Arc`-clone + deep-copy tax `sieve` hits). The gap to Clojure (122 ms) is
+interpreter overhead per match, not matcher algorithm — closing it needs cheaper `Table` ops
+(the `sieve` levers) and/or call-bearing loops tiering, both kernel work, both shared with
+other rows. The DFA is the right architecture regardless (linear-time guarantee).
+
 ## 2026-07-15 — `persistent-map` off 7/7 by transcription; two JIT hypotheses tested and refuted
 
 (NOTE for merge: the sibling perf branches — `perf/regex`, `perf/table`, `perf/errors` —
