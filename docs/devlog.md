@@ -3990,3 +3990,27 @@ nbody **0.74 → 0.54 s** (≈520 ms compute vs Python's ~715 — decisively 6/7
 `regex` remains last-of-seven). Checksum bit-identical on all three engines; sqrt edge
 script green (0 → 0.0, negative → error, int operands, redefinition-after-hot wins on
 the hot loop); GC-stress clean; 16-row gauntlet 3-engine identical; suite 777/777.
+
+## 2026-07-15 — `std/json`: the parser goes int-codes, the encoder goes emit-list (0.39 → 0.30 s)
+
+The regex playbook applied to `json` (363 ms, 303×, the top remaining multiple). The
+parser already indexed a char VECTOR (the old O(n²) `char-at` fix) — but of 1-char
+STRINGS, so every per-char test (`(= c "{")`, `digit?` via `includes?`) was a
+string-equality/scan through the slow dispatch path. The whole parse section now runs
+on **integer code points** (-1 = EOF sentinel): every per-char test is an int prim,
+digits are a range compare, literals match by code, escapes/`\uXXXX` produce codes,
+and a string body assembles once at the close quote via `int->char` (which the module
+predates — its `read-string`-based `cp->string` workaround survives only in the
+encoder's control-escape table). Number validation walks the code vector directly; a
+token string is built only when it parses.
+
+The encoder's `join`+`map` per node (a lazy seq-view + realize per object, and a
+re-copy of the text at every enclosing level) became a single-pass **emit into a
+reversed fragment list** with one `(apply str (reverse …))` at the top.
+
+`json` 0.39 → **0.30 s** (parse portion −37%; the encoder's residual is
+allocation-bound — `map-pairs`/`number->string` per node — left for a future pass).
+30/30 json tests + 9 new edge checks (surrogate pairs, strict-number rejections,
+control-char encoding, round-trips); GC-stress clean; 3 engines bit-identical;
+suite 777/777. Still 6/7 — native C parsers are the field here; the multiple drops
+~25% and the row stays pure Brood.
