@@ -497,16 +497,59 @@ pub(crate) const INLINE_VEC_CAP: usize = 2;
 /// (tag byte at 0; the `Inline` variant's `len` at 8, `items` at 16) for the
 /// JIT's inline element read — see `jit_lower.rs`.
 #[repr(u8)]
-#[derive(Clone)]
 pub(crate) enum VecStore {
     Inline {
         len: u8,
         items: [Value; INLINE_VEC_CAP],
     },
-    Spill(Vec<Value>),
+    Spill {
+        /// Cached `vec.as_ptr()`, so the JIT reads spilled elements through one
+        /// raw load instead of an FFI slab call (the ~20 ns/element that gated
+        /// nbody's field reads and the json/regex code-vector scans). Sound
+        /// because a spilled buffer never moves: vector contents are immutable
+        /// (never pushed/resized after construction; `DerefMut` element writes
+        /// don't reallocate), and moving the `VecStore` struct itself (slab
+        /// growth, GC copy) moves three words — not the heap buffer they point
+        /// to. A GC relocation builds a NEW store via [`VecStore::spill`], which
+        /// re-derives the pointer.
+        ptr: *const Value,
+        /// Cached element count for the JIT's bounds check.
+        len: u64,
+        vec: Vec<Value>,
+    },
+}
+
+// SAFETY: `Spill::ptr` always points into `Spill::vec`'s own buffer (established
+// by the one constructor and re-derived on clone), so it is exactly as sendable/
+// sharable as the `Vec` it caches.
+unsafe impl Send for VecStore {}
+unsafe impl Sync for VecStore {}
+
+impl Clone for VecStore {
+    fn clone(&self) -> Self {
+        match self {
+            VecStore::Inline { len, items } => VecStore::Inline {
+                len: *len,
+                items: *items,
+            },
+            // NOT derived: a derived clone would copy `ptr` — pointing the clone
+            // at the ORIGINAL buffer. Re-derive from the cloned Vec.
+            VecStore::Spill { vec, .. } => VecStore::spill(vec.clone()),
+        }
+    }
 }
 
 impl VecStore {
+    /// The one `Spill` constructor: caches the buffer pointer + length.
+    #[inline]
+    fn spill(vec: Vec<Value>) -> Self {
+        VecStore::Spill {
+            ptr: vec.as_ptr(),
+            len: vec.len() as u64,
+            vec,
+        }
+    }
+
     /// Wrap owned elements, inlining when they fit (no heap allocation) and
     /// spilling otherwise. Consumes `items` so the spill path is a move, not a copy.
     #[inline]
@@ -519,7 +562,7 @@ impl VecStore {
                 items: inline,
             }
         } else {
-            VecStore::Spill(items)
+            VecStore::spill(items)
         }
     }
 
@@ -538,7 +581,7 @@ impl VecStore {
                 items: inline,
             }
         } else {
-            VecStore::Spill((0..len).map(producer).collect())
+            VecStore::spill((0..len).map(producer).collect())
         }
     }
 
@@ -546,7 +589,7 @@ impl VecStore {
     fn as_slice(&self) -> &[Value] {
         match self {
             VecStore::Inline { len, items } => &items[..*len as usize],
-            VecStore::Spill(v) => v,
+            VecStore::Spill { vec, .. } => vec,
         }
     }
 
@@ -554,7 +597,7 @@ impl VecStore {
     fn as_mut_slice(&mut self) -> &mut [Value] {
         match self {
             VecStore::Inline { len, items } => &mut items[..*len as usize],
-            VecStore::Spill(v) => v,
+            VecStore::Spill { vec, .. } => vec,
         }
     }
 
@@ -580,6 +623,15 @@ impl VecStore {
     /// `Inline.items[0]` byte offset within a slot.
     #[cfg(feature = "jit")]
     pub(crate) const JIT_ITEMS_OFF: i32 = 8;
+    /// Discriminant value that means `Spill` (pointer-readable).
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_SPILL_TAG: i64 = 1;
+    /// `Spill.ptr` byte offset within a slot (u8 tag, padded to the pointer's align).
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_SPILL_PTR_OFF: i32 = 8;
+    /// `Spill.len` byte offset within a slot.
+    #[cfg(feature = "jit")]
+    pub(crate) const JIT_SPILL_LEN_OFF: i32 = 16;
 }
 
 impl std::ops::Deref for VecStore {
@@ -9358,6 +9410,26 @@ mod vecstore_layout_tests {
         // The JIT reads a Value element as 3 i64 words; the slab stride between
         // elements is `size_of::<Value>()`.
         assert_eq!(std::mem::size_of::<Value>(), 24, "Value stride");
+        // Spill layout: discriminant 1 @0, cached ptr @8, cached len @16 — the
+        // JIT's pointer-read path loads exactly these.
+        let sp = VecStore::spill(vec![Value::int(1), Value::int(2), Value::int(3)]);
+        let sbase = &sp as *const VecStore as usize;
+        let stag = unsafe { *(sbase as *const u8) };
+        assert_eq!(stag as i64, VecStore::JIT_SPILL_TAG, "Spill discriminant");
+        if let VecStore::Spill { ptr, len, vec } = &sp {
+            assert_eq!(
+                ptr as *const *const Value as usize - sbase,
+                VecStore::JIT_SPILL_PTR_OFF as usize,
+                "Spill.ptr offset"
+            );
+            assert_eq!(
+                len as *const u64 as usize - sbase,
+                VecStore::JIT_SPILL_LEN_OFF as usize,
+                "Spill.len offset"
+            );
+            assert_eq!(*ptr, vec.as_ptr(), "cached ptr matches the buffer");
+            assert_eq!(*len as usize, vec.len(), "cached len matches");
+        }
     }
 }
 

@@ -2633,10 +2633,15 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
             Some(r) => Value::int(r),
             None => return Ok(None),
         },
-        // `%div` returns an Int only when it divides evenly (matching `prim_div`);
-        // a remainder means a Float result, which the native builds.
+        // `%div`: an even division yields the exact Int; a remainder yields the
+        // float `a as f64 / b as f64` — exactly `prim_div`'s int arm (this covers
+        // `i64::MIN / -1` too: its `checked_rem` is None and the native also takes
+        // the float path). Only ÷0 defers, for the native's exact error. Inlining
+        // the non-exact case matters: `(/ px n)` per pixel was 582k full dispatches
+        // in mandelbrot alone.
         PrimOp::Div => match (a.checked_rem(b), a.checked_div(b)) {
             (Some(0), Some(q)) => Value::int(q),
+            _ if b != 0 => Value::Float(a as f64 / b as f64),
             _ => return Ok(None),
         },
         PrimOp::Quot => match a.checked_div(b) {

@@ -2997,10 +2997,151 @@ fn jit_lower_arm_inner(
     // VM owns the exact result (`vector-ref`'s error, `nth`'s default); otherwise the
     // element rides back as a `Handle`. The helper never allocates, so the handle is
     // safe to hold until its immediate consumer.
+    // Dynamic-index vector read, fully inline for a LOCAL vector (either storage):
+    // tag/region/int-index checks → slab slot → inline or spill element read — no
+    // FFI on the hot path (this was ~20 ns/element on the json/regex code-vector
+    // scans). Anything else — non-vector, non-LOCAL region (RUNTIME/PRELUDE, e.g.
+    // matmul's def'd rows), non-int index, out-of-range — falls back to the
+    // `brood_rt_vector_ref` FFI, whose nonzero status deopts (the VM owns `nth`'s
+    // exact result and errors).
     let vector_ref = |b: &mut FunctionBuilder,
                       vec: [cranelift_codegen::ir::Value; 3],
                       idx: [cranelift_codegen::ir::Value; 3]|
      -> Op {
+        let vr_done = b.create_block();
+        b.append_block_param(vr_done, types::I64);
+        b.append_block_param(vr_done, types::I64);
+        b.append_block_param(vr_done, types::I64);
+        let ffi_blk = b.create_block();
+        // tag byte must be Vector.
+        let tagb = b.ins().band_imm(vec[0], 0xff);
+        let is_vec = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_VECTOR as i64);
+        let c1 = b.create_block();
+        b.ins().brif(is_vec, c1, &[], ffi_blk, &[]);
+        b.switch_to_block(c1);
+        // region: high 2 bits of the handle == 0 (LOCAL); RUNTIME/PRELUDE → FFI.
+        let high2 = b.ins().ushr_imm(vec[1], 62);
+        let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0);
+        let c2 = b.create_block();
+        b.ins().brif(is_local, c2, &[], ffi_blk, &[]);
+        b.switch_to_block(c2);
+        // index must be an Int.
+        let itag = b.ins().band_imm(idx[0], 0xff);
+        let is_int = b.ins().icmp_imm(IntCC::Equal, itag, TAG_INT as i64);
+        let c3 = b.create_block();
+        b.ins().brif(is_int, c3, &[], ffi_blk, &[]);
+        b.switch_to_block(c3);
+        let idxv = idx[1];
+        // age bit 61 selects the slab base (fetched per read, like the const-index
+        // inline — safe across any prior safepoint).
+        let age = b.ins().ushr_imm(vec[1], 61);
+        let is_old = b.ins().icmp_imm(IntCC::NotEqual, age, 0);
+        let nb2 = b.create_block();
+        let ob2 = b.create_block();
+        let based = b.create_block();
+        b.append_block_param(based, ptr_ty);
+        b.ins().brif(is_old, ob2, &[], nb2, &[]);
+        b.switch_to_block(nb2);
+        let cn2 = b.ins().call(vnbase_ref, &[heap]);
+        let bn2 = b.inst_results(cn2)[0];
+        b.ins().jump(based, &[BlockArg::Value(bn2)]);
+        b.switch_to_block(ob2);
+        let co2 = b.ins().call(vobase_ref, &[heap]);
+        let bo2 = b.inst_results(co2)[0];
+        b.ins().jump(based, &[BlockArg::Value(bo2)]);
+        b.switch_to_block(based);
+        let sbase = b.block_params(based)[0];
+        let vidx = b.ins().band_imm(vec[1], 0xFFFF_FFFFi64);
+        let soff = b.ins().imul_imm(vidx, VS::JIT_STRIDE);
+        let slotp = b.ins().iadd(sbase, soff);
+        let disc = b
+            .ins()
+            .load(types::I8, MemFlagsData::trusted(), slotp, VS::JIT_TAG_OFF);
+        let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
+        let inl = b.create_block();
+        let not_inl = b.create_block();
+        b.ins().brif(is_inline, inl, &[], not_inl, &[]);
+        // Inline storage: bounds vs the u8 len, elements at JIT_ITEMS_OFF.
+        b.switch_to_block(inl);
+        let lenb = b
+            .ins()
+            .load(types::I8, MemFlagsData::trusted(), slotp, VS::JIT_LEN_OFF);
+        let lenw = b.ins().uextend(types::I64, lenb);
+        let ib = b.ins().icmp(IntCC::UnsignedLessThan, idxv, lenw);
+        let iok = b.create_block();
+        b.ins().brif(ib, iok, &[], ffi_blk, &[]);
+        b.switch_to_block(iok);
+        let eo = b.ins().imul_imm(idxv, STRIDE);
+        let ebase = b.ins().iadd_imm(slotp, VS::JIT_ITEMS_OFF as i64);
+        let ep = b.ins().iadd(ebase, eo);
+        let i0 = b.ins().load(types::I64, MemFlagsData::trusted(), ep, 0);
+        let i1 = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            ep,
+            PAYLOAD_OFFSET as i32,
+        );
+        let i2 = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            ep,
+            PAYLOAD_OFFSET as i32 + 8,
+        );
+        b.ins().jump(
+            vr_done,
+            &[
+                BlockArg::Value(i0),
+                BlockArg::Value(i1),
+                BlockArg::Value(i2),
+            ],
+        );
+        // Spill storage: bounds vs the cached len, elements via the cached ptr.
+        b.switch_to_block(not_inl);
+        let is_spill = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_SPILL_TAG);
+        let spl = b.create_block();
+        b.ins().brif(is_spill, spl, &[], ffi_blk, &[]);
+        b.switch_to_block(spl);
+        let sptr = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            slotp,
+            VS::JIT_SPILL_PTR_OFF,
+        );
+        let slen = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            slotp,
+            VS::JIT_SPILL_LEN_OFF,
+        );
+        let sb2 = b.ins().icmp(IntCC::UnsignedLessThan, idxv, slen);
+        let sok2 = b.create_block();
+        b.ins().brif(sb2, sok2, &[], ffi_blk, &[]);
+        b.switch_to_block(sok2);
+        let seo = b.ins().imul_imm(idxv, STRIDE);
+        let sep = b.ins().iadd(sptr, seo);
+        let s0 = b.ins().load(types::I64, MemFlagsData::trusted(), sep, 0);
+        let s1 = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            sep,
+            PAYLOAD_OFFSET as i32,
+        );
+        let s2 = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            sep,
+            PAYLOAD_OFFSET as i32 + 8,
+        );
+        b.ins().jump(
+            vr_done,
+            &[
+                BlockArg::Value(s0),
+                BlockArg::Value(s1),
+                BlockArg::Value(s2),
+            ],
+        );
+        // FFI fallback: exact semantics for every non-inlined shape; status → deopt.
+        b.switch_to_block(ffi_blk);
         let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
         let c = b.ins().call(
             vref_ref,
@@ -3019,7 +3160,19 @@ fn jit_lower_arm_inner(
         let w2 = b
             .ins()
             .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-        Op::Handle(w0, w1, w2)
+        b.ins().jump(
+            vr_done,
+            &[
+                BlockArg::Value(w0),
+                BlockArg::Value(w1),
+                BlockArg::Value(w2),
+            ],
+        );
+        b.switch_to_block(vr_done);
+        let r0 = b.block_params(vr_done)[0];
+        let r1 = b.block_params(vr_done)[1];
+        let r2 = b.block_params(vr_done)[2];
+        Op::Handle(r0, r1, r2)
     };
 
     // `table-has?` / 2-arg `table-get` via their runtime callbacks. Status protocol:
@@ -3212,10 +3365,57 @@ fn jit_lower_arm_inner(
                 ],
             );
             // Heap-backed (a >`INLINE_VEC_CAP` vector — e.g. nbody's 7-element body
-            // vectors): a constant-index `(nth v k)` used to deopt here (the whole arm fell
-            // to the VM every read). Instead read via the general `brood_rt_vector_ref`
-            // helper, which handles any storage and only errors on a bad index (→ deopt).
+            // vectors): read straight through the spill store's CACHED buffer pointer
+            // (`VecStore::Spill{ptr,len,..}` — `#[repr(u8)]`-pinned, layout-tested).
+            // This replaces the ~20 ns `brood_rt_vector_ref` FFI per field read with
+            // two loads + a bounds check. Out-of-range (or an unexpected disc) deopts —
+            // the VM owns `nth`'s exact result.
             b.switch_to_block(heap_blk);
+            let is_spill = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_SPILL_TAG);
+            let spill_blk = b.create_block();
+            b.ins().brif(is_spill, spill_blk, &[], deopt, &[]);
+            b.switch_to_block(spill_blk);
+            let sptr = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                slot_ptr,
+                VS::JIT_SPILL_PTR_OFF,
+            );
+            let slen = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                slot_ptr,
+                VS::JIT_SPILL_LEN_OFF,
+            );
+            let idxc2 = b.ins().iconst(types::I64, idx);
+            let in_b = b.ins().icmp(IntCC::UnsignedLessThan, idxc2, slen);
+            let sok = b.create_block();
+            b.ins().brif(in_b, sok, &[], deopt, &[]);
+            b.switch_to_block(sok);
+            let elem2 = b.ins().iadd_imm(sptr, idx * STRIDE);
+            let s0 = b.ins().load(types::I64, MemFlagsData::trusted(), elem2, 0);
+            let s1 = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                elem2,
+                PAYLOAD_OFFSET as i32,
+            );
+            let s2 = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                elem2,
+                PAYLOAD_OFFSET as i32 + 8,
+            );
+            b.ins().jump(
+                ivr_done,
+                &[
+                    BlockArg::Value(s0),
+                    BlockArg::Value(s1),
+                    BlockArg::Value(s2),
+                ],
+            );
+            let dead_ffi = b.create_block();
+            b.switch_to_block(dead_ffi);
             let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
             let it = b.ins().iconst(types::I64, TAG_INT as i64);
             let iv = b.ins().iconst(types::I64, idx);

@@ -4040,3 +4040,35 @@ Concurrency rows flat (spawn/ring/pingpong — fairness intact); a standalone `h
 scare turned out to be the missing harness-managed server (0 on all three engines,
 incl. the tree-walker my change can't touch). Suite 777/777; 10-row correctness
 gauntlet OK; fmt clean.
+
+## 2026-07-15 — Two profiled cuts: non-exact int `/` inlines (mandelbrot −17%); spilled vectors read through a cached pointer (nbody −9%)
+
+Profiling the "boxed array math" class before any storage redesign paid off twice —
+neither finding was the storage:
+
+**mandelbrot's 582,120 `prim2_fallback`s** were `(/ px n)`: non-exact int÷int
+deferred to a full dispatch per pixel (540² pixels × 2 divisions — the count matched
+exactly). `prim_apply`'s `Div` now yields the float `a as f64 / b as f64` inline —
+exactly `prim_div`'s int arm, `i64::MIN / -1` included; only ÷0 still defers for the
+native's exact error. mandelbrot 0.24 → **0.20 s**; semantics verified identical on
+both engines (incl. MIN/−1 and the ÷0 error).
+
+**The general vector-read FFI (~20 ns/element).** `VecStore::Spill` now carries a
+cached `(ptr, len)` header (`#[repr(u8)]`-pinned at disc 1 / ptr @8 / len @16,
+layout-tested): sound because a spilled buffer never moves — contents are immutable,
+and slab growth / GC copies move the three-word struct, not the heap buffer it points
+to; `Clone` is hand-implemented to re-derive the pointer (a derived clone would alias
+the original buffer). The JIT then reads LOCAL vectors fully inline on BOTH index
+shapes: the constant-index path's heap-backed branch (nbody's 7-element body fields —
+formerly the `brood_rt_vector_ref` FFI per read) and a new dynamic-index inline
+(tag/region/int-index checks → slab slot → inline-or-spill element read), with the
+FFI kept as the exact-semantics fallback for RUNTIME/PRELUDE regions, non-vectors,
+and out-of-range. nbody 0.54 → **0.49 s**.
+
+**The honest boundary:** matmul stays FFI-bound — its `def`'d matrices are
+RUNTIME-region, and that slab is `boxcar`-backed (bucket-indexed; no flat base to
+inline against without reaching into boxcar internals). Inlining RUNTIME vector reads
+needs a JIT-visible RUNTIME vector arena — noted as the follow-on. Verified:
+GC-stress + GC_VERIFY + JIT_VERIFY clean on the vector-heavy rows (the load-bearing
+check for a `VecStore` layout change); 21-row gauntlet 3-engine bit-identical; suite
+777/777; fmt clean.
