@@ -3728,6 +3728,43 @@ interpreter overhead per match, not matcher algorithm — closing it needs cheap
 (the `sieve` levers) and/or call-bearing loops tiering, both kernel work, both shared with
 other rows. The DFA is the right architecture regardless (linear-time guarantee).
 
+## 2026-07-15 — Table throughput: lock-free registry + fast scalar hash (and why `sieve` stays 7/7)
+
+Chasing `sieve` (7/7, ~19× Elixir — a `Table` of composite marks). Ablation localised the cost
+precisely (perf is unusable in the sandbox, so this was measured by short-circuiting each stage of
+`table.rs::has` behind a read-once toggle):
+
+- The registry `Mutex` + `Arc<Store>` clone per op: real but small.
+- `heap.hash_value` built a fresh **SipHash** (`DefaultHasher`) to hash *one integer* — ~40 ns/op of
+  pure overhead on every table/map op.
+- The store `Mutex` and `find_idx`: **~free** (uncontended lock is cheap; bucket size 1).
+- **`HashMap::get` on the 3 M-entry map: ~183 ns/op** — cache misses probing a big (~32 B/entry) table.
+
+Two general fixes landed (help *every* `Table` user and the CHAMP maps — regex DFA memo, `wordcount`,
+`json`, any process state):
+1. **Lock-free registry** (`table.rs`): the `Mutex<HashMap<id, Arc<Store>>>` became an append-only
+   `boxcar::Vec<Store>` indexed by `id-1` (ids dense, never reused). A handle resolves with one
+   lock-free indexed read + a `'static` borrow — no registry mutex, no `Arc` clone per op, and the
+   *global* serialization point every process's every table op hit is gone. `table-drop` tombstones
+   in place (data cleared); no slot reuse, so no ABA — a stale handle still errors. Fine given the
+   design intent (tables are app-lifetime).
+2. **Fast scalar hash** (`heap.rs::hash_value`): int/bool/nil keys — the hot case — take a splitmix64
+   finalize instead of SipHash; compound keys are byte-identical to before. Plus an identity hasher on
+   the store's `HashMap<u64, …>` (its key is already a structural hash — no need to SipHash it again).
+
+Result: `sieve` **1.22 → 1.07 s** (~12 %), `wordcount` ~0.17 → 0.13 s (~20 %), `persistent-map`/`json`
+flat. Full suite **777/777**, rustfmt clean.
+
+**`sieve` stays 7/7, and the data structure isn't why.** A follow-up microbench nailed the floor:
+**every builtin call costs ~90–120 ns of VM dispatch** regardless of the work it does (a no-op
+`table-count` on an empty table: ~86 ns; `string-length`: ~120 ns; vs ~26 ns for a call-free loop
+iteration). `sieve`'s ~3.8 M table ops therefore have a **~0.33 s floor** before *any* storage work —
+already 2.4× Clojure's whole run (138 ms). So neither a dense int-array (Phase 2, would cut the
+cache-miss half) nor anything in `table.rs` can clear `sieve`'s 7/7; the same interpreter-dispatch
+ceiling that pins `regex`. The genuinely general lever behind *both* is cutting builtin-call dispatch
+cost (JIT-inlining hot builtins so `table-*`/`string-*` don't pay the ~90 ns crossing). That's the
+next target, not more `Table` micro-tuning.
+
 ## 2026-07-15 — `persistent-map` off 7/7 by transcription; two JIT hypotheses tested and refuted
 
 (NOTE for merge: the sibling perf branches — `perf/regex`, `perf/table`, `perf/errors` —
