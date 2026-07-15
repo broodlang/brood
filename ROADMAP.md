@@ -63,35 +63,104 @@ would retire the bug class at the language level. See hatch's
   call during the hatch work); and either fixing or erroring on **`let`
   vector-destructure of a list value**.
 
-### Elixir-parity performance gaps (2026-07-12)
+### Elixir-parity performance gaps (2026-07-12, refreshed 2026-07-14)
 
 Benchmarked brood ÷ **Elixir** per row (`../brood-benchmarks`). Elixir is *also*
 immutable + GC'd + boxed-float + actor-based, so **every gap here is an
 implementation deficiency, not an "immutability tax"** — the bar is "match an
 immutable peer," and BEAM proves each is reachable. Ranked by ratio; `[kernel]`
-unless noted. (`regex`/`json`/`base64` are excluded as gaps here — Elixir wins those
-with native C libraries against our by-design pure-Brood code; narrowing pure-Brood
-codec speed is a separate, lower-priority track.)
+unless noted.
 
-- ⬜ **`nbody` — 43× (float math across call chains).** Boxed-float arithmetic spread
-  across `newvel`/`advance-body` recursion; the unboxing JIT only covers tight
-  self-loops, and the profitability gate keeps these call-mediated arms on the VM
-  (interpreted, one boxed float alloc per op). Needs the JIT to keep floats unboxed
-  **across calls** (inline the small numeric helpers, or an f64-register calling
-  convention). Highest single ratio; hardest. **[kernel/JIT]**
-- ⬜ **`errors-deep` — 26× (throw/unwind cost).** 50-frame non-tail `descend` then
-  `throw`, ×50k. Diagnose whether the throw unwinds via the VM or defers to the
-  tree-walker, and whether `%try` setup allocates per-iteration. Likely a concrete
-  inefficiency, not a tuning grind — good early target. **[kernel]**
-- ⬜ **`sieve` — 22× (Table deep-copy per op).** Brood's `Table` deep-copies keys/values
-  in and out on every `get`/`put` (cross-process safety), pure waste for a
-  single-process sieve of scalar keys. Skip the copy for scalar/immutable values, or
-  when the table is provably single-owner. **[kernel]**
+**The four rows where Brood is currently *last of 7 languages* (7/7 on the
+2026-07-13 report) are `nbody`, `regex`, `sieve`, and `persistent-map`** — the
+priority set below, each with the "how the BEAM does it" lever spelled out.
+`json`/`base64` stay excluded as gaps (Elixir/Node win them with native C codecs
+against our by-design pure-Brood code — a separate, lower-priority pure-Brood-codec
+track), but **`regex` is pulled in as a real entry** because its lever is structural
+(engine design), not merely "we lack a C library."
+
+- 🔶 **`nbody` — was 7/7 (~40× Elixir, 5.9s); now ~0.82s (~8× total), ~5× Elixir
+  (2026-07-14).** The gap was **not** float-across-calls (the `docs/jit-float.md` premise) —
+  it was two things, both fixed:
+  1. **Data structure (benchmark).** Bodies were a `(list …)`, so `(f b i k)` =
+     `(nth (nth b i) k)` did an **O(i) list walk**, re-walked per field, where every other
+     port indexes an O(1) array/tuple (Node `x[i]`, Elixir `elem(b,i)`). Two
+     faithful-transcription fixes in `brood-benchmarks/bench/brood/nbody.blsp`: bodies
+     `(list …)` → **vector** (~3.3× on the VM) and **bind `bi`/`bj` once** (drop the
+     re-walking `f` helper, matching Elixir; +~23%). → 6.65 → 1.25s.
+  2. **JIT deopts (kernel — committed, branch `perf/jit-nbody-float`).** At 1.25s the JIT was
+     *net-neutral* (jit ≈ no-jit): `BROOD_DEOPT_TRACE` showed `newvel`/`advance-body`
+     deopting on ~every call (~498k). Two root causes: **(a)** `inline_vec_ref` deopted on
+     any vector past `INLINE_VEC_CAP` (2) — nbody's **7-element** body vectors are
+     heap-backed, so every constant-index `(nth v k)` fell to the VM; fixed by falling back
+     to the `brood_rt_vector_ref` helper on the non-inline branch (bintree's 2-elem inline
+     path unchanged). **(b)** `(nth v k)` yields an `Op::Handle` (type-erased) and
+     `op_is_float(Handle)` is `false`, so `(- (nth bi 0) (nth bj 0))` took the integer path →
+     `as_int` → deopt on the `Float` tag; fixed by `as_f64(Handle)` tag-checking `Float` +
+     extracting, and routing `Handle`-operand arithmetic to the float path in float-context
+     arms (`has_float_slot`) — deopt-safe (a wrong guess deopts, never miscompiles), and a
+     right guess yields `Op::Float` that cascades unboxed via `store_op`'s `slot_float` mark.
+     Also added float `/` to `emit_float_arith` (zero-divisor guard → deopt, matching the
+     VM's `(/ x 0.0)` error). `newvel` now runs fully native (deopts 498k → 249k). → 1.25 →
+     ~0.82s. Verified: suite **2730/2730**, jit 28/28, differential 2/2, all 13 numeric
+     benches bit-identical to `BROOD_VM=0`, `GC_STRESS`+`VERIFY`+`JIT_VERIFY` clean, bintree
+     unregressed.
+
+  **Compute is now ~780ms vs Python 729ms — likely still 7/7 by a hair** (or a marginal 6/7;
+  re-run the harness to confirm the rank). To pull clearly ahead: **(1)** the residual ~249k
+  deopts are `advance-body`, which has no float *param* so the `has_float_slot` gate misses
+  it — catching it needs a float-context signal that survives `(nth …)`/call-return type
+  erasure (cross-arm return typing, or a compile-time float-global check for `dt`) *without*
+  regressing int-vector arms (matmul/nqueens spuriously deopting); **(2)** inline `sqrt` as
+  Cranelift `fsqrt` (a boxed Brood call ~1.5M times) via a `PrimOp1::Sqrt` recognised like
+  `nth`→`VectorRef`; **(3)** cut the ~1M `global_ic_miss` on `dt`/`sm` reads in call-mediated
+  arms. **Layer B (typed cross-arm float ABI) is deprioritised** — the hot calls have no float
+  *args*. The next big general win is **full float type-specialization** (profile-drive an
+  arm's float slots/stack so vector-read floats stay unboxed everywhere, covering
+  advance-body too). **[kernel/JIT + benchmark]**
+- ⬜ **`regex` — ~62× vs Elixir (981ms v 16ms), 7/7 (interpreted CPS backtracker).**
+  Erlang compiles `~r/…/` once to a PCRE NFA and matches native. Brood's pure-Brood
+  engine already **memoises the parse** (`regex--compile`, a Table cache), so the
+  residual is *not* re-parsing — it is the CPS backtracking matcher itself: every
+  `regex--star`/`seq-match` step allocates a fresh continuation closure `(fn (i2) …)`,
+  and set membership is a linear `string-contains?` scan of the class string per char.
+  Levers, ascending cost/benefit: **(a)** compile the AST to a closure-free NFA/DFA
+  (state table + a flat step loop, no per-step closure alloc — stays pure-Brood, the
+  dogfood-correct fix); **(b)** cheaper set membership (a char→bool set built once at
+  compile). A native regex primitive is the fast-but-wrong escape hatch (reverses
+  "write it in Brood") — keep it out unless (a)/(b) prove insufficient. **[std/Brood]**
+- ✅ **`errors-deep` — was 26× (mis-filed as "throw/unwind cost"), FIXED (`3cefcad`,
+  branch `perf/errors`, 2026-07-15): 0.28 → 0.07 s (~4×, 5/7 → ~2/7 by compute — past
+  Ruby/Node/Python, behind only Elixir).** The diagnosis inverted the premise: throw +
+  catch with zero frames between is ~free and the unwind was always cheap — the linear
+  ~96 ns/frame cost was the `throw` call **knocking `descend` out of the unboxed-i64
+  register worker's subset**, so all 2.5 M frames were *built* on the interpreted VM
+  call protocol. Fix: the register worker lowers `(throw <scalar>)` via a
+  `brood_rt_i64_throw` callback (park error → sentinel 3 → native unwind → outcome 3),
+  with a per-throw runtime check that global `throw` still binds the builtin (a redef
+  deopts → the VM runs the redefinition — late binding exact). Verified: 3 engines
+  bit-identical; payload identity (int + float workers); non-final-`do` throws; 40 k
+  depth-bail; suite 777/777. **[kernel]**
+- ⬜ **`sieve` — ~19× vs Elixir (1.0s v 52ms), 7/7 (Table op overhead).** Elixir uses
+  `:atomics` — a lock-free fixed-size i64 array, ~one atomic instruction per access.
+  Brood has no mutable array (the immutability invariant), so composite marks live in a
+  `Table`, and **every** `table-put`/`table-has?` pays: a registry `Mutex` lock + an
+  `Arc<Store>` clone + the store's own `Mutex` + a `to_message`/`from_message` deep-copy
+  of the key (cross-process safety) — ~3.8M times here. All of that is waste for scalar
+  (int) keys on a single-owner table. Levers (each keeps `Table` as the one sanctioned
+  mutable, each general to *every* Table user): **(1)** cache the `Arc<Store>` on the
+  `Value::Table` handle to skip the registry lock+clone per op; **(2)** fast-path
+  immediate keys/values (int/bool are already heap-independent — store them directly,
+  skip `to_message`); **(3)** a provably-single-owner path that elides the deep-copy. A
+  bitset primitive would beat all three but adds a Rust builtin — defer. **[kernel]**
 - ⬜ **`nqueens` — 15× (backtracking allocation).** List/closure allocation per branch;
   overlaps the HOF-fold and allocation paths. **[kernel]**
-- ⬜ **`ackermann` — 14× (non-tail double recursion).** Interpreted — the JIT covers
-  fib's non-tail *single* recursion but not this shape. Extend JIT recursion coverage.
-  **[kernel/JIT]**
+- ✅ **`ackermann` — was 14× (non-tail double recursion), FIXED (`f90910c`, 2026-07-13):
+  4.02 → 0.36s, 7/7 → 3/7.** The i64 unboxed worker's subset checker only matched *non-tail*
+  self-calls (fib's arg-position recursion); `ack`'s recursion is in *tail* position
+  (`SelfCall`), and its native-recursion depth cap was a stale 1400 (< `ack`'s ~4093 depth).
+  Taught the subset about tail self-calls + raised the cap to 32768. Now 3rd, past
+  Node/Clojure/Ruby/Python. **[kernel/JIT]**
 - ⬜ **`ring` / `pingpong` — 8× / 6× (residual message machinery).** Already cut from
   ~13× (ADR-135 + wake elision); the remainder is per-message `to_message`/`from_message`
   copy + continuation capture/restore. Trim the copy for small scalar messages; shrink
@@ -102,8 +171,21 @@ codec speed is a separate, lower-priority track.)
   vs BEAM (i64 worker engages but gives only ~12%). Per-iteration overhead: overflow-
   checked add, reduction/safepoint tick, frame reset. Incremental JIT-tuning grind (BEAM
   has a 25-yr lead) — expect small wins. **[kernel/JIT]**
-- ⬜ **`persistent-map` — 5.2× (CHAMP vs BEAM HAMT).** Read-modify-write churn; smallest
-  gap. Node-alloc / path-copy constant factors. **[kernel]**
+- ✅ **`persistent-map` — was 5.2× vs Elixir (612ms v 118ms), 7/7; FIXED by lever (1)
+  (2026-07-15, benchmark transcription in `brood-benchmarks`, no kernel change):
+  0.71 → 0.16 s locally (~4.4×), harness-scaled ≈ 138 ms → past Clojure's 285 ms
+  (7/7 → 6/7), within ~1.2× of Elixir.** The port's hand-written `get`+`assoc` (two
+  descents) became `map-int-add` — the same fused single-descent RMW idiom `wordcount`
+  already uses, and the faithful counterpart of Elixir's one-call `Map.update/4`.
+  Diagnosis notes (measured, 2026-07-15): with `map-int-add` the loop is *already
+  optimal* on the kernel side — the LINMAP rewrite turns the accumulator into a private
+  Table (`map-int-add` → `table-incr`) and the loop **already runs JIT-native** (the
+  letrec-style rewrite emits `SelfCall`, so the gate + back-edge tiering cover it);
+  two hypothesized JIT levers (gate relaxation for defn-style tail loops with calls +
+  a Call-tail back-edge escape) were implemented, measured **zero win**, and reverted —
+  the residual floor is the per-iteration native-call/Table cost, the same shared floor
+  as `sieve`/`regex`. Deferred levers (2)/(3) (assoc-path node alloc, general fused
+  `update`) remain valid for *non*-linmap map workloads. **[benchmark + measured]**
 
 ### Findings from brood-life profiling (2026-06-13)
 

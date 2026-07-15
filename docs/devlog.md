@@ -3623,3 +3623,40 @@ tail+non-tail int recursion now rides registers. Full suite **777/777** (incl. t
 fuzzer); 4 engines agree bit-for-bit on `ack`/a second mixed shape; no regression on any JIT row
 (loop/collatz slightly *faster* — more depth stays on the fast path); runaway 5 M-deep recursion still
 raises a **clean error, not SIGSEGV** (depth-bail → boxed drain). rustfmt clean.
+
+## 2026-07-15 — `persistent-map` off 7/7 by transcription; two JIT hypotheses tested and refuted
+
+(NOTE for merge: the sibling perf branches — `perf/regex`, `perf/table`, `perf/errors` —
+each appended their own dated entry at this same anchor; on merge, keep ALL entries in
+date order.)
+
+`persistent-map` (RMW churn on a 50k-key map, 612 ms published, 7/7): the port hand-wrote
+`(assoc acc key (+ (get acc key 0) d))` — two CHAMP descents — while Elixir's port uses the
+one-call `Map.update/4` and `wordcount` already uses Brood's own fused idiom. Transcribed the
+step to **`map-int-add`** (roadmap lever 1): **0.71 → 0.16 s** locally (~4.4×), checksum
+bit-identical on all three engines; harness-scaled ≈ 138 ms → past Clojure (285 ms), 7/7 →
+6/7, ~1.2× from Elixir (118 ms). Benchmark-repo change only; no kernel change.
+
+The interesting part is what the kernel investigation **refuted**. Ablation first showed the
+un-transcribed loop paying ~0.9 µs per `get` and ~1.5 µs per `assoc` (dispatch layers: the
+polymorphic prelude `get`/`assoc` closure + `map?`/`vector?` + the kernel native), while
+`map-int-add` lands at ~0.4 µs. Then two hypothesized JIT levers for the remaining floor:
+
+1. **"The profitability gate blocks defn-style tail loops with calls"** — relaxed the gate so
+   a tail `Inst::Call` whose head == the arm's own `dbg_name` counts as a self-loop. Measured:
+   **zero change** on persistent-map/sieve/regex/wordcount/json.
+2. **"Defn-style tail loops never get hot"** — the `Inst::Call`-tail inline fast path in
+   `exec_chunk` has no back-edge escape (unlike `SelfCall`'s every-256 escape), so a loop
+   entered once can never reach `jit_tier`'s threshold. Added the twin escape. Measured:
+   **zero change**.
+
+Tier-tracing explained why: the LINMAP rewrite (`docs/linear-map-accumulator.md`) had already
+turned the benchmark's accumulator into a private Table (`map-int-add` → `table-incr`) as
+`go/linmap-loop__79`, whose letrec-style `SelfCall` loop **already lowers, installs, and runs
+JIT-native** (149 tier entries, valid pointer, current epoch — the `jit_native` perf counter
+simply doesn't cover the `vm_run_bc` try_jit path, which had me chasing a ghost). The loop was
+native all along; the 0.16 s floor is the per-iteration native-call + Table-op protocol — the
+same shared floor `sieve` and `regex` sit on (see the 2026-07-15 Table entry's ~90–120 ns
+builtin-call measurement). Both experimental changes reverted; the gate is correct as-is.
+Deferred roadmap levers (assoc-path node alloc; a general fused `update`) remain valid for
+non-linmap map workloads.
