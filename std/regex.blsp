@@ -30,8 +30,7 @@
 whole string to match. The pattern is parsed and NFA-compiled once, then memoised.
 Subset: literals, `.`, `* + ?`, `^ $`, `[...]`/`[^...]` sets (explicit chars),
 `\\d \\w \\s`, escapes, `|`, and `(...)` groups. No ranges, captures, or
-backreferences yet."
-  (:use editor/buffer))
+backreferences yet.")
 
 ;; ---- parse: pattern string -> AST -------------------------------------------
 ;; A pattern parses to a list of BRANCHES (the top-level alternation); each branch

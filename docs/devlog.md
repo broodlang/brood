@@ -4072,3 +4072,54 @@ needs a JIT-visible RUNTIME vector arena — noted as the follow-on. Verified:
 GC-stress + GC_VERIFY + JIT_VERIFY clean on the vector-heavy rows (the load-bearing
 check for a `VecStore` layout change); 21-row gauntlet 3-engine bit-identical; suite
 777/777; fmt clean.
+
+## 2026-07-15 — Refuted: deferred frame stores for register-carried JIT loops (≤2%, reverted)
+
+Hypothesis (from the prior session's profiling note): a register-carried self-tail
+loop's per-iteration back-edge stores of the carried scalar slots to `roots` cost
+~8 ns/iter, and exist only to give a rare deopt/preempt the frame's resume state —
+so eliding them (the live value already flows in a Cranelift `Variable`) and
+reconstructing `roots` on the exit paths should be a broad win for
+`loop`/`collatz`/`mandelbrot`/`nbody`.
+
+Built it: back-edge skips the carried-slot stores; a `deopt` shim spills the
+*current* iteration's carried registers (header values) before the raw deopt, a
+`poll_deopt` shim + the `preempt` block spill the *next* iteration's (post
+back-edge `def_var`); the carry update became a register-level parallel assignment.
+
+**Measured ≈2% and reverted.** A/B (worktree on `dc66500`): loop 2.53 → 2.48 s at
+N=300M (0.17 ns/iter, not 8), collatz/mandelbrot ~1 tick, nbody/nqueens flat. The
+stores were never the bottleneck — they target hot L1 frame words and the store
+buffer + OoO fully hide them behind the loop's arithmetic. Not worth the cost: the
+change introduces a **"`roots` is stale for a carried slot"** invariant into the
+hottest, most delicate JIT code, and *every* site that reads a carried slot from
+`roots` becomes a silent miscompile. Three surfaced during the build, each a
+too-small final result: `read_words` (returning/aliasing a carried slot),
+`store_op`→`copy_value` (the `exit_done` roots→roots copy of the accumulator — the
+big one), and the parallel-assignment ordering. `load_slot_int`/`as_int`/`as_f64`
+already had the carry fast path; the point is that keeping `roots` authoritative
+every iteration is the safer invariant and costs ~nothing. **Don't re-chase frame
+stores** — profile a genuinely allocation- or FFI-bound benchmark instead.
+
+## 2026-07-15 — Regex's dead `(:use editor/buffer)`: the last 7/7 falls, 578 → ~310 ms (one line)
+
+Right after the frame-stores dead end, took its own advice — *measure the benchmark,
+don't assume* — on `regex`, the sole surviving last-of-seven (578 ms). Bisected the
+cost and it was **none of** the matcher, the per-call compile (cached — a string-keyed
+`table-get`, 0.03 s/20k), or the codes conversion. It was **module load**: `require
+'regex` alone cost **0.29 s** vs `require 'json` ~0. The regex module header carried
+`(:use editor/buffer)` — pulling in the 862-line editor/buffer module (which loads in
+~0.33 s all by itself) — and **regex references nothing from it** (checked all 89 of
+buffer's public defns against the whole file: zero hits). A pure dead dependency,
+paid once per process at startup. Deleted the one line.
+
+Result: `require 'regex` 0.32 → **0.03 s**; the benchmark 0.578 → **~0.31 s** — past
+clojure (477 ms), so regex goes **7/7 → 6/7**. That was the *last* dead-last row: the
+07-14/15 sweep is complete, no benchmark is last-of-seven anymore. Verified: regex
+suite 14/14; 3-engine (JIT / NO_JIT / tree-walk) bit-identical on the benchmark; the
+checked-but-**kept** deps (sexp genuinely uses `buffer-text`/`goto-char`/… ; leave it).
+Follow-on noted, not chased: **editor/buffer itself loads in 0.33 s for 862 lines** —
+json's 396 load in ~0, so large-module load time is superlinear/pathological and would
+speed up real editor + `nest` startup broadly. The general lesson: a benchmark's wall
+time includes process startup, and a stray `:use` taxes *every* run — measure load vs
+work before optimizing the work.
