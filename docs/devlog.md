@@ -3912,3 +3912,27 @@ from native code cheap — a kernel project of its own. Suite 777/777; 3 engines
 bit-identical across the gauntlet; fmt + `nest check` clean. (Mid-run the disk filled —
 7 scratch worktrees × multi-GB `target/`s; reclaimed ~32 GB by deleting their build
 artifacts. The worktrees themselves are merged and disposable.)
+
+## 2026-07-15 — The big one, increment 1: native→builtin calls get an IC fast path
+
+The cross-arm call ceiling, measured precisely (10M-iteration microbench from a JIT'd
+loop): a Brood→Brood call via the fast-link is already ~26 ns — but a call to a **Rust
+builtin** cost **~55–75 ns** (`string-length` 55, `char->int` 75), because a Native
+callee never entered the call IC: `jit_dispatch_call` fell to the slow path — an
+`env_get` per call + the full `dispatch` (passthrough loop, `apply`-unfold check,
+re-dispatch) — every single time.
+
+Fix (pure `jit_dispatch_call`, no lowering change): the call IC now caches Native
+callees as arm-less entries; a hit invokes the fn pointer directly on the staged
+(rooted) args — one arity check, no `env_get`, no `dispatch`. `apply` has a real
+native body so even it is exact; dynamic heads are never cached (call direct, uncached).
+
+Builtin calls from native code: **55→38 ns / 75→58 ns**; `str`-heavy loop −17%.
+Free riders: `strings` 0.13→0.04 s, `wordcount` 0.11→0.09 s. Brood→Brood unchanged
+(0.40/0.50 s microbench flat); full gauntlet 3-engine bit-identical; suite 777/777.
+
+Remaining rungs on this ladder (the BEAM picture: args in X registers, patched direct
+calls, no per-frame zeroing): batch arg staging (one stack-slot FFI instead of
+`brood_rt_push` × argc), a flat per-site native-pointer cell to kill the IC RefCell
+borrow, and skipping the nil-fill for definitely-assigned frames. Each is a measured
+10–20 ns; none taken yet.

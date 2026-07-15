@@ -6439,9 +6439,42 @@ pub(crate) fn jit_dispatch_call(
     // frame is exactly where the VM puts a callee frame, so this holds no more roots than the
     // interpreter. These sites bypass `exec_chunk`, so the JIT self-populates the IC on a miss.
     {
+        // Direct-call a BUILTIN callee: read the staged args (rooted at
+        // `[stage_base, n)` — the same discipline the VM's `Inst::Call` uses),
+        // invoke the native fn pointer, park any error. This is the native-callee
+        // fast path: no `env_get`, no `dispatch` (passthrough loop + `apply`
+        // unfold + arity re-checks) — the ~55–75 ns/call protocol every `str`/
+        // `char->int`/`string-length` from JIT'd code used to pay. `apply` itself
+        // has a real native body (`apply_builtin`), so direct invocation is exact.
+        macro_rules! call_native_direct {
+            ($nid:expr) => {{
+                let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
+                for k in 0..argc {
+                    argv.push(heap.root_at(stage_base + k));
+                }
+                let env = heap.read_root_env(heap.jit_call_env);
+                let r = crate::eval::call_native(heap, $nid, &argv, env);
+                heap.truncate_roots(stage_base);
+                return match r {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        heap.jit_pending_error = Some(e);
+                        None
+                    }
+                };
+            }};
+        }
         let resolved: Option<(Arc<CompiledArm>, EnvId)> = if elided {
             match heap.vm_call_ic_probe(site, head, argc as u32, epoch) {
                 Some((_, Some((a, env)))) => Some((a, env)),
+                // IC hit on a NATIVE callee (arm-less entry, filled below on first
+                // resolve): the whole call is one arity-checked fn-pointer call.
+                Some((v, None)) if !over_cap => {
+                    if let ValueRef::Native(nid) = v.unpack() {
+                        call_native_direct!(nid)
+                    }
+                    None
+                }
                 _ => {
                     // Miss: resolve the callee global (the only `env_get` on the call path,
                     // and only while cold) and fill the IC.
@@ -6464,6 +6497,25 @@ pub(crate) fn jit_dispatch_call(
                             }
                             (a, env)
                         }),
+                        // A builtin callee: fill an arm-less IC entry (so the next call
+                        // takes the direct path above) and call it now. Dynamic heads are
+                        // never cached (they can shadow per call) but still call direct.
+                        Some(ValueRef::Native(nid)) if !over_cap => {
+                            if !value::is_dynamic(head) {
+                                heap.vm_call_ic_put(
+                                    site,
+                                    crate::core::heap::CallIcEntry {
+                                        sym: head,
+                                        argc: argc as u32,
+                                        epoch,
+                                        callee: Value::native(nid),
+                                        arm: None,
+                                        fast: std::cell::Cell::new(None),
+                                    },
+                                );
+                            }
+                            call_native_direct!(nid)
+                        }
                         _ => None,
                     }
                 }
