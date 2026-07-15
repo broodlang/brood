@@ -325,3 +325,61 @@
       (assert= (table-count t) n)
       (assert= (table-get t 7) 49)
       (assert= (table-get t 99) (* 99 99)))))
+
+;; --- Dense int-key storage (the sieve representation) + its hashed migration ---
+;; A table starts dense (int keys in range, nil/bool/int values, direct-indexed
+;; array); the first op that doesn't fit migrates it to the hashed map — every
+;; entry must survive, and Empty-vs-stored-nil must stay distinct throughout.
+(describe "dense table storage and migration"
+  (test "stored nil is present (Empty vs Nil stays exact)"
+    (let (t (table))
+      (table-put t 5 nil)
+      (is (table-has? t 5))
+      (assert= (table-get t 5 :dflt) nil)
+      (assert= (table-get t 6 :dflt) :dflt)
+      (assert= (table-count t) 1)))
+  (test "overwrite and delete keep the count exact"
+    (let (t (table))
+      (table-put t 3 true)
+      (table-put t 3 42)
+      (assert= (table-count t) 1)
+      (table-delete t 3)
+      (assert= (table-count t) 0)
+      (is (not (table-has? t 3)))))
+  (test "a string key migrates dense -> hashed with every entry intact"
+    (let (t (table))
+      (fold (fn (_ i) (table-put t i (* i 2))) nil (range 500))
+      (table-put t "s" :str)
+      (assert= (table-count t) 501)
+      (assert= (table-get t 250) 500)
+      (assert= (table-get t "s") :str)))
+  (test "an out-of-range / negative key migrates and both worlds read back"
+    (let (t (table))
+      (table-put t 3 :near)
+      (table-put t 99999999999 :far)
+      (table-put t -7 :neg)
+      (assert= (table-get t 3) :near)
+      (assert= (table-get t 99999999999) :far)
+      (assert= (table-get t -7) :neg)))
+  (test "a non-scalar value migrates (dense holds only nil/bool/int)"
+    (let (t (table))
+      (table-put t 1 42)
+      (table-put t 2 [1 2 3])
+      (assert= (table-get t 1) 42)
+      (assert= (table-get t 2) [1 2 3])))
+  (test "table-incr works on dense, across migration, and keeps its type error"
+    (let (t (table))
+      (assert= (table-incr t 10) 1)
+      (assert= (table-incr t 10 5) 6)
+      (table-put t "k" 1)
+      (assert= (table-incr t 10) 7)
+      (table-put t 20 true)
+      (assert= (try (do (table-incr t 20) :no-error) (catch e :err)) :err)))
+  (test "snapshot of a dense table"
+    (let (t (table))
+      (table-put t 1 10)
+      (table-put t 3 30)
+      (let (m (table-snapshot t))
+        (assert= (get m 1) 10)
+        (assert= (get m 3) 30)
+        (assert= (count m) 2)))))

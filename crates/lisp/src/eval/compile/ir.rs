@@ -51,6 +51,35 @@ pub enum PrimOp {
     BitAnd,
     BitOr,
     BitXor,
+    // `table-has?` / 2-arg `table-get` (perf): the Table workhorses (`sieve`'s marks,
+    // the regex DFA memo, counters). Like `Cons`/`VectorRef` they need the heap, so
+    // they're handled in the exec arm; a non-Table first operand defers to the native
+    // so type errors stay bit-identical. Removing the per-op native Call is what lets
+    // a table-driven self-tail loop keep its register carry (same rationale as the
+    // bitops above), and the JIT lowers them as a single runtime-callback call.
+    TableHas,
+    TableGet,
+}
+
+/// A 3-ary inlinable primitive — the `PrimOp` family's arity-3 sibling. One member
+/// today: `table-put` (the write half of the Table workhorses — `sieve`'s 2.5M marks).
+/// Same discipline as `PrimOp`: the op needs the heap so it runs in the exec arm; a
+/// non-Table first operand (or a redefined head, via the epoch guard) defers to the
+/// dispatched native so errors stay bit-identical; the JIT lowers it as one runtime
+/// callback. Kept a separate enum (not `PrimOp`) so every existing 2-ary match stays
+/// exhaustive without dead arms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimOp3 {
+    TablePut,
+}
+
+impl PrimOp3 {
+    pub(super) fn from_native_name(name: &str) -> Option<PrimOp3> {
+        match name {
+            "table-put" => Some(PrimOp3::TablePut),
+            _ => None,
+        }
+    }
 }
 
 /// A core 1-ary sequence primitive the compiler inlines (ADR-096) — the list
@@ -98,6 +127,8 @@ impl PrimOp {
             "bit-and" => PrimOp::BitAnd,
             "bit-or" => PrimOp::BitOr,
             "bit-xor" => PrimOp::BitXor,
+            "table-has?" => PrimOp::TableHas,
+            "table-get" => PrimOp::TableGet,
             _ if name == kw::EQ_PRIM => PrimOp::Eq,
             _ => return None,
         })
@@ -364,6 +395,18 @@ pub enum Node {
         guard: AtomicU64,
         pos: Option<Pos>,
         broot: bool,
+    },
+    /// An inlined 3-ary primitive (`table-put`): args in source order; no arg-map
+    /// (its one member is a direct native — no wrapper reordering to normalise).
+    /// Same guard discipline as [`Node::Prim2`].
+    Prim3 {
+        op: PrimOp3,
+        a: Box<Node>,
+        b: Box<Node>,
+        c: Box<Node>,
+        head: Symbol,
+        guard: AtomicU64,
+        pos: Option<Pos>,
     },
     /// An inlined 1-ary sequence primitive (ADR-096) — `(first xs)` / `(rest xs)`.
     /// The `Pair`/`Nil` cases run inline; any other operand shape — or a
@@ -716,6 +759,11 @@ pub(super) fn rewrite_node(node: &Node, f: &mut dyn FnMut(Value) -> Value) {
             rewrite_node(a, f);
             rewrite_node(b, f);
         }
+        Node::Prim3 { a, b, c, .. } => {
+            rewrite_node(a, f);
+            rewrite_node(b, f);
+            rewrite_node(c, f);
+        }
         Node::Prim1 { a, .. } => rewrite_node(a, f),
         Node::TryCatch { body, handler, .. } => {
             rewrite_node(body, f);
@@ -820,6 +868,14 @@ pub enum Inst {
     Prim2 {
         op: PrimOp,
         map: [u8; 2],
+        head: Symbol,
+        guard: AtomicU64,
+        pos: Option<Pos>,
+    },
+    /// Inlined 3-ary primitive (`table-put`): replace the top three operands with
+    /// the result, or fall back to a general call on `head`. Mirrors `Node::Prim3`.
+    Prim3 {
+        op: PrimOp3,
         head: Symbol,
         guard: AtomicU64,
         pos: Option<Pos>,
@@ -934,6 +990,10 @@ impl Inst {
             ),
             Inst::Prim2 { op, head, .. } => format!(
                 "Prim2({op:?}, {})",
+                crate::core::value::symbol_name_ref(*head)
+            ),
+            Inst::Prim3 { op, head, .. } => format!(
+                "Prim3({op:?}, {})",
                 crate::core::value::symbol_name_ref(*head)
             ),
             Inst::Prim2SlotSlot {

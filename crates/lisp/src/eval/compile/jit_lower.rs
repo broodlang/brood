@@ -78,6 +78,19 @@ pub(crate) fn jit_spill_reserve(code: &[Inst]) -> usize {
                         op: PrimOp::Cons,
                         ..
                     }
+                    | Inst::Prim2 {
+                        op: PrimOp::TableGet,
+                        ..
+                    }
+                    | Inst::Prim2SlotSlot {
+                        op: PrimOp::TableGet,
+                        ..
+                    }
+                    | Inst::Prim2SlotInt {
+                        op: PrimOp::TableGet,
+                        ..
+                    }
+                    | Inst::Prim3 { .. }
             )
         })
         .count();
@@ -122,6 +135,8 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
                 | PrimOp::BitAnd
                 | PrimOp::BitOr
                 | PrimOp::BitXor
+                | PrimOp::TableHas
+                | PrimOp::TableGet
         )
         // `Cons` is admitted: the lowering calls `brood_rt_cons` (same bump-allocate
         // path as `brood_rt_make_vector2`, which works) and reads all 3 result words
@@ -143,6 +158,11 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
         Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
             in_subset_op(op)
         }
+        // `table-put` — lowered as one runtime-callback call (brood_rt_table_put).
+        Inst::Prim3 {
+            op: PrimOp3::TablePut,
+            ..
+        } => true,
         // A vector literal `[a …]`. Arity 2 (bintree's `make`) lowers via the inline
         // `brood_rt_make_vector2`; a wider literal (nbody's `[vx vy vz]` / 7-body
         // rebuild) stages its elements into a Cranelift stack slot and calls the
@@ -162,6 +182,7 @@ fn inst_opcode_name(inst: &Inst) -> &'static str {
     match inst {
         Inst::Const(_) => "Const",
         Inst::Local(_) => "Local",
+        Inst::Prim3 { .. } => "Prim3",
         Inst::Global(_) => "Global",
         Inst::GlobalIc { .. } => "GlobalIc",
         Inst::Pop => "Pop",
@@ -224,6 +245,11 @@ fn collect_self_call_args<'a>(node: &'a Node, out: &mut Vec<&'a [Node]>) {
         Node::Prim2 { a, b, .. } => {
             collect_self_call_args(a, out);
             collect_self_call_args(b, out);
+        }
+        Node::Prim3 { a, b, c, .. } => {
+            collect_self_call_args(a, out);
+            collect_self_call_args(b, out);
+            collect_self_call_args(c, out);
         }
         Node::Prim1 { a, .. } => collect_self_call_args(a, out),
         Node::TryCatch { body, handler, .. } => {
@@ -320,6 +346,11 @@ fn invariant_global_vecs(node: &Node, out: &mut std::collections::HashSet<Symbol
         Node::Prim2 { a, b, .. } => {
             invariant_global_vecs(a, out);
             invariant_global_vecs(b, out);
+        }
+        Node::Prim3 { a, b, c, .. } => {
+            invariant_global_vecs(a, out);
+            invariant_global_vecs(b, out);
+            invariant_global_vecs(c, out);
         }
         Node::Prim1 { a, .. } => invariant_global_vecs(a, out),
         Node::TryCatch { body, handler, .. } => {
@@ -1843,6 +1874,25 @@ fn jit_lower_arm_inner(
     let vref_id = m
         .declare_function("brood_rt_vector_ref", Linkage::Import, &vref_sig)
         .ok()?;
+    // brood_rt_table_has / brood_rt_table_get2: (heap, out, table 3 words, key 3 words)
+    // -> status. Same word-triple signature as vector_ref; status 2 = error parked.
+    let thas_id = m
+        .declare_function("brood_rt_table_has", Linkage::Import, &vref_sig)
+        .ok()?;
+    let tget_id = m
+        .declare_function("brood_rt_table_get2", Linkage::Import, &vref_sig)
+        .ok()?;
+    // brood_rt_table_put: (heap, out, table 3w, key 3w, val 3w) -> status.
+    let mut tput_sig = m.make_signature();
+    tput_sig.params.push(AbiParam::new(ptr_ty)); // heap
+    tput_sig.params.push(AbiParam::new(ptr_ty)); // out
+    for _ in 0..9 {
+        tput_sig.params.push(AbiParam::new(types::I64));
+    }
+    tput_sig.returns.push(AbiParam::new(types::I64));
+    let tput_id = m
+        .declare_function("brood_rt_table_put", Linkage::Import, &tput_sig)
+        .ok()?;
     // brood_rt_vector_base(heap, vec 3 words, out_len: *mut i64) -> *const Value: resolve
     // an invariant vector's element (data_ptr, len) once for the LICM hoist; null ptr ⇒
     // not a vector (the hoist deopts at entry). Only declared/used when `hoist_slots`.
@@ -1955,6 +2005,9 @@ fn jit_lower_arm_inner(
     let flbase_ref = m.declare_func_in_func(flbase_id, b.func);
     let fastframe_ref = m.declare_func_in_func(fastframe_id, b.func);
     let vref_ref = m.declare_func_in_func(vref_id, b.func);
+    let thas_ref = m.declare_func_in_func(thas_id, b.func);
+    let tget_ref = m.declare_func_in_func(tget_id, b.func);
+    let tput_ref = m.declare_func_in_func(tput_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
     let gepochptr_ref = m.declare_func_in_func(gepochptr_id, b.func);
     let const_load_ref = m.declare_func_in_func(const_load_id, b.func);
@@ -2408,6 +2461,9 @@ fn jit_lower_arm_inner(
             PrimOp::BitXor => b.ins().bxor(x, y),
             PrimOp::Cons => return None, // allocates — never in the JIT subset
             PrimOp::VectorRef => return None, // heap slab read — not lowered; out of subset
+            // Table ops: not an int-arith op — lowered as a runtime callback in the
+            // Inst::Prim2 arm below (never through this integer emitter).
+            PrimOp::TableHas | PrimOp::TableGet => return None,
         })
     };
 
@@ -2922,6 +2978,41 @@ fn jit_lower_arm_inner(
         Op::Handle(w0, w1, w2)
     };
 
+    // `table-has?` / 2-arg `table-get` via their runtime callbacks. Status protocol:
+    // 0 = done (`out` holds the result), 1 = deopt (non-Table operand — the VM owns the
+    // exact type error), 2 = a real error is parked in `jit_pending_error` (dropped
+    // table / bad key) → exit via the arm's error block (outcome 3). The callbacks may
+    // allocate (a compound stored value reconstructs) but never collect, so live
+    // register handles stay valid across the call.
+    let table_prim = |b: &mut FunctionBuilder,
+                      fref: cranelift_codegen::ir::FuncRef,
+                      tbl: [cranelift_codegen::ir::Value; 3],
+                      key: [cranelift_codegen::ir::Value; 3]|
+     -> Op {
+        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+        let c = b.ins().call(
+            fref,
+            &[
+                heap, out_addr, tbl[0], tbl[1], tbl[2], key[0], key[1], key[2],
+            ],
+        );
+        let status = b.inst_results(c)[0];
+        let cont = b.create_block();
+        let slow = b.create_block();
+        b.ins().brif(status, slow, &[], cont, &[]);
+        b.switch_to_block(slow);
+        let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
+        b.ins().brif(is_err, error, &[], deopt, &[]);
+        b.switch_to_block(cont);
+        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+        let w1 = b
+            .ins()
+            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+        let w2 = b
+            .ins()
+            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+        Op::Handle(w0, w1, w2)
+    };
     // Inline read of `(nth v <const idx>)` for a LOCAL small (inline) vector, the
     // analog of the pair `first`/`rest` inline. Fetches the vector-slab base
     // *per read* (a trivial FFI, not the hoist used for pairs) so it is safe even
@@ -3634,6 +3725,20 @@ fn jit_lower_arm_inner(
                             &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
                         );
                         stack.push(h);
+                    } else if matches!(op, PrimOp::TableHas | PrimOp::TableGet) {
+                        // `(table-has? t k)` / 2-arg `(table-get t k)`. `map[0]` picks
+                        // which SOURCE is the table (a swapped wrapper reorders), exactly
+                        // like the VM's `[sa, sb][map[0]]`.
+                        let s0 = read_words(&mut b, aa_op);
+                        let s1 = read_words(&mut b, bb_op);
+                        let (tbl, key) = if map[0] == 0 { (s0, s1) } else { (s1, s0) };
+                        let fref = if matches!(op, PrimOp::TableHas) {
+                            thas_ref
+                        } else {
+                            tget_ref
+                        };
+                        let h = table_prim(&mut b, fref, tbl, key);
+                        stack.push(h);
                     } else if matches!(op, PrimOp::VectorRef) {
                         // `(vector-ref v i)` / inlined `(nth v i)`: map is `[0,1]`, so
                         // source 0 (`aa`) is the vector, source 1 (`bb`) the index.
@@ -3695,6 +3800,44 @@ fn jit_lower_arm_inner(
                         stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
                     }
                 }
+                Inst::Prim3 {
+                    op: PrimOp3::TablePut,
+                    ..
+                } => {
+                    // `(table-put t k v)`: operands pushed in source order — value on
+                    // top. Same status protocol as the 2-arg table callbacks: 0 → the
+                    // table handle rides back via `out`, 1 → deopt (non-Table operand),
+                    // 2 → parked error (dropped table / bad key) → the error block.
+                    let val = stack.pop()?;
+                    let key = stack.pop()?;
+                    let tbl = stack.pop()?;
+                    let t = read_words(&mut b, tbl);
+                    let k = read_words(&mut b, key);
+                    let v = read_words(&mut b, val);
+                    let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                    let c = b.ins().call(
+                        tput_ref,
+                        &[
+                            heap, out_addr, t[0], t[1], t[2], k[0], k[1], k[2], v[0], v[1], v[2],
+                        ],
+                    );
+                    let status = b.inst_results(c)[0];
+                    let cont = b.create_block();
+                    let slow = b.create_block();
+                    b.ins().brif(status, slow, &[], cont, &[]);
+                    b.switch_to_block(slow);
+                    let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
+                    b.ins().brif(is_err, error, &[], deopt, &[]);
+                    b.switch_to_block(cont);
+                    let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+                    let w1 = b
+                        .ins()
+                        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                    let w2 = b
+                        .ins()
+                        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                    stack.push(Op::Handle(w0, w1, w2));
+                }
                 Inst::Prim2SlotSlot {
                     op,
                     map,
@@ -3711,6 +3854,19 @@ fn jit_lower_arm_inner(
                             cons_ref,
                             &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
                         );
+                        stack.push(h);
+                    } else if matches!(op, PrimOp::TableHas | PrimOp::TableGet) {
+                        // `(table-has?/table-get slot_a slot_b)`. `map[0]` picks which
+                        // slot is the table (mirrors the VM's `[sa, sb][map[0]]`).
+                        let s0 = read_words(&mut b, Op::Slot(*slot_a));
+                        let s1 = read_words(&mut b, Op::Slot(*slot_b));
+                        let (tbl, key) = if map[0] == 0 { (s0, s1) } else { (s1, s0) };
+                        let fref = if matches!(op, PrimOp::TableHas) {
+                            thas_ref
+                        } else {
+                            tget_ref
+                        };
+                        let h = table_prim(&mut b, fref, tbl, key);
                         stack.push(h);
                     } else if matches!(op, PrimOp::VectorRef) {
                         // `(nth slot_a slot_b)`: source 0 = vector slot, source 1 = index
@@ -3779,6 +3935,29 @@ fn jit_lower_arm_inner(
                         // `(nth node 0/1)` hot path.
                         let vec = read_words(&mut b, Op::Slot(*slot_a));
                         let h = inline_vec_ref(&mut b, vec, *int_b);
+                        stack.push(h);
+                    } else if matches!(op, PrimOp::TableHas | PrimOp::TableGet) {
+                        // `(table-has?/table-get slot <int-const>)` — a constant int fused
+                        // into the instruction. `map[0]` says which side is the table: 0 →
+                        // the slot (`(table-has? t 5)`), 1 → the const (a swapped
+                        // `(table-has? 5 x)` fusion — nonsense at runtime; the callback
+                        // returns status 1 and the VM raises the exact type error).
+                        let slot_w = read_words(&mut b, Op::Slot(*slot_a));
+                        let kt = b.ins().iconst(types::I64, TAG_INT as i64);
+                        let kv = b.ins().iconst(types::I64, *int_b);
+                        let kz = b.ins().iconst(types::I64, 0);
+                        let int_w = [kt, kv, kz];
+                        let (tbl, key) = if map[0] == 0 {
+                            (slot_w, int_w)
+                        } else {
+                            (int_w, slot_w)
+                        };
+                        let fref = if matches!(op, PrimOp::TableHas) {
+                            thas_ref
+                        } else {
+                            tget_ref
+                        };
+                        let h = table_prim(&mut b, fref, tbl, key);
                         stack.push(h);
                     } else
                     // `(cons slot int_literal)` or `(cons int_literal slot)` (after map

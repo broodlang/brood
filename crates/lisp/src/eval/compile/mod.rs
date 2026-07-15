@@ -81,7 +81,9 @@ pub const NO_SITE: u32 = u32::MAX;
 
 mod ir;
 pub use ir::{rewrite_arm_handles, Inst};
-pub use ir::{Chunk, CompiledArm, CompiledClosure, ConstVal, HandleKind, Node, PrimOp, PrimOp1};
+pub use ir::{
+    Chunk, CompiledArm, CompiledClosure, ConstVal, HandleKind, Node, PrimOp, PrimOp1, PrimOp3,
+};
 // pub(super) items from ir: explicitly imported so `use ir::*` (pub-only) doesn't miss them.
 // pub items re-exported above; these are pub(super) items needed internally:
 use ir::{ArmSpec, ChunkExit, Step};
@@ -837,6 +839,24 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                         });
                     }
                 }
+                // 3-arg inlinable primitive (`table-put`): same guard discipline as the
+                // 2-arg prims; only a direct-native head qualifies (no wrapper to follow).
+                if items.len() == 4 && scope.lookup(h).is_none() {
+                    if let Some(op3) = resolve_prim3(heap, h) {
+                        let a = compile_node(heap, items[1], scope, false)?;
+                        let b = compile_node(heap, items[2], scope, false)?;
+                        let c = compile_node(heap, items[3], scope, false)?;
+                        return Some(Node::Prim3 {
+                            op: op3,
+                            a: Box::new(a),
+                            b: Box::new(b),
+                            c: Box::new(c),
+                            head: h,
+                            guard: AtomicU64::new(heap.global_epoch()),
+                            pos: heap.form_pos_only(form),
+                        });
+                    }
+                }
                 // N-ary associative arithmetic (`(+ a b c …)`, `(* …)`) whose head is a
                 // free reference to the prelude operator: left-fold into nested 2-ary
                 // `Prim2` so each step inlines to a native add/mul (and the whole arm can
@@ -1004,6 +1024,9 @@ fn node_has_rt_handles(node: &Node) -> bool {
             binds.iter().any(|(_, n)| node_has_rt_handles(n)) || node_has_rt_handles(body)
         }
         Node::Prim2 { a, b, .. } => node_has_rt_handles(a) || node_has_rt_handles(b),
+        Node::Prim3 { a, b, c, .. } => {
+            node_has_rt_handles(a) || node_has_rt_handles(b) || node_has_rt_handles(c)
+        }
         Node::Prim1 { a, .. } => node_has_rt_handles(a),
         Node::TryCatch { body, handler, .. } => {
             node_has_rt_handles(body) || node_has_rt_handles(handler)
@@ -1057,6 +1080,11 @@ fn walk_children<F: FnMut(&Node)>(node: &Node, mut f: F) {
             f(a);
             f(b);
         }
+        Node::Prim3 { a, b, c, .. } => {
+            f(a);
+            f(b);
+            f(c);
+        }
         Node::Prim1 { a, .. } => f(a),
         Node::TryCatch { body, handler, .. } => {
             f(body);
@@ -1093,6 +1121,11 @@ fn walk_children_mut<F: FnMut(&mut Node)>(node: &mut Node, mut f: F) {
         Node::Prim2 { a, b, .. } => {
             f(a);
             f(b);
+        }
+        Node::Prim3 { a, b, c, .. } => {
+            f(a);
+            f(b);
+            f(c);
         }
         Node::Prim1 { a, .. } => f(a),
         Node::TryCatch { body, handler, .. } => {
@@ -1531,6 +1564,23 @@ fn shift_slots(node: &Node, delta: usize) -> Node {
             pos: *pos,
             broot: *broot,
         },
+        Node::Prim3 {
+            op,
+            a,
+            b,
+            c,
+            head,
+            guard,
+            pos,
+        } => Node::Prim3 {
+            op: *op,
+            a: Box::new(shift_slots(a, delta)),
+            b: Box::new(shift_slots(b, delta)),
+            c: Box::new(shift_slots(c, delta)),
+            head: *head,
+            guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
+            pos: *pos,
+        },
         Node::Prim1 {
             op,
             a,
@@ -1618,6 +1668,11 @@ fn inline_self_calls(
         Node::Prim2 { a, b, .. } => {
             count += inline_self_calls(a, orig_body, defn_name, nrequired, m, next_block);
             count += inline_self_calls(b, orig_body, defn_name, nrequired, m, next_block);
+        }
+        Node::Prim3 { a, b, c, .. } => {
+            count += inline_self_calls(a, orig_body, defn_name, nrequired, m, next_block);
+            count += inline_self_calls(b, orig_body, defn_name, nrequired, m, next_block);
+            count += inline_self_calls(c, orig_body, defn_name, nrequired, m, next_block);
         }
         Node::Prim1 { a, .. } => {
             count += inline_self_calls(a, orig_body, defn_name, nrequired, m, next_block);
@@ -1889,11 +1944,12 @@ fn node_touches_heap(node: &Node) -> bool {
     match node {
         // Allocating literals: `[..]` (bintree's `make`), `{..}`.
         Node::Vector(_) | Node::Map(_) => true,
-        // `cons` and `nth`/`vector-ref`.
+        // `cons` and `nth`/`vector-ref`; the table ops reconstruct/store values.
         Node::Prim2 {
-            op: PrimOp::VectorRef | PrimOp::Cons,
+            op: PrimOp::VectorRef | PrimOp::Cons | PrimOp::TableHas | PrimOp::TableGet,
             ..
         } => true,
+        Node::Prim3 { .. } => true,
         // `first`/`rest` (car/cdr) dereference a pair handle — heap reads.
         // `nil?`/`pair?` are tag-only checks — no heap dereference.
         Node::Prim1 {
@@ -2521,7 +2577,9 @@ fn prim2_int_fast(op: PrimOp, a: i64, b: i64) -> Option<Value> {
         // Cons needs heap alloc; Div may return Float — both handled by prim_apply.
         // VectorRef needs the heap (slab index) and its operands aren't (Int, Int);
         // handled directly in prim2_inline_exec.
-        PrimOp::Cons | PrimOp::Div | PrimOp::VectorRef => None,
+        PrimOp::Cons | PrimOp::Div | PrimOp::VectorRef | PrimOp::TableHas | PrimOp::TableGet => {
+            None
+        }
     }
 }
 
@@ -2580,7 +2638,7 @@ fn prim_apply(op: PrimOp, x: Value, y: Value) -> Result<Option<Value>, LispError
         PrimOp::BitOr => Value::int(a | b),
         PrimOp::BitXor => Value::int(a ^ b),
         // Handled in the exec arm (they need `&mut Heap` / the heap); never reach here.
-        PrimOp::Cons | PrimOp::VectorRef => return Ok(None),
+        PrimOp::Cons | PrimOp::VectorRef | PrimOp::TableHas | PrimOp::TableGet => return Ok(None),
     };
     Ok(Some(v))
 }
@@ -2715,6 +2773,27 @@ fn prim2_inline_exec(
             }
             Ok(None)
         }
+        // `table-has?` / 2-arg `table-get`: run the table op directly, skipping the
+        // whole native-call protocol. Same key guard as the natives (`check_key`), so a
+        // closure/NaN key raises the identical error; a non-Table first operand defers
+        // to the native for its exact type error. Errors (dropped table, bad key)
+        // propagate — bit-identical to the dispatched native.
+        None if op == PrimOp::TableHas => {
+            if let ValueRef::Table(tid) = x.unpack() {
+                crate::table::check_key("table-has?", y)?;
+                crate::perf_bump!(prim2_inline);
+                return Ok(Some(Value::boolean(crate::table::has(heap, tid, y)?)));
+            }
+            Ok(None)
+        }
+        None if op == PrimOp::TableGet => {
+            if let ValueRef::Table(tid) = x.unpack() {
+                crate::table::check_key("table-get", y)?;
+                crate::perf_bump!(prim2_inline);
+                return Ok(Some(crate::table::get(heap, tid, y, Value::Nil)?));
+            }
+            Ok(None)
+        }
         None => Ok(None), // overflow or other deferred edge → fallback
     }
 }
@@ -2743,6 +2822,45 @@ fn prim2_dispatch_rooted(
     let sa = heap.root_at(save);
     let sb = heap.root_at(save + 1);
     let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
+    let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
+    heap.truncate_roots(save);
+    result.map_err(|e| tag_pos(e, pos))
+}
+
+/// Resolve a 3-arg call head to an inlinable [`PrimOp3`]. Only a **direct** native
+/// binding qualifies (its one member, `table-put`, has no prelude wrapper to follow).
+/// Read against the live global env — a redefined head simply doesn't match.
+fn resolve_prim3(heap: &Heap, h: Symbol) -> Option<PrimOp3> {
+    match heap.env_get(heap.global(), h)?.unpack() {
+        ValueRef::Native(id) => PrimOp3::from_native_name(&heap.native(id).name),
+        _ => None,
+    }
+}
+
+/// [`prim2_dispatch_rooted`]'s 3-ary sibling: operands already rooted at
+/// `[save..save+3)`; look up `head`, dispatch, truncate, return.
+#[inline(never)]
+fn prim3_dispatch_rooted(
+    heap: &mut Heap,
+    head: Symbol,
+    save: usize,
+    pos: Option<Pos>,
+    genv: EnvRoot,
+) -> Result<Value, LispError> {
+    crate::perf_bump!(prim2_fallback);
+    let cur_env = heap.read_root_env(genv);
+    let callee = match heap.env_get(cur_env, head) {
+        Some(c) => c,
+        None => {
+            heap.truncate_roots(save);
+            return Err(tag_pos(crate::eval::unbound_error(heap, head), pos));
+        }
+    };
+    let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[
+        heap.root_at(save),
+        heap.root_at(save + 1),
+        heap.root_at(save + 2),
+    ]);
     let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
     heap.truncate_roots(save);
     result.map_err(|e| tag_pos(e, pos))
@@ -3098,6 +3216,57 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
                 }
             };
             let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[sa, sb]);
+            let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
+            heap.truncate_roots(save);
+            result.map_err(tag)
+        }
+        Node::Prim3 {
+            a, b, c, head, pos, ..
+        } => {
+            let pos = *pos;
+            let tag = |e: LispError| match pos {
+                Some(p) => e.or_pos(p),
+                None => e,
+            };
+            // Cold path (optional defaults & co.): evaluate the three operands in
+            // source order, rooting each across the later evals (which can reach a
+            // safepoint), then dispatch `head` exactly like the generic call path —
+            // identical semantics for every operand shape and for a redefined head.
+            let save = heap.roots_len();
+            let sa = match exec_value(heap, a, frame_base, genv) {
+                Ok(v) => v,
+                Err(e) => return Err(tag(e)),
+            };
+            heap.push_root(sa);
+            let sb = match exec_value(heap, b, frame_base, genv) {
+                Ok(v) => v,
+                Err(e) => {
+                    heap.truncate_roots(save);
+                    return Err(tag(e));
+                }
+            };
+            heap.push_root(sb);
+            let sc = match exec_value(heap, c, frame_base, genv) {
+                Ok(v) => v,
+                Err(e) => {
+                    heap.truncate_roots(save);
+                    return Err(tag(e));
+                }
+            };
+            heap.push_root(sc);
+            let cur_env = heap.read_root_env(genv);
+            let callee = match heap.env_get(cur_env, *head) {
+                Some(cv) => cv,
+                None => {
+                    heap.truncate_roots(save);
+                    return Err(tag(crate::eval::unbound_error(heap, *head)));
+                }
+            };
+            let argv: SmallVec<[Value; 4]> = SmallVec::from_slice(&[
+                heap.root_at(save),
+                heap.root_at(save + 1),
+                heap.root_at(save + 2),
+            ]);
             let result = dispatch(heap, callee, argv, false, cur_env).and_then(|s| force(heap, s));
             heap.truncate_roots(save);
             result.map_err(tag)
@@ -4182,6 +4351,27 @@ fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 });
             }
         }
+        Node::Prim3 {
+            op,
+            a,
+            b,
+            c,
+            head,
+            guard,
+            pos,
+        } => {
+            // No fused variants (one member, `table-put` — the operand-stack form is
+            // already one inst); operands push in source order, the inst pops three.
+            emit_node(a, code)?;
+            emit_node(b, code)?;
+            emit_node(c, code)?;
+            code.push(Inst::Prim3 {
+                op: *op,
+                head: *head,
+                guard: AtomicU64::new(guard.load(Ordering::Relaxed)),
+                pos: *pos,
+            });
+        }
         Node::Call {
             callee,
             args,
@@ -4506,6 +4696,50 @@ fn exec_chunk(
                     None => {
                         // Operands already rooted at n-2 and n-1.
                         let v = prim2_dispatch_rooted(heap, *head, n - 2, *pos, genv)?;
+                        heap.push_root(v);
+                    }
+                }
+            }
+            Inst::Prim3 {
+                op,
+                head,
+                guard,
+                pos,
+            } => {
+                let n = heap.roots_len();
+                let sa = heap.root_at(n - 3); // table
+                let sb = heap.root_at(n - 2); // key
+                let sc = heap.root_at(n - 1); // value
+                                              // Epoch guard, same discipline as Prim2: inline only while `head` still
+                                              // resolves to the primitive; a `def` bump forces one re-validate.
+                let cur = heap.global_epoch();
+                let inlinable = guard.load(Ordering::Relaxed) == cur || {
+                    match resolve_prim3(heap, *head) {
+                        Some(op2) if op2 == *op => {
+                            guard.store(cur, Ordering::Relaxed);
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                let mut done = None;
+                if inlinable {
+                    if let ValueRef::Table(tid) = sa.unpack() {
+                        // Same key guard as the native — a closure/NaN key raises the
+                        // identical error; a non-Table first operand defers below.
+                        crate::table::check_key("table-put", sb)?;
+                        crate::perf_bump!(prim2_inline);
+                        done = Some(crate::table::put(heap, tid, sb, sc)?);
+                    }
+                }
+                match done {
+                    Some(v) => {
+                        heap.truncate_roots(n - 3);
+                        heap.push_root(v);
+                    }
+                    None => {
+                        // Operands already rooted at n-3..n; dispatch the surface head.
+                        let v = prim3_dispatch_rooted(heap, *head, n - 3, *pos, genv)?;
                         heap.push_root(v);
                     }
                 }

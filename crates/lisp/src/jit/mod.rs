@@ -109,6 +109,9 @@ impl Jit {
         );
         builder.symbol("brood_rt_fast_frame", brood_rt_fast_frame as *const u8);
         builder.symbol("brood_rt_vector_ref", brood_rt_vector_ref as *const u8);
+        builder.symbol("brood_rt_table_has", brood_rt_table_has as *const u8);
+        builder.symbol("brood_rt_table_get2", brood_rt_table_get2 as *const u8);
+        builder.symbol("brood_rt_table_put", brood_rt_table_put as *const u8);
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
         builder.symbol(
@@ -511,6 +514,134 @@ pub unsafe extern "C" fn brood_rt_vector_ref(
     }
     *out = v[idx as usize];
     0
+}
+
+/// `(table-has? t k)` from JIT'd code (the `PrimOp::TableHas` lowering). Returns
+/// 0 = done (`*out` holds the boolean), 1 = deopt (first operand isn't a Table —
+/// the VM owns the exact type error), 2 = a real error was parked in
+/// `jit_pending_error` (dropped table / invalid key) — the arm exits via its
+/// error block (outcome 3), bit-identical to the native raising it.
+///
+/// # Safety
+/// `heap` must be the live context pointer and `out` a writable `*mut Value`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_table_has(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    t0: i64,
+    t1: i64,
+    t2: i64,
+    k0: i64,
+    k1: i64,
+    k2: i64,
+) -> i64 {
+    use crate::core::value::Value;
+    let h = &mut *heap;
+    let Value::Table(id) = words_to_val(t0, t1, t2) else {
+        return 1;
+    };
+    let key = words_to_val(k0, k1, k2);
+    if let Err(e) = crate::table::check_key("table-has?", key) {
+        h.jit_pending_error = Some(e);
+        return 2;
+    }
+    match crate::table::has(h, id, key) {
+        Ok(b) => {
+            *out = Value::Bool(b);
+            0
+        }
+        Err(e) => {
+            h.jit_pending_error = Some(e);
+            2
+        }
+    }
+}
+
+/// 2-arg `(table-get t k)` from JIT'd code (the `PrimOp::TableGet` lowering) — nil
+/// default. Same status protocol as [`brood_rt_table_has`]. The returned value is a
+/// fresh reconstruction in the caller's heap; reconstruction may allocate (a compound
+/// stored value) but **never collects** (`alloc_slot!` is a plain push; collection
+/// runs only at safepoints), so handles the JIT'd arm holds in registers across this
+/// call stay valid — same discipline as `brood_rt_cons`/`brood_rt_make_vector_n`.
+///
+/// # Safety
+/// `heap` must be the live context pointer and `out` a writable `*mut Value`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_table_get2(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    t0: i64,
+    t1: i64,
+    t2: i64,
+    k0: i64,
+    k1: i64,
+    k2: i64,
+) -> i64 {
+    use crate::core::value::Value;
+    let h = &mut *heap;
+    let Value::Table(id) = words_to_val(t0, t1, t2) else {
+        return 1;
+    };
+    let key = words_to_val(k0, k1, k2);
+    if let Err(e) = crate::table::check_key("table-get", key) {
+        h.jit_pending_error = Some(e);
+        return 2;
+    }
+    match crate::table::get(h, id, key, Value::Nil) {
+        Ok(v) => {
+            *out = v;
+            0
+        }
+        Err(e) => {
+            h.jit_pending_error = Some(e);
+            2
+        }
+    }
+}
+
+/// `(table-put t k v)` from JIT'd code (the `PrimOp3::TablePut` lowering). Same
+/// status protocol as [`brood_rt_table_has`]; on success `*out` holds the table
+/// handle (put returns the table, for threading). Storing deep-clones the key and
+/// value out of the GC heap (`to_message`) — allocation-free on the dense int path
+/// and never collecting on any path, so register-held handles stay valid.
+///
+/// # Safety
+/// `heap` must be the live context pointer and `out` a writable `*mut Value`.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_table_put(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    t0: i64,
+    t1: i64,
+    t2: i64,
+    k0: i64,
+    k1: i64,
+    k2: i64,
+    v0: i64,
+    v1: i64,
+    v2: i64,
+) -> i64 {
+    use crate::core::value::Value;
+    let h = &mut *heap;
+    let Value::Table(id) = words_to_val(t0, t1, t2) else {
+        return 1;
+    };
+    let key = words_to_val(k0, k1, k2);
+    if let Err(e) = crate::table::check_key("table-put", key) {
+        h.jit_pending_error = Some(e);
+        return 2;
+    }
+    let val = words_to_val(v0, v1, v2);
+    match crate::table::put(h, id, key, val) {
+        Ok(v) => {
+            *out = v;
+            0
+        }
+        Err(e) => {
+            h.jit_pending_error = Some(e);
+            2
+        }
+    }
 }
 
 /// Loop-invariant-hoist support for the JIT (matmul LICM): resolve a vector value's

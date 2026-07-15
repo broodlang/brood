@@ -3834,3 +3834,41 @@ same shared floor `sieve` and `regex` sit on (see the 2026-07-15 Table entry's ~
 builtin-call measurement). Both experimental changes reverted; the gate is correct as-is.
 Deferred roadmap levers (assoc-path node alloc; a general fused `update`) remain valid for
 non-linmap map workloads.
+
+## 2026-07-15 — Dense Table storage + table-op prims: `sieve` 0.88 → 0.15 s (~6×, at Clojure's heels)
+
+The two remaining dead-last rows (`sieve` 284×, `regex` 208×) share the measured floor:
+per-op Table cost × per-op call dispatch. Both halves cut, in three layers:
+
+**1. Dense int-key storage (`table.rs`).** A `Store` is now `Storage::Dense { vals:
+Vec<DenseVal>, count }` — int keys in `[0, 2^23)` with scalar (`nil`/bool/int) values
+index a flat array directly: no structural hash, no bucket probe (the 3M-entry HashMap
+probe was ~183 ns of cache misses per op), no `Message` key clone. `DenseVal::Empty` vs
+`::Nil` keeps `table-has?` exact for stored nils. Every table starts dense; the first
+out-of-shape op (string/negative/out-of-range key, non-scalar value, too-sparse grow —
+`new_len ≤ 64·count + 4096` bounds RSS) migrates one-way to the original hashed map with
+every entry preserved. Alone: `sieve` 0.88 → 0.33 s and **RSS 417 → 60 MB**.
+
+**2. Table ops as prims.** `table-has?` / 2-arg `table-get` join `PrimOp`
+(exec-arm-handled like `Cons`/`VectorRef` — same `check_key` and error text as the
+natives, non-Table operand defers for the exact type error); `table-put` gets the first
+**`PrimOp3`/`Node::Prim3`/`Inst::Prim3`** (a new 3-operand inst: operands on the stack,
+same epoch-guard + `resolve_prim3` + `prim3_dispatch_rooted` fallback discipline).
+Removing the per-op native `Call` also removes the last calls from `sieve`'s loops, so
+they keep full register carry.
+
+**3. JIT lowering.** All three lower as one runtime-callback call
+(`brood_rt_table_has/get2/put` — vector_ref-style word-triple ABI) with a 3-way status:
+0 = done, 1 = deopt (VM owns the exact type error), 2 = a real error parked in
+`jit_pending_error` → the arm's error block (outcome 3). The callbacks may allocate (a
+compound `get` reconstructs) but never collect, so register-held handles stay valid.
+`TableGet`/`Prim3` count as spill producers.
+
+Result: `sieve` **0.88 → 0.15 s (~6×)** — harness-scaled ≈ 0.14 s, right at Clojure's
+144 ms (the 7/7 escape is a re-run coin-flip); `regex` 0.69 → ~0.64 s (its residual is
+the interpreted matcher loop, not the memo). Verified: 3 engines bit-identical on every
+table-heavy row + the full gauntlet; 42/42 table tests (7 new dense/migration cases:
+stored-nil vs Empty, count bookkeeping, all three migration triggers, incr across
+migration + its type error, snapshot); 22-case dense edge script; **redefining
+`table-put`/`table-has?` after the loops are hot dispatches the redefinition on both
+engines** (epoch guard exact); GC-stress clean on sieve+regex.
