@@ -41,3 +41,40 @@
     (assert= (hammer2 3000 0) 1000))    ; (rem i 3)-1 < 0 ⇔ rem=0 ⇔ 1000 of 3000
   (test "throw from JIT-inlined non-tail recursion unwinds cleanly (was a UAF abort)"
     (assert= (hammer3 2000 0) 2000)))   ; every (deep 30) throws at the bottom, caught
+
+;; --- (throw <scalar>) inside the unboxed REGISTER worker (jit_lower `lower_i64_value`) ---
+;; An int/float-only non-tail recursion whose base case throws now keeps its register
+;; worker (errors-deep's `descend`): the throw lowers to the `brood_rt_i64_throw`
+;; callback (park error → sentinel 3 → native unwind → outcome 3). These guard: the
+;; payload's identity across the native unwind, the float worker's boxing, a throw in
+;; NON-final `do` position (the lowering must not skip it), and the depth-bail interplay
+;; (past the 32768 cap the arm switches to the boxed path and must still catch).
+(check-allow :non-tail-recursion
+  (defn descend-throw (d i)
+    (if (= d 0) (throw (rem i 100)) (+ 1 (descend-throw (- d 1) i)))))
+(defn hammer4 (i acc)
+  (if (= i 0) acc
+    (hammer4 (- i 1) (+ acc (try (descend-throw 50 i) (catch e e))))))
+(check-allow :non-tail-recursion
+  (defn fdescend-throw (d x)
+    (if (= d 0.0) (throw (* x 2.0)) (+ 1.0 (fdescend-throw (- d 1.0) x)))))
+(defn fhammer (i acc)
+  (if (= i 0) acc
+    (fhammer (- i 1) (+ acc (try (fdescend-throw 50.0 1.5) (catch e e))))))
+(check-allow :non-tail-recursion
+  (defn do-throw (d i)
+    (if (= d 0) (do (throw i) 999) (+ 1 (do-throw (- d 1) i)))))
+(defn dohammer (i acc)
+  (if (= i 0) acc
+    (dohammer (- i 1) (+ acc (try (do-throw 30 i) (catch e e))))))
+
+(describe "throw from the unboxed register worker (i64/f64 recursion)" :serial
+  (test "int payload survives the native unwind, every iteration"
+    ;; sum of (rem i 100) for i=1..2000 = 20 * (0+1+...+99) = 99000
+    (assert= (hammer4 2000 0) 99000))
+  (test "float worker boxes its thrown payload"
+    (assert= (fhammer 100 0.0) 300.0))  ; 100 × (1.5*2.0)
+  (test "a throw in non-final do position still fires (never the 999)"
+    (assert= (dohammer 200 0) (reduce + 0 (map (fn (k) k) (range 1 201)))))
+  (test "past the depth cap the arm depth-bails to boxed and still catches"
+    (assert= (try (descend-throw 40000 5) (catch e e)) 5)))

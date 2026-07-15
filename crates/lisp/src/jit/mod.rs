@@ -131,6 +131,7 @@ impl Jit {
         );
         builder.symbol("brood_rt_in_capture", brood_rt_in_capture as *const u8);
         builder.symbol("brood_rt_roots_base", brood_rt_roots_base as *const u8);
+        builder.symbol("brood_rt_i64_throw", brood_rt_i64_throw as *const u8);
         builder.symbol(
             "brood_rt_pair_nursery_base",
             brood_rt_pair_nursery_base as *const u8,
@@ -604,6 +605,42 @@ pub unsafe extern "C" fn brood_rt_i64_overflow_ptr(heap: *mut Heap) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn brood_rt_roots_base(heap: *mut Heap) -> *mut u8 {
     (*heap).roots_base_ptr() as *mut u8
+}
+
+/// `(throw x)` reached inside an unboxed-scalar register worker
+/// (`jit_lower.rs::lower_i64_value`): park the thrown error and tell the worker how to
+/// unwind. Returns the **sentinel byte** the native code stores before jumping its
+/// `poisoned` unwind block:
+///   - `3` — the global `throw` still binds the builtin: the error (payload = the
+///     scalar, boxed as `Value::Int`/`Value::Float`) is parked in `jit_pending_error`
+///     and the wrapper exits with outcome 3 (error), bit-identical to the VM raising it.
+///   - `1` — a user redefined `throw` (late binding must win): nothing is parked and
+///     the wrapper deopts (outcome 1), so the VM re-runs the arm — sound because the
+///     worker's subset is pure up to the throw — and calls the redefinition.
+/// The payload is an immediate scalar (never a heap handle), so parking it across the
+/// native unwind is GC-safe by construction.
+///
+/// # Safety
+/// `heap` must be the live context pointer.
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_i64_throw(heap: *mut Heap, bits: i64, is_float: i64) -> i64 {
+    let h = &mut *heap;
+    let sym = crate::core::value::intern("throw");
+    let is_builtin = matches!(
+        h.env_get(h.global(), sym).map(|v| v.unpack()),
+        Some(crate::core::value::ValueRef::Native(id)) if h.native(id).name == "throw"
+    );
+    if !is_builtin {
+        return 1;
+    }
+    let payload = if is_float != 0 {
+        crate::core::value::Value::Float(f64::from_bits(bits as u64))
+    } else {
+        crate::core::value::Value::int(bits)
+    };
+    let e = crate::error::LispError::thrown(payload, h);
+    h.jit_pending_error = Some(e);
+    3
 }
 
 // DEBUG ONLY: the call site currently staging its args (set by `brood_rt_dbg_set_staging`
