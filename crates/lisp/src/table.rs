@@ -19,10 +19,10 @@
 //!
 //! ## Locking discipline
 //!
-//! Two lock levels, never nested: the registry `Mutex` is taken, the `Arc<Store>`
-//! cloned out, the registry lock dropped — *then* the store's own `Mutex`. So no
-//! deadlock, and per-table operations only contend with operations on the *same*
-//! table.
+//! The registry is **lock-free** (an append-only `boxcar::Vec` — see `REGISTRY`): a
+//! handle resolves to its store with a single indexed read and no lock or `Arc` clone,
+//! so per-table ops never contend on a global. Only the store's own `Mutex` is taken,
+//! and only per-op — so operations contend solely with operations on the *same* table.
 //!
 //! ## Lifetime
 //!
@@ -36,8 +36,8 @@ use crate::core::value::Value;
 use crate::error::{LispError, LispResult};
 use crate::process::{from_message, to_message, Message};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 /// One structural-hash bucket: the (key-clone, value-clone) pairs sharing a hash. Almost
 /// always length 1 — a genuine hash collision is rare — so the single entry is stored
@@ -46,27 +46,76 @@ use std::sync::{Arc, LazyLock, Mutex};
 /// less RSS, less allocator churn, one fewer pointer-chase per `get`/`put`.
 type Bucket = smallvec::SmallVec<[(Message, Message); 1]>;
 
+/// The store map is keyed by `heap.hash_value(key)` — an already-well-distributed
+/// 64-bit **structural** hash. Re-hashing that u64 with the default SipHash on every
+/// `get`/`put`/`has?` is pure waste, so key the map with an **identity** hasher: the
+/// u64 passes straight through. Low-bit collisions are resolved exactly by the bucket's
+/// `from_message`+`equal` walk (as before), so correctness is unchanged — this only
+/// removes a SipHash round from the hot path of every table op.
+#[derive(Default, Clone, Copy)]
+struct IdentityHasher(u64);
+impl std::hash::Hasher for IdentityHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // The key is always a single `write_u64`; this fallback keeps the impl total.
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ b as u64;
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
+    }
+}
+#[derive(Default, Clone, Copy)]
+struct BuildIdentityHasher;
+impl std::hash::BuildHasher for BuildIdentityHasher {
+    type Hasher = IdentityHasher;
+    #[inline]
+    fn build_hasher(&self) -> IdentityHasher {
+        IdentityHasher(0)
+    }
+}
+type StoreMap = HashMap<u64, Bucket, BuildIdentityHasher>;
+
 /// One shared store: `hash → bucket of (key-clone, value-clone)`. A bucket holds the
 /// (rare) structural-hash collisions; equality within it is resolved against the
 /// caller's heap so it matches Brood's `=` exactly.
 struct Store {
-    data: Mutex<HashMap<u64, Bucket>>,
+    data: Mutex<StoreMap>,
+    /// Tombstone for `table-drop`. The registry is append-only + lock-free, so a
+    /// dropped table is flagged in place (its data cleared to free memory) rather
+    /// than removed; `lookup` treats a tombstoned store as gone.
+    dropped: AtomicBool,
 }
 
-static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<Store>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-fn registry() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<Store>>> {
-    REGISTRY.lock().expect("table registry mutex")
-}
+/// The table registry is **lock-free**: an append-only `boxcar::Vec` indexed by
+/// `id - 1` (ids are handed out densely by `push` and never reused). A `table-put`/
+/// `get`/`has?` resolves its store with a single lock-free `get` + a borrow — no
+/// registry mutex and no `Arc` clone per op, which is what makes a hot `Table` loop
+/// (`sieve`, the regex DFA memo, a process's state map) cheap. Entries are never
+/// removed (drop tombstones in place), so a `&Store` is stable for the whole process
+/// lifetime and safe to hand out as `'static`.
+static REGISTRY: LazyLock<boxcar::Vec<Store>> = LazyLock::new(boxcar::Vec::new);
 
 /// Resolve a handle to its store, or a clean error if it was dropped / never existed.
-fn lookup(id: u64) -> Result<Arc<Store>, LispError> {
-    registry()
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| LispError::runtime(format!("table {}: no such table (dropped?)", id)))
+/// Lock-free: one `boxcar::Vec::get` (a stable ref) plus the tombstone check.
+fn lookup(id: u64) -> Result<&'static Store, LispError> {
+    let idx = id
+        .checked_sub(1)
+        .ok_or_else(|| LispError::runtime(format!("table {}: no such table", id)))?
+        as usize;
+    match REGISTRY.get(idx) {
+        Some(store) if !store.dropped.load(Ordering::Relaxed) => Ok(store),
+        _ => Err(LispError::runtime(format!(
+            "table {}: no such table (dropped?)",
+            id
+        ))),
+    }
 }
 
 /// Reject a key that can't reliably be looked up again — i.e. one for which the
@@ -98,22 +147,33 @@ pub fn check_key(who: &str, key: Value) -> Result<(), LispError> {
     Err(LispError::type_err(format!("{}: {}", who, reason)))
 }
 
-/// `(table)` — create a new empty table; returns its handle id.
+/// `(table)` — create a new empty table; returns its handle id. `push` hands out the
+/// next dense index atomically, so `id = idx + 1` (0 is reserved as "no table").
 pub fn create() -> u64 {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    registry().insert(
-        id,
-        Arc::new(Store {
-            data: Mutex::new(HashMap::new()),
-        }),
-    );
-    id
+    let idx = REGISTRY.push(Store {
+        data: Mutex::new(StoreMap::default()),
+        dropped: AtomicBool::new(false),
+    });
+    idx as u64 + 1
 }
 
-/// `(table-drop t)` — remove a table from the registry. Idempotent; returns whether
-/// it existed. Other handles to it then error on use.
+/// `(table-drop t)` — tombstone a table (the lock-free registry can't remove entries).
+/// Idempotent; returns whether it was still live. Clears the data to free memory; other
+/// handles to it then error on use. Only the small store shell lingers.
 pub fn drop_table(id: u64) -> bool {
-    registry().remove(&id).is_some()
+    let Some(idx) = id.checked_sub(1) else {
+        return false;
+    };
+    match REGISTRY.get(idx as usize) {
+        Some(store) => {
+            let was_live = !store.dropped.swap(true, Ordering::Relaxed);
+            if was_live {
+                store.data.lock().expect("table store mutex").clear();
+            }
+            was_live
+        }
+        None => false,
+    }
 }
 
 /// `(table-count t)` — number of entries.

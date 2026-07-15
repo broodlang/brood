@@ -4399,9 +4399,32 @@ impl Heap {
     ///   the same key.
     pub fn hash_value(&self, v: Value) -> u64 {
         use std::hash::Hasher;
+        // Fast path for immediate scalars — the overwhelmingly common table/map key
+        // (a `sieve` int, a counter, an id, a `persistent-map` key). Building a fresh
+        // SipHash `DefaultHasher` (128-bit init + finalize) to hash one integer is
+        // ~40 ns of pure overhead paid on *every* table/map op; a splitmix64 finalize
+        // is a handful of cycles. The hash is internal (buckets/trie slots resolve
+        // exact equality with `equal`), so any well-distributed deterministic function
+        // is correct — this only re-distributes, and equal scalars still hash equal.
+        // A distinct per-type salt keeps `Int(0)`/`Bool(false)`/`Nil` from colliding.
+        // Compound values fall through to the unchanged `DefaultHasher` path.
+        match v.unpack() {
+            ValueRef::Int(i) => return Self::mix64(i as u64 ^ 0x9E37_79B9_7F4A_7C15),
+            ValueRef::Bool(b) => return Self::mix64(b as u64 ^ 0xD1B5_4A32_D192_ED03),
+            ValueRef::Nil => return Self::mix64(0xA0761D6478BD642F),
+            _ => {}
+        }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.hash_value_into(v, &mut h);
         h.finish()
+    }
+
+    /// splitmix64 finalizer: a fast, well-distributed `u64 -> u64` avalanche mix.
+    #[inline]
+    fn mix64(mut z: u64) -> u64 {
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
     }
 
     fn hash_value_into<H: std::hash::Hasher>(&self, v: Value, h: &mut H) {
