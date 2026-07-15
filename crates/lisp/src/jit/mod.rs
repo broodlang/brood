@@ -90,6 +90,7 @@ impl Jit {
                 .or_else(|_| JITBuilder::new(default_libcall_names()))
                 .expect("Cranelift JITBuilder for the host ISA");
         builder.symbol("brood_rt_tick", brood_rt_tick as *const u8);
+        builder.symbol("brood_rt_tick_n", brood_rt_tick_n as *const u8);
         builder.symbol("brood_rt_gc_safepoint", brood_rt_gc_safepoint as *const u8);
         builder.symbol("brood_rt_cons", brood_rt_cons as *const u8);
         builder.symbol("brood_rt_make_vector2", brood_rt_make_vector2 as *const u8);
@@ -269,6 +270,18 @@ mod smoke {
 /// going, like the VM's `tick()` else-branch. Gating here is load-bearing: without it a
 /// JIT'd loop on the root thread would yield on its first iteration and bail to the VM,
 /// so the JIT could never actually run the loop.
+/// Batched preemption poll: burn `n` reductions in one call — the back-edge's
+/// in-register countdown calls this once per batch (see `tick_capture_n`), so a
+/// tight JIT'd loop pays ~one sub+branch per iteration instead of an FFI.
+#[no_mangle]
+pub extern "C" fn brood_rt_tick_n(_heap: *mut Heap, n: i64) -> u8 {
+    if crate::process::in_capture_run() {
+        crate::process::tick_capture_n(n as u32) as u8
+    } else {
+        0 // root / non-capture: never preempt (matches the VM)
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn brood_rt_tick(_heap: *mut Heap) -> u8 {
     #[cfg(debug_assertions)]

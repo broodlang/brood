@@ -601,6 +601,23 @@ pub(crate) fn tick_capture() -> bool {
     })
 }
 
+/// Batched [`tick_capture`]: burn `n` reductions at once — the JIT's loop back-edge
+/// polls every N iterations with an in-register countdown (BEAM-style reduction
+/// batching) instead of one FFI per iteration, and settles the account here so
+/// scheduler fairness is unchanged (the budget depletes at the same reduction rate).
+pub(crate) fn tick_capture_n(n: u32) -> bool {
+    REDUCTIONS.with(|r| {
+        let cur = r.get();
+        if cur < n {
+            r.set(0);
+            true
+        } else {
+            r.set(cur - n);
+            false
+        }
+    })
+}
+
 /// Is an untrappable hard `:kill` pending for the current process? The driver checks this
 /// at a loop-top safepoint and stops. A *soft* exit isn't honoured here — it waits for
 /// the next `receive` (checked when `run_one` would park).

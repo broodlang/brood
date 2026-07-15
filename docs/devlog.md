@@ -4014,3 +4014,29 @@ allocation-bound — `map-pairs`/`number->string` per node — left for a future
 control-char encoding, round-trips); GC-stress clean; 3 engines bit-identical;
 suite 777/777. Still 6/7 — native C parsers are the field here; the multiple drops
 ~25% and the row stays pure Brood.
+
+## 2026-07-15 — BEAM-style reduction batching on the JIT loop back-edge (collatz −35%)
+
+Chasing `loop`'s anomalous ~9.4 ns/iteration: every JIT'd self-tail back-edge paid a
+`brood_rt_tick` **FFI + two TLS ops per iteration** (the entry-time `in_capture` gate
+went dead when ADR-135 made the top level a capture-mode green process — every loop
+takes the poll path now) plus the hoisted-global epoch-guard load. BEAM doesn't check
+per reduction; it burns a budget in batches.
+
+The back-edge now decrements an **in-register countdown** (`TICK_BATCH = 128`): while
+nonzero, resuming the loop is one sub + branch — no FFI, no TLS, no guard load. The
+poll block (every 128th iteration) refills the countdown, runs the epoch guard (a
+rebind is observed within one batch — the guard's documented "eventually" contract),
+and settles the reduction account with a new `brood_rt_tick_n`/`tick_capture_n`
+(burns the whole batch, so the budget depletes at exactly the old rate — scheduler
+fairness unchanged; only the check granularity coarsens, bounded at 128 iterations).
+Frame stores stay per-iteration: deferring them to the poll would make body-deopts
+(arith overflow) resume from a stale batch-start state — replaying up to 127
+iterations, which duplicates side effects in any effectful loop. Unsound; not taken.
+
+collatz 0.17 → **0.11 s** (−35%), mandelbrot 0.29 → 0.24, primes 0.08 → 0.07, loop
+0.31 → 0.28 (its residual is the per-iteration frame stores, deliberately kept).
+Concurrency rows flat (spawn/ring/pingpong — fairness intact); a standalone `http` "0"
+scare turned out to be the missing harness-managed server (0 on all three engines,
+incl. the tree-walker my change can't touch). Suite 777/777; 10-row correctness
+gauntlet OK; fmt clean.

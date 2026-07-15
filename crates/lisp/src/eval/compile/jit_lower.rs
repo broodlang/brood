@@ -1693,6 +1693,14 @@ fn jit_lower_arm_inner(
     let tick_id = m
         .declare_function("brood_rt_tick", Linkage::Import, &tick_sig)
         .ok()?;
+    // brood_rt_tick_n(heap, n) -> u8: the batched back-edge poll (burns n reductions).
+    let mut tickn_sig = m.make_signature();
+    tickn_sig.params.push(AbiParam::new(ptr_ty));
+    tickn_sig.params.push(AbiParam::new(types::I64));
+    tickn_sig.returns.push(AbiParam::new(types::I8));
+    let tickn_id = m
+        .declare_function("brood_rt_tick_n", Linkage::Import, &tickn_sig)
+        .ok()?;
     // brood_rt_in_capture(heap) -> u8: is this a capture-mode (preemptible) process? Read once
     // at entry to gate the per-back-edge `brood_rt_tick` poll — a non-capture (root) loop skips
     // the FFI, which returns 0 there anyway.
@@ -2003,6 +2011,7 @@ fn jit_lower_arm_inner(
     };
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
     let tick_ref = m.declare_func_in_func(tick_id, b.func);
+    let tickn_ref = m.declare_func_in_func(tickn_id, b.func);
     let incap_ref = m.declare_func_in_func(incap_id, b.func);
     let car_ref = m.declare_func_in_func(car_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
@@ -2349,6 +2358,18 @@ fn jit_lower_arm_inner(
         } else {
             b.def_var(var, bits);
         }
+    }
+    // BEAM-style reduction batching for the self-tail loop: an in-register countdown
+    // (`TICK_BATCH` iterations) gates the back-edge's preemption poll + epoch guard —
+    // one sub+branch per iteration instead of an FFI + TLS ops + a guard load. The
+    // poll settles the batch with `brood_rt_tick_n`, so scheduler fairness (reduction
+    // accounting) is unchanged; a rebind's epoch bump is observed within one batch
+    // (the guard's own contract is "eventually").
+    const TICK_BATCH: i64 = 128;
+    let tick_budget = b.declare_var(types::I64);
+    {
+        let init = b.ins().iconst(types::I64, TICK_BATCH);
+        b.def_var(tick_budget, init);
     }
     b.ins().jump(leader_block[0].unwrap(), &[]);
 
@@ -4387,16 +4408,27 @@ fn jit_lower_arm_inner(
                     if has_cons {
                         b.ins().call(sp_ref, &[heap]);
                     }
-                    // Global-vector hoist guard: if any global was rebound since entry
-                    // (`global_epoch` changed — only possible via another process's `def`,
-                    // since this arm makes no Brood call), deopt so the VM re-runs the loop
-                    // against the live binding. Keeps a hoisted global bit-identical to the
-                    // VM's per-iteration late binding. Frame slots already hold the next
-                    // iteration's args, so the VM resumes there.
+                    // Back-edge bookkeeping, BATCHED (BEAM-style): decrement the
+                    // in-register countdown; while nonzero the loop resumes with ONE
+                    // sub + branch — no FFI, no TLS, no guard load. Every `TICK_BATCH`
+                    // iterations the poll block settles the reduction account
+                    // (`brood_rt_tick_n`, preempting exactly like the old per-iteration
+                    // tick, at the same reduction rate) and runs the hoisted-global
+                    // epoch guard (a rebind is observed within one batch — the guard's
+                    // "eventually" contract; the frame slots hold the current iteration's
+                    // args every iteration, so both deopt and preempt resume exactly).
+                    let loop_top = leader_block[0]?;
+                    let bv = b.use_var(tick_budget);
+                    let nv = b.ins().iadd_imm(bv, -1);
+                    b.def_var(tick_budget, nv);
+                    let poll = b.create_block();
+                    b.ins().brif(nv, loop_top, &[], poll, &[]);
+                    b.switch_to_block(poll);
+                    {
+                        let refill = b.ins().iconst(types::I64, TICK_BATCH);
+                        b.def_var(tick_budget, refill);
+                    }
                     if let Some(entry_ep) = entry_epoch {
-                        // Raw load of the epoch counter (ptr fetched once at entry) — no FFI on
-                        // the back-edge. A plain load matches the `Relaxed` atomic; the guard only
-                        // needs to eventually observe a concurrent `def`'s bump.
                         let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when a global is hoisted");
                         let now_ep = b.ins().load(types::I64, MemFlagsData::trusted(), ep_ptr, 0);
                         let changed = b.ins().icmp(IntCC::NotEqual, now_ep, entry_ep);
@@ -4404,24 +4436,10 @@ fn jit_lower_arm_inner(
                         b.ins().brif(changed, deopt, &[], ck, &[]);
                         b.switch_to_block(ck);
                     }
-                    // Preemption (ADR-027): poll the reduction budget on the back-edge. On
-                    // yield, deopt to `preempt` (return 2) — the frame slots already hold the
-                    // next iteration's args (in `roots`), so the driver resumes on the VM.
-                    // In **non-capture** mode (the root thread) the poll always returns 0, so gate
-                    // it on the entry-read capture flag and jump straight to the loop top — no FFI.
-                    let loop_top = leader_block[0]?;
-                    if let Some(cap) = capture_active {
-                        let poll = b.create_block();
-                        b.ins().brif(cap, poll, &[], loop_top, &[]);
-                        b.switch_to_block(poll);
-                        let tc = b.ins().call(tick_ref, &[heap]);
-                        let yld = b.inst_results(tc)[0];
-                        b.ins().brif(yld, preempt, &[], loop_top, &[]);
-                    } else {
-                        let tc = b.ins().call(tick_ref, &[heap]);
-                        let yld = b.inst_results(tc)[0];
-                        b.ins().brif(yld, preempt, &[], loop_top, &[]);
-                    }
+                    let batch = b.ins().iconst(types::I64, TICK_BATCH);
+                    let tc = b.ins().call(tickn_ref, &[heap, batch]);
+                    let yld = b.inst_results(tc)[0];
+                    b.ins().brif(yld, preempt, &[], loop_top, &[]);
                     break;
                 }
                 Inst::JumpIfFalse(t) => {
