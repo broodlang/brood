@@ -46,6 +46,17 @@ for f in stress/table_model_test.blsp stress/vm_loops_test.blsp; do
   run_one "$f" "BROOD_VM=1 BROOD_REDUCTIONS=97" "chaos  "
 done
 
+# Checker soundness corpus: every program must RUN clean and CHECK clean —
+# a type warning on a valid program is a false positive (the checker's
+# contract is sound-but-incomplete).
+for f in stress/check_corpus/*.blsp; do
+  if "$BROOD" "$f" >/dev/null 2>&1 && ! "$BROOD" --check "$f" 2>&1 | grep -q warning; then
+    echo "pass  checker-sound $f"; pass=$((pass+1))
+  else
+    echo "FAIL  checker-sound $f (runs clean but warns, or no longer runs)"; fail=$((fail+1))
+  fi
+done
+
 # Cross-language differential
 a=$("$BROOD" stress/table_digest.blsp 2>/dev/null)
 b=$(python3 stress/table_oracle.py)

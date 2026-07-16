@@ -4503,3 +4503,35 @@ identity` over seeded nested values) drove two things:
 
 Suite 777/777; `make stress` at 22 green runs (round-trip battery included,
 engines × GC-stress).
+
+## 2026-07-16 — stress kit round 3: concurrency fuzzing, formatter properties, checker soundness
+
+- **Concurrency in the program fuzzer**: generated programs now optionally fan
+  out 4–16 workers running a generated pure helper plus commutative shared-table
+  ops (`table-incr` on one key, disjoint-range puts), fanning results in via
+  `receive`. The digest is deterministic even though scheduling is not — any
+  divergence is a real concurrency bug, never schedule noise. (One generator
+  lesson: a worker crash turns the fan-in's timeout into an all-config hang
+  that *looks* like agreement — workers now avoid the float helper whose
+  result the masking `bit-and` rejects, and the timeout is 10s.)
+- **Formatter properties over the whole repo** (`stress/formatter_test.blsp`):
+  the strong pair — SEMANTIC PRESERVATION (`read-all (format-source src)`
+  renders identically to `read-all src`) and idempotency — verified over every
+  `.blsp` in `std/**`, `tests/`, `stress/`, plus a tricky-syntax corpus
+  (quasiquote/splicing, escape-laden strings, bytes literals, comments in every
+  position, non-finite floats, guarded match patterns). One property lesson:
+  compare via `pr-str`, not `=` — a `nan` literal in the source never equals
+  itself, producing a phantom diff on byte-identical parses (hit twice today;
+  now written down). The formatter itself came out clean.
+- **Checker soundness harness** ("sound in all aspects, not necessarily
+  complete"): (1) the fuzzer now runs `brood --check` on every seed whose
+  program runs cleanly on all engines and fails on any TYPE warning (style
+  lints — unused binder, non-tail recursion — are legitimate on generated code
+  and excluded); (2) `stress/check_corpus/` holds seven hand-built valid
+  programs in the historically false-positive-prone shapes — int/float
+  widening, global redefinition across types (the reload contract), match
+  branches joining different types, HOF/closure flows, sequence polymorphism,
+  dynamic table gets, bigint promotion — each must run clean AND check clean.
+  All pass; 100 fresh fuzz seeds type-warning-free.
+
+`make stress` is now 31 green runs. Suite 777/777.

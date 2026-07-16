@@ -1,0 +1,64 @@
+;; STRESS — formatter properties over the REAL repo corpus + a tricky-syntax
+;; battery. The contract (std/format.blsp): idempotent on every well-formed
+;; input. This suite adds the stronger property the unit tests don't sweep:
+;; **semantic preservation** — formatting must never change the PARSED FORMS
+;; (`read-all src` ≡ `read-all (format-source src)`), verified across every
+;; .blsp in std/ and tests/ plus hand-built corner cases.
+
+(defmodule formatter-stress-test (:use test) (:use format))
+
+(defn check-file! (path)
+  (let (src (slurp path)
+        fmt (format-source src))
+    (do
+      ;; semantic preservation: same forms before and after. Compared via
+      ;; pr-str, not `=`: a `nan` LITERAL in the source (float_roundtrip_test,
+      ;; arithmetic_edge_test) never equals itself, so structural `=` reports a
+      ;; phantom diff on byte-identical parses. Printing renders both sides
+      ;; canonically and still exposes any real change.
+      (assert= (pr-str (read-all fmt)) (pr-str (read-all src)))
+      ;; idempotency: a second pass changes nothing
+      (assert= (format-source fmt) fmt)
+      true)))
+
+(defn blsp-files (dir)
+  (filter (fn (p) (ends-with? p ".blsp"))
+    (map (fn (e) (path-join dir e)) (list-dir dir))))
+
+(defn check-dir! (dir)
+  (do (fold (fn (_ p) (check-file! p)) nil (blsp-files dir))
+    (count (blsp-files dir))))
+
+(describe "formatter: semantic preservation + idempotency over the repo"
+  (test "every std/*.blsp"          (is (> (check-dir! "std") 5)))
+  (test "every std/editor/*.blsp"   (is (> (check-dir! "std/editor") 3)))
+  (test "every std/tool/*.blsp"     (is (> (check-dir! "std/tool") 3)))
+  (test "every std/proc/*.blsp"     (is (> (check-dir! "std/proc") 0)))
+  (test "every std/net/*.blsp"      (is (> (check-dir! "std/net") 0)))
+  (test "every tests/*.blsp"        (is (> (check-dir! "tests") 30)))
+  (test "every stress/*.blsp"       (is (> (check-dir! "stress") 4))))
+
+(defn check-src! (src)
+  (do (assert= (pr-str (read-all (format-source src))) (pr-str (read-all src)))
+    (assert= (format-source (format-source src)) (format-source src))
+    true))
+
+(describe "formatter: tricky syntax corpus"
+  (test "quotes, quasiquote, unquote, splicing"
+    (check-src! "(defmacro m (x) `(let (y ~x) (list 'a ~@x y `(nested ~y))))"))
+  (test "strings with escapes, unicode, embedded delimiters"
+    (check-src! "(def s \"a\\\"b\\\\c\\nd\\teé€ ) ] } ; not-a-comment\")"))
+  (test "bytes literals"
+    (check-src! "(def b #b\"\\x00\\xff ok\\n\")"))
+  (test "deeply nested mixed collections"
+    (check-src! "(def v [1 [2 {:a (list 3 [4 {:b '(5)}])}] {:c [{:d 6}]}])"))
+  (test "comments in every position"
+    (check-src! ";; leading\n(defn f (x) ; trailing\n  ;; inner\n  (+ x 1)) ;; after\n;; end\n"))
+  (test "negative numbers, floats, bigints, non-finite literals"
+    (check-src! "(def xs [-1 -0.5 1e300 5e-324 -0.0 18446744073709551614 inf -inf])"))
+  (test "keywords and match patterns with guards"
+    (check-src! "(defn g (v) (match v ([:a x] :when (> x 1) x) ({:keys [p q] :or {q 1}} (+ p q)) (_ 0)))"))
+  (test "empty collections and nil"
+    (check-src! "(def e [() [] {} nil])"))
+  (test "one-liner defns stay parseable through repeated formats"
+    (check-src! "(defn tiny (x) x)(defn tiny2 (y) y)")))

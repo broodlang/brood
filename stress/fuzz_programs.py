@@ -127,6 +127,41 @@ class Gen:
             f"      {body_bits[1]}\n"
             f"      (drive (+ i 1) n ({r.choice(["bit-xor", "+"])} acc (bit-and ({f} {args}) 268435455))))))")
         lines.append(f"(def acc (drive 0 {n_iters} 0))")
+        # optional CONCURRENT phase: fan out workers running a pure helper +
+        # commutative shared-table ops (incr / disjoint puts), fan in results.
+        # The final digest is deterministic even though scheduling is not —
+        # any divergence is a real concurrency bug (lost update, torn value,
+        # broken fan-in), not schedule noise.
+        if r.random() < 0.6:
+            # int-returning helpers only: the worker masks with bit-and, which
+            # errors on the float helper's result — a crashed worker never sends
+            # :done and the fan-in's timeout turns the whole seed into a hang.
+            int_helpers = [(n, a) for (n, a) in helpers if not n.startswith("g")]
+            pf, par = r.choice(int_helpers)
+            pargs = " ".join(["j"] * par)
+            per = r.choice([500, 1500, 3000])
+            nworkers = r.choice([4, 8, 16])
+            span = r.choice([64, 512])
+            lines.append("(def me (self))")
+            lines.append(
+                "(defn worker (w j n s)\n"
+                "  (if (>= j n) (send me [:done s])\n"
+                "    (do (table-incr t 999983 1)\n"
+                "      (table-put t (+ 100000 (* w " + str(span) + ") (rem j " + str(span) + ")) (bit-and (" + pf + " " + pargs + ") 268435455))\n"
+                "      (worker w (+ j 1) n (bit-and (+ s (" + pf + " " + pargs + ")) 268435455)))))")
+            lines.append(
+                "(defn fan (w) (if (= w " + str(nworkers) + ") nil (do (spawn (worker w 0 " + str(per) + " 0)) (fan (+ w 1)))))")
+            lines.append(
+                "(defn fan-in (k s) (if (= k " + str(nworkers) + ") s (fan-in (+ k 1) (receive ([:done v] (bit-and (+ s v) 268435455)) (after 10000 -1)))))")
+            lines.append(
+                "(defn dig2 (k n s)\n"
+                "  (if (>= k n) s\n"
+                "    (dig2 (+ k 1) n (bit-xor s (* (- k 99999) (table-get t k 0))))))")
+            lines.append("(fan 0)")
+            lines.append("(def conc (fan-in 0 0))")
+            lines.append(
+                f'(println "conc" conc (table-get t 999983 0) '
+                f"(dig2 100000 {100000 + nworkers * span} 0))")
         # digest: accumulator + table contents
         lines.append(
             "(defn dig (k n s)\n"
@@ -134,6 +169,28 @@ class Gen:
             "    (dig (+ k 1) n (bit-xor s (* (+ k 1) (table-get t k 0))))))")
         lines.append(f'(println "digest" acc (dig 0 {key_mod} 0) (table-count t))')
         return "\n".join(lines) + "\n"
+
+def check_soundness(path):
+    """The advisory checker must be SOUND: zero warnings on a program that runs
+    cleanly (missed errors are fine — completeness is not required; false
+    positives are bugs). Returns None if sound, else the offending output."""
+    env = dict(os.environ)
+    try:
+        out = subprocess.run([BROOD, "--check", path], capture_output=True,
+                             text=True, timeout=120, env=env)
+    except subprocess.TimeoutExpired:
+        return "CHECKER TIMEOUT"
+    text = (out.stdout + out.stderr).strip()
+    # Style lints are legitimate on generated code (the generator makes unused
+    # binders and non-tail recursion on purpose); SOUNDNESS is about TYPE
+    # warnings — any remaining warning on a cleanly-running program is a
+    # checker false positive.
+    style = ("unused let binding", "non-tail position", "unused parameter")
+    real = [ln for ln in text.splitlines()
+            if "warning" in ln and not any(t in ln for t in style)]
+    if real:
+        return "\n".join(real)
+    return None
 
 def run_one(path, env_extra):
     env = dict(os.environ)
@@ -161,6 +218,14 @@ def main():
         with open(path, "w") as fh:
             fh.write(src)
         results = {name: run_one(path, env) for name, env in CONFIGS}
+        # checker soundness: a program every engine runs CLEANLY must produce
+        # zero advisory warnings (sound-but-incomplete contract)
+        if all(r.startswith("exit=0") for r in results.values()):
+            if (w := check_soundness(path)) is not None:
+                bad += 1
+                print(f"CHECKER FALSE POSITIVE seed={seed} ({path} kept):")
+                print("  " + w[:400].replace(chr(10), chr(10) + "  "))
+                continue
         vals = set(results.values())
         if len(vals) != 1:
             bad += 1
