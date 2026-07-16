@@ -17,3 +17,7 @@ _deps/
 .brood_crash_dump
 .brood-skip-blsp-check
 erl_crash.dump
+
+# LLVM coverage artifacts
+*.profraw
+/target-cov/
