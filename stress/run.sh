@@ -63,5 +63,14 @@ b=$(python3 stress/table_oracle.py)
 if [ "$a" = "$b" ]; then echo "pass  x-lang table digest ($a)"; pass=$((pass+1));
 else echo "FAIL  x-lang: brood='$a' python='$b'"; fail=$((fail+1)); fi
 
+# Reader/evaluator ROBUSTNESS: adversarial mostly-invalid input must fail
+# gracefully — never a crash signal, Rust panic, or hang. (fuzz_programs.py only
+# makes VALID programs; this covers the error paths it can't reach.)
+if BROOD="$BROOD" python3 stress/fuzz_reader.py --seeds 1500 >/dev/null 2>&1; then
+  echo "pass  reader robustness (1500 adversarial inputs, all graceful)"; pass=$((pass+1))
+else
+  echo "FAIL  reader robustness — a crash/panic/hang on malformed input (see stress/fuzz_out/reader_*)"; fail=$((fail+1))
+fi
+
 echo "---- stress: $pass passed, $fail failed, $xfail known-bug xfails, $xpass unexpected xpasses"
 [ "$fail" -eq 0 ] && [ "$xpass" -eq 0 ]

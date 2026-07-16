@@ -4658,3 +4658,18 @@ toolchain quirk), so the target runs `--tests` (skips doctests).
 wrap) and `i64_throw_call` (a `throw` inside an i64 arm). Added an unmasked-
 overflow pure recursion (`(* a base)` to a bignum) and a throw-in-recursion
 (caught) to the pure-recursive generator section.
+
+## 2026-07-16 — Reader/evaluator robustness fuzzer (adversarial input)
+
+Added `stress/fuzz_reader.py` and wired it into `make stress`. The differential
+fuzzer only makes VALID programs, so the reader's and evaluator's *error* paths on
+malformed input were untested. This one feeds hostile input — random (possibly
+non-UTF-8) bytes, unbalanced/blown-out delimiters, up-to-thousands-deep nesting,
+truncated strings/escapes, hostile numerics (`1e999999`, `1/0`, `1.2.3`), giant
+single tokens — and asserts the process always fails GRACEFULLY: never a crash
+signal (SIGSEGV/SIGABRT), never a Rust panic (`.brood_crash_dump` / "panicked
+at"), never a hang. A clean nonzero exit with a diagnostic is the correct outcome
+and not a finding. Result: **3400 adversarial inputs + deep-nesting probes (10k /
+50k / 200k parens) all failed gracefully** — the reader has a depth guard (no
+stack-overflow SIGSEGV) and no unwrap/index panics on garbage. Runs in a dedicated
+workdir so a concurrent differential sweep can't cross-pollute the crash-dump check.
