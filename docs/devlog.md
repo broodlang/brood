@@ -4568,3 +4568,40 @@ engines × GC-stress).
   file lands next to the kept seed in `stress/fuzz_out/`.
 
 Suite is now 779 (the TSAN hammer runs as a plain stress test too); all green.
+
+## 2026-07-16 — Auto-shrink pays off: JIT sibling-`let` slot-reuse miscompile
+
+The fuzzer's new auto-shrink earned its keep on its first real catch. Seed
+20108 diverged: the JIT computed `digest 268435109 18 8` where every other
+engine (VM, tree-walker, GC-stress) agreed on `0 2102 8`. Delta-debugging plus
+a hand reduction cut it to a one-liner:
+
+```
+(defn f (p) (- (let (a 300) a) (let (b 5) b)))   ; warmed past tier → 0, not 295
+```
+
+**Root cause** (`jit_lower.rs`, the general bytecode→CLIF lowerer). `Inst::Local`
+pushes a **lazy** `Op::Slot(i)` — a "read frame slot `i` at the consumer" token —
+onto the lowerer's operand stack. The bytecode compiler **reuses one slot index
+across sibling `let` scopes** (`a` dies before `b` is bound, so both get slot 1).
+That is sound for the VM, whose operand stack holds *materialised values*: the
+left operand's 300 is already on the stack when `b`'s `SetLocal` overwrites the
+slot. But the JIT's lazy `Op::Slot(1)` for the left operand re-reads slot 1 at
+the subtract — by then holding `b`'s 5 — so `(- (let a…) (let b…))` lowered to
+`(- 5 5) = 0`. The IR dump showed it plainly: two stores to the *same*
+`(base+1)*STRIDE` address, then both reads loading it back. Only the general
+lowerer was affected; the SSA i64 fast path (`lower_i64_value`, distinct
+`def_var` per binder) was already correct, which is why it took a two-`let`,
+two-operand shape to surface.
+
+**Fix**: at `SetLocal(i)`, before the overwrite, materialise every still-pending
+`Op::Slot(i)` on the operand stack to the slot's *current* (pre-store) value —
+reconstructing its exact type from the slot caches (`Op::Float` via bitcast for
+a float slot, `Op::Bool` for a bool slot, else `Op::Handle` of the three words)
+so consumers behave identically to the lazy read they replace. Common case
+(SetLocal to a fresh slot, nothing pending) is just an O(depth) scan that finds
+nothing.
+
+Verified: min repro and seed 20108 now agree across all engines; float/bool/int
+reuse shapes all bit-identical VM↔JIT; new regression `tests/jit_let_slot_reuse_test.blsp`
+(4 tests); 800 fresh fuzz seeds clean; full suite green (2754 in-language).

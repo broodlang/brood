@@ -4107,6 +4107,30 @@ fn jit_lower_arm_inner(
                     // distinct from the loop-carried param slots and dominated by this store,
                     // so a deopt's VM re-run recomputes the binding before any read sees a
                     // stale slot.
+                    //
+                    // BUT `Inst::Local` pushes a *lazy* `Op::Slot(i)` that re-reads the slot
+                    // at its consumer. The bytecode reuses one slot index across sibling
+                    // `let` scopes (sound for the VM, whose operand stack holds *values*), so
+                    // a still-pending `Op::Slot(i)` from an earlier binding would, after this
+                    // overwrite, read THIS binding instead of the value that was live when its
+                    // `Local` was pushed. Materialise every such pending reference to the
+                    // slot's *current* (pre-store) value first — preserving its exact type so
+                    // consumers behave identically to the lazy read they replace. (Fuzzer
+                    // seed 20108: `(- (let (a A) a) (let (b B) b))` reused slot 1 → 0 not A-B.)
+                    let si = *i as usize;
+                    for op in stack.iter_mut() {
+                        if !matches!(*op, Op::Slot(k) if k == si) {
+                            continue;
+                        }
+                        let w = read_words(&mut b, Op::Slot(si));
+                        *op = if slot_float.borrow().get(si).copied().unwrap_or(false) {
+                            Op::Float(b.ins().bitcast(types::F64, MemFlagsData::new(), w[1]))
+                        } else if slot_bool.borrow().get(si).copied().unwrap_or(false) {
+                            Op::Bool(w[1])
+                        } else {
+                            Op::Handle(w[0], w[1], w[2])
+                        };
+                    }
                     let op = stack.pop()?;
                     store_op(&mut b, *i as i64, op);
                 }

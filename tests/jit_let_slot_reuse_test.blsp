@@ -1,0 +1,46 @@
+;; Regression: JIT slot-reuse across sibling `let` scopes (devlog 2026-07-16).
+;;
+;; `Inst::Local` pushes a LAZY `Op::Slot(i)` (a "read frame slot i later" token)
+;; onto the JIT lowerer's operand stack. The bytecode compiler reuses one slot
+;; index across sibling `let` scopes — sound for the VM, whose operand stack
+;; holds materialised VALUES — but a still-pending `Op::Slot(i)` from the FIRST
+;; binding, once the SECOND `let` overwrites slot i, would re-read the second
+;; binding's value at its consumer. So `(op (let (a A) a) (let (b B) b))`
+;; lowered to `(op B B)` (both operands read the same, last-written slot).
+;;
+;; Fixed by materialising every pending `Op::Slot(i)` to the slot's CURRENT
+;; value (preserving its int/float/bool type) at `SetLocal(i)`, before the
+;; overwrite. Found by the differential fuzzer (seed 20108). The functions are
+;; warmed past the JIT threshold so the miscompiled native arm is what runs.
+
+(defmodule jit-let-slot-reuse-test (:use test))
+
+;; Two sibling lets in the two operands of a binary op — the minimal trigger.
+(defn sub-lets (p) (- (let (a 300) a) (let (b 5) b)))
+
+;; The exact fuzzer shape: bit ops + an inner `if`/`let`, both operands binding.
+(defn f5 (p) (bit-xor (let (t8 (if (<= p p) -347 p)) t8) (* (let (t9 0) 0) p)))
+
+;; A driver that consumes each result (so f5's arm is JIT'd in a consuming
+;; context) and accumulates — the value diverged at odd iteration counts.
+(defn drive (f i n acc)
+  (if (>= i n) acc
+    (drive f (+ i 1) n (bit-xor acc (bit-and (f i) 268435455)))))
+
+;; Warm a 1-arg fn past the tier threshold, then return its value at `x`.
+(defn warm (f i x) (if (>= i 400) (f x) (do (f i) (warm f (+ i 1) x))))
+
+(describe "jit: sibling-let slot reuse computes both operands"
+  (test "(- (let (a 300) a) (let (b 5) b)) is 295 under the JIT"
+    (assert= (warm sub-lets 0 0) 295))
+
+  (test "the fuzzer's f5 arm yields -347, not 0"
+    (assert= (warm f5 0 3) -347))
+
+  ;; drive xors an odd number of copies of (bit-and -347 mask) = 268435109;
+  ;; the miscompiled arm returned 0 every iteration → acc stayed 0.
+  (test "accumulating drive over f5 matches the interpreter (odd n)"
+    (assert= (drive f5 0 4001 0) 268435109))
+
+  (test "accumulating drive over f5 cancels at even n"
+    (assert= (drive f5 0 4000 0) 0)))
