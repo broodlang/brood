@@ -52,8 +52,8 @@
   (test "assoc-by-index replaces without touching the source"
     (let (v [1 2 3] v2 (assoc v 1 :x))
       (do (assert= v [1 2 3]) (assert= v2 [1 :x 3]) true)))
-  (test "into builds a vector; nth/get agree"
-    (let (v (into [] (range 1000)))
+  (test "conj appends per element; nth/get agree"
+    (let (v (fold conj [] (range 1000)))
       (do (assert= (count v) 1000)
         (assert= (nth v 999) 999) (assert= (get v 500) 500)
         true)))

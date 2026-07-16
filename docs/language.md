@@ -1140,7 +1140,7 @@ detection are deferred. Full reference: [distribution.md](distribution.md).
 
 ### Lists & sequences
 `cons`  `first`  `rest`  `car`  `cdr`  `second`  `third`  `last`  `but-last`
-`list`  `vector`  `append`  `concat`  `reverse`  `nth`  `count`  `length`  `empty?`
+`list`  `vector`  `conj`  `append`  `concat`  `reverse`  `nth`  `count`  `length`  `empty?`
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
 `member?`  `some?`  `every?`  `find`  `index-of`  `index-where`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`

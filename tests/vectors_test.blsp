@@ -116,3 +116,21 @@
     (let (results (vt-collect 0 25 nil))
       (assert= (count results) 25)
       (is (every? (fn (v) (= v [0 1 4 9 16])) results)))))
+
+;; ---- conj (Clojure-style natural insertion; added 2026-07-16 — the stress
+;; batteries found brood-for-claude.md promising it while nothing defined it) --
+(describe "conj"
+  (test "appends to a vector, returns a vector"
+    (let (v [1 2] v2 (conj v 3 4))
+      (do (assert= v2 [1 2 3 4]) (is (vector? v2)) (assert= v [1 2]) true)))
+  (test "prepends to a list; nil is the empty list"
+    (do (assert= (conj (list 2 3) 1) (list 1 2 3))
+      (assert= (conj nil 1) (list 1))
+      true))
+  (test "assocs a [k v] pair or merges a map into a map"
+    (do (assert= (conj {:a 1} [:b 2]) {:a 1 :b 2})
+      (assert= (conj {:a 1} {:b 2 :c 3}) {:a 1 :b 2 :c 3})
+      (assert= (try (conj {:a 1} 5) (catch e :err)) :err)
+      true))
+  (test "non-collection errors"
+    (assert= (try (conj 42 1) (catch e :err)) :err)))

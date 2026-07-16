@@ -1930,6 +1930,27 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
     (vector? to) (apply vector (append to from))
     else (append to from)))
 
+;; conj's per-element step: each collection kind has a natural insertion point.
+(defn conj--one (coll x)
+  (cond
+    (nil? coll) (list x)
+    (vector? coll) (into coll [x])
+    (map? coll)
+      (cond
+        (map? x) (merge coll x)
+        (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
+        else (error "conj: adding to a map takes a [k v] pair or a map, got " (pr-str x)))
+    (pair? coll) (cons x coll)
+    else (error "conj: not a collection: " (pr-str coll))))
+
+(defn conj (coll & xs)
+  "Add element(s) to `coll` at its natural insertion point (Clojure-style):
+APPEND to a vector, PREPEND to a list (`nil` counts as an empty list), and
+`assoc` a `[k v]` pair — or merge a map — into a map. Returns a fresh
+collection; `coll` is untouched. e.g. (conj [1 2] 3) → [1 2 3];
+(conj '(2 3) 1) → (1 2 3); (conj {:a 1} [:b 2]) → {:a 1 :b 2}."
+  (fold conj--one coll xs))
+
 (defn remove-nth (coll i)
   "A fresh collection like `coll` with the element at index `i` removed. Returns
 a vector for a vector and a list for a list. `i` must be in `[0, count)`."
