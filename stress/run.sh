@@ -33,6 +33,19 @@ for f in stress/table_model_test.blsp stress/match_props_test.blsp stress/core_s
   run_one "$f" "BROOD_VM=1 BROOD_GC_STRESS=1" "gc-str "
 done
 
+# Random-program differential fuzzer (engine/GC/chaos-preempt configs must agree)
+if python3 stress/fuzz_programs.py --seeds 25 >/dev/null 2>&1; then
+  echo "pass  program fuzzer (25 seeds x 4 configs)"; pass=$((pass+1))
+else
+  echo "FAIL  program fuzzer — divergent seeds kept in stress/fuzz_out/"; fail=$((fail+1))
+fi
+
+# Chaos-preemption pass: a tiny prime reduction budget forces preempt/resume
+# storms through every loop — the capture machinery's torture test.
+for f in stress/table_model_test.blsp stress/vm_loops_test.blsp; do
+  run_one "$f" "BROOD_VM=1 BROOD_REDUCTIONS=97" "chaos  "
+done
+
 # Cross-language differential
 a=$("$BROOD" stress/table_digest.blsp 2>/dev/null)
 b=$(python3 stress/table_oracle.py)

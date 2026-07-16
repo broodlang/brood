@@ -4444,3 +4444,27 @@ is nil (not an error; `get` takes its default), and `docs/brood-for-claude.md`
 line ~273 mentions `conj` for vector append but no `conj` exists (`append`
 returns a LIST even from vector inputs) — doc or design gap, left for a
 deliberate decision rather than a drive-by edit.
+
+## 2026-07-16 — conj lands; the stress kit gains a program fuzzer + chaos preemption
+
+- **`conj`** (prelude, pure Brood): the batteries caught `language.md` AND
+  `brood-for-claude.md` both promising it while nothing defined it. Clojure
+  semantics: append to a vector, prepend to a list (`nil` = empty list),
+  `assoc` a `[k v]` / merge a map into a map; variadic via `fold`. Tests in
+  `tests/vectors_test.blsp`.
+- **Random-program differential fuzzer** (`stress/fuzz_programs.py`,
+  Fuzzilli-lite): seeded, deterministic, terminating programs from a small
+  grammar — pure helpers over i64/bigint-edge ints and floats (if/let
+  nesting, guarded division, vector build+index), an effectful self-tail
+  driver (table-put + table-incr — non-idempotent by design; this is the
+  shape that caught the deopt-rerun bug) and a digest print. Each program
+  runs under four configs — jit, no-jit, gc-stress, and **chaos-preempt**
+  (`BROOD_REDUCTIONS=97`, a tiny prime budget forcing preempt/resume storms)
+  — and any stdout difference (agreed errors included) fails the run, with
+  divergent programs kept in `stress/fuzz_out/`. `make stress` runs 25 seeds;
+  crank `--seeds` for long hunts.
+- Chaos-preempt passes added for the table-model and vm-loops batteries.
+- Noted for a deliberate look: `BROOD_VM=0` no longer selects the tree-walker
+  for top-level program code (observed VM counters under it while debugging —
+  likely a consequence of ADR-135's top-level-as-capture-process; either the
+  flag or CLAUDE.md's description should be updated).
