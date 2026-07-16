@@ -541,7 +541,7 @@ def main():
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
-    outdir = "stress/fuzz_out"
+    outdir = os.environ.get("FUZZ_OUTDIR", "stress/fuzz_out")
     os.makedirs(outdir, exist_ok=True)
     bad = 0
     for seed in range(args.start, args.start + args.seeds):

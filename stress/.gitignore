@@ -1,2 +1,2 @@
-fuzz_out/
+fuzz_out*/
 __pycache__/
