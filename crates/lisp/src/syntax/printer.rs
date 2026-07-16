@@ -240,6 +240,11 @@ fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u3
 }
 
 fn format_float(f: f64) -> String {
+    // Non-finite floats print as `inf`/`-inf`/`nan` — which the READER parses
+    // back as float literals (see float_roundtrip_test.blsp), so the round-trip
+    // holds. (2026-07-16: briefly switched to Clojure's ##-spellings on a probe
+    // that checked printing but not read-back — the bare spellings were already
+    // reader-known floats. Lesson kept in the devlog: probe the FULL round trip.)
     if f.is_nan() {
         return "nan".to_string();
     }
@@ -250,7 +255,11 @@ fn format_float(f: f64) -> String {
             "-inf".to_string()
         };
     }
-    let s = format!("{}", f);
+    // `{:?}` is Rust's shortest ROUND-TRIP rendering and uses scientific notation
+    // for extreme magnitudes — `{}` (Display) never does, so 1e300 printed as a
+    // 300-digit expansion (same finding). Both keep a trailing `.0` on integral
+    // floats; the suffix fix-up below is belt-and-braces.
+    let s = format!("{:?}", f);
     if s.contains('.') || s.contains('e') || s.contains('E') {
         s
     } else {

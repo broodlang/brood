@@ -1,0 +1,51 @@
+;; STRESS — reader/printer round-trip property: `(read-string (pr-str v))` must
+;; equal `v` for every printable value. Seeded random nested values across all
+;; the data shapes; float edges incl. the non-finite literals (inf/-inf/nan —
+;; reader-known float atoms) and extreme magnitudes (1e300, 5e-324, printed
+;; in shortest round-trip form since 2026-07-16).
+
+(defmodule reader-roundtrip-stress-test (:use test))
+
+(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+
+(defn gen (s depth)
+  (let (c (rem s (if (= depth 0) 8 11)))
+    (cond
+      (= c 0) (rem s 100000)
+      (= c 1) (- 0 (rem s 1000000000000))
+      (= c 2) (* 9223372036854775807 (+ 1 (rem s 3)))     ; bigints
+      (= c 3) (/ (rem s 1000) 8)                          ; mixed int/float results
+      (= c 4) (str "s" (rem s 100) "\"q\\b\né€")          ; escapes + unicode
+      (= c 5) (keyword (str "k" (rem s 50)))
+      (= c 6) (= (rem s 2) 0)
+      (= c 7) nil
+      (= c 8) (let (s2 (lcg s)) [(gen s2 (- depth 1)) (gen (lcg s2) (- depth 1))])
+      (= c 9) (let (s2 (lcg s)) (list (gen s2 (- depth 1)) (gen (lcg s2) (- depth 1))))
+      else (let (s2 (lcg s))
+             {(keyword (str "a" (rem s2 20))) (gen s2 (- depth 1))
+              (rem s2 64) (gen (lcg s2) (- depth 1))}))))
+
+(defn prop (s n)
+  (if (= n 0) true
+    (let (s2 (lcg s) v (gen s2 3))
+      (do (assert= (read-string (pr-str v)) v)
+        (prop s2 (- n 1))))))
+
+(describe "read-string ∘ pr-str = identity"
+  (test "seed 11, 3000 nested values" (is (prop 11 3000)))
+  (test "seed 47, 3000 nested values" (is (prop 47 3000)))
+  (test "float edges round-trip"
+    (do
+      (assert= (read-string (pr-str 1e300)) 1e300)
+      (assert= (read-string (pr-str 5e-324)) 5e-324)
+      (assert= (read-string (pr-str -0.0)) -0.0)
+      (assert= (read-string (pr-str 0.30000000000000004)) 0.30000000000000004)
+      (assert= (read-string (pr-str (* 1e300 1e300))) (* 1e300 1e300))   ; inf
+      (assert= (read-string "-inf") (- 0 (* 1e300 1e300)))
+      (let (n (read-string (pr-str (- (* 1e300 1e300) (* 1e300 1e300)))))
+        (do (is (float? n)) (assert= (= n n) false)))                    ; nan
+      true))
+  (test "string escapes round-trip"
+    (do (assert= (read-string (pr-str "a\"b\\c\nd\té€")) "a\"b\\c\nd\té€")
+      (assert= (read-string (pr-str "")) "")
+      true)))

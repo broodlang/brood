@@ -4482,3 +4482,24 @@ production path). Verified: zero VM work-attribution counters under
 `BROOD_VM=0`, results identical. The fuzzer gains `tree-walk` as a fifth
 config — a genuinely independent oracle again — and 30 fresh seeds agree
 across all five. Suite 777/777; `make stress` fully green.
+
+## 2026-07-16 — float printing goes shortest-round-trip; a reader/printer round-trip battery; an honest false alarm
+
+The new `stress/reader_roundtrip_test.blsp` property (`read-string ∘ pr-str =
+identity` over seeded nested values) drove two things:
+
+- **Float printing now uses Rust's `{:?}`** (shortest round-trip rendering):
+  `1e300` prints as `1e300` instead of a 301-character decimal expansion, and
+  `5e-324` likewise — both still read back exactly. Normal floats are
+  unchanged (`1.0`, `0.1`, `-0.0`).
+- **A false alarm, kept for the lesson:** a probe showed `pr-str` emitting
+  `inf`/`nan` and I "fixed" it to Clojure's `##inf` spellings, breaking
+  `tests/float_roundtrip_test.blsp` — which documents that the READER already
+  parses bare `inf`/`-inf`/`nan` as float literals; the old design was
+  symmetric all along. Reverted to the existing contract. The lesson: a
+  round-trip probe must test BOTH directions before concluding anything —
+  print-side inspection alone said "bug" where there was none. (The 777 suite
+  catching the misfix within minutes is the system working.)
+
+Suite 777/777; `make stress` at 22 green runs (round-trip battery included,
+engines × GC-stress).

@@ -81,6 +81,38 @@ class Gen:
             lines.append(
                 f"(defn {g} (x) (+ (* x 1.5) (/ (+ x 1) 4)))")
             helpers.append((g, 1))
+        # a closure-through-HOF helper: maps a generated closure over a small
+        # range and folds — exercises hof_apply_native / capture slots / the
+        # closure-arm gate under every tier
+        if r.random() < 0.4:
+            h = self.name("h")
+            k = r.randint(1, 9)
+            op = r.choice(["+", "*", "bit-xor"])
+            lines.append("(defn " + h + " (x) (fold + 0 (map (fn (y) (" + op
+                         + " y (rem x " + str(k + 1) + "))) (range " + str(k) + "))))")
+            helpers.append((h, 1))
+        # a match-dispatch helper: builds a shape from its arg and matches it —
+        # exercises the fail-thunk match lowering + destructures under every tier
+        if r.random() < 0.4:
+            m = self.name("m")
+            lines.append(
+                "(defn " + m + " (x) "
+                "(match (if (= (rem x 3) 0) [:a x] (if (= (rem x 3) 1) [:b x (+ x 1)] (list :c x))) "
+                "([:a v] :when (> v 100) (+ v 1)) "
+                "([:a v] (- v 1)) "
+                "([:b v w] (+ v w)) "
+                "((:c v) (* v 2)) "
+                "(_ 0)))")
+            helpers.append((m, 1))
+        # a string helper: digest of the decimal rendering — exercises str /
+        # string-length across tiers
+        if r.random() < 0.3:
+            sname = self.name("s")
+            lines.append(
+                "(defn " + sname + " (x) "
+                '(let (t (str x "-" (* x 3))) '
+                "(+ (string-length t) (bit-and x 7))))")
+            helpers.append((sname, 1))
         f, arity = r.choice(helpers)
         args = " ".join(["i"] * arity)
         key_mod = r.choice([8, 64, 512, 4095])
