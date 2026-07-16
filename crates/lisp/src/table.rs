@@ -9,35 +9,42 @@
 //!
 //! ## Why this can't corrupt
 //!
-//! The store holds **deep clones in heap-independent [`Message`] form** — the same
-//! serialization a cross-process `send` uses. Nothing in the store is ever a live GC
-//! handle, so the moving collector never traces or moves into it. `get` reconstructs
-//! a **fresh** value in the *caller's* heap, so two processes never alias a stored
-//! value (Erlang's ETS copy-in/copy-out). Key equality is **borrowed from the heap**
-//! (`hash_value` to bucket, `equal` on a reconstructed key to resolve collisions), so
-//! table keys behave identically to immutable-map keys — no parallel equality code.
+//! The store holds **deep clones in heap-independent [`Message`] form** (hashed
+//! representation) or immediate scalars packed into atomic words (dense
+//! representation) — nothing in a store is ever a live GC handle, so the moving
+//! collector never traces or moves into it. `get` reconstructs a **fresh** value in
+//! the *caller's* heap, so two processes never alias a stored value (Erlang's ETS
+//! copy-in/copy-out). Key equality is **borrowed from the heap** (`hash_value` to
+//! bucket, `equal` on a reconstructed key to resolve collisions), so table keys
+//! behave identically to immutable-map keys — no parallel equality code.
 //!
 //! ## Locking discipline
 //!
 //! The registry is **lock-free** (an append-only `boxcar::Vec` — see `REGISTRY`): a
-//! handle resolves to its store with a single indexed read and no lock or `Arc` clone,
-//! so per-table ops never contend on a global. Only the store's own `Mutex` is taken,
-//! and only per-op — so operations contend solely with operations on the *same* table.
+//! handle resolves to its store with a single indexed read and no lock or `Arc`
+//! clone. The **dense** representation is lock-free per op too — one atomic
+//! load/swap/CAS on the key's slot plus one flag load, the shape of
+//! `:atomics`/`bytearray` that every hot Table workload (sieve marks, counters,
+//! memo sets) actually is; the store `Mutex` is taken only for the hashed
+//! representation and the one-time dense→hashed migration (see "Migration
+//! protocol" on [`Store`]).
 //!
 //! ## Lifetime
 //!
 //! A table lives until `table-drop` or runtime exit (no owner-death GC in v1 — an
 //! app-lifetime store created at startup is the model; owner/`heir` semantics are a
 //! deferred follow-on). Operating on a dropped/unknown handle is a clean error, never
-//! UB.
+//! UB. Like the registry's store shells, a dropped table's dense slot region is
+//! retained (cleared to `EMPTY`, unusable) until process exit — the lock-free region
+//! has no exclusive owner to unmap it; only the hashed map's memory is released.
 
 use crate::core::heap::Heap;
 use crate::core::value::Value;
 use crate::error::{LispError, LispResult};
 use crate::process::{from_message, to_message, Message};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
 
 /// One structural-hash bucket: the (key-clone, value-clone) pairs sharing a hash. Almost
 /// always length 1 — a genuine hash collision is rare — so the single entry is stored
@@ -82,102 +89,246 @@ impl std::hash::BuildHasher for BuildIdentityHasher {
 }
 type StoreMap = HashMap<u64, Bucket, BuildIdentityHasher>;
 
-/// A value in the dense (int-keyed array) representation: the scalar shapes that
-/// round-trip without a heap (`nil`/bool/int). `Empty` = the key is absent — distinct
-/// from a stored `Nil`, so `table-has?` stays exact. 16 bytes/slot.
-#[derive(Clone, Copy, PartialEq)]
-enum DenseVal {
-    Empty,
-    Nil,
-    Bool(bool),
-    Int(i64),
+// ---- Dense slot encoding -----------------------------------------------------
+//
+// A dense slot is one atomic u64, so every dense op is a single atomic
+// load/swap/CAS — no lock, no 16-byte enum. Tag in the low 3 bits:
+//
+//   0             EMPTY  (key absent — distinct from a stored nil)
+//   1             NIL
+//   2             TRUE
+//   3             FALSE
+//   5             MOVED  (migration sentinel — see the protocol on `Store`)
+//   ..​.100 (bit 2) an int: value = (word as i64) >> 3  (61-bit two's complement)
+//
+// Ints outside ±2^60 don't fit the tagged word and migrate the table to the
+// hashed representation (they round-trip fine there); every hot dense workload
+// (marks, flags, counters, ids) lives comfortably in 61 bits.
+
+const SLOT_EMPTY: u64 = 0;
+const SLOT_NIL: u64 = 1;
+const SLOT_TRUE: u64 = 2;
+const SLOT_FALSE: u64 = 3;
+const SLOT_MOVED: u64 = 5;
+const INT_TAG: u64 = 0b100;
+
+/// Encode a value into a dense slot word, or `None` when it needs the hashed
+/// representation (non-scalar, or an int outside the 61-bit tagged range).
+#[inline]
+fn slot_enc(v: Value) -> Option<u64> {
+    match v {
+        Value::Nil => Some(SLOT_NIL),
+        Value::Bool(true) => Some(SLOT_TRUE),
+        Value::Bool(false) => Some(SLOT_FALSE),
+        Value::Int(n) if (-(1i64 << 60)..(1i64 << 60)).contains(&n) => {
+            Some(((n as u64) << 3) | INT_TAG)
+        }
+        _ => None,
+    }
 }
 
-impl DenseVal {
-    /// The dense encoding of `v`, or `None` when `v` needs the hashed representation.
-    fn encode(v: Value) -> Option<DenseVal> {
-        match v {
-            Value::Nil => Some(DenseVal::Nil),
-            Value::Bool(b) => Some(DenseVal::Bool(b)),
-            Value::Int(n) => Some(DenseVal::Int(n)),
-            _ => None,
+/// Decode a dense slot word to a `Value` — scalars are immediate, so no heap is
+/// needed. `None` for `EMPTY`. Must not be called on `MOVED` (callers route those
+/// to the hashed path first).
+#[inline]
+fn slot_dec(s: u64) -> Option<Value> {
+    match s {
+        SLOT_EMPTY => None,
+        SLOT_NIL => Some(Value::Nil),
+        SLOT_TRUE => Some(Value::Bool(true)),
+        SLOT_FALSE => Some(Value::Bool(false)),
+        _ => {
+            debug_assert!(s & INT_TAG != 0, "slot_dec on a MOVED/invalid word");
+            Some(Value::int((s as i64) >> 3))
         }
     }
-    /// Decode to a `Value` — scalars are immediate, so no heap is needed.
-    fn decode(self) -> Option<Value> {
-        match self {
-            DenseVal::Empty => None,
-            DenseVal::Nil => Some(Value::Nil),
-            DenseVal::Bool(b) => Some(Value::Bool(b)),
-            DenseVal::Int(n) => Some(Value::int(n)),
-        }
-    }
-    fn to_message(self) -> Option<Message> {
-        match self {
-            DenseVal::Empty => None,
-            DenseVal::Nil => Some(Message::Nil),
-            DenseVal::Bool(b) => Some(Message::Bool(b)),
-            DenseVal::Int(n) => Some(Message::Int(n)),
-        }
+}
+
+/// The `Message` form of a dense slot word (for migration / snapshot).
+fn slot_to_message(s: u64) -> Option<Message> {
+    match s {
+        SLOT_EMPTY => None,
+        SLOT_NIL => Some(Message::Nil),
+        SLOT_TRUE => Some(Message::Bool(true)),
+        SLOT_FALSE => Some(Message::Bool(false)),
+        _ => Some(Message::Int((s as i64) >> 3)),
     }
 }
 
 /// Largest int key the dense representation will hold. Beyond it (or for a negative /
-/// non-int key, or a non-scalar value) the store migrates to the hashed map. 2^23 slots
-/// × 16 B = 128 MB worst-case per table, bounded in practice by the sparsity guard.
+/// non-int key, or a value outside the tagged-scalar shapes) the store migrates to
+/// the hashed map. The dense region is a single lazily-committed anonymous mapping
+/// (2^23 slots × 8 B = 64 MB **virtual**); the OS commits 4 KB pages as slots are
+/// first written, so RSS tracks the keys actually used — which is also why the old
+/// sparsity guard is gone: one far-out key costs one page, not a 64 MB resize.
 const DENSE_KEY_MAX: i64 = 1 << 23;
 
-/// Sparsity guard: growing the dense array to `new_len` is allowed only while the
-/// array stays reasonably full (`new_len ≤ 64·count + 4096`), so one far-out key
-/// can't balloon RSS — it migrates to the hashed map instead.
-fn dense_grow_ok(new_len: usize, count: usize) -> bool {
-    new_len <= 64 * (count + 1) + 4096
+/// The dense slot region: `DENSE_KEY_MAX` atomic words, all-zero (= `EMPTY`) at
+/// birth, reserved on the first dense write. On unix this is one anonymous
+/// `mmap` — a virtual reservation whose pages the OS commits on first touch, so
+/// an idle or sparse table costs pages, not the full span. (It also deliberately
+/// bypasses the ADR-043 counting allocator: 64 MB of untouched reservation
+/// against the soft cap would be pure fiction; the hashed side's real
+/// allocations are counted as always.) Never unmapped — see "Lifetime" above.
+struct DenseSlots(*const AtomicU64);
+// SAFETY: the region is shared, immovable, and only ever accessed through
+// `&AtomicU64` — exactly what atomics are for.
+unsafe impl Send for DenseSlots {}
+unsafe impl Sync for DenseSlots {}
+
+impl DenseSlots {
+    #[cfg(unix)]
+    fn new() -> Self {
+        let bytes = DENSE_KEY_MAX as usize * std::mem::size_of::<AtomicU64>();
+        // SAFETY: a fresh private anonymous mapping; MAP_ANONYMOUS pages read as
+        // zero (= every slot EMPTY) and commit lazily on first write.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert!(
+            ptr != libc::MAP_FAILED,
+            "table: reserving the dense slot region failed"
+        );
+        DenseSlots(ptr as *const AtomicU64)
+    }
+
+    #[cfg(not(unix))]
+    fn new() -> Self {
+        // Fallback: one zeroed allocation (committed up front — the unix path's
+        // lazy-commit is an optimization, not a semantic requirement).
+        let layout =
+            std::alloc::Layout::array::<AtomicU64>(DENSE_KEY_MAX as usize).expect("layout");
+        // SAFETY: AtomicU64 is repr(transparent) over u64 and all-zero is a valid
+        // (EMPTY) value; the region is leaked (never freed), matching the unix path.
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        DenseSlots(ptr as *const AtomicU64)
+    }
+
+    /// The slot for dense index `i`. Callers only produce `i` via [`dense_idx`],
+    /// which bounds it below `DENSE_KEY_MAX`.
+    #[inline]
+    fn slot(&self, i: usize) -> &AtomicU64 {
+        debug_assert!(i < DENSE_KEY_MAX as usize);
+        // SAFETY: in-bounds within the region mapped in `new`.
+        unsafe { &*self.0.add(i) }
+    }
 }
 
-/// A store's physical representation.
+/// One shared store.
 ///
-/// **Dense**: int keys in `[0, DENSE_KEY_MAX)` with scalar (`nil`/bool/int) values live
-/// in a flat `Vec` indexed by key — one bounds-check + direct slot access per op: no
-/// structural hash, no bucket probe (the 3M-entry `HashMap` probe was ~183 ns of cache
-/// misses per op in `sieve`), no `Message` clone of the key. This is the shape of the
-/// hot Table workloads (`sieve`'s composite marks, counters, id sets).
+/// **Dense** (the birth representation): int keys in `[0, DENSE_KEY_MAX)` with
+/// tagged-scalar values live in `slots` (see [`DenseSlots`]), indexed directly by
+/// key. A `put`/`get`/`has?`/`incr` is ONE atomic op on the key's slot plus one
+/// flag load — no structural hash, no bucket probe, no mutex (the per-op lock
+/// round-trip and the old 16-byte-enum second cache line were most of `sieve`'s
+/// per-op cost). `dense_count` tracks non-EMPTY slots exactly (swap-based, so
+/// concurrent puts/deletes never drift) for `table-count`; `dense_max` is a
+/// watermark (1 + highest index ever written) bounding migration/snapshot/drop
+/// scans so they never touch — and so never commit — the untouched tail.
 ///
-/// **Hashed**: everything else — the original `hash → bucket` map. A dense store
-/// migrates here (one-time O(n)) the first time an op doesn't fit the dense shape;
-/// it never migrates back.
-enum Storage {
-    Dense { vals: Vec<DenseVal>, count: usize },
-    Hashed(StoreMap),
+/// **Hashed**: everything else — the original `hash → bucket` map, under `hashed`'s
+/// `Mutex` (`Some` once migrated). A dense store migrates here (one-time, O(max))
+/// the first time an op doesn't fit the dense shape; it never migrates back.
+///
+/// **Migration protocol** (why lock-free dense ops can't race it wrong). The
+/// migrator (holding the mutex) stores `dense = false` (SeqCst), reads the
+/// watermark, then captures each non-EMPTY slot in `[0, max]` with
+/// `swap(MOVED)`. Every dense op performs its slot op and then **re-checks the
+/// flag** (a plain load on x86):
+///
+///   - Flag still true ⟹ the op's slot access is SeqCst-ordered *before* the
+///     migrator's flag store, hence before every capture read — the migrator
+///     sees its effect. (A writer beyond the old watermark updates `dense_max`
+///     *before* its slot op, so the capture scan covers it by the same order.)
+///   - Flag false (or the slot op observed `MOVED`) ⟹ ambiguity: re-route
+///     through the hashed path, which blocks on the mutex the migrator holds.
+///     `put`/`delete` re-apply (last-writer-wins set semantics — idempotent);
+///     `get`/`has` re-read; `incr` resolves its one ambiguous case (CAS
+///     succeeded, flag now false) under the lock by inspecting the slot: MOVED
+///     means the migrator captured the incremented word (done — return it),
+///     anything else means it skipped this slot as EMPTY before the CAS landed
+///     (re-execute the increment on the map).
+struct Store {
+    slots: OnceLock<DenseSlots>,
+    dense_count: AtomicUsize,
+    /// Watermark: 1 + the highest dense index ever written.
+    dense_max: AtomicUsize,
+    /// Fast-path filter + the migration fence (see the protocol above): true
+    /// until the store migrates.
+    dense: AtomicBool,
+    /// The hashed representation (`Some` once migrated) — also the lock that
+    /// serializes migration, snapshots, and every hashed op.
+    hashed: Mutex<Option<StoreMap>>,
+    /// Tombstone for `table-drop`. The registry is append-only + lock-free, so a
+    /// dropped table is flagged in place rather than removed; `lookup` treats a
+    /// tombstoned store as gone.
+    dropped: AtomicBool,
 }
 
-impl Storage {
-    /// Migrate a dense store to the hashed representation, preserving every entry.
-    /// Int keys hash through the same `hash_value` fast path the hashed ops use.
-    fn migrate_to_hashed(&mut self, heap: &Heap) {
-        if let Storage::Dense { vals, .. } = self {
-            let mut map = StoreMap::default();
-            for (k, dv) in vals.iter().enumerate() {
-                if let Some(vm) = dv.to_message() {
-                    let hash = heap.hash_value(Value::int(k as i64));
+impl Store {
+    #[inline]
+    fn dense_slots(&self) -> &DenseSlots {
+        self.slots.get_or_init(DenseSlots::new)
+    }
+
+    /// Raise the watermark to cover index `i` — BEFORE the slot op (load-bearing
+    /// for the migration protocol above).
+    #[inline]
+    fn cover(&self, i: usize) {
+        if i >= self.dense_max.load(Ordering::Relaxed) {
+            self.dense_max.fetch_max(i + 1, Ordering::SeqCst);
+        }
+    }
+
+    /// Migrate to the hashed representation, preserving every entry. MUST be
+    /// called with `guard` = the held `hashed` lock and `guard.is_none()`.
+    fn migrate_to_hashed(&self, guard: &mut MutexGuard<'_, Option<StoreMap>>) {
+        self.dense.store(false, Ordering::SeqCst);
+        let mut map = StoreMap::default();
+        if let Some(slots) = self.slots.get() {
+            let max = self.dense_max.load(Ordering::SeqCst);
+            for k in 0..max {
+                let slot = slots.slot(k);
+                // Skip EMPTY without writing (an untouched page stays untouched);
+                // capture the rest with swap(MOVED) — the swap's return value is
+                // authoritative even against a concurrent last-instant write.
+                if slot.load(Ordering::SeqCst) == SLOT_EMPTY {
+                    continue;
+                }
+                let s = slot.swap(SLOT_MOVED, Ordering::SeqCst);
+                if let Some(vm) = slot_to_message(s) {
+                    // Int keys hash exactly as the hashed ops hash them (the
+                    // heap's int fast path is heap-independent).
+                    let hash = Heap::hash_int(k as i64);
                     map.entry(hash)
                         .or_default()
                         .push((Message::Int(k as i64), vm));
                 }
             }
-            *self = Storage::Hashed(map);
         }
+        **guard = Some(map);
     }
-}
 
-/// One shared store: dense int-keyed array or `hash → bucket of (key-clone,
-/// value-clone)` (see [`Storage`]). Bucket equality is resolved against the
-/// caller's heap so it matches Brood's `=` exactly.
-struct Store {
-    data: Mutex<Storage>,
-    /// Tombstone for `table-drop`. The registry is append-only + lock-free, so a
-    /// dropped table is flagged in place (its data cleared to free memory) rather
-    /// than removed; `lookup` treats a tombstoned store as gone.
-    dropped: AtomicBool,
+    /// The held-lock hashed map, migrating first if this store is still dense.
+    fn hashed_or_migrate<'g>(
+        &self,
+        guard: &'g mut MutexGuard<'_, Option<StoreMap>>,
+    ) -> &'g mut StoreMap {
+        if guard.is_none() {
+            self.migrate_to_hashed(guard);
+        }
+        guard.as_mut().expect("migrated above")
+    }
 }
 
 /// The table registry is **lock-free**: an append-only `boxcar::Vec` indexed by
@@ -236,22 +387,24 @@ pub fn check_key(who: &str, key: Value) -> Result<(), LispError> {
 
 /// `(table)` — create a new empty table; returns its handle id. `push` hands out the
 /// next dense index atomically, so `id = idx + 1` (0 is reserved as "no table").
+/// The dense slot region is reserved lazily on the first dense write, so an
+/// unused (or immediately-hashed) table costs only this small shell.
 pub fn create() -> u64 {
     let idx = REGISTRY.push(Store {
-        // Every table starts dense (an empty Vec — free); the first op that doesn't
-        // fit the dense shape migrates it to the hashed map.
-        data: Mutex::new(Storage::Dense {
-            vals: Vec::new(),
-            count: 0,
-        }),
+        slots: OnceLock::new(),
+        dense_count: AtomicUsize::new(0),
+        dense_max: AtomicUsize::new(0),
+        dense: AtomicBool::new(true),
+        hashed: Mutex::new(None),
         dropped: AtomicBool::new(false),
     });
     idx as u64 + 1
 }
 
 /// `(table-drop t)` — tombstone a table (the lock-free registry can't remove entries).
-/// Idempotent; returns whether it was still live. Clears the data to free memory; other
-/// handles to it then error on use. Only the small store shell lingers.
+/// Idempotent; returns whether it was still live. Frees the hashed map and clears the
+/// touched dense slots to `EMPTY`; the slot region itself (like the store shell) is
+/// retained until process exit — the lock-free region has no exclusive owner to unmap.
 pub fn drop_table(id: u64) -> bool {
     let Some(idx) = id.checked_sub(1) else {
         return false;
@@ -260,10 +413,14 @@ pub fn drop_table(id: u64) -> bool {
         Some(store) => {
             let was_live = !store.dropped.swap(true, Ordering::Relaxed);
             if was_live {
-                *store.data.lock().expect("table store mutex") = Storage::Dense {
-                    vals: Vec::new(),
-                    count: 0,
-                };
+                *store.hashed.lock().expect("table store mutex") = None;
+                if let Some(slots) = store.slots.get() {
+                    let max = store.dense_max.load(Ordering::SeqCst);
+                    for k in 0..max {
+                        slots.slot(k).store(SLOT_EMPTY, Ordering::Relaxed);
+                    }
+                }
+                store.dense_count.store(0, Ordering::Relaxed);
             }
             was_live
         }
@@ -274,11 +431,15 @@ pub fn drop_table(id: u64) -> bool {
 /// `(table-count t)` — number of entries.
 pub fn count(id: u64) -> Result<i64, LispError> {
     let store = lookup(id)?;
-    let data = store.data.lock().expect("table store mutex");
-    Ok(match &*data {
-        Storage::Dense { count, .. } => *count as i64,
-        Storage::Hashed(map) => map.values().map(|b| b.len()).sum::<usize>() as i64,
-    })
+    if store.dense.load(Ordering::Acquire) {
+        return Ok(store.dense_count.load(Ordering::Relaxed) as i64);
+    }
+    let data = store.hashed.lock().expect("table store mutex");
+    match &*data {
+        Some(map) => Ok(map.values().map(|b| b.len()).sum::<usize>() as i64),
+        // Raced a migration that hadn't published the map when we read the flag.
+        None => Ok(store.dense_count.load(Ordering::Relaxed) as i64),
+    }
 }
 
 /// The dense-array index for `key`, when `key` is an int the dense shape can hold.
@@ -304,37 +465,29 @@ fn find_idx(heap: &mut Heap, bucket: &[(Message, Message)], key: Value) -> Optio
 /// existing entry for `k`. Returns the table handle (for threading).
 pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
     let store = lookup(id)?;
-    let mut data = store.data.lock().expect("table store mutex");
-    // Dense fast path: int key in range + scalar value → a bounds-check and a direct
-    // slot store. No structural hash, no Message clone, no bucket probe.
-    let mut needs_migrate = false;
-    if let Storage::Dense { vals, count } = &mut *data {
-        match (dense_idx(key), DenseVal::encode(val)) {
-            (Some(i), Some(dv)) if i < vals.len() || dense_grow_ok(i + 1, *count) => {
-                if i >= vals.len() {
-                    vals.resize(i + 1, DenseVal::Empty);
+    // Dense fast path: int key in range + tagged-scalar value → ONE atomic swap
+    // on the key's slot. Lock-free; see the migration protocol on `Store`.
+    if store.dense.load(Ordering::Acquire) {
+        if let (Some(i), Some(word)) = (dense_idx(key), slot_enc(val)) {
+            store.cover(i);
+            let old = store.dense_slots().slot(i).swap(word, Ordering::SeqCst);
+            if old != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
+                if old == SLOT_EMPTY {
+                    store.dense_count.fetch_add(1, Ordering::Relaxed);
                 }
-                if vals[i] == DenseVal::Empty {
-                    *count += 1;
-                }
-                vals[i] = dv;
                 return Ok(Value::table(id));
             }
-            // Out-of-shape key/value (or a too-sparse grow): this table leaves the
-            // dense world for good.
-            _ => needs_migrate = true,
+            // A migration raced us — re-apply on the map (idempotent overwrite).
         }
     }
-    if needs_migrate {
-        data.migrate_to_hashed(heap);
-    }
-    // Hashed path — clone both out of the GC heap (also rejects non-sendable values).
+    // Hashed path (migrating first if still dense — an out-of-shape key/value
+    // leaves the dense world for good).
+    let mut guard = store.hashed.lock().expect("table store mutex");
+    // Clone both out of the GC heap (also rejects non-sendable values).
     let km = to_message(heap, key)?;
     let vm = to_message(heap, val)?;
     let hash = heap.hash_value(key);
-    let Storage::Hashed(map) = &mut *data else {
-        unreachable!("dense either stored or migrated above");
-    };
+    let map = store.hashed_or_migrate(&mut guard);
     let bucket = map.entry(hash).or_default();
     match find_idx(heap, bucket, key) {
         Some(i) => bucket[i].1 = vm,
@@ -344,126 +497,176 @@ pub fn put(heap: &mut Heap, id: u64, key: Value, val: Value) -> LispResult {
 }
 
 /// `(table-get t k [default])` — a fresh copy of the value under `k`, or `default`.
-/// A read never migrates: an out-of-shape key simply can't be present in a dense store.
 pub fn get(heap: &mut Heap, id: u64, key: Value, default: Value) -> LispResult {
     let store = lookup(id)?;
-    let found = {
-        let data = store.data.lock().expect("table store mutex");
-        match &*data {
-            Storage::Dense { vals, .. } => {
-                return Ok(dense_idx(key)
-                    .and_then(|i| vals.get(i))
-                    .and_then(|dv| dv.decode())
-                    .unwrap_or(default));
-            }
-            Storage::Hashed(map) => {
-                let hash = heap.hash_value(key);
-                match map.get(&hash) {
-                    Some(bucket) => find_idx(heap, bucket, key).map(|i| bucket[i].1.clone()),
-                    None => None,
+    if store.dense.load(Ordering::Acquire) {
+        match dense_idx(key) {
+            Some(i) => {
+                let s = match store.slots.get() {
+                    Some(slots) => slots.slot(i).load(Ordering::SeqCst),
+                    None => SLOT_EMPTY, // no dense write ever happened
+                };
+                if s != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
+                    return Ok(slot_dec(s).unwrap_or(default));
                 }
+                // Migration in flight: read through the hashed path below.
             }
+            // An out-of-shape key can't be present in a dense store.
+            None => return Ok(default),
         }
+    }
+    let found = {
+        let mut guard = store.hashed.lock().expect("table store mutex");
+        let map = store.hashed_or_migrate(&mut guard);
+        let hash = heap.hash_value(key);
+        match map.get(&hash) {
+            Some(bucket) => find_idx(heap, bucket, key).map(|i| bucket[i].1.clone()),
+            None => None,
+        }
+        // Reconstruct after releasing the store lock (keeps the lock hold minimal).
     };
-    // Reconstruct after releasing the store lock (keeps the lock hold minimal).
     Ok(found.map_or(default, |vm| from_message(heap, &vm)))
 }
 
 /// `(table-has? t k)` — whether `k` is present.
 pub fn has(heap: &mut Heap, id: u64, key: Value) -> Result<bool, LispError> {
     let store = lookup(id)?;
-    let data = store.data.lock().expect("table store mutex");
-    Ok(match &*data {
-        Storage::Dense { vals, .. } => dense_idx(key)
-            .and_then(|i| vals.get(i))
-            .is_some_and(|dv| *dv != DenseVal::Empty),
-        Storage::Hashed(map) => {
-            let hash = heap.hash_value(key);
-            map.get(&hash)
-                .is_some_and(|bucket| find_idx(heap, bucket, key).is_some())
+    if store.dense.load(Ordering::Acquire) {
+        match dense_idx(key) {
+            Some(i) => {
+                let s = match store.slots.get() {
+                    Some(slots) => slots.slot(i).load(Ordering::SeqCst),
+                    None => SLOT_EMPTY,
+                };
+                if s != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
+                    return Ok(s != SLOT_EMPTY);
+                }
+            }
+            None => return Ok(false),
         }
-    })
+    }
+    let mut guard = store.hashed.lock().expect("table store mutex");
+    let map = store.hashed_or_migrate(&mut guard);
+    let hash = heap.hash_value(key);
+    Ok(map
+        .get(&hash)
+        .is_some_and(|bucket| find_idx(heap, bucket, key).is_some()))
 }
 
 /// `(table-delete t k)` — remove `k` if present. Returns the table handle.
 pub fn delete(heap: &mut Heap, id: u64, key: Value) -> LispResult {
     let store = lookup(id)?;
-    let mut data = store.data.lock().expect("table store mutex");
-    match &mut *data {
-        Storage::Dense { vals, count } => {
+    if store.dense.load(Ordering::Acquire) {
+        match dense_idx(key) {
+            Some(i) => {
+                if store.slots.get().is_none() {
+                    return Ok(Value::table(id)); // nothing was ever stored densely
+                }
+                store.cover(i);
+                let old = store
+                    .dense_slots()
+                    .slot(i)
+                    .swap(SLOT_EMPTY, Ordering::SeqCst);
+                if old != SLOT_MOVED && store.dense.load(Ordering::SeqCst) {
+                    if old != SLOT_EMPTY {
+                        store.dense_count.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    return Ok(Value::table(id));
+                }
+                // Migration raced us — re-apply on the map (idempotent).
+            }
             // An out-of-shape key can't be present in a dense store — no-op.
-            if let Some(slot) = dense_idx(key).and_then(|i| vals.get_mut(i)) {
-                if *slot != DenseVal::Empty {
-                    *slot = DenseVal::Empty;
-                    *count -= 1;
-                }
-            }
+            None => return Ok(Value::table(id)),
         }
-        Storage::Hashed(map) => {
-            let hash = heap.hash_value(key);
-            let now_empty = if let Some(bucket) = map.get_mut(&hash) {
-                if let Some(i) = find_idx(heap, bucket, key) {
-                    bucket.swap_remove(i);
-                }
-                bucket.is_empty()
-            } else {
-                false
-            };
-            if now_empty {
-                map.remove(&hash);
-            }
+    }
+    let mut guard = store.hashed.lock().expect("table store mutex");
+    let map = store.hashed_or_migrate(&mut guard);
+    let hash = heap.hash_value(key);
+    let now_empty = if let Some(bucket) = map.get_mut(&hash) {
+        if let Some(i) = find_idx(heap, bucket, key) {
+            bucket.swap_remove(i);
         }
+        bucket.is_empty()
+    } else {
+        false
+    };
+    if now_empty {
+        map.remove(&hash);
     }
     Ok(Value::table(id))
 }
 
 /// `(table-incr t k [delta])` — **atomically** add `delta` (default 1) to the integer
-/// at `k` (treating an absent key as 0) and return the new value. The whole
-/// read-modify-write happens under the store lock, so concurrent increments never
-/// lose an update — the one safe atomic mutator (no user closure can run under the
-/// lock). Errors if the existing value is not a plain integer.
+/// at `k` (treating an absent key as 0) and return the new value. On the dense path
+/// this is a lock-free CAS loop on the key's slot (concurrent increments never lose
+/// an update, and a racing migration can neither lose nor double-apply one — see the
+/// protocol on `Store`); on the hashed path the whole read-modify-write happens under
+/// the store lock. Errors if the existing value is not a plain integer.
 pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
-    let km = to_message(heap, key)?;
     let store = lookup(id)?;
-    let mut data = store.data.lock().expect("table store mutex");
-    // Dense fast path: an int slot RMW in place. A non-Int stored value gets the same
-    // errors as the hashed path; an out-of-shape key migrates (incr *inserts* on absent,
-    // so the key must land somewhere the store can hold it).
-    let mut needs_migrate = false;
-    if let Storage::Dense { vals, count } = &mut *data {
-        match dense_idx(key) {
-            Some(i) if i < vals.len() || dense_grow_ok(i + 1, *count) => {
-                if i >= vals.len() {
-                    vals.resize(i + 1, DenseVal::Empty);
-                }
-                let cur = match vals[i] {
-                    DenseVal::Int(n) => n,
-                    DenseVal::Empty => {
-                        *count += 1;
-                        0
-                    }
+    if store.dense.load(Ordering::Acquire) {
+        if let Some(i) = dense_idx(key) {
+            store.cover(i);
+            let slot = store.dense_slots().slot(i);
+            let mut cur = slot.load(Ordering::SeqCst);
+            loop {
+                let (cur_int, was_empty) = match cur {
+                    SLOT_EMPTY => (0i64, true),
+                    SLOT_MOVED => break, // migration in flight → hashed path
+                    s if s & INT_TAG != 0 => ((s as i64) >> 3, false),
                     _ => {
                         return Err(LispError::type_err(
                             "table-incr: the value at this key is not an integer",
                         ))
                     }
                 };
-                let next = cur.checked_add(delta).ok_or_else(|| {
+                let next = cur_int.checked_add(delta).ok_or_else(|| {
                     LispError::runtime("table-incr: incrementing would exceed the ±2^63 range")
                 })?;
-                vals[i] = DenseVal::Int(next);
-                return Ok(Value::int(next));
+                let Some(word) = slot_enc(Value::int(next)) else {
+                    break; // leaves the 61-bit tagged range → migrate below
+                };
+                match slot.compare_exchange_weak(cur, word, Ordering::SeqCst, Ordering::SeqCst) {
+                    Ok(_) => {
+                        if store.dense.load(Ordering::SeqCst) {
+                            if was_empty {
+                                store.dense_count.fetch_add(1, Ordering::Relaxed);
+                            }
+                            return Ok(Value::int(next));
+                        }
+                        // CAS landed but a migration started: resolve under its
+                        // lock. MOVED in the slot ⟹ the migrator captured our
+                        // incremented word (done); anything else ⟹ it skipped
+                        // this slot as EMPTY before our CAS ⟹ re-execute on the
+                        // map (`incr` commutes, so re-executing linearizes).
+                        let mut guard = store.hashed.lock().expect("table store mutex");
+                        if slot.load(Ordering::SeqCst) == SLOT_MOVED {
+                            return Ok(Value::int(next));
+                        }
+                        return incr_hashed(heap, store, guard.as_mut(), key, delta);
+                    }
+                    Err(actual) => cur = actual,
+                }
             }
-            _ => needs_migrate = true,
         }
     }
-    if needs_migrate {
-        data.migrate_to_hashed(heap);
+    let mut guard = store.hashed.lock().expect("table store mutex");
+    if guard.is_none() {
+        store.migrate_to_hashed(&mut guard);
     }
+    incr_hashed(heap, store, guard.as_mut(), key, delta)
+}
+
+fn incr_hashed(
+    heap: &mut Heap,
+    _store: &Store,
+    map: Option<&mut StoreMap>,
+    key: Value,
+    delta: i64,
+) -> LispResult {
+    let map = map.expect("hashed map exists after migration");
+    let km = to_message(heap, key)?;
     let hash = heap.hash_value(key);
-    let Storage::Hashed(map) = &mut *data else {
-        unreachable!("dense either returned or migrated above");
-    };
     let bucket = map.entry(hash).or_default();
     let idx = find_idx(heap, bucket, key);
     let cur = match idx {
@@ -494,22 +697,36 @@ pub fn incr(heap: &mut Heap, id: u64, key: Value, delta: i64) -> LispResult {
     Ok(Value::int(next))
 }
 
-/// `(table-snapshot t)` — a consistent point-in-time copy of the whole table as an
-/// immutable Brood map. Atomic (taken under one lock); because the entries are
-/// immutable clones, the returned map is unaffected by later mutation — the MVCC win
-/// over ETS's dirty reads. O(n) copy.
+/// `(table-snapshot t)` — a point-in-time copy of the whole table as an immutable
+/// Brood map. Because the entries are immutable clones, the returned map is
+/// unaffected by later mutation — the MVCC win over ETS's dirty reads. O(n) copy.
+/// Atomic per entry; on a **dense** table concurrent lock-free writes to *other*
+/// keys may land before or after the copy independently (the hashed path snapshots
+/// under the store lock, as before).
 pub fn snapshot(heap: &mut Heap, id: u64) -> LispResult {
     let store = lookup(id)?;
-    // Snapshot the raw clones under the lock; build the Brood map after releasing it.
-    let raw: Vec<(Message, Message)> = {
-        let data = store.data.lock().expect("table store mutex");
-        match &*data {
-            Storage::Dense { vals, .. } => vals
-                .iter()
-                .enumerate()
-                .filter_map(|(k, dv)| dv.to_message().map(|vm| (Message::Int(k as i64), vm)))
-                .collect(),
-            Storage::Hashed(map) => map.values().flat_map(|b| b.iter().cloned()).collect(),
+    // Snapshot the raw clones first; build the Brood map after (outside any lock).
+    let raw: Vec<(Message, Message)> = 'raw: {
+        if store.dense.load(Ordering::Acquire) {
+            let mut raw = Vec::new();
+            if let Some(slots) = store.slots.get() {
+                let max = store.dense_max.load(Ordering::SeqCst);
+                for k in 0..max {
+                    let s = slots.slot(k).load(Ordering::SeqCst);
+                    if s == SLOT_MOVED {
+                        break 'raw snapshot_hashed(store); // migration in flight
+                    }
+                    if let Some(vm) = slot_to_message(s) {
+                        raw.push((Message::Int(k as i64), vm));
+                    }
+                }
+            }
+            if store.dense.load(Ordering::SeqCst) {
+                break 'raw raw;
+            }
+            snapshot_hashed(store)
+        } else {
+            snapshot_hashed(store)
         }
     };
     let mut pairs = Vec::with_capacity(raw.len());
@@ -524,4 +741,10 @@ pub fn snapshot(heap: &mut Heap, id: u64) -> LispResult {
         _ => unreachable!("alloc_empty_map returns a Map"),
     };
     Ok(heap.map_from_pairs_into(into, pairs))
+}
+
+fn snapshot_hashed(store: &Store) -> Vec<(Message, Message)> {
+    let mut guard = store.hashed.lock().expect("table store mutex");
+    let map = store.hashed_or_migrate(&mut guard);
+    map.values().flat_map(|b| b.iter().cloned()).collect()
 }

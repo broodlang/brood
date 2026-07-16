@@ -4511,7 +4511,7 @@ fn tag_pos(e: LispError, pos: Option<Pos>) -> LispError {
 /// frame (TCO). A single pass to the next call/return is bounded by the chunk length.
 fn exec_chunk(
     heap: &mut Heap,
-    arm: &CompiledArm,
+    arm_arc: &Arc<CompiledArm>,
     ip: &mut usize,
     base: usize,
     genv: EnvRoot,
@@ -4523,6 +4523,11 @@ fn exec_chunk(
     // stored in BcFrame so it survives frame save/restore.
     #[cfg(feature = "jit")] back_edges: &mut u32,
 ) -> Result<ChunkExit, LispError> {
+    // Deref the Arc ONCE — the dispatch loop reads `arm.` fields per instruction
+    // (`nslots`/`nrequired` on every SelfCall), and going through the Arc each time
+    // cost the most interpreter-bound row (json) ~10%. `arm_arc` itself is only for
+    // the spinning-loop sync compile, which needs the Arc for the keepalive.
+    let arm: &CompiledArm = arm_arc.as_ref();
     let chunk = arm.chunk.as_ref().expect("exec_chunk: arm has no chunk");
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
@@ -5140,7 +5145,16 @@ fn exec_chunk(
                         let installed = !code.is_null()
                             && code != crate::jit::BAILED
                             && code != crate::jit::QUEUED;
-                        if installed || code.is_null() {
+                        // A loop stuck QUEUED also exits (every 8th boundary) so the
+                        // driver can compile it synchronously — see the back-edge
+                        // check above `jit_tier` in `vm_run_bc`. Kept as a bare
+                        // condition: calling into the compiler from inside this
+                        // dispatch loop wrecked its codegen (+45% branch misses,
+                        // json −10%).
+                        if installed
+                            || code.is_null()
+                            || edges.is_multiple_of(JIT_QUEUED_SYNC_EDGES)
+                        {
                             return Ok(ChunkExit::SelfTail);
                         }
                     }
@@ -5428,8 +5442,17 @@ fn vm_run_bc(
     // `ChunkExit` that flows through the *same* handling as the interpreter's output, so
     // a JIT `Done`/`Tail` retires/reuses the frame identically to the VM. A re-entry via
     // tail call thus re-tiers the callee, and an arm *ending* in a tail call tiers too.
+    //
+    // A RESUME tiers too when it re-enters at ip 0. ip 0 always means "run the whole
+    // arm against the current slot state": a preempted self-tail loop parks with its
+    // frame already reset (carried slots in place, ip 0), so handing it straight back
+    // to its native code is exactly resuming the loop. Without this, every scheduler
+    // preempt of a native loop resumed INTERPRETED and only re-tiered at the next
+    // 256th back-edge — sieve's `mark` preempted ~1030 times and paid ~256 interpreted
+    // iterations each (~260k, ~20% of the row). A mid-`receive` resume rewinds to its
+    // `Inst::Call` at a nonzero ip and still (correctly) never tiers.
     #[cfg(feature = "jit")]
-    let mut try_jit = fresh;
+    let mut try_jit = fresh || cur_ip == 0;
     #[cfg(not(feature = "jit"))]
     let _ = fresh; // silence unused warning when the JIT is off
 
@@ -5525,6 +5548,18 @@ fn vm_run_bc(
                 {
                     if try_jit {
                         try_jit = false;
+                        // Spinning-loop escape hatch (see JIT_QUEUED_SYNC_EDGES): a
+                        // self-tail loop that exited here after spinning ~2k edges
+                        // against a still-QUEUED arm compiles it right now, on this
+                        // thread, instead of interpreting until the background
+                        // compiler gets to it.
+                        if cur_back_edges != 0
+                            && cur_back_edges.is_multiple_of(JIT_QUEUED_SYNC_EDGES)
+                            && cur_arm.jit_code.load(std::sync::atomic::Ordering::Acquire)
+                                == crate::jit::QUEUED
+                        {
+                            jit_compile_now(heap, &cur_arm, cur_base);
+                        }
                         // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
                         // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
                         // *installed* native version is the deferred inlined upgrade does the
@@ -6010,7 +6045,53 @@ struct JitCompiler {
 static JIT_ARM_KEEPALIVE: std::sync::Mutex<Vec<Arc<CompiledArm>>> =
     std::sync::Mutex::new(Vec::new());
 
+/// A self-tail loop that has spun this many back-edges while its arm sits QUEUED
+/// compiles synchronously (`jit_compile_now`): a bounded ~ms block beats an
+/// unbounded interpreted tail (sieve's p=2 `mark` pass raced the cold-start
+/// background compile for ~500k interpreted iterations; a short-lived arm never
+/// accumulates this many edges). Checked in `exec_chunk`'s back-edge exit and
+/// acted on in `vm_run_bc`'s tier hook.
 #[cfg(feature = "jit")]
+const JIT_QUEUED_SYNC_EDGES: u32 = 2048;
+
+/// Compile `arm`'s small native NOW, on the calling thread — the spinning-loop
+/// escape hatch (see [`JIT_QUEUED_SYNC_EDGES`]). The arm must be
+/// `QUEUED`; re-checked under the module lock so a background compile that beat
+/// us is not repeated. Mirrors the background `compile` closure's install path
+/// (pointer store + keepalive); a panic bails just this arm (the poison latch
+/// stays with the background thread — this path is for one already-elected arm).
+#[cfg(feature = "jit")]
+fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) {
+    use std::sync::atomic::Ordering::{Acquire, Release};
+    // Snapshot the live frame's slot tags exactly as jit_tier's enqueuer does
+    // (used to type-specialize float arms).
+    let slot_tags: Vec<u8> = (0..arm.nslots)
+        .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
+        .collect();
+    let mut jit = crate::jit::GLOBAL_JIT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if arm.jit_code.load(Acquire) != crate::jit::QUEUED {
+        return; // the background thread finished it while we waited for the lock
+    }
+    let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        jit_lower_arm(&mut jit, arm, &slot_tags)
+    }));
+    drop(jit); // install the pointer outside the module lock
+    match lowered {
+        Ok(Some(ptr)) => {
+            arm.jit_code.store(ptr as *mut u8, Release);
+            // Same keepalive contract as the background path: installed native code
+            // bakes raw pointers into the arm's chunk ConstVals — keep the arm alive.
+            JIT_ARM_KEEPALIVE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(arm.clone());
+        }
+        Ok(None) | Err(_) => arm.jit_code.store(crate::jit::BAILED, Release),
+    }
+}
+
 static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new(|| {
     use std::sync::atomic::Ordering::Release;
     use std::sync::mpsc::{sync_channel, TryRecvError};
@@ -6038,6 +6119,16 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
                 } else {
                     &arm.jit_code
                 };
+                // Already resolved (a spinning loop sync-compiled it via
+                // `jit_compile_now`, or it was bailed) — don't compile it twice.
+                // A queued small arm holds QUEUED here; a queued inlined upgrade
+                // holds null (its queue marker is `inline_queued`).
+                {
+                    let existing = slot.load(std::sync::atomic::Ordering::Acquire);
+                    if !existing.is_null() && existing != crate::jit::QUEUED {
+                        return;
+                    }
+                }
                 if codegen_poisoned {
                     slot.store(crate::jit::BAILED, Release);
                     return;
@@ -6045,6 +6136,8 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
                 let mut jit = crate::jit::GLOBAL_JIT
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
+                #[cfg(feature = "perf-stats")]
+                let t0 = std::time::Instant::now();
                 let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if inlined {
                         jit_lower_inlined_arm(&mut jit, arm, slot_tags)
@@ -6052,6 +6145,17 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
                         jit_lower_arm(&mut jit, arm, slot_tags)
                     }
                 }));
+                #[cfg(feature = "perf-stats")]
+                if std::env::var_os("BROOD_COMPILE_TRACE").is_some() {
+                    eprintln!(
+                        "[compile] {:?} arm={} inlined={}",
+                        t0.elapsed(),
+                        arm.dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>"),
+                        inlined
+                    );
+                }
                 drop(jit); // install the pointer outside the module lock
                 match lowered {
                     Ok(Some(ptr)) => {

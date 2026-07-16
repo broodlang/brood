@@ -4239,3 +4239,61 @@ spawn/pingpong/ring/base64/fib/collatz/json/sort/sieve/loop/matmul/bintree.
 Standings: nqueens moves to 5/7; nbody's 6/7 gap to Ruby closes 140 → ~7 ms;
 the two open frontiers are unchanged in kind — bintree/regex hang on the call
 convention, json/base64 on native-library rivals.
+
+## 2026-07-16 — sieve deep-dive: lock-free dense Table + resume-tier fix (sieve −33%, loop −75%)
+
+Chased sieve's 6/7 (~120 ms compute; the rivals all use a lock-free mutable
+byte array — python `bytearray`, elixir `:atomics`, .NET `bool[]`). Three
+landings and one instructive revert:
+
+**1. The dense Table path is now lock-free** (`table.rs` rewrite). A dense op
+was `lookup → Mutex lock → Vec index → unlock`; perf-annotate put the mutex at
+~half the ~27 ns/op and the 16-byte `DenseVal` enum's second cache line in the
+rest. Now: slots are ONE anonymous `mmap` region of `2^23` atomic words
+(64 MB **virtual**, pages committed on first touch — sieve RSS 60 → 32 MB, and
+the old sparsity guard is gone: a far-out key costs one 4 KB page, not a
+resize), values pack into tagged u64s (EMPTY/NIL/TRUE/FALSE/int«3; ints beyond
+±2^60 migrate), and every `put`/`get`/`has?` is one atomic op + a flag load.
+`table-incr` is a lock-free CAS loop — stronger than the old locked RMW.
+Migration to the hashed map keeps the mutex and captures each non-EMPTY slot
+with `swap(MOVED)`; per-slot atomic total order + a post-op flag re-check make
+racing lock-free ops exact (put/delete redo idempotently; incr resolves its one
+ambiguous interleaving under the migration lock; full protocol on `Store`).
+An 8-process race of 80 k puts + 80 k incrs across a mid-run migration loses
+nothing. First cut used `boxcar::Vec` — its per-entry init-flag byte was 37% of
+`put` (a second dependent cache miss per op); the flat region removed it.
+
+**2. Resumed native loops no longer interpret 256 iterations per timeslice**
+(`try_jit = fresh || cur_ip == 0`). The tier hook only fired on *fresh*
+activations, so a preempted JIT'd self-tail loop resumed on the interpreter
+and re-tiered at the next 256th back-edge. sieve's `mark` preempted ~1030
+times → ~260 k interpreted iterations (~20% of the row); `loop` was worse:
+0.28 → **0.07 s** (−75%) from this one line. An ip-0 resume is always "run the
+whole arm against the current slots" — a preempted self-tail frame parks reset
+(ip 0, carried slots live), which is exactly its native re-entry; a
+mid-`receive` resume rewinds to a nonzero ip and still never tiers.
+
+**3. A self-tail loop stuck QUEUED sync-compiles** after ~2k back-edges
+(`jit_compile_now`, called from the driver's tier hook): a bounded ~ms block
+on the loop's own thread instead of an unbounded interpreted tail while the
+cold-start background compile crawls the queue. The first cut called the
+compiler from *inside* `exec_chunk`'s dispatch loop and wrecked its codegen
+(+45% branch misses, json −10%) — moved to `vm_run_bc`, keeping only a bare
+exit-condition in the loop. Also: the background compiler now skips arms a
+sync compile already resolved, and `BROOD_COMPILE_TRACE=1` (perf-stats builds)
+prints per-arm compile latency.
+
+**Reverted: disabling cranelift's `enable_verifier` in release.** The extra
+flag made `JITBuilder::with_flags` fall back to DEFAULT flags — silently
+dropping `opt_level=speed` for every compiled arm (json −10% was the tell;
+found by per-file bisect against the previous commit). Compile latency was
+already fine (380 µs/arm measured); nothing was lost by reverting.
+
+Numbers (interleaved best-of-3 vs `bf41695`): sieve 0.15 → **0.10 s**
+(compute ~120 → ~70 ms — past python 123 and ruby 85, **6/7 → 4/7**; elixir's
+53 ms is next), loop 0.28 → **0.07 s**, wordcount 0.08 → 0.06, everything else
+flat (spawn reads +1 tick on identical instruction counts — layout wobble).
+Verified: suite 777/777; `nest check` zero warnings; 3-engine bit-identical on
+10 rows; GC_STRESS + GC_VERIFY + JIT_VERIFY clean; the concurrent-table race
+test exact. `Heap::hash_int` is the one heap API addition (int structural hash,
+heap-free, for migration).

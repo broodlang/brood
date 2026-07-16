@@ -4461,7 +4461,7 @@ impl Heap {
         // A distinct per-type salt keeps `Int(0)`/`Bool(false)`/`Nil` from colliding.
         // Compound values fall through to the unchanged `DefaultHasher` path.
         match v.unpack() {
-            ValueRef::Int(i) => return Self::mix64(i as u64 ^ 0x9E37_79B9_7F4A_7C15),
+            ValueRef::Int(i) => return Self::hash_int(i),
             ValueRef::Bool(b) => return Self::mix64(b as u64 ^ 0xD1B5_4A32_D192_ED03),
             ValueRef::Nil => return Self::mix64(0xA0761D6478BD642F),
             _ => {}
@@ -4469,6 +4469,15 @@ impl Heap {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.hash_value_into(v, &mut h);
         h.finish()
+    }
+
+    /// The structural hash of an `Int`, heap-free — the exact value
+    /// [`hash_value`](Self::hash_value) computes for `Value::Int` (that fast path
+    /// delegates here). Public for `table`'s dense→hashed migration, which hashes
+    /// int keys without a heap in scope.
+    #[inline]
+    pub fn hash_int(i: i64) -> u64 {
+        Self::mix64(i as u64 ^ 0x9E37_79B9_7F4A_7C15)
     }
 
     /// splitmix64 finalizer: a fast, well-distributed `u64 -> u64` avalanche mix.
