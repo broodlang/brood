@@ -105,12 +105,12 @@ type StoreMap = HashMap<u64, Bucket, BuildIdentityHasher>;
 // hashed representation (they round-trip fine there); every hot dense workload
 // (marks, flags, counters, ids) lives comfortably in 61 bits.
 
-const SLOT_EMPTY: u64 = 0;
-const SLOT_NIL: u64 = 1;
-const SLOT_TRUE: u64 = 2;
-const SLOT_FALSE: u64 = 3;
-const SLOT_MOVED: u64 = 5;
-const INT_TAG: u64 = 0b100;
+pub(crate) const SLOT_EMPTY: u64 = 0;
+pub(crate) const SLOT_NIL: u64 = 1;
+pub(crate) const SLOT_TRUE: u64 = 2;
+pub(crate) const SLOT_FALSE: u64 = 3;
+pub(crate) const SLOT_MOVED: u64 = 5;
+pub(crate) const INT_TAG: u64 = 0b100;
 
 /// Encode a value into a dense slot word, or `None` when it needs the hashed
 /// representation (non-scalar, or an int outside the 61-bit tagged range).
@@ -161,7 +161,7 @@ fn slot_to_message(s: u64) -> Option<Message> {
 /// (2^23 slots × 8 B = 64 MB **virtual**); the OS commits 4 KB pages as slots are
 /// first written, so RSS tracks the keys actually used — which is also why the old
 /// sparsity guard is gone: one far-out key costs one page, not a 64 MB resize.
-const DENSE_KEY_MAX: i64 = 1 << 23;
+pub(crate) const DENSE_KEY_MAX: i64 = 1 << 23;
 
 /// The dense slot region: `DENSE_KEY_MAX` atomic words, all-zero (= `EMPTY`) at
 /// birth, reserved on the first dense write. On unix this is one anonymous
@@ -263,6 +263,14 @@ struct Store {
     dense_count: AtomicUsize,
     /// Watermark: 1 + the highest dense index ever written.
     dense_max: AtomicUsize,
+    /// Latched once [`jit_dense_base`] hands this store's slot region to JIT'd
+    /// code. Inline ops are a bare atomic on the key's slot — no watermark or
+    /// count upkeep — so from that point `dense_count`/`dense_max` are lower
+    /// bounds only: `table-count` tallies by scan and migration/snapshot/drop
+    /// scan the FULL region (reads of untouched pages skip without committing
+    /// them). Set (SeqCst) *before* the pointer escapes, so any scan that could
+    /// observe an inline write also observes the latch.
+    jit_shared: AtomicBool,
     /// Fast-path filter + the migration fence (see the protocol above): true
     /// until the store migrates.
     dense: AtomicBool,
@@ -281,6 +289,18 @@ impl Store {
         self.slots.get_or_init(DenseSlots::new)
     }
 
+    /// The slot range every scan (count/migrate/snapshot/drop) must cover:
+    /// the exact watermark normally, the whole region once JIT'd code holds the
+    /// slot pointer (see `jit_shared`).
+    #[inline]
+    fn scan_max(&self) -> usize {
+        if self.jit_shared.load(Ordering::SeqCst) {
+            DENSE_KEY_MAX as usize
+        } else {
+            self.dense_max.load(Ordering::SeqCst)
+        }
+    }
+
     /// Raise the watermark to cover index `i` — BEFORE the slot op (load-bearing
     /// for the migration protocol above).
     #[inline]
@@ -296,7 +316,7 @@ impl Store {
         self.dense.store(false, Ordering::SeqCst);
         let mut map = StoreMap::default();
         if let Some(slots) = self.slots.get() {
-            let max = self.dense_max.load(Ordering::SeqCst);
+            let max = self.scan_max();
             for k in 0..max {
                 let slot = slots.slot(k);
                 // Skip EMPTY without writing (an untouched page stays untouched);
@@ -394,6 +414,7 @@ pub fn create() -> u64 {
         slots: OnceLock::new(),
         dense_count: AtomicUsize::new(0),
         dense_max: AtomicUsize::new(0),
+        jit_shared: AtomicBool::new(false),
         dense: AtomicBool::new(true),
         hashed: Mutex::new(None),
         dropped: AtomicBool::new(false),
@@ -414,10 +435,20 @@ pub fn drop_table(id: u64) -> bool {
             let was_live = !store.dropped.swap(true, Ordering::Relaxed);
             if was_live {
                 *store.hashed.lock().expect("table store mutex") = None;
+                // Retire the dense fast paths too: any JIT'd inline op re-checks
+                // this flag and re-routes to the FFI, whose `lookup` then reports
+                // the drop — so a dropped table errors instead of silently writing
+                // into the retained region.
+                store.dense.store(false, Ordering::SeqCst);
                 if let Some(slots) = store.slots.get() {
-                    let max = store.dense_max.load(Ordering::SeqCst);
+                    let max = store.scan_max();
                     for k in 0..max {
-                        slots.slot(k).store(SLOT_EMPTY, Ordering::Relaxed);
+                        // Clear only non-EMPTY slots: a blind store would commit
+                        // every untouched page of the full-region scan.
+                        let slot = slots.slot(k);
+                        if slot.load(Ordering::Relaxed) != SLOT_EMPTY {
+                            slot.store(SLOT_EMPTY, Ordering::Relaxed);
+                        }
                     }
                 }
                 store.dense_count.store(0, Ordering::Relaxed);
@@ -428,11 +459,30 @@ pub fn drop_table(id: u64) -> bool {
     }
 }
 
-/// `(table-count t)` — number of entries.
+/// `(table-count t)` — number of entries. Once JIT'd code holds the dense slot
+/// region (`jit_shared` — inline ops don't maintain the exact counter), the
+/// dense count is a full-region tally instead: O(region), still exact.
 pub fn count(id: u64) -> Result<i64, LispError> {
     let store = lookup(id)?;
     if store.dense.load(Ordering::Acquire) {
-        return Ok(store.dense_count.load(Ordering::Relaxed) as i64);
+        if !store.jit_shared.load(Ordering::SeqCst) {
+            return Ok(store.dense_count.load(Ordering::Relaxed) as i64);
+        }
+        if let Some(slots) = store.slots.get() {
+            let mut n = 0i64;
+            for k in 0..store.scan_max() {
+                let s = slots.slot(k).load(Ordering::Relaxed);
+                if s != SLOT_EMPTY && s != SLOT_MOVED {
+                    n += 1;
+                }
+            }
+            if store.dense.load(Ordering::SeqCst) {
+                return Ok(n);
+            }
+            // A migration raced the tally — fall through to the hashed count.
+        } else {
+            return Ok(0);
+        }
     }
     let data = store.hashed.lock().expect("table store mutex");
     match &*data {
@@ -710,7 +760,7 @@ pub fn snapshot(heap: &mut Heap, id: u64) -> LispResult {
         if store.dense.load(Ordering::Acquire) {
             let mut raw = Vec::new();
             if let Some(slots) = store.slots.get() {
-                let max = store.dense_max.load(Ordering::SeqCst);
+                let max = store.scan_max();
                 for k in 0..max {
                     let s = slots.slot(k).load(Ordering::SeqCst);
                     if s == SLOT_MOVED {
@@ -747,4 +797,24 @@ fn snapshot_hashed(store: &Store) -> Vec<(Message, Message)> {
     let mut guard = store.hashed.lock().expect("table store mutex");
     let map = store.hashed_or_migrate(&mut guard);
     map.values().flat_map(|b| b.iter().cloned()).collect()
+}
+
+/// Hand the dense slot region of table `id` to JIT'd code: `(slots_base,
+/// dense_flag)` raw pointers, or `None` when the table is missing/dropped/
+/// hashed. The region is a process-lifetime anonymous mapping that never moves
+/// (stable across GC, compaction, and even `table-drop` — see "Lifetime"), so
+/// baked pointers cannot dangle; every inline op re-checks the `dense` flag
+/// after its slot access and re-routes to the FFI path when it flipped
+/// (migration or drop) — the exact per-op protocol the Rust ops use. Latches
+/// `jit_shared` BEFORE the pointer escapes, so scans switch to full-region
+/// coverage no later than any inline write they could observe.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_dense_base(id: u64) -> Option<(*const AtomicU64, *const AtomicBool)> {
+    let store = lookup(id).ok()?;
+    if !store.dense.load(Ordering::SeqCst) {
+        return None;
+    }
+    store.jit_shared.store(true, Ordering::SeqCst);
+    let slots = store.dense_slots();
+    Some((slots.0, &store.dense as *const AtomicBool))
 }

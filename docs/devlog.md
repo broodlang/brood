@@ -4297,3 +4297,36 @@ Verified: suite 777/777; `nest check` zero warnings; 3-engine bit-identical on
 10 rows; GC_STRESS + GC_VERIFY + JIT_VERIFY clean; the concurrent-table race
 test exact. `Heap::hash_int` is the one heap API addition (int structural hash,
 heap-free, for migration).
+
+## 2026-07-16 — JIT inlines dense table ops (sieve 0.10 → 0.06 s, 4/7 → 3/7)
+
+The wrapper chain around one xchg — `brood_rt_table_put` arg marshalling 12%,
+`table::put` prologue, `lookup` 4%, `check_key` 3% — was ~70% of what remained
+of sieve. The vector LICM (`brood_rt_vector_base`, matmul) already shows the
+shape, and the lock-free rewrite made it LEGAL for tables: the dense slot
+region is one process-lifetime mmap that never moves (not a heap object —
+stable across GC and compaction), and migration/drop are observable per-op via
+the MOVED sentinel + dense flag.
+
+So: `Op::HoistedTable` — when a hoisted scalar global resolves (at arm entry,
+via the new `brood_rt_table_dense_base`) to a dense table, its slot base + flag
+address ride with the value words. A `(table-put g k v)` in the loop is then
+ONE inline atomic xchg (key bounds-checked, value tag-encoded inline —
+Int/Bool/Nil, mirroring `slot_enc`) + the protocol's post-op flag check; a
+`(table-has? g k)` is one atomic load. **Every guard failure — null base
+(hashed/non-table global), non-int or out-of-range key, unencodable value,
+MOVED, flag flipped — branches to the per-op FFI block, never a deopt**, so an
+odd shape can't thrash the arm (the advance-body lesson) and a hashed table
+just keeps its FFI cost. A rebind of the global itself is the existing
+back-edge epoch guard's job. Inline ops skip the exact-count/watermark upkeep,
+so handing out a base latches `jit_shared` on the store: `table-count` tallies
+by scan and migration/snapshot/drop scan the full region (reads of untouched
+zero pages commit nothing).
+
+sieve 0.10 → **0.06 s** (compute ~30 ms — past Elixir's 53, **4/7 → 3/7**;
+ahead only node 6 ms / .NET 3 ms, both on native arrays). Verified: suite
+777/777; 3-engine bit-identical; GC_STRESS + GC_VERIFY + JIT_VERIFY clean;
+`nest check` zero warnings; a 5×-repeated race of a JIT'd 200k-put loop against
+a mid-run dense→hashed migration (string key from another process) loses
+nothing (`bad: 0`, exact count, every value intact); the full sweep flat
+everywhere else (regex/json/persistent-map — the other table users — unchanged).

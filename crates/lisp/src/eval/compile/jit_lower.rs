@@ -1952,6 +1952,12 @@ fn jit_lower_arm_inner(
     let vbase_id = m
         .declare_function("brood_rt_vector_base", Linkage::Import, &vbase_sig)
         .ok()?;
+    // brood_rt_table_dense_base(heap, table 3 words, out_flag: *mut i64) -> *const u8:
+    // resolve a hoisted global table's dense slot region once (the sieve lever); null ⇒
+    // non-table / hashed / dropped (per-op FFI path used instead). Same shape as vbase.
+    let tdbase_id = m
+        .declare_function("brood_rt_table_dense_base", Linkage::Import, &vbase_sig)
+        .ok()?;
     // brood_rt_global_epoch(heap) -> i64: the process global-rebind epoch, for the
     // back-edge guard that keeps a hoisted global vector bit-identical to the VM's late
     // binding (deopt if the global was rebound). Only declared/used when hoisting a global.
@@ -2057,6 +2063,7 @@ fn jit_lower_arm_inner(
     let tget_ref = m.declare_func_in_func(tget_id, b.func);
     let tput_ref = m.declare_func_in_func(tput_id, b.func);
     let vbase_ref = m.declare_func_in_func(vbase_id, b.func);
+    let tdbase_ref = m.declare_func_in_func(tdbase_id, b.func);
     let gepochptr_ref = m.declare_func_in_func(gepochptr_id, b.func);
     let const_load_ref = m.declare_func_in_func(const_load_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
@@ -2159,6 +2166,33 @@ fn jit_lower_arm_inner(
             cranelift_codegen::ir::Value,
         ),
     > = std::collections::HashMap::new();
+    // Hoisted global dense tables (the sieve lever): sym → (slots base — possibly
+    // NULL at runtime for a hashed/non-table global, checked per op —, dense-flag
+    // address, and the global's entry-resolved `Value` words).
+    let mut hoisted_table: std::collections::HashMap<
+        Symbol,
+        (
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+        ),
+    > = std::collections::HashMap::new();
+    // Only pay the entry-time dense-base resolution when the body has table ops
+    // a hoisted table could serve.
+    let chunk_has_table_ops = code.iter().any(|i| {
+        matches!(
+            i,
+            Inst::Prim3 {
+                op: PrimOp3::TablePut,
+                ..
+            } | Inst::Prim2 {
+                op: PrimOp::TableHas,
+                ..
+            }
+        )
+    });
     let mut entry_epoch: Option<cranelift_codegen::ir::Value> = None;
     // Fetch the global-epoch counter's address once here in the entry block (which dominates
     // every loop/call block) when the arm reads the epoch on a hot path — a hoisted-global
@@ -2334,6 +2368,18 @@ fn jit_lower_arm_inner(
                 .ins()
                 .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
             hoisted_scalar.insert(sym, (w0, w1, w2));
+            // Dense-table hoist (the sieve lever): resolve this global's dense slot
+            // region once. NO branch here — a null base (non-table / hashed /
+            // dropped) is carried and checked per op, so such an arm never deopts,
+            // it just uses the per-op FFI path.
+            if chunk_has_table_ops {
+                let c = b.ins().call(tdbase_ref, &[heap, w0, w1, w2, len_addr]);
+                let slots = b.inst_results(c)[0];
+                let flag = b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), len_addr, 0);
+                hoisted_table.insert(sym, (slots, flag, w0, w1, w2));
+            }
         }
         if !hoisted_global.is_empty() || !hoisted_scalar.is_empty() {
             let ep_ptr = epoch_ptr.expect("epoch_ptr fetched when globals are hoisted");
@@ -2579,6 +2625,21 @@ fn jit_lower_arm_inner(
             w1: cranelift_codegen::ir::Value,
             w2: cranelift_codegen::ir::Value,
         },
+        // A hoisted invariant **global dense table** (the sieve lever): its resolved
+        // `Value` words PLUS the dense slot region base and the store's `dense`-flag
+        // address, resolved once at entry (`brood_rt_table_dense_base`). A
+        // `table-put`/`table-has?` on this global with an int key becomes ONE inline
+        // atomic slot op + a flag re-check; any guard failure (MOVED sentinel, flag
+        // flipped by a migration/drop, out-of-range key, unencodable value) falls
+        // back to the per-op FFI callback, which handles the full semantics. The
+        // back-edge epoch guard covers a rebind of the global itself.
+        HoistedTable {
+            slots: cranelift_codegen::ir::Value,
+            flag: cranelift_codegen::ir::Value,
+            w0: cranelift_codegen::ir::Value,
+            w1: cranelift_codegen::ir::Value,
+            w2: cranelift_codegen::ir::Value,
+        },
     }
     let done_block = leader_block[len]?;
     // Store an unboxed scalar `Op::Int` value into frame slot `k`, boxing it as `Int` or
@@ -2696,6 +2757,8 @@ fn jit_lower_arm_inner(
             // A hoisted global vector used as a whole `Value` (any non-`VectorRef`
             // consumer): its entry-resolved words move verbatim, exactly like a `Handle`.
             Op::HoistedVec { w0, w1, w2, .. } => [w0, w1, w2],
+            // Same for a hoisted global table used as a whole `Value`.
+            Op::HoistedTable { w0, w1, w2, .. } => [w0, w1, w2],
         }
     };
     // Store the three words of a `Value` into frame slot `dst`.
@@ -2734,9 +2797,9 @@ fn jit_lower_arm_inner(
                 b.switch_to_block(cont);
                 w1
             }
-            // A hoisted global vector used as an int (a vector value isn't one) — tag-check
+            // A hoisted global vector/table used as an int (neither is one) — tag-check
             // its word like a `Handle` and deopt; sound, never expected to fire.
-            Op::HoistedVec { w0, w1, .. } => {
+            Op::HoistedVec { w0, w1, .. } | Op::HoistedTable { w0, w1, .. } => {
                 let tagb = b.ins().band_imm(w0, 0xff);
                 let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
                 let cont = b.create_block();
@@ -2846,7 +2909,7 @@ fn jit_lower_arm_inner(
                 b.switch_to_block(cont);
                 b.ins().bitcast(types::F64, MemFlagsData::new(), w1)
             }
-            Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } => {
+            Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
                 b.ins().jump(deopt, &[]);
                 let dead = b.create_block();
                 b.switch_to_block(dead);
@@ -2969,7 +3032,7 @@ fn jit_lower_arm_inner(
                 *s = None;
             }
         }
-        Op::HoistedVec { w0, w1, w2, .. } => {
+        Op::HoistedVec { w0, w1, w2, .. } | Op::HoistedTable { w0, w1, w2, .. } => {
             // Stored as a whole `Value` (its entry-resolved words), like a `Handle`.
             store_words(b, dst, [w0, w1, w2]);
             set_slot_float(dst, false);
@@ -3558,7 +3621,17 @@ fn jit_lower_arm_inner(
                     // (no per-iteration global read). The back-edge epoch guard deopts on a
                     // rebind, so this stays bit-identical to the VM's late binding. Falls
                     // through to the normal loop tail like the resolved-`Handle` path.
-                    if let Some(&(w0, w1, w2)) = hoisted_scalar.get(s) {
+                    if let Some(&(slots, flag, w0, w1, w2)) = hoisted_table.get(s) {
+                        // Hoisted dense table: words + slot region for the inline
+                        // table ops (a non-table-op consumer reads just the words).
+                        stack.push(Op::HoistedTable {
+                            slots,
+                            flag,
+                            w0,
+                            w1,
+                            w2,
+                        });
+                    } else if let Some(&(w0, w1, w2)) = hoisted_scalar.get(s) {
                         // Hoisted scalar global (#1): the value was resolved once at entry;
                         // reuse its words as a `Handle` (no per-access `brood_rt_global_ic`).
                         // The back-edge epoch guard deopts on a rebind (late-binding-exact).
@@ -4151,16 +4224,100 @@ fn jit_lower_arm_inner(
                         // `(table-has? t k)` / 2-arg `(table-get t k)`. `map[0]` picks
                         // which SOURCE is the table (a swapped wrapper reorders), exactly
                         // like the VM's `[sa, sb][map[0]]`.
-                        let s0 = read_words(&mut b, aa_op);
-                        let s1 = read_words(&mut b, bb_op);
-                        let (tbl, key) = if map[0] == 0 { (s0, s1) } else { (s1, s0) };
-                        let fref = if matches!(op, PrimOp::TableHas) {
-                            thas_ref
+                        let (tbl_op, key_op) = if map[0] == 0 {
+                            (aa_op, bb_op)
                         } else {
-                            tget_ref
+                            (bb_op, aa_op)
                         };
-                        let h = table_prim(&mut b, fref, tbl, key);
-                        stack.push(h);
+                        if let (
+                            PrimOp::TableHas,
+                            Op::HoistedTable {
+                                slots,
+                                flag,
+                                w0,
+                                w1,
+                                w2,
+                            },
+                        ) = (*op, tbl_op)
+                        {
+                            // Inline dense has? (the sieve lever): one atomic load of
+                            // the key's slot. Guard failures route to the FFI (exact
+                            // semantics, no deopt); an in-range EMPTY/set slot answers
+                            // inline, and an out-of-range int key is simply absent.
+                            let kw = read_words(&mut b, key_op);
+                            let ffi = b.create_block();
+                            let merge = b.create_block();
+                            b.append_block_param(merge, types::I8);
+                            let g_key = b.create_block();
+                            let g_bounds = b.create_block();
+                            let g_load = b.create_block();
+                            let g_flag = b.create_block();
+                            let absent = b.create_block();
+                            let nul = b.ins().icmp_imm(IntCC::Equal, slots, 0);
+                            b.ins().brif(nul, ffi, &[], g_key, &[]);
+                            b.switch_to_block(g_key);
+                            let ktag = b.ins().band_imm(kw[0], 0xff);
+                            let k_int = b.ins().icmp_imm(IntCC::Equal, ktag, TAG_INT as i64);
+                            b.ins().brif(k_int, g_bounds, &[], ffi, &[]);
+                            b.switch_to_block(g_bounds);
+                            let oob = b.ins().icmp_imm(
+                                IntCC::UnsignedGreaterThanOrEqual,
+                                kw[1],
+                                crate::table::DENSE_KEY_MAX,
+                            );
+                            b.ins().brif(oob, absent, &[], g_load, &[]);
+                            b.switch_to_block(absent);
+                            let no = b.ins().iconst(types::I8, 0);
+                            b.ins().jump(merge, &[BlockArg::Value(no)]);
+                            b.switch_to_block(g_load);
+                            let off = b.ins().imul_imm(kw[1], 8);
+                            let addr = b.ins().iadd(slots, off);
+                            let sv = b
+                                .ins()
+                                .atomic_load(types::I64, MemFlagsData::trusted(), addr);
+                            let moved =
+                                b.ins()
+                                    .icmp_imm(IntCC::Equal, sv, crate::table::SLOT_MOVED as i64);
+                            b.ins().brif(moved, ffi, &[], g_flag, &[]);
+                            b.switch_to_block(g_flag);
+                            let f = b
+                                .ins()
+                                .atomic_load(types::I8, MemFlagsData::trusted(), flag);
+                            let done = b.create_block();
+                            b.ins().brif(f, done, &[], ffi, &[]);
+                            b.switch_to_block(done);
+                            let present = b.ins().icmp_imm(
+                                IntCC::NotEqual,
+                                sv,
+                                crate::table::SLOT_EMPTY as i64,
+                            );
+                            b.ins().jump(merge, &[BlockArg::Value(present)]);
+                            // FFI fallback: the exact `table-has?`; its `Value::Bool`
+                            // result reduces to the same i8.
+                            b.switch_to_block(ffi);
+                            let h = table_prim(&mut b, thas_ref, [w0, w1, w2], kw);
+                            let hb = match h {
+                                Op::Handle(_, hw1, _) => {
+                                    let bit = b.ins().band_imm(hw1, 1);
+                                    b.ins().icmp_imm(IntCC::NotEqual, bit, 0)
+                                }
+                                _ => unreachable!("table_prim returns a Handle"),
+                            };
+                            b.ins().jump(merge, &[BlockArg::Value(hb)]);
+                            b.switch_to_block(merge);
+                            let out = b.block_params(merge)[0];
+                            stack.push(Op::Int(out));
+                        } else {
+                            let tbl = read_words(&mut b, tbl_op);
+                            let key = read_words(&mut b, key_op);
+                            let fref = if matches!(op, PrimOp::TableHas) {
+                                thas_ref
+                            } else {
+                                tget_ref
+                            };
+                            let h = table_prim(&mut b, fref, tbl, key);
+                            stack.push(h);
+                        }
                     } else if matches!(op, PrimOp::VectorRef) {
                         // `(vector-ref v i)` / inlined `(nth v i)`: map is `[0,1]`, so
                         // source 0 (`aa`) is the vector, source 1 (`bb`) the index.
@@ -4244,32 +4401,151 @@ fn jit_lower_arm_inner(
                     let val = stack.pop()?;
                     let key = stack.pop()?;
                     let tbl = stack.pop()?;
-                    let t = read_words(&mut b, tbl);
-                    let k = read_words(&mut b, key);
-                    let v = read_words(&mut b, val);
-                    let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
-                    let c = b.ins().call(
-                        tput_ref,
-                        &[
-                            heap, out_addr, t[0], t[1], t[2], k[0], k[1], k[2], v[0], v[1], v[2],
-                        ],
-                    );
-                    let status = b.inst_results(c)[0];
-                    let cont = b.create_block();
-                    let slow = b.create_block();
-                    b.ins().brif(status, slow, &[], cont, &[]);
-                    b.switch_to_block(slow);
-                    let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
-                    b.ins().brif(is_err, error, &[], deopt, &[]);
-                    b.switch_to_block(cont);
-                    let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-                    let w1 = b
-                        .ins()
-                        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-                    let w2 = b
-                        .ins()
-                        .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-                    stack.push(Op::Handle(w0, w1, w2));
+                    if let Op::HoistedTable {
+                        slots,
+                        flag,
+                        w0,
+                        w1,
+                        w2,
+                    } = tbl
+                    {
+                        // Inline dense put (the sieve lever): ONE atomic xchg on the
+                        // key's slot. Every guard failure — null base (hashed table),
+                        // non-int / out-of-range key, unencodable value, MOVED
+                        // sentinel, dense flag dropped — routes to the FFI block,
+                        // which runs the exact full semantics (never a deopt, so an
+                        // odd shape can't thrash the arm). The result is the table
+                        // handle either way — the hoisted words.
+                        use cranelift_codegen::ir::AtomicRmwOp;
+                        let kw = read_words(&mut b, key);
+                        let vw = read_words(&mut b, val);
+                        let ffi = b.create_block();
+                        let merge = b.create_block();
+                        let g_key = b.create_block();
+                        let g_bounds = b.create_block();
+                        let g_enc = b.create_block();
+                        let enc_done = b.create_block();
+                        b.append_block_param(enc_done, types::I64);
+                        let nul = b.ins().icmp_imm(IntCC::Equal, slots, 0);
+                        b.ins().brif(nul, ffi, &[], g_key, &[]);
+                        b.switch_to_block(g_key);
+                        let ktag = b.ins().band_imm(kw[0], 0xff);
+                        let k_int = b.ins().icmp_imm(IntCC::Equal, ktag, TAG_INT as i64);
+                        b.ins().brif(k_int, g_bounds, &[], ffi, &[]);
+                        b.switch_to_block(g_bounds);
+                        let oob = b.ins().icmp_imm(
+                            IntCC::UnsignedGreaterThanOrEqual,
+                            kw[1],
+                            crate::table::DENSE_KEY_MAX,
+                        );
+                        b.ins().brif(oob, ffi, &[], g_enc, &[]);
+                        // Encode the value into a tagged slot word (mirrors
+                        // `table::slot_enc`): Int (61-bit) / Bool / Nil; else FFI.
+                        b.switch_to_block(g_enc);
+                        let vtag = b.ins().band_imm(vw[0], 0xff);
+                        let enc_int_range = b.create_block();
+                        let t_bool = b.create_block();
+                        let v_int = b.ins().icmp_imm(IntCC::Equal, vtag, TAG_INT as i64);
+                        b.ins().brif(v_int, enc_int_range, &[], t_bool, &[]);
+                        b.switch_to_block(enc_int_range);
+                        let sh = b.ins().ishl_imm(vw[1], 3);
+                        let back = b.ins().sshr_imm(sh, 3);
+                        let fits = b.ins().icmp(IntCC::Equal, back, vw[1]);
+                        let enc_int_ok = b.create_block();
+                        b.ins().brif(fits, enc_int_ok, &[], ffi, &[]);
+                        b.switch_to_block(enc_int_ok);
+                        let wi = b.ins().bor_imm(sh, crate::table::INT_TAG as i64);
+                        b.ins().jump(enc_done, &[BlockArg::Value(wi)]);
+                        b.switch_to_block(t_bool);
+                        let v_bool = b.ins().icmp_imm(IntCC::Equal, vtag, TAG_BOOL as i64);
+                        let t_nil = b.create_block();
+                        let enc_bool = b.create_block();
+                        b.ins().brif(v_bool, enc_bool, &[], t_nil, &[]);
+                        b.switch_to_block(enc_bool);
+                        // Bool payload byte may carry padding above bit 0 — mask, then
+                        // 3 - bit → TRUE (1→2) / FALSE (0→3).
+                        let bit = b.ins().band_imm(vw[1], 1);
+                        let three = b.ins().iconst(types::I64, 3);
+                        let wb = b.ins().isub(three, bit);
+                        b.ins().jump(enc_done, &[BlockArg::Value(wb)]);
+                        b.switch_to_block(t_nil);
+                        // `Value::Nil`'s discriminant is 0 (declaration order).
+                        let v_nil = b.ins().icmp_imm(IntCC::Equal, vtag, 0);
+                        let enc_nil = b.create_block();
+                        b.ins().brif(v_nil, enc_nil, &[], ffi, &[]);
+                        b.switch_to_block(enc_nil);
+                        let wn = b.ins().iconst(types::I64, crate::table::SLOT_NIL as i64);
+                        b.ins().jump(enc_done, &[BlockArg::Value(wn)]);
+                        b.switch_to_block(enc_done);
+                        let word = b.block_params(enc_done)[0];
+                        let off = b.ins().imul_imm(kw[1], 8);
+                        let addr = b.ins().iadd(slots, off);
+                        let old = b.ins().atomic_rmw(
+                            types::I64,
+                            MemFlagsData::trusted(),
+                            AtomicRmwOp::Xchg,
+                            addr,
+                            word,
+                        );
+                        let moved =
+                            b.ins()
+                                .icmp_imm(IntCC::Equal, old, crate::table::SLOT_MOVED as i64);
+                        let g_flag = b.create_block();
+                        b.ins().brif(moved, ffi, &[], g_flag, &[]);
+                        // Post-op dense-flag re-check (the migration protocol on
+                        // `table::Store`): still dense → done; flipped → re-apply via
+                        // the FFI (an idempotent overwrite on the hashed map).
+                        b.switch_to_block(g_flag);
+                        let f = b
+                            .ins()
+                            .atomic_load(types::I8, MemFlagsData::trusted(), flag);
+                        b.ins().brif(f, merge, &[], ffi, &[]);
+                        b.switch_to_block(ffi);
+                        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        let c = b.ins().call(
+                            tput_ref,
+                            &[
+                                heap, out_addr, w0, w1, w2, kw[0], kw[1], kw[2], vw[0], vw[1],
+                                vw[2],
+                            ],
+                        );
+                        let status = b.inst_results(c)[0];
+                        let slow = b.create_block();
+                        b.ins().brif(status, slow, &[], merge, &[]);
+                        b.switch_to_block(slow);
+                        let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
+                        b.ins().brif(is_err, error, &[], deopt, &[]);
+                        b.switch_to_block(merge);
+                        stack.push(Op::Handle(w0, w1, w2));
+                    } else {
+                        let t = read_words(&mut b, tbl);
+                        let k = read_words(&mut b, key);
+                        let v = read_words(&mut b, val);
+                        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                        let c = b.ins().call(
+                            tput_ref,
+                            &[
+                                heap, out_addr, t[0], t[1], t[2], k[0], k[1], k[2], v[0], v[1],
+                                v[2],
+                            ],
+                        );
+                        let status = b.inst_results(c)[0];
+                        let cont = b.create_block();
+                        let slow = b.create_block();
+                        b.ins().brif(status, slow, &[], cont, &[]);
+                        b.switch_to_block(slow);
+                        let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
+                        b.ins().brif(is_err, error, &[], deopt, &[]);
+                        b.switch_to_block(cont);
+                        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
+                        let w1 = b
+                            .ins()
+                            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
+                        let w2 =
+                            b.ins()
+                                .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
+                        stack.push(Op::Handle(w0, w1, w2));
+                    }
                 }
                 Inst::Prim2SlotSlot {
                     op,
@@ -4529,9 +4805,10 @@ fn jit_lower_arm_inner(
                                     (PAYLOAD_OFFSET as i32 + 8, w2),
                                 ]);
                             }
-                            // A hoisted global vector passed as a self-call arg — moves its
-                            // three entry-resolved words verbatim, exactly like a `Handle`.
-                            Op::HoistedVec { w0, w1, w2, .. } => {
+                            // A hoisted global vector/table passed as a self-call arg —
+                            // moves its three entry-resolved words verbatim, like a `Handle`.
+                            Op::HoistedVec { w0, w1, w2, .. }
+                            | Op::HoistedTable { w0, w1, w2, .. } => {
                                 vals.push(vec![
                                     (0, w0),
                                     (PAYLOAD_OFFSET as i32, w1),

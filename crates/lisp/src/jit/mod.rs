@@ -119,6 +119,10 @@ impl Jit {
         builder.symbol("brood_rt_table_get2", brood_rt_table_get2 as *const u8);
         builder.symbol("brood_rt_table_put", brood_rt_table_put as *const u8);
         builder.symbol("brood_rt_vector_base", brood_rt_vector_base as *const u8);
+        builder.symbol(
+            "brood_rt_table_dense_base",
+            brood_rt_table_dense_base as *const u8,
+        );
         builder.symbol("brood_rt_global_epoch", brood_rt_global_epoch as *const u8);
         builder.symbol(
             "brood_rt_i64_overflow_ptr",
@@ -701,6 +705,35 @@ pub unsafe extern "C" fn brood_rt_vector_base(
             std::ptr::null()
         }
     }
+}
+
+/// Resolve a table value's **dense slot region** for the JIT's table hoist
+/// (the sieve lever — see `Op::HoistedTable` in `jit_lower`): the raw slots
+/// base, with the store's `dense`-flag address written to `*out_flag`. Returns
+/// null for a non-table / dropped / already-hashed store, in which case the
+/// per-op FFI path is used. The region is process-lifetime and never moves
+/// (stable across GC and compaction — it is not a heap object), so the baked
+/// pointers cannot dangle; the per-op flag re-check routes to the FFI when the
+/// table migrates or drops. See `table::jit_dense_base`.
+///
+/// # Safety
+/// Called from JIT'd code with the live heap pointer and a valid out param.
+pub unsafe extern "C" fn brood_rt_table_dense_base(
+    _heap: *mut Heap,
+    w0: i64,
+    w1: i64,
+    w2: i64,
+    out_flag: *mut i64,
+) -> *const u8 {
+    use crate::core::value::Value;
+    if let Value::Table(id) = words_to_val(w0, w1, w2) {
+        if let Some((slots, flag)) = crate::table::jit_dense_base(id) {
+            *out_flag = flag as i64;
+            return slots as *const u8;
+        }
+    }
+    *out_flag = 0;
+    std::ptr::null()
 }
 
 /// The process global-rebind epoch ([`Heap::global_epoch`]). Used by the JIT's
