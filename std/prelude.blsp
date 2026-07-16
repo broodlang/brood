@@ -1282,6 +1282,53 @@ its printed form."
     (when (and (match-irrefutable? (nth parsed 0) (nth parsed 1)) (not (empty? following)))
       (error "match: unreachable clause after a catch-all (an irrefutable pattern must come last)"))))
 
+;; Occurrences of symbol `s` in code tree `form` (pairs only — `s` is a gensym,
+;; so quoted user data can never contain it and vectors need no descent).
+(defn match-count-sym (form s)
+  (cond
+    (= form s) 1
+    (pair? form) (+ (match-count-sym (first form) s) (match-count-sym (rest form) s))
+    else 0))
+
+;; Replace each `(k)` call in code tree `form` with `code` (used only when the
+;; duplication is bounded — one use, or a small `code`).
+(defn match-splice-fail (form k code)
+  (cond
+    (and (pair? form) (= (first form) k) (nil? (rest form))) code
+    (pair? form) (cons (match-splice-fail (first form) k code)
+                   (match-splice-fail (rest form) k code))
+    else form))
+
+;; Remaining budget after counting `form`'s pair nodes, or -1 once exhausted —
+;; an early-exit size probe (big trees aren't walked past the budget).
+(defn match-size-budget (form budget)
+  (cond
+    (< budget 0) -1
+    (pair? form) (match-size-budget (rest form) (match-size-budget (first form) (- budget 1)))
+    else budget))
+
+(defn match-small? (form) (>= (match-size-budget form 64) 0))
+
+;; Compile one clause with `rest-code` (the code for every following clause) as
+;; its fail-continuation — WITHOUT exponential growth. The pattern compilers
+;; splice `fail` at every failure point, so handing them `rest-code` verbatim
+;; duplicates it once per test and the whole match doubles per clause (a 16-arm
+;; receive took seconds to load). Instead compile against a thunk call `(k)`,
+;; then: 0 uses → drop rest-code (irrefutable pattern, later clauses dead);
+;; 1 use → splice rest-code in place (zero runtime cost, growth stays linear);
+;; 2+ uses of a SMALL rest-code → still splice (bounded duplication — the hot
+;; 2–4-arm receive/fn dispatch stays thunk-free, zero runtime cost); 2+ uses of
+;; a big one → bind it once as `(let (k (fn () rest-code)) …)`. The `(k)` call
+;; is in tail position wherever fail was, so match stays TCO-safe.
+(defn match-build-clause (clause target rest-code)
+  (let (k (gensym "mfail")
+        compiled (match-compile-clause clause target (list k))
+        uses (match-count-sym compiled k))
+    (cond
+      (= uses 0) compiled
+      (or (= uses 1) (match-small? rest-code)) (match-splice-fail compiled k rest-code)
+      else `(let (~k (fn () ~rest-code)) ~compiled))))
+
 ;; Chain the clauses: each clause's fail-continuation is the code for the rest;
 ;; the innermost fail is the structured no-match throw. Each chosen body lands in
 ;; tail position of the generated if/let, so a `match` in tail position is TCO-safe.
@@ -1292,7 +1339,7 @@ its printed form."
           following (rest clauses)
           rest-code (match-build-from following target fail))
       (match-check-reachable clause following)
-      (match-compile-clause clause target rest-code))))
+      (match-build-clause clause target rest-code))))
 
 (defn match-build (clauses target context)
   (match-build-from clauses target (match-no-match context target (match-clause-patterns clauses))))
@@ -2864,8 +2911,15 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; someone else is mid-load: wait for their provide (never see a partial module)
       (contains? *features-loading* key) (require--await key 1000)
       :else
+      ;; Clear the in-flight marker on BOTH exits: a load that throws (module not
+      ;; found, or an error inside its source) must not leave `key` marked, or
+      ;; every later require of it stalls the full `require--await` window
+      ;; (~5s of 5ms ticks) before taking the load over.
       (do (def *features-loading* (assoc *features-loading* key (self)))
-        (require--force key)
+        (try (require--force key)
+          (catch e
+            (do (def *features-loading* (dissoc *features-loading* key))
+              (throw e))))
         (def *features-loading* (dissoc *features-loading* key))
         key))))
 

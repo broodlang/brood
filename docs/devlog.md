@@ -4129,3 +4129,52 @@ json's 396 load in ~0, so large-module load time is superlinear/pathological and
 speed up real editor + `nest` startup broadly. The general lesson: a benchmark's wall
 time includes process startup, and a stray `:use` taxes *every* run — measure load vs
 work before optimizing the work.
+
+## 2026-07-16 — match/receive lowering was EXPONENTIAL in arm count (editor/buffer load 297 → 7 ms); require's stale in-flight marker (5 s stall on a failed load)
+
+Chased the "editor/buffer loads 0.33 s for 862 lines" follow-on. It was neither
+module size nor the loader: a synthetic module of **800 trivial defns loads in
+12 ms** (perfectly linear), and per-form timing (`read-all` + `eval` each top-level
+form) fingered **one form** — `buffer--serve`, the 15-arm `receive` loop — at
+206 ms of the 297 and ~130 MB of RSS.
+
+**Root cause: `match-build-from` compiled each clause with the full rest-of-clauses
+code as its fail continuation, and the pattern compilers splice `fail` at EVERY
+failure point** — a vector pattern pastes it once per element test, so the tree
+~doubles per arm. Measured: 8-arm receive 15 ms, 12 arms 331 ms, **16 arms 7.0 s**
+(plain `match` identical). Every multi-arm `match`/`receive`/multi-clause `fn` in
+any program paid this at compile/load time.
+
+**Fix (std/prelude.blsp, `match-build-clause`):** compile the clause against a
+gensym'd thunk call `(k)` instead, count its uses in the compiled tree, then:
+0 uses → drop rest-code (irrefutable pattern, rest is dead); 1 use **or small
+rest-code** (≤64 pair nodes, early-exit budget probe) → splice it in place —
+bounded duplication, so the hot 2–4-arm dispatch (pingpong's receive) generates
+**identical code to before**, zero runtime cost; otherwise bind once as
+`(let (k (fn () rest-code)) …)`. `(k)` sits exactly where `fail` did — tail
+position — so TCO through a chain of fail thunks holds (verified: 200k iterations
+falling through 11 arms, O(1) stack). The small-inline threshold matters: the first
+cut thunked unconditionally and cost pingpong +7% (a thunk alloc per received
+message); with it, old-vs-new benchmarks are flat (pingpong/ring/fib/collatz/json/
+nqueens/bintree/sort/regex/errors-deep, interleaved best-of-N).
+
+Results: `match` 16 clauses 3441 → **2 ms**; 16-arm receive 6981 → 2 ms;
+`require 'editor/buffer` 297 → **7 ms** (whole process 0.32 s / 153 MB →
+0.03 s / 27 MB); `sexp` (uses buffer) 294 → **11 ms**. Anything loading the
+editor stack — brood-edit boot, `nest` tooling over sexp — gets ~290 ms back.
+Verified: suite 777/777; `nest check` zero warnings; the match-semantics gauntlet
+(guards, list/vector/map/string/int patterns, `& rest`, `:or` defaults, no-match
+throw, cross-process receive) bit-identical on all 3 engines; GC-stress clean.
+
+**Bug #2, found via the same diagnosis:** a `require` whose load THROWS (module
+not found, or an error inside its source) left its `*features-loading*` marker
+behind — a later require of that key in another process stalled the full
+`require--await` window (**~5 s** of 5 ms ticks) before taking the load over, and
+a same-process retry silently "succeeded" via the circular-require check. A failed
+`(require 'nope)` measured 5.4 s wall / 0.3 s CPU. `require-one` now clears the
+marker on the throw path too (catch → dissoc → rethrow); a failed require errors
+instantly and a retry attempts the load afresh.
+
+Lesson: "superlinear module load" was really "one pathological form" — time the
+forms, not the file. And the old benchmark memory's "regex residual is module
+load" chain ends here: the load cost itself was the match expansion.
