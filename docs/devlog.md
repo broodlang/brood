@@ -4424,3 +4424,23 @@ Verified: the xfail repro flips to green and is **promoted to
 `table-incr` coverage (8/8 ×5 incl. GC-stress); suite 777/777; `make stress`
 fully green (no xfails remain); 3-engine bit-identical ×8 rows; `nest check`
 clean; benchmarks flat vs the `BROOD_NO_DEOPT_RESUME` baseline.
+
+## 2026-07-16 — stress suite grows external-style batteries (R7RS- and Clojure-inspired)
+
+`make stress` now also runs two adapted correctness batteries: 
+**core_semantics** (the shapes Chibi's R7RS suite exercises, asserted against
+Brood's documented semantics — i64 edges + exact bigint promotion, truncating
+`quot`/`rem`, exact-vs-float `/`, type-strict `=` with cross-type ordering,
+IEEE float identities, unicode char-indexed strings, 1M-deep self- and
+mutual-tail calls, closure/scoping laws, structured throw/catch through 50k
+frames) and **collections** (Clojure-style invariants: CHAMP assoc/dissoc
+round-trips at 20k scale with immutability asserts, exact counts under churn,
+merge bias, mixed-type keys, vector index ops, and the sequence laws —
+map composition, filter/remove partition, fold associativity, take/drop
+partition, reverse involution, sort idempotence, 10k-map deep equality).
+39 new cases, swept across engines + GC-stress by the runner. Two
+actual-semantics findings while writing them: `nth` out-of-range on a vector
+is nil (not an error; `get` takes its default), and `docs/brood-for-claude.md`
+line ~273 mentions `conj` for vector append but no `conj` exists (`append`
+returns a LIST even from vector inputs) — doc or design gap, left for a
+deliberate decision rather than a drive-by edit.

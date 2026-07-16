@@ -29,7 +29,7 @@ for f in stress/*_test.blsp; do
   [[ $f == */xfail_* ]] || run_one "$f" "BROOD_VM=1 BROOD_NO_JIT=1" "no-jit "
 done
 # GC-stress pass on the table suites (the GC-sensitive ones); loops are too slow under stress
-for f in stress/table_model_test.blsp stress/match_props_test.blsp; do
+for f in stress/table_model_test.blsp stress/match_props_test.blsp stress/core_semantics_test.blsp stress/collections_test.blsp; do
   run_one "$f" "BROOD_VM=1 BROOD_GC_STRESS=1" "gc-str "
 done
 

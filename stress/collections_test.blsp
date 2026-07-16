@@ -1,0 +1,105 @@
+;; STRESS — persistent collection battery, adapted from the invariants
+;; Clojure's collection suite checks: CHAMP map algebra at scale (assoc/dissoc
+;; round-trips, unordered equality, merge), vectors, and the sequence-function
+;; laws (map/filter/fold identities, take/drop, reverse involution). Immutability
+;; is asserted throughout — every op must leave its input untouched.
+
+(defmodule collections-stress-test (:use test))
+
+(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+
+;; build a map of n entries keyed by a PRNG walk (collision-ish key space)
+(defn build (m s n)
+  (if (= n 0) m
+    (let (s2 (lcg s)) (build (assoc m (rem s2 4096) s2) s2 (- n 1)))))
+
+(describe "maps: CHAMP algebra at scale"
+  (test "assoc/dissoc round-trip leaves the original untouched"
+    (let (m (build {} 7 20000)
+          m2 (assoc m :extra 1))
+      (do
+        (assert= (contains? m :extra) false)      ; immutability
+        (assert= (get m2 :extra) 1)
+        (assert= (dissoc m2 :extra) m)            ; structural round-trip
+        true)))
+  (test "count is exact after heavy assoc/dissoc churn"
+    (let (m (build {} 21 20000)
+          gone (fold (fn (mm k) (dissoc mm k)) m (keys m)))
+      (do (assert= (count gone) 0) (assert= gone {}) true)))
+  (test "assoc twice with the same key keeps one entry, last value wins"
+    (let (m (assoc (assoc {} :k 1) :k 2))
+      (do (assert= (count m) 1) (assert= (get m :k) 2) true)))
+  (test "merge: right side wins, both inputs untouched"
+    (let (a {:x 1 :y 2} b {:y 9 :z 3} m (merge a b))
+      (do (assert= m {:x 1 :y 9 :z 3})
+        (assert= a {:x 1 :y 2}) (assert= b {:y 9 :z 3})
+        true)))
+  (test "keys/vals agree with get over a 10k map"
+    (let (m (build {} 63 10000))
+      (do
+        (fold (fn (_ k) (assert= (contains? m k) true)) nil (keys m))
+        (assert= (count (keys m)) (count m))
+        (assert= (count (vals m)) (count m))
+        true)))
+  (test "mixed-type keys coexist"
+    (let (m {1 :int "1" :str :one :kw [1] :vec})
+      (do (assert= (get m 1) :int) (assert= (get m "1") :str)
+        (assert= (get m :one) :kw) (assert= (get m [1]) :vec)
+        (assert= (count m) 4)
+        true))))
+
+(describe "vectors: indexed ops + immutability"
+  (test "assoc-by-index replaces without touching the source"
+    (let (v [1 2 3] v2 (assoc v 1 :x))
+      (do (assert= v [1 2 3]) (assert= v2 [1 :x 3]) true)))
+  (test "into builds a vector; nth/get agree"
+    (let (v (into [] (range 1000)))
+      (do (assert= (count v) 1000)
+        (assert= (nth v 999) 999) (assert= (get v 500) 500)
+        true)))
+  (test "out-of-range nth is nil; get takes its default"
+    (do (assert= (nth [1 2] 5) nil)
+      (assert= (get [1 2] 5 :dflt) :dflt)
+      true)))
+
+(describe "sequence laws"
+  (test "map identity / composition"
+    (let (xs (range 500))
+      (do (assert= (map (fn (x) x) xs) (seq xs))
+        (assert= (map (fn (x) (* 2 (+ x 1))) xs)
+          (map (fn (x) (* 2 x)) (map inc xs)))
+        true)))
+  (test "filter splits: (filter p) ++ (remove p) permutes the input"
+    (let (xs (range 1000)
+          evens (filter (fn (x) (= (rem x 2) 0)) xs)
+          odds (remove (fn (x) (= (rem x 2) 0)) xs))
+      (do (assert= (+ (count evens) (count odds)) 1000)
+        (assert= (fold + 0 evens) 249500)
+        (assert= (fold + 0 odds) 250000)
+        true)))
+  (test "fold is left-associative"
+    (assert= (fold (fn (acc x) (cons x acc)) () (list 1 2 3)) (list 3 2 1)))
+  (test "take/drop partition"
+    (let (xs (range 100))
+      (do (assert= (concat (take 30 xs) (drop 30 xs)) (seq xs))
+        (assert= (take 0 xs) ())
+        (assert= (count (drop 100 xs)) 0)
+        true)))
+  (test "reverse is an involution; count-preserving"
+    (let (xs (map (fn (x) (* x 3)) (range 777)))
+      (do (assert= (reverse (reverse xs)) (seq xs))
+        (assert= (count (reverse xs)) 777)
+        true)))
+  (test "sort is idempotent, stable-length, ordered"
+    (let (s1 (sort [5 3 9 1 3 5 0]))
+      (do (assert= s1 (list 0 1 3 3 5 5 9))
+        (assert= (sort s1) s1)
+        true))))
+
+;; big structural equality — the CHAMP hash/equality path over deep values
+(describe "deep structural equality at scale"
+  (test "two independently-built 10k maps compare equal"
+    (assert= (build {} 99 10000) (build {} 99 10000)))
+  (test "one differing leaf breaks equality"
+    (let (a (build {} 5 5000) b (assoc (build {} 5 5000) 12345678 :odd))
+      (assert= (= a b) false))))
