@@ -4228,12 +4228,16 @@ impl ProgramState {
     /// A top-level form raised: publish the located message to the root thread and retire
     /// the process `:normal` (it handled its own crash), so the scheduler prints nothing.
     fn crash(&self, e: LispError) -> VmOutcome {
-        let msg = format!("{}", e.located());
-        let msg = match &self.file {
-            Some(f) if !msg.contains(f.as_str()) => format!("{}: {}", f, msg),
-            _ => msg,
+        // Attach the file to the error's own field (innermost `load` wins, a no-op if
+        // already set) so `located()` renders the canonical `file:LINE:COL: msg` — NOT
+        // string-prepend `file: ` onto an already-located `LINE:COL: msg`, which emits a
+        // stray space (`file: LINE:COL:`) that diverges from the tree-walker's editor-
+        // parseable form. (Found by the differential fuzzer, 2026-07-16.)
+        let e = match &self.file {
+            Some(f) => e.or_file(f.clone()),
+            None => e,
         };
-        self.exit.publish(Err(msg));
+        self.exit.publish(Err(e.located()));
         VmOutcome::Done(Value::nil())
     }
 }

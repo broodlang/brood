@@ -4605,3 +4605,38 @@ nothing.
 Verified: min repro and seed 20108 now agree across all engines; float/bool/int
 reuse shapes all bit-identical VM↔JIT; new regression `tests/jit_let_slot_reuse_test.blsp`
 (4 tests); 800 fresh fuzz seeds clean; full suite green (2754 in-language).
+
+## 2026-07-16 — Coverage-guided fuzzing finds a second bug: VM error-format divergence
+
+Pushed the differential fuzzer harder. Two structural upgrades, one real bug.
+
+**Grammar expansion + coverage guidance.** `llvm-cov` over a fuzzer sample showed
+the generated programs hit only **64%** of `jit_lower.rs` — and the 21 dark
+functions were almost entirely the **i64 fast-path lowerer** (`jit_lower_arm_inner`
+& gates). The table/closure/match-heavy programs are too complex to qualify for
+that specialised SSA path, so a whole second JIT engine was unfuzzed. Added a
+restricted pure-i64 expression generator + standalone pure self-recursive numeric
+fns (int accumulator, fib-like non-tail double recursion, float recursion), which
+lift `jit_lower_arm_inner` from 0% to 23–98%. Also added maps-as-values, try/catch,
+nested closures, process trees (spawn+monitor+selective-receive), and a
+slot/operand-torture helper (sibling `let`s in operand positions + shadowing — the
+neighbourhood of the sibling-let slot-reuse bug).
+
+**Harness hardening: re-confirm before reporting.** A concurrent instrumented build
+starved fuzzer subprocesses and produced two "divergences" that vanished on re-run
+(220×/120× identical). The fuzzer now re-runs a flagged seed 3× and only reports if
+it STILL diverges — a real engine-diff reproduces, an OS-contention artifact
+converges. Makes the sweep trustworthy under load.
+
+**The bug (fuzzer seed 70002, pure-recursive shape).** The `brood` file runner
+rendered a top-level runtime error as `file: LINE:COL: msg` under the VM/JIT but the
+canonical `file:LINE:COL: msg` under the tree-walker — a stray space, and the VM's
+form is NOT the `file:line:col` shape editors/LSP parse. Root cause:
+`ProgramState::crash` called `located()` *before* the file was attached (yielding
+`LINE:COL: msg`), then string-prepended `file: ` with a space. Fixed to attach the
+file to the error's own field (`or_file`) so `located()` renders the canonical
+prefix once, identical to the tree-walker. CI regression:
+`crates/cli/tests/error_format_parity.rs` (type/unbound/arity/thrown errors, all
+three engines byte-identical). Also tightened the generator so the driver never
+bit-ands a float-helper result (gratuitous type errors; floats covered by the pure
+`flt` recursion). Full suite 779 green; error-parity 4/4.
