@@ -336,6 +336,24 @@ class Gen:
                 f"  (if (<= n 0) a\n"
                 f"    ({fln} (- n 1) (+ (* a 1.0000001) (- (* n 0.5) a)))))")
             lines.append(f'(println "{fln}" (< ({fln} {r.choice([1500, 3000])} 1.0) 1.0e18))')
+        # UNMASKED-overflow recursion — the i64 arm's overflow guard
+        # (`i64_guard_overflow`) must deopt to the VM, which promotes to a bignum
+        # (never silently wrap). The bignum result is engine-independent.
+        if r.random() < 0.4:
+            ovn = self.name("ov")
+            base = r.choice([2, 3, 5])
+            lines.append(
+                f"(defn {ovn} (n a) (if (<= n 0) a ({ovn} (- n 1) (* a {base}))))")
+            lines.append(f'(println "{ovn}" ({ovn} {r.choice([40, 50, 80])} {r.randint(2, 9)}))')
+        # THROW inside an i64 arm (`i64_throw_call`) — the throw fires from the
+        # recursion and is caught deterministically.
+        if r.random() < 0.4:
+            trn = self.name("thr")
+            lines.append(
+                f"(defn {trn} (n a)\n"
+                f"  (if (<= n 0) (throw [:done a])\n"
+                f"    ({trn} (- n 1) (bit-and (+ (* a 2) n) 268435455))))")
+            lines.append(f'(println "{trn}" (try ({trn} {r.choice([2000, 5000])} 1) (catch e (nth e 1))))')
         # digest: accumulator + table contents
         lines.append(
             "(defn dig (k n s)\n"

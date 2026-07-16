@@ -4640,3 +4640,21 @@ prefix once, identical to the tree-walker. CI regression:
 three engines byte-identical). Also tightened the generator so the driver never
 bit-ands a float-helper result (gratuitous type errors; floats covered by the pure
 `flt` recursion). Full suite 779 green; error-parity 4/4.
+
+## 2026-07-16 — ASAN pass: kernel is memory-clean; i64-path fuzz edges
+
+**AddressSanitizer** (`make asan`: nightly + `-Zbuild-std` + `system-alloc` so
+ASAN intercepts allocations instead of mimalloc's un-instrumented arena) over the
+whole `-p brood` test surface — every integration test, plus the entire
+in-language suite via `suite.rs` (45 s under ASAN). **Zero AddressSanitizer /
+UBSan reports.** The unsafe substrate — the 2^23-slot mmap dense-table + its
+lock-free migration, JIT codegen buffers, the moving GC, the scheduler, promote/
+spawn — is memory-clean, not just logically-clean (the GC tripwires) and race-
+clean (TSAN). The one non-finding: doctests don't LINK under ASAN + build-std (a
+toolchain quirk), so the target runs `--tests` (skips doctests).
+
+**Fuzz grammar, i64-path edges.** Coverage showed two still-dark i64-arm paths:
+`i64_guard_overflow` (an unmasked overflow that must deopt to a bignum, never
+wrap) and `i64_throw_call` (a `throw` inside an i64 arm). Added an unmasked-
+overflow pure recursion (`(* a base)` to a bignum) and a throw-in-recursion
+(caught) to the pure-recursive generator section.
