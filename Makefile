@@ -159,6 +159,9 @@ quickbench: ## Fast (~10s) benchmark for iteration — no archive, few samples
 suite: ## Run the in-language suite via the project runner (discovers tests/**/*_test.blsp)
 	$(NEST) test
 
+stress: build ## The occasional BIG stress run (property/differential/race tests, 3 engines) — not part of CI
+	./stress/run.sh
+
 repl: ## Start the REPL
 	$(CLI)
 

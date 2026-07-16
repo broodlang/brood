@@ -4330,3 +4330,52 @@ ahead only node 6 ms / .NET 3 ms, both on native arrays). Verified: suite
 a mid-run dense→hashed migration (string key from another process) loses
 nothing (`bad: 0`, exact count, every value intact); the full sweep flat
 everywhere else (regex/json/persistent-map — the other table users — unchanged).
+
+## 2026-07-16 — the stress suite (`make stress`) + KNOWN BUG: JIT deopt re-run duplicates side effects
+
+Built the occasional big stress run under `stress/` (deliberately outside
+`tests/` discovery — `make stress`): a property-based differential of the
+lock-free Table against an immutable-map model (seeded LCG op sequences over
+every representation boundary: dense/hashed keys, ±2^60 tagged-int edges,
+stored-nil-vs-absent, migration mid-sequence), multi-process races (8 writers
+across a mid-run migration; concurrent `table-incr` exactness; drop-under-fire
+conservation; snapshots under writers), VM/JIT loop torture (16×2M-iteration
+preempted native loops, collatz checksums, a float-crossing deopt loop), match
+lowering vs a hand-written cond oracle (60k random values + 300k-deep
+fail-thunk TCO), and a **cross-language differential** (an identical LCG op
+sequence driven against a python dict; digests must match — they do). Runner
+sweeps JIT / no-JIT / GC-stress; `xfail_*` files are known-bug repros reported
+separately (an unexpected pass = promote to `tests/`).
+
+**It caught a real one immediately — a long-latent JIT soundness hole.**
+`stress/xfail_deopt_rerun_test.blsp`: a JIT'd self-tail loop whose body does a
+side effect (`table-incr`) and then destructures a **call-result vector**
+duplicates the effect once per 256-edge tier boundary. Chain: the destructure
+emits a deopt-capable instruction that fires on EVERY native entry of the arm;
+an outcome-1 deopt "re-runs the arm on the VM with the frame intact" — from
+ip 0 — so everything before the deopt point, side effects included,
+**executes twice**. Diagnosed with an execution-counter table (each op index
+must run exactly once): doubles at exact 256-multiples, immune to
+`BROOD_REDUCTIONS`, gone under `BROOD_NO_JIT=1`. Bisect: reproduces on
+**ed502ba (pre-session)** at 60k iterations — pre-existing; today's faster
+tiering (tier-on-resume, sync compile) only surfaces it at smaller N. Control
+variants that do NOT reproduce: manual `(nth v 0)` instead of a destructure,
+and destructuring a locally-built vector literal (escape analysis elides it).
+
+Scope: needs a lowered arm + a non-idempotent effect (`table-incr`, `send`,
+io — NOT `table-put`/`delete`, which re-apply idempotently) + a later deopt in
+the same activation. `receive` loops are safe (their per-arm closures carry
+`MakeClosure`, which never lowers). Deopt feedback doesn't help — self-call
+arms are exempt by design, and the first 16 duplications would land anyway.
+
+Fix directions (next session, needs design + benchmarks — NOT a quick patch):
+the real fix is **deopt-site metadata** (resume interpretation at the deopting
+instruction — statement boundaries have an empty operand stack, so per-site
+resume-ip + slot-state suffices); the interim conservative option is bailing
+lowering when a potentially-effectful instruction precedes a deopt-capable one
+(cost unknown — it would hit fib-shaped pure arms unless purity is tracked).
+Until then: table_model stress runs idempotent ops only, and the incr coverage
+lives in the xfail. ALSO worth fixing regardless: the destructure-of-call-result
+emits a deopt on every entry — finding and lowering that instruction properly
+removes the whole "every-entry deopt" class (such arms gain nothing from the
+JIT anyway and currently pay native entry + deopt + VM re-run per call).

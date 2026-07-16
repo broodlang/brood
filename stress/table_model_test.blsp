@@ -1,0 +1,127 @@
+;; STRESS (not part of the regular suite — run via `make stress`).
+;;
+;; Property-based differential test of the lock-free Table (devlog 2026-07-16):
+;; drive a table with a SEEDED random op sequence and mirror every op onto an
+;; immutable map (the model). After every batch the table must agree with the
+;; model on gets, has?, count, and a full snapshot compare. Key/value generators
+;; deliberately cross every representation boundary: dense int keys, the
+;; DENSE_KEY_MAX edge (2^23), negative and huge keys (hashed), string/keyword/
+;; vector keys (forces dense->hashed migration MID-SEQUENCE), values at the
+;; 61-bit tagged-int edges (+-2^60), nil/true/false (the EMPTY-vs-stored-nil
+;; distinction), strings and nested vectors (unencodable -> migration).
+;; All ops here are IDEMPOTENT (put/delete/get/has) so the suite passes even
+;; while the deopt-rerun bug stands; incr coverage is in the xfail file.
+
+(defmodule table-model-stress-test (:use test))
+
+;; Deterministic 31-bit LCG (identical constants in stress/table_model_oracle.py).
+(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+
+;; ---- generators (each consumes one PRNG step) --------------------------------
+(defn gen-key (s)
+  (let (c (rem s 12))
+    (cond
+      (< c 5) (rem s 512)                     ; hot dense key (collisions likely)
+      (= c 5) (rem s 100000)                  ; cold dense key
+      (= c 6) 8388607                         ; DENSE_KEY_MAX - 1 (last dense slot)
+      (= c 7) 8388608                         ; DENSE_KEY_MAX (first hashed key)
+      (= c 8) (- 0 (rem s 100))               ; negative (hashed)
+      (= c 9) (str "k" (rem s 64))            ; string key -> migration
+      (= c 10) 1152921504606846976            ; 2^60 as a KEY (hashed, in range)
+      else [:vec (rem s 16)])))               ; compound key -> migration
+
+(defn gen-val (s)
+  (let (c (rem s 13))
+    (cond
+      (< c 4) (rem s 1000)
+      (= c 4) nil                             ; stored nil (distinct from absent)
+      (= c 5) true
+      (= c 6) false
+      (= c 7) 1152921504606846975             ; 2^60 - 1  (largest tagged int)
+      (= c 8) 1152921504606846976             ; 2^60      (unencodable -> migration)
+      (= c 9) (- 0 1152921504606846976)       ; -2^60     (smallest tagged int)
+      (= c 10) (- 0 1152921504606846977)      ; -2^60 - 1 (unencodable -> migration)
+      (= c 11) (str "v" (rem s 32))
+      else [:nested (rem s 8) [true nil]])))
+
+;; ---- one op applied to (table, model) — returns [seed model] -----------------
+(defn apply-op (t s m)
+  (let (s1 (lcg s) c (rem s1 10))
+    (cond
+      ;; put
+      (< c 5)
+      (let (s2 (lcg s1) k (gen-key s2) s3 (lcg s2) v (gen-val s3))
+        (do (table-put t k v) [s3 (assoc m k v)]))
+      ;; delete
+      (< c 7)
+      (let (s2 (lcg s1) k (gen-key s2))
+        (do (table-delete t k) [s2 (dissoc m k)]))
+      ;; a second put flavour (NOTE: table-incr is deliberately NOT exercised here —
+      ;; it is non-idempotent, and the KNOWN deopt-rerun bug (see
+      ;; xfail_deopt_rerun_test.blsp) duplicates it under a JIT'd loop. Its model
+      ;; coverage lives in that xfail file until the bug is fixed.)
+      (< c 9)
+      (let (s2 (lcg s1) k (rem s2 32) s3 (lcg s2) v (gen-val s3))
+        (do (table-put t k v) [s3 (assoc m k v)]))
+      ;; get with sentinel default — must equal the model exactly
+      else
+      (let (s2 (lcg s1) k (gen-key s2))
+        (do (assert= (table-get t k :absent) (get m k :absent))
+          [s2 m])))))
+
+(defn run-ops (t s m n)
+  (if (= n 0) m
+    (let ([s2 m2] (apply-op t s m))
+      (run-ops t s2 m2 (- n 1)))))
+
+;; Full agreement check: count, snapshot as a map, spot gets over the model keys.
+(defn agree! (t m)
+  (do
+    (assert= (table-count t) (count m))
+    (assert= (table-snapshot t) m)
+    (fold (fn (_ k) (assert= (table-get t k :absent) (get m k :absent)))
+      nil (keys m))))
+
+(defn one-seed (seed ops)
+  (let (t (table) m (run-ops t seed {} ops))
+    (do (agree! t m) (table-drop t) true)))
+
+(describe "table stress: differential model"
+  (test "seed 1"  (is (one-seed 1 4000)))
+  (test "seed 2"  (is (one-seed 2 4000)))
+  (test "seed 3"  (is (one-seed 3 4000)))
+  (test "seed 42" (is (one-seed 42 4000)))
+  (test "seed 1337" (is (one-seed 1337 4000)))
+  (test "seed 99991 (long)" (is (one-seed 99991 20000)))
+  (test "dense-only never migrates and agrees"
+    (let (t (table))
+      (do
+        ;; puts across the whole dense shape incl. nil/false values
+        (fold (fn (_ i) (table-put t i (if (= (rem i 3) 0) nil (if (= (rem i 3) 1) false (* i 7)))))
+          nil (range 5000))
+        (assert= (table-count t) 5000)
+        (assert= (table-get t 0 :absent) nil)    ; stored nil, NOT absent
+        (assert= (table-has? t 0) true)
+        (assert= (table-get t 1 :absent) false)
+        (assert= (table-get t 2 :absent) 14)
+        (fold (fn (_ i) (table-delete t i)) nil (range 2500))
+        (assert= (table-count t) 2500)
+        (assert= (table-has? t 100) false)
+        (table-drop t)
+        true)))
+  (test "boundary keys and values round-trip"
+    (let (t (table))
+      (do
+        (table-put t 8388607 :last-dense)
+        (table-put t 8388608 :first-hashed)
+        (table-put t 0 1152921504606846975)
+        (table-put t 1 (- 0 1152921504606846976))
+        (table-put t 2 1152921504606846976)     ; migrates (62-bit)
+        (assert= (table-get t 8388607) :last-dense)
+        (assert= (table-get t 8388608) :first-hashed)
+        (assert= (table-get t 0) 1152921504606846975)
+        (assert= (table-get t 1) (- 0 1152921504606846976))
+        (assert= (table-get t 2) 1152921504606846976)
+        (assert= (table-count t) 5)
+        (table-drop t)
+        true))))

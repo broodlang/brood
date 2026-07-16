@@ -1,0 +1,72 @@
+;; STRESS — property tests for the match/receive lowering (the 2026-07-16
+;; fail-thunk rewrite): a many-armed matcher vs a hand-written cond oracle over
+;; seeded random values, plus TCO through long fail-thunk chains.
+
+(defmodule match-props-stress-test (:use test))
+
+(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+
+;; random shallow value across the shapes the matcher dispatches on
+(defn gen (s)
+  (let (c (rem s 11))
+    (cond
+      (= c 0) [:a (rem s 100)]
+      (= c 1) [:a (rem s 100) (rem s 7)]
+      (= c 2) [:b (rem s 100) (rem s 9)]
+      (= c 3) (list :c (rem s 5) (rem s 5) (rem s 5))
+      (= c 4) {:p (rem s 50)}
+      (= c 5) {:p (rem s 50) :q (rem s 50)}
+      (= c 6) "lit"
+      (= c 7) 7
+      (= c 8) nil
+      (= c 9) (rem s 1000)
+      else [:z])))
+
+(defn via-match (v)
+  (match v
+    ([:a x] :when (> x 50) [:guarded x])
+    ([:a x] [:plain x])
+    ([:a x y] [:pair x y])
+    ([:b x y] (+ x y))
+    ((:c a & tl) [a tl])
+    ({:keys [p q] :or {q 42}} [p q])
+    ("lit" :string)
+    (7 :seven)
+    (nil :nil)
+    (_ :other)))
+
+(defn via-oracle (v)
+  (cond
+    (and (vector? v) (= (count v) 2) (= (nth v 0) :a))
+      (if (> (nth v 1) 50) [:guarded (nth v 1)] [:plain (nth v 1)])
+    (and (vector? v) (= (count v) 3) (= (nth v 0) :a)) [:pair (nth v 1) (nth v 2)]
+    (and (vector? v) (= (count v) 3) (= (nth v 0) :b)) (+ (nth v 1) (nth v 2))
+    (and (pair? v) (= (first v) :c)) [(first (rest v)) (rest (rest v))]
+    (map? v) [(get v :p) (get v :q 42)]
+    (= v "lit") :string
+    (= v 7) :seven
+    (nil? v) :nil
+    else :other))
+
+(defn prop-run (s n)
+  (if (= n 0) true
+    (let (s2 (lcg s) v (gen s2))
+      (do (assert= (via-match v) (via-oracle v))
+        (prop-run s2 (- n 1))))))
+
+(describe "match stress: matcher agrees with a cond oracle"
+  (test "seed 7,  20k values" (is (prop-run 7 20000)))
+  (test "seed 21, 20k values" (is (prop-run 21 20000)))
+  (test "seed 63, 20k values" (is (prop-run 63 20000))))
+
+;; TCO through the fail-thunk chain: the LAST arm matches every iteration, so
+;; every earlier arm's fail thunk fires — 300k deep, O(1) stack.
+(defn spin (n)
+  (match [:go n]
+    ([:stop] :done) ([:a x y z] :no) ([:b x y z] :no) ([:c x y z] :no)
+    ([:d x y z] :no) ([:e x y z] :no) ([:f x y z] :no) ([:g x y z] :no)
+    ([:h x y z] :no) ([:i x y z] :no) ([:j x y z] :no)
+    ([:go k] (if (= k 0) :done (spin (- k 1))))))
+
+(describe "match stress: TCO through fail thunks"
+  (test "300k iterations x 11 failing arms" (assert= (spin 300000) :done)))

@@ -1,0 +1,31 @@
+;; STRESS — KNOWN BUG (xfail): JIT deopt re-run duplicates side effects.
+;; See devlog 2026-07-16 "KNOWN BUG: deopt re-run duplicates side effects".
+;;
+;; A JIT'd self-tail loop whose body performs a SIDE EFFECT (here table-incr)
+;; and then hits a per-entry deopt (destructuring a CALL-RESULT vector emits a
+;; deopt-capable instruction) re-runs the whole arm from ip 0 on the VM —
+;; re-executing the effect. One duplicated iteration per 256-edge tier boundary.
+;; Pre-existing (reproduces on ed502ba); exposed by the 2026-07-16 stress work.
+;; Expected to FAIL until deopt gains side-effect discipline (resume-at-deopt
+;; metadata, or an effect-then-deopt lowering bail).
+
+(defmodule xfail-deopt-rerun-test (:use test))
+
+(defn mk (s) [(rem (+ (* s 1103515245) 12345) 2147483648) :tag])
+
+(defn spin (t s n i)
+  (if (= n 0) nil
+    (do
+      (table-incr t i 1)
+      (let ([s2 tag] (mk s))
+        (spin t s2 (- n 1) (+ i 1))))))
+
+(defn dup-count (t i n acc)
+  (if (= i n) acc
+    (dup-count t (+ i 1) n (if (= (table-get t i 0) 1) acc (+ acc 1)))))
+
+(describe "KNOWN BUG xfail: deopt re-run duplicates effects"
+  (test "every loop iteration's incr applies exactly once"
+    (let (t (table))
+      (do (spin t 1337 20000 0)
+        (assert= (dup-count t 0 20000 0) 0)))))
