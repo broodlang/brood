@@ -2159,6 +2159,16 @@ fn compile_arm(
     // any other. Computed identically here (to size the frame) and in `jit_lower_arm`
     // (to place spills) via `jit_spill_reserve`.
     let spill_reserve = chunk.as_ref().map_or(0, |c| jit_spill_reserve(&c.code));
+    // Deopt-resume checkpoint slots (see `CompiledArm::ckpt_slot`): one packed
+    // journal slot + room for the deepest post-call operand stack. Reserved above
+    // the spill slots; zero cost for call-free arms (`ckpt_depth` is None).
+    let ckpt_depth = chunk
+        .as_ref()
+        .and_then(|c| jit_lower::jit_ckpt_depth(&c.code));
+    let (ckpt_slot, ckpt_reserve) = match ckpt_depth {
+        Some(d) => ((scope.max + spill_reserve) as u32, 1 + d),
+        None => (u32::MAX, 0),
+    };
     // Deopt-feedback watch (see the field doc): any non-loop arm with ≥1 non-tail
     // call. Vector-op arms are watched too — nbody's `advance-body` (calls +
     // `nth`s + a vector literal) deopted on ~100% of activations and only
@@ -2175,7 +2185,7 @@ fn compile_arm(
         noptional,
         optional_defaults,
         rest_slot: rest.map(|_| nrequired + noptional),
-        nslots: scope.max + spill_reserve,
+        nslots: scope.max + spill_reserve + ckpt_reserve,
         body,
         chunk,
         has_runtime_handles,
@@ -2183,6 +2193,7 @@ fn compile_arm(
         jit_calls: AtomicU32::new(0),
         deopt_watch,
         jit_deopts: AtomicU32::new(0),
+        ckpt_slot,
         compile_epoch: AtomicU64::new(0),
         share_key: None,
         shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -2559,6 +2570,20 @@ fn hof_apply_native(
         // `[base, base+argc)` (GC-updated); re-read, drop the frame, and `vm_apply`.
         _ => {
             crate::perf_bump!(jit_link_rerun);
+            // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the checkpoint,
+            // frame intact — never re-running side effects.
+            if outcome == 1 {
+                if let Some((rip, depth)) = jit_ckpt_read(heap, arm, base) {
+                    return Some(vm_resume_deopt(
+                        heap,
+                        arm.clone(),
+                        base,
+                        cenv_live,
+                        rip,
+                        depth,
+                    ));
+                }
+            }
             let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
             for k in 0..argc {
                 argv2.push(heap.root_at(base + k));
@@ -3659,7 +3684,8 @@ fn dispatch(
                         heap.truncate_env_roots(env_base);
                         return Err(e);
                     }
-                    match jit_tier(&arm, heap, base, env_root) {
+                    let jit_outcome = jit_tier(&arm, heap, base, env_root);
+                    match jit_outcome {
                         Some(0) => {
                             crate::perf_bump!(jit_apply_fast);
                             let v = heap.root_at(base);
@@ -3749,6 +3775,22 @@ fn dispatch(
                             // into a list; they're unreachable in the JIT int-subset
                             // and fall through to cur_argv as an inert dead-code path.
                             let callee_env2 = heap.read_root_env(env_root);
+                            // Deopt-resume (see `CompiledArm::ckpt_slot`): a deopt after
+                            // a completed non-tail call keeps the frame and resumes AT
+                            // the checkpoint — never re-running its side effects.
+                            if matches!(jit_outcome, Some(1)) {
+                                if let Some((rip, depth)) = jit_ckpt_read(heap, &arm, base) {
+                                    heap.truncate_env_roots(env_base);
+                                    return Ok(Step::Done(vm_resume_deopt(
+                                        heap,
+                                        arm,
+                                        base,
+                                        callee_env2,
+                                        rip,
+                                        depth,
+                                    )?));
+                                }
+                            }
                             let argc = cur_argv.len();
                             let fresh_argv: SmallVec<[Value; 4]> = if arm.rest_slot.is_none() {
                                 (0..argc).map(|k| heap.root_at(base + k)).collect()
@@ -5542,145 +5584,164 @@ fn vm_run_bc(
 
         // Either run the arm natively (if it's flagged for a tier check) or interpret it.
         // Both yield a `Result<ChunkExit, _>` handled uniformly below.
-        let exit =
+        let exit = {
+            #[cfg(feature = "jit")]
             {
-                #[cfg(feature = "jit")]
-                {
-                    if try_jit {
-                        try_jit = false;
-                        // Spinning-loop escape hatch (see JIT_QUEUED_SYNC_EDGES): a
-                        // self-tail loop that exited here after spinning ~2k edges
-                        // against a still-QUEUED arm compiles it right now, on this
-                        // thread, instead of interpreting until the background
-                        // compiler gets to it.
-                        if cur_back_edges != 0
-                            && cur_back_edges.is_multiple_of(JIT_QUEUED_SYNC_EDGES)
-                            && cur_arm.jit_code.load(std::sync::atomic::Ordering::Acquire)
-                                == crate::jit::QUEUED
-                        {
-                            jit_compile_now(heap, &cur_arm, cur_base);
+                if try_jit {
+                    try_jit = false;
+                    // Spinning-loop escape hatch (see JIT_QUEUED_SYNC_EDGES): a
+                    // self-tail loop that exited here after spinning ~2k edges
+                    // against a still-QUEUED arm compiles it right now, on this
+                    // thread, instead of interpreting until the background
+                    // compiler gets to it.
+                    if cur_back_edges != 0
+                        && cur_back_edges.is_multiple_of(JIT_QUEUED_SYNC_EDGES)
+                        && cur_arm.jit_code.load(std::sync::atomic::Ordering::Acquire)
+                            == crate::jit::QUEUED
+                    {
+                        jit_compile_now(heap, &cur_arm, cur_base);
+                    }
+                    // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
+                    // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
+                    // *installed* native version is the deferred inlined upgrade does the
+                    // native entry need the larger `inline_nslots` frame (the spliced blocks'
+                    // shifted slot ranges). `inline_installed` is false for every arm that
+                    // doesn't inline (the overwhelming common case — fib is the exception),
+                    // so the hot path pays nothing: it calls `jit_tier` exactly as before.
+                    // Only the inlined arm grows `roots` and restores the small top on a
+                    // non-`Done` outcome (deopt re-runs the ORIGINAL small body from params).
+                    let inlined_active = cur_arm
+                        .inline_installed
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let small_top = cur_base + cur_arm.nslots;
+                    if inlined_active {
+                        heap.extend_roots_to_nil(cur_base + cur_arm.inline_nslots);
+                    }
+                    // Clean frame state `jit_tier` runs against: slots set up, operand
+                    // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
+                    // assumes roots return to exactly here.
+                    let pre_roots = heap.roots_len();
+                    let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
+                    // Restore the small frame top on every non-Done path so the `exec_chunk`
+                    // re-run sees the original layout (Done retires the whole frame anyway).
+                    // The inlined native keeps operands in registers, so it leaves `roots`
+                    // exactly at the frame top it was entered with (`cur_base+inline_nslots`).
+                    // A Some(4) tail outcome stages callee+args ABOVE that top, read by
+                    // `jit_dispatch_tail` relative to `active_nslots` — don't disturb those.
+                    if inlined_active
+                        && matches!(jit_outcome, Some(1) | Some(2) | None)
+                        && heap.roots_len() == cur_base + cur_arm.inline_nslots
+                    {
+                        heap.truncate_roots(small_top);
+                    }
+                    // Work-attribution (perf-stats): native completion (0/4) vs a
+                    // mid-run deopt (1) vs preemption (2). A hot arm with high
+                    // `jit_deopt` vs `jit_native` compiles but keeps falling off the
+                    // native path — the matmul-class signal.
+                    match jit_outcome {
+                        Some(0) | Some(4) => {
+                            crate::perf_bump!(jit_native);
                         }
-                        // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
-                        // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
-                        // *installed* native version is the deferred inlined upgrade does the
-                        // native entry need the larger `inline_nslots` frame (the spliced blocks'
-                        // shifted slot ranges). `inline_installed` is false for every arm that
-                        // doesn't inline (the overwhelming common case — fib is the exception),
-                        // so the hot path pays nothing: it calls `jit_tier` exactly as before.
-                        // Only the inlined arm grows `roots` and restores the small top on a
-                        // non-`Done` outcome (deopt re-runs the ORIGINAL small body from params).
-                        let inlined_active = cur_arm
-                            .inline_installed
-                            .load(std::sync::atomic::Ordering::Acquire);
-                        let small_top = cur_base + cur_arm.nslots;
-                        if inlined_active {
-                            heap.extend_roots_to_nil(cur_base + cur_arm.inline_nslots);
-                        }
-                        // Clean frame state `jit_tier` runs against: slots set up, operand
-                        // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
-                        // assumes roots return to exactly here.
-                        let pre_roots = heap.roots_len();
-                        let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
-                        // Restore the small frame top on every non-Done path so the `exec_chunk`
-                        // re-run sees the original layout (Done retires the whole frame anyway).
-                        // The inlined native keeps operands in registers, so it leaves `roots`
-                        // exactly at the frame top it was entered with (`cur_base+inline_nslots`).
-                        // A Some(4) tail outcome stages callee+args ABOVE that top, read by
-                        // `jit_dispatch_tail` relative to `active_nslots` — don't disturb those.
-                        if inlined_active
-                            && matches!(jit_outcome, Some(1) | Some(2) | None)
-                            && heap.roots_len() == cur_base + cur_arm.inline_nslots
-                        {
-                            heap.truncate_roots(small_top);
-                        }
-                        // Work-attribution (perf-stats): native completion (0/4) vs a
-                        // mid-run deopt (1) vs preemption (2). A hot arm with high
-                        // `jit_deopt` vs `jit_native` compiles but keeps falling off the
-                        // native path — the matmul-class signal.
-                        match jit_outcome {
-                            Some(0) | Some(4) => {
-                                crate::perf_bump!(jit_native);
+                        Some(1) => {
+                            crate::perf_bump!(jit_deopt);
+                            #[cfg(feature = "perf-stats")]
+                            if std::env::var_os("BROOD_DEOPT_TRACE").is_some() {
+                                eprintln!(
+                                    "[deopt] arm={} watch={}",
+                                    cur_arm
+                                        .dbg_name
+                                        .map(crate::core::value::symbol_name_ref)
+                                        .unwrap_or_else(|| "<closure>".into()),
+                                    cur_arm.deopt_watch
+                                );
                             }
-                            Some(1) => {
-                                crate::perf_bump!(jit_deopt);
-                                #[cfg(feature = "perf-stats")]
-                                if std::env::var_os("BROOD_DEOPT_TRACE").is_some() {
+                        }
+                        Some(2) => {
+                            crate::perf_bump!(jit_preempt);
+                        }
+                        _ => {}
+                    }
+                    // Dirty-stack-on-deopt check: a native arm that deopts (1) or is
+                    // preempted (2) must leave `roots` as `jit_tier` found them; if it
+                    // grew, the `exec_chunk` re-run starts on a corrupt operand stack.
+                    if matches!(jit_outcome, Some(1) | Some(2)) {
+                        let now = heap.roots_len();
+                        if now != pre_roots {
+                            crate::perf_bump!(jit_deopt_dirty);
+                            #[cfg(feature = "perf-stats")]
+                            {
+                                static SHOWN: std::sync::atomic::AtomicBool =
+                                    std::sync::atomic::AtomicBool::new(false);
+                                if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
                                     eprintln!(
-                                        "[deopt] arm={} watch={}",
-                                        cur_arm
-                                            .dbg_name
-                                            .map(crate::core::value::symbol_name_ref)
-                                            .unwrap_or_else(|| "<closure>".into()),
-                                        cur_arm.deopt_watch
+                                        "[jit-dirty] deopt/preempt left roots_len={now} \
+                                         (jit_tier found {pre_roots}) — dirty operand stack \
+                                         before the VM re-run"
                                     );
                                 }
                             }
-                            Some(2) => {
-                                crate::perf_bump!(jit_preempt);
-                            }
-                            _ => {}
                         }
-                        // Dirty-stack-on-deopt check: a native arm that deopts (1) or is
-                        // preempted (2) must leave `roots` as `jit_tier` found them; if it
-                        // grew, the `exec_chunk` re-run starts on a corrupt operand stack.
-                        if matches!(jit_outcome, Some(1) | Some(2)) {
-                            let now = heap.roots_len();
-                            if now != pre_roots {
-                                crate::perf_bump!(jit_deopt_dirty);
-                                #[cfg(feature = "perf-stats")]
+                    }
+                    match jit_outcome {
+                        // Done: result in `roots[cur_base]` → the `Done` arm retires it.
+                        Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
+                        // A JIT'd call/global errored — propagate the parked error.
+                        Some(3) => {
+                            Err(jit_take_error(heap)
+                                .expect("JIT error outcome without a parked error"))
+                        }
+                        // A JIT'd tail call: dispatch the staged callee+args → reuse the
+                        // frame (`Tail`) or a finished native callee (`Done`).
+                        Some(4) => jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env),
+                        // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the
+                        // arm on the VM with the frame intact (`cur_ip` is still 0).
+                        _ => {
+                            // Deopt-resume (see `CompiledArm::ckpt_slot`): a deopt
+                            // in an activation that completed a non-tail call
+                            // resumes AT the checkpoint (operands re-pushed from
+                            // the journal slots) — never re-running, and so never
+                            // re-effecting, the code before it. A preempt / cold
+                            // arm keeps the ip-0 entry (checkpoint reads 0 there).
+                            if matches!(jit_outcome, Some(1)) {
+                                if let Some((rip, depth)) = jit_ckpt_read(heap, &cur_arm, cur_base)
                                 {
-                                    static SHOWN: std::sync::atomic::AtomicBool =
-                                        std::sync::atomic::AtomicBool::new(false);
-                                    if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                        eprintln!(
-                                            "[jit-dirty] deopt/preempt left roots_len={now} \
-                                         (jit_tier found {pre_roots}) — dirty operand stack \
-                                         before the VM re-run"
-                                        );
+                                    let cb = cur_base + cur_arm.ckpt_slot as usize + 1;
+                                    for k in 0..depth {
+                                        let v = heap.root_at(cb + k);
+                                        heap.push_root(v);
                                     }
+                                    cur_ip = rip;
                                 }
                             }
-                        }
-                        match jit_outcome {
-                            // Done: result in `roots[cur_base]` → the `Done` arm retires it.
-                            Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
-                            // A JIT'd call/global errored — propagate the parked error.
-                            Some(3) => Err(jit_take_error(heap)
-                                .expect("JIT error outcome without a parked error")),
-                            // A JIT'd tail call: dispatch the staged callee+args → reuse the
-                            // frame (`Tail`) or a finished native callee (`Done`).
-                            Some(4) => jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env),
-                            // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the
-                            // arm on the VM with the frame intact (`cur_ip` is still 0).
-                            _ => exec_chunk(
+                            exec_chunk(
                                 heap,
                                 &cur_arm,
                                 &mut cur_ip,
                                 cur_base,
                                 cur_env,
                                 capture,
-                                #[cfg(feature = "jit")]
                                 &mut cur_back_edges,
-                            ),
+                            )
                         }
-                    } else {
-                        exec_chunk(
-                            heap,
-                            &cur_arm,
-                            &mut cur_ip,
-                            cur_base,
-                            cur_env,
-                            capture,
-                            #[cfg(feature = "jit")]
-                            &mut cur_back_edges,
-                        )
                     }
+                } else {
+                    exec_chunk(
+                        heap,
+                        &cur_arm,
+                        &mut cur_ip,
+                        cur_base,
+                        cur_env,
+                        capture,
+                        #[cfg(feature = "jit")]
+                        &mut cur_back_edges,
+                    )
                 }
-                #[cfg(not(feature = "jit"))]
-                {
-                    exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture)
-                }
-            };
+            }
+            #[cfg(not(feature = "jit"))]
+            {
+                exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture)
+            }
+        };
         match exit {
             Ok(ChunkExit::Done(v)) => {
                 // Retire the current frame, then either finish or hand `v` to the caller.
@@ -5919,6 +5980,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 jit_calls: AtomicU32::new(0),
                 deopt_watch: false,
                 jit_deopts: AtomicU32::new(0),
+                ckpt_slot: u32::MAX,
                 compile_epoch: AtomicU64::new(0),
                 share_key: None,
                 shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -6455,7 +6517,6 @@ fn jit_run_fast_link(
             for k in 0..argc {
                 argv2.push(heap.root_at(base + k));
             }
-            heap.truncate_roots(stage_base);
             if let Some((_, Some((arm, cenv)))) =
                 heap.vm_call_ic_probe(site, head, argc as u32, epoch)
             {
@@ -6465,6 +6526,23 @@ fn jit_run_fast_link(
                 if outcome == 1 && arm.deopt_watch {
                     jit_deopt_feedback(&arm);
                 }
+                // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the
+                // checkpoint, frame intact — never re-running its side effects.
+                // Guard nslots: the IC could have re-resolved to a different arm
+                // than the one whose native ran; a mismatched frame shape can't
+                // be resumed and takes the legacy re-run instead.
+                if outcome == 1 && arm.active_nslots() == nslots {
+                    if let Some((rip, depth)) = jit_ckpt_read(heap, &arm, base) {
+                        return match vm_resume_deopt(heap, arm, base, cenv, rip, depth) {
+                            Ok(v) => FastLinkOutcome::Done(v),
+                            Err(e) => {
+                                heap.jit_pending_error = Some(e);
+                                FastLinkOutcome::Error
+                            }
+                        };
+                    }
+                }
+                heap.truncate_roots(stage_base);
                 return match vm_apply(heap, arm, &argv2, cenv) {
                     Ok(v) => FastLinkOutcome::Done(v),
                     Err(e) => {
@@ -6473,6 +6551,7 @@ fn jit_run_fast_link(
                     }
                 };
             }
+            heap.truncate_roots(stage_base);
             // IC changed under us: restage the args so the elided slow path finds them.
             for a in &argv2 {
                 heap.push_root(*a);
@@ -6856,6 +6935,21 @@ pub(crate) fn jit_dispatch_call(
                     // overwritten by the arm body), so re-read, drop the frame, and `vm_apply`.
                     _ => {
                         crate::perf_bump!(jit_link_rerun);
+                        // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the
+                        // checkpoint, frame intact — never re-running side effects.
+                        if outcome == 1 {
+                            if let Some((rip, depth)) = jit_ckpt_read(heap, &arm, base) {
+                                return match vm_resume_deopt(
+                                    heap, arm, base, callee_env, rip, depth,
+                                ) {
+                                    Ok(v) => Some(v),
+                                    Err(e) => {
+                                        heap.jit_pending_error = Some(e);
+                                        None
+                                    }
+                                };
+                            }
+                        }
                         let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);
                         for k in 0..argc {
                             argv2.push(heap.root_at(base + k));
@@ -7036,6 +7130,83 @@ fn jit_dispatch_tail(
 /// occasional deopts never reaches 16 consecutive and keeps its native code.
 /// `BAILED` is sticky until the next epoch invalidation, which resets the
 /// counter so the recompiled arm gets a fresh trial.
+/// Deopt-resume checkpoint (see `CompiledArm::ckpt_slot`): decode the live
+/// frame's journal — `Some((resume_ip, operand_depth))` when a completed
+/// non-tail call checkpointed this activation, meaning the VM must resume THERE
+/// (the side effects before it already happened, exactly once). `None` ⇒ resume
+/// from ip 0, which is then effect-free by construction (everything the boxed
+/// subset executes besides calls is pure or idempotent).
+#[cfg(feature = "jit")]
+fn jit_ckpt_read(heap: &Heap, arm: &CompiledArm, base: usize) -> Option<(usize, usize)> {
+    if arm.ckpt_slot == u32::MAX {
+        return None;
+    }
+    match heap.root_at(base + arm.ckpt_slot as usize) {
+        Value::Int(p) if p > 0 => Some(((p >> 16) as usize, (p & 0xFFFF) as usize)),
+        _ => None,
+    }
+}
+
+/// Resume a deopted JIT frame at its checkpoint on the VM: push the journaled
+/// operand stack (slots `[ckpt_slot+1 ..]`, GC-current) and drive the frame from
+/// `rip` via `vm_run_bc`'s resume machinery (a synthetic single-frame
+/// continuation — the frame at `roots[base..]` is intact per the deopt
+/// contract, exactly the shape of a frame suspended at a `Call`).
+#[cfg(feature = "jit")]
+fn vm_resume_deopt(
+    heap: &mut Heap,
+    arm: Arc<CompiledArm>,
+    base: usize,
+    cenv: EnvId,
+    rip: usize,
+    depth: usize,
+) -> LispResult {
+    let cb = base + arm.ckpt_slot as usize + 1;
+    for k in 0..depth {
+        let v = heap.root_at(cb + k);
+        heap.push_root(v);
+    }
+    let env_base = heap.env_roots_len();
+    let env_root = heap.root_env(cenv);
+    let entry_arms = heap.live_arm_len();
+    let arm_slot = if arm.has_runtime_handles {
+        heap.live_arm_push(arm.clone())
+    } else {
+        usize::MAX
+    };
+    let s = Suspended {
+        frames: Vec::new(),
+        cur: BcFrame {
+            arm: arm.clone(),
+            ip: rip,
+            base,
+            env: env_root,
+            env_base,
+            arm_slot,
+            back_edges: 0,
+        },
+        entry_roots: base,
+        entry_env: env_base,
+        entry_arms,
+        deadline: None,
+    };
+    let genv = heap.global();
+    match vm_run_bc(heap, arm, &[], genv, Some(s), false)? {
+        VmOutcome::Done(v) => Ok(v),
+        // Native-nested receive-suspend: same discipline as `vm_apply`.
+        VmOutcome::Suspended(s) => {
+            let deadline = s.deadline;
+            heap.truncate_roots(s.entry_roots);
+            heap.truncate_env_roots(s.entry_env);
+            heap.live_arm_truncate(s.entry_arms);
+            Err(LispError::suspend(deadline))
+        }
+        VmOutcome::Preempted(_) | VmOutcome::Killed => {
+            unreachable!("a nested deopt-resume run does no loop-top preempt/kill capture")
+        }
+    }
+}
+
 #[cfg(feature = "jit")]
 fn jit_deopt_feedback(arm: &CompiledArm) {
     use std::sync::atomic::Ordering::{Relaxed, Release};
@@ -7460,6 +7631,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7584,6 +7756,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7687,6 +7860,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7762,6 +7936,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7847,6 +8022,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7974,6 +8150,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8040,6 +8217,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8100,6 +8278,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8169,6 +8348,7 @@ mod tests {
             jit_calls: std::sync::atomic::AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: std::sync::atomic::AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8326,6 +8506,7 @@ mod tests {
             jit_calls: AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8490,6 +8671,7 @@ mod tests {
             jit_calls: AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8598,6 +8780,7 @@ mod tests {
             jit_calls: AtomicU32::new(0),
             deopt_watch: false,
             jit_deopts: AtomicU32::new(0),
+            ckpt_slot: u32::MAX,
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),

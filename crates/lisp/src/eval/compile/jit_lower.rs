@@ -101,6 +101,98 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
 }
 
+/// Deopt-resume checkpointing (the fix for the deopt-rerun side-effect bug,
+/// devlog 2026-07-16): the abstract operand-stack depth **after each non-tail
+/// `Call` completes**, maximised over all call sites — the number of extra frame
+/// slots the JIT'd arm needs to journal its live operands at each checkpoint.
+/// `None` when the chunk has no non-tail call (nothing to checkpoint — deopts
+/// re-run from ip 0, which is then effect-free by construction: everything the
+/// boxed subset can execute besides calls is pure or idempotent), or when the
+/// static pass can't assign a consistent depth (never expected from this
+/// compiler's structured output — checkpointing is then disabled and the arm
+/// keeps the legacy re-run behaviour).
+///
+/// The pass is a tiny abstract interpreter over the chunk: propagate the stack
+/// depth instruction by instruction, following both branch edges; depths must
+/// agree wherever control merges.
+#[cfg(feature = "jit")]
+pub(super) fn jit_ckpt_depth(code: &[Inst]) -> Option<usize> {
+    if std::env::var_os("BROOD_NO_DEOPT_RESUME").is_some() {
+        return None; // chicken switch: legacy from-ip-0 re-run everywhere
+    }
+    let len = code.len();
+    let mut depth: Vec<Option<usize>> = vec![None; len + 1];
+    depth[0] = Some(0);
+    let mut work = vec![0usize];
+    let mut max_after_call: Option<usize> = None;
+    // merge: assign-or-check a depth at ip; push to the worklist on first visit.
+    fn merge(depth: &mut [Option<usize>], work: &mut Vec<usize>, ip: usize, d: usize) -> bool {
+        match depth[ip] {
+            None => {
+                depth[ip] = Some(d);
+                work.push(ip);
+                true
+            }
+            Some(prev) => prev == d,
+        }
+    }
+    while let Some(ip) = work.pop() {
+        if ip >= len {
+            continue; // the implicit Done block
+        }
+        let d = depth[ip].expect("worklist entries have depths");
+        let ok = match &code[ip] {
+            Inst::Const(_)
+            | Inst::Local(_)
+            | Inst::Global(_)
+            | Inst::GlobalIc { .. }
+            | Inst::Prim2SlotSlot { .. }
+            | Inst::Prim2SlotInt { .. }
+            | Inst::TryCatch { .. } => merge(&mut depth, &mut work, ip + 1, d + 1),
+            Inst::Pop | Inst::SetLocal(_) => d >= 1 && merge(&mut depth, &mut work, ip + 1, d - 1),
+            Inst::Prim1 { .. } => d >= 1 && merge(&mut depth, &mut work, ip + 1, d),
+            Inst::Prim2 { .. } => d >= 2 && merge(&mut depth, &mut work, ip + 1, d - 1),
+            Inst::Prim3 { .. } => d >= 3 && merge(&mut depth, &mut work, ip + 1, d - 2),
+            Inst::MakeVector(n) => d >= *n && merge(&mut depth, &mut work, ip + 1, d - n + 1),
+            Inst::MakeMap(n) => d >= 2 * n && merge(&mut depth, &mut work, ip + 1, d - 2 * n + 1),
+            Inst::MakeClosure { names, .. } => {
+                d >= names.len() && merge(&mut depth, &mut work, ip + 1, d - names.len() + 1)
+            }
+            Inst::Jump(t) => merge(&mut depth, &mut work, *t, d),
+            Inst::JumpIfFalse(t) => {
+                d >= 1
+                    && merge(&mut depth, &mut work, *t, d - 1)
+                    && merge(&mut depth, &mut work, ip + 1, d - 1)
+            }
+            Inst::SelfCall { argc } => d >= *argc, // terminal (frame reset + loop)
+            Inst::Call {
+                argc, tail, head, ..
+            } => {
+                // A free-global head isn't staged (the IC resolves the callee), so
+                // the call consumes only `argc` operands; a computed head adds one.
+                let consumed = argc + usize::from(head.is_none());
+                if d < consumed {
+                    false
+                } else if *tail {
+                    true // terminal: the driver reuses the frame
+                } else {
+                    let after = d - consumed + 1;
+                    max_after_call = Some(max_after_call.map_or(after, |m| m.max(after)));
+                    merge(&mut depth, &mut work, ip + 1, after)
+                }
+            }
+        };
+        if !ok {
+            return None; // inconsistent depths — disable checkpointing for this arm
+        }
+    }
+    max_after_call
+}
+#[cfg(not(feature = "jit"))]
+pub(super) fn jit_ckpt_depth(_code: &[Inst]) -> Option<usize> {
+    None
+}
+
 /// Count of non-tail Brood→Brood calls in `code` — the shape that needs a handle spill
 /// (≥2) and drives the spill-reserve / lowering gates.
 #[cfg(feature = "jit")]
@@ -1522,7 +1614,18 @@ fn jit_lower_arm_inner(
     // that must survive a later call's safepoint. `reserve` matches what arm
     // construction added to `nslots`, so `spill_base` is exactly the old `scope.max`.
     let reserve = jit_spill_reserve(code);
-    let spill_base = nslots - reserve;
+    // Frame layout: [locals | spill slots | ckpt slot + journal]. The checkpoint
+    // area (deopt-resume, `CompiledArm::ckpt_slot`) sits ABOVE the spills, so the
+    // spill base is measured from the checkpoint start when one is reserved.
+    let frame_top_for_spills = if inline.is_none() && arm.ckpt_slot != u32::MAX {
+        arm.ckpt_slot as usize
+    } else {
+        // Inlined upgrade: its own (larger) layout has no checkpoint area — the
+        // small layout's `ckpt_slot` points into its locals, so spills measure
+        // from the full frame top exactly as before.
+        nslots
+    };
+    let spill_base = frame_top_for_spills - reserve;
     let mut spill_next = 0usize;
     // Return-via-roots writes/reads the result at `roots[base]` (slot 0), and the VM hooks
     // read it back the same way — both require slot 0 to exist. A 0-slot arm (a 0-arg,
@@ -2432,6 +2535,30 @@ fn jit_lower_arm_inner(
     {
         let init = b.ins().iconst(types::I64, TICK_BATCH);
         b.def_var(tick_budget, init);
+    }
+    // Deopt-resume checkpointing (see `CompiledArm::ckpt_slot`) is active for the
+    // ORIGINAL body only: an inlined upgrade's chunk ips don't match the
+    // interpreter's chunk, so its journal would mislead a resume — it keeps the
+    // legacy from-ip-0 re-run (its inline gate excludes self-tail loops, the shape
+    // the duplication bug needs in practice).
+    let ckpt_active = inline.is_none() && arm.ckpt_slot != u32::MAX;
+    // The entry RESET must also run for an inlined upgrade (whose ips don't match
+    // the interpreter chunk, so it never journals): a stale journal left by an
+    // earlier small-body native run would otherwise mislead a later resume.
+    if arm.ckpt_slot != u32::MAX {
+        // Entry reset: clear any stale journal from a previous native run of this
+        // frame (an interpreted stretch between native runs never maintains it).
+        // Packed 0 = "resume at ip 0 with an empty operand stack" — the legacy
+        // (and here effect-free) re-run.
+        let idx = b.ins().iadd_imm(base, arm.ckpt_slot as i64);
+        let off = b.ins().imul_imm(idx, STRIDE);
+        let rb = b.use_var(rb_var);
+        let addr = b.ins().iadd(rb, off);
+        let tag = b.ins().iconst(types::I8, TAG_INT as i64);
+        let zero = b.ins().iconst(types::I64, 0);
+        b.ins().store(MemFlagsData::trusted(), tag, addr, 0);
+        b.ins()
+            .store(MemFlagsData::trusted(), zero, addr, PAYLOAD_OFFSET as i32);
     }
     b.ins().jump(leader_block[0].unwrap(), &[]);
 
@@ -4901,6 +5028,14 @@ fn jit_lower_arm_inner(
                     if has_cons {
                         b.ins().call(sp_ref, &[heap]);
                     }
+                    // Back-edge checkpoint reset (see `CompiledArm::ckpt_slot`): the
+                    // frame was just reset to the next iteration's args — a deopt from
+                    // here on resumes at ip 0 with an empty stack, which re-executes
+                    // only this fresh iteration's (so-far-nonexistent) work.
+                    if ckpt_active {
+                        let zero = b.ins().iconst(types::I64, 0);
+                        store_int(&mut b, arm.ckpt_slot as i64, zero);
+                    }
                     // Back-edge bookkeeping, BATCHED (BEAM-style): decrement the
                     // in-register countdown; while nonzero the loop resumes with ONE
                     // sub + branch — no FFI, no TLS, no guard load. Every `TICK_BATCH`
@@ -5024,6 +5159,21 @@ fn jit_lower_arm_inner(
                 }
                 _ => return None,
             }
+            // Deopt-resume checkpoint (see `CompiledArm::ckpt_slot`): a non-tail
+            // call just completed — journal the abstract operand stack (it contains
+            // only GC-safe shapes here: unboxed scalars, frame slots, and the fresh
+            // call result) into the reserved frame slots plus the packed
+            // `(resume_ip << 16) | depth`, so a LATER deopt in this activation
+            // resumes right here instead of re-running (and re-effecting) from ip 0.
+            if ckpt_active && matches!(&code[j], Inst::Call { tail: false, .. }) {
+                let ckpt_base = arm.ckpt_slot as i64 + 1;
+                for (k, &op) in stack.iter().enumerate() {
+                    store_op(&mut b, ckpt_base + k as i64, op);
+                }
+                let packed = (((j as i64) + 1) << 16) | stack.len() as i64;
+                let pv = b.ins().iconst(types::I64, packed);
+                store_int(&mut b, arm.ckpt_slot as i64, pv);
+            }
             j += 1;
             if j == len {
                 // Fall off the end into Done: return the single result via roots[base].
@@ -5089,11 +5239,12 @@ fn jit_lower_arm_inner(
             // CLIF to a source arm, then the CLIF itself.
             let ops: Vec<&str> = code.iter().map(inst_opcode_name).collect();
             eprintln!(
-                "[jit-ir] ===== arm: {} ({}) insts: {} =====",
+                "[jit-ir] ===== arm: {} ({}) ckpt_slot: {} insts: {} =====",
                 code.len(),
                 arm.dbg_name
                     .map(crate::core::value::symbol_name_ref)
                     .unwrap_or("<closure>"),
+                arm.ckpt_slot,
                 ops.join(" ")
             );
             // Per-Call (site, head) so the CLIF can be correlated to a source arm.

@@ -501,6 +501,17 @@ pub struct CompiledArm {
     /// arms pay a single bool test; watched healthy arms one relaxed load.
     pub deopt_watch: bool,
     pub jit_deopts: std::sync::atomic::AtomicU32,
+    /// Deopt-resume checkpoint layout (devlog 2026-07-16 fix): `u32::MAX` = no
+    /// checkpointing (no non-tail calls in the chunk — a from-ip-0 re-run is
+    /// then effect-free). Otherwise `ckpt_slot` is the frame slot holding the
+    /// packed `(resume_ip << 16) | operand_depth` journal (a plain `Value::Int`,
+    /// GC-inert), and slots `[ckpt_slot+1, ckpt_slot+1+depth)` hold the journaled
+    /// operand stack — written by the JIT'd arm after every completed non-tail
+    /// call, reset at entry and on every self-tail back-edge. On an outcome-1
+    /// deopt the VM resumes AT the checkpoint (operands re-pushed from the
+    /// journal slots) instead of re-running from ip 0, so side effects that
+    /// already executed are never repeated.
+    pub ckpt_slot: u32,
     /// The [`Heap::global_epoch`] at which this arm was last compiled to native code —
     /// the inline-cache epoch guard (ADR-096 §4.A) for the JIT'd arm. The lowered code
     /// inlines arithmetic operators (`+`/`<`/…) as raw machine ops, valid only while

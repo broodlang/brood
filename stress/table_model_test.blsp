@@ -9,8 +9,8 @@
 ;; vector keys (forces dense->hashed migration MID-SEQUENCE), values at the
 ;; 61-bit tagged-int edges (+-2^60), nil/true/false (the EMPTY-vs-stored-nil
 ;; distinction), strings and nested vectors (unencodable -> migration).
-;; All ops here are IDEMPOTENT (put/delete/get/has) so the suite passes even
-;; while the deopt-rerun bug stands; incr coverage is in the xfail file.
+;; Includes non-idempotent table-incr — exercising the JIT deopt-resume
+;; checkpoints alongside the table itself.
 
 (defmodule table-model-stress-test (:use test))
 
@@ -56,13 +56,18 @@
       (< c 7)
       (let (s2 (lcg s1) k (gen-key s2))
         (do (table-delete t k) [s2 (dissoc m k)]))
-      ;; a second put flavour (NOTE: table-incr is deliberately NOT exercised here —
-      ;; it is non-idempotent, and the KNOWN deopt-rerun bug (see
-      ;; xfail_deopt_rerun_test.blsp) duplicates it under a JIT'd loop. Its model
-      ;; coverage lives in that xfail file until the bug is fixed.)
+      ;; incr on a dedicated int-count key space — non-idempotent, exercising the
+      ;; deopt-resume checkpoints (tests/jit_deopt_effects_test.blsp is the
+      ;; focused regression for the duplication bug this once caught)
       (< c 9)
-      (let (s2 (lcg s1) k (rem s2 32) s3 (lcg s2) v (gen-val s3))
-        (do (table-put t k v) [s3 (assoc m k v)]))
+      (let (s2 (lcg s1) k (rem s2 32) cur (get m k :zero))
+        (if (int? cur)
+          (do (table-incr t k 1) [s2 (assoc m k (+ cur 1))])
+          (if (= cur :zero)
+            (do (table-incr t k 1) [s2 (assoc m k 1)])
+            ;; model says non-int lives there: table-incr must throw, state unchanged
+            (do (assert= (try (do (table-incr t k 1) :no-throw) (catch e :threw)) :threw)
+              [s2 m]))))
       ;; get with sentinel default — must equal the model exactly
       else
       (let (s2 (lcg s1) k (gen-key s2))

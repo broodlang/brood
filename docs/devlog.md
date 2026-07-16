@@ -4379,3 +4379,48 @@ lives in the xfail. ALSO worth fixing regardless: the destructure-of-call-result
 emits a deopt on every entry — finding and lowering that instruction properly
 removes the whole "every-entry deopt" class (such arms gain nothing from the
 JIT anyway and currently pay native entry + deopt + VM re-run per call).
+
+## 2026-07-16 — FIXED: JIT deopts resume at effect-safe checkpoints (the deopt-rerun bug)
+
+The morning's KNOWN BUG is closed the real way — **deopt-resume checkpoints**
+— rather than by restricting what lowers:
+
+- `compile_arm` runs a tiny static pass (`jit_ckpt_depth`: an abstract
+  interpreter over the chunk propagating operand-stack depth; both branch
+  edges, merge-consistent) and, for any arm with a non-tail call, reserves a
+  **checkpoint area** above the spill slots: one journal slot (packed
+  `(resume_ip << 16) | depth` as a plain `Value::Int`) plus room for the
+  deepest post-call operand stack (`CompiledArm::ckpt_slot`).
+- The lowering journals after **every completed non-tail call**: each abstract
+  operand (only GC-safe shapes exist there — unboxed scalars, frame slots, the
+  fresh call result) is stored into the checkpoint slots, then the packed
+  ip/depth. Entry and every self-tail back-edge reset the journal to 0; the
+  inlined-upgrade lowering resets at entry but never journals (its chunk ips
+  aren't the interpreter's).
+- On an outcome-1 deopt every consumer (vm_run_bc's tier hook, the dispatch
+  fast path, `jit_run_fast_link`, `jit_dispatch_call`, `hof_apply_native`)
+  reads the journal: ip > 0 ⇒ push the journaled operands and **resume the VM
+  at the checkpoint** — the frame is intact, exactly the shape of a frame
+  suspended at a `Call` (the three FFI-side consumers drive it via a synthetic
+  single-frame `vm_run_bc` resume, `vm_resume_deopt`). ip = 0 ⇒ the legacy
+  from-ip-0 re-run, which is now effect-free by construction: everything the
+  boxed subset executes besides calls is pure or idempotent (the inline table
+  put re-applies; allocs re-allocate). Effects therefore execute exactly once,
+  always. `BROOD_NO_DEOPT_RESUME=1` is the A/B lever (per-arm, at chunk time).
+- Frame slots make the journal GC-traced and nesting-safe for free (a callee's
+  own journal lives in its own frame) — no heap fields, no FFI on the hot path.
+  Cost: a few stores per completed call; the full benchmark A/B is flat.
+
+Two landmines hit while landing it: the depth pass must not count a
+free-global-head call's callee as a staged operand (the IC resolves it — the
+pass returned None for every real arm until fixed), and the **spill area must
+be measured from the checkpoint base**, not `nslots` (spills and journal
+otherwise collide — caught by `nested_ifs_and_multiple_args_under_jit`'s
+3-calls-plus-adds shape, and only there: a reminder that the Rust JIT tests
+earn their keep).
+
+Verified: the xfail repro flips to green and is **promoted to
+`tests/jit_deopt_effects_test.blsp`**; the model stress regains non-idempotent
+`table-incr` coverage (8/8 ×5 incl. GC-stress); suite 777/777; `make stress`
+fully green (no xfails remain); 3-engine bit-identical ×8 rows; `nest check`
+clean; benchmarks flat vs the `BROOD_NO_DEOPT_RESUME` baseline.

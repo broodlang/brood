@@ -1,0 +1,30 @@
+;; Regression: JIT deopt must not re-execute side effects (devlog 2026-07-16).
+;;
+;; A JIT'd self-tail loop whose body performs a SIDE EFFECT (table-incr) and
+;; then hits a per-entry deopt (destructuring a CALL-RESULT vector) used to
+;; re-run the whole arm from ip 0 on the VM — duplicating the effect once per
+;; 256-edge tier boundary. Fixed by deopt-resume checkpoints (`ckpt_slot` on
+;; CompiledArm): after every completed non-tail call the arm journals its
+;; operand stack + resume ip into reserved frame slots, and a deopt resumes AT
+;; the checkpoint. This test was the xfail repro; promoted on the fix landing.
+
+(defmodule jit-deopt-effects-test (:use test))
+
+(defn mk (s) [(rem (+ (* s 1103515245) 12345) 2147483648) :tag])
+
+(defn spin (t s n i)
+  (if (= n 0) nil
+    (do
+      (table-incr t i 1)
+      (let ([s2 tag] (mk s))
+        (spin t s2 (- n 1) (+ i 1))))))
+
+(defn dup-count (t i n acc)
+  (if (= i n) acc
+    (dup-count t (+ i 1) n (if (= (table-get t i 0) 1) acc (+ acc 1)))))
+
+(describe "jit: deopt never re-executes side effects"
+  (test "every loop iteration's incr applies exactly once"
+    (let (t (table))
+      (do (spin t 1337 20000 0)
+        (assert= (dup-count t 0 20000 0) 0)))))
