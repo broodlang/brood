@@ -4468,3 +4468,17 @@ deliberate decision rather than a drive-by edit.
   for top-level program code (observed VM counters under it while debugging —
   likely a consequence of ADR-135's top-level-as-capture-process; either the
   flag or CLAUDE.md's description should be updated).
+
+## 2026-07-16 — BROOD_VM=0 honored again at top level; the fuzzer gets its third oracle
+
+ADR-135 (top level as a capture-mode process) silently swallowed `BROOD_VM=0`
+for `brood file.blsp`: `run_program_body` always drove forms through the VM, so
+the "tree-walker" leg of every engine-differential comparison was really the VM
+(discovered while building the fuzzer — its "TW" runs showed VM counters).
+`run_program_body` now honors the flag: each expanded form runs synchronously
+on `eval::eval` (`def` is its special form; a top-level `receive` blocks the
+worker — the documented tree-walker behavior; it is a debug engine, not the
+production path). Verified: zero VM work-attribution counters under
+`BROOD_VM=0`, results identical. The fuzzer gains `tree-walk` as a fifth
+config — a genuinely independent oracle again — and 30 fresh seeds agree
+across all five. Suite 777/777; `make stress` fully green.

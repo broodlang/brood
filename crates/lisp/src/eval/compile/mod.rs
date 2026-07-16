@@ -4165,6 +4165,18 @@ pub(crate) fn run_program_body(
         let step = (|| -> Result<VmOutcome, LispError> {
             let expanded = crate::eval::macros::compile(heap, form, root)?;
             heap.note_definition(expanded, pos);
+            // `BROOD_VM=0` — the tree-walking debug engine. ADR-135 made the top
+            // level a capture-mode process driven by the VM, which silently
+            // swallowed the flag for `brood file.blsp` (discovered 2026-07-16 while
+            // building the engine-differential fuzzer: the "tree-walker" leg was
+            // really the VM). Honor it here: run the whole form synchronously on
+            // the tree-walker — `def` is its special form, and a top-level
+            // `receive` blocks the worker (the documented tree-walker behavior;
+            // it's a debug engine, not the production path).
+            if !vm_enabled() {
+                prog.def_name = None;
+                return Ok(VmOutcome::Done(crate::eval::eval(heap, expanded, root)?));
+            }
             // A top-level `(def name rhs)` runs its RHS on the capture path and binds after
             // (`def` is a special form the VM won't body-compile, so wrapping the whole form
             // would defer to the tree-walker, whose `receive` blocks the worker instead of

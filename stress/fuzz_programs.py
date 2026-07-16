@@ -20,6 +20,7 @@ BROOD = os.environ.get("BROOD", "target/release/brood")
 CONFIGS = [
     ("jit", {}),
     ("no-jit", {"BROOD_NO_JIT": "1"}),
+    ("tree-walk", {"BROOD_VM": "0"}),  # honored at top level again since 2026-07-16
     ("gc-stress", {"BROOD_GC_STRESS": "1", "BROOD_NO_JIT": "1"}),
     ("chaos-preempt", {"BROOD_REDUCTIONS": "97"}),  # tiny prime budget: preempt storms
 ]
