@@ -4178,3 +4178,64 @@ instantly and a retry attempts the load afresh.
 Lesson: "superlinear module load" was really "one pathological form" — time the
 forms, not the file. And the old benchmark memory's "regex residual is module
 load" chain ends here: the load cost itself was the match expansion.
+
+## 2026-07-16 — JIT: closure arms through the call-profitability gate + deopt feedback (nqueens −31%, nbody −28%, pipeline −14%)
+
+Set out to profile the presumed "allocation rate" frontier on bintree/nqueens.
+The profile refuted it on both rows:
+
+- **bintree is call-protocol-bound**, not alloc-bound: `jit_run_fast_link` 27% +
+  `brood_rt_fast_frame` 10% + `push_n` 5% + frame memmove 14%, vs ~7% in
+  `make_vector2` (the actual allocation). That's the known call-convention
+  frontier ("the big one") — left alone this session.
+- **nqueens never ran its hot code natively at all**: 348k per-element calls of
+  the `reduce` step closure, every one through the full `vm_apply` →
+  `vm_run_bc` → `push_frame` trampoline (≈45% of the row), `jit_link_done` = 0.
+  `hof_apply_native` exists precisely for this and never fired — the step arm
+  never compiled, refused by the static profitability gate (jit_lower_arm's
+  "call-mediated boxed work does not win natively": ≥1 non-tail call, no vector
+  op, no self-loop → bail).
+
+Two changes, shaped by three measured dead ends (recorded so they aren't
+re-walked):
+
+1. **The static gate now applies to top-level defns only; closure arms are
+   exempt.** A closure arm (the HOF step shape) going native is what lets
+   `hof_apply_native` skip the trampoline per element: nqueens wall 0.16 →
+   **0.11 s** (compute ~130 → ~80 ms — past Ruby's 123 ms, **6/7 → 5/7**),
+   pipeline 0.07 → 0.06, a closure-reduce microbench −62%. The dead ends: (a)
+   removing the gate outright also won nqueens but regressed nbody +11% —
+   native `advance` linked into `advance-body`, which deopts, re-runs on the
+   VM, re-tiers, and ran native TWICE per call; (b) refining the gate on the
+   float-slot profile didn't protect nbody (the thrasher's floats live in
+   let-binder slots, which snapshot as nil at enqueue); (c) admitting defns
+   with a ≥4-work floor still regressed `spawn` 0.08 → 0.3–1.3 s erratic
+   (145k context switches, 20× task-clock) — the newly-admitted hot defns were
+   the PRELUDE's own compile machinery (`match-count-sym`, `match-splice-fail`,
+   `seq`, `fold`), which every spawned process's compile path runs under
+   10k-process fan-out. Hence the final scoping: defns keep the old gate
+   verbatim; closures are governed dynamically by —
+
+2. **Deopt feedback** (`deopt_watch` on `CompiledArm`): every non-loop arm with
+   ≥1 non-tail call — closure or defn, vector ops included — counts
+   **consecutive** type-deopts (a success resets; `SelfCall` loop arms are
+   exempt, their deopt follows productive native iterations); 16 in a row
+   store `BAILED`, so a persistently-thrashing arm self-heals onto the VM.
+   This caught a bug nobody had seen: **nbody's `advance-body` has been
+   deopting on ~100% of its 248k activations in the baseline too**
+   (`jit_deopt ≈ jit_native`, paying native entry + deopt + a full VM re-run
+   per call, invisible because the row still "worked"). With feedback it bails
+   at exactly deopt #16: nbody 0.47 → **0.34 s** (−28%, compute ~440 → ~310 ms,
+   within a hair of Ruby's 303) — better than the baseline ever was, with the
+   gate never having admitted anything new on that row. `BROOD_DEOPT_TRACE=1`
+   (perf-stats builds) prints each deopt's arm for exactly this diagnosis.
+
+Counters after: nqueens `vm_apply` 348k → 41k, `jit_link_done` 0 → 684k,
+deopts 0; nbody `jit_deopt` 248k → 16, `jit_link_rerun` 0. Verified: suite
+777/777; `nest check` zero warnings; 3-engine bit-identical on 8 rows;
+GC_STRESS + GC_VERIFY + JIT_VERIFY clean; interleaved A/B flat on
+spawn/pingpong/ring/base64/fib/collatz/json/sort/sieve/loop/matmul/bintree.
+
+Standings: nqueens moves to 5/7; nbody's 6/7 gap to Ruby closes 140 → ~7 ms;
+the two open frontiers are unchanged in kind — bintree/regex hang on the call
+convention, json/base64 on native-library rivals.

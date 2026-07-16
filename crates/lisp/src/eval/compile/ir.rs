@@ -487,6 +487,20 @@ pub struct CompiledArm {
     /// trigger compilation past a threshold. Shared across `Arc<CompiledArm>` clones.
     pub jit_code: std::sync::atomic::AtomicPtr<u8>,
     pub jit_calls: std::sync::atomic::AtomicU32,
+    /// Deopt feedback (the dynamic replacement for the static "call-mediated boxed
+    /// work" lowering gate). `deopt_watch` is true for a non-loop arm with ≥1
+    /// non-tail call — the shape whose native profitability only runtime behaviour
+    /// can decide (a `SelfCall` loop arm is never watched: its deopt follows
+    /// productive native iterations, e.g. an overflow at the end of a long int
+    /// loop, so counting activations would mis-bail it). `jit_deopts` counts
+    /// **consecutive** type-deopts: a successful native completion resets it, a
+    /// deopt bumps it, and 16 in a row store `BAILED` — a persistent thrasher
+    /// (nbody's `advance-body` deopted on ~100% of its 248k activations, paying
+    /// native entry + deopt + a full VM re-run per call) self-heals onto the VM,
+    /// while an arm with only occasional deopts keeps its native code. Unwatched
+    /// arms pay a single bool test; watched healthy arms one relaxed load.
+    pub deopt_watch: bool,
+    pub jit_deopts: std::sync::atomic::AtomicU32,
     /// The [`Heap::global_epoch`] at which this arm was last compiled to native code —
     /// the inline-cache epoch guard (ADR-096 §4.A) for the JIT'd arm. The lowered code
     /// inlines arithmetic operators (`+`/`<`/…) as raw machine ops, valid only while

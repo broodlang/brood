@@ -2159,6 +2159,17 @@ fn compile_arm(
     // any other. Computed identically here (to size the frame) and in `jit_lower_arm`
     // (to place spills) via `jit_spill_reserve`.
     let spill_reserve = chunk.as_ref().map_or(0, |c| jit_spill_reserve(&c.code));
+    // Deopt-feedback watch (see the field doc): any non-loop arm with ≥1 non-tail
+    // call. Vector-op arms are watched too — nbody's `advance-body` (calls +
+    // `nth`s + a vector literal) deopted on ~100% of activations and only
+    // feedback can catch that; a healthy vec arm (bintree's `check`) never
+    // deopts, so it pays one relaxed load per native completion.
+    let deopt_watch = chunk.as_ref().is_some_and(|c| {
+        c.code
+            .iter()
+            .any(|i| matches!(i, Inst::Call { tail: false, .. }))
+            && !c.code.iter().any(|i| matches!(i, Inst::SelfCall { .. }))
+    });
     Some(CompiledArm {
         nrequired,
         noptional,
@@ -2170,6 +2181,8 @@ fn compile_arm(
         has_runtime_handles,
         jit_code: AtomicPtr::new(std::ptr::null_mut()),
         jit_calls: AtomicU32::new(0),
+        deopt_watch,
+        jit_deopts: AtomicU32::new(0),
         compile_epoch: AtomicU64::new(0),
         share_key: None,
         shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -2491,6 +2504,16 @@ fn hof_apply_native(
     heap.jit_native_depth = depth;
     heap.jit_call_env = saved;
     heap.jit_dbg_fn = saved_fn;
+    // Deopt feedback (see `jit_deopt_feedback`): the HOF step arm is the canonical
+    // watched shape (nqueens' reduce closure).
+    if arm.deopt_watch {
+        use std::sync::atomic::Ordering::Relaxed;
+        if outcome == 1 {
+            jit_deopt_feedback(arm);
+        } else if arm.jit_deopts.load(Relaxed) != 0 {
+            arm.jit_deopts.store(0, Relaxed);
+        }
+    }
     // `f()` may have collected + relocated the captured env; re-read the live id before dropping
     // its root (the deopt path hands it to `vm_apply`).
     let cenv_live = heap.read_root_env(env_root);
@@ -5545,6 +5568,17 @@ fn vm_run_bc(
                             }
                             Some(1) => {
                                 crate::perf_bump!(jit_deopt);
+                                #[cfg(feature = "perf-stats")]
+                                if std::env::var_os("BROOD_DEOPT_TRACE").is_some() {
+                                    eprintln!(
+                                        "[deopt] arm={} watch={}",
+                                        cur_arm
+                                            .dbg_name
+                                            .map(crate::core::value::symbol_name_ref)
+                                            .unwrap_or_else(|| "<closure>".into()),
+                                        cur_arm.deopt_watch
+                                    );
+                                }
                             }
                             Some(2) => {
                                 crate::perf_bump!(jit_preempt);
@@ -5848,6 +5882,8 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 has_runtime_handles,
                 jit_code: AtomicPtr::new(std::ptr::null_mut()),
                 jit_calls: AtomicU32::new(0),
+                deopt_watch: false,
+                jit_deopts: AtomicU32::new(0),
                 compile_epoch: AtomicU64::new(0),
                 share_key: None,
                 shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -6319,6 +6355,12 @@ fn jit_run_fast_link(
             if let Some((_, Some((arm, cenv)))) =
                 heap.vm_call_ic_probe(site, head, argc as u32, epoch)
             {
+                // Deopt feedback (see `jit_deopt_feedback`): the fast-link hot path
+                // carries no arm reference, so runs go uncounted here — only deopts.
+                // Undercounted runs only make a mixed arm bail sooner (conservative).
+                if outcome == 1 && arm.deopt_watch {
+                    jit_deopt_feedback(&arm);
+                }
                 return match vm_apply(heap, arm, &argv2, cenv) {
                     Ok(v) => FastLinkOutcome::Done(v),
                     Err(e) => {
@@ -6643,6 +6685,15 @@ pub(crate) fn jit_dispatch_call(
                 heap.jit_native_depth = depth;
                 heap.jit_call_env = saved;
                 heap.jit_dbg_fn = saved_fn;
+                // Deopt feedback (see `jit_deopt_feedback`) for the native→native link.
+                if arm.deopt_watch {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    if outcome == 1 {
+                        jit_deopt_feedback(&arm);
+                    } else if arm.jit_deopts.load(Relaxed) != 0 {
+                        arm.jit_deopts.store(0, Relaxed);
+                    }
+                }
                 // `f()` runs the callee, which allocates freely and so may have triggered a
                 // collection that *relocated* the captured env. `minor_collect` forwarded the
                 // rooted copy (`env_root`) but NOT the local `callee_env` EnvId — re-read the
@@ -6872,6 +6923,25 @@ fn jit_dispatch_tail(
 /// definition). The check is per *activation*, not per loop iteration: a JIT'd arm
 /// evaluates no Brood, so no `def` can land mid-run, and the redefinition therefore takes
 /// effect at the next arm entry — the standard safepoint granularity for a JIT.
+/// Deopt feedback for a watched arm (`deopt_watch`, see the `CompiledArm` field
+/// doc): count the **consecutive** type-deopt (each success resets the counter
+/// at the call sites) and, once the arm has demonstrably thrashed — 16 deopts
+/// in a row — mark it `BAILED` so it stays on the VM. A native attempt that
+/// keeps deopting pays entry + deopt + a full VM re-run per call (nbody's
+/// `advance-body`: ~100% deopt rate across 248k activations). An arm with only
+/// occasional deopts never reaches 16 consecutive and keeps its native code.
+/// `BAILED` is sticky until the next epoch invalidation, which resets the
+/// counter so the recompiled arm gets a fresh trial.
+#[cfg(feature = "jit")]
+fn jit_deopt_feedback(arm: &CompiledArm) {
+    use std::sync::atomic::Ordering::{Relaxed, Release};
+    const DEOPT_BAIL_CONSECUTIVE: u32 = 16;
+    let d = arm.jit_deopts.fetch_add(1, Relaxed) + 1;
+    if d >= DEOPT_BAIL_CONSECUTIVE {
+        arm.jit_code.store(crate::jit::BAILED, Release);
+    }
+}
+
 #[cfg(feature = "jit")]
 pub(crate) fn jit_tier(
     arm: &Arc<CompiledArm>,
@@ -6994,6 +7064,7 @@ pub(crate) fn jit_tier(
     if arm.compile_epoch.load(Acquire) != heap.global_epoch() {
         arm.jit_code.store(std::ptr::null_mut(), Release);
         arm.jit_calls.store(THRESHOLD, Release); // re-tier promptly (already proven hot)
+        arm.jit_deopts.store(0, Relaxed); // fresh deopt-feedback trial for the recompile
         arm.shared_published.store(false, Relaxed); // recompiled code must re-publish
         arm.inline_installed.store(false, Relaxed); // re-decide the inline swap at the new epoch
         arm.inline_queued.store(false, Relaxed); // re-enqueue the inlined upgrade if still hot
@@ -7152,6 +7223,16 @@ pub(crate) fn jit_tier(
         arm.shared_published.store(false, Relaxed);
         return None;
     }
+    // Deopt feedback (watched arms only — a plain bool test for the rest): a
+    // type-deopt bumps the consecutive counter (bailing a persistent thrasher);
+    // any other outcome resets it.
+    if arm.deopt_watch {
+        if outcome == 1 {
+            jit_deopt_feedback(arm);
+        } else if arm.jit_deopts.load(Relaxed) != 0 {
+            arm.jit_deopts.store(0, Relaxed);
+        }
+    }
     Some(outcome)
 }
 
@@ -7273,6 +7354,8 @@ mod tests {
             has_runtime_handles: true,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7395,6 +7478,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7496,6 +7581,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7569,6 +7656,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7652,6 +7741,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7777,6 +7868,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7841,6 +7934,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7899,6 +7994,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -7966,6 +8063,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: std::sync::atomic::AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: std::sync::atomic::AtomicU32::new(0),
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8121,6 +8220,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: AtomicU32::new(0),
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8283,6 +8384,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: AtomicU32::new(0),
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
@@ -8389,6 +8492,8 @@ mod tests {
             has_runtime_handles: false,
             jit_code: AtomicPtr::new(std::ptr::null_mut()),
             jit_calls: AtomicU32::new(0),
+            deopt_watch: false,
+            jit_deopts: AtomicU32::new(0),
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),

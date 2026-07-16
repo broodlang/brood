@@ -421,7 +421,23 @@ pub(crate) fn jit_lower_arm(
         let has_float_slot = slot_tags
             .iter()
             .any(|&t| t == crate::core::value::Tag::Float as u8);
-        if non_tail_call_count(code) >= 1 && !has_inline_vec && (!has_self_loop || has_float_slot) {
+        // The static call-mediated profitability bail — but for **top-level defns
+        // only** (`dbg_name` set). A CLOSURE arm (a `reduce`/`fold` step, the HOF
+        // shape) is exempt: making it native is what lets `hof_apply_native` skip
+        // the `vm_apply` trampoline per element (nqueens −31%, pipeline −14%),
+        // and **deopt feedback** (`deopt_watch` in `CompiledArm`) bails one that
+        // type-thrashes after 16 consecutive deopts, so a bad closure shape
+        // self-heals instead of needing this static guess. Named defns keep the
+        // old gate verbatim: they are name-called from everywhere — including the
+        // per-process compile machinery (macro expansion runs prelude Brood like
+        // `match-count-sym`, `seq`, `fold`) — and admitting those regressed
+        // `spawn` 0.08 → 0.3–1.3 s erratic (contention around per-process compile
+        // + shared-install under 10k-process fan-out) for zero row wins.
+        if arm.dbg_name.is_some()
+            && non_tail_call_count(code) >= 1
+            && !has_inline_vec
+            && (!has_self_loop || has_float_slot)
+        {
             return None;
         }
     }
@@ -4796,8 +4812,11 @@ fn jit_lower_arm_inner(
             // CLIF to a source arm, then the CLIF itself.
             let ops: Vec<&str> = code.iter().map(inst_opcode_name).collect();
             eprintln!(
-                "[jit-ir] ===== arm: {} insts: {} =====",
+                "[jit-ir] ===== arm: {} ({}) insts: {} =====",
                 code.len(),
+                arm.dbg_name
+                    .map(crate::core::value::symbol_name_ref)
+                    .unwrap_or("<closure>"),
                 ops.join(" ")
             );
             // Per-Call (site, head) so the CLIF can be correlated to a source arm.
