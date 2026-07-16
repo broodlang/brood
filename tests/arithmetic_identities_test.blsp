@@ -1,0 +1,80 @@
+;; Metamorphic / property-based arithmetic identities.
+;;
+;; The engine differential (fuzz_programs.py) catches jit-vs-tree DIVERGENCE, but
+;; is BLIND to a bug where every engine agrees on the same WRONG answer — a
+;; systematic error in a shared primitive (builtins.rs). Algebraic identities
+;; catch that class: they must hold no matter how the primitive is implemented,
+;; so a broken `*`/`quot`/`bit-*` breaks a law. Checked over many seeded-random
+;; values spanning the i64 range AND bignum territory (cubes of ~1e6 overflow
+;; i64), plus a few float laws that survive IEEE rounding (commutativity, self-
+;; subtraction, identity element — NOT associativity/distributivity, which don't).
+
+(defmodule arithmetic-identities-test (:use test))
+
+;; deterministic LCG (matches the stress-suite generator)
+(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+
+;; a wide-range int: -1e6..1e6, occasionally cubed into bignum territory, with
+;; the type/overflow edges mixed in so promotion boundaries get exercised.
+(defn rand-int (s)
+  (let (x (- (rem s 2000001) 1000000))
+    (cond
+      (= (rem s 11) 0) (* x x x)          ; bignum
+      (= (rem s 13) 0) (* x 4294967296)   ; push past 2^32
+      else x)))
+
+(defn int-laws (a b c)
+  (and
+    (= (+ a b) (+ b a))                          ; + commutes
+    (= (* a b) (* b a))                          ; * commutes
+    (= (+ (+ a b) c) (+ a (+ b c)))              ; + associates (exact for ints)
+    (= (* (* a b) c) (* a (* b c)))              ; * associates
+    (= (* a (+ b c)) (+ (* a b) (* a c)))        ; * distributes over +
+    (= (- a a) 0)
+    (= (+ a (- b)) (- a b))
+    (= (* a 2) (+ a a))
+    (= (* a -1) (- a))
+    (= (bit-xor a a) 0)
+    (= (bit-and a a) a)
+    (= (bit-or a a) a)
+    (= (bit-xor a 0) a)
+    (= (bit-and a 0) 0)
+    (= (bit-xor (bit-xor a b) b) a)              ; xor is its own inverse
+    (= (max a b) (max b a))
+    (= (min a b) (min b a))
+    (= (+ (max a b) (min a b)) (+ a b))
+    ;; the division identity: a = (quot a b)*b + (rem a b), rem has sign of a
+    (if (= b 0) true (= (+ (* (quot a b) b) (rem a b)) a))))
+
+(defn float-laws (a b)
+  (and
+    (= (+ a b) (+ b a))                          ; float + commutes exactly
+    (= (* a b) (* b a))                          ; float * commutes exactly
+    (= (- a a) 0.0)
+    (= (+ a 0.0) a)
+    (= (* a 1.0) a)))
+
+(defn check-ints (s n)
+  (if (= n 0) true
+    (let (a (rand-int (lcg s))
+          b (rand-int (lcg (lcg s)))
+          c (rand-int (lcg (lcg (lcg s)))))
+      (if (int-laws a b c)
+        (check-ints (lcg (lcg (lcg (lcg s)))) (- n 1))
+        false))))
+
+(defn check-floats (s n)
+  (if (= n 0) true
+    (let (a (/ (rand-int (lcg s)) 7.0)
+          b (/ (rand-int (lcg (lcg s))) 13.0))
+      (if (float-laws a b)
+        (check-floats (lcg (lcg s)) (- n 1))
+        false))))
+
+(describe "arithmetic identities hold over random values"
+  (test "integer laws over 1500 cases (incl. bignum)"
+    (is (check-ints 12345 1500)))
+  (test "integer laws from a second seed"
+    (is (check-ints 987654321 1500)))
+  (test "float commutativity/identity over 800 cases"
+    (is (check-floats 555 800))))
