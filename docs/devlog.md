@@ -4535,3 +4535,36 @@ engines × GC-stress).
   All pass; 100 fresh fuzz seeds type-warning-free.
 
 `make stress` is now 31 green runs. Suite 777/777.
+
+## 2026-07-16 — TSAN clean, loom model-check, fuzzer auto-shrink
+
+- **ThreadSanitizer** (`make tsan`: nightly + build-std + a new `system-alloc`
+  feature): a new 8-thread table hammer (`tests/table_tsan.rs` — puts/incrs/
+  gets/deletes racing a mid-run migration and a drop) plus the existing
+  concurrency/preemption/live-migration/GC tests, all under TSAN. First run
+  screamed 195 data races — every one a **mimalloc artifact**: its
+  un-instrumented C internals hide the free→alloc happens-before, so every
+  cross-thread block reuse reports as a phantom race. With allocations routed
+  through the (interceptable) system allocator: **zero reports across all 15
+  tests**. The scheduler, shared code region, promote/spawn, JIT compile, and
+  the lock-free table protocol are TSAN-clean.
+- **Loom model-check** (`make loom`, `tests/loom_table_protocol.rs`): the
+  dense-table migration protocol as a faithful miniature (the real slots live
+  in an mmap loom can't instrument), exhaustively interleaved — disjoint and
+  same-key put races, exact increments, and reader coherence across a
+  migration all hold. Big caveat discovered en route: **loom 0.7 does not
+  model the C11 SC total order for plain SeqCst accesses** — a classic
+  store-buffering litmus FAILS under it (kept in the file as evidence). The
+  model therefore expresses its store→load orderings as explicit SeqCst
+  fences (which loom handles); the real code needs no fences — its SeqCst
+  RMWs/stores/loads carry the SC order per C11. Four earlier "lost write"
+  loom failures were exactly this artifact, chased to ground via the litmus
+  before touching a line of table.rs.
+- **Auto-shrink**: any divergent fuzz seed is now minimized automatically —
+  s-expression-level delta debugging (drop top-level forms, replace subtrees
+  with `0`, halve int literals, to a fixpoint under the still-diverges
+  oracle). Validated end-to-end with a synthetic oracle: a 697-byte generated
+  program reduced to the true 25-byte minimum in 124 oracle runs. The `.min`
+  file lands next to the kept seed in `stress/fuzz_out/`.
+
+Suite is now 779 (the TSAN hammer runs as a plain stress test too); all green.

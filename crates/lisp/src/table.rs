@@ -258,6 +258,13 @@ impl DenseSlots {
 ///     means the migrator captured the incremented word (done — return it),
 ///     anything else means it skipped this slot as EMPTY before the CAS landed
 ///     (re-execute the increment on the map).
+///
+/// The protocol is model-checked in `tests/loom_table_protocol.rs` (a faithful
+/// miniature — the real slots live in an mmap loom can't instrument). NOTE:
+/// the model expresses the store→load orderings as explicit SeqCst FENCES
+/// because loom 0.7 does not model the C11 SC total order for plain SeqCst
+/// accesses (the litmus in that file demonstrates it); the real code needs no
+/// fences — its SeqCst RMWs/stores/loads already carry that order per C11.
 struct Store {
     slots: OnceLock<DenseSlots>,
     dense_count: AtomicUsize,

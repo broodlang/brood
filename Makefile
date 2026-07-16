@@ -162,6 +162,12 @@ suite: ## Run the in-language suite via the project runner (discovers tests/**/*
 stress: build ## The occasional BIG stress run (property/differential/race tests, 3 engines) — not part of CI
 	./stress/run.sh
 
+tsan: ## ThreadSanitizer over the concurrency-sensitive Rust tests (needs nightly + rust-src; system-alloc feature so mimalloc's un-instrumented internals don't report phantom races)
+	RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --test table_tsan --test concurrency_race --test preemption --test live_migration --test gc
+
+loom: ## Loom model-check of the dense-table migration protocol (exhaustive interleavings of a faithful model)
+	cargo test -p brood --release --features brood/loom-model --test loom_table_protocol
+
 repl: ## Start the REPL
 	$(CLI)
 

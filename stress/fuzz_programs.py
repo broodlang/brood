@@ -203,6 +203,135 @@ def run_one(path, env_extra):
     except subprocess.TimeoutExpired:
         return "TIMEOUT"
 
+# ---- auto-shrink (delta debugging over s-expressions) ------------------------
+
+def tokenize(src):
+    out, i, n = [], 0, len(src)
+    while i < n:
+        c = src[i]
+        if c in "()[]{}":
+            out.append(c); i += 1
+        elif c == '"':
+            j = i + 1
+            while j < n and (src[j] != '"' or src[j-1] == "\\"):
+                j += 1
+            out.append(src[i:j+1]); i = j + 1
+        elif c == ";":
+            while i < n and src[i] != "\n":
+                i += 1
+        elif c.isspace():
+            i += 1
+        else:
+            j = i
+            while j < n and not src[j].isspace() and src[j] not in "()[]{};":
+                j += 1
+            out.append(src[i:j]); i = j
+    return out
+
+CLOSE = {"(": ")", "[": "]", "{": "}"}
+
+def parse(tokens):
+    """token list -> nested lists; each node is (kind, children|atom)."""
+    def one(i):
+        t = tokens[i]
+        if t in CLOSE:
+            kids, i = [], i + 1
+            while tokens[i] != CLOSE[t]:
+                node, i = one(i)
+                kids.append(node)
+            return (t, kids), i + 1
+        return ("a", t), i + 1
+    forms, i = [], 0
+    while i < len(tokens):
+        node, i = one(i)
+        forms.append(node)
+    return forms
+
+def render(node):
+    kind, v = node
+    if kind == "a":
+        return v
+    return kind + " ".join(render(k) for k in v) + CLOSE[kind]
+
+def render_forms(forms):
+    return "\n".join(render(f) for f in forms) + "\n"
+
+def all_nodes(forms):
+    """(container, index) pairs for every removable/replaceable child, largest first."""
+    out = []
+    def walk(node):
+        kind, v = node
+        if kind == "a":
+            return 1
+        size = 1
+        for i, k in enumerate(v):
+            size += walk(k)
+            out.append((v, i))
+        return size
+    for f in forms:
+        walk(f)
+    out.sort(key=lambda ci: -node_size(ci[0][ci[1]]))
+    return out
+
+def node_size(node):
+    kind, v = node
+    return 1 if kind == "a" else 1 + sum(node_size(k) for k in v)
+
+def shrink(path, still_bad, budget=250):
+    """Greedy delta debugging: try dropping top-level forms, then replacing
+    subtrees with `0`, then halving int literals — keeping every change that
+    preserves `still_bad(src)`. Bounded by `budget` oracle runs."""
+    src = open(path).read()
+    forms = parse(tokenize(src))
+    runs = [0]
+    def check(candidate_forms):
+        if runs[0] >= budget:
+            return False
+        runs[0] += 1
+        cand = render_forms(candidate_forms)
+        with open(path + ".shrink", "w") as fh:
+            fh.write(cand)
+        return still_bad(path + ".shrink")
+    changed = True
+    while changed and runs[0] < budget:
+        changed = False
+        # pass 1: drop whole top-level forms
+        for i in range(len(forms) - 1, -1, -1):
+            cand = forms[:i] + forms[i+1:]
+            if cand and check(cand):
+                forms = cand
+                changed = True
+        # pass 2: replace subtrees with the atom 0 (largest first)
+        for container, i in all_nodes(forms):
+            saved = container[i]
+            if saved == ("a", "0"):
+                continue
+            container[i] = ("a", "0")
+            if check(forms):
+                changed = True
+            else:
+                container[i] = saved
+        # pass 3: shrink big int literals toward 0
+        for container, i in all_nodes(forms):
+            kind, v = container[i]
+            if kind == "a" and v.lstrip("-").isdigit() and abs(int(v)) > 8:
+                saved = container[i]
+                container[i] = ("a", str(int(v) // 2))
+                if check(forms):
+                    changed = True
+                else:
+                    container[i] = saved
+    out = render_forms(forms)
+    with open(path + ".min", "w") as fh:
+        fh.write(out)
+    os.remove(path + ".shrink") if os.path.exists(path + ".shrink") else None
+    return path + ".min", runs[0]
+
+def divergence_oracle(path):
+    """True iff the configs still disagree on `path` (the shrink predicate)."""
+    results = {run_one(path, env) for _, env in CONFIGS}
+    return len(results) != 1
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=25)
@@ -232,6 +361,9 @@ def main():
             print(f"DIVERGENCE seed={seed} ({path} kept):")
             for name, res in results.items():
                 print(f"  [{name}] {res.strip()[:200]}")
+            minp, oracle_runs = shrink(path, divergence_oracle)
+            print(f"  shrunk -> {minp} ({oracle_runs} oracle runs, "
+                  f"{len(open(minp).read())} bytes from {len(open(path).read())})")
         else:
             if not args.keep:
                 os.remove(path)

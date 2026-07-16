@@ -11,6 +11,12 @@ name = "brood"
 path = "src/lib.rs"
 
 [features]
+# Sanitizer runs: route allocations through the system allocator so TSAN can
+# see free/alloc happens-before (mimalloc's C internals are un-instrumented).
+system-alloc = []
+# Loom model-check of the table migration protocol (tests/loom_table_protocol.rs);
+# a feature (not --cfg loom) so the global cfg doesn't break boxcar's own loom hooks.
+loom-model = []
 # `jit` is a default feature: the tier-1 JIT (ADR-101) is on for every ordinary
 # `cargo build`/`cargo test`/rust-analyzer and the shipped `brood`/`nest` binaries.
 # The lean `nest release` bundle and unsupported hosts strip it via
@@ -253,6 +259,7 @@ cranelift-frontend = { version = "0.133", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+loom = "0.7"
 # Lightweight microbenchmark harness for the interpreter core. Dev-only (the
 # released library pulls nothing extra). Run with `cargo bench`.
 divan = "0.1"

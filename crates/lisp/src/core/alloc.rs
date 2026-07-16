@@ -52,7 +52,14 @@ use std::cell::Cell;
 /// the OS — a deliberate memory-for-speed trade, the right one for a long-running
 /// app. The byte-counting in [`Counting`] (ADR-043 `BROOD_MEM_LIMIT`) is unaffected:
 /// it tallies the requested `Layout` size around this backend exactly as before.
+#[cfg(not(feature = "system-alloc"))]
 const BACKEND: mimalloc::MiMalloc = mimalloc::MiMalloc;
+/// Sanitizer builds (`--features system-alloc`): ThreadSanitizer can't see the
+/// synchronization inside mimalloc's un-instrumented C internals, so every
+/// cross-thread memory-block reuse reports as a phantom data race. The system
+/// allocator is TSAN-interceptable, making real races stand out.
+#[cfg(feature = "system-alloc")]
+const BACKEND: std::alloc::System = std::alloc::System;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Live-bytes accounting is **sharded** across cache-line-padded counters, one
