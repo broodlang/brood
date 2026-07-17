@@ -6228,107 +6228,118 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
             // itself lives forever in GLOBAL_JIT regardless — see the keepalive).
             let mut published: std::collections::HashMap<(u64, (u64, u16)), (usize, u64)> =
                 std::collections::HashMap::new();
+            // The inlined-upgrade counterpart (the deferred queue has the same
+            // per-process-copy flood shape). Separate map: a small-arm pointer
+            // must never install into `inline_code` (different frame sizing —
+            // `inline_nslots`), and vice versa.
+            let mut published_inline: std::collections::HashMap<(u64, (u64, u16)), (usize, u64)> =
+                std::collections::HashMap::new();
             // Lower one work item: `inlined=false` → the small original arm, store into
             // `jit_code`; `inlined=true` → the re-derived inlined body, store into
             // `inline_code` (jit_tier swaps it into `jit_code` later, epoch-bumped).
-            let mut compile =
-                |arm: &Arc<CompiledArm>, slot_tags: &[u8], rt_tag: u64, inlined: bool| {
-                    let slot = if inlined {
-                        &arm.inline_code
+            let mut compile = |arm: &Arc<CompiledArm>,
+                               slot_tags: &[u8],
+                               rt_tag: u64,
+                               inlined: bool| {
+                let slot = if inlined {
+                    &arm.inline_code
+                } else {
+                    &arm.jit_code
+                };
+                // Already resolved (a spinning loop sync-compiled it via
+                // `jit_compile_now`, or it was bailed) — don't compile it twice.
+                // A queued small arm holds QUEUED here; a queued inlined upgrade
+                // holds null (its queue marker is `inline_queued`).
+                {
+                    let existing = slot.load(std::sync::atomic::Ordering::Acquire);
+                    if !existing.is_null() && existing != crate::jit::QUEUED {
+                        return;
+                    }
+                }
+                if codegen_poisoned {
+                    slot.store(crate::jit::BAILED, Release);
+                    return;
+                }
+                // Cross-process dedupe: a peer's identical arm (same shared
+                // closure, same runtime) already lowered by THIS thread — and at
+                // the same epoch this copy was enqueued at — installs directly.
+                // A `def`/compaction between the two enqueues bumps the epoch, so
+                // a stale entry never installs (and the runner's live-epoch guard
+                // in `jit_tier` re-checks on every native entry regardless). No
+                // keepalive push: the first copy's push owns the code's chunk.
+                if let Some(key) = arm.share_key {
+                    let map = if inlined {
+                        &published_inline
                     } else {
-                        &arm.jit_code
+                        &published
                     };
-                    // Already resolved (a spinning loop sync-compiled it via
-                    // `jit_compile_now`, or it was bailed) — don't compile it twice.
-                    // A queued small arm holds QUEUED here; a queued inlined upgrade
-                    // holds null (its queue marker is `inline_queued`).
-                    {
-                        let existing = slot.load(std::sync::atomic::Ordering::Acquire);
-                        if !existing.is_null() && existing != crate::jit::QUEUED {
+                    if let Some(&(ptr, epoch)) = map.get(&(rt_tag, key)) {
+                        if epoch == arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire) {
+                            slot.store(ptr as *mut u8, Release);
                             return;
                         }
                     }
-                    if codegen_poisoned {
-                        slot.store(crate::jit::BAILED, Release);
-                        return;
+                }
+                let mut jit = crate::jit::GLOBAL_JIT
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                #[cfg(feature = "perf-stats")]
+                let t0 = std::time::Instant::now();
+                let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if inlined {
+                        jit_lower_inlined_arm(&mut jit, arm, slot_tags)
+                    } else {
+                        jit_lower_arm(&mut jit, arm, slot_tags)
                     }
-                    // Cross-process dedupe: a peer's identical arm (same shared
-                    // closure, same runtime) already lowered by THIS thread — and at
-                    // the same epoch this copy was enqueued at — installs directly.
-                    // A `def`/compaction between the two enqueues bumps the epoch, so
-                    // a stale entry never installs (and the runner's live-epoch guard
-                    // in `jit_tier` re-checks on every native entry regardless). No
-                    // keepalive push: the first copy's push owns the code's chunk.
-                    if !inlined {
+                }));
+                #[cfg(feature = "perf-stats")]
+                if std::env::var_os("BROOD_COMPILE_TRACE").is_some() {
+                    eprintln!(
+                        "[compile] {:?} arm={} inlined={}",
+                        t0.elapsed(),
+                        arm.dbg_name
+                            .map(crate::core::value::symbol_name_ref)
+                            .unwrap_or("<closure>"),
+                        inlined
+                    );
+                }
+                drop(jit); // install the pointer outside the module lock
+                match lowered {
+                    Ok(Some(ptr)) => {
+                        slot.store(ptr as *mut u8, Release);
+                        // The installed native code lives forever in GLOBAL_JIT and bakes raw
+                        // pointers into this arm's chunk `ConstVal`s. Keep the arm (hence its
+                        // chunk) alive permanently so those pointers never dangle when the
+                        // closure / call-IC that referenced it is dropped (e.g. a green process
+                        // exits) — the bug-#2 use-after-free: a freed ConstVal chunk fed garbage
+                        // consts (a garbage map_get key) into still-installed native code.
+                        JIT_ARM_KEEPALIVE
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(arm.clone());
+                        // Remember it for the queued copies still behind this one.
                         if let Some(key) = arm.share_key {
-                            if let Some(&(ptr, epoch)) = published.get(&(rt_tag, key)) {
-                                if epoch
-                                    == arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire)
-                                {
-                                    slot.store(ptr as *mut u8, Release);
-                                    return;
-                                }
-                            }
+                            let map = if inlined {
+                                &mut published_inline
+                            } else {
+                                &mut published
+                            };
+                            map.insert(
+                                (rt_tag, key),
+                                (
+                                    ptr as usize,
+                                    arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire),
+                                ),
+                            );
                         }
                     }
-                    let mut jit = crate::jit::GLOBAL_JIT
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    #[cfg(feature = "perf-stats")]
-                    let t0 = std::time::Instant::now();
-                    let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        if inlined {
-                            jit_lower_inlined_arm(&mut jit, arm, slot_tags)
-                        } else {
-                            jit_lower_arm(&mut jit, arm, slot_tags)
-                        }
-                    }));
-                    #[cfg(feature = "perf-stats")]
-                    if std::env::var_os("BROOD_COMPILE_TRACE").is_some() {
-                        eprintln!(
-                            "[compile] {:?} arm={} inlined={}",
-                            t0.elapsed(),
-                            arm.dbg_name
-                                .map(crate::core::value::symbol_name_ref)
-                                .unwrap_or("<closure>"),
-                            inlined
-                        );
+                    Ok(None) => slot.store(crate::jit::BAILED, Release),
+                    Err(_) => {
+                        codegen_poisoned = true;
+                        slot.store(crate::jit::BAILED, Release);
                     }
-                    drop(jit); // install the pointer outside the module lock
-                    match lowered {
-                        Ok(Some(ptr)) => {
-                            slot.store(ptr as *mut u8, Release);
-                            // The installed native code lives forever in GLOBAL_JIT and bakes raw
-                            // pointers into this arm's chunk `ConstVal`s. Keep the arm (hence its
-                            // chunk) alive permanently so those pointers never dangle when the
-                            // closure / call-IC that referenced it is dropped (e.g. a green process
-                            // exits) — the bug-#2 use-after-free: a freed ConstVal chunk fed garbage
-                            // consts (a garbage map_get key) into still-installed native code.
-                            JIT_ARM_KEEPALIVE
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push(arm.clone());
-                            // Remember it for the queued copies still behind this one.
-                            if !inlined {
-                                if let Some(key) = arm.share_key {
-                                    published.insert(
-                                        (rt_tag, key),
-                                        (
-                                            ptr as usize,
-                                            arm.compile_epoch
-                                                .load(std::sync::atomic::Ordering::Acquire),
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                        Ok(None) => slot.store(crate::jit::BAILED, Release),
-                        Err(_) => {
-                            codegen_poisoned = true;
-                            slot.store(crate::jit::BAILED, Release);
-                        }
-                    }
-                };
+                }
+            };
             loop {
                 // 1. Drain the entire primary queue before touching deferred — the
                 //    initial-tier work always wins the compiler.
@@ -8700,7 +8711,11 @@ mod tests {
             0,
             1,
         ));
-        for _ in 0..400 {
+        // Generous poll cap: under plain `cargo test` (one process, every test
+        // sharing the single background compiler thread) the queue ahead of this
+        // arm can take seconds — 400×2ms flaked there. nextest (the canonical
+        // runner) isolates per process and never sees it.
+        for _ in 0..5000 {
             let base = interp.heap.roots_len();
             interp.heap.push_root(Value::int(0));
             assert_eq!(

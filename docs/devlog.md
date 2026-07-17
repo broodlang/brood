@@ -4800,3 +4800,18 @@ noise (min 145 vs 142 ms), and `BROOD_NO_DEOPT_RESUME=1` bounds the journaling
 cost at ~5 ms on this shape. A sound skip needs transitive callee purity (a
 non-tail call's completed callee may have effects) — not worth re-entering the
 exactly-once soundness neighbourhood for ~4%; accepted cost, documented here.
+
+## 2026-07-17 — Inlined-upgrade queue gets the same flood dedupe
+
+The deferred (inlined-upgrade) compile queue has the identical per-process-copy
+shape the primary queue's flood came from, so it got the identical fix
+preemptively: a second thread-local publish map (`published_inline`) keyed
+`(runtime_tag, share_key)`, consulted before lowering and written after. Kept
+as a separate map from the small-arm one — a small-arm pointer must never
+install into `inline_code` (different frame sizing, `inline_nslots`) and vice
+versa. Also deflaked `jit_tier_compiles_a_hot_arm_then_runs_native` under
+plain `cargo test` (one process, every test sharing the single background
+compiler — the 400×2ms poll starved; nextest never sees it) and re-confirmed
+the remote-spawn `after 5000` timeout is a parallel-load flake (fails ~1 in 5
+full runs, passes alone and in clean runs). Suite 784/784; 300 fuzz seeds
+agree.
