@@ -210,6 +210,21 @@ class Gen:
                 "  (+ (if (< (let (a (* (rem x 5) 1.5)) a) (let (b (/ (+ x 3) 2.0)) b)) 1 0)\n"
                 "     (if (< (let (a (+ x 0.5)) a) (let (a (* x 0.25)) a)) 10 0)))")
             helpers.append((fn, 1))
+        # an EA-SCALAR-REPLACEMENT helper: a single-binder `let` of a small vector
+        # LITERAL read only by CONSTANT index — the escape-analysis pass proves the
+        # vector never escapes and lifts each element into its own slot (the vector
+        # is never allocated). Exercises mod.rs `ea_scalar_replace`/`local_escapes`/
+        # `rewrite_elem_reads`, which the immediate `(nth [..] k)` form never reaches.
+        if r.random() < 0.5:
+            en = self.name("ea")
+            ne = r.randint(2, 6)
+            elems = " ".join(self.i64_expr(["x"], 2) for _ in range(ne))
+            reads = " ".join(f"(nth v {r.randint(0, ne - 1)})" for _ in range(r.randint(2, 5)))
+            lines.append(
+                "(defn " + en + " (x)\n"
+                "  (let (v [" + elems + "])\n"
+                "    (bit-and (+ " + reads + ") 268435455)))")
+            helpers.append((en, 1))
         # the driver bit-ands the helper result, so it must be int-returning; the
         # float helper `g` is exercised on its own (and by the pure `flt`/`accf`
         # recursion below), never fed to a bit op.
@@ -354,6 +369,31 @@ class Gen:
                 f"  (if (<= n 0) (throw [:done a])\n"
                 f"    ({trn} (- n 1) (bit-and (+ (* a 2) n) 268435455))))")
             lines.append(f'(println "{trn}" (try ({trn} {r.choice([2000, 5000])} 1) (catch e (nth e 1))))')
+        # a LINMAP (linear map-accumulator) loop: an immutable map threaded through
+        # a self-recursive fold, updated ONLY via map-int-add / map-dissoc and read
+        # via map-get / map-count — the whitelist that lets the compiler rewrite it
+        # to a private mutable Table internally (mod.rs linmap; a semantics-preserving
+        # transform, so any jit-vs-tree diff is a real miscompile). The observable
+        # result is still an ordinary immutable map.
+        if r.random() < 0.5:
+            hn = self.name("hist")
+            keys = r.choice([5, 7, 10, 16])
+            upd = r.choice([1, 2, 3])
+            body = f"(map-int-add m (rem i {keys}) {upd})"
+            if r.random() < 0.45:  # mix in the other update op (dissoc)
+                body = f"(if (= (rem i 13) 0) (map-dissoc m (rem i {keys})) {body})"
+            lines.append(
+                f"(defn {hn} (m i n)\n"
+                f"  (if (>= i n) m\n"
+                f"    ({hn} {body} (+ i 1) n)))")
+            dn = self.name("mdig")
+            lines.append(
+                f"(defn {dn} (m k acc)\n"
+                f"  (if (>= k {keys}) acc\n"
+                f"    ({dn} m (+ k 1) (bit-xor acc (* (+ k 1) (map-get m k 0))))))")
+            hv = hn + "-r"
+            lines.append(f"(def {hv} ({hn} {{}} 0 {r.choice([2000, 5000, 9000])}))")
+            lines.append(f'(println "{hn}" ({dn} {hv} 0 0) (map-count {hv}))')
         # digest: accumulator + table contents
         lines.append(
             "(defn dig (k n s)\n"
