@@ -4711,3 +4711,25 @@ got their pass the same morning (`5e54d01`):
   fuzzing the checkpoint machinery that keeps effects exactly-once (the
   deopt-rerun bug's neighbourhood).
 Both agree jit-vs-tree across 50 seeds; the soaks fuzz them continuously now.
+
+## 2026-07-17 — Checker: a file's own defn now supersedes a builtin's signature
+
+The bintree benchmark surfaced a checker false positive: a file defining its own
+`check` (shadowing the `(check form)` builtin) still had its call sites typed by
+the *builtin's* signature — "+: argument 2 expects number, got list" on every
+run, plus the builtin's 1-ary arity leaking into arity checks. That violates the
+ADR-123 contract (a def always wins; the checker never warns on a use valid for
+the image's next state — the file is checked pre-load, so any existing heap
+binding for a file-defined name is by definition the OLD value).
+
+Fix: every heap-derived read in the checker is now gated on
+`!ctx.is_file_global(s)` — the call-site sig + arity resolution and zero-arg
+lint (walk.rs), the call-result type via `sig_of`/`declared_heap_overload`, the
+numeric/seq by-name refinements, and the value-reference `global_value_ty`
+reads (guards.rs, gradual_of). A file-redefined name is typed only from what
+the file itself declares (`(sig …)`) or nothing — dynamic, never stale.
+Regression: `file_defn_shadowing_a_builtin_wins_over_its_signature` (no stale
+sig, no stale arity, and the *un*-shadowed builtin still warns). Also restored
+the zero-warnings invariant across tests/: `rand-val` (message_roundtrip_test)
+opts out via `check-allow :non-tail-recursion` (depth-bounded by design) and
+jit_let_slot_reuse_test's deliberate dead binding is `_`-prefixed.

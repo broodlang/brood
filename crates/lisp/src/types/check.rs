@@ -2255,6 +2255,39 @@ mod tests {
     }
 
     #[test]
+    fn file_defn_shadowing_a_builtin_wins_over_its_signature() {
+        // A file's own `defn check` supersedes the `check` builtin (ADR-123: a
+        // def always wins) — the checker must not type its calls with the
+        // builtin's list-returning signature. This exact shape (the bintree
+        // bench) produced "+: argument 2 expects number, got list" plus a
+        // phantom arity from the builtin's 1-arg Arity.
+        let w = file_warnings(
+            "(defn check (node) (if (nil? node) 1 (+ 1 (check (nth node 0)))))\n\
+             (println (check nil))",
+        );
+        assert!(
+            !w.iter().any(|s| s.contains("expects")),
+            "stale builtin signature leaked into a shadowed call: {:?}",
+            w
+        );
+        // Arity from the stale builtin must not leak either: the builtin `check`
+        // is 1-ary, the file's redefinition is 2-ary.
+        let w = file_warnings("(defn check (a b) (+ a b))\n(println (check 1 2))");
+        assert!(
+            !w.iter().any(|s| s.contains("argument")),
+            "stale builtin arity leaked into a shadowed call: {:?}",
+            w
+        );
+        // No over-suppression: the real builtin (not redefined) still warns.
+        let w = file_warnings("(println (+ 1 (check '(nil? nil))))");
+        assert!(
+            w.iter().any(|s| s.contains("expects number")),
+            "the un-shadowed builtin's signature should still warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
     fn infers_a_straight_line_wrapper() {
         // (defn inc (x) (+ x 1)) → x : number (from +'s rest type).
         // So `(inc :k)` is a provable misuse.

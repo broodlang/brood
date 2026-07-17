@@ -19,7 +19,7 @@
 (defn sub-lets (p) (- (let (a 300) a) (let (b 5) b)))
 
 ;; The exact fuzzer shape: bit ops + an inner `if`/`let`, both operands binding.
-(defn f5 (p) (bit-xor (let (t8 (if (<= p p) -347 p)) t8) (* (let (t9 0) 0) p)))
+(defn f5 (p) (bit-xor (let (t8 (if (<= p p) -347 p)) t8) (* (let (_t9 0) 0) p)))
 
 ;; A driver that consumes each result (so f5's arm is JIT'd in a consuming
 ;; context) and accumulates — the value diverged at odd iteration counts.

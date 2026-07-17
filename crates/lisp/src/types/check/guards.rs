@@ -631,10 +631,16 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 // Declared value type first (authoritative), then the Gap A
                 // inferred current-image type: same-file (`inferred_value_ty`),
                 // then cross-file (`global_value_ty`, read from the loaded image).
-                // All feed the gradual relation, so it's reload-safe.
+                // All feed the gradual relation, so it's reload-safe. A name this
+                // file redefines skips the heap read — the image's binding is the
+                // OLD value (the file is checked pre-load; a def always wins).
                 ctx.declared_value_ty(s)
                     .or_else(|| ctx.inferred_value_ty(s))
-                    .or_else(|| global_value_ty(heap, s))
+                    .or_else(|| {
+                        (!ctx.is_file_global(s))
+                            .then(|| global_value_ty(heap, s))
+                            .flatten()
+                    })
             }
         }),
         // A vector literal `[a b c]` — its elements are evaluated in place, so
@@ -730,9 +736,10 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     }
                     // Sequence-aware refinements (`list`/`vector` constructors,
                     // `first`/`last`/`nth` extractors) and the integer-closed
-                    // numeric rule — both when the head isn't a local shadow; else
-                    // the callee's flat result type.
-                    if !ctx.is_local(s) {
+                    // numeric rule — both when the head isn't a local shadow AND
+                    // isn't redefined by this file (a file `defn nth` supersedes
+                    // the by-name refinement); else the callee's flat result type.
+                    if !ctx.is_local(s) && !ctx.is_file_global(s) {
                         if let Some(t) = numeric_call_ty(heap, s, &items, ctx) {
                             return Some(t);
                         }
@@ -744,7 +751,14 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     // check above (ADR-116) — makes an overload declared in
                     // *another* module visible here too, the same way
                     // `sig_of`/`declared_heap_sig` already does for a plain
-                    // single-arrow sig.
+                    // single-arrow sig. Both heap reads are skipped for a name
+                    // this file redefines — the image's binding (a builtin like
+                    // `check`, a prelude closure) is the OLD value; using its
+                    // signature manufactured false positives (the bintree bench's
+                    // own `defn check` typed as the `check` builtin's list return).
+                    if ctx.is_file_global(s) {
+                        return None;
+                    }
                     if let Some(sigs) = declared_heap_overload(heap, s) {
                         let arg_tys: Vec<Option<Ty>> =
                             items[1..].iter().map(|&a| expr_ty(heap, a, ctx)).collect();

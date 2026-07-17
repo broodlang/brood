@@ -20,22 +20,24 @@
 (defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
 
 ;; a random depth-bounded value: ints/bignums/floats/strings/keywords at the
-;; leaves, lists/vectors/maps in the interior.
-(defn rand-val (s depth)
-  (let (c (rem s 7))
-    (if (or (= depth 0) (< c 3))
-      (cond (= c 0) (- (rem s 1000000) 500000)
-            (= c 1) (* (- (rem s 2000) 1000) 1000000000000)
-            (= c 2) (/ (- (rem s 2000) 1000) 7.0)
-            else (str "s" (rem s 100000)))
-      (cond
-        (= c 3) (if (= (rem s 2) 0) :kw-a :kw-b)
-        (= c 4) (list (rand-val (lcg s) (- depth 1))
-                      (rand-val (lcg (lcg s)) (- depth 1)))
-        (= c 5) [(rand-val (lcg s) (- depth 1))
-                 (rand-val (lcg (lcg s)) (- depth 1))]
-        else {(rem s 10) (rand-val (lcg s) (- depth 1))
-              :k (rand-val (lcg (lcg s)) (- depth 1))}))))
+;; leaves, lists/vectors/maps in the interior. Deliberately non-tail — the
+;; recursion is bounded by `depth` (≤ 4 here), never deep.
+(check-allow :non-tail-recursion
+  (defn rand-val (s depth)
+    (let (c (rem s 7))
+      (if (or (= depth 0) (< c 3))
+        (cond (= c 0) (- (rem s 1000000) 500000)
+              (= c 1) (* (- (rem s 2000) 1000) 1000000000000)
+              (= c 2) (/ (- (rem s 2000) 1000) 7.0)
+              else (str "s" (rem s 100000)))
+        (cond
+          (= c 3) (if (= (rem s 2) 0) :kw-a :kw-b)
+          (= c 4) (list (rand-val (lcg s) (- depth 1))
+                        (rand-val (lcg (lcg s)) (- depth 1)))
+          (= c 5) [(rand-val (lcg s) (- depth 1))
+                   (rand-val (lcg (lcg s)) (- depth 1))]
+          else {(rem s 10) (rand-val (lcg s) (- depth 1))
+                :k (rand-val (lcg (lcg s)) (- depth 1))})))))
 
 (defn check-rt (s n)
   (if (= n 0) true

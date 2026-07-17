@@ -708,7 +708,14 @@ pub(super) fn check_into(
         } else {
             ctx.declared_sig(s)
         };
-        let sig = declared.clone().or_else(|| sig_of(heap, s));
+        // A name this file `def`s/`defn`s supersedes whatever the image currently
+        // binds (the file is checked *before* it loads, so a heap binding — a
+        // builtin like `check`, a prelude closure — is by definition the OLD
+        // value; ADR-123: a def always wins). Only the file-local declared sig
+        // may describe it; never the stale heap signature.
+        let sig = declared
+            .clone()
+            .or_else(|| (!ctx.is_file_global(s)).then(|| sig_of(heap, s)).flatten());
         // The real callable's arity is authoritative when known (a `sig!` wrapper
         // preserves the wrapped fn's arity); fall back to the declared param count
         // for a file-local defn the read-only checker can't inspect. A declared
@@ -716,19 +723,22 @@ pub(super) fn check_into(
         // a fixed sig to a range instead of an exact count; a fixed-arity sig that
         // applies to a known-variadic global is suppressed (the sig's fixed count
         // is an undercount, so using it as an exact arity would be a false positive).
-        let arity = arity_of(heap, s).or_else(|| {
-            declared
-                .filter(|sg| sg.rest.is_some() || !ctx.is_variadic_global(s))
-                .map(|sg| {
-                    if sg.rest.is_some() {
-                        Arity::at_least(sg.params.len())
-                    } else if sg.optional.is_empty() {
-                        Arity::exact(sg.params.len())
-                    } else {
-                        Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
-                    }
-                })
-        });
+        let arity = (!ctx.is_file_global(s))
+            .then(|| arity_of(heap, s))
+            .flatten()
+            .or_else(|| {
+                declared
+                    .filter(|sg| sg.rest.is_some() || !ctx.is_variadic_global(s))
+                    .map(|sg| {
+                        if sg.rest.is_some() {
+                            Arity::at_least(sg.params.len())
+                        } else if sg.optional.is_empty() {
+                            Arity::exact(sg.params.len())
+                        } else {
+                            Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
+                        }
+                    })
+            });
         // Unbound-symbol diagnostic: warn only when the head is **truly not
         // resolvable** — not local, not a syntactic keyword, not in the global
         // env (which includes `Value::Macro`s like `test` / `assert=` that
@@ -788,6 +798,7 @@ pub(super) fn check_into(
             for &arg in &items[1..] {
                 if let Value::Sym(a) = arg {
                     if !ctx.is_local(a)
+                        && !ctx.is_file_global(a) // a file redefinition supersedes the heap's arity
                         && matches!(arity_of(heap, a), Some(ar) if ar.min == 0 && ar.max == Some(0))
                     {
                         let n = name_of(a);
@@ -1113,11 +1124,20 @@ fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
         // same-module reference that got qualified to `mod/name` during
         // expansion, or a genuine cross-module reference — same fix
         // `declared_heap_sig` already applies for arrows.
+        // For a name this file redefines, the heap-wide stores describe the OLD
+        // binding (the file is checked pre-load) — only the file-local ctx
+        // sources apply (ADR-123: a def always wins).
+        let heap_declared = (!ctx.is_file_global(s))
+            .then(|| declared_heap_value_ty(heap, s))
+            .flatten();
+        let heap_global = (!ctx.is_file_global(s))
+            .then(|| global_value_ty(heap, s))
+            .flatten();
         return match ctx
             .declared_value_ty(s)
-            .or_else(|| declared_heap_value_ty(heap, s))
+            .or(heap_declared)
             .or_else(|| ctx.inferred_value_ty(s))
-            .or_else(|| global_value_ty(heap, s))
+            .or(heap_global)
         {
             // The Gap A inferred current-image type (same-file `inferred_value_ty`,
             // or cross-file `global_value_ty` read from the loaded image) is exposed
