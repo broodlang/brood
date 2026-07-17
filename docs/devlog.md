@@ -4673,3 +4673,26 @@ and not a finding. Result: **3400 adversarial inputs + deep-nesting probes (10k 
 50k / 200k parens) all failed gracefully** — the reader has a depth guard (no
 stack-overflow SIGSEGV) and no unwrap/index panics on garbage. Runs in a dedicated
 workdir so a concurrent differential sweep can't cross-pollute the crash-dump check.
+
+## 2026-07-17 — Chasing mod.rs coverage: two optimization passes now fuzzed
+
+llvm-cov showed the differential fuzzer reached only 70% of `mod.rs` (the VM
+compiler + exec_chunk + dispatch). Triaged the 70 dark functions: most are
+debug/test-only (`set_forced_engine`, `jit_verify_staged` — unreachable by
+fuzzing by design), monomorphization instances, or slow rooted fallbacks hit by
+volume. The valuable gaps were two semantics-preserving COMPILER OPTIMIZATION
+passes the grammar never triggered (prime miscompile territory):
+- **linmap** (linear map-accumulator → private mutable Table): fires only for a
+  map threaded through self-recursion, updated via `map-int-add`/`map-dissoc` and
+  read via `map-get`/`map-count` (the serializable whitelist — `map-assoc` is
+  excluded). The grammar used `assoc`/`get`, so it never fired.
+- **EA scalar replacement**: a single-binder `(let (v [..]) ..)` read only by
+  constant `(nth v K)`, lifted element-wise into slots (vector never allocated).
+  The grammar only did the immediate `(nth [..] k)` form.
+Added generators for both; verified they fire and are correct (jit==tree). mod.rs
+70.0→74.1%, jit_lower 74.6→77.5%, dark fns 70→55. The 4 soaks were restarted on
+the new grammar so both passes now fuzz continuously. Remaining dark: the
+deopt-resume machinery (`vm_resume_deopt` — already guarded by
+jit_deopt_effects_test, and gated to non-self-loop/float-slot arms) and the
+`hof_apply_native` JIT fast-path (narrow `apply`-with-closure trigger) — deep
+internals with contrived triggers, left for a targeted pass if ever needed.
