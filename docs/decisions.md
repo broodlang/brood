@@ -8557,3 +8557,38 @@ driving), so a project run gets the fast path too; project setup runs first on t
 thread and its `*load-path*` `def` is a shared global the program process sees. The
 `--watch`/`--for` wrap (which already spawns the program under a monitor) and the REPL keep
 their existing paths for now — moving them onto the mechanism is a follow-on.
+
+## ADR-136 — `require` is a concurrency contract: no observer sees a half-loaded module
+
+**Status:** accepted, shipped 2026-07-11 (fix `fdc35d3`; error-unwind + tests same day).
+
+**Context.** `defmodule` provided its feature at the TOP of its file, so `require`'s
+load-once check ("already in `*features*`?") answered yes while the rest of the file was
+still evaluating. Single-threaded that's invisible; across processes it's a TOCTOU — a
+`(require 'proctree)` racing another process's load of the same module returned
+immediately and the caller's next `proctree/fn` call hit *unbound symbol*. Surfaced as a
+once-in-several-runs myedit suite flake, but the window is live in production wherever a
+spawned loader races an interactive require (myedit's deferred feature loading is exactly
+that shape).
+
+**Decision.** `require` returning now MEANS the module's defs exist. Loads in flight are
+tracked in `*features-loading*` (feature → loader pid), set before the load begins:
+(a) a CONCURRENT requirer waits — 5 ms `sleep` ticks (never a bare `receive`, which would
+eat a queued mailbox message) — for the loader's end-of-file `provide`, taking the load
+over after ~5 s if the loader died (re-evaluating a module is idempotent: same source,
+same defs); (b) a CIRCULAR require inside one file's own load returns immediately (the
+loader pid matches — the old early-provide contract, kept); (c) `defmodule`'s
+top-of-file provide is suppressed while a require-driven load is in flight
+(`defmodule--provide`), and a direct `(load "x.blsp")` keeps the immediate provide it
+always had; (d) the marker CLEARS on a failed load (try/unwind + rethrow), else the same
+process's retry would fake success via the circular arm and every other process would
+stall out the await window per attempt.
+
+**Consequences.** The require contract is now safe under the actor grain the rest of the
+system runs on — any process may require anything at any time. Cost: one map lookup per
+require; polling waiters (a waiters-list wakeup on `provide` is the known deeper
+mechanism if the 5 ms ticks ever matter). The takeover-after-timeout keeps a >5 s load
+theoretically re-enterable — acceptable while module loads are sub-second; revisit with
+the module-cache work. Load-once state now lives in two places (`*features*`,
+`*features-loading*`); a single load-state map would be cleaner if a third state ever
+appears.

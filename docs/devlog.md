@@ -3473,6 +3473,39 @@ green-process receive (ADR-100 §8.4); `make test` runs the default VM engine, s
 this is never surfaced there. Noted, not fixed (out of scope — the tree-walker is
 being phased out per ADR-076).
 
+## 2026-07-11 — The buffer-process protocol grows up (myedit's actor endgame, both halves)
+
+myedit flipped to every-buffer-hosted (its ROADMAP §E.2); the std work it forced, plus
+the review findings fixed the same day:
+
+- **`editor/buffer-client` (ADR-134)** — the protocol's CLIENT half extracted from
+  myedit's collab layer: `link-init`/`link-propagate`/`link-fold` (echo suppression,
+  foreign-splice transform over in-flight edits, resync fallback), `text-splice` (native
+  `%str-splice-diff` under it — the per-keystroke diff went ~40 ms → 0.4 ms on a 300-line
+  hosted buffer), `view-parts`, `text-apply-splice` (string holders — registry mirrors).
+- **`[:io-write]` is a structured splice** — delta push, transform-ring recorded; a
+  streamed log buffer costs subscribers O(line) and no longer invalidates based splices.
+- **`buffer-edit-reply` / `buffer-edit-value`** — the read-then-decide edit (kill-region
+  shape) as one atomic, totally-ordered round-trip. Built ahead of its editor consumer.
+- **OT hole closed: same-origin ring skip** — a client pipelining two splices before the
+  first echo folds had its second one double-shifted (the ring transformed it over the
+  sender's OWN first splice, already part of its basis). Ring entries now carry origin;
+  a based splice transforms only over OTHER origins. Repro'd, fixed, regression-tested
+  ("axybcd", not "axbycd"). Latent since the collab track; hot once every buffer hosts.
+- **`buffer-sync`** — atomic `[version view]` snapshot (the resync primitive): rebuilding
+  after an ambiguous collision pairs text with its version, so queued pushes sort
+  themselves instead of replaying onto the rebuilt copy.
+- **`require` is a concurrency contract (ADR-136)** — no observer sees a half-loaded
+  module; failed loads unwind their in-flight marker.
+- **serve: only the CLIENT's `[:down]` closes a session** — a served collab app monitors
+  its buffer processes; their corpses must reach `update` (rehost/reshare), not kill
+  every attached session.
+- **`stop-buffer` is bounded** — 2 s timeout → `:no-reply` instead of parking forever on
+  an already-dead process (killing a buffer whose process just crashed froze the caller).
+- **KI-10** — `buffer--serve` exposed a `receive` compile cliff at the 13th arm (+65%
+  wall / +80% peak on the buffer suite from one trivial arm); worked around by merging
+  the two `[:edit]` arms to stay at 12, recorded as a known issue.
+
 ## 2026-07-12 — The top-level program is a green process (ADR-135): ping-pong 6.5 → 3.3 µs/RT
 
 Chasing the message-passing latency gap vs Elixir/BEAM. Real baseline (1M round-trips,
