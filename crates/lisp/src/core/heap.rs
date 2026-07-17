@@ -502,6 +502,10 @@ pub(crate) enum VecStore {
         len: u8,
         items: [Value; INLINE_VEC_CAP],
     },
+    // Rust never reads `ptr`/`len` by name — JIT-lowered native code loads them
+    // through the `#[repr(u8)]`-pinned byte offsets (see jit_lower.rs), which
+    // dead_code analysis can't see.
+    #[allow(dead_code)]
     Spill {
         /// Cached `vec.as_ptr()`, so the JIT reads spilled elements through one
         /// raw load instead of an FFI slab call (the ~20 ns/element that gated

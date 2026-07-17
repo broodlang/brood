@@ -6822,7 +6822,7 @@ pub(crate) fn jit_dispatch_call(
                         // stays entirely in IR (arity pre-validated for this argc).
                         let nat = heap.native(nid);
                         if nat.arity.accepts(argc) && !value::is_dynamic(head) {
-                            let func = nat.func as u64;
+                            let func = nat.func as usize as u64;
                             heap.vm_fast_link_publish_native(site, head, argc as u32, epoch, func);
                         }
                         call_native_direct!(nid)
@@ -6871,7 +6871,7 @@ pub(crate) fn jit_dispatch_call(
                                 // straight to the fn pointer (arity pre-validated here).
                                 let nat = heap.native(nid);
                                 if nat.arity.accepts(argc) {
-                                    let func = nat.func as u64;
+                                    let func = nat.func as usize as u64;
                                     heap.vm_fast_link_publish_native(
                                         site,
                                         head,

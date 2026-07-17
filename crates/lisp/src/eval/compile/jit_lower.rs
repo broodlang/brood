@@ -510,9 +510,7 @@ pub(crate) fn jit_lower_arm(
             )
         });
         let has_self_loop = code.iter().any(|i| matches!(i, Inst::SelfCall { .. }));
-        let has_float_slot = slot_tags
-            .iter()
-            .any(|&t| t == crate::core::value::Tag::Float as u8);
+        let has_float_slot = slot_tags.contains(&(crate::core::value::Tag::Float as u8));
         // The static call-mediated profitability bail — but for **top-level defns
         // only** (`dbg_name` set). A CLOSURE arm (a `reduce`/`fold` step, the HOF
         // shape) is exempt: making it native is what lets `hof_apply_native` skip
@@ -1588,7 +1586,7 @@ fn jit_lower_arm_inner(
     // miscompile — a wrong guess just deopts (the same outcome as today's int-path
     // `as_int`-on-a-float). When the guess is right the result is `Op::Float`, which
     // `store_op` marks float, so the whole `(nth …)`-fed arithmetic chain stays unboxed.
-    let has_float_slot = slot_tags.iter().any(|&t| t == profile_tag_float);
+    let has_float_slot = slot_tags.contains(&profile_tag_float);
     // Per-slot "holds a `Value::Bool`" flag — the boolean analogue of `slot_float`, but
     // seeded all-false: a bool is rarely a loop *param*, and the case that matters is a
     // let-binder, e.g. `(and X Y)` → `(let (g X) (if g Y g))` storing a comparison result
@@ -1805,13 +1803,6 @@ fn jit_lower_arm_inner(
     let rb_id = m
         .declare_function("brood_rt_roots_base", Linkage::Import, &rb_sig)
         .ok()?;
-    // brood_rt_tick(heap) -> u8  (nonzero = the process should yield)
-    let mut tick_sig = m.make_signature();
-    tick_sig.params.push(AbiParam::new(ptr_ty));
-    tick_sig.returns.push(AbiParam::new(types::I8));
-    let tick_id = m
-        .declare_function("brood_rt_tick", Linkage::Import, &tick_sig)
-        .ok()?;
     // brood_rt_tick_n(heap, n) -> u8: the batched back-edge poll (burns n reductions).
     let mut tickn_sig = m.make_signature();
     tickn_sig.params.push(AbiParam::new(ptr_ty));
@@ -1819,15 +1810,6 @@ fn jit_lower_arm_inner(
     tickn_sig.returns.push(AbiParam::new(types::I8));
     let tickn_id = m
         .declare_function("brood_rt_tick_n", Linkage::Import, &tickn_sig)
-        .ok()?;
-    // brood_rt_in_capture(heap) -> u8: is this a capture-mode (preemptible) process? Read once
-    // at entry to gate the per-back-edge `brood_rt_tick` poll — a non-capture (root) loop skips
-    // the FFI, which returns 0 there anyway.
-    let mut incap_sig = m.make_signature();
-    incap_sig.params.push(AbiParam::new(ptr_ty));
-    incap_sig.returns.push(AbiParam::new(types::I8));
-    let incap_id = m
-        .declare_function("brood_rt_in_capture", Linkage::Import, &incap_sig)
         .ok()?;
     // The handle ops, by-value with an out-pointer (a `Value` is 24 bytes → no register-pair
     // return): brood_rt_cons(heap, out, car0,car1,car2, cdr0,cdr1,cdr2);
@@ -2135,9 +2117,7 @@ fn jit_lower_arm_inner(
         }
     };
     let rb_ref = m.declare_func_in_func(rb_id, b.func);
-    let tick_ref = m.declare_func_in_func(tick_id, b.func);
     let tickn_ref = m.declare_func_in_func(tickn_id, b.func);
-    let incap_ref = m.declare_func_in_func(incap_id, b.func);
     let car_ref = m.declare_func_in_func(car_id, b.func);
     let cdr_ref = m.declare_func_in_func(cdr_id, b.func);
     let pnbase_ref = m.declare_func_in_func(pnbase_id, b.func);
@@ -2322,18 +2302,6 @@ fn jit_lower_arm_inner(
             None
         }
     };
-
-    // Capture-mode flag, read once at entry (when the arm has a self-tail back-edge): a
-    // non-capture (root-thread) loop skips the per-iteration `brood_rt_tick` poll, which returns
-    // 0 there anyway. Capture mode is constant for the arm's whole execution, so one read
-    // suffices; the capture path keeps polling every iteration (preemption fairness unchanged).
-    let capture_active: Option<cranelift_codegen::ir::Value> =
-        if code.iter().any(|i| matches!(i, Inst::SelfCall { .. })) {
-            let c = b.ins().call(incap_ref, &[heap]);
-            Some(b.inst_results(c)[0])
-        } else {
-            None
-        };
 
     // Inline `first`/`rest` pair reads: if the arm uses First/Rest but contains no Cons
     // or MakeVector (which trigger the back-edge GC safepoint — `minor_collect` replaces
@@ -4117,7 +4085,7 @@ fn jit_lower_arm_inner(
                     // slot's *current* (pre-store) value first — preserving its exact type so
                     // consumers behave identically to the lazy read they replace. (Fuzzer
                     // seed 20108: `(- (let (a A) a) (let (b B) b))` reused slot 1 → 0 not A-B.)
-                    let si = *i as usize;
+                    let si = *i;
                     for op in stack.iter_mut() {
                         if !matches!(*op, Op::Slot(k) if k == si) {
                             continue;
