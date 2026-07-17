@@ -5662,13 +5662,26 @@ fn vm_run_bc(
                             crate::perf_bump!(jit_deopt);
                             #[cfg(feature = "perf-stats")]
                             if std::env::var_os("BROOD_DEOPT_TRACE").is_some() {
+                                // The checkpoint journal (ckpt_slot) packs
+                                // (resume_ip << 16 | operand-depth) — print it so a
+                                // deopt-storm's SITE is identifiable, not just its arm.
+                                let ckpt = if cur_arm.ckpt_slot != u32::MAX {
+                                    match heap.root_at(cur_base + cur_arm.ckpt_slot as usize) {
+                                        Value::Int(p) => p,
+                                        _ => -1,
+                                    }
+                                } else {
+                                    -1
+                                };
                                 eprintln!(
-                                    "[deopt] arm={} watch={}",
+                                    "[deopt] arm={} watch={} resume_ip={} depth={}",
                                     cur_arm
                                         .dbg_name
                                         .map(crate::core::value::symbol_name_ref)
                                         .unwrap_or_else(|| "<closure>".into()),
-                                    cur_arm.deopt_watch
+                                    cur_arm.deopt_watch,
+                                    ckpt >> 16,
+                                    ckpt & 0xffff
                                 );
                             }
                         }

@@ -4815,3 +4815,38 @@ compiler — the 400×2ms poll starved; nextest never sees it) and re-confirmed
 the remote-spawn `after 5000` timeout is a parallel-load flake (fails ~1 in 5
 full runs, passes alone and in clean runs). Suite 784/784; 300 fuzz seeds
 agree.
+
+## 2026-07-17 — regex leaves 7/7: cache split, vector hot-object, and a deopt storm
+
+Three rounds took the regex row 279 → ~92 ms compute — past Clojure (103 ms),
+off last place for the first time. The row was 67 % PER-CALL overhead (7.45 µs
+each; the DFA loop itself only 0.245 µs/char), so the levers were:
+
+1. **Cache split.** `regex--compile`'s memo hit was a `table-get` of the whole
+   compiled object — and a Table read deep-clones the value out, including the
+   `:states` NFA (a vector of per-state maps) on EVERY `matches?` call. The
+   cache now holds a small hot object; the state vector lives in its own table
+   (`regex--states-cache`) fetched only on a memo miss / exit-first-sight /
+   the n = 0 edge. −1.3 µs/call.
+2. **Vector hot-object.** The hot object became a 6-slot vector — a Table
+   clone-out of a small vector is a flat copy (a CHAMP map rebuilds nodes) and
+   the entry glue reads `nth`, not keyword lookups. compile-hit 1.2 → 0.47 µs.
+3. **The deopt storm** (the real find — a general JIT gap). `BROOD_DEOPT_TRACE`
+   (now printing the checkpoint's resume ip) showed the matcher loop compiled
+   but deopted ~every 256 back-edges, running the whole 2M-char workload
+   interpreted. Minimised to: a self-tail loop whose LAST self-call argument is
+   an `if` expression strands the earlier args across the branch's block
+   boundary, where the cross-block operand carry materialises a lazy `Op::Slot`
+   as an int-guarded payload — an opaque handle (the pattern string, the two
+   memo tables) fails the guard every iteration. The regex loops now compute
+   the branch in a let binder (empty operand stack at the boundary; every
+   self-call arg a simple slot read) — per-char cost 0.245 → 0.056 µs (4.4×).
+   **Engine follow-up recorded:** per-leader stack-shape analysis (meet of
+   `Slot(k)` across predecessors → keep the slot lazy through the boundary)
+   would make the natural nested-if style equally fast; until then any
+   self-tail loop threading an opaque value through an arg-position branch
+   hits this cliff. The `[deopt] resume_ip` trace addition is the diagnosis
+   tool for the next one.
+
+Checksums bit-identical across VM / no-JIT / tree-walker; regex tests 14/14;
+suite 784/784; nest check clean.
