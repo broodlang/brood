@@ -4696,3 +4696,18 @@ deopt-resume machinery (`vm_resume_deopt` — already guarded by
 jit_deopt_effects_test, and gated to non-self-loop/float-slot arms) and the
 `hof_apply_native` JIT fast-path (narrow `apply`-with-closure trigger) — deep
 internals with contrived triggers, left for a targeted pass if ever needed.
+
+## 2026-07-17 — The targeted pass happened anyway: HOF driver + deopt/effect shapes
+
+The two "left for a targeted pass if ever needed" dark spots from the entry above
+got their pass the same morning (`5e54d01`):
+- **`%range-reduce` HOF driver**: `reduce` with a NON-prim closure over a range
+  routes through the native HOF driver + its JIT fast-frame
+  (`hof_apply_native`/`hof_apply_step`) — a prim reducer (`fold` with `+`) skips
+  it entirely, which is why the grammar never lit it. Confirmed firing (60k calls
+  in a probe run) and correct.
+- **Deopt/effect-ordering shape**: a `table-incr` effect before a non-tail call
+  whose vector result is destructured — forces a deopt across a pending effect,
+  fuzzing the checkpoint machinery that keeps effects exactly-once (the
+  deopt-rerun bug's neighbourhood).
+Both agree jit-vs-tree across 50 seeds; the soaks fuzz them continuously now.
