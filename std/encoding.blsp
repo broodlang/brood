@@ -54,11 +54,14 @@ UTF-8-encodes a string."
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as uppercase hexadecimal."
   (encoding--hex-encode-codes bytes encoding--hex-upper-codes))
 
+;; Codepoint → nibble value (int keys — the decode loop walks a `string->codepoints`
+;; vector, so lookups hash an int, not a fresh 1-char string per char).
 (def encoding--hex-val
-  {"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7
-   "8" 8 "9" 9
-   "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
-   "A" 10 "B" 11 "C" 12 "D" 13 "E" 14 "F" 15})
+  (let (lower (string->codepoints "0123456789abcdef")
+        upper (string->codepoints "0123456789ABCDEF"))
+    (fold (fn (m i) (assoc (assoc m (nth lower i) i) (nth upper i) i))
+          {}
+          (range 16))))
 
 ;; Decode hex `s` to a list of byte ints (reversed during accumulation, returned
 ;; in order), or the `:invalid` sentinel on a bad/odd input. `:invalid` rather
@@ -75,7 +78,7 @@ UTF-8-encodes a string."
         :invalid))))
 
 (defn encoding--hex-decode-bytelist (s)
-  (let (s (into [] (string->list s))   ; char vector: O(1) nth, not char-at O(i)
+  (let (s (string->codepoints s)            ; codepoint vector: O(1) nth, int lookups
         n (count s))
     (if (= (rem n 2) 0)
       (encoding--hex-decode-loop s 0 n nil)
@@ -102,8 +105,8 @@ binary payload (digests, salts, wire bytes)."
 ;; ASCII byte codes and builds the string ONCE with utf8-bytes->string — like
 ;; hex-encode. The old `(str acc …)` per 3-byte group was O(n^2) (each str copies
 ;; the whole accumulator) and spiked peak RSS on large inputs.
-(def encoding--b64-std-codes (into [] (map char->int (string->list encoding--b64-std))))
-(def encoding--b64-url-codes (into [] (map char->int (string->list encoding--b64-url))))
+(def encoding--b64-std-codes (string->codepoints encoding--b64-std))
+(def encoding--b64-url-codes (string->codepoints encoding--b64-url))
 (def encoding--b64-pad 61)   ; the code point of "="
 
 ;; Encode a byte sequence to base64 using the given 64-entry code-point vector.
@@ -156,12 +159,14 @@ UTF-8 form."
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as URL-safe Base64."
   (encoding--b64-encode bytes encoding--b64-url-codes))
 
-;; Reverse lookup map: base64 char → 6-bit value (shared for both alphabets
-;; because -/_ only differ from +// in the last two positions).
+;; Reverse lookup map: base64 char CODEPOINT → 6-bit value (int keys — the
+;; decode loop walks a `string->codepoints` vector, so each lookup hashes an int,
+;; not a fresh 1-char string per char).
 (defn encoding--b64-val-map (alpha)
-  (fold (fn (m i) (assoc m (char-at alpha i) i))
-        {}
-        (range 64)))
+  (let (cs (string->codepoints alpha))
+    (fold (fn (m i) (assoc m (nth cs i) i))
+          {}
+          (range 64))))
 
 (def encoding--b64-std-vals (encoding--b64-val-map encoding--b64-std))
 (def encoding--b64-url-vals (encoding--b64-val-map encoding--b64-url))
@@ -170,8 +175,8 @@ UTF-8 form."
 ;; input. As with hex, `:invalid` (not nil) keeps an empty valid input distinct
 ;; from a failure; the public wrappers map `:invalid` → nil.
 (defn encoding--b64-decode (s vals)
-  (let (s    (into [] (string->list (replace s "=" "")))  ; char vector: O(1) nth
-        n    (count s)                 ; (char-at on the raw string is O(i) → O(n^2) decode)
+  (let (s    (string->codepoints (replace s "=" ""))  ; codepoint vector: O(1) nth, int lookups
+        n    (count s)
         tail (rem n 4))
     (if (= tail 1)
       :invalid                         ; 1 leftover char is always invalid

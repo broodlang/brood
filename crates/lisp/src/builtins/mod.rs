@@ -549,6 +549,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, string], list_ty),
         string_split,
     );
+    // Codepoint access needs Rust for the same reason as split/search: char
+    // indexing into UTF-8 is O(index), and the pure-Brood construction
+    // (`map char->int` over `string->list`) pays a 1-char string + a closure
+    // call per char. One O(n) pass to the vector the text parsers index.
+    def(
+        heap,
+        "string->codepoints",
+        Arity::exact(1),
+        Sig::new(vec![string], Ty::vector_of(int)),
+        string_to_codepoints,
+    );
     // Case folding (Unicode tables) and parse-or-nil genuinely need Rust; the rest
     // of the string library (split/join/replace/index-of/trim/…) is Brood over
     // these + `substring`/`%str-index-of`/`str` (std/prelude.blsp).
@@ -2490,6 +2501,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length."),
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
     ("string-split", &["s", "sep"], "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters."),
+    ("string->codepoints", &["s"], "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes))."),
     ("string-span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string-span-until."),
     ("string-span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string-length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string-span."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),

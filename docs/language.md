@@ -1251,10 +1251,10 @@ kernel primitive), so neither walks nor materialises the entries.
 
 ### Strings
 `str`  `pr-str`  `string-length`  `substring`  `char-at`  `string->list`
-`list->string`  `upper`  `lower`  `string->number`  `number->string`
-`index-of`  `string-contains?`  `join`  `string-split`  `replace`
-`trim`  `triml`  `trimr`  `blank?`  `starts-with?`  `ends-with?`
-`string-repeat`  `pad-left`  `pad-right`  `to-fixed`  `format`
+`list->string`  `string->codepoints`  `codepoints->string`  `upper`  `lower`
+`string->number`  `number->string`  `index-of`  `string-contains?`  `join`
+`string-split`  `replace`  `trim`  `triml`  `trimr`  `blank?`  `starts-with?`
+`ends-with?`  `string-repeat`  `pad-left`  `pad-right`  `to-fixed`  `format`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
@@ -1264,6 +1264,10 @@ kernel primitive), so neither walks nor materialises the entries.
   correct for multi-byte UTF-8, not byte offsets).
 - `substring`, `char-at`, `string-length` are the char-indexed accessors;
   `string->list` / `list->string` bridge to and from a list of chars.
+- `string->codepoints` gives the chars as a **vector of integer codepoints** in
+  one O(n) native pass — the random-access form text parsers index with `nth`
+  and compare as ints (`std/regex`/`std/json`/`std/encoding` all scan it);
+  `codepoints->string` is its inverse.
 - `upper` / `lower` case-fold (Unicode-aware: `(upper "ß")` → `"SS"`).
 - `string->number` is a **strict** parse — int if it is one, else float, else
   `nil`; it rejects partial input (`(string->number "3abc")` → `nil`) and
@@ -1297,9 +1301,12 @@ kernel primitive), so neither walks nor materialises the entries.
 ```
 
 Only `upper`/`lower` (Unicode tables), `string->number` (strict parse-or-nil),
-and `to-fixed` (float formatting) are Rust primitives; the rest of the library is
-Brood over `substring`/`str` (`std/prelude.blsp`) — the "write the language in
-the language" principle.
+`to-fixed` (float formatting), and the O(n) char-access mechanisms
+(`string-split`, `string->codepoints`, `string-span`/`string-span-until`,
+`%str-index-of` — char indexing into UTF-8 is O(index), so a pure-Brood scan is
+unavoidably O(n²)) are Rust primitives; the rest of the library is Brood over
+`substring`/`str` (`std/prelude.blsp`) — the "write the language in the
+language" principle.
 
 ### I/O
 `print`  `println`  `with-out-str`

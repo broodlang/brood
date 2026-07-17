@@ -1271,6 +1271,20 @@ pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(heap.list_from_slice(&out))
 }
 
+/// `(string->codepoints s)` — the characters of `s` as a **vector of integer Unicode
+/// codepoints**, one O(n) pass. The random-access text-scanning primitive:
+/// parsers (std/regex, std/json, std/encoding) index code points with O(1)
+/// `nth` and compare them as ints. Building the same vector in Brood —
+/// `(apply vector (map char->int (string->list s)))` — costs a 1-char string
+/// allocation per char plus a closure call per char, and measured ~40 % of the
+/// whole regex benchmark. Like `string-split`/`string-span`, this is text-access
+/// *mechanism*; the parsers themselves stay in Brood.
+pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "string->codepoints", arg(args, 0))?;
+    let codes: Vec<Value> = s.chars().map(|c| Value::int(c as i64)).collect();
+    Ok(heap.alloc_vector(codes))
+}
+
 /// `(to-fixed x n)` — x rendered with exactly `n` digits after the decimal point
 /// (rounded). The one float→text op the language can't bootstrap: `str`/`pr-str`
 /// print the shortest round-tripping form (full f64 precision, e.g.

@@ -2385,12 +2385,9 @@ iterating for side effects."
     s
     (str (upper (substring s 0 1)) (lower (substring s 1)))))
 
-(defn string-codepoints (s)
-  "The Unicode codepoint values of `s` as a vector of integers."
-  (into [] (map char->int (string->list s))))
-
-(defn string-from-codepoints (cs)
-  "Build a string from a list (or vector) of Unicode codepoint integers."
+(defn codepoints->string (cs)
+  "Build a string from a list (or vector) of Unicode codepoint integers — the
+inverse of the `string->codepoints` primitive."
   (apply str (map int->char cs)))
 
 (defn char-at (s i)

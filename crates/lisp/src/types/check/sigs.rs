@@ -200,17 +200,13 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     put("char-at", Sig::new(vec![str_ty, int], str_ty));
     // String/list conversions: recursive helpers or `apply`.
-    //   string->list           — (string-split s "").
-    //   list->string           — (apply str cs).
-    //   string-codepoints      — (into [] (map char->int (string->list s))).
-    //   string-from-codepoints — (apply str (map int->char cs)).
+    //   string->list        — (string-split s "").
+    //   list->string        — (apply str cs).
+    //   codepoints->string  — (apply str (map int->char cs)).
+    // (string->codepoints is a primitive now — its sig rides on the NativeFn.)
     put("string->list", Sig::new(vec![str_ty], Ty::LIST));
     put("list->string", Sig::new(vec![seq], str_ty));
-    put(
-        "string-codepoints",
-        Sig::new(vec![str_ty], Ty::of(Tag::Vector)),
-    );
-    put("string-from-codepoints", Sig::new(vec![seq], str_ty));
+    put("codepoints->string", Sig::new(vec![seq], str_ty));
     // format: variadic with a required string template arg and a string result.
     put("format", Sig::with_rest(vec![str_ty], any, str_ty));
     // Search → int: all have branchy/recursive/optional-param bodies.

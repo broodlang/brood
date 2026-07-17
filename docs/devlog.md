@@ -4733,3 +4733,29 @@ sig, no stale arity, and the *un*-shadowed builtin still warns). Also restored
 the zero-warnings invariant across tests/: `rand-val` (message_roundtrip_test)
 opts out via `check-allow :non-tail-recursion` (depth-bounded by design) and
 jit_let_slot_reuse_test's deliberate dead binding is `_`-prefixed.
+
+## 2026-07-17 — string->codepoints: the missing text-access primitive
+
+The benchmark 7/7 chase quantified a shared bottleneck across every text row:
+building the codepoint vector the parsers index. `(apply vector (map char->int
+(string->list s)))` pays a 1-char string allocation per char, a closure call per
+char (through `map`), and three passes — measured at **~40 % of the whole regex
+benchmark** (134 of ~331 ms of match work), and the same shape sat under
+`std/json`'s parse entry, `std/encoding`'s hex/base64 decodes (which also hashed
+*1-char-string* map keys per char), and the prelude's `string-codepoints`.
+
+Added the `string->codepoints` primitive: one O(n) `chars()` pass to a vector of
+int codepoints. It clears the "genuinely needs Rust" bar the same way
+`string-split`/`string-span`/`%str-index-of` did — char indexing into UTF-8 is
+O(index), so pure Brood can't express the O(n) scan — and it's pure mechanism:
+the regex/json/base64 parsers stay Brood. Rewired: `std/regex` (`regex--codes`
+wrapper deleted, call sites use the primitive), `std/json` (`json-parse` entry),
+`std/encoding` (hex + base64 alphabets, and both decode val-maps now key by
+**int** codepoint instead of 1-char strings). The prelude `string-codepoints`
+defn is deleted — the primitive replaces it under the arrow-convention name —
+and its inverse is renamed `string-from-codepoints` → `codepoints->string`
+(greenfield rename; callers updated; curated checker sigs follow).
+
+Tests: strings_test's codepoints block extended (astral plane, cross-process
+send/receive round-trip); regex/encoding/json suites green; nest check zero
+warnings; full suite green.

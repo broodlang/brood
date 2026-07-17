@@ -306,18 +306,26 @@
   (test "single char"
     (assert= (string-capitalize "a") "A")))
 
-(describe "string-codepoints / string-from-codepoints"
+(describe "string->codepoints / codepoints->string"
   (test "ASCII codepoints"
-    (assert= (string-codepoints "ABC") [65 66 67]))
+    (assert= (string->codepoints "ABC") [65 66 67]))
   (test "empty string"
-    (assert= (string-codepoints "") []))
+    (assert= (string->codepoints "") []))
   (test "roundtrip via codepoints"
     (let (s "Hello, 世界")
-      (assert= s (string-from-codepoints (string-codepoints s)))))
-  (test "string-from-codepoints from a vector"
-    (assert= "ABC" (string-from-codepoints [65 66 67])))
+      (assert= s (codepoints->string (string->codepoints s)))))
+  (test "codepoints->string from a vector"
+    (assert= "ABC" (codepoints->string [65 66 67])))
   (test "non-ASCII codepoint"
-    (assert= (string-codepoints "é") [233])))
+    (assert= (string->codepoints "é") [233]))
+  (test "astral codepoint (one code point, not surrogates)"
+    (assert= (string->codepoints "🙂") [128578]))
+  (test "across processes: codes vector survives send/receive"
+    (let (me (self))
+      (spawn (send me [:codes (string->codepoints "héλ🙂")]))
+      (receive ([:codes v]
+        (do (assert= v [104 233 955 128578])
+            (assert= "héλ🙂" (codepoints->string v))))))))
 
 (describe "string-span / string-span-until (native char-class scanners)"
   (test "string-span: end of the run of set-members from start"

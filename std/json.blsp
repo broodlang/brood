@@ -296,8 +296,8 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
 a vector, string → string, number → int/float, true/false → bool, null → nil. Errors
 on malformed input or trailing content. Pure."
-  (let (s (apply vector (map char->int (string->list s)))  ; int code points: O(1) nth
-        n (count s)                                        ; and pure-prim per-char tests
+  (let (s (string->codepoints s)   ; int code points: O(1) nth, one native pass
+        n (count s)           ; and pure-prim per-char tests
         i (json--skip-ws s 0 n))
     (if (>= i n)
       (error "json: empty input")
@@ -324,7 +324,7 @@ on malformed input or trailing content. Pure."
 char (< 0x20). The common case is a clean ASCII string, so this one O(n) codepoint
 scan lets `json--enc-escapes` skip ~27 whole-string `replace` passes (backslash/quote/
 the named escapes + every C0 control) that would each find nothing."
-  (some? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string-codepoints s)))
+  (some? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string->codepoints s)))
 
 (defn json--enc-escapes (s)
   "Escape the JSON-special characters in `s` (backslash first)."
