@@ -6102,15 +6102,26 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
 // slot, snapshotted from a live frame at tier time) alongside the arm, so the
 // background compiler can type-specialize float arms without a `CompiledArm` field.
 // Empty means "no profile" (integer-only lowering, the pre-float behaviour).
+/// A background-compile work item: the arm, its enqueue-time slot-tag snapshot,
+/// and the enqueuing runtime's plain-`u64` tag. Deliberately NOT the runtime
+/// `Arc` (or a `Weak`): the single-process RUNTIME compactor's gate is
+/// `Arc::get_mut`, so any reference parked in the queue would block compaction.
+/// The tag keys the compiler thread's own publish map — its route to cross-
+/// process dedupe (thousands of short-lived processes each queue their OWN
+/// `CompiledArm` copy of the same shared closure; without the dedupe a spawn
+/// storm compiled `fib` ~68× and the sync-compile escape hatch then stalled the
+/// spawning process on the module lock the flood was holding).
+type JitWorkItem = (Arc<CompiledArm>, Vec<u8>, u64);
+
 struct JitCompiler {
     /// Primary (initial-tier) queue: the small ORIGINAL arm. Drained first, always.
-    primary: std::sync::mpsc::SyncSender<(Arc<CompiledArm>, Vec<u8>)>,
+    primary: std::sync::mpsc::SyncSender<JitWorkItem>,
     /// Deferred (lower-priority) queue: the re-derived **inlined** upgrade. The bg thread
     /// pulls from it only when `primary` is empty — so under a spawn-style initial-tier
     /// storm (thousands of short-lived processes tiering their small arms) the inlined
     /// upgrades sit behind the backlog and never compete; a long-lived workload (fib 35)
     /// drains its primary, then the deferred inlined compile lands and the swap fires.
-    deferred: std::sync::mpsc::SyncSender<(Arc<CompiledArm>, Vec<u8>)>,
+    deferred: std::sync::mpsc::SyncSender<JitWorkItem>,
 }
 
 /// Permanent keep-alive for every `CompiledArm` whose native code was installed into the
@@ -6141,6 +6152,26 @@ const JIT_QUEUED_SYNC_EDGES: u32 = 2048;
 #[cfg(feature = "jit")]
 fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) {
     use std::sync::atomic::Ordering::{Acquire, Release};
+    // A peer's identical shared arm may already be compiled + published — install
+    // that instead of blocking on the module lock (held across every compile) to
+    // lower it again. This is the spinning-loop escape hatch: any valid native
+    // pointer ends the spin.
+    if let Some(key) = arm.share_key {
+        if let Some((ptr, epoch)) = heap.jit_shared_lookup(key) {
+            if epoch == heap.global_epoch()
+                && !ptr.is_null()
+                && ptr != crate::jit::BAILED
+                && ptr != crate::jit::QUEUED
+                && !jit_lower::arm_i64_too_deep(arm)
+            {
+                arm.compile_epoch.store(epoch, Release);
+                arm.jit_code.store(ptr, Release);
+                arm.shared_published
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+    }
     // Snapshot the live frame's slot tags exactly as jit_tier's enqueuer does
     // (used to type-specialize float arms).
     let slot_tags: Vec<u8> = (0..arm.nslots)
@@ -6173,8 +6204,8 @@ fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) {
 static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new(|| {
     use std::sync::atomic::Ordering::Release;
     use std::sync::mpsc::{sync_channel, TryRecvError};
-    let (ptx, prx) = sync_channel::<(Arc<CompiledArm>, Vec<u8>)>(256);
-    let (dtx, drx) = sync_channel::<(Arc<CompiledArm>, Vec<u8>)>(256);
+    let (ptx, prx) = sync_channel::<JitWorkItem>(256);
+    let (dtx, drx) = sync_channel::<JitWorkItem>(256);
     std::thread::Builder::new()
         .name("brood-jit".into())
         .spawn(move || {
@@ -6188,80 +6219,122 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
             // interpreter. A single panic still prints once via the default hook — a
             // loud, actionable signal — but doesn't spam or crash.
             let mut codegen_poisoned = false;
+            // The compiler thread's OWN publish map — (runtime_tag, share_key) →
+            // (code, compile_epoch) for every shared arm it has lowered. Consulted
+            // before lowering so the Nth queued copy of the same shared closure
+            // installs the first copy's code instead of recompiling. Thread-local
+            // by construction (this closure never escapes), so no locking. Entries
+            // for a dropped runtime are inert garbage (a few words each; the code
+            // itself lives forever in GLOBAL_JIT regardless — see the keepalive).
+            let mut published: std::collections::HashMap<(u64, (u64, u16)), (usize, u64)> =
+                std::collections::HashMap::new();
             // Lower one work item: `inlined=false` → the small original arm, store into
             // `jit_code`; `inlined=true` → the re-derived inlined body, store into
             // `inline_code` (jit_tier swaps it into `jit_code` later, epoch-bumped).
-            let mut compile = |arm: &Arc<CompiledArm>, slot_tags: &[u8], inlined: bool| {
-                let slot = if inlined {
-                    &arm.inline_code
-                } else {
-                    &arm.jit_code
-                };
-                // Already resolved (a spinning loop sync-compiled it via
-                // `jit_compile_now`, or it was bailed) — don't compile it twice.
-                // A queued small arm holds QUEUED here; a queued inlined upgrade
-                // holds null (its queue marker is `inline_queued`).
-                {
-                    let existing = slot.load(std::sync::atomic::Ordering::Acquire);
-                    if !existing.is_null() && existing != crate::jit::QUEUED {
+            let mut compile =
+                |arm: &Arc<CompiledArm>, slot_tags: &[u8], rt_tag: u64, inlined: bool| {
+                    let slot = if inlined {
+                        &arm.inline_code
+                    } else {
+                        &arm.jit_code
+                    };
+                    // Already resolved (a spinning loop sync-compiled it via
+                    // `jit_compile_now`, or it was bailed) — don't compile it twice.
+                    // A queued small arm holds QUEUED here; a queued inlined upgrade
+                    // holds null (its queue marker is `inline_queued`).
+                    {
+                        let existing = slot.load(std::sync::atomic::Ordering::Acquire);
+                        if !existing.is_null() && existing != crate::jit::QUEUED {
+                            return;
+                        }
+                    }
+                    if codegen_poisoned {
+                        slot.store(crate::jit::BAILED, Release);
                         return;
                     }
-                }
-                if codegen_poisoned {
-                    slot.store(crate::jit::BAILED, Release);
-                    return;
-                }
-                let mut jit = crate::jit::GLOBAL_JIT
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                #[cfg(feature = "perf-stats")]
-                let t0 = std::time::Instant::now();
-                let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if inlined {
-                        jit_lower_inlined_arm(&mut jit, arm, slot_tags)
-                    } else {
-                        jit_lower_arm(&mut jit, arm, slot_tags)
+                    // Cross-process dedupe: a peer's identical arm (same shared
+                    // closure, same runtime) already lowered by THIS thread — and at
+                    // the same epoch this copy was enqueued at — installs directly.
+                    // A `def`/compaction between the two enqueues bumps the epoch, so
+                    // a stale entry never installs (and the runner's live-epoch guard
+                    // in `jit_tier` re-checks on every native entry regardless). No
+                    // keepalive push: the first copy's push owns the code's chunk.
+                    if !inlined {
+                        if let Some(key) = arm.share_key {
+                            if let Some(&(ptr, epoch)) = published.get(&(rt_tag, key)) {
+                                if epoch
+                                    == arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire)
+                                {
+                                    slot.store(ptr as *mut u8, Release);
+                                    return;
+                                }
+                            }
+                        }
                     }
-                }));
-                #[cfg(feature = "perf-stats")]
-                if std::env::var_os("BROOD_COMPILE_TRACE").is_some() {
-                    eprintln!(
-                        "[compile] {:?} arm={} inlined={}",
-                        t0.elapsed(),
-                        arm.dbg_name
-                            .map(crate::core::value::symbol_name_ref)
-                            .unwrap_or("<closure>"),
-                        inlined
-                    );
-                }
-                drop(jit); // install the pointer outside the module lock
-                match lowered {
-                    Ok(Some(ptr)) => {
-                        slot.store(ptr as *mut u8, Release);
-                        // The installed native code lives forever in GLOBAL_JIT and bakes raw
-                        // pointers into this arm's chunk `ConstVal`s. Keep the arm (hence its
-                        // chunk) alive permanently so those pointers never dangle when the
-                        // closure / call-IC that referenced it is dropped (e.g. a green process
-                        // exits) — the bug-#2 use-after-free: a freed ConstVal chunk fed garbage
-                        // consts (a garbage map_get key) into still-installed native code.
-                        JIT_ARM_KEEPALIVE
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(arm.clone());
+                    let mut jit = crate::jit::GLOBAL_JIT
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    #[cfg(feature = "perf-stats")]
+                    let t0 = std::time::Instant::now();
+                    let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if inlined {
+                            jit_lower_inlined_arm(&mut jit, arm, slot_tags)
+                        } else {
+                            jit_lower_arm(&mut jit, arm, slot_tags)
+                        }
+                    }));
+                    #[cfg(feature = "perf-stats")]
+                    if std::env::var_os("BROOD_COMPILE_TRACE").is_some() {
+                        eprintln!(
+                            "[compile] {:?} arm={} inlined={}",
+                            t0.elapsed(),
+                            arm.dbg_name
+                                .map(crate::core::value::symbol_name_ref)
+                                .unwrap_or("<closure>"),
+                            inlined
+                        );
                     }
-                    Ok(None) => slot.store(crate::jit::BAILED, Release),
-                    Err(_) => {
-                        codegen_poisoned = true;
-                        slot.store(crate::jit::BAILED, Release);
+                    drop(jit); // install the pointer outside the module lock
+                    match lowered {
+                        Ok(Some(ptr)) => {
+                            slot.store(ptr as *mut u8, Release);
+                            // The installed native code lives forever in GLOBAL_JIT and bakes raw
+                            // pointers into this arm's chunk `ConstVal`s. Keep the arm (hence its
+                            // chunk) alive permanently so those pointers never dangle when the
+                            // closure / call-IC that referenced it is dropped (e.g. a green process
+                            // exits) — the bug-#2 use-after-free: a freed ConstVal chunk fed garbage
+                            // consts (a garbage map_get key) into still-installed native code.
+                            JIT_ARM_KEEPALIVE
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(arm.clone());
+                            // Remember it for the queued copies still behind this one.
+                            if !inlined {
+                                if let Some(key) = arm.share_key {
+                                    published.insert(
+                                        (rt_tag, key),
+                                        (
+                                            ptr as usize,
+                                            arm.compile_epoch
+                                                .load(std::sync::atomic::Ordering::Acquire),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => slot.store(crate::jit::BAILED, Release),
+                        Err(_) => {
+                            codegen_poisoned = true;
+                            slot.store(crate::jit::BAILED, Release);
+                        }
                     }
-                }
-            };
+                };
             loop {
                 // 1. Drain the entire primary queue before touching deferred — the
                 //    initial-tier work always wins the compiler.
                 match prx.try_recv() {
-                    Ok((arm, tags)) => {
-                        compile(&arm, &tags, false);
+                    Ok((arm, tags, rt_tag)) => {
+                        compile(&arm, &tags, rt_tag, false);
                         continue;
                     }
                     Err(TryRecvError::Empty) => {}
@@ -6269,8 +6342,8 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
                 }
                 // 2. Primary empty: take one deferred inlined upgrade if any.
                 match drx.try_recv() {
-                    Ok((arm, tags)) => {
-                        compile(&arm, &tags, true);
+                    Ok((arm, tags, rt_tag)) => {
+                        compile(&arm, &tags, rt_tag, true);
                         continue;
                     }
                     Err(TryRecvError::Empty) => {}
@@ -6281,7 +6354,7 @@ static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new
                 //    promptly once primary stays quiet. A 1ms idle poll is free (the thread
                 //    is otherwise sleeping) and never delays a primary send (which wakes it).
                 match prx.recv_timeout(std::time::Duration::from_millis(1)) {
-                    Ok((arm, tags)) => compile(&arm, &tags, false),
+                    Ok((arm, tags, rt_tag)) => compile(&arm, &tags, rt_tag, false),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
@@ -7272,8 +7345,8 @@ pub(crate) fn jit_tier(
         }
     }
     let mut code = arm.jit_code.load(Acquire);
-    if code == crate::jit::BAILED || code == crate::jit::QUEUED {
-        return None; // out of subset, or compile in flight — run the VM
+    if code == crate::jit::BAILED {
+        return None; // out of subset — run the VM
     }
     // Shared-JIT install (the spawn lever): before this process spends THRESHOLD
     // interpreted calls + a background compile on its OWN copy of a RUNTIME/PRELUDE
@@ -7283,7 +7356,14 @@ pub(crate) fn jit_tier(
     // not once per process. Stale entries (a `def`/compaction bumped the epoch) skip.
     // A fn a depth-bail switched to boxed must not re-install a stale shared i64 wrapper from the
     // cache — skip the shared install so it recompiles boxed locally (and re-publishes boxed).
-    if code.is_null() && !jit_lower::arm_i64_too_deep(arm) {
+    //
+    // A QUEUED copy checks too: its own compile is in flight, but a peer's identical
+    // arm may have compiled AND published since we enqueued (a spawn storm queues
+    // dozens of copies of the same shared closure). Installing over QUEUED is benign
+    // either way — the background dequeue skips any resolved slot, and if it races a
+    // concurrent store of this copy's own pointer, both pointers are valid code for
+    // the same epoch (each kept alive by its compiler's keepalive push).
+    if (code.is_null() || code == crate::jit::QUEUED) && !jit_lower::arm_i64_too_deep(arm) {
         if let Some(key) = arm.share_key {
             if let Some((ptr, epoch)) = heap.jit_shared_lookup(key) {
                 if epoch == heap.global_epoch()
@@ -7298,6 +7378,9 @@ pub(crate) fn jit_tier(
                 }
             }
         }
+    }
+    if code == crate::jit::QUEUED {
+        return None; // compile in flight, nothing published yet — run the VM
     }
     if code.is_null() {
         // Count the invocation; only enqueue once the arm is hot.
@@ -7330,7 +7413,7 @@ pub(crate) fn jit_tier(
                 .collect();
             if JIT_COMPILER
                 .primary
-                .try_send((arm.clone(), slot_tags))
+                .try_send((arm.clone(), slot_tags, heap.runtime_tag()))
                 .is_err()
             {
                 // The background compile queue is full (a burst of distinct hot arms — e.g.
@@ -7421,7 +7504,7 @@ pub(crate) fn jit_tier(
                 // later call re-attempts — but DON'T disturb the running small native.
                 if JIT_COMPILER
                     .deferred
-                    .try_send((arm.clone(), slot_tags))
+                    .try_send((arm.clone(), slot_tags, heap.runtime_tag()))
                     .is_err()
                 {
                     arm.inline_queued.store(false, Relaxed);

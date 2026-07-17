@@ -4759,3 +4759,44 @@ and its inverse is renamed `string-from-codepoints` → `codepoints->string`
 Tests: strings_test's codepoints block extended (astral plane, cross-process
 send/receive round-trip); regex/encoding/json suites green; nest check zero
 warnings; full suite green.
+
+## 2026-07-17 — spawn regression root-caused: the shared-arm compile flood
+
+The 2026-07-17 benchmark rerun drifted `spawn` 48 → 68 ms; bisect landed it on
+286e91f (dense Table + tier-on-resume + the sync-compile escape hatch). Phase
+instrumentation put the whole loss in the **fan (spawn) loop** (23 → 45 ms,
+bimodal), and `BROOD_COMPILE_TRACE` showed why: **`fib` compiled ~68 times** —
+every short-lived process queues its OWN `CompiledArm` copy of the same shared
+closure, the shared-cache publish only happened at the compiling process's
+*next native run*, and the dequeue-side resolved-skip can't see across copies.
+The flood is old, mostly-harmless background waste; what 286e91f changed is
+that fan's own arm now hits the sync-compile escape hatch (QUEUED at a 2048th
+back-edge) and **blocks on the GLOBAL_JIT module lock the flood was holding** —
+compile latency moved onto the spawning process's critical path.
+
+Three fixes, all keeping the queue free of runtime references:
+- `jit_tier`: a QUEUED arm now still consults the shared cache — a peer's
+  published code installs over QUEUED instead of interpreting until this copy's
+  own compile lands (the dequeue resolved-skip then drops the stale queue entry).
+- The background compiler keeps its **own** publish map — `(runtime_tag,
+  share_key) → (code, epoch)`, a plain thread-local HashMap — so the Nth queued
+  copy installs the first copy's code instead of lowering again. `runtime_tag`
+  is a new plain-u64 id on `RuntimeCode`: the first cut passed the runtime
+  `Arc` through the queue and **broke the single-process RUNTIME compactor**
+  (its gate is `Arc::get_mut`; two runtime_collector tests caught it — a Weak
+  would break it identically). Epoch-validated against the copy's enqueue-time
+  `compile_epoch`; the runner's live-epoch guard re-checks on entry regardless.
+- `jit_compile_now`: shared-lookup before taking the module lock — any valid
+  published pointer ends the spin without compiling.
+
+fib now compiles ONCE under a 10k-process storm; fan 45 → 22 ms; the plain
+bench 107 → 87 ms (release-fast A/B) — at/under the pre-regression baseline.
+Suite 784/784; runtime_collector 20/20; 500 fresh differential-fuzz seeds
+agree across engines.
+
+Also closed: the bintree drift (91 → 115 ms in the rerun) attributed to
+9c81190's effect-safe checkpoints. Controlled A/B puts today's gap within
+noise (min 145 vs 142 ms), and `BROOD_NO_DEOPT_RESUME=1` bounds the journaling
+cost at ~5 ms on this shape. A sound skip needs transitive callee purity (a
+non-tail call's completed callee may have effects) — not worth re-entering the
+exactly-once soundness neighbourhood for ~4%; accepted cost, documented here.

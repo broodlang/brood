@@ -1026,6 +1026,13 @@ pub struct RuntimeCode {
     /// Index (0 or 1) of the current code generation — read at `promote`/collect,
     /// never on the hot read path (the handle carries its own generation).
     current_gen: AtomicUsize,
+    /// A process-wide-unique tag for this runtime instance — a plain `u64` the
+    /// background JIT compiler keys its per-runtime publish cache by. Carried
+    /// inside compile work items INSTEAD of the runtime `Arc` (or a `Weak`):
+    /// either would park a reference in the queue and break the single-process
+    /// RUNTIME compactor's `Arc::get_mut` uniqueness gate. Distinct per runtime,
+    /// so shared native code never leaks across independent runtimes.
+    runtime_tag: u64,
     /// Monotonic version of the `gens` **`Arc` identities**, bumped only when a slot's
     /// `Arc<CodeSlabs>` is *replaced* — a Stage-4 free or a compaction store, both rare
     /// (never on the `def`/`promote`/append hot path, which mutates a loaded slab's
@@ -1209,6 +1216,12 @@ pub struct GlobalsSnapshot {
     block_depth: u32,
 }
 
+/// The next [`RuntimeCode::runtime_tag`] — a process-wide monotonic counter.
+fn next_runtime_tag() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 impl Default for RuntimeCode {
     fn default() -> Self {
         RuntimeCode {
@@ -1217,6 +1230,7 @@ impl Default for RuntimeCode {
                 ArcSwap::from_pointee(CodeSlabs::default()),
             ],
             current_gen: AtomicUsize::new(0),
+            runtime_tag: next_runtime_tag(),
             gen_version: AtomicU64::new(0),
             globals: RwLock::new(SymbolMap::default()),
             version: AtomicU64::new(0),
@@ -1301,6 +1315,7 @@ impl RuntimeCode {
                 ArcSwap::from_pointee(CodeSlabs::default()),
             ],
             current_gen: AtomicUsize::new(0),
+            runtime_tag: next_runtime_tag(),
             gen_version: AtomicU64::new(0),
             globals: RwLock::new(globals),
             version: AtomicU64::new(0),
@@ -2149,6 +2164,12 @@ impl Heap {
 
     /// Clone the Arc to this runtime's shared code region (for spawning a child
     /// that shares this runtime's live globals).
+    /// This heap's runtime-instance tag — see [`RuntimeCode::runtime_tag`].
+    #[cfg(feature = "jit")]
+    pub(crate) fn runtime_tag(&self) -> u64 {
+        self.runtime.runtime_tag
+    }
+
     pub fn runtime_arc(&self) -> Arc<RuntimeCode> {
         Arc::clone(&self.runtime)
     }
