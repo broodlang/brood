@@ -225,6 +225,19 @@ class Gen:
                 "  (let (v [" + elems + "])\n"
                 "    (bit-and (+ " + reads + ") 268435455)))")
             helpers.append((en, 1))
+        # a RANGE-REDUCE helper: a NON-prim closure folded over a range, which
+        # dispatches through the native `%range-reduce` HOF driver + its JIT
+        # fast-frame (mod.rs `hof_apply_native`/`hof_apply_step`). A prim reducer
+        # (`fold +`) skips that path, so the grammar never reached it before.
+        if r.random() < 0.5:
+            rrn = self.name("rr")
+            k = r.randint(6, 15)
+            op = r.choice(["+", "-", "bit-xor"])
+            m = r.randint(2, 9)
+            lines.append(
+                "(defn " + rrn + " (x)\n"
+                "  (reduce (fn (acc i) (bit-and (" + op + " acc (* i (rem x " + str(m) + "))) 268435455)) 0 (range " + str(k) + ")))")
+            helpers.append((rrn, 1))
         # the driver bit-ands the helper result, so it must be int-returning; the
         # float helper `g` is exercised on its own (and by the pure `flt`/`accf`
         # recursion below), never fed to a bit op.
@@ -394,6 +407,25 @@ class Gen:
             hv = hn + "-r"
             lines.append(f"(def {hv} ({hn} {{}} 0 {r.choice([2000, 5000, 9000])}))")
             lines.append(f'(println "{hn}" ({dn} {hv} 0 0) (map-count {hv}))')
+        # a SIDE-EFFECT + call-result-DESTRUCTURE loop — the deopt-rerun bug's
+        # shape: a `table-incr` effect before a non-tail call whose vector result
+        # is destructured (which deopts). Exercises the JIT deopt/effect-ordering
+        # machinery (the checkpoint that makes an effect execute exactly once); a
+        # jit-vs-tree diff here would be a duplicated/lost effect.
+        if r.random() < 0.4:
+            sp = self.name("spin")
+            mk = self.name("mk")
+            key = r.choice([777, 888, 999])
+            lines.append(f"(defn {mk} (s) [(rem (+ (* s 1103515245) 12345) 2147483648) :tag])")
+            lines.append(
+                f"(defn {sp} (s i n acc)\n"
+                f"  (if (>= i n) acc\n"
+                f"    (do (table-incr t {key} 1)\n"
+                f"      (let ([s2 tag] ({mk} s))\n"
+                f"        ({sp} s2 (+ i 1) n (bit-xor acc (bit-and s2 268435455)))))))")
+            sv = sp + "-r"
+            lines.append(f'(def {sv} ({sp} 1337 0 {r.choice([5000, 15000])} 0))')
+            lines.append(f'(println "{sp}" {sv} (table-get t {key} 0))')
         # digest: accumulator + table contents
         lines.append(
             "(defn dig (k n s)\n"
