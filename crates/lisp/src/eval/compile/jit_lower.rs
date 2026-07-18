@@ -115,10 +115,37 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
 /// The pass is a tiny abstract interpreter over the chunk: propagate the stack
 /// depth instruction by instruction, following both branch edges; depths must
 /// agree wherever control merges.
+///
+/// **Pure-self-recursion exemption** (`self_name`): an arm whose every `Call` —
+/// tail or not — targets *itself*, with no mutating inline prim (`table-put`)
+/// and no `try`/`catch`, is effect-free by induction: a deopt's from-ip-0
+/// re-run re-executes only completed *self*-calls, which run this same pure
+/// arm (a redefinition mid-run bumps the epoch and invalidates the arm before
+/// it re-enters native code). Such arms skip checkpointing entirely — the
+/// journal writes after every non-tail call were ~5 % of bintree's
+/// *instructions* (two self-calls per node × 819k nodes; invisible in
+/// wall-clock noise, plain in `perf stat -e instructions` and matching the
+/// `BROOD_NO_DEOPT_RESUME=1` lever). Anything else — a call to another fn or
+/// a native (where all effects live), a computed callee, `table-put`, a catch
+/// frame — keeps the exactly-once checkpoint machinery.
 #[cfg(feature = "jit")]
-pub(super) fn jit_ckpt_depth(code: &[Inst]) -> Option<usize> {
+pub(super) fn jit_ckpt_depth(code: &[Inst], self_name: Option<Symbol>) -> Option<usize> {
     if std::env::var_os("BROOD_NO_DEOPT_RESUME").is_some() {
         return None; // chicken switch: legacy from-ip-0 re-run everywhere
+    }
+    if let Some(me) = self_name {
+        let pure_self = code.iter().all(|i| match i {
+            Inst::Call { head, .. } => *head == Some(me),
+            Inst::Prim3 {
+                op: PrimOp3::TablePut,
+                ..
+            } => false,
+            Inst::TryCatch { .. } => false,
+            _ => true,
+        });
+        if pure_self {
+            return None; // effect-free re-run — no journal needed
+        }
     }
     let len = code.len();
     let mut depth: Vec<Option<usize>> = vec![None; len + 1];
@@ -189,7 +216,7 @@ pub(super) fn jit_ckpt_depth(code: &[Inst]) -> Option<usize> {
     max_after_call
 }
 #[cfg(not(feature = "jit"))]
-pub(super) fn jit_ckpt_depth(_code: &[Inst]) -> Option<usize> {
+pub(super) fn jit_ckpt_depth(_code: &[Inst], _self_name: Option<Symbol>) -> Option<usize> {
     None
 }
 

@@ -697,6 +697,34 @@ struct Slabs {
 /// [`Heap::local_live_count`] (the nursery) and [`Heap::old_live_count`] (the old
 /// gen), which were identical sums. `natives` is excluded (it's never GC'd — see
 /// the byte-weighted [`slab_bytes`], which does count it for footprint).
+impl Slabs {
+    /// A fresh, empty `Slabs` whose per-slab `Vec`s carry the **capacity of
+    /// `like`'s lengths** — the flip-side nursery allocator. A minor collection
+    /// used to install `Slabs::default()` (zero capacity), so every cycle
+    /// re-paid the full Vec-doubling ladder up to the nursery threshold — each
+    /// doubling memmoves everything allocated so far, ~12 % of an
+    /// allocation-bound run (bintree) went to those copies. The previous
+    /// nursery's *lengths* are the steady-state high-water mark (each cycle
+    /// allocates about as much as the last), so reserving them up front makes
+    /// the next cycle's pushes copy-free while releasing the memory of any
+    /// one-off spike (capacity follows the last cycle's actual use, not max).
+    fn with_capacity_like(like: &Slabs) -> Slabs {
+        Slabs {
+            pairs: Vec::with_capacity(like.pairs.len()),
+            vectors: Vec::with_capacity(like.vectors.len()),
+            maps: Vec::with_capacity(like.maps.len()),
+            strings: Vec::with_capacity(like.strings.len()),
+            bigints: Vec::with_capacity(like.bigints.len()),
+            decimals: Vec::with_capacity(like.decimals.len()),
+            bytes: Vec::with_capacity(like.bytes.len()),
+            ropes: Vec::with_capacity(like.ropes.len()),
+            closures: Vec::with_capacity(like.closures.len()),
+            natives: Vec::new(), // never GC'd, never grows here
+            envs: Vec::with_capacity(like.envs.len()),
+        }
+    }
+}
+
 fn slab_live_count(s: &Slabs) -> usize {
     s.pairs.len()
         + s.vectors.len()
@@ -7701,7 +7729,10 @@ impl Heap {
         let (mut dest, epoch, dest_old) = if tenure {
             (std::mem::take(&mut self.old), self.old_epoch, true)
         } else {
-            (Slabs::default(), self.local_epoch, false)
+            // Flip: seed the fresh nursery with the outgoing one's capacity so
+            // neither the survivor copy nor the next cycle's allocations re-pay
+            // the Vec-doubling ladder (see `Slabs::with_capacity_like`).
+            (Slabs::with_capacity_like(&young), self.local_epoch, false)
         };
         let mut fwd = FlushForward::default();
         fwd.epoch = epoch;
@@ -7754,10 +7785,12 @@ impl Heap {
             }
         }
         // Install the relocated space. Tenure: `dest` is the grown old gen; the
-        // nursery stays the empty Slabs left by the take. Flip: `dest` is the fresh
+        // nursery restarts empty but with the outgoing nursery's capacity (same
+        // doubling-ladder rationale as the flip path). Flip: `dest` is the fresh
         // nursery; the old gen was untouched.
         if tenure {
             self.old = dest;
+            self.local = Slabs::with_capacity_like(&young);
         } else {
             self.local = dest;
         }

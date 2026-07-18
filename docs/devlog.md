@@ -4850,3 +4850,37 @@ each; the DFA loop itself only 0.245 µs/char), so the levers were:
 
 Checksums bit-identical across VM / no-JIT / tree-walker; regex tests 14/14;
 suite 784/784; nest check clean.
+
+## 2026-07-18 — bintree: the checkpoint tax measured honestly, and a purity exemption
+
+Chasing the bintree drift (91 → 110 ms across mid-July) with wall-clock A/Bs
+kept returning noise; `perf stat -e instructions` (the load-independent metric,
+per docs/benchmarking.md) settled it: HEAD ran **+6.5 % instructions** over the
+ed502ba baseline on bintree, and `BROOD_NO_DEOPT_RESUME=1` recovered ~5 % —
+the 9c81190 checkpoint journaling after every completed non-tail call (two
+self-calls per node × 819k nodes), previously judged "flat" from wall alone.
+
+Fix: a **pure-self-recursion exemption** in `jit_ckpt_depth`. An arm whose
+every `Call` (tail or not) targets itself, with no `table-put` inline prim and
+no `try`/`catch`, is effect-free by induction — a deopt's from-ip-0 re-run
+re-executes only completed self-calls of this same pure arm (a mid-run
+redefinition bumps the epoch and invalidates the arm first). Such arms skip
+checkpointing: no journal slots reserved, no per-call journal stores. Anything
+that can reach an effect — a non-self call (natives live there), a computed
+callee, `table-put`, a catch frame — keeps the exactly-once machinery.
+bintree instructions 1.788G → 1.711G (+1.9 % vs baseline, from +6.5 %).
+
+Also: **minor-collect nursery capacity seeding** (`Slabs::with_capacity_like`).
+A collection installed `Slabs::default()` — zero capacity — so every cycle
+re-paid the Vec-doubling ladder up to the threshold (each doubling memmoves
+everything so far). The fresh nursery now reserves the outgoing nursery's
+lengths (the steady-state high-water mark; a spike's excess capacity is
+released next cycle). Neutral on bintree's wall (collections are rare there —
+the memmove in its profile is per-call `push_n` frame staging, intrinsic call
+machinery), but removes the ladder for any workload that collects often.
+
+What bintree's profile says is LEFT: ~17 % `jit_run_fast_link` + ~11 %
+`push_n`/frame staging (the boxed non-tail call path — the "true call
+inlining" FRONTIER lever), ~10 % allocation FFI. Those are the deferred
+big-ticket JIT items, not regressions. Validated: effects test, GC_STRESS
+checksum, suite 784/784, 300 fuzz seeds across engines.

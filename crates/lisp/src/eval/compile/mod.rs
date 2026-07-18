@@ -2164,7 +2164,7 @@ fn compile_arm(
     // the spill slots; zero cost for call-free arms (`ckpt_depth` is None).
     let ckpt_depth = chunk
         .as_ref()
-        .and_then(|c| jit_lower::jit_ckpt_depth(&c.code));
+        .and_then(|c| jit_lower::jit_ckpt_depth(&c.code, defn_name));
     let (ckpt_slot, ckpt_reserve) = match ckpt_depth {
         Some(d) => ((scope.max + spill_reserve) as u32, 1 + d),
         None => (u32::MAX, 0),
