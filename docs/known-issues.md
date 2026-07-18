@@ -10,6 +10,20 @@ ADRs / topic docs.
 
 ---
 
+## KI-10 — `receive` compile cliff at the 13th arm · **open (worked around)**
+
+Adding a 13th arm to a hot `receive` loop degrades it badly: on `buffer--serve`
+(std/editor/buffer.blsp), a single TRIVIAL extra arm (`([:sync-probe] (recur …))`)
+took the buffer suite from 4.9 s / 139 MB peak to 8.0 s / 248 MB — +65% wall,
++80% peak — and pushed the full parallel suite over the 1 GB test soft limit.
+Bisected 2026-07-11 while adding a `[:sync …]` arm for the resync primitive;
+12 arms are fine, 13 fall off the cliff, so the dispatch likely drops from an
+indexed strategy to an allocating linear one at that width. Worked around by
+merging `buffer--serve`'s two `[:edit …]` arms (buffer-edit always sends the
+3-element form now) to stay at 12; the arm-budget constraint is noted in the
+serve loop. Real fix: find the clause-count threshold in the receive/pattern
+compiler and either raise it or make the wide path allocation-free.
+
 ## KI-9 — arity error from a closure shipped in a `spawn` body · **likely transient; not present in committed code**
 
 Surfaced once while parallelising `nest check`: a driver spawned

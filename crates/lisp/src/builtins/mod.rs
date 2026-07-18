@@ -560,6 +560,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], Ty::vector_of(int)),
         string_to_codepoints,
     );
+    // The minimal-splice diff of two strings — one O(n) byte pass, char-indexed
+    // result. Needs Rust like the search/split above (no O(1) char access), and it
+    // is per-keystroke hot: every process-hosted editor buffer diffs old->new text
+    // at the loop tail (std/editor/buffer-client `text-splice` rides on this).
+    def(
+        heap,
+        "%str-splice-diff",
+        Arity::exact(2),
+        Sig::new(vec![string, string], vec_ty),
+        str_splice_diff,
+    );
     // Case folding (Unicode tables) and parse-or-nil genuinely need Rust; the rest
     // of the string library (split/join/replace/index-of/trim/…) is Brood over
     // these + `substring`/`%str-index-of`/`str` (std/prelude.blsp).

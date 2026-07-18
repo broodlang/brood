@@ -64,6 +64,16 @@
         (delete-file path)
         (is (every? (fn (r) (= r :ok)) results)))))
 
+  ;; A FAILED load must clear the in-flight marker: a stale self-marker would make
+  ;; the same process's retry match the circular-require arm and "succeed" without
+  ;; loading (the later mod/fn call dies unbound with no pointer to the real error),
+  ;; while every other process stalls out the full await window per attempt.
+  (test "a failed require clears its loading marker; the retry re-raises the real error"
+    (let (_ (try (require 'no-such-module-xyz) (catch e :expected)))
+      (refute (contains? *features-loading* "no-such-module-xyz"))
+      ;; the retry must fail the SAME way — not fake success via a stale marker
+      (assert-error (require 'no-such-module-xyz))))
+
   ;; The circular-require contract survives the fix: a module being loaded that
   ;; (directly or via :use) requires itself back must NOT deadlock or reload — the
   ;; loader pid matches the in-flight marker, so the inner require returns at once.
