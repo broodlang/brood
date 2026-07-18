@@ -148,7 +148,7 @@ The contract for every operation:
 
 ## The tool surface (Brood, in `std/tool/mcp.blsp`)
 
-Sixteen tools, each earning its place by needing the runtime to answer —
+Seventeen tools, each earning its place by needing the runtime to answer —
 anything a plain file read or grep would answer is **not** here, because
 Claude Code already has those:
 
@@ -156,6 +156,8 @@ Claude Code already has those:
 |---|---|---|---|
 | `eval`        | `{source}`                  | `{value, stdout, error?, diagnostics}` | The point — iterate without restart |
 | `load`        | `{file}`                    | `{ok, diagnostics, shadows}`           | Reload a `.blsp` into the live image, *and* check it: `diagnostics` are `check-file-structured` warnings (type/arity/unbound/non-tail-recursion); `shadows` flags names this file also-defines in another source file (flat-namespace collision) |
+| `write`       | `{path, content}`           | `{ok, path, diagnostics, shadows}`     | Create/overwrite a project file *through* the image, not the raw filesystem: `path` is project-relative and sandboxed under the project root (absolute paths, `~`, `..` rejected); a `.blsp` file is loaded into the session and checked, so success carries `diagnostics`/`shadows` like `load` (failure is `{ok: false, error}`) |
+| `edit`        | `{path, old, new}`          | `{ok, path, diagnostics, shadows}`     | Exact-string replace in a project file (sandboxed like `write`; `old` must occur exactly once); a `.blsp` file is reloaded and checked, same result shape as `write` |
 | `lookup`      | `{name}`                    | `{arglist, doc, source_location, kind}`| Resolves prelude, project, macros uniformly |
 | `macroexpand` | `{form, mode: "1"\|"all"}`  | `{expanded}`                           | Teaches the agent quasiquote/`when-let`/etc. |
 | `run-tests`   | `{file?, name?}`            | `[{name, status, output}]`             | Structured, not GNU-line parsing |
@@ -250,9 +252,9 @@ everything via tools alone.
 The transport is newline-delimited JSON over **stdout**, so a handler that
 `(print …)`d straight to stdout would corrupt the JSON-RPC stream — the one
 thing the skill used to have to warn against, because printing is the natural
-debugging reflex. It no longer can: the dispatcher installs a thread-local
-capture buffer around every `tools/call`, so `print` / `println` divert into
-it instead of the channel. The captured text rides back as a **second** content
+debugging reflex. It no longer can: the dispatcher installs a process-scoped,
+spawn-inherited capture buffer around every `tools/call`, so `print` / `println`
+divert into it instead of the channel. The captured text rides back as a **second** content
 block in the reply, labelled `[captured stdout]`:
 
 ```json
@@ -266,8 +268,9 @@ block in the reply, labelled `[captured stdout]`:
 stdout block appears only when something was printed. This is the realized form
 of the `stdout` column in the tool table above — delivered uniformly for every
 tool rather than threaded through each handler's return map. Capture is
-thread-local: it covers the synchronous handler, not green processes the handler
-`spawn`s on other workers (which shouldn't be writing to the channel anyway).
+process-scoped and **spawn-inherited** — it lives in the process `Ctx`
+(`crates/lisp/src/builtins/io.rs`), so output from green processes the handler
+`spawn`s on other workers is captured too, not just the synchronous handler's.
 `eprint` (stderr) is untouched — it never shared the protocol channel.
 
 ## The crate

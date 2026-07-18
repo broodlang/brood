@@ -822,11 +822,12 @@ fn remote_monitor_fires_noconnection_on_node_down() {
     );
 }
 
-/// `(ensure-link addr)` keeps a peer link alive across restarts. Start A1, B
-/// `ensure-link`s it and sends a probe; kill A1; restart A2 on the same
-/// port/name; B's supervisor reconnects and a second probe round-trips. Pure
-/// Brood policy on top of `connect` + `monitor-node`; no Rust changes — this
-/// test guards the policy code in `std/prelude.blsp`.
+/// `net/reconnect` keeps a peer link alive across restarts. Start A1, B
+/// watches it and sends a probe; kill A1; restart A2 on the same port/name;
+/// B's watcher reconnects and a second probe round-trips. Pure Brood policy
+/// on top of `connect` + `monitor-node`; no Rust changes — this test guards
+/// the policy code in `std/net/reconnect.blsp` (which superseded the
+/// prelude's `ensure-link`, 2026-07-18).
 #[test]
 fn ensure_link_reconnects_across_a_node_restart() {
     let _g = port_lock();
@@ -855,15 +856,20 @@ fn ensure_link_reconnects_across_a_node_restart() {
     // a second time — `ensure-link` will reconnect under us).
     let client_src = format!(
         r#"
+(require 'net/reconnect)
 (node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
-(ensure-link "a@127.0.0.1:{port_a}")
+(net/reconnect/watch "a@127.0.0.1:{port_a}" {{:min-ms 200 :max-ms 400}})
+;; Wait for the watcher's initial connect (it is asynchronous, unlike the old
+;; ensure-link) before the first probe.
+(defn wait-link () (if (empty? (nodes)) (do (sleep 25) (wait-link)) nil))
+(wait-link)
 ;; First probe — proves the initial link came up.
 (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
 (receive ([:pong _] (println "FIRST-OK")) (after 30000 (throw "no first pong")))
 ;; Tell the harness we're ready for the restart.
 (println "ARMED")
 ;; Now retry the second ping until something answers — the harness will
-;; bounce A1 → A2 in between. `ensure-link` re-`connect`s on :nodedown.
+;; bounce A1 → A2 in between. The watcher re-`connect`s on :nodedown.
 (defn try-second (n)
   (when (= n 0) (throw "no second pong after retries"))
   (send {{:name :probe :node :a@127.0.0.1}} [:ping (self)])
@@ -2049,4 +2055,99 @@ fn cluster_mesh_simultaneous_joins_converge() {
         full.iter().all(|&x| x),
         "simultaneous joins did not converge to a full 5-node mesh.\n{reports}"
     );
+}
+
+/// The dist self-healing slice (survey gap #5): `net/reconnect`'s watcher heals a
+/// fallen link. A watches B; B exits (nodedown fires, subscriber notified); the
+/// harness restarts B on the same port; the watcher's backoff `connect` retries
+/// land, the subscriber gets `[:nodeup]`, and a `send` to B works again —
+/// end-to-end recovery with no manual `connect`. Also exercises the opt-in
+/// `(process-flag :send-errors true)` seam: while B is down, a send raises the
+/// catchable E0060 noconnection error instead of silently dropping.
+#[test]
+fn reconnect_watcher_heals_a_fallen_link() {
+    let _g = port_lock();
+    let dir = std::env::temp_dir().join(format!("brood-dist-reconnect-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let port_a = free_port();
+    let port_b = free_port();
+
+    // Node B, round 1: come up, wait until A links in, then exit cleanly
+    // (closes the listener → A sees [:nodedown]).
+    let b_round1 = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(defn wait-link () (if (empty? (nodes)) (do (sleep 25) (wait-link)) (first (nodes))))
+(wait-link)
+(sleep 300)
+"#
+    );
+
+    // Node B, round 2: same identity + port; echo one ping so A can prove the
+    // healed link routes messages.
+    let b_round2 = format!(
+        r#"
+(node-start :b "127.0.0.1:{port_b}" "secret-test-cookie-16+")
+(let (echoer (spawn (receive ([:ping from] (send from [:pong])))))
+  (register :echo echoer)
+  (sleep 30000))
+"#
+    );
+
+    // Node A: watch B via net/reconnect (fast backoff for the test), subscribe,
+    // then narrate the down → noconnection-send → up → message-flows sequence.
+    let watcher = format!(
+        r#"
+(require 'net/reconnect)
+(node-start :a "127.0.0.1:{port_a}" "secret-test-cookie-16+")
+(def spec "b@127.0.0.1:{port_b}")
+(net/reconnect/watch spec {{:min-ms 100 :max-ms 400}})
+(net/reconnect/subscribe spec)
+(receive
+  ([:nodedown _] (println "NODEDOWN-OK"))
+  (after 15000 (println "TIMEOUT-no-nodedown")))
+;; while down: an opted-in send raises catchable noconnection instead of dropping
+(process-flag :send-errors true)
+(println
+  (try (do (send {{:name :echo :node (keyword spec)}} [:ping (self)]) "SEND-DID-NOT-RAISE")
+    (catch e (if (= (get e :code) "E0060") "NOCONNECTION-OK" (get e :message)))))
+(process-flag :send-errors nil)
+(receive
+  ([:nodeup up]
+    (println "NODEUP-OK")
+    ;; the healed link routes: ping B's echoer by registered name
+    (send {{:name :echo :node up}} [:ping (self)])
+    (receive
+      ([:pong] (println "PONG-OK"))
+      (after 5000 (println "TIMEOUT-no-pong"))))
+  (after 20000 (println "TIMEOUT-no-nodeup")))
+"#
+    );
+
+    let b1 = spawn_brood(&dir, "b1.blsp", &b_round1);
+    wait_until_listening(port_b);
+    let a = spawn_brood(&dir, "a.blsp", &watcher);
+
+    // B round 1 exits on its own once A links in. Reap it, then bring B back on
+    // the same port for the watcher's retries to find.
+    let _ = b1.wait_with_output();
+    // Give A a beat to observe the down + run the noconnection send before B
+    // returns (the backoff retries tolerate any gap here).
+    std::thread::sleep(Duration::from_millis(400));
+    let mut b2 = spawn_brood(&dir, "b2.blsp", &b_round2);
+
+    let out = a.wait_with_output().expect("watcher finished");
+    let _ = b2.kill();
+    let _ = b2.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for expect in ["NODEDOWN-OK", "NOCONNECTION-OK", "NODEUP-OK", "PONG-OK"] {
+        assert!(
+            out.status.success() && stdout.contains(expect),
+            "reconnect healing: missing {expect}.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        );
+    }
 }

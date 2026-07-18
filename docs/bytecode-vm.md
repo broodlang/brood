@@ -55,7 +55,7 @@ might extract.
 
 ## As-built (Stage 0–1, 2026-05-30)
 
-Implemented in `crates/lisp/src/eval/compile.rs` behind the `BROOD_VM` env flag
+Implemented in `crates/lisp/src/eval/compile/` behind the `BROOD_VM` env flag
 (off by default; the tree-walker remains the engine), on branch
 `worktree-bytecode-vm`. Three commits: Stage 0 (scaffolding), Stage 1 (mechanism),
 and the primitive-redirect increment.
@@ -106,7 +106,7 @@ Lexical scope is **flattened into the single activation frame**: a compile-time
 `Scope` (name→flat-slot, sequential, shadowing; high-water = `nslots`) replaces the
 param-only list. `Node::LetBind` evaluates each rhs and writes it into its frame
 slot (`Heap::set_root_at`), in order, then runs the body; `vm_apply` pushes the args
-then nil-fills to `nslots`. `let`/`let*` are sequential, `letrec` pre-allocates all
+then nil-fills to `nslots`. `let` is sequential, `letrec` pre-allocates all
 slots (init nil). Top-level forms get a frame too. Binding forms accept a list or
 vector; pattern binders defer. **A `let`-body tail loop (30M iters): 25.5 s →
 10.9 s (~2.3×)**; `let` slots on `Heap::roots` survive GC-stress.
@@ -301,7 +301,7 @@ dependency**: an un-addressable ref degrades to the current scan, not to a bug.
 ## 4. Data structures (sketched against existing types)
 
 ```rust
-// crates/lisp/src/eval/compile.rs (new) — the IR / compiled node.
+// crates/lisp/src/eval/compile/ (new) — the IR / compiled node.
 // NOT a Value; never escapes to the language. No Tag, no Ty bit, no wire/printer.
 enum Node {
     Const(Value),                       // literal / quote result
@@ -371,7 +371,7 @@ interpreter** — they're cold and top-level, which also shrinks the initial dif
 
 ## 7. Staged rollout — each stage shippable and test-green, behind `BROOD_VM`
 
-**Stage 0 — Scaffolding + benchmark harness (small).** Add `eval/compile.rs` with
+**Stage 0 — Scaffolding + benchmark harness (small).** Add `eval/compile/` with
 the `Node` enum and a `compile_form` that *currently* produces faithful IR-mirror
 nodes executed by a thin interpreter calling existing helpers. Behind a `BROOD_VM`
 env flag (default off). Lock in the ADR-069 benchmark set (fib(32), loop(3M),
@@ -440,7 +440,7 @@ precisely because the language is unchanged (invariant #8).
 
 ## 9. First milestone (concrete)
 
-> Add `crates/lisp/src/eval/compile.rs` with the `Node` enum and a `lex_resolve`
+> Add `crates/lisp/src/eval/compile/` with the `Node` enum and a `lex_resolve`
 > pass wired into `eval::macros::compile` that produces `Node::Local{depth,index}`
 > for lexically-bound references and `Node::Global`/`SymbolRef` otherwise. Execute
 > `Node`s with a thin trampoline that allocates frame slots as `Heap::roots` regions

@@ -118,7 +118,7 @@ never a mutable `Value` the language can observe.
   `alloc_pair`/`alloc_vector` (`:1652`), `FlushForward` (`:5476`, the HashMap→Vec target),
   `flush_value`/`flush_pair`/the vector flush (`:5598+`), `collect`/`minor_collect` (`:4834`),
   the per-deref epoch tripwire (`vector`/`pair` accessors).
-- `crates/lisp/src/eval/compile.rs` — the JIT's `make_vector2`/`vector_ref`/`cons`/`car`/`cdr`
+- `crates/lisp/src/eval/compile/` — the JIT's `make_vector2`/`vector_ref`/`cons`/`car`/`cdr`
   lowering (must follow an inlined-vector repr), `Op::Handle` (the scalar-replacement seed for B),
   `chunk_walks_structure` / the benefit gates (interact with the mixed-bound §1 picture).
 - `std/prelude.blsp` — `map`/`filter`/`reduce` (the 2N-cons builders for D), `sort`.

@@ -22,9 +22,9 @@ doc plans the Cranelift inline-cache direct call + true inlining to remove it). 
 > This doc is the pickup reference; it assumes `docs/jit-stage1.md` (the tier-1 int JIT) as background.
 
 Everything here lives behind `--features jit`. The codegen is `jit_lower_arm` in
-`crates/lisp/src/eval/compile.rs`; the runtime callbacks are in
+`crates/lisp/src/eval/compile/jit_lower.rs`; the runtime callbacks are in
 `crates/lisp/src/jit/mod.rs`; the tiering driver is `jit_tier` + the `vm_run_bc`
-hooks (also `compile.rs`).
+hooks (`compile/mod.rs`).
 
 ## 1. The problem tier-2 solves
 
@@ -156,16 +156,17 @@ calls, error/preempt propagation, and multi-arg.
   holds a handle across a safepoint.
 - `cargo test -p brood --features jit --test differential` — the VM≡tree-walker corpus.
 - Confirm an arm actually *tiers* (not silently bails): temporarily trace the bg compiler's
-  install site in `compile.rs` (the `match lowered { Some => …, None => … }`) behind an env
+  install site in `compile/mod.rs` (the `match lowered { Some => …, None => … }`) behind an env
   var, run a warmed program, check `COMPILED`.
 - Keep the default (no-`jit`) build clean.
 
 ## 8. Key files & symbols
 
-- `crates/lisp/src/eval/compile.rs` — `jit_lower_arm` (codegen: `Op`, `read_words`,
-  `store_words`, `as_int`, `store_op`, `exit_done`, `call_handle`, the per-inst handlers),
-  `jit_tier` (tiering + the hot-reload epoch guard), `chunk_ops_all_native`, the `vm_run_bc`
-  hooks, `tests` (unit) + the `jit_speedup_vs_vm` bench.
+- `crates/lisp/src/eval/compile/` — `jit_lower_arm` (codegen: `Op`, `read_words`,
+  `store_words`, `as_int`, `store_op`, `exit_done`, `call_handle`, the per-inst handlers,
+  all in `jit_lower.rs`), `jit_tier` (tiering + the hot-reload epoch guard),
+  `chunk_ops_all_native`, the `vm_run_bc` hooks (`mod.rs`), `tests` (unit) + the
+  `jit_speedup_vs_vm` bench.
 - `crates/lisp/src/jit/mod.rs` — the `brood_rt_*` callbacks + `Jit::new` registration.
 - `crates/lisp/src/core/value.rs` — `jit_layout` (`PAYLOAD_OFFSET`, `TAG_INT`, `TAG_PAIR`) +
   `value_layout_is_stable_for_the_jit`.

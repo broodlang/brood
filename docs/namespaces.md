@@ -125,9 +125,9 @@ one thing it deliberately can't do is *hard* sealing — which §2 says we don't
 - A symbol that **already contains `/`** is fully-qualified — taken as-is, never
   re-prefixed (so `(def observer/observe …)` from outside works; matches Clojure).
 - A bare symbol resolves in order: **(1)** local lexical binding (unchanged —
-  resolution only touches *free* references; the resolver tracks `let`/`let*`/
+  resolution only touches *free* references; the resolver tracks `let`/
   `letrec`/`fn` binders and over-approximates `match*` pattern binders), **(2)**
-  an imported/`:refer`'d name *(inc-2 — not yet)*, **(3)** ns-qualified
+  an imported/`:refer`'d name, **(3)** ns-qualified
   (`observe` → `observer/observe`) if such a global **already exists** *or* the
   name was **pre-scanned** as a def head this file will create (the forward-ref
   pre-scan — without it a reference to a later definition would silently stay

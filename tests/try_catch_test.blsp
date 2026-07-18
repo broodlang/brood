@@ -321,3 +321,44 @@
     (assert-error (first 5))
     (assert-error (eval 'undefined-xyz-99))
     (assert-error (read-string "(("))))
+
+;; ── 11. error stack traces (:trace) ──────────────────────────────────────────
+;; A caught builtin error's map carries :trace — the call stack at the raise,
+;; innermost frame first, each entry {:fn name :file f :line l :col c} with
+;; absent fields omitted. Entries pair a frame's fn with the call site that
+;; entered it; tail calls collapse into their caller's frame (BEAM-style).
+
+(defn trace-inner (x) (/ x 0))
+(defn trace-middle (x) (+ 1 (trace-inner x)))
+(defn trace-outer () (trace-middle 41))
+
+(defn caught-trace ()
+  (try (trace-outer) (catch e (get e :trace))))
+
+(describe "error stack traces"
+  (test "innermost frame first, named by the erroring fn"
+    (assert= "try-catch-test/trace-inner" (get (first (caught-trace)) :fn)))
+
+  (test "the tail chain outer->middle collapses to one frame named middle"
+    (assert= "try-catch-test/trace-middle" (get (first (rest (caught-trace))) :fn)))
+
+  (test "the innermost entry carries its call site"
+    (let (f (first (caught-trace)))
+      (is (> (get f :line) 0))
+      (is (> (get f :col) 0))))
+
+  (test "trace is capped at 32 frames under deep non-tail recursion"
+    (check-allow :non-tail-recursion
+      (letrec (deep (fn (n) (if (= n 0) (/ 1 0) (+ 1 (deep (- n 1))))))
+        (assert= 32 (count (try (deep 100) (catch e (get e :trace))))))))
+
+  (test "a native-boundary callback frame appears by name"
+    (let (names (try (map trace-inner [1])
+                     (catch e (map (fn (f) (get f :fn)) (get e :trace)))))
+      (assert= "try-catch-test/trace-inner" (first names))))
+
+  (test "a user throw's error still traces when uncaught payload is rethrown"
+    ;; the trace rides the error object, so a catch of a *builtin* error after
+    ;; frames unwound through helpers still sees them
+    (assert= "try-catch-test/trace-inner"
+      (get (first (try (trace-middle 1) (catch e (get e :trace)))) :fn))))

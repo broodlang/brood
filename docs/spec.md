@@ -148,8 +148,8 @@ A local binding may therefore shadow a global function of the same name.
 Scoping is **lexical**. An environment is a frame of bindings with an optional
 parent. Lookup searches the current frame, then its parent, and so on; the
 outermost frame is the **global environment**. A closure captures the
-environment in which it was created. (Dynamically-scoped variables are planned
-but not yet implemented — see §11.)
+environment in which it was created. (Dynamically-scoped variables are also
+implemented — `defdyn`/`binding`, per-process — see §11.)
 
 `def` always binds in the global environment. **It is the only mutation in the
 language** — rebinding a global, which is what enables live redefinition / hot

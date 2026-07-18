@@ -298,7 +298,7 @@ points, locals, "where do I go when this returns") — is encoded in **native Ru
 stack frames**. This is true of both execution engines:
 
 - the **tree-walker** (`eval/mod.rs`) recurses one Rust frame per combination;
-- **today's VM** (`eval/compile.rs`, ADR-076) reified the **operand stack** onto
+- **today's VM** (`eval/compile/mod.rs`, ADR-076) reified the **operand stack** onto
   the heap (so the moving GC can relocate transients at a safepoint) and
   trampolines **tail** calls (`dispatch`'s `'apply: loop`) — but **non-tail calls
   still recurse on the native Rust stack** (`exec_call` → `vm_apply`).
@@ -466,7 +466,7 @@ Removing corosensei means **every** yielder use migrates, not just `receive`:
   > continuation *through* the native frame (so the thunk does **not** re-run), or to
   > run a stateful-native-wrapped suspending body on a coroutine — the step-3 design.
 
-### 8.2 The capture/resume machinery (`compile.rs`, `mailbox.rs`)
+### 8.2 The capture/resume machinery (`eval/compile/mod.rs`, `mailbox.rs`)
 
 - `Suspended { frames: Vec<BcFrame>, cur: BcFrame, /* + receive deadline */ }` — the
   reified continuation. Promote `vm_run_bc`'s local `Frame` to a module `BcFrame`.

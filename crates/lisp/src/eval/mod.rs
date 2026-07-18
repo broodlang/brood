@@ -91,7 +91,71 @@ pub(crate) fn is_special_form(s: Symbol) -> bool {
     SPECIAL_IDS.contains_key(&s)
 }
 
+/// Tree-walker frame bookkeeping for error stack traces. One `eval` invocation
+/// is one logical call frame: the `'tail:` loop below may *enter* a closure body
+/// (an ordinary call in tail position re-enters the loop without a new Rust
+/// frame), and when an error unwinds out of this frame the wrapper appends one
+/// `:trace` entry — the closure the frame ended up in, at the call site that
+/// first entered one. Tail chains overwrite `name` but keep the first call site,
+/// which is exactly the VM's frame-reuse behaviour, so both engines produce the
+/// same trace for the same program.
+struct TwFrame {
+    name: Option<Symbol>,
+    call_pos: Option<crate::error::Pos>,
+    call_file: Option<String>,
+}
+
+/// Record that this eval frame entered closure `id` via `call_form`. First entry
+/// wins the call site (`form_pos` lookup, once per frame); later (tail) entries
+/// only follow the name.
+fn record_tw_entry(
+    heap: &Heap,
+    entered: &mut Option<TwFrame>,
+    id: crate::core::value::ClosureId,
+    call_form: Value,
+) {
+    let name = heap.closure(id).name;
+    match entered {
+        Some(fr) => fr.name = name,
+        None => {
+            let (call_pos, call_file) = match heap.form_pos(call_form) {
+                Some((p, file)) => (Some(p), file.map(|f| f.to_string())),
+                None => (None, None),
+            };
+            *entered = Some(TwFrame {
+                name,
+                call_pos,
+                call_file,
+            });
+        }
+    }
+}
+
 pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
+    let mut entered: Option<TwFrame> = None;
+    let r = eval_tail_loop(heap, expr, env, &mut entered);
+    match (r, entered) {
+        (Err(mut e), Some(fr)) => {
+            // This frame entered a closure and the error is unwinding out of it —
+            // append its `:trace` entry (innermost first; `push_trace` caps the
+            // list and ignores control signals).
+            e.push_trace(crate::error::TraceFrame {
+                name: fr.name.map(value::symbol_name_ref),
+                file: fr.call_file,
+                pos: fr.call_pos,
+            });
+            Err(e)
+        }
+        (r, _) => r,
+    }
+}
+
+fn eval_tail_loop(
+    heap: &mut Heap,
+    expr: Value,
+    env: EnvId,
+    entered: &mut Option<TwFrame>,
+) -> LispResult {
     let mut expr = expr;
     let mut env = env;
     // GC-block guard: increments `GC_BLOCK` for the lifetime of this `eval` frame.
@@ -266,6 +330,12 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
         // relaxed load of a zero, early `None`.
         if let Some(used) = crate::core::alloc::soft_limit_hit() {
             return Err(memory_limit_error(used).or_form_pos(heap, expr));
+        }
+        // Per-process heap limit (`(process-flag :max-heap n)`): the sticky flag a
+        // collection armed raises here, killing (catchably) just this process.
+        if let Some(live) = heap.take_proc_limit_hit() {
+            let limit = heap.proc_mem_limit().unwrap_or(0);
+            return Err(proc_memory_limit_error(live, limit).or_form_pos(heap, expr));
         }
         // Reduction-counted preemption: bound the work a process does before it
         // yields its worker (fairness — a CPU-bound process can't monopolise a
@@ -720,8 +790,21 @@ pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
                     // `bind_params` selects the arm matching this call's arity, binds
                     // it, and hands back that arm's body (snapshotted into an inline
                     // `SmallVec` so the loop below doesn't re-dispatch the slab).
-                    let (scope, body) = bind_params(heap, id, &cur_argv)
-                        .map_err(|e| e.or_form_pos(heap, call_form))?;
+                    // An arity/bind failure appends a name-only trace entry for the
+                    // callee — the same attribution the VM produces (a no-arm call
+                    // defers to `apply_closure`, whose bind error is name-only).
+                    let cl_name = heap.closure(id).name;
+                    let (scope, body) = bind_params(heap, id, &cur_argv).map_err(|e| {
+                        let mut e = e.or_form_pos(heap, call_form);
+                        e.push_trace(crate::error::TraceFrame {
+                            name: cl_name.map(value::symbol_name_ref),
+                            file: None,
+                            pos: None,
+                        });
+                        e
+                    })?;
+                    // Error-trace bookkeeping: this frame is now entering `id`'s body.
+                    record_tw_entry(heap, entered, id, call_form);
                     if body.is_empty() {
                         return Ok(Value::nil());
                     }
@@ -855,26 +938,68 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
 }
 
 pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResult {
-    // `bind_params` selects the arm for `argv`'s arity and returns its body.
-    let (scope, body) = bind_params(heap, cl, argv)?;
+    // Error-trace bookkeeping: this native-boundary entry into `cl` (a `map`/`try`/
+    // macro-expansion callback) is one logical frame, mirrored on the VM by a
+    // `vm_apply` driver whose arm0 is `cl`. The call site is native code, so the
+    // frame's entry carries the name only. Non-last body forms attach it directly
+    // on error (they run *in* this frame — nested calls are their own `eval`
+    // frames); the last body form instead runs on `eval_tail_loop` with the
+    // tracker **seeded** to this frame, so a tail call out of `cl` renames the
+    // entry rather than adding one — the VM's frame-reuse behaviour exactly.
+    let trace_name = heap.closure(cl).name;
+    let boundary_entry = |name: Option<Symbol>| crate::error::TraceFrame {
+        name: name.map(value::symbol_name_ref),
+        file: None,
+        pos: None,
+    };
+    // `bind_params` selects the arm for `argv`'s arity and returns its body. An
+    // arity/bind error names the callee, matching the VM's `push_frame` attribution.
+    let (scope, body) = bind_params(heap, cl, argv).map_err(|mut e| {
+        e.push_trace(boundary_entry(trace_name));
+        e
+    })?;
     if body.is_empty() {
         return Ok(Value::nil());
     }
     // Each body-form eval can collect at ANY depth (ADR-061), so keep `scope` and
     // the remaining body forms on the operand stack across them (the intermediate
-    // `result`s are dead the moment they're overwritten, so they need no slot).
+    // results of non-last forms are dead immediately, so they need no slot).
     // Tag each body form's position on any error so the diagnostic points at the
     // failing line (same as the closure body branch in the main eval loop).
     heap.root_scope(|heap| {
         let scope_r = heap.root_env(scope);
-        let body_r: SmallVec<[Root; 8]> = body.iter().map(|&f| heap.root(f)).collect();
-        let mut result = Value::nil();
-        for &fr in &body_r {
+        let (last, init) = body.split_last().expect("checked non-empty");
+        let last_r = heap.root(*last);
+        let init_r: SmallVec<[Root; 8]> = init.iter().map(|&f| heap.root(f)).collect();
+        for &fr in &init_r {
             let scope_now = heap.read_root_env(scope_r);
             let form = heap.read_root(fr);
-            result = eval_at(heap, form, scope_now)?;
+            eval_at(heap, form, scope_now).map_err(|mut e| {
+                e.push_trace(boundary_entry(trace_name));
+                e
+            })?;
         }
-        Ok(result)
+        // The last form is this frame's tail: run it on the loop with the frame
+        // tracker pre-seeded, so the entry starts as `cl` and follows any tail
+        // chain out of it (first entry wins the — native, so absent — call site).
+        let scope_now = heap.read_root_env(scope_r);
+        let form = heap.read_root(last_r);
+        let mut entered = Some(TwFrame {
+            name: trace_name,
+            call_pos: None,
+            call_file: None,
+        });
+        eval_tail_loop(heap, form, scope_now, &mut entered).map_err(|e| {
+            let mut e = e.or_form_pos(heap, form);
+            if let Some(fr) = entered {
+                e.push_trace(crate::error::TraceFrame {
+                    name: fr.name.map(value::symbol_name_ref),
+                    file: fr.call_file,
+                    pos: fr.call_pos,
+                });
+            }
+            e
+        })
     })
 }
 
@@ -1042,7 +1167,26 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
         )));
     }
     let func = nat.func;
-    func(argv, env, heap)
+    // Dirty-CPU diagnostic (BEAM's NIF-reduction model), armed by
+    // `BROOD_STALL_MS`: in a green process, time the call, charge long natives
+    // against the reduction budget (`scheduler::charge_native`) and name the
+    // builtin that held the worker. Gated behind the stall tracer because
+    // always-on per-call timing measured **8–22% on the message-heavy rows**
+    // (pingpong/ring/json, 2026-07-18 A/B) while buying almost nothing: the
+    // reduction budget already bounds post-native hogging to ~one quantum
+    // (~1 ms of Brood work) — the un-preemptible time *inside* a long native
+    // is only fixed by the M4 dirty-CPU offload pool. When the tracer is off
+    // (the default), this is one TLS bool + one cached-env load.
+    if crate::core::heap::stall_threshold_ms().is_some() && crate::process::in_capture_run() {
+        let t0 = std::time::Instant::now();
+        let r = func(argv, env, heap);
+        if let Some(ms) = crate::process::charge_native(t0) {
+            eprintln!("[stall] native {} took {}ms", heap.native(id).name, ms);
+        }
+        r
+    } else {
+        func(argv, env, heap)
+    }
 }
 
 /// Construct an "unbound symbol: …" error, attaching the scheduler-race hint
@@ -1259,6 +1403,21 @@ pub(crate) fn stack_depth_error(used: usize) -> LispError {
 }
 
 /// "memory limit exceeded …" — the ADR-043 soft-memory backstop.
+/// "process heap limit exceeded …" — this process's live heap stayed over its
+/// own `(process-flag :max-heap n)` cap after a collection. Catchable; uncaught
+/// it kills just this process (the BEAM `max_heap_size` behaviour).
+pub(crate) fn proc_memory_limit_error(live: usize, limit: usize) -> LispError {
+    LispError::runtime(format!(
+        "process heap limit exceeded: {live} live bytes after collection \
+         exceeds this process's {limit}-byte :max-heap limit"
+    ))
+    .with_code(crate::error::error_codes::PROC_MEMORY_LIMIT)
+    .with_hint(
+        "raise or clear the limit with (process-flag :max-heap n), \
+         or hold less live data (stream instead of accumulating)",
+    )
+}
+
 pub(crate) fn memory_limit_error(used: usize) -> LispError {
     LispError::runtime(format!(
         "memory limit exceeded: {used} bytes allocated process-wide \

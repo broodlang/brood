@@ -570,6 +570,16 @@ current element and `acc` is the current accumulator."
   "A list of the items of `coll` for which `(pred x)` is truthy."
   (if (pred item) (cons item acc) acc))
 
+(defn mapv (f coll)
+  "A VECTOR of `(f x)` for each `x` in `coll` — `map` when the caller needs
+indexed access or a vector literal shape (`(into [] (map f coll))`, named)."
+  (into [] (map f coll)))
+
+(defn filterv (pred coll)
+  "A VECTOR of the items of `coll` for which `(pred x)` is truthy — `filter`
+when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
+  (into [] (filter pred coll)))
+
 (defn append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
 
 ;; Prepend every element of `lst` onto `acc` (so `acc` collects all elements in
@@ -1428,7 +1438,8 @@ its printed form."
     form (reloading the file doesn't fire a second worker).
 
   Erlang **let-it-crash** (`spawn/1`): an uncaught throw kills the process and
-  any monitors see `[:down pid [:error msg]]` immediately."
+  any monitors see `[:down pid [:error {:kind :message … :trace}]]` immediately
+  (the reason carries the structured error map, call trace included)."
   ;; Param name is `more` (not `rest`) so the body can still call the
   ;; prelude's `rest` function without param-shadowing itself.
   (if (empty? more)
@@ -1556,7 +1567,7 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
 
 ;; The host part of a "host:port" address (everything before the last colon),
 ;; IPv6-safe. So a TCP node's name host == the host peers dial, keeping
-;; `connect`/`ensure-link` name-derivation consistent with the node's identity.
+;; `connect`/`net/reconnect` name-derivation consistent with the node's identity.
 (defn node--addr-host (addr)
   (let (lc (node--last-colon addr 0 (string-length addr) -1))
     (if (>= lc 0) (substring addr 0 lc) addr)))
@@ -1628,25 +1639,7 @@ runtime isn't a node yet."
                        (str "unix:" (node--socket-path (node--name-part (name (node-name)))))
                        (str "tcp:" addr))))
 
-;; ---- node-link reconnect: policy in Brood over connect + monitor-node ------
-;; Today's `(connect addr)` is one-shot; if the peer is down it raises, if it
-;; later disconnects nothing notices. `ensure-link` is a thin reconnect loop —
-;; a small green process that watches a node via `monitor-node` (persistent,
-;; fires on each down) and re-`connect`s with backoff. No Rust support needed:
-;; `connect` + `monitor-node` + `receive (after …)` are enough.
-
-;; Split "alpha@127.0.0.1:9000" → :alpha@127.0.0.1 (the node's `name@host`
-;; identity, ADR-073). Used internally so the loop can match `[:nodedown peer]`
-;; against the address it's maintaining — the node name is everything before the
-;; port colon.
-(defn ensure-link--peer-name (addr)
-  (let (n (string-length addr)
-        at (node--at addr 0 n)
-        lc (node--last-colon addr 0 n -1))
-    (when (or (< at 0) (<= lc at))
-      (error "ensure-link: address must be \"name@host:port\", got " addr))
-    (keyword (substring addr 0 lc))))
-
+;; ---- sleep: park on the scheduler timer (policy in Brood) ---------------
 ;; Sleep `ms` milliseconds in the current process. A bare `(receive (after ms …))`
 ;; would *consume* the next queued message — an empty clause list matches anything,
 ;; so `%receive` grabs whatever is in the mailbox and returns immediately instead of
@@ -1659,36 +1652,10 @@ runtime isn't a node yet."
   "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread."
   (let (never (ref)) (receive (~never nil) (after ms nil))))
 
-;; Retry `(connect addr)` on a 200ms backoff until it succeeds — used both on
-;; first :nodedown and inside the supervisor loop. `monitor-node` is
-;; *transition-triggered* (fires when the link goes from up→down, not
-;; continuously while down), so one missed connect would otherwise wedge the
-;; supervisor; we drive the retry off connect's own success/failure here.
-(defn ensure-link--reconnect (addr)
-  (if (try (do (connect addr) true) (catch e false))
-    nil
-    (do (sleep 200) (ensure-link--reconnect addr))))
-
-;; The supervisor receive loop: on each `[:nodedown peer]`, sleep a beat,
-;; reconnect (retrying until success), then go back to listening. Exits
-;; cleanly on `:stop`.
-(defn ensure-link--loop (addr peer)
-  (receive ([:nodedown p] (when (= p peer)
-                            (sleep 200)
-                            (ensure-link--reconnect addr)
-                            (ensure-link--loop addr peer)))
-    (:stop nil)
-    (_ (ensure-link--loop addr peer))))
-
-(defn ensure-link (addr)
-  "Maintain a persistent link to a peer node addressed as `\"name@host:port\"`. Synchronously attempts the initial `(connect addr)` (errors are swallowed — caller still gets a supervisor); spawns a small supervisor process that `monitor-node`s the peer and re-`connect`s with backoff on every `[:nodedown …]`. Returns the supervisor pid; send it `:stop` to disable. Pure Brood policy over `connect` + `monitor-node` + `receive (after …)`: no extra runtime support."
-  (let (peer (ensure-link--peer-name addr))
-    ;; Initial connect synchronously so the caller's next `send` doesn't race
-    ;; the link-up. If it fails, the supervisor will retry on each subsequent
-    ;; `:nodedown` — which `monitor-node` fires immediately when the peer
-    ;; isn't connected, so we'll be back here soon.
-    (try (connect addr) (catch _ nil))
-    (spawn (do (monitor-node peer) (ensure-link--loop addr peer)))))
+;; Node-link auto-reconnect moved to `std/net/reconnect` (2026-07-18):
+;; `(require 'net/reconnect)` then `(net/reconnect/watch "name@host:port")` —
+;; exponential backoff, [:nodeup]/[:nodedown] subscriber events, idempotent
+;; named watchers. It supersedes the old prelude `ensure-link`.
 
 ;; ---- receive: selective, pattern-matched message receipt --------------------
 ;; (receive clause...) where each clause is (pattern [:when guard] body...), with an

@@ -90,7 +90,7 @@ What the walk flags, beyond types/arity/unbound: **non-tail self-recursion**.
 Brood loops must be tail-recursive — deep *non*-tail recursion overflows the
 green-process stack (a silent footgun that only bites at depth). The checker
 walks each function's body mirroring the evaluator's tail-position rules
-(`if`/`when`/`unless`/`cond`/`do`/`let`/`let*`/`letrec`/`and`/`or`) and warns
+(`if`/`when`/`unless`/`cond`/`do`/`let`/`letrec`/`and`/`or`) and warns
 when a function calls *itself* outside tail position (e.g. `(* n (fact (- n 1)))`
 — `fact` is an argument, so non-tail). Conservative: it stops at nested closures
 (a different frame) and only warns when certain, preferring a miss to a false

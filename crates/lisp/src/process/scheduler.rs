@@ -411,6 +411,32 @@ pub fn tick() {
     });
 }
 
+/// Dirty-CPU accounting for native builtins (BEAM's NIF-reduction model; ROADMAP
+/// "Robustness gaps" survey). A long-running native can't be preempted mid-call
+/// and holds its worker; what we CAN do is charge the time it held the worker
+/// against the process's reduction budget afterwards, so the **next** safepoint
+/// preempts promptly instead of the process keeping its quantum as if the call
+/// were one reduction. ~2 reductions per µs (a 2000-reduction quantum ≈ ~1 ms of
+/// Brood work), saturating — ≥ ~1 ms of native work drains the budget outright.
+/// Called only from a green process (`in_capture_run`, the caller's gate): a
+/// root-thread native starves no peers. Returns `Some(elapsed_ms)` when the
+/// `BROOD_STALL_MS` tracer is armed and tripped, so the caller — which knows the
+/// builtin's *name* — can log it (the missing half of the stall tracer: "which
+/// native stalled the worker").
+pub(crate) fn charge_native(t0: std::time::Instant) -> Option<u128> {
+    let elapsed = t0.elapsed();
+    let us = elapsed.as_micros().min(u32::MAX as u128) as u32;
+    // Below ~50 µs the call is quantum-noise — skip the TLS write.
+    if us >= 50 {
+        let charge = us.saturating_mul(2);
+        REDUCTIONS.with(|r| r.set(r.get().saturating_sub(charge)));
+    }
+    match crate::core::heap::stall_threshold_ms() {
+        Some(ms) if elapsed.as_millis() >= ms => Some(elapsed.as_millis()),
+        _ => None,
+    }
+}
+
 /// Set (or clear with `None`) this thread's eval deadline. Paired set/clear by the
 /// `nest mcp` dispatcher around a guarded `eval`/`load`. Thread-local: only the
 /// thread running the guarded eval is affected.
@@ -625,8 +651,7 @@ pub(crate) fn capture_hard_kill_pending() -> bool {
     CURRENT.with(|c| {
         c.borrow()
             .as_ref()
-            .and_then(|ctx| ctx.mailbox.pending_kill())
-            .is_some_and(|r| is_kill_reason(&r))
+            .is_some_and(|ctx| ctx.mailbox.pending_hard_kill())
     })
 }
 
@@ -972,11 +997,24 @@ pub(super) fn is_kill_reason(reason: &Message) -> bool {
 /// `[:down mref pid reason]`. A no-op for an unknown / already-dead pid, so it's
 /// idempotent (double-exit, exit-of-dead are safe).
 pub fn exit(pid: u64, reason: Message) {
+    let hard = is_kill_reason(&reason);
+    exit_with(pid, reason, hard);
+}
+
+/// Link propagation's kill: **hard** (the peer dies at its next reduction tick,
+/// like `:kill`) but carrying the **originating reason** — so the peer's own
+/// monitors and cascading links report *why* the tree fell (the BEAM behaviour),
+/// not a blanket `:kill`. Hardness and reason are independent (`request_kill`).
+pub(super) fn exit_propagate(pid: u64, reason: Message) {
+    exit_with(pid, reason, true);
+}
+
+fn exit_with(pid: u64, reason: Message, hard: bool) {
     let mailbox = match crate::core::sync::lock(&REGISTRY).get(&pid).cloned() {
         Some(mb) => mb,
         None => return, // already dead / never existed
     };
-    mailbox.request_kill(reason);
+    mailbox.request_kill(reason, hard);
     // If the target is waiting in `receive` it isn't running, so it'll never reach a
     // `tick` (preempt) or re-enter `receive` on its own — we must rouse it. Two waiting
     // shapes, woken the same way `deliver` wakes them for a message:
@@ -1422,12 +1460,16 @@ fn handle_capture_outcome(
         }
         Ok(Err(e)) => {
             // An uncaught throw/error killed the process (Erlang let-it-crash).
+            // The death reason carries the STRUCTURED error — `[:error {:kind
+            // :message … :trace}]`, see `message::error_reason` — so a monitor /
+            // trapping link / supervisor gets BEAM's `{Reason, Stacktrace}`
+            // rather than a flattened string.
             eprintln!("process {} died: {}", proc_descr(proc.pid), e.located());
-            let reason = Message::Vector(vec![
-                Message::Keyword(value::intern(pk::ERROR)),
-                Message::Str(e.to_string()),
-            ]);
-            deregister(proc.pid, reason, &proc.heap);
+            deregister(
+                proc.pid,
+                crate::process::message::error_reason(&e),
+                &proc.heap,
+            );
         }
         Err(_) => {
             eprintln!("process {} panicked", proc_descr(proc.pid));
@@ -1896,4 +1938,40 @@ pub fn capture_append(s: &str) -> bool {
             None => false,
         },
     )
+}
+
+#[cfg(test)]
+mod charge_tests {
+    use super::*;
+
+    /// Dirty-CPU accounting: a long native call drains the reduction budget
+    /// (proportionally, saturating), so the next tick preempts promptly; a
+    /// sub-threshold call leaves the budget untouched.
+    #[test]
+    fn charge_native_drains_reductions_proportionally() {
+        // ~1 ms of native work at 2 red/µs ≥ the whole 2000-reduction budget.
+        REDUCTIONS.with(|r| r.set(reduction_budget()));
+        let long_ago = std::time::Instant::now() - std::time::Duration::from_millis(2);
+        charge_native(long_ago);
+        assert_eq!(
+            REDUCTIONS.with(|r| r.get()),
+            0,
+            "a ≥1ms native must drain the whole budget"
+        );
+
+        // ~100 µs charges ~200 reductions — proportional, not all-or-nothing.
+        REDUCTIONS.with(|r| r.set(2000));
+        let recent = std::time::Instant::now() - std::time::Duration::from_micros(100);
+        charge_native(recent);
+        let left = REDUCTIONS.with(|r| r.get());
+        assert!(
+            (1400..=1900).contains(&left),
+            "a ~100µs native charges ~200 reductions, got {left} left"
+        );
+
+        // Below the 50 µs floor: budget untouched.
+        REDUCTIONS.with(|r| r.set(2000));
+        charge_native(std::time::Instant::now());
+        assert_eq!(REDUCTIONS.with(|r| r.get()), 2000);
+    }
 }

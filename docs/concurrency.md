@@ -1,7 +1,13 @@
 # Concurrency — green processes on all cores
 
-> Status: **implemented** (phases 1–4 below). Green M:N on a worker pool,
-> preemptively fair, with selective `receive` + timeouts and process monitors.
+> Status: **implemented — all phases.** Green M:N on a worker pool, preemptively
+> fair, with selective `receive` + timeouts, monitors **and** links/`trap-exit`
+> (ADR-067), userland supervision (`std/proc/supervisor.blsp`), registered
+> names, general work-stealing + live migration (ADR-100, state capture — the
+> original coroutine substrate is gone), and full distribution (closure
+> shipping, distributed links/monitors, node-down detection). This doc is the
+> original design rationale; the current engine is described in
+> [`concurrency-v2.md`](concurrency-v2.md) §8 and [`scheduler.md`](scheduler.md).
 
 ## Goal
 
@@ -97,15 +103,13 @@ per-worker budget and the process yields at zero, so a CPU-bound process can't
 monopolise a core even on a small pool. This is the BEAM's fairness mechanism,
 done as the additive step the original design anticipated.
 
-## Out of scope for v1 (the "fancy" we're skipping)
+## Out of scope for v1 — all since shipped
 
-- Supervision trees, `link`, restart strategies, registered names
-  (`monitor`/`demonitor` are now in — see Phasing)
-- Distribution across machines/nodes
-- Live migration of *running* processes (we start pinned)
-- Work-stealing across workers (one shared run queue for now)
-
-These are all additive later.
+Everything v1 deliberately skipped has since landed, additively as predicted:
+supervision trees + `link` + restart strategies + registered names
+(`std/proc/supervisor.blsp`, ADR-044/063/067), distribution across nodes
+(ADR-033/034/088/089), live migration of running processes, and general
+work-stealing (both via the state-capture scheduler, ADR-100).
 
 ## Impact on the roadmap
 
@@ -125,11 +129,12 @@ This is the largest *core* undertaking in the project. Two consequences:
    `Message` (deep copy) rebuilt in the receiver's heap; a global registry maps
    pid → mailbox. The mailbox is registered in the parent before the thread
    starts (so a `send` right after `spawn` can't race).
-2. ✅ **Green M:N** — processes are now stackful coroutines (`corosensei`) on a
-   pool of ≈`nproc` worker threads (a setting; `-j` overrides), suspending at
-   `receive` rather than blocking. Cheap spawn, bounded OS threads, no `Gate`
-   deadlock. `Send` per-process heaps let a process migrate between workers. See
-   `docs/scheduler.md` / ADR-018.
+2. ✅ **Green M:N** — processes run on a pool of ≈`nproc` worker threads (a
+   setting; `-j` overrides), suspending at `receive` rather than blocking. Cheap
+   spawn, bounded OS threads, no `Gate` deadlock. `Send` per-process heaps let a
+   process migrate between workers. (Landed on `corosensei` stackful coroutines,
+   ADR-018; the substrate was replaced 2026-06-08 by state capture — a paused
+   process is plain heap data — ADR-100.) See `docs/scheduler.md`.
 3. ✅ **Reduction-counted preemption** (ADR-027) — `eval`'s loop decrements a
    per-worker budget (≈2000) and the process yields its worker at zero (`Suspend`
    carries `Receive` vs `Preempt`), so a CPU-bound process can't monopolise a
@@ -139,13 +144,16 @@ This is the largest *core* undertaking in the project. Two consequences:
    runs the first match, and leaves non-matching messages queued. A green process
    waiting on a timeout is woken by a dedicated timer thread. Timeouts are
    catchable (`throw` from the `after` body → `try`/`catch`).
-5. ⬜ **Work-stealing** — per-worker run queues + steal-on-idle (today: one shared
-   run queue). An optimisation, not a correctness need.
+5. ✅ **Work-stealing** — per-worker run queues + steal-on-idle; general since
+   the state-capture cutover (any queued process, ADR-100; `(steal-count)`
+   observes it).
 6. ✅ **Process monitors** — `monitor`/`demonitor`/`ref`: a unidirectional watch
    that delivers `[:down mref pid reason]` to the monitoring process when `pid`
    dies (`:noproc` if already dead), in `process.rs`. The one supervision
    mechanism that needs a primitive; the rest is Brood (the `hatch` library).
-7. ⬜ Later: links, supervision trees, registered names; work-stealing.
+7. ✅ Links + `trap-exit` (ADR-067), userland supervision trees
+   (`std/proc/supervisor.blsp` — `:one-for-one`/`:one-for-all`/`:rest-for-one`),
+   and registered names (`register`/`whereis`/`(spawn :name …)`) all shipped.
 
 ## Distribution across nodes (slice 1 implemented)
 
@@ -165,10 +173,13 @@ TCP and message each other (ADR-034; full reference in
 - ✅ **A wire codec for `Message`** — reuses the heap-crossing deep-copy.
   **Symbols travel by name** (not by local interned id — each node has its own
   interner) and re-intern on arrival.
-- ⬜ **Code distribution** — remote `spawn` needs the function on the far node.
-  The closure-as-data path (ADR-033) is the missing piece; the wire codec rejects
-  a `Closure` for now.
-- ⬜ **Later** — distributed links/monitors and node-down detection.
+- ✅ **Code distribution** — closures travel as data (ADR-033): the wire codec
+  ships a closure's code + captured locals (`M_CLOSURE`, `dist/wire.rs`), so
+  `remote-spawn` works.
+- ✅ **Distributed links/monitors and node-down detection** — cross-node
+  `monitor`/`link` fire `[:down … :noconnection]`/`[:EXIT pid :noconnection]`
+  on link teardown; `monitor-node` delivers `[:nodedown name]`
+  (see [`distribution.md`](distribution.md)).
 
 Caveats Erlang learned the hard way, still to address: security (the cookie is a
 placeholder — auth/TLS later), partial failure / net-splits, serialization
@@ -176,26 +187,23 @@ versioning, latency. This fits the project's "backend hosted remotely by a
 frontend" premise — a remote frontend or second backend is just another node that
 links and message-passes.
 
-### Current limitations (to lift later)
+### Current limitations
 
-Steps 4a→4b and ADR-027 lifted the early limits — processes are now cheap green
-coroutines (not OS threads), they share the runtime's live code (ADR-013, no
-per-spawn prelude reload), scheduling is preemptively fair, and `receive` is
-selective with timeouts. What's still open:
+The early limits are lifted — processes are cheap captured continuations (not
+OS threads), they share the runtime's live code (ADR-013, no per-spawn prelude
+reload), scheduling is preemptively fair with general work-stealing, `receive`
+is selective with timeouts, closures `send` across processes and nodes
+(ADR-033), and links + userland supervision ship (`std/proc/supervisor.blsp`;
+the kernel-level supervisor, ADR-039, was tried and **reverted** — see
+[`supervision.md`](supervision.md)). What's genuinely still open:
 
-- **Messages are data only** — you can't `send` a function (closures are
-  per-heap). Send a *symbol* naming a top-level function instead; code is shared,
-  so the receiver resolves it.
-- **One shared run queue** — no work-stealing yet (phase 5). Fine until run-queue
-  contention shows up in a profile.
-- **No `link` and no supervision trees** (phase 6). `monitor` and registered
-  names *are* in (see ✅ above; `(register name pid)` / `(spawn :name expr)` /
-  `(whereis name)`). The kernel-level supervisor with mid-iteration retry
-  (ADR-039) shipped briefly and was **reverted** — see
-  [`supervision.md`](supervision.md). A process death prints to stderr and
-  fires `[:down …]` to monitors; recover-on-throw is userland (`spawn` +
-  `monitor` in ~10 lines).
+- **A long-running native builtin can't be preempted mid-call** — reductions
+  tick only at evaluator/VM safepoints, so a huge regex/map-build holds its
+  worker for the call's duration (the dirty carve-out; the M4 blocking-offload
+  pool is the planned home for genuinely-blocking natives).
+- **No mailbox bounds/backpressure and no per-process heap cap** — a runaway
+  producer or process is only caught by the global ADR-043 memory cap.
 - **Selective-receive scan cost** — testing a candidate rebuilds it into the
-  LOCAL heap; non-matching messages leave short-lived garbage (reclaimed at the
-  next top-level arena reset, ADR-016). Negligible when the first message matches;
-  optimisable later if a hot skip-heavy receive loop needs it.
+  LOCAL heap; non-matching messages leave short-lived garbage (reclaimed by the
+  per-process GC). Negligible when the first message matches; optimisable later
+  if a hot skip-heavy receive loop needs it.

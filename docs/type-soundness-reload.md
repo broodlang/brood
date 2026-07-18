@@ -32,7 +32,7 @@ runtime `Tag`, and every operation — arithmetic, calls, field access, even the
 JIT's unboxed fast paths — does a real runtime tag check before proceeding.
 `crates/lisp/src/lib.rs` labels the `types` module "the advisory type lattice +
 checker (nothing gates on it)" for a reason: `types/check.rs` and
-`eval/compile.rs` are fully separate pipelines that both just consume the same
+`eval/compile/mod.rs` are fully separate pipelines that both just consume the same
 AST. There is no code path where a statically-proved type causes a runtime
 check to be skipped.
 

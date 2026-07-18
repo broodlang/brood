@@ -415,3 +415,19 @@
     (let (v (lmap (fn (x) (view-scale x)) (range 4)))   ; view built, NOT realised
       (def view-scale (fn (x) (* x 10)))
       (assert= (seq v) (list 0 10 20 30)))))  ; fold realises
+
+(describe "mapv / filterv"
+  (test "mapv returns a VECTOR of mapped items"
+    (assert= [2 4 6] (mapv (fn (x) (* x 2)) (list 1 2 3)))
+    (is (vector? (mapv inc (list 1 2 3))))
+    (assert= [] (mapv inc nil)))
+
+  (test "filterv returns a VECTOR of kept items"
+    (assert= [2 4] (filterv even? (list 1 2 3 4)))
+    (is (vector? (filterv even? (list 1 2))))
+    (assert= [] (filterv even? (list 1 3))))
+
+  (test "both accept any seqable source"
+    (assert= [1 2 3] (mapv inc (range 3)))
+    (assert= [0 2 4] (filterv even? (range 6)))
+    (assert= [10 20] (mapv (fn (x) (* x 10)) [1 2]))))

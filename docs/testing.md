@@ -218,8 +218,9 @@ attributed to its test), then a summary:
 ```
 
 The last line reflects the **green M:N** process model (step 4b in
-[`concurrency.md`](concurrency.md)): processes are cheap coroutines multiplexed
-onto a fixed pool of ≈`nproc` worker threads — *not* one OS thread each.
+[`concurrency.md`](concurrency.md)): processes are cheap captured continuations
+(plain heap data) multiplexed onto a fixed pool of ≈`nproc` worker threads —
+*not* one OS thread each.
 "processes" is the total spawned over the run; "running at once" is the
 high-water mark, bounded by the pool. `run-tests` raises if anything failed, so
 the process exits non-zero — which is how `cargo test` notices.

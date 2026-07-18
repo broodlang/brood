@@ -12,7 +12,7 @@ use crate::core::value::Value;
 /// Return the shortest useful path for display: relative when the file lives
 /// under the cwd, absolute otherwise. Best-effort — falls back to `path` as-is
 /// if the cwd or canonicalization is unavailable.
-fn display_path(path: &str) -> String {
+pub(crate) fn display_path(path: &str) -> String {
     let p = Path::new(path);
     if p.is_absolute() {
         if let Ok(cwd) = std::env::current_dir() {
@@ -140,10 +140,35 @@ pub enum Control {
     Kill,
 }
 
+/// One call-stack entry on an error's `:trace` (innermost first). `name` is the
+/// function the frame was executing (`None` for an anonymous `fn` or the
+/// top-level form); `file`/`pos` locate the **call site** — where that function
+/// was called *from* — which is buildable from purely local frame state in both
+/// engines and collapses tail calls identically (a tail callee reuses its
+/// caller's frame, so the entry shows the tail chain's final name at the
+/// original call site — the BEAM behaviour).
+#[derive(Debug, Clone)]
+pub struct TraceFrame {
+    pub name: Option<&'static str>,
+    pub file: Option<String>,
+    pub pos: Option<Pos>,
+}
+
+/// Cap on `:trace` length — deep recursion keeps the *innermost* frames (the
+/// interesting end: the recursion cycle), appended first as the error unwinds.
+pub const MAX_TRACE_FRAMES: usize = 32;
+
 #[derive(Debug, Clone)]
 pub struct LispErrorData {
     pub kind: ErrorKind,
     pub message: String,
+    /// Call trace captured as the raise unwinds the live frame stacks — VM
+    /// `BcFrame`s and/or tree-walker eval frames — innermost first, capped at
+    /// [`MAX_TRACE_FRAMES`]. Empty until the first frame boundary the error
+    /// crosses; zero cost on the non-throwing path (an empty `Vec` never
+    /// allocates). A caught built-in error surfaces it as `:trace` (see
+    /// [`LispError::to_value_map`]); `report_error` prints it for uncaught ones.
+    pub trace: Vec<TraceFrame>,
     /// `Some` iff this is a [`Control`] signal riding the error channel (a suspend),
     /// not a real error. `None` for every actual error. See [`Control`].
     pub control: Option<Control>,
@@ -237,6 +262,12 @@ pub mod error_codes {
     /// at the eval safepoint so a runaway/hostile program fails cleanly instead
     /// of exhausting host RAM. Catchable; tune via `BROOD_MEM_LIMIT`.
     pub const MEMORY_LIMIT: &str = "E0043";
+    /// This process's live heap stayed over its own `(process-flag :max-heap n)`
+    /// limit after a collection — the BEAM `max_heap_size` analogue. Raised at
+    /// the next safepoint **in that process only** (a catchable kill: uncaught,
+    /// it retires just the offender; every other process is untouched — unlike
+    /// the ADR-043 *hard* cap, which aborts the whole OS process).
+    pub const PROC_MEMORY_LIMIT: &str = "E0045";
     /// File IO failed: `load` / `slurp` / `spit` / `make-dir` / `list-dir` /
     /// `cwd` / `check-file` couldn't read or write a path.
     pub const FILE_IO: &str = "E0050";
@@ -256,6 +287,7 @@ impl LispError {
         LispError(Box::new(LispErrorData {
             kind,
             message: message.into(),
+            trace: Vec::new(),
             control: None,
             payload: None,
             pos: None,
@@ -271,6 +303,7 @@ impl LispError {
         LispError(Box::new(LispErrorData {
             kind: ErrorKind::Runtime,
             message: String::new(),
+            trace: Vec::new(),
             control: Some(c),
             payload: None,
             pos: None,
@@ -314,6 +347,27 @@ impl LispError {
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
+    }
+
+    /// Append a call-stack entry (innermost first, as the raise unwinds).
+    /// Silently drops entries past [`MAX_TRACE_FRAMES`] — deep recursion keeps
+    /// the innermost frames, which is the end that shows the cycle. No-op for
+    /// [`Control`] signals (a suspend/kill is not an error), and for a fully
+    /// empty entry (no name, file, or position — e.g. the top-level program
+    /// thunk, or an anonymous callback at a native boundary): it carries no
+    /// information, and the engines don't agree on which synthetic frames exist.
+    pub fn push_trace(&mut self, frame: TraceFrame) {
+        if frame.name.is_none() && frame.file.is_none() && frame.pos.is_none() {
+            return;
+        }
+        if self.control.is_none() && self.trace.len() < MAX_TRACE_FRAMES {
+            self.trace.push(frame);
+        }
+    }
+
+    /// Is the trace at its cap? Frame walkers use this to stop early.
+    pub fn trace_full(&self) -> bool {
+        self.trace.len() >= MAX_TRACE_FRAMES
     }
 
     /// Attach a source position (builder style).
@@ -415,6 +469,7 @@ impl LispError {
         LispError(Box::new(LispErrorData {
             kind: ErrorKind::User,
             message: crate::syntax::printer::display(heap, value),
+            trace: Vec::new(),
             control: None,
             payload: Some(value),
             pos: None,
@@ -452,6 +507,35 @@ impl LispError {
         if let Some(hint) = &self.hint {
             let hint_str = heap.alloc_string(hint);
             entries.push((Value::keyword(intern("hint")), hint_str));
+        }
+        if !self.trace.is_empty() {
+            // Each entry is a small map `{[:fn <string>] [:file <string>]
+            // [:line <int> :col <int>]}` — same omitted-when-absent convention as
+            // the outer error map, innermost frame first. Like the fields above,
+            // the intermediate values need no rooting: allocation never collects
+            // (the GC fires only at eval safepoints, which this never crosses).
+            let items: Vec<Value> = self
+                .trace
+                .iter()
+                .map(|f| {
+                    let mut fields: Vec<(Value, Value)> = Vec::with_capacity(4);
+                    if let Some(name) = f.name {
+                        let name_str = heap.alloc_string(name);
+                        fields.push((Value::keyword(intern("fn")), name_str));
+                    }
+                    if let Some(file) = &f.file {
+                        let file_str = heap.alloc_string(file);
+                        fields.push((Value::keyword(intern("file")), file_str));
+                    }
+                    if let Some(pos) = f.pos {
+                        fields.push((Value::keyword(intern("line")), Value::int(pos.line as i64)));
+                        fields.push((Value::keyword(intern("col")), Value::int(pos.col as i64)));
+                    }
+                    heap.map_from_pairs(fields)
+                })
+                .collect();
+            let trace_list = heap.list(items);
+            entries.push((Value::keyword(intern("trace")), trace_list));
         }
         heap.map_from_pairs(entries)
     }

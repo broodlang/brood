@@ -8,8 +8,8 @@
 
 See also: ADR-101 (architecture + calling convention), `value-repr.md` (the kept-enum
 decision + the slot-size-is-neutral measurement this plan leans on), `vm-perf-and-jit-runway.md`
-§6, `src/jit/mod.rs` (the Stage-0 callbacks), `src/eval/compile.rs` (the bytecode the
-JIT lowers from).
+§6, `src/jit/mod.rs` (the Stage-0 callbacks), `src/eval/compile/` (the bytecode the
+JIT lowers from; the lowering itself is `compile/jit_lower.rs`).
 
 ## 1. Goal & success criterion
 

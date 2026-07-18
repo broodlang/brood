@@ -19,9 +19,11 @@ must respect so we never drift off this path. Decision recorded in
 Brood's types follow the **Elixir model — set-theoretic and gradual** — not
 TypeScript's pragmatic-but-unsound one. A type *is a set of values*; subtyping is
 set inclusion; what can't be pinned down statically is `dynamic()` and mixes
-soundly with the rest. Checking is **advisory**: it warns and optimises, it never
-rejects a runnable program (the one exception — provably-sound special-form
-*structure* errors — can't be wrong because special forms aren't redefinable).
+soundly with the rest. Checking is **advisory for the live image**: it warns and
+optimises, and it never gates the running image (a `def`/reload always wins —
+contract #5 below). The one hard reject is **batch/CI only**: `nest check` exits
+nonzero on any warning. (Provably-sound special-form *structure* errors can't be
+wrong because special forms aren't redefinable.)
 The language stays fully dynamic; types never inhibit it. Mechanism lives in Rust
 (`Ty`, the `Tag` atoms, primitive signatures); policy (`assert-type`, contracts)
 lives in Brood (ADR-006).
@@ -189,7 +191,7 @@ never a false positive.
   1))` participates without a hand-written sig).
 - ✅ **Guard narrowing + let-binding tracking** (the second behavioural payoff):
   the checker now threads a `Ctx { sym → Ty }` of locally-known types through
-  the walk. A `let`/`let*` binding seeds the variable with the RHS's
+  the walk. A `let` binding seeds the variable with the RHS's
   `expr_ty`; an `if`'s test narrows in both branches via [`Ty::tested_by`]
   (`(if (int? x) … …)` ⇒ in the *then* branch `x` is `int`, in the *else* it's
   `not int`); `(not <inner>)` flips. Inner shadowing overrides — a fresh
@@ -492,11 +494,13 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   `(or :ok 5)`). `type-matches?` enforces every kind at the runtime-contract
   boundary; a declared literal-set return/param type flows to callers
   correctly. Call-site argument literal precision (matching a literal
-  int/bool/string *argument* the way a literal keyword argument already is,
-  via `Ty::of_value`) stays deferred for int/bool/string — tried for int,
-  reverted (cascades into unrelated warning-message wording project-wide).
-  See [`docs/type-int-literals.md`](type-int-literals.md) and
-  [`docs/type-bool-string-literals.md`](type-bool-string-literals.md).
+  int/bool/string *argument* the way a literal keyword argument already is)
+  **shipped as Gap B0** (2026-07-10): `Ty::of_value` returns
+  `int_lit`/`bool_lit` singletons (an early int attempt was reverted for
+  warning-wording cascades; B0 landed it cleanly), and string literals get
+  `str_lit` via `expr_ty`. See [`docs/type-int-literals.md`](type-int-literals.md),
+  [`docs/type-bool-string-literals.md`](type-bool-string-literals.md), and
+  [`docs/type-gating.md`](type-gating.md).
 - ✅ **Match exhaustiveness over literal-enum types** (ADR-118, generalized in
   ADR-121) — a `match` whose scrutinee's declared type is a *pure* enumerable
   literal type (any combination of keyword/int/bool/string literals plus
@@ -640,6 +644,8 @@ marked **(enforced)** are compile errors if violated; the rest are review rules.
   - `check/protocol.rs` — protocol / behaviour conformance.
   - `check/recursion.rs` — the non-tail self-recursion lint.
   - `check/hygiene.rs` — the macro-hygiene capture lint.
+  - `check/deps.rs` — dependency capture for the incremental check cache
+    (ADR-119 Phase 2).
 - `crates/lisp/src/core/value.rs` — `Tag` (the atoms), `value::tag`, `NativeFn`
   (carries the `Sig` the checker reads — contract point #6).
 - `crates/lisp/src/eval/mod.rs` — `call_native` (the arity gate).

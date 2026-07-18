@@ -2289,6 +2289,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "process-flag",
+        Arity::range(1, 2),
+        Sig::new(vec![any, any], any),
+        process_flag,
+    );
+    def(
+        heap,
         "spawn-count",
         Arity::exact(0),
         Sig::nullary(int),
@@ -2702,6 +2709,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("link", &["pid"], "Symmetrically link the current process and pid, local or remote (Erlang link/1). When either dies, the other gets a [:EXIT pid reason] message if it set (trap-exit true), else dies too on an abnormal reason (propagation cascades through links; :normal does not propagate). A remote link fires :noconnection on net-split; linking an already-dead/unreachable pid notifies the caller (:noproc / :noconnection). Returns nil."),
     ("unlink", &["pid"], "Drop the symmetric link between the current process and pid (local or remote; best-effort). Returns nil."),
     ("trap-exit", &["on"], "Set the current process's trap_exit flag (Erlang process_flag(trap_exit, …)); returns the previous value. When on, a linked peer's death arrives as a trappable [:EXIT pid reason] message instead of killing this process."),
+    ("process-flag", &["flag", "&optional", "value"], "Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). Checked after each GC against the live footprint; exceeding it raises a catchable E0045 error in this process only — uncaught, it kills just the offender (the global BROOD_MEM_LIMIT hard cap aborts the whole runtime). Set it first thing in a spawned fn to cap that process: (spawn (fn () (process-flag :max-heap 8000000) (work))). :send-errors — when truthy, a (send …) whose target NODE is unknown/disconnected raises a catchable E0060 noconnection error instead of silently dropping the message (Erlang's default; process liveness stays silent either way) — so a sender can queue-and-retry across a net-split; pairs with the net/reconnect reconnector."),
     ("spawn-count", &[], "How many green processes have been spawned since program start."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),

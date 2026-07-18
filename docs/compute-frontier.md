@@ -126,7 +126,7 @@
 > 1. ~~**car/cdr inline in JIT** (§3e)~~ **SHIPPED 2026-06-20** — nqueens 163→**137 ms** (−16%).
 >    3-file change: `heap.rs` exposes `local_pair_nursery_base`/`local_pair_old_base`; `jit/mod.rs`
 >    exports them via `builder.symbol()` (critical: without this the JIT linker can't resolve the
->    symbols even though they're `#[no_mangle]`); `compile.rs` hoists both pointers at arm entry
+>    symbols even though they're `#[no_mangle]`); `compile/jit_lower.rs` hoists both pointers at arm entry
 >    (`pair_bases: Option<(nursery, old)>`) when the arm has First/Rest AND no Cons, then emits
 >    `ushr(w1,62)==0` region guard → `ushr(w1,61)!=0` age select → `base+idx*48+{0,24}` loads.
 >    bintree flat (uses vectors not pairs). sort: ~215ms now (pair reads were not the bottleneck).
@@ -163,7 +163,7 @@
 > records that the remaining gaps are **data-structure-specific**, not the `Value`-width
 > question (which `value-repr.md` already settled).
 
-See also: `value-repr.md` (the `Value`-enum-width decision — **keep the 16-byte enum**,
+See also: `value-repr.md` (the `Value`-enum-width decision — **keep the 24-byte enum**,
 §5), `jit-tier2.md` / `jit-float.md` / `jit-stage1.md` (the JIT as built),
 `benchmarking.md`, the `brood-benchmarks` repo.
 
@@ -221,7 +221,7 @@ Profiled with `--features perf-stats` (`BROOD_PERF_STATS=1`) + `BROOD_JIT_DUMP_I
   read). What it still can't beat without unboxing: .NET reads a register `long`, Brood a
   24-byte boxed `Value` — so this **narrows substantially** but doesn't fully close matmul.
   See §6 for why this is sound.
-- Entry points: `eval/compile.rs` — `let vector_ref =` (the JIT helper, ~line 5265, currently
+- Entry points: `eval/compile/` — `let vector_ref =` (the JIT helper in `jit_lower.rs`, currently
   emits the call), `chunk_in_jit_subset`/`resolve_prim` (`nth` → `PrimOp::VectorRef`),
   `jit/mod.rs::brood_rt_vector_ref` (the runtime helper); `core/heap.rs` `vector()` + the
   `CodeSlabs.vectors` boxcar (the storage to flatten).
@@ -337,8 +337,8 @@ inline; fall back to FFI.
 `first`/`rest`: ~20–30 ns → ~2–3 ns (3 loads + arithmetic). bintree: ~127ms → ~90ms;
 nqueens: ~163ms → ~120ms. `sort`'s `hash--acc` walk gains proportionally.
 
-**Entry points:** `jit/mod.rs` (add `brood_rt_pair_bases`), `eval/compile.rs`
-`jit_lower_arm` (`Inst::Prim1` arm at ~line 7164), `jit_lower_arm` function entry (add the
+**Entry points:** `jit/mod.rs` (add `brood_rt_pair_bases`), `eval/compile/jit_lower.rs`
+`jit_lower_arm` (the `Inst::Prim1` arm), `jit_lower_arm` function entry (add the
 one-shot `brood_rt_pair_bases` call + store base SSA values for later use by First/Rest arms).
 
 ---
@@ -346,7 +346,7 @@ one-shot `brood_rt_pair_bases` call + store base SSA values for later use by Fir
 ### 3f. `reduce` — **range-fold JIT bypass**
 
 **Root cause.** `(reduce + 0 (range n))` routes through the prelude's `fold`, which detects a
-range and calls `%range-reduce` (the Rust native at `builtins.rs`). Inside `%range-reduce`, the
+range and calls `%range-reduce` (the Rust native in `builtins/`). Inside `%range-reduce`, the
 accumulator function `f` is called per element via `heap.eval_apply(f, &[acc, elem])` — the
 full function-dispatch path: IC probe, `RefCell` borrow, dispatch match. Even though `+` is a
 native (`prim_add`), `eval_apply` still goes through `dispatch()`. Cost: ~22 ns/element × 5M
@@ -372,7 +372,7 @@ This keeps `%range-reduce` Rust-native (no JIT compile of the loop), but replace
 **Expected gain.** reduce: 109ms → ~20ms (matching `loop`'s profile at ~44ms for 30M iters, or
 ~1.4× worse due to the `prim_apply` overhead vs pure SSA arithmetic).
 
-**Entry points:** `builtins.rs` (`range_reduce` function), `eval/compile.rs` (`prim_apply`
+**Entry points:** `builtins/` (`range_reduce` function), `eval/compile/` (`prim_apply`
 export or inline copy), `core/value.rs` (`PrimOp` — may need to be accessible from builtins).
 
 ---
@@ -395,7 +395,7 @@ remains. Estimate: ~172ms → ~130ms after §3e; further narrowing requires eith
 (in-place pair update — unsafe, only valid for nursery pairs not aliased elsewhere) or returning
 a sorted vector instead of a list (`sort-vec` variant).
 
-**Entry points:** `builtins.rs` (`sort_asc`, `seq_items`, `list_with_tail`). Phase 3 is in
+**Entry points:** `builtins/` (`sort_asc`, `seq_items`, `list_with_tail`). Phase 3 is in
 `core/heap.rs` (`alloc_pair`/`list_with_tail`). The `hash--acc` gain is from §3e.
 
 ---
@@ -417,7 +417,7 @@ for fib), (c) handling the base case (`if (< m 2) m`) as a CLIF conditional insi
 body. Cranelift supports this — it's a normal CLIF subgraph — but the compiler machinery to
 detect, bound, and emit self-recursive inlines doesn't exist yet. Likely a 2–3 day change.
 
-**Entry points:** `eval/compile.rs` `jit_lower_arm` — would detect `Node::Call` to the
+**Entry points:** `eval/compile/jit_lower.rs` `jit_lower_arm` — would detect `Node::Call` to the
 function being compiled and recurse into `emit_body` with a depth limit.
 
 ## 4. Recommendation & priority

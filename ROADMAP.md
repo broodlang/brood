@@ -22,6 +22,101 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 ## Active work — dated findings & backlogs
 
+### Robustness gaps vs BEAM / .NET (2026-07-18 runtime survey)
+
+A structured survey of the runtime against Erlang/BEAM and the .NET CLR
+(scheduler, fault isolation, GC/JIT, diagnostics — code-verified with file
+refs). The shape that emerged: Brood is **architecturally BEAM-class already**
+(per-process generational GC, reduction preemption with JIT back-edge batching,
+links/monitors/`trap-exit`, selective receive, real OSR — which BeamAsm doesn't
+have). What remains are targeted gaps, ranked here by leverage. Each keeps the
+mechanism/policy split: kernel primitive, Brood policy.
+
+- ✅ **Stack traces in error values — the biggest debuggability gap.** Shipped
+  2026-07-18. Every `LispError` now accumulates a `trace` as the raise unwinds:
+  the VM walks its live `BcFrame`s (a caller's `code[ip-1]` is the `Inst::Call`
+  with the call-site pos; arms carry `fn_name`/`src_file`), the tree-walker
+  attaches one entry per eval frame that entered a closure (tail entries rename
+  the frame, first entry keeps the call site — matching the VM's frame reuse
+  exactly; `apply_closure` seeds the tracker for native-boundary callbacks).
+  Caught kernel errors surface it as `:trace` — innermost-first
+  `{:fn [:file :line :col]}` maps, capped at 32 — and uncaught errors print
+  `at fn (file:line:col)` lines (CLI + REPL). En route the ADR-135 program-exit
+  seam was upgraded from a flattened string to the structured error, so file
+  runs now render the caret/hint/trace they previously lost. Engines
+  agree (error_format_parity extended by the suppression of information-free
+  synthetic frames); JIT'd arms trace via their deopt re-raise. The follow-up
+  also shipped same day: **process death reasons carry the structured error**
+  — an uncaught error retires the process with `[:error {:kind :message …
+  :trace}]` (`message::error_reason`, heap-independent so it deep-copies to
+  monitors/links and crosses the dist wire), BEAM's `{Reason, Stacktrace}`
+  parity for supervisors.
+- 🟡 **Per-process resource limits (BEAM `max_heap_size` / mailbox bounds).**
+  Lever (1) shipped 2026-07-18: **`(process-flag :max-heap n)`** (Erlang
+  `process_flag/2` shape; positive int sets, nil clears, absent reads, returns
+  previous). Mechanism: `Heap::proc_mem_limit` checked at the end of both
+  collection paths against the *live* (post-GC nursery+old) footprint — a
+  sticky flag the eval/VM safepoints raise as a catchable `E0045` **in that
+  process only** (uncaught → kills just the offender; the ADR-043 hard cap
+  still aborts the whole OS process). Policy is Brood: set the flag first
+  thing in the spawned fn. Tests `tests/process_limit_test.blsp` (7 cases,
+  green on VM/TW/no-JIT/GC_STRESS). ⬜ Remaining lever (2): optional mailbox
+  bounds — a `send` to a full mailbox drops/errors by policy (accounting
+  exists: `process-info` `:mailbox`); deferred per ADR-011 until a concrete
+  consumer picks the policy (drop vs error vs park has real design surface,
+  incl. remote delivery which can't error the sender). **[kernel mechanism,
+  Brood policy]**
+- ⬜ **Startup image snapshot (ReadyToRun / `.beam` analogue).** Cold start
+  re-parses + re-evals the prelude from source every run (~28 ms; amortised
+  per-OS-process via `LazyLock`, but paid by every CLI invocation, test shard,
+  and `nest` subcommand). Lever: serialize the frozen `SharedCode` bundle
+  (post-parse, post-macro-expand, post-freeze) into the binary or an
+  mtime-keyed cache — the ADR-129 `build-id` already solves the invalidation
+  key. Target: single-digit-ms cold start. **[kernel]**
+- ⬜ **Observability: timing tier + trace pipeline + profiler.** Everything
+  today is *counts* (`gc-stats`, `vm-stats`, `process-info` reductions); there
+  are **no pause times, no consumable event stream, no Brood-level CPU
+  profile** (.NET has EventPipe/dotnet-trace; BEAM has `:fprof`/`recon`). This
+  is the telemetry roadmap item's missing half — fold in: GC collections with
+  **durations**, scheduler spawn/exit/preempt/steal events, deopt events, a
+  sampling profiler over the reified frame stacks (the state-capture rewrite
+  made cheap sampling possible: any process's `frames` are inspectable data at
+  a safepoint). See "Telemetry" under M3 below (ADR-106). **[kernel sources,
+  Brood aggregation]**
+- ✅ **Distribution self-healing: auto-reconnect + backoff.** Shipped
+  2026-07-18. Brood policy: **`std/net/reconnect`** — a named, idempotent
+  watcher process per node spec that connects, arms `monitor-node`, and on
+  `[:nodedown]` retries `(connect spec)` with exponential backoff
+  (`:min-ms`/`:max-ms`), re-arming + notifying subscribers `[:nodeup name]`.
+  Kernel seam: `route` reports link-missing and `send` raises a catchable
+  **E0060 noconnection** when the sender opted in via
+  `(process-flag :send-errors true)` (queue-and-retry instead of silent drop;
+  process liveness stays Erlang-silent). End-to-end test
+  `reconnect_watcher_heals_a_fallen_link` (down → raise → heal → message
+  flows). The cluster **global registry / `pg`** stays in "OTP deferred"
+  below (gated on a real consumer). **[Brood + kernel seam]**
+- 🟡 **Dirty-CPU accounting for long native builtins.** Shipped 2026-07-18 as
+  a **`BROOD_STALL_MS`-armed diagnostic** (revised same day by measurement):
+  when the stall tracer is armed, `call_native` times each builtin in a green
+  process, `scheduler::charge_native` charges the elapsed time against the
+  reduction budget (~2 reductions/µs, the BEAM NIF model; ≥~1 ms drains the
+  quantum), and a trip **names the builtin** (`[stall] native %range-reduce
+  took 766ms`). Always-on per-call charging was tried first and **rolled
+  back**: the A/B measured **8–22% on the message-heavy rows**
+  (pingpong/ring/json — two `Instant::now` per native call) while buying
+  almost nothing, because reduction preemption already bounds post-native
+  hogging to ~one quantum (~1 ms); the un-preemptible time *inside* a long
+  native is only fixed by the offload pool. ⬜ Remaining: the M4 dirty-CPU
+  offload pool. **[kernel]**
+- 🟡 **Housekeeping found by the survey:** ⬜ permanently-parked `receive`
+  waiters (nothing will ever send) leak their mailbox slot in a long-lived
+  embedded host (`mailbox.rs`). ✅ Exit-signal propagation fixed (2026-07-18):
+  kill **hardness** is now a request property separate from the reason
+  (`MailboxState.kill_hard`), so link propagation stays hard (dies at the next
+  reduction tick) but carries the **originating reason** — a cascading death
+  reports why the tree fell (`[:error {… :trace}]` end to end), BEAM
+  semantics; the sticky-latch guarantee keys on hardness. **[kernel]**
+
 ### Findings from hatch (2026-07-11)
 
 Three runtime/language items surfaced while eliminating a whole *class* of O(n²)
@@ -56,14 +151,15 @@ would retire the bug class at the language level. See hatch's
   request head reader, chunked drain, and WS frame gather trivially O(n) — no manual
   list+`join`, no length-drain gymnastics. **[kernel]** a transient/builder value +
   freeze.
-- ⬜ Smaller ergonomic wins (all cheap): **`mapv`/`filterv`** (vector-returning
-  variants — `map`/`filter`/`fold` return lists, so hatch littered `(into [] (map …))`
-  wherever a vector was needed); making the **`foo--private` convention
-  link-checked** rather than a runtime unbound-symbol surprise (it bit a cross-module
-  call during the hatch work); and either fixing or erroring on **`let`
-  vector-destructure of a list value**.
+- 🟡 Smaller ergonomic wins (all cheap): ✅ **`mapv`/`filterv`** shipped
+  2026-07-18 (prelude one-liners over `into`; `tests/sequence_test.blsp`).
+  ✅ **`let` vector-destructure of a list value** — verified 2026-07-18 to
+  already raise a clean `[:match-error :let …]` (the "or erroring" arm of the
+  ask; the silent-misbind era is gone). Still ⬜: making the **`foo--private`
+  convention link-checked** rather than a runtime unbound-symbol surprise (it
+  bit a cross-module call during the hatch work).
 
-### Elixir-parity performance gaps (2026-07-12, refreshed 2026-07-14)
+### Elixir-parity performance gaps (2026-07-12, refreshed 2026-07-18)
 
 Benchmarked brood ÷ **Elixir** per row (`../brood-benchmarks`). Elixir is *also*
 immutable + GC'd + boxed-float + actor-based, so **every gap here is an
@@ -71,13 +167,15 @@ implementation deficiency, not an "immutability tax"** — the bar is "match an
 immutable peer," and BEAM proves each is reachable. Ranked by ratio; `[kernel]`
 unless noted.
 
-**The four rows where Brood is currently *last of 7 languages* (7/7 on the
-2026-07-13 report) are `nbody`, `regex`, `sieve`, and `persistent-map`** — the
-priority set below, each with the "how the BEAM does it" lever spelled out.
+**The 2026-07-13 priority set — the four rows where Brood was *last of 7
+languages* (`nbody`, `regex`, `sieve`, `persistent-map`) — is now cleared
+(2026-07-17):** nbody left 7/7 with the `fsqrt` inline (2026-07-15), sieve is
+3/7 after the dense-Table work (2026-07-16), persistent-map is 6/7 (2026-07-15),
+and regex left 7/7 at ~92 ms compute, past Clojure (2026-07-17). The remaining
+open rows are `nqueens`, `ring`/`pingpong`, `bintree`, and `loop`.
 `json`/`base64` stay excluded as gaps (Elixir/Node win them with native C codecs
 against our by-design pure-Brood code — a separate, lower-priority pure-Brood-codec
-track), but **`regex` is pulled in as a real entry** because its lever is structural
-(engine design), not merely "we lack a C library."
+track); `base64` is the residual coin-flip last place.
 
 - 🔶 **`nbody` — was 7/7 (~40× Elixir, 5.9s); now ~0.82s (~8× total), ~5× Elixir
   (2026-07-14).** The gap was **not** float-across-calls (the `docs/jit-float.md` premise) —
@@ -106,29 +204,33 @@ track), but **`regex` is pulled in as a real entry** because its lever is struct
      benches bit-identical to `BROOD_VM=0`, `GC_STRESS`+`VERIFY`+`JIT_VERIFY` clean, bintree
      unregressed.
 
-  **Compute is now ~780ms vs Python 729ms — likely still 7/7 by a hair** (or a marginal 6/7;
-  re-run the harness to confirm the rank). To pull clearly ahead: **(1)** the residual ~249k
-  deopts are `advance-body`, which has no float *param* so the `has_float_slot` gate misses
-  it — catching it needs a float-context signal that survives `(nth …)`/call-return type
-  erasure (cross-arm return typing, or a compile-time float-global check for `dt`) *without*
-  regressing int-vector arms (matmul/nqueens spuriously deopting); **(2)** inline `sqrt` as
-  Cranelift `fsqrt` (a boxed Brood call ~1.5M times) via a `PrimOp1::Sqrt` recognised like
-  `nth`→`VectorRef`; **(3)** cut the ~1M `global_ic_miss` on `dt`/`sm` reads in call-mediated
-  arms. **Layer B (typed cross-arm float ABI) is deprioritised** — the hot calls have no float
-  *args*. The next big general win is **full float type-specialization** (profile-drive an
-  arm's float slots/stack so vector-read floats stay unboxed everywhere, covering
+  **OFF 7/7 (2026-07-15):** lever (2) shipped — `sqrt` inlines as Cranelift `fsqrt`
+  (0.74 → 0.54 s, "kills the last coin-flip 7/7"), and the closure-arm
+  call-profitability gate + deopt feedback took another −28% (2026-07-16). Still
+  ~a few × Elixir; the remaining levers: **(1)** the residual `advance-body`
+  deopts — no float *param*, so the `has_float_slot` gate misses it; catching it
+  needs a float-context signal that survives `(nth …)`/call-return type erasure
+  (cross-arm return typing, or a compile-time float-global check for `dt`)
+  *without* regressing int-vector arms; **(3)** cut the `global_ic_miss` on
+  `dt`/`sm` reads in call-mediated arms. **Layer B (typed cross-arm float ABI)
+  is deprioritised** — the hot calls have no float *args*. The next big general
+  win is **full float type-specialization** (profile-drive an arm's float
+  slots/stack so vector-read floats stay unboxed everywhere, covering
   advance-body too). **[kernel/JIT + benchmark]**
-- ⬜ **`regex` — ~62× vs Elixir (981ms v 16ms), 7/7 (interpreted CPS backtracker).**
-  Erlang compiles `~r/…/` once to a PCRE NFA and matches native. Brood's pure-Brood
-  engine already **memoises the parse** (`regex--compile`, a Table cache), so the
-  residual is *not* re-parsing — it is the CPS backtracking matcher itself: every
-  `regex--star`/`seq-match` step allocates a fresh continuation closure `(fn (i2) …)`,
-  and set membership is a linear `string-contains?` scan of the class string per char.
-  Levers, ascending cost/benefit: **(a)** compile the AST to a closure-free NFA/DFA
-  (state table + a flat step loop, no per-step closure alloc — stays pure-Brood, the
-  dogfood-correct fix); **(b)** cheaper set membership (a char→bool set built once at
-  compile). A native regex primitive is the fast-but-wrong escape hatch (reverses
-  "write it in Brood") — keep it out unless (a)/(b) prove insufficient. **[std/Brood]**
+- ✅ **`regex` — was ~62× vs Elixir (981ms), 7/7 (interpreted CPS backtracker);
+  OFF 7/7 (2026-07-17): ~92 ms compute, past Clojure (103 ms) — and it stayed
+  pure-Brood.** Lever (a) shipped first: the AST compiles to a **lazy DFA**
+  (closure-free state table + flat step loop; catastrophic patterns now linear;
+  1.03 → 0.69 s, 2026-07-14), then `re:compile` discipline + the JIT learning
+  keyword `=` (2026-07-15), dropping a dead `(:use editor/buffer)` (578 → ~301 ms
+  wall, RSS 182 → 65 MB), and the 2026-07-17 round: memo-cache split (hot object
+  out of the deep-cloning Table read), a 6-slot vector hot object, and fixing the
+  **self-tail arg-position-`if` deopt storm** (a lazy `Op::Slot` materialised as
+  an int-guarded payload at the block boundary — the regex loops now bind the
+  branch in a `let`). Engine follow-up recorded: per-leader stack-shape analysis
+  would make the natural nested-`if` style equally fast; until then any self-tail
+  loop threading an opaque value through an arg-position branch hits this cliff.
+  A native regex primitive stayed out — the dogfood-correct fix won. **[std/Brood]**
 - ✅ **`errors-deep` — was 26× (mis-filed as "throw/unwind cost"), FIXED (`3cefcad`,
   branch `perf/errors`, 2026-07-15): 0.28 → 0.07 s (~4×, 5/7 → ~2/7 by compute — past
   Ruby/Node/Python, behind only Elixir).** The diagnosis inverted the premise: throw +
@@ -141,35 +243,40 @@ track), but **`regex` is pulled in as a real entry** because its lever is struct
   deopts → the VM runs the redefinition — late binding exact). Verified: 3 engines
   bit-identical; payload identity (int + float workers); non-final-`do` throws; 40 k
   depth-bail; suite 777/777. **[kernel]**
-- ⬜ **`sieve` — ~19× vs Elixir (1.0s v 52ms), 7/7 (Table op overhead).** Elixir uses
-  `:atomics` — a lock-free fixed-size i64 array, ~one atomic instruction per access.
-  Brood has no mutable array (the immutability invariant), so composite marks live in a
-  `Table`, and **every** `table-put`/`table-has?` pays: a registry `Mutex` lock + an
-  `Arc<Store>` clone + the store's own `Mutex` + a `to_message`/`from_message` deep-copy
-  of the key (cross-process safety) — ~3.8M times here. All of that is waste for scalar
-  (int) keys on a single-owner table. Levers (each keeps `Table` as the one sanctioned
-  mutable, each general to *every* Table user): **(1)** cache the `Arc<Store>` on the
-  `Value::Table` handle to skip the registry lock+clone per op; **(2)** fast-path
-  immediate keys/values (int/bool are already heap-independent — store them directly,
-  skip `to_message`); **(3)** a provably-single-owner path that elides the deep-copy. A
-  bitset primitive would beat all three but adds a Rust builtin — defer. **[kernel]**
-- ⬜ **`nqueens` — 15× (backtracking allocation).** List/closure allocation per branch;
-  overlaps the HOF-fold and allocation paths. **[kernel]**
+- ✅ **`sieve` — was ~19× vs Elixir (1.0s), 7/7 (Table op overhead); now 3/7
+  (2026-07-16, ~0.06 s — at Clojure's heels).** The levers landed as a
+  Table-general series (every Table user benefits, `Table` stays the one
+  sanctioned mutable): **dense int-keyed Table storage + fused table-op prims**
+  (0.88 → 0.15 s, 2026-07-15), a **lock-free registry + fast scalar hash**
+  (2026-07-15), the lock-free dense store + resume-tier fix (sieve −33%, loop
+  −75%, 2026-07-16), and the **JIT inlining dense table ops** (0.10 → 0.06 s,
+  4/7 → 3/7, 2026-07-16). No bitset primitive needed. **[kernel]**
+- ⬜ **`nqueens` — was 15× (backtracking allocation); −31% from routing closure
+  arms through the call-profitability gate + deopt feedback (2026-07-16);
+  re-measure the ratio.** Residual: list/closure allocation per branch; overlaps
+  the HOF-fold and allocation paths (see
+  [`docs/allocation-elimination.md`](docs/allocation-elimination.md)). **[kernel]**
 - ✅ **`ackermann` — was 14× (non-tail double recursion), FIXED (`f90910c`, 2026-07-13):
   4.02 → 0.36s, 7/7 → 3/7.** The i64 unboxed worker's subset checker only matched *non-tail*
   self-calls (fib's arg-position recursion); `ack`'s recursion is in *tail* position
   (`SelfCall`), and its native-recursion depth cap was a stale 1400 (< `ack`'s ~4093 depth).
   Taught the subset about tail self-calls + raised the cap to 32768. Now 3rd, past
   Node/Clojure/Ruby/Python. **[kernel/JIT]**
-- ⬜ **`ring` / `pingpong` — 8× / 6× (residual message machinery).** Already cut from
-  ~13× (ADR-135 + wake elision); the remainder is per-message `to_message`/`from_message`
-  copy + continuation capture/restore. Trim the copy for small scalar messages; shrink
-  the capture. **[kernel]**
-- ⬜ **`bintree` — 7.5× (GC / allocation pressure).** Build+walk trees; per-node alloc +
-  minor-GC throughput vs BEAM. **[kernel]**
-- ⬜ **`loop` — 6× (raw iteration overhead).** A JIT'd int tail loop is still ~7×/iter
-  vs BEAM (i64 worker engages but gives only ~12%). Per-iteration overhead: overflow-
-  checked add, reduction/safepoint tick, frame reset. Incremental JIT-tuning grind (BEAM
+- ⬜ **`ring` / `pingpong` — residual message machinery.** Already cut from ~13×
+  (ADR-135 top-level-as-green-process, 6.5 → 3.3 µs/RT + wake elision), then
+  closure arms shared behind an `Arc` (ring 2.02 → 1.50 s, pingpong ~18%,
+  2026-07-13) and closure-template caching (2026-07-11); the remainder is
+  per-message `to_message`/`from_message` copy + continuation capture/restore.
+  Trim the copy for small scalar messages; shrink the capture. **[kernel]**
+- ⬜ **`bintree` — GC / allocation pressure.** Build+walk trees; per-node alloc +
+  minor-GC throughput vs BEAM. Inline small-vector storage (2026-07-01) and the
+  checkpoint purity exemption + nursery capacity seeding (2026-07-18) trimmed it;
+  the 2026-07-18 profile says what's LEFT is the deferred big-ticket JIT items
+  (~17% `jit_run_fast_link` + ~11% frame staging — the "true call inlining"
+  lever — and ~10% allocation FFI), not regressions. **[kernel]**
+- ⬜ **`loop` — raw iteration overhead.** Was 6×; the resume-tier fix took −75%
+  (2026-07-16). Residual per-iteration overhead: overflow-checked add,
+  reduction/safepoint tick, frame reset. Incremental JIT-tuning grind (BEAM
   has a 25-yr lead) — expect small wins. **[kernel/JIT]**
 - ✅ **`persistent-map` — was 5.2× vs Elixir (612ms v 118ms), 7/7; FIXED by lever (1)
   (2026-07-15, benchmark transcription in `brood-benchmarks`, no kernel change):
@@ -201,14 +308,18 @@ corruption, allocation serialisation). One item stays deferred:
 
 ### Stability backlog (2026-07-10)
 
-- ⬜ **Continuous fuzzing (`cargo-fuzz`)** — libFuzzer targets for the
-  highest-risk untrusted-input parsers: the **reader/scanner**, **JSON**, the **dist
-  wire framing** (`dist/wire.rs`), and the **bundle footer/archive** (`bundle.rs`).
-  Highest long-term leverage for keeping the kernel stable as it grows.
+- 🟡 **Continuous fuzzing (`cargo-fuzz`)** — libFuzzer targets ship for the
+  **reader/scanner** and the **evaluator** (`crates/lisp/fuzz/fuzz_targets/`),
+  alongside the July stress kit (`make stress`: the 3-oracle differential
+  program fuzzer with coverage-guided expansion + auto-shrink, the
+  reader-robustness fuzzer, chaos preemption, TSAN/loom/ASAN passes). ⬜ Still
+  missing targets: **JSON**, the **dist wire framing** (`dist/wire.rs`), and the
+  **bundle footer/archive** (`bundle.rs`).
 - ⬜ **Host-panic hardening (audit residue)** — adversarial input can still panic
   the Rust host: no recursion-depth counter on `expr_ty`/`check_into` (checker stack
-  overflow on deeply-nested types), no `catch_unwind` around the worker `run_one`,
-  no RAII guard on `check_file`'s panic path.
+  overflow on deeply-nested types), no RAII guard on `check_file`'s panic path.
+  (The worker `run_one` is covered — `catch_unwind` retires the process with
+  `:killed`, `scheduler.rs`.)
 
 ---
 
@@ -231,7 +342,9 @@ Compressed; per-item history is in [`docs/devlog.md`](docs/devlog.md) and
   transducers.
 - **Concurrency — green processes on all cores** (`docs/concurrency.md`).
   `spawn`/`send`/`receive`/`self` with per-process `Send` heaps and copy-on-send;
-  green M:N scheduling on a worker pool (corosensei, ADR-018); shared code region
+  green M:N scheduling on a worker pool (originally corosensei coroutines,
+  ADR-018; replaced 2026-06-08 by state-capture continuations with general
+  work-stealing + live migration, ADR-100); shared code region
   for cross-process hot reload (ADR-013/014); closures sent between processes and
   across nodes (ADR-033); reduction-counted preemption (ADR-027); selective
   `receive` + `(after ms …)` timeouts.
@@ -263,14 +376,16 @@ Compressed; per-item history is in [`docs/devlog.md`](docs/devlog.md) and
   `serve-stop` — plus the exit-signal hardening it forced (ADR-132; pid identity
   across `node-start`).
 
-Runtime housekeeping still open:
+Runtime housekeeping (both items landed):
 
-- ⬜ **Tracing GC for mid-eval / never-returning loops.** Arena-reset at top-level
-  boundaries shipped (ADR-016); a general tracing collector still needs scannable
-  roots (coupled with the explicit-value-stack VM step). **[kernel]**, sizable.
-- ⬜ **Work-stealing scheduler.** Gated on the `Send` per-process heaps + tracing
-  GC above; the root-cause of the earlier scheduler race and the invariants any
-  reintroduction must honour are in [`docs/concurrency-v2.md`](docs/concurrency-v2.md).
+- ✅ **Tracing GC for mid-eval / never-returning loops.** The per-process
+  generational semi-space copying collector (ADR-055/061/072) fires at the eval
+  safepoint at **any** depth — roots are the explicit operand/env stacks the VM
+  reified. Superseded the ADR-016 arena-reset.
+- ✅ **Work-stealing scheduler.** Landed 2026-06-08 via the state-capture
+  rewrite (ADR-100): corosensei deleted, a paused process is relocatable heap
+  data, stealing is general (any queued process) and live cross-worker migration
+  works. History + invariants in [`docs/concurrency-v2.md`](docs/concurrency-v2.md) §8.
 
 ---
 
@@ -364,16 +479,20 @@ Runtime housekeeping still open:
   **`Application`** behaviour; **synchronous, ordered, rollback-on-failure** supervisor
   startup + per-child intensity counting + child `type`/`significant`/`auto_shutdown`
   metadata.
-- ⬜ **Dist refinements** (ADR-011): exact propagated exit reason for a *non-trapping*
-  linked peer (reports `:kill` today); a `terminate/2` hook on hard kill; **long-name
-  FQDN resolution** (a long name is passed explicitly today, no resolver); Windows
-  Unix-socket transport.
+- 🟡 **Dist refinements** (ADR-011): ✅ exact propagated exit reason for a
+  *non-trapping* linked peer (fixed 2026-07-18 — hardness split from the reason,
+  see the survey housekeeping item above; the shared `deliver_exit_to` covers
+  remote links too). Still ⬜: a `terminate/2` hook on hard kill; **long-name
+  FQDN resolution** (a long name is passed explicitly today, no resolver);
+  Windows Unix-socket transport.
 
 ### Packaging & ecosystem
 
-- 🟡 **Package manager** (ADR-037, [`docs/packages.md`](docs/packages.md)) — `:path`
-  deps end-to-end ✅; ⬜ **`:git` deps** (slice 2); ⬜ **the verbs + auto-fetch**
-  (slice 3). **[kernel]** primitives are tiny (`%git-*`/`%sha256`/`%http-get`).
+- ✅ **Package manager** (ADR-037, [`docs/packages.md`](docs/packages.md)) — `:path`
+  deps end-to-end, **`:git` deps** (slice 2), and **the verbs + auto-fetch**
+  (slice 3: `nest fetch`/`update`/`tree`/`add`/`remove`) all shipped 2026-05-30
+  (`%git-clone`/`%git-resolve-ref` in `builtins/io.rs`, policy in
+  `std/tool/package.blsp`). ⬜ Remaining: `:tarball` deps + `%http-get` (deferred).
 - ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of
   project + `_deps/` to a pre-built `brood`; deferred until the editor needs end-user
   distribution.
@@ -399,9 +518,11 @@ everything local — `let`/`fn`-param bindings, call arity and argument types, `
 coverage, `sig!` contracts — while global `def`/`defn` types, inter-module flow, and
 global-fn return types stay advisory. Slogan: *Elixir's checker for the interior,
 Erlang's late binding for globals and module boundaries.* The full-soundness-vs-reload
-mechanism has shipped (re-check per reload rather than prove once — ADR-123/124/125);
-the "checking never rejects a runnable program" invariant in `CLAUDE.md` and
-[`docs/types.md`](docs/types.md) contract #5 needs revising now that it has.
+mechanism has shipped (re-check per reload rather than prove once — ADR-123/124/125),
+and the old "checking never rejects a runnable program" invariant has been revised
+throughout (`CLAUDE.md`, [`docs/types.md`](docs/types.md) contract #5): the checker
+never gates the live image; the one hard reject is batch/CI (`nest check` exits
+nonzero on any warning).
 
 ### Telemetry — what we improve over Erlang's `:telemetry`
 

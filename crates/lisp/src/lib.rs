@@ -159,10 +159,11 @@ impl Interp {
     /// OS thread and every message to a spawned worker crosses a thread boundary — the
     /// program runs on a worker in capture mode, so it uses the userspace direct-handoff
     /// path and its top-level `receive`s park-and-capture. `file` tags errors with a
-    /// path. Returns `Err(message)` if a top-level form raised (message pre-located).
-    pub fn run_program(&mut self, src: &str, file: Option<String>) -> Result<(), String> {
-        let exit = process::spawn_root_program(&self.heap, src, file)
-            .map_err(|e| e.located().to_string())?;
+    /// path. Returns the structured error if a top-level form raised (file/pos attached,
+    /// payload stripped at the process boundary) so the caller can render the full
+    /// report — caret, hint, call trace.
+    pub fn run_program(&mut self, src: &str, file: Option<String>) -> Result<(), LispError> {
+        let exit = process::spawn_root_program(&self.heap, src, file)?;
         exit.wait()
     }
 

@@ -7,8 +7,11 @@
 > string literals followed as the same pattern again (ADR-120,
 > [type-bool-string-literals.md](type-bool-string-literals.md)) — that
 > deferral is now closed. Call-site argument literal precision (matching a
-> literal int *argument* against a declared literal set) is still deferred —
-> see [Deferred](#deferred) — this slice covers declared-sig literal sets only.
+> literal int *argument* against a declared literal set) was initially tried
+> and reverted, then shipped as Gap B0 (2026-07-10,
+> [type-gating.md](type-gating.md)) — `Ty::of_value` now returns
+> `Ty::int_lit(n)`; see [Deferred](#deferred) for the history. This slice
+> itself covers declared-sig literal sets only.
 
 ## Problem
 
@@ -103,30 +106,30 @@ actually check it.
   set specifically, not a technical restriction.
 - **`BigInt` literals** — out of `i64` range; would need `lit_int`'s storage
   widened to a `BigInt`-aware representation. Not needed for the common case.
-- **Call-site argument literal precision — tried, reverted, explicitly
-  deferred.** Keywords get more than declared-sig precision: `Ty::of_value`
-  (the bridge from a runtime value to its static type) turns a *literal
-  keyword appearing in code* into its singleton type too, so
-  `(c-mode :bogus)` against a declared `(or :maximized :fullboth :fullscreen
-  nil)` is a provable disjointness the **static checker** catches, not just
-  the runtime contract. Extending `of_value` to do the same for `Value::Int`
-  was tried — and reverted — because it's a materially bigger, riskier change
-  than it looks: `of_value` feeds *every* literal int expression's inferred
-  type throughout the checker, not just call arguments, so making every
-  int literal a singleton changed the *rendered text* of unrelated
-  misuse-warning messages project-wide (e.g. `"got int"` → `"got 5"`),
-  breaking 7 pre-existing, unrelated tests on exact wording
+- **Call-site argument literal precision — tried, reverted, then shipped as
+  Gap B0 (2026-07-10).** Keywords got more than declared-sig precision from
+  the start: `Ty::of_value` (the bridge from a runtime value to its static
+  type) turns a *literal keyword appearing in code* into its singleton type
+  too, so `(c-mode :bogus)` against a declared `(or :maximized :fullboth
+  :fullscreen nil)` is a provable disjointness the **static checker** catches,
+  not just the runtime contract. Extending `of_value` to do the same for
+  `Value::Int` was first tried — and reverted — because it's a materially
+  bigger, riskier change than it looks: `of_value` feeds *every* literal int
+  expression's inferred type throughout the checker, not just call arguments,
+  so making every int literal a singleton changed the *rendered text* of
+  unrelated misuse-warning messages project-wide (e.g. `"got int"` →
+  `"got 5"`), breaking 7 pre-existing, unrelated tests on exact wording
   (`eq_against_a_literal_is_a_guard`, `let_binding_propagates_its_rhs_type`,
   `match_literal_pattern_narrows_the_scrutinee`, and four others in
-  `types/check.rs`). This slice's scope is **declared-sig literal sets only**
+  `types/check.rs`). This slice's scope was **declared-sig literal sets only**
   — a function's declared return type or parameter type can be an int-literal
   set and that flows to callers correctly (verified,
-  `int_literal_return_type_flows_through_checker`), but a literal int
-  *argument* at a call site isn't itself recognized as a singleton the way a
-  literal keyword argument already is. Picking this up needs a real design
-  pass on where else `of_value`'s result is consumed and whether the warning-
-  message wording changes are acceptable (likely yes, they're arguably *more*
-  correct) or need their own handling.
+  `int_literal_return_type_flows_through_checker`). The full design pass
+  happened later as **Gap B0** ([type-gating.md](type-gating.md)): the
+  wording changes were accepted as *more* correct (`got 5`, not `got int`),
+  and `Ty::of_value` now returns `Ty::int_lit(n)` (bool singletons too;
+  string literals get `str_lit` via `expr_ty`) — so a literal int argument
+  at a call site *is* recognized as a singleton, closing this item.
 
 ## Soundness
 

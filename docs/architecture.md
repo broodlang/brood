@@ -128,25 +128,22 @@ Dispatch order for a list form `(head ...)`:
 Symbols are **interned** to `u32` ids (see `core/value.rs`), so lookups and equality
 are integer operations and the spelling is stored once.
 
-## Memory model (and the plan to change it)
+## Memory model
 
-Heap values are no longer `Rc` pointers: `Value` is `Copy` and its heap variants
+Heap values are not `Rc` pointers: `Value` is `Copy` and its heap variants
 are integer **handles** into a per-process `Heap` of plain `Vec` slabs (so a
-`Heap` is `Send` and a process can move between scheduler threads). Reclamation
-today is **arena reset at top-level boundaries**: between top-level forms the
-LOCAL heap holds nothing live but the result, so `eval_str` / the REPL truncate
-it back (globals live in the shared PRELUDE/RUNTIME regions, never in LOCAL).
-
-What's still open: bounding memory inside *long-running tail-recursive
-computation* that never goes through `receive`. As of 2026-05-29
-(commit `f90f0de`) the allocator is **bump-only** — slots are never
-recycled, so a stale handle can't observe a different value, which closed
-most of the scheduler race surface — but a tight loop that doesn't pass
-through `receive` grows unboundedly per process. **Phase 2** (not yet
-landed) is an *arena flip on `receive`*: deep-copy the surviving state to
-a fresh slab, drop the old. The migration stays contained because *all
-heap construction goes through the helpers in `core/heap.rs` /
-`core/value.rs`*. See [memory-model.md](memory-model.md) and
+`Heap` is `Send` and a process moves between scheduler threads). Reclamation is
+a **per-process, generational, semi-space copying GC** (ADR-055/061/072):
+a nursery + tenured old generation, collected at the eval safepoint at *any*
+depth — stop-the-world for that one process only, since heaps are never
+shared. Slots are **never reused in place** (survivors relocate; handles carry
+a generation epoch, so a stale handle trips a debug tripwire instead of
+aliasing — the invariant that closed the scheduler race surface, `f90f0de`).
+The shared `def`'d code region is reclaimed separately by the Erlang-style
+two-generation RUNTIME collector (ADR-091); large immutable byte strings live
+in the refcounted cross-process blob heap (`core/blob.rs`). The whole model
+stays contained because *all heap construction goes through the helpers in
+`core/heap.rs` / `core/value.rs`*. See [memory-model.md](memory-model.md) and
 [shared-code.md](shared-code.md) for the regions and hot-reload story.
 
 ## Dependencies
@@ -158,8 +155,14 @@ Current set:
 
 - `boxcar` (lisp) — lock-free, append-only vector backing the shared RUNTIME
   code region (stable refs under concurrent `def`; see shared-code.md).
-- `corosensei` (lisp) — stackful coroutines for the green-process scheduler, so
-  the recursive evaluator parks at `receive` without a rewrite (scheduler.md).
+  (`corosensei` used to sit here for the green-process scheduler; it was
+  removed 2026-06-08 when suspension became state capture — ADR-100.)
+- `cranelift-*` (lisp, `jit` feature — a default feature) — the tier-1 JIT
+  backend (ADR-101).
+- `mimalloc` (lisp) — the global allocator; allocation throughput is
+  load-bearing for the copying GC.
+- `arc-swap` (lisp) — the RUNTIME code-generation slots for the ADR-091
+  two-generation collector.
 - `rustyline` (cli) — line editing / history for the interactive REPL. A
   dev/UX dependency in the binary, not the library.
 - `ropey` (lisp) — the text rope backing editor buffers (M2, ADR-045): an
@@ -172,5 +175,9 @@ Current set:
 - `divan` (dev only) — the microbenchmark harness; the released library pulls
   nothing extra.
 
-More will arrive with the features that need them: `tokio` + `serde` for the
-server/protocol.
+Later features brought their own (no `tokio`/`serde` — the socket layer is
+hand-rolled non-blocking TCP, ADR-062, and the wire codec is ours): `rustls` +
+`rcgen` for TLS (ADR-089), `tree-sitter` (+ grammars, `treesit` feature) for
+foreign-language parsing, `image` for decode/thumbnail, the `winit`/
+`softbuffer`/`cosmic-text` stack behind the `gui` feature (ADR-046), and the
+`unicode-width`/`unicode-segmentation` pair for the terminal/rope seam.

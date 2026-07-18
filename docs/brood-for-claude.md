@@ -280,6 +280,11 @@ rebuild.
 `throw` hands back its argument verbatim (often a bare string from `error`),
 while a kernel error is a `{:kind :message …}` map. `error-message` normalises
 any of them to a human string — don't branch on `string?`/`map?` yourself.
+A kernel error map also carries **`:trace`** — the call stack at the raise,
+innermost first, each entry `{:fn <name> [:file :line :col]}` (the location is
+the call site that entered the frame; tail calls collapse into their caller's
+frame). Debug "how did I get here" from a caught error with
+`(map (fn (f) (get f :fn)) (get e :trace))`.
 
 For longer pipelines over large data, the **lazy `l*` combinators** fuse
 intermediate collections (one pass, no throwaway lists). Thread them with `->>`:

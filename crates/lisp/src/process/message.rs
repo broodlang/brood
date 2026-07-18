@@ -148,6 +148,57 @@ pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
     to_message_rec(heap, v, &mut Vec::new(), 0)
 }
 
+/// The death reason for a process killed by an uncaught error: `[:error {…}]`,
+/// where the map mirrors [`LispError::to_value_map`] — `{:kind :message [:code
+/// :file :line :col :hint :trace]}`, `:trace` a list of `{:fn [:file :line
+/// :col]}` frames — so a monitor's `[:down …]` / a trapping link's `[:EXIT …]`
+/// carries the **structured** error (BEAM's `{Reason, Stacktrace}` parity), not
+/// a flattened string. Built as a heap-independent [`Message`] directly (the
+/// dying process's heap is about to drop), so it deep-copies into any
+/// receiver's heap and crosses the dist wire intact. A supervisor can log
+/// `(get m :message)` / walk `(get m :trace)` from the reason alone.
+pub fn error_reason(e: &crate::error::LispError) -> Message {
+    let kw = |s: &str| Message::Keyword(crate::core::value::intern(s));
+    let mut m: Vec<(Message, Message)> = Vec::with_capacity(8);
+    m.push((kw("kind"), kw(e.kind.tag_name())));
+    m.push((kw("message"), Message::Str(e.message.clone())));
+    if let Some(code) = e.code {
+        m.push((kw("code"), Message::Str(code.to_string())));
+    }
+    if let Some(file) = &e.file {
+        m.push((kw("file"), Message::Str(file.clone())));
+    }
+    if let Some(pos) = e.pos {
+        m.push((kw("line"), Message::Int(pos.line as i64)));
+        m.push((kw("col"), Message::Int(pos.col as i64)));
+    }
+    if let Some(hint) = &e.hint {
+        m.push((kw("hint"), Message::Str(hint.clone())));
+    }
+    if !e.trace.is_empty() {
+        let frames: Vec<Message> = e
+            .trace
+            .iter()
+            .map(|f| {
+                let mut fm: Vec<(Message, Message)> = Vec::with_capacity(4);
+                if let Some(name) = f.name {
+                    fm.push((kw("fn"), Message::Str(name.to_string())));
+                }
+                if let Some(file) = &f.file {
+                    fm.push((kw("file"), Message::Str(file.clone())));
+                }
+                if let Some(pos) = f.pos {
+                    fm.push((kw("line"), Message::Int(pos.line as i64)));
+                    fm.push((kw("col"), Message::Int(pos.col as i64)));
+                }
+                Message::Map(fm)
+            })
+            .collect();
+        m.push((kw("trace"), Message::List(frames, None)));
+    }
+    Message::Vector(vec![kw(crate::process::keywords::ERROR), Message::Map(m)])
+}
+
 /// `visited` carries the closures currently being serialised, so a self- or
 /// mutually-recursive *local* closure is rejected cleanly instead of looping.
 fn to_message_rec(

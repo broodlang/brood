@@ -111,7 +111,9 @@ pub(super) fn fire_down(w: Watcher, dying_pid: u64, reason: Message) {
     match w {
         Watcher::Local { pid, .. } => deliver(pid, msg),
         Watcher::Remote { node, pid, .. } => {
-            crate::dist::route(node, crate::dist::Target::Pid(pid), msg);
+            // Best-effort: a DOWN to a disconnected watcher has nowhere to go
+            // (its own [:nodedown] tells it the link fell).
+            let _ = crate::dist::route(node, crate::dist::Target::Pid(pid), msg);
         }
     }
 }

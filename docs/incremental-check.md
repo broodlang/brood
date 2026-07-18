@@ -157,7 +157,10 @@ Mirror the existing runtime/image cache conventions
   build id** (`BROOD_GIT_SHA` — the checker's *logic* changes between builds, so results
   are not portable across binaries) + a **`check-cache-format` version int** + a hash of
   the **checker-relevant prelude/std** (a std change can change name resolution). Any
-  mismatch → cold path (full parallel check, then rewrite the cache).
+  mismatch → cold path (full parallel check, then rewrite the cache). *As shipped:*
+  ADR-129 (2026-07-05) added the binary's own mtime to the stamp — `(build-id)` is now
+  `<version>+<git-sha>+<binary-mtime-hex>` — because git-sha alone went stale during
+  uncommitted checker changes.
 - **Per-file entries** keyed by content hash (the existing hashing primitive).
 - **Path**: `$XDG_CACHE_HOME/brood/check/<project-id>/manifest` (+ entries), falling back
   to `~/.cache`, exactly like the image cache. Never inside the project tree.

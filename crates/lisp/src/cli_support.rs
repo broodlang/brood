@@ -195,6 +195,30 @@ pub fn report_error(e: &LispError) {
             eprintln!("    hint: {hint}");
         }
     }
+    // The call trace (innermost frame first): `at <fn> (<file>:<line>:<col>)`,
+    // where the location is the call site that entered the frame. Anonymous
+    // frames print as `<fn>`. Dimmed so the error line stays the focal point.
+    for f in &e.trace {
+        let name = f.name.unwrap_or("<fn>");
+        let loc = match (&f.file, f.pos) {
+            (Some(file), Some(p)) => {
+                format!(
+                    " ({}:{}:{})",
+                    crate::error::display_path(file),
+                    p.line,
+                    p.col
+                )
+            }
+            (Some(file), None) => format!(" ({})", crate::error::display_path(file)),
+            (None, Some(p)) => format!(" ({}:{})", p.line, p.col),
+            (None, None) => String::new(),
+        };
+        if color {
+            eprintln!("    {C_DIM}at {name}{loc}{C_RESET}");
+        } else {
+            eprintln!("    at {name}{loc}");
+        }
+    }
     let footer = format!(
         "    brood {} ({})",
         env!("CARGO_PKG_VERSION"),

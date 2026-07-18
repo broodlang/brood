@@ -1501,7 +1501,10 @@ landed, in increments tracked in `docs/distribution.md`:
 - **Auto-reconnect** — `(ensure-link "name@host:port")` (Brood policy in
   `std/prelude.blsp`) maintains a peer link across restarts: synchronous
   initial connect, supervisor watches via `monitor-node`, retries on each
-  `[:nodedown …]` with a 200ms backoff until success.
+  `[:nodedown …]` with a 200ms backoff until success. *(Superseded 2026-07-18:
+  the reconnector is now `std/net/reconnect` — exponential backoff, idempotent
+  named watchers, `[:nodeup]`/`[:nodedown]` subscriber events — and
+  `ensure-link` was removed from the prelude; see the devlog.)*
 - **Handshake v2 (real auth)** — 4-byte magic+version prefix (`b"BRD\x02"`),
   nonce-based `Hello`s, HMAC-SHA256 `Auth` frames. The cookie is **never on
   the wire** — it's an HMAC key, so an eavesdropper can't replay either it

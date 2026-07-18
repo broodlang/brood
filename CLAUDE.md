@@ -242,7 +242,7 @@ handles; a handle held across a collection without re-rooting goes stale):
 (`cli_support::install_crash_dump`) that appends the panic + backtrace to
 **`.brood_crash_dump`** in the cwd (in addition to stderr) — durable when a TUI /
 `nest run` animation scrolls the message away. Catches Rust *panics*, **not**
-`SIGSEGV` (a coroutine stack overflow leaves no panic — use `gdb --batch -ex run
+`SIGSEGV` (e.g. a use-after-GC blow-up leaves no panic — use `gdb --batch -ex run
 -ex bt <test-binary>` for those; `rr` isn't installed, and `valgrind` won't see a
 *logical* use-after-GC over safe `Vec` slabs). The first reliable repro of the
 scheduler race lives in `docs/claude-demo-findings.md`.
@@ -379,8 +379,8 @@ co-author trailer, overriding any default that would append one.
    `to_message`/`from_message` *and* `promote`/freeze round-trip the value), read
    it from a shared global in many processes at once, and fan-in the results.
    See the `:isolated` "across processes" block in `tests/maps_test.blsp` for the
-   pattern. **Caveat:** a `test` body runs in a green process whose coroutine
-   stack is small, so prefer **tail-recursive** loops (O(1) stack). Deep *non*-tail
+   pattern. **Caveat:** a `test` body runs in a green process with bounded
+   recursion depth, so prefer **tail-recursive** loops (O(1) stack). Deep *non*-tail
    recursion is no longer an uncatchable segfault: under the VM it hits the
    `MAX_BC_FRAMES` (~1M) frame cap and raises a clean, catchable `recursion too
    deep` error (the tree-walker has the equivalent byte-budget guard), so a runaway

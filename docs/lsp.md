@@ -295,7 +295,7 @@ symbol binds to**. Two layers:
     string as the file's first top-level form. `nest doc` extracts both as
     Markdown by loading + introspecting (see `docs/tooling.md`).
 - **Locals** — a scope walk over the CST tracking binders: `def`/`defn`/
-  `defmacro`, `let`/`let*`, `fn`/`lambda` params (including `&optional` and
+  `defmacro`, `let`/`letrec`, `fn`/`lambda` params (including `&optional` and
   `& rest`), and `match`/`fn`-clause patterns. This is pure CST analysis, no
   heap. It should be **shared with the checker's own scope tracking** so scope
   resolution isn't written twice.

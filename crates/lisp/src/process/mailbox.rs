@@ -144,10 +144,18 @@ pub(super) struct Mailbox {
 
 pub(super) struct MailboxState {
     pub(super) queue: VecDeque<Message>,
-    /// The exit reason set by `(exit pid reason)`, paired with `kill_pending`. Read
-    /// (and cleared) when the target dies; written under this lock before the flag
-    /// is published, so a reader that sees the flag set always sees the reason.
+    /// The exit reason set by `(exit pid reason)` / link propagation, paired with
+    /// `kill_pending`. Read (and cleared) when the target dies; written under this
+    /// lock before the flag is published, so a reader that sees the flag set always
+    /// sees the reason.
     pub(super) kill: Option<Message>,
+    /// Is the pending `kill` **hard** (untrappable: die at the next reduction tick,
+    /// not the next `receive`)? Hardness is a property of the *request*, separate
+    /// from the reason value: `(exit pid :kill)` is hard with reason `:kill`, and
+    /// **link propagation is hard with the originating reason** — so a cascading
+    /// death reports *why* the tree fell (BEAM propagates the reason), not a
+    /// blanket `:kill`. Meaningful only while `kill` is `Some`.
+    pub(super) kill_hard: bool,
     /// The parked green process waiting on this mailbox, if any. `send` takes it
     /// and re-queues it. (A short-lived `Process → Arc<Mailbox> → Process` cycle
     /// while parked; broken the moment it's re-queued or the process ends.)
@@ -198,6 +206,7 @@ impl Mailbox {
                 waiter: None,
                 scanned: 0,
                 kill: None,
+                kill_hard: false,
                 recv_deadline: None,
             }),
             cv: Condvar::new(),
@@ -213,35 +222,50 @@ impl Mailbox {
         })
     }
 
-    /// Record a pending exit signal (`(exit pid reason)`). Stores the reason *then*
-    /// publishes the flag, so any reader (`pending_kill`) that observes the flag set
-    /// is guaranteed to see the reason. A later signal overwrites the reason.
-    pub(super) fn request_kill(&self, reason: Message) {
+    /// Record a pending exit signal (`(exit pid reason)` / link propagation).
+    /// Stores the reason *then* publishes the flag, so any reader (`pending_kill`)
+    /// that observes the flag set is guaranteed to see the reason. `hard` marks an
+    /// untrappable kill honoured at the next reduction tick (vs the next `receive`)
+    /// — a property of the request, independent of the reason value, so link
+    /// propagation can be hard *and* carry the originating reason.
+    pub(super) fn request_kill(&self, reason: Message, hard: bool) {
         {
             let mut st = crate::core::sync::lock(&self.state);
-            // A latched untrappable `:kill` is **sticky**: a later *soft* `(exit pid
-            // reason)` must not overwrite it (Erlang's guarantee that `exit(pid, kill)`
-            // can't be undone — otherwise a racing soft exit could downgrade the kill
-            // and spare a CPU-bound target, which only honours `:kill` at `preempt`).
-            // A fresh `:kill` may still upgrade a pending soft reason.
-            let latched_kill =
-                matches!(&st.kill, Some(existing) if super::scheduler::is_kill_reason(existing));
-            if !latched_kill {
+            // A latched **hard** kill is **sticky**: a later *soft* `(exit pid
+            // reason)` must not overwrite it (Erlang's guarantee that `exit(pid,
+            // kill)` can't be undone — otherwise a racing soft exit could downgrade
+            // the kill and spare a CPU-bound target, which only honours a hard kill
+            // at `preempt`). A fresh hard kill may still upgrade a pending soft
+            // reason; the first hard reason wins thereafter.
+            let latched_hard = st.kill.is_some() && st.kill_hard;
+            if !latched_hard {
                 st.kill = Some(reason);
+                st.kill_hard = hard;
             }
         }
         self.kill_pending.store(true, Ordering::Relaxed);
     }
 
-    /// The pending exit reason, if any. Fast path: one atomic load returning `None`
-    /// when no exit is pending (the common case, checked every `preempt`/`receive`).
-    /// Used by `preempt` (hard `:kill`) and `receive_match` (soft) to decide whether
-    /// to die; a clone (not a take) — the reason is finally consumed at death.
+    /// The pending exit reason, if any (test-only now: production death sites take
+    /// `state.kill` directly under the lock, and the loop-top probe is
+    /// [`pending_hard_kill`](Self::pending_hard_kill)).
+    #[cfg(test)]
     pub(super) fn pending_kill(&self) -> Option<Message> {
         if !self.kill_pending.load(Ordering::Relaxed) {
             return None;
         }
         crate::core::sync::lock(&self.state).kill.clone()
+    }
+
+    /// Is an untrappable **hard** kill pending? The loop-top safepoint probe: a
+    /// soft exit isn't honoured there (it waits for the next `receive`). Same
+    /// fast path as [`pending_kill`](Self::pending_kill).
+    pub(super) fn pending_hard_kill(&self) -> bool {
+        if !self.kill_pending.load(Ordering::Relaxed) {
+            return false;
+        }
+        let st = crate::core::sync::lock(&self.state);
+        st.kill.is_some() && st.kill_hard
     }
 }
 
@@ -316,20 +340,43 @@ pub(crate) fn deliver(pid: u64, msg: Message) {
 /// **registered-name address** for bootstrapping a peer before you hold its pid.
 /// Routing is location-transparent: a local target delivers in-process; a remote
 /// one is forwarded over the node link (`crate::dist`). Sending to a dead/unknown
-/// target is a silent no-op (Erlang semantics).
+/// target is a silent no-op (Erlang semantics) — with one opt-in exception: a
+/// process that set `(process-flag :send-errors true)` gets a catchable
+/// `:noconnection` error when the target *node* is unknown/disconnected (the
+/// message would otherwise be dropped on the floor until a reconnect), so it can
+/// queue-and-retry. Process liveness stays silent either way — `:send-errors`
+/// is about the link, not the peer process.
 pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispError> {
     let msg = to_message(heap, msg_val)?;
-    match target_val {
-        Value::Pid { node, id } => crate::dist::route(node, crate::dist::Target::Pid(id), msg),
+    let (routed, node) = match target_val {
+        Value::Pid { node, id } => (
+            crate::dist::route(node, crate::dist::Target::Pid(id), msg),
+            node,
+        ),
         Value::Map(mid) => {
             let (name, node) = read_name_address(heap, mid)?;
-            crate::dist::route(node, crate::dist::Target::Name(name), msg);
+            (
+                crate::dist::route(node, crate::dist::Target::Name(name), msg),
+                node,
+            )
         }
         _ => {
             return Err(LispError::type_err(
                 "send: target must be a pid or a {:name :node} address",
             ))
         }
+    };
+    if !routed && heap.proc_send_errors() {
+        return Err(LispError::runtime(format!(
+            "send: no connection to node {} (noconnection; raised because \
+             this process set (process-flag :send-errors true))",
+            crate::core::value::symbol_name(node)
+        ))
+        .with_code(crate::error::error_codes::DISTRIBUTION)
+        .with_hint(
+            "reconnect with (connect addr) — or run a supervised reconnector \
+             (require 'net/reconnect) — then resend",
+        ));
     }
     Ok(())
 }
@@ -774,42 +821,54 @@ mod tests {
         assert_eq!(gen3, current, "only the latest park's entry is live");
     }
 
-    /// Sticky `:kill` (the `request_kill` hardening): once an untrappable `:kill` is
-    /// latched, a racing *soft* `(exit …)` must not overwrite it — otherwise the soft
-    /// reason would downgrade the kill and a CPU-bound target (which honours only
-    /// `:kill`, at `preempt`) could survive. A `:kill` may still upgrade a pending
-    /// soft reason, and two soft reasons never become a kill.
+    /// Sticky **hard** kill (the `request_kill` hardening): once an untrappable
+    /// hard kill is latched, a racing *soft* `(exit …)` must not overwrite it —
+    /// otherwise the soft reason would downgrade the kill and a CPU-bound target
+    /// (which honours only a hard kill, at `preempt`) could survive. A hard kill
+    /// may still upgrade a pending soft reason, two soft reasons never become
+    /// hard, and — the link-propagation case — a hard kill carries whatever
+    /// reason it was requested with (hardness ≠ the `:kill` reason value).
     #[test]
     fn kill_is_sticky_against_a_racing_soft_exit() {
-        use crate::process::scheduler::is_kill_reason;
         let kill = || Message::Keyword(value::intern(pk::KILL));
         let soft = || Message::Keyword(value::intern("shutdown"));
 
-        // :kill, then a soft exit → still :kill (no downgrade).
+        // hard :kill, then a soft exit → still hard (no downgrade).
         let mb = Mailbox::new();
-        mb.request_kill(kill());
-        mb.request_kill(soft());
+        mb.request_kill(kill(), true);
+        mb.request_kill(soft(), false);
         assert!(
-            is_kill_reason(&mb.pending_kill().unwrap()),
-            "a soft exit must not downgrade a latched :kill"
+            mb.pending_hard_kill(),
+            "a soft exit must not downgrade a latched hard kill"
         );
 
-        // soft, then :kill → upgraded to :kill.
+        // soft, then hard :kill → upgraded to hard.
         let mb = Mailbox::new();
-        mb.request_kill(soft());
-        mb.request_kill(kill());
+        mb.request_kill(soft(), false);
+        mb.request_kill(kill(), true);
         assert!(
-            is_kill_reason(&mb.pending_kill().unwrap()),
-            "a :kill must upgrade a pending soft reason"
+            mb.pending_hard_kill(),
+            "a hard kill must upgrade a pending soft reason"
         );
 
-        // soft, then another soft → last soft wins; never spuriously a kill.
+        // soft, then another soft → last soft wins; never spuriously hard.
         let mb = Mailbox::new();
-        mb.request_kill(soft());
-        mb.request_kill(Message::Keyword(value::intern("other")));
+        mb.request_kill(soft(), false);
+        mb.request_kill(Message::Keyword(value::intern("other")), false);
         assert!(
-            !is_kill_reason(&mb.pending_kill().unwrap()),
-            "two soft reasons never become a kill"
+            !mb.pending_hard_kill(),
+            "two soft reasons never become a hard kill"
+        );
+
+        // link propagation: hard, but the reason is the ORIGINATING one — the
+        // peer's monitors report why the tree fell, not a blanket :kill.
+        let mb = Mailbox::new();
+        mb.request_kill(soft(), true);
+        assert!(mb.pending_hard_kill());
+        assert!(
+            matches!(mb.pending_kill().unwrap(),
+                     Message::Keyword(k) if k == value::intern("shutdown")),
+            "a hard kill carries its requested reason"
         );
     }
 

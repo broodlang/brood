@@ -14,16 +14,16 @@ body) 16%, `brood_rt_push` 5.5%, `brood_rt_call_slow` 4.8% — i.e. **~40% is th
 is the same shape. The protocol is shared by every Brood→Brood call, so cutting it pays off across
 `fib`/`pfib`/`spawn`/`nqueens`/any call-heavy code at once.
 
-### What a single non-tail call costs today (the `Inst::Call` lowering, `compile.rs:~5732`)
+### What a single non-tail call costs today (the `Inst::Call` lowering, `compile/jit_lower.rs`)
 
 1. **Stage operands** `[callee?, arg0..argc-1]` onto `roots` — **one `brood_rt_push` FFI call per
-   operand** (`compile.rs:5834`; the callback is `jit/mod.rs:410`, a `push_root`).
-2. **`brood_rt_call_slow`** (FFI, `jit/mod.rs:477`) → **`jit_dispatch_call`** (`compile.rs:~6560`):
+   operand** (`compile/jit_lower.rs`; the callback is `jit/mod.rs:410`, a `push_root`).
+2. **`brood_rt_call_slow`** (FFI, `jit/mod.rs:477`) → **`jit_dispatch_call`** (`compile/mod.rs`):
    the IC probe (`vm_call_ic_fast_link`), `truncate_roots` + `extend_roots_to_nil` to lay out the
    callee frame, env save/restore, `jit_native_depth` bump, `transmute` + call the callee's native
    `fn(*mut Heap, base)`, then outcome handling (0=ok/3=err/1,2,4=deopt-preempt-tail).
 3. **`brood_rt_roots_base`** (FFI) to re-fetch the (possibly relocated) frame base afterward
-   (`compile.rs:5860`).
+   (`compile/jit_lower.rs`).
 
 So every call crosses the FFI boundary **2 + argc times** and runs a chunk of Rust dispatch — even
 on the fast (no-clone, epoch-current, native-linked) path. The compiled callee body is often
@@ -68,7 +68,7 @@ top for leaf/helper calls and bounded recursion.
 - **GC discipline is the existing per-arm discipline** (`docs/jit-tier2.md §5`). A spliced callee
   body (B) or an inline-dispatched call (A) is still one arm: handles live across the call/safepoint
   must be in `roots`/slots, not registers — exactly the handle-spill the `Inst::Call` lowering does
-  today (`compile.rs:5806`). For B the callee's slots extend the caller's `nslots` (GC-visible,
+  today (`compile/jit_lower.rs`). For B the callee's slots extend the caller's `nslots` (GC-visible,
   nil-init'd by `push_frame` like any frame slot). `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` is the gate.
 - **The native code is position-independent + shareable** (proven by `eebfbd3`): it embeds only
   immediates + epoch-guarded globals and lives in the process-lifetime `GLOBAL_JIT` module. So a
@@ -181,7 +181,7 @@ against the uncapped spill (the regression cause is removed). Keep the conservat
 the benefit gate is revisited (that's the lever-2/allocation interaction, `allocation-elimination.md`).
 
 **DONE (2026-06-17) — Phase B / Phase 3 shipped, ~1.7× on fib.** The §6b self-inliner landed on top
-of Phase A: `shift_slots` + `inline_self_calls` + `self_inline_arm` in `compile.rs`, gated exactly as
+of Phase A: `shift_slots` + `inline_self_calls` + `self_inline_arm` in `compile/mod.rs`, gated exactly as
 designed (top-level no-capture recursive `defn`, no `SelfCall`/`MakeClosure`, fixed arity,
 `SELF_INLINE_MAX_BODY = 64`). fib(35) 0.53 → 0.31 s (~1.7×, ~4.4× → ~2.6× of Elixir); the inlined arm
 lowers to native (4 leaf calls, 3-handle spill — Phase A was the prerequisite). `BROOD_NO_INLINE=1`
@@ -200,6 +200,12 @@ shelved opt-in (`BROOD_JIT_INLINE=1`). Re-enabling it default-on (the JIT-only i
 the original) needs **per-engine frame sizing**, which is the same capability that removes the §1
 per-call protocol cost — both are scoped together in **`docs/frame-representation.md`** (the chosen
 structural lever after the incremental allocation levers measured neutral, devlog 2026-06-17).
+
+**SUPERSEDED (same day, 2026-06-17): the inliner shipped default-ON after all**, via two-stage
+tiering (dual-body: the VM keeps the small original, only the JIT runs the inlined body, with
+per-engine frame sizing + a deferred lower-priority inlined upgrade — see
+`crates/lisp/src/eval/compile/mod.rs` around `jit_tier`). `BROOD_JIT_INLINE=1` is gone; the lever is
+now the opt-*out* `BROOD_NO_INLINE=1`.
 
 ## 6b. Phase 3 — recursive self-inlining (the fib lever), designed 2026-06-16 (see 6c: regressed)
 
@@ -251,8 +257,8 @@ the target is `jit_dispatch_call` + `brood_rt_call_slow` dropping out of the pro
 
 ## 8. Key files & symbols
 
-- `crates/lisp/src/eval/compile.rs` — `jit_lower_arm` (the `Inst::Call` handler, `~5732`),
-  `jit_dispatch_call` (`~6560`, the dispatch to replace/inline), `vm_call_ic_fast_link` /
+- `crates/lisp/src/eval/compile/` — `jit_lower_arm` (the `Inst::Call` handler, `jit_lower.rs`),
+  `jit_dispatch_call` (`mod.rs`, the dispatch to replace/inline), `vm_call_ic_fast_link` /
   `vm_call_ic_probe` (the IC, `core/heap.rs`), `jit_tier`, `chunk_in_jit_subset`, `CompiledArm`
   (`share_key`, `jit_code`, `compile_epoch`).
 - `crates/lisp/src/jit/mod.rs` — `brood_rt_push`/`brood_rt_call_slow`/`brood_rt_roots_base` (the FFI
@@ -284,8 +290,8 @@ The original spec, as implemented:
 
 ## Technique A — increment 1 implementation spec (2026-06-18, code-grounded)
 
-Begun by reading the real code (`jit_dispatch_call` compile.rs:7540, the `Inst::Call` lowering
-~6700, `vm_call_ic_fast_link` + `CallIcEntry` heap.rs). Confirmed frontier with fresh `--bin`
+Begun by reading the real code (`jit_dispatch_call` in `compile/mod.rs`, the `Inst::Call` lowering
+in `compile/jit_lower.rs`, `vm_call_ic_fast_link` + `CallIcEntry` heap.rs). Confirmed frontier with fresh `--bin`
 numbers: `jit_dispatch_call` = **40.9% of fib(35)**. The cost is the Rust dispatch itself (IC probe +
 frame setup + env/depth bookkeeping + the native call + outcome), not the FFI arg-staging (fib stages
 1 arg). So the win requires emitting the **fast-link in IR** with a direct `call_indirect`.

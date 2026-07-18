@@ -22,6 +22,9 @@ build call (~7% end-to-end on build-heavy programs); no small-map regression.
 Covered by `tests/transients_test.blsp` (equivalence, input-immutability,
 cross-process round-trip, hot-reload), green under `BROOD_GC_STRESS=1`/`GC_VERIFY`.
 
+**REVERTED — the block below is kept as history only; none of this exists in
+the code today (immutability is absolute, ADR-026/112).**
+
 **Update (Phase 2 shipped — this note's rejection was overruled).** The
 user-facing surface *was* subsequently added: `transient` / `assoc!` / `dissoc!`
 / `persistent!` as builtins over a real `Value::Transient` (`heap.rs`
@@ -296,10 +299,10 @@ it — the global-immutability simplicity is worth a lot.
    unchanged. Add a transient `map_from_pairs`/`map_from_pairs_into` that sets
    the watermark and folds. Leave single-assoc `map_assoc` on `None` (a lone
    `assoc` has no reuse to exploit).
-2. `builtins.rs`: register `%map-from-pairs` (initial-map + sequence → map) over
-   the new builder; it reads the seq into `Vec<(Value, Value)>` then builds.
-   (Same `def(heap, name, arity, sig, fn_ptr)` pattern as the existing
-   `map_assoc`/`hash-map` entries around `builtins.rs:286`/`1976`.)
+2. the `crates/lisp/src/builtins/` directory: register `%map-from-pairs`
+   (initial-map + sequence → map) over the new builder; it reads the seq into
+   `Vec<(Value, Value)>` then builds. (Same `def(heap, name, arity, sig, fn_ptr)`
+   pattern as the existing `map_assoc`/`hash-map` entries.)
 3. `std/prelude.blsp`: re-point `into` (map branch), `zipmap`, `select-keys` at
    `%map-from-pairs`. Leave `frequencies`/`group-by`/`merge-with` unchanged
    (deferred scope above).

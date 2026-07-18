@@ -1,15 +1,18 @@
 # Step 4b — green M:N scheduler
 
-> Status: **implemented**, now **preemptive**, with **fresh-only work-stealing**.
-> Stages 1–2 (processes are `corosensei` coroutines on an ≈`nproc` worker pool,
-> suspending at `receive`) and Stage 4 (reduction-counted preemption — ADR-027)
-> are done. Stage 3 (work-stealing) landed in its **migration-free form** — an
-> idle worker steals *fresh, never-resumed* processes from a backed-up peer
-> (ADR-100, 2026-06-07; see Placement below). **Full migration of a *running*
-> process** (BEAM-style rebalancing) stays deferred — it is the *stepping-VM
-> endgame*, not a corosensei swap (`concurrency-v2.md` §7, ADR-100). The
-> *rationale* lives in [`concurrency.md`](concurrency.md); this is the build plan
-> and how it landed (ADR-018, ADR-027, ADR-100).
+> Status: **implemented — and since superseded in substrate.** This doc is the
+> 4b build plan as it landed on the **`corosensei` coroutine** substrate
+> (ADR-018, ADR-027). On **2026-06-08 the stepping-VM endgame shipped**
+> (ADR-100, [`concurrency-v2.md`](concurrency-v2.md) §8): corosensei is
+> **deleted**, a paused process is captured as relocatable heap data
+> (`Suspended` — bytecode frames + operand stack), work-stealing is **general**
+> (any queued process, not fresh-only), and **live cross-worker migration
+> works**. Reduction-counted preemption (ADR-027) carries over unchanged; a
+> native-nested `receive` blocks its worker instead (the dirty carve-out,
+> concurrency-v2 §7.4). Sections below that narrate coroutines/pinning are the
+> as-built history of the corosensei era — read `concurrency-v2.md` §8 and
+> `crates/lisp/src/process/scheduler.rs` for the current engine. The
+> *rationale* lives in [`concurrency.md`](concurrency.md).
 
 ## Goal & what changes
 
@@ -127,8 +130,9 @@ RwLock), so concurrent workers reading code is already fine.
 2. **N-worker pool.** Spin up ≈ `nproc` workers sharing the run queue
    (`Mutex<VecDeque>` + `Condvar`). Proves real parallelism and heap migration.
    `-j N` sets the count.
-3. **Work-stealing** (optimization). Per-worker deques + steal-on-idle, to cut run-
-   queue contention. Optional; only if profiling shows the global queue hurts.
+3. ✅ **Work-stealing.** Per-worker queues + steal-on-idle — landed fresh-only
+   first (2026-06-07), generalised to any process by the state-capture cutover
+   (ADR-100, 2026-06-08).
 4. ✅ **Reduction-counted preemption** (fairness — ADR-027). Scheduling is no
    longer cooperative-only: `eval`'s `'tail:` loop decrements a per-worker
    *reduction* counter (`process::tick`, budget ≈ 2000) and the process yields its
@@ -143,16 +147,14 @@ RwLock), so concurrent workers reading code is already fine.
 
 The target shape is Erlang's, lean:
 
-| BEAM | This plan |
+| BEAM | Brood (as shipped) |
 |---|---|
-| one scheduler thread per core, **per-scheduler run queues** | worker pool ≈ core count; **single shared run queue** to start (per-worker + stealing = stage 3) |
-| **reduction-counted preemption** (yield every ~2000 calls) | ✅ implemented (ADR-027): `eval` decrements a per-worker budget (~2000) and yields at zero |
-| `receive` suspends until a message arrives | same |
-| process migration / work-stealing across schedulers | deferred (stage 3); `Heap` is `Send`, so migration is *possible* from day one |
-| per-process generational copying GC | per-process arena + top-level reset (ADR-016); tracing GC deferred (Path B) |
-| dirty schedulers for long native calls | not needed yet (our builtins are short) |
-
-So we're "BEAM-minus-preemption-minus-migration" at first — both are additive later, not redesigns.
+| one scheduler thread per core, **per-scheduler run queues** | ✅ worker pool ≈ core count with **per-worker run queues** + steal-on-idle |
+| **reduction-counted preemption** (yield every ~2000 calls) | ✅ implemented (ADR-027): a per-worker budget (~2000, `BROOD_REDUCTIONS`); the JIT batches the countdown at loop back-edges |
+| `receive` suspends until a message arrives | same (selective receive + `after` timeouts) |
+| process migration / work-stealing across schedulers | ✅ general since ADR-100 (2026-06-08): a paused process is heap data — any queued process can be stolen, a woken process resumes on the least-loaded worker |
+| per-process generational copying GC | ✅ shipped (ADR-055/061/072) — per-process nursery + tenured old gen |
+| dirty schedulers for long native calls | the dirty-block carve-out (concurrency-v2 §7.4): a native-nested `receive` blocks its worker, which is excluded from placement and drains its backlog; an all-dirty pool grows an overflow drainer |
 
 ## Risks & open questions
 
@@ -172,40 +174,33 @@ So we're "BEAM-minus-preemption-minus-migration" at first — both are additive 
 - **Determinism.** Parallel scheduling makes interleavings nondeterministic; the
   test framework already tolerates this (results aggregate by message).
 
-## Out of scope (explicitly deferred)
+## Out of scope at 4b time (all have since landed)
 
-Precise mid-eval GC (needs Path B / scannable roots), supervision/links,
-work-stealing (stage 3), and cross-node distribution. None block 4b.
-(Reduction preemption was deferred here originally; it has since landed — ADR-027.)
+Everything this plan deferred has since shipped: precise mid-eval GC (the
+generational collector + any-depth safepoint, ADR-055/061), supervision/links
+(`std/proc/supervisor.blsp`, ADR-044/063/067), general work-stealing + live
+migration (ADR-100), and cross-node distribution (ADR-033/034/088/089).
+(Reduction preemption was deferred here originally too; it landed as ADR-027.)
 
-**Work-stealing note:** stage-3 work-stealing was first *deliberately removed* (the
-scheduler pinned each process to one worker — `2abf05e`) because cross-thread
-coroutine resume was the last slice of the KI-1 race. It is now **back in its safe
-form**: an idle worker steals *fresh, never-resumed* processes only (their first
-`resume` is on the thief, no saved native stack to migrate — ADR-100). Stealing a
-*running* (suspended) process is still off the table on the corosensei substrate,
-and the way to unblock it is the stepping-VM call-stack reification, **not** a
-substrate swap — root-cause analysis, invariants, and the full design are in
-[`concurrency-v2.md`](concurrency-v2.md) §3 and §7.
+**Work-stealing note (history → current):** stage-3 work-stealing was first
+*deliberately removed* (the scheduler pinned each process to one worker —
+`2abf05e`) because cross-thread coroutine resume was the last slice of the KI-1
+race, then reintroduced in its **fresh-only** safe form (steal only
+never-resumed processes). The stepping-VM cutover (ADR-100, 2026-06-08) removed
+the constraint entirely: with no native stack to pin, `try_steal` takes **any**
+queued process from a backed-up peer, and the `fresh` flag is gone. Root-cause
+analysis, invariants, and the full design are in
+[`concurrency-v2.md`](concurrency-v2.md) §3 and §8.
 
-**Placement + fresh-steal (the two load-balancing levers):** a *running* process
-never migrates, so the primary lever is **where it's first pinned**, decided once
-at spawn by `assign_worker` (`scheduler.rs`); the secondary lever is **fresh-only
-stealing** — an idle worker pulls a not-yet-resumed process from a backed-up
-peer's queue (`try_steal`) and re-pins it, rebalancing a spawn-burst backlog that
-placement didn't spread. Neither moves an already-running process. The policy is **least-loaded with a rotating
-start**: scan the per-worker queues from a round-robin offset (`NEXT_WORKER`) and
-pick the lightest, breaking ties toward the rotation. A worker's load is its
-runnable-queue length **plus 1 if it's currently inside `resume`** (the
-`WORKER_BUSY` gauge) — so a worker draining one CPU-bound process reads as loaded
-even with an empty queue, instead of looking idle. When the pool is idle this
-degrades to plain round-robin (so N spawns onto N idle cores land one-per-core);
-when one worker is backed up, fresh processes steer to idle cores. Two caveats
-follow from pinning: it balances *process count*, not *CPU load* (a count-balanced
-placement can still be load-skewed and, once a process is running, can't
-self-correct — fresh-only stealing fixes *unstarted* backlog but not a process
-that turns long-running after placement; that needs live-process migration, the
-stepping-VM endgame in `concurrency-v2.md` §7, still deferred), and under heavy
-concurrent spawning the relaxed
-`NEXT_WORKER` rotation + `try_lock` queue sampling make it *approximately*, not
-exactly, round-robin.
+**Placement + stealing (the load-balancing levers today):** spawn placement is
+scan-free — a process spawned from a worker lands on that worker's queue, else
+round-robin (`pick_spawn_worker`); an idle worker steals from the back of a
+backed-up peer's queue (`try_steal`, rotating-start `try_lock` scan, gated by a
+relaxed `STEALABLE` counter so a truly-idle pool re-parks cheaply). A *woken*
+process is re-routed to the least-loaded worker (`assign_worker`: queue length
+plus 1 if the worker is inside a quantum — the `WORKER_BUSY` gauge — with a
+direct-handoff optimisation that elides cross-thread futex wakes on
+send-then-receive ping-pong); a *preempted* process re-enqueues on its own
+worker for cache locality. Dirty-blocked workers (a native-nested `receive`)
+are excluded from placement and drain their stranded backlog onto peers.
+Observable via `(steal-count)`.

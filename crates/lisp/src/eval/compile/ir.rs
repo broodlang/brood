@@ -550,6 +550,15 @@ pub struct CompiledArm {
     /// flat capture frame — the VM-built common case — with an `env_get`-by-name fallback
     /// for a chained/tree-walker env, so it's correct in both engines).
     pub capture_names: Box<[Symbol]>,
+    /// The closure's name (`Closure::name`), for error stack traces — `None` for
+    /// an anonymous `fn` or a synthetic wrapper arm. Unlike the jit-only
+    /// `dbg_name` (top-level `defn`s only — its symbol keys semantic tables like
+    /// `i64_mark_too_deep`), this is purely diagnostic and set for *any* named
+    /// closure.
+    pub fn_name: Option<Symbol>,
+    /// The source file this arm's body was read from (via `Heap::form_pos` at
+    /// compile time), for error stack traces. `None` for REPL/eval'd code.
+    pub src_file: Option<std::sync::Arc<str>>,
     /// Recursive self-inlining (Phase B, the two-stage tiering upgrade, devlog
     /// 2026-06-17). `Some(name)` when this arm qualifies as a top-level no-capture
     /// recursive `defn` whose body the JIT can splice depth-1 of into its own frame
@@ -989,6 +998,21 @@ pub enum Inst {
 }
 
 impl Inst {
+    /// The source position this instruction was compiled from, when recorded —
+    /// used by the error-trace builder: a caller frame's `code[ip - 1]` is the
+    /// `Inst::Call` that pushed the callee, so its `pos` is the call site.
+    pub(crate) fn call_pos(&self) -> Option<Pos> {
+        match self {
+            Inst::Prim1 { pos, .. }
+            | Inst::Prim2 { pos, .. }
+            | Inst::Prim3 { pos, .. }
+            | Inst::Prim2SlotSlot { pos, .. }
+            | Inst::Prim2SlotInt { pos, .. }
+            | Inst::Call { pos, .. } => *pos,
+            _ => None,
+        }
+    }
+
     /// Compact name for `BROOD_VM_TRACE` output — variant + key operands,
     /// no AtomicU64 (not Debug-able).
     #[cfg(debug_assertions)]

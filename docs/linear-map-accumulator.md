@@ -1,7 +1,10 @@
 # Design note — fast immutable-map folds via a linear-accumulator → Table rewrite
 
-**Status:** design, not yet implemented. Targets the `wordcount`-class gap (a
-streaming fold that builds an immutable map one update at a time).
+**Status:** shipped — the pass lives in `crates/lisp/src/eval/macros.rs`
+(`linmap_split_def` and friends, with `%table-from-map`/`table-snapshot` as the
+runtime endpoints). Targets the `wordcount`-class gap (a streaming fold that
+builds an immutable map one update at a time). §7–9 below describe the plan as
+designed, and match the as-built shape.
 
 **Goal:** make a hand-written immutable-map fold — e.g.
 

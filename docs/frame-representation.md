@@ -26,6 +26,11 @@
 > levels. **Revised plan: SKIP Phases 1–2 (neutral). Build the RootStack (option B) justified
 > ONLY by Phase 3 (per-engine frame sizing → inliner default-on: fib ~1.7×, no spawn/bintree
 > regression) + Phase 4 (wider coverage).**
+>
+> **NOTE (later 2026-06-17): the self-inliner unblock already happened** — it shipped
+> default-ON via two-stage tiering the same day (see devlog), so Phase 3's "re-enable the
+> inliner" goal is done. The doc's remaining live rationale is the per-call protocol cost +
+> wider JIT coverage (Phase 4).
 
 ## 1. Why this, and why now
 
@@ -169,9 +174,9 @@ reverted, not shipped** (the lesson from this session's neutral allocation lever
 - `crates/lisp/src/core/heap.rs` — `roots`/`env_roots` (`:895`), `push_root`/
   `extend_roots_to_nil`/`truncate_roots`/`roots_base_ptr` (`:4107+`), `arena_flip` (`:2989`,
   the in-place relocation Phase 0 must preserve), `push_frame` (`:3158`).
-- `crates/lisp/src/eval/compile.rs` — `jit_dispatch_call` (`:7238`, the protocol Phases 1–2
-  internalize), `jit_lower_arm` (the `Inst::Call` lowering), the shelved self-inliner
-  (`self_inline_arm`/`shift_slots`, gated `BROOD_JIT_INLINE`) for Phase 3.
+- `crates/lisp/src/eval/compile/` — `jit_dispatch_call` (`mod.rs`, the protocol Phases 1–2
+  internalize), `jit_lower_arm` (the `Inst::Call` lowering, `jit_lower.rs`), the self-inliner
+  (`self_inline_arm`/`shift_slots`, `mod.rs`) for Phase 3.
 - `crates/lisp/src/jit/mod.rs` — `brood_rt_push`/`brood_rt_roots_base`/`brood_rt_call_slow`
   (`:396+`, the FFI Phases 1–2 remove from the hot path), `Jit::new` symbol registration.
 - Background: `docs/jit-optimizing-tier.md`, `docs/jit-tier2.md`, `docs/vm-perf-and-jit-runway.md`

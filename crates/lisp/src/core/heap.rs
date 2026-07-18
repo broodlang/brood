@@ -1675,6 +1675,22 @@ pub struct Heap {
     gc_runs: u64,
     gc_copied: u64,
     gc_reclaimed: u64,
+    /// Per-process heap limit (bytes), the BEAM `max_heap_size` analogue — set by
+    /// this process on itself via `(process-flag :max-heap n)`, `None` = unlimited
+    /// (the default; the ADR-043 global soft/hard cap is separate). Checked
+    /// **after** each collection against the *surviving* footprint (nursery +
+    /// old gen), so transient garbage a collection reclaims never trips it.
+    proc_mem_limit: Option<usize>,
+    /// Sticky post-collection flag: `Some(live_bytes)` when the last collection
+    /// left the heap over `proc_mem_limit`. Probed (and cleared) at the eval/VM
+    /// safepoints, which raise a catchable error **in this process only** — the
+    /// per-process isolation the global hard cap (whole-OS-process abort) lacks.
+    proc_limit_hit: Option<usize>,
+    /// `(process-flag :send-errors on)` — when set, a `send` whose target *node*
+    /// is unknown/disconnected raises a catchable `:noconnection` error instead
+    /// of silently dropping the message (the dist self-healing seam). Default
+    /// off: Erlang's silent-send semantics.
+    proc_send_errors: bool,
     /// Per-process GC **trace** switch (`(gc-trace on/off)`, defaulted from
     /// `BROOD_GC_TRACE`). When set, each minor/major collection prints a one-line
     /// summary to stderr — a Tier-1 observability aid for tests/benchmarks (the
@@ -2104,6 +2120,9 @@ impl Heap {
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
+            proc_mem_limit: None,
+            proc_limit_hit: None,
+            proc_send_errors: false,
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
             seen_free_epoch: Cell::new(0),
@@ -2166,6 +2185,9 @@ impl Heap {
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
+            proc_mem_limit: None,
+            proc_limit_hit: None,
+            proc_send_errors: false,
             gc_trace: gc_trace_default(),
             vm_cache: RefCell::new(VmCacheMap::default()),
             seen_free_epoch: Cell::new(0),
@@ -4147,6 +4169,7 @@ impl Heap {
         self.gc_reclaimed = self
             .gc_reclaimed
             .saturating_add(before.saturating_sub(survivors) as u64);
+        self.note_proc_limit();
         // `old` drops here, releasing every LOCAL slot the previous iteration
         // ever allocated.
     }
@@ -7134,6 +7157,53 @@ impl Heap {
         slab_bytes(&self.local)
     }
 
+    /// Set this process's heap limit (bytes; `None` = unlimited), returning the
+    /// previous setting — the `(process-flag :max-heap n)` mechanism. Clearing
+    /// the limit also clears a pending hit, so `(process-flag :max-heap nil)`
+    /// inside a `catch` genuinely rescues the process.
+    pub fn set_proc_mem_limit(&mut self, limit: Option<usize>) -> Option<usize> {
+        if limit.is_none() {
+            self.proc_limit_hit = None;
+        }
+        std::mem::replace(&mut self.proc_mem_limit, limit)
+    }
+
+    /// This process's heap limit, if set. Backs the `(process-flag :max-heap)` read.
+    pub fn proc_mem_limit(&self) -> Option<usize> {
+        self.proc_mem_limit
+    }
+
+    /// `(process-flag :send-errors on)` — should a `send` to a disconnected node
+    /// raise `:noconnection` (vs Erlang's silent drop)? Setter returns the
+    /// previous value.
+    pub fn proc_send_errors(&self) -> bool {
+        self.proc_send_errors
+    }
+    pub fn set_proc_send_errors(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.proc_send_errors, on)
+    }
+
+    /// Take the sticky over-limit flag (post-collection live bytes) — the eval/VM
+    /// safepoint probe. Clearing on read means the raise happens exactly once;
+    /// if the process catches it and keeps allocating, the next collection
+    /// re-arms the flag.
+    pub fn take_proc_limit_hit(&mut self) -> Option<usize> {
+        self.proc_limit_hit.take()
+    }
+
+    /// Post-collection heap-limit check: called at the end of both collection
+    /// paths (legacy flip + generational), where the slabs hold exactly the
+    /// survivors — so the figure is *live* data, never reclaimable garbage.
+    /// O(1) (slab lens × sizes); no-op unless a limit is set.
+    fn note_proc_limit(&mut self) {
+        if let Some(limit) = self.proc_mem_limit {
+            let live = slab_bytes(&self.local) + slab_bytes(&self.old);
+            if live > limit {
+                self.proc_limit_hit = Some(live);
+            }
+        }
+    }
+
     /// GC observability counters (Tier-1; `docs/memory-review.md` §7), as a
     /// `(runs, copied, reclaimed)` triple of cumulative figures since process
     /// start: collections performed, LOCAL objects relocated, LOCAL objects
@@ -7804,6 +7874,7 @@ impl Heap {
         self.gc_reclaimed = self
             .gc_reclaimed
             .saturating_add(before_young.saturating_sub(survivors) as u64);
+        self.note_proc_limit();
         if self.gc_trace {
             eprintln!(
                 "[gc] minor {}: {} nursery objects, {} {}, {} reclaimed",
@@ -8417,7 +8488,7 @@ macro_rules! flush_bound {
 /// that runs ≥ n ms logs `[stall] <label> Nms` to stderr. Release-capable; zero cost
 /// (no `Instant`) unless the env is set. Used to pinpoint a long pause (GC vs compaction
 /// vs elsewhere) in a live session that can't be driven headless.
-fn stall_threshold_ms() -> Option<u128> {
+pub(crate) fn stall_threshold_ms() -> Option<u128> {
     static MS: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
     *MS.get_or_init(|| {
         std::env::var("BROOD_STALL_MS")

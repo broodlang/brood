@@ -207,7 +207,7 @@ the payload rather than nesting a second archive.
 
 - `crates/lisp/src/bundle.rs` — wire format, `current_exe` mount, `strip_existing`,
   `write_release` (+ unit tests)
-- `crates/lisp/src/builtins.rs` — `%bundled?`, `%bundle-manifest`,
+- `crates/lisp/src/builtins/system.rs` (+ registration in `builtins/mod.rs`) — `%bundled?`, `%bundle-manifest`,
   `%bundle-module-names`; `%builtin-module` consults the bundle; `CORE_MODULES`
   vs `DEV_MODULES` (the latter `#[cfg(feature = "dev-tools")]`); GC debug builtins
   cfg-gated

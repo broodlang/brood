@@ -1,5 +1,9 @@
 # Plan — the `Value` representation decision (the JIT prerequisite)
 
+*See also [`value-representation.md`](value-representation.md) — despite the similar name it
+is a distinct doc (the post-JIT 8-byte shrink scope, unstarted); this one records the
+pre-JIT "keep the enum" decision.*
+
 > **Update (2026-06-14): decision held — the tier-1 JIT shipped on the enum
 > (§5, option D), and the easy codegen wins are landed (geomean 19.5× → 13.5×). With a
 > real JIT in hand, the remaining single-threaded gaps profile as

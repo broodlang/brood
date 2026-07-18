@@ -133,7 +133,8 @@ path, which already recurses into every sub-form (including a `throw` call's
 argument) in the normal macroexpanded walk.
 
 **Why this doesn't touch `Ty`, doesn't need a new pass, and doesn't revisit
-the reverted `of_value` extension from ADR-117:** the scrutinee's type comes
+the reverted `of_value` extension from ADR-117 (which later shipped as Gap B0,
+2026-07-10 — see [type-gating.md](type-gating.md)):** the scrutinee's type comes
 from its *declared* `(sig …)` type via the exact same `ctx.declared_sig` →
 `sig_params` → `expr_ty` pipeline every other check already uses. Nothing
 about literal-in-*code* inference (`of_value`) is touched, so the

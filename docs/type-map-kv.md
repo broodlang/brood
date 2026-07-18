@@ -1,9 +1,11 @@
 # Map key/value types — `(map KeyType ValType)` in the type grammar
 
 > Status: **slice 1 shipped** (Brood runtime), **slice 2 shipped** (checker
-> flat-accept). `type-matches?` walks `entries` to verify each key/value pair;
-> `parse_type` parses `(map K V)` and produces `Ty::of(Tag::Map)`. Slice 3 (full
-> `map_kv` refinement in `Ty`) deferred until a real consumer drives it.
+> flat-accept), **slice 3 shipped** (full `map_kv` refinement in `Ty`).
+> `type-matches?` walks `entries` to verify each key/value pair; `parse_type`
+> (`check/annot.rs:132-137`) now produces `Ty::map_of(k, v)`, and
+> `check/guards.rs:1188-1212` derives precise `get`/`keys`/`vals`/`assoc`
+> result types from `Ty::map_kv`.
 
 ## Problem
 

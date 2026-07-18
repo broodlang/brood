@@ -2062,7 +2062,11 @@ fn compile_arm(
     enclosing: Vec<Symbol>,
     self_name: Option<Symbol>,
     defn_name: Option<Symbol>,
+    trace_name: Option<Symbol>,
 ) -> Option<CompiledArm> {
+    // Grab the first body form before `body` is shadowed by the compiled Node —
+    // its recorded reader position carries the defining source file (`src_file`).
+    let body_first_form = body.first().copied();
     let nrequired = required.len();
     let noptional = optionals.len();
     let mut scope = Scope::with_params_enclosing(&[], enclosing);
@@ -2197,6 +2201,13 @@ fn compile_arm(
         compile_epoch: AtomicU64::new(0),
         share_key: None,
         shared_published: std::sync::atomic::AtomicBool::new(false),
+        fn_name: trace_name,
+        // The file the body was read from — trace entries name it as the call
+        // site's file (a fn's calls are in its own source). Cold: once per arm
+        // compile.
+        src_file: body_first_form
+            .and_then(|f| heap.form_pos(f))
+            .and_then(|(_, file)| file),
         capture_names,
         #[cfg(feature = "jit")]
         inline_name,
@@ -2240,6 +2251,8 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     // letrec. The in-flight call's Arc owns the compiled arm, so it runs the current
     // compiled version even if the global is redefined; new callers see the new version.
     let defn_name: Option<Symbol> = if cl.env.is_none() { cl.name } else { None };
+    // Any closure's name (top-level or not), for error stack traces (`fn_name`).
+    let trace_name: Option<Symbol> = cl.name;
     // Snapshot every arm's shape + body (cloning ends the `cl` borrow), then compile
     // each via [`compile_arm`]. An arm is VM-eligible when its body — and every real
     // `&optional` default form — is core vocabulary; otherwise that arm defers
@@ -2275,6 +2288,7 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
             enclosing.clone(),
             self_name,
             defn_name,
+            trace_name,
         )
         .map(|mut arm| {
             // Shared-JIT identity (the spawn lever, ADR-101): a simple fixed-arity
@@ -4015,12 +4029,15 @@ pub(crate) fn run_process_body(
 
 /// The one-shot slot the **root program process** publishes its terminal outcome to,
 /// and the main (root) thread blocks on. `Ok(())` = every top-level form ran to
-/// completion; `Err(msg)` = a top-level form raised (the message is already tagged
-/// `FILE:LINE:COL:`). A program that never returns (a top-level server that suspends
-/// forever in `receive`) simply never publishes — the root thread blocks indefinitely,
-/// exactly as it did when it ran the program itself.
+/// completion; `Err(e)` = a top-level form raised — the **structured** error (file/pos
+/// already attached), so the CLI can render the full report (caret, hint, call trace)
+/// instead of a pre-flattened string. The error's `payload` is stripped before
+/// publishing: a `Value` is a handle into the program process's heap, which is dead by
+/// the time the root thread reads the slot. A program that never returns (a top-level
+/// server that suspends forever in `receive`) simply never publishes — the root thread
+/// blocks indefinitely, exactly as it did when it ran the program itself.
 pub struct ProgramExit {
-    slot: std::sync::Mutex<Option<Result<(), String>>>,
+    slot: std::sync::Mutex<Option<Result<(), LispError>>>,
     cv: std::sync::Condvar,
 }
 
@@ -4032,7 +4049,7 @@ impl ProgramExit {
         })
     }
 
-    fn publish(&self, r: Result<(), String>) {
+    fn publish(&self, r: Result<(), LispError>) {
         let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         if g.is_none() {
             *g = Some(r);
@@ -4041,7 +4058,7 @@ impl ProgramExit {
     }
 
     /// Block the calling (root) thread until the program publishes its outcome.
-    pub fn wait(&self) -> Result<(), String> {
+    pub fn wait(&self) -> Result<(), LispError> {
         let mut g = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         while g.is_none() {
             g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
@@ -4225,19 +4242,24 @@ impl ProgramState {
         Ok(())
     }
 
-    /// A top-level form raised: publish the located message to the root thread and retire
-    /// the process `:normal` (it handled its own crash), so the scheduler prints nothing.
+    /// A top-level form raised: publish the structured error to the root thread and
+    /// retire the process `:normal` (it handled its own crash), so the scheduler prints
+    /// nothing.
     fn crash(&self, e: LispError) -> VmOutcome {
         // Attach the file to the error's own field (innermost `load` wins, a no-op if
         // already set) so `located()` renders the canonical `file:LINE:COL: msg` — NOT
         // string-prepend `file: ` onto an already-located `LINE:COL: msg`, which emits a
         // stray space (`file: LINE:COL:`) that diverges from the tree-walker's editor-
         // parseable form. (Found by the differential fuzzer, 2026-07-16.)
-        let e = match &self.file {
+        let mut e = match &self.file {
             Some(f) => e.or_file(f.clone()),
             None => e,
         };
-        self.exit.publish(Err(e.located()));
+        // The payload `Value` is a handle into THIS process's heap — dead once the
+        // root thread reads the slot. Everything else (message, pos, hint, trace)
+        // is plain data and crosses intact.
+        e.payload = None;
+        self.exit.publish(Err(e));
         VmOutcome::Done(Value::nil())
     }
 }
@@ -5041,6 +5063,10 @@ fn exec_chunk(
                             if let Some(used) = crate::core::alloc::soft_limit_hit() {
                                 return Err(crate::eval::memory_limit_error(used));
                             }
+                            if let Some(live) = heap.take_proc_limit_hit() {
+                                let limit = heap.proc_mem_limit().unwrap_or(0);
+                                return Err(crate::eval::proc_memory_limit_error(live, limit));
+                            }
                             if capture {
                                 if crate::process::capture_hard_kill_pending() {
                                     return Ok(ChunkExit::Killed);
@@ -5171,6 +5197,10 @@ fn exec_chunk(
                 *ip = 0;
                 if let Some(used) = crate::core::alloc::soft_limit_hit() {
                     return Err(crate::eval::memory_limit_error(used));
+                }
+                if let Some(live) = heap.take_proc_limit_hit() {
+                    let limit = heap.proc_mem_limit().unwrap_or(0);
+                    return Err(crate::eval::proc_memory_limit_error(live, limit));
                 }
                 if capture {
                     if crate::process::capture_hard_kill_pending() {
@@ -5376,6 +5406,58 @@ pub(crate) enum VmOutcome {
 /// `receive` suspend returns `Ok(VmOutcome::Suspended(..))` *without unwinding* (the roots
 /// must survive for the resume). The driver runs directly on the worker thread; the
 /// continuation lives entirely in `s`, no native stack involved.
+/// Append this driver's live frames to `e`'s call trace, innermost first — the
+/// raise-path walk behind `:trace` on caught error maps. Each entry pairs a
+/// frame's function name with the **call site that entered it**: a pending
+/// caller's saved `ip` is the return address, so `code[ip - 1]` is the
+/// `Inst::Call` that pushed the callee and its recorded `pos` (plus the caller
+/// arm's `src_file`) locate the call. Tail calls collapse naturally — a tail
+/// callee reuses its caller's frame, so the entry shows the final callee's name
+/// at the original call site (the BEAM behaviour). Nested drivers (a native's
+/// `vm_apply` callback) each append their own frames as the error crosses them,
+/// so the chain accumulates across native boundaries. Only ever runs on the
+/// error path; capped at [`crate::error::MAX_TRACE_FRAMES`] keeping the
+/// innermost frames (the end that shows a recursion cycle).
+fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: &[BcFrame]) {
+    use crate::error::TraceFrame;
+    if e.is_control() || e.trace_full() {
+        return;
+    }
+    fn call_site(f: &BcFrame) -> (Option<String>, Option<crate::error::Pos>) {
+        let pos = f
+            .arm
+            .chunk
+            .as_ref()
+            .and_then(|c| f.ip.checked_sub(1).and_then(|i| c.code.get(i)))
+            .and_then(|inst| inst.call_pos());
+        (f.arm.src_file.as_deref().map(str::to_string), pos)
+    }
+    // The running arm's entry, called from the innermost pending caller; then the
+    // pending callers themselves — frame k was called from frame k-1, and the
+    // driver's outermost frame (k = 0) was entered from a native boundary or the
+    // top level, which the next driver out (if any) accounts for.
+    let (file, pos) = frames.last().map(call_site).unwrap_or((None, None));
+    e.push_trace(TraceFrame {
+        name: cur_arm.fn_name.map(value::symbol_name_ref),
+        file,
+        pos,
+    });
+    for k in (0..frames.len()).rev() {
+        if e.trace_full() {
+            break;
+        }
+        let (file, pos) = match k {
+            0 => (None, None),
+            _ => call_site(&frames[k - 1]),
+        };
+        e.push_trace(TraceFrame {
+            name: frames[k].arm.fn_name.map(value::symbol_name_ref),
+            file,
+            pos,
+        });
+    }
+}
+
 fn vm_run_bc(
     heap: &mut Heap,
     arm0: Arc<CompiledArm>,
@@ -5467,10 +5549,11 @@ fn vm_run_bc(
             } else {
                 usize::MAX
             };
-            if let Err(e) = push_frame(heap, &cur_arm, args0, cur_env) {
+            if let Err(mut e) = push_frame(heap, &cur_arm, args0, cur_env) {
                 heap.truncate_roots(entry_roots);
                 heap.truncate_env_roots(entry_env);
                 heap.live_arm_truncate(entry_arms);
+                attach_vm_trace(&mut e, &cur_arm, &[]);
                 return Err(e);
             }
             cur_ip = 0usize;
@@ -5559,7 +5642,19 @@ fn vm_run_bc(
         }
         if let Some(used) = crate::core::alloc::soft_limit_hit() {
             unwind(heap);
-            return Err(crate::eval::memory_limit_error(used));
+            let mut e = crate::eval::memory_limit_error(used);
+            attach_vm_trace(&mut e, &cur_arm, &frames);
+            return Err(e);
+        }
+        // Per-process heap limit (`(process-flag :max-heap n)`): the sticky flag
+        // the loop-top collection armed raises here — catchable, and it kills
+        // just this process, with the trace showing where the data was live.
+        if let Some(live) = heap.take_proc_limit_hit() {
+            unwind(heap);
+            let limit = heap.proc_mem_limit().unwrap_or(0);
+            let mut e = crate::eval::proc_memory_limit_error(live, limit);
+            attach_vm_trace(&mut e, &cur_arm, &frames);
+            return Err(e);
         }
         if capture {
             // State-capture preemption/kill (ADR-100 §8.1), in place of the coroutine
@@ -5595,7 +5690,9 @@ fn vm_run_bc(
         }
         if crate::process::deadline_exceeded() {
             unwind(heap);
-            return Err(crate::eval::deadline_error());
+            let mut e = crate::eval::deadline_error();
+            attach_vm_trace(&mut e, &cur_arm, &frames);
+            return Err(e);
         }
 
         // Either run the arm natively (if it's flagged for a tier check) or interpret it.
@@ -5803,7 +5900,9 @@ fn vm_run_bc(
             Ok(ChunkExit::Call { arm, args, genv }) => {
                 if frames.len() + 1 > MAX_BC_FRAMES {
                     unwind(heap);
-                    return Err(crate::eval::bc_frame_depth_error(frames.len()));
+                    let mut e = crate::eval::bc_frame_depth_error(frames.len());
+                    attach_vm_trace(&mut e, &cur_arm, &frames);
+                    return Err(e);
                 }
                 // Suspend the caller (resume at the already-advanced `cur_ip`) and
                 // switch the registers to the callee. `exec_chunk` already dropped the
@@ -5827,8 +5926,9 @@ fn vm_run_bc(
                 } else {
                     usize::MAX
                 };
-                if let Err(e) = push_frame(heap, &cur_arm, &args, cur_env) {
+                if let Err(mut e) = push_frame(heap, &cur_arm, &args, cur_env) {
                     unwind(heap);
+                    attach_vm_trace(&mut e, &cur_arm, &frames);
                     return Err(e);
                 }
                 // The callee frame is set up at `roots[cur_base..]` with `cur_ip = 0`; flag
@@ -5854,8 +5954,9 @@ fn vm_run_bc(
                 } else if arm.has_runtime_handles {
                     cur_arm_slot = heap.live_arm_push(arm.clone());
                 }
-                if let Err(e) = push_frame(heap, &arm, &args, cur_env) {
+                if let Err(mut e) = push_frame(heap, &arm, &args, cur_env) {
                     unwind(heap);
+                    attach_vm_trace(&mut e, &cur_arm, &frames);
                     return Err(e);
                 }
                 cur_arm = arm;
@@ -5947,6 +6048,8 @@ fn vm_run_bc(
                 if capture && e.is_kill_signal() {
                     return Ok(VmOutcome::Killed);
                 }
+                let mut e = e;
+                attach_vm_trace(&mut e, &cur_arm, &frames);
                 return Err(e);
             }
         }
@@ -6013,6 +6116,8 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 compile_epoch: AtomicU64::new(0),
                 share_key: None,
                 shared_published: std::sync::atomic::AtomicBool::new(false),
+                fn_name: None,
+                src_file: None,
                 capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
@@ -7758,6 +7863,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -7883,6 +7990,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -7987,6 +8096,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8063,6 +8174,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8149,6 +8262,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8277,6 +8392,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8344,6 +8461,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8405,6 +8524,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8475,6 +8596,8 @@ mod tests {
             compile_epoch: std::sync::atomic::AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8633,6 +8756,8 @@ mod tests {
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8802,6 +8927,8 @@ mod tests {
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,
@@ -8911,6 +9038,8 @@ mod tests {
             compile_epoch: AtomicU64::new(0),
             share_key: None,
             shared_published: std::sync::atomic::AtomicBool::new(false),
+            fn_name: None,
+            src_file: None,
             capture_names: Box::new([]),
             #[cfg(feature = "jit")]
             inline_name: None,

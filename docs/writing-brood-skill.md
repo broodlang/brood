@@ -79,8 +79,9 @@ attached, prefer it over guessing: it's how you check that the code you're about
 to write actually works. Its tools:
 
 - **`eval`** — evaluate a Brood expression in the running image. Use it to test a
-  function before committing it to a file, or to reproduce a bug. *Return data
-  as the result value — don't `(print …)`; that corrupts the JSON-RPC stream.*
+  function before committing it to a file, or to reproduce a bug. *Prefer
+  returning data as the result value; `(print …)` is safe too — the dispatcher
+  captures stdout process-scoped and returns it as a separate block.*
 - **`load`** — load a file into the image (re-`def`s its globals, hot-reload).
   The image is a separate world from disk: after editing a file, `eval` sees the
   *old* defs until you `load` it. Reflex: edit → `load` → `eval`.

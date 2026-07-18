@@ -149,6 +149,9 @@ The live set = everything reachable from these, transitively through RUNTIME cod
     ~1900 ≪ 6000, `f` still correct); green under `BROOD_GC_STRESS=1
     BROOD_GC_VERIFY=1`. The manual-path tests opt out via `set_rt_auto_collect(false)`.
   - **2c — runtime-wide stop-the-world (design; the race-prone part, deferred).**
+    [Note: this subsection's coroutine framing is stale — the coroutine substrate was
+    replaced by state capture on 2026-06-08 (ADR-100, `concurrency-v2.md` §8), so the
+    2c protocol would need re-deriving against the state-capture scheduler.]
     Lets the collector run when *other processes are live* — today 2b's `Arc::get_mut`
     gate skips (`:ran false`) because parked processes still hold runtime-`Arc`
     clones. Grounded in the scheduler as it is:

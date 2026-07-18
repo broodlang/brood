@@ -196,16 +196,32 @@ a form or string) — the signal to read another line. Matches the stable error
 code rather than re-scanning delimiters (ADR-049)."
   (and (map? e) (= (get e :code) *repl-incomplete-code*)))
 
+(defn repl--trace-lines (tr)
+  "Render an error map's :trace entries as `  at fn (file:line:col)` lines,
+innermost frame first (each location is the call site that entered the frame)."
+  (join ""
+    (map (fn (f)
+           (str "\n  at " (or (get f :fn) "<fn>")
+             (cond
+               (contains? f :line)
+               (str " (" (if (contains? f :file) (str (get f :file) ":") "")
+                 (get f :line) ":" (get f :col) ")")
+               (contains? f :file) (str " (" (get f :file) ")")
+               :else "")))
+      tr)))
+
 (defn repl--error-message (e)
   "Render a caught value for display: built-in errors arrive as a structured map
-`{:kind :message [:line :col] …}`, a user `throw` arrives as the raw value."
+`{:kind :message [:line :col] [:trace …] …}`, a user `throw` arrives as the raw
+value."
   (if (and (map? e) (contains? e :message))
     (str (if (contains? e :kind) (str (name (get e :kind)) " error") "error")
       ": "
       (get e :message)
       (if (contains? e :line)
         (str " (line " (get e :line) ", col " (get e :col) ")")
-        ""))
+        "")
+      (if (contains? e :trace) (repl--trace-lines (get e :trace)) ""))
     (str "error: " (if (string? e) e (pr-str e)))))
 
 (defn repl--print-value (v)

@@ -72,11 +72,12 @@ any combination composes freely on one declared type (`(or :ok 5)`). `false`
 type, use `nil`" guidance was scoped to the keyword-only era (avoiding
 `false`/`nil` confusion in an *enumerated keyword* set specifically), not a
 technical restriction; now that bool-literal types are their own real kind,
-`(sig f (false -> any))` means exactly what it looks like. See
+`(sig f (false -> any))` means exactly what it looks like. Call-site literal-argument precision **shipped as Gap B0** (2026-07-10): a
+literal int/bool/string *argument* is now recognized as a singleton via
+`Ty::of_value`/`expr_ty`, the way a literal keyword argument always was (an
+early int attempt was reverted; B0 landed it cleanly). See
 [type-int-literals.md](type-int-literals.md)/[type-bool-string-literals.md](type-bool-string-literals.md)
-for what's still deferred (a literal int/bool/string *argument* at a call
-site isn't recognized as a singleton the way a literal keyword argument
-already is — tried for int, reverted).
+for the history.
 
 **Match exhaustiveness and redundancy (ADR-118/120/121).** A `match` over a
 scrutinee whose declared type is a pure enumerable literal type (any mix of
@@ -118,9 +119,7 @@ unconditionally as if it can't be `nil` is still caught. `&optional` before
 dropped by the parser rather than misparsed.
 
 Base names map to the same lattice points the predicates imply (`number` =
-`int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …). Deferred: map K/V
-full checker refinement (`map_kv` in `Ty`); type variable unification at call
-sites (`SigTerm` route — see [type-variables.md](type-variables.md)).
+`int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …).
 
 A `(sig name (… -> …))` whose type-expr is an **arrow** declares a function
 signature. Non-arrow `(sig x int)` (a value's type) declares a **value type**:
@@ -193,7 +192,8 @@ walk `(list E)` / `(vector E)` arguments at call time; `&` rest params let
 checker (`Ty::intersect`); `(map K V)` checks every key/value pair at runtime
 and the checker flat-accepts the annotation as `Ty::Map`; and `?A` type
 variables are parsed by both runtime and checker (resolved to `any` / `Ty::ANY`
-— the static-only constraint is not yet unified at call sites). See
+— the static-only constraint is not yet unified at call sites) (superseded by
+slice 10 — call-site unification shipped). See
 `tests/contract_test.blsp` for coverage.
 
 ## The gradual checks (slices 11–13)

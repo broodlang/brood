@@ -12,6 +12,10 @@
 (defn expand-error (form)
   (error-of (eval form)))
 
+(defn chaos-crash-helper (x)
+  "Crash one call down, so the death reason's :trace has a named frame."
+  (/ x 0))
+
 ;; ── 1. Spawn with non-function values ────────────────────────────────────────
 ;;
 ;; `spawn` takes an EXPRESSION, not a callable — `(spawn nil)` spawns a process
@@ -43,8 +47,21 @@
     ;; no-op footgun), so a crash here surfaces — its monitor sees the error
     ;; reason, not :normal.
     (let (w (spawn (fn () (/ 1 0))) _ref (monitor w))
-      (assert= (receive ([:down _ _ reason] reason) (after 5000 :timeout))
-               [:error "runtime error: division by zero"])))
+      ;; the reason carries the structured error map (BEAM {Reason, Stacktrace}
+      ;; parity): [:error {:kind :message :code …}], not a flattened string
+      (let (reason (receive ([:down _ _ r] r) (after 5000 :timeout)))
+        (assert= :error (first reason))
+        (assert= :runtime (get (first (rest reason)) :kind))
+        (assert= "division by zero" (get (first (rest reason)) :message)))))
+
+  (test "the crash reason carries the call trace across the process boundary"
+    ;; :trace deep-copies with the reason (message.rs error_reason), so a
+    ;; monitor learns not just WHAT killed the child but WHERE — the frame
+    ;; names survive into the receiver's heap
+    (let (w (spawn (fn () (chaos-crash-helper 5))) _ref (monitor w))
+      (let (reason (receive ([:down _ _ r] r) (after 5000 :timeout)))
+        (assert= "chaos-test/chaos-crash-helper"
+          (get (first (get (first (rest reason)) :trace)) :fn)))))
 
   (test "parent process is unaffected when a child crashes without a monitor"
     (let (_w (spawn (fn () (/ 1 0))))

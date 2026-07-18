@@ -41,13 +41,15 @@ like.
 
 ## Deferred
 
-Same boundary ADR-117 already settled: **no revisit of the `of_value`
+Same boundary ADR-117 originally settled: **no revisit of the `of_value`
 call-site-argument question.** A literal keyword *argument* at a call site
 gets static disjointness checking (via `Ty::of_value`); int/bool/string
-literals don't, because extending `of_value` for int was tried and reverted
-(cascaded into unrelated warning-message wording across 7 pre-existing
-tests). Bool/string literals stay declared-sig-only, the same boundary int
-literals landed at.
+literals didn't at first, because extending `of_value` for int was tried and
+reverted (cascaded into unrelated warning-message wording across 7
+pre-existing tests). That boundary has since moved: **Gap B0 (2026-07-10,
+[type-gating.md](type-gating.md)) shipped it** — `Ty::of_value` now returns
+int/bool singletons, and string literals get `str_lit` via `expr_ty` — so
+bool/string literal arguments are no longer declared-sig-only.
 
 ## Tests
 

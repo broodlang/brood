@@ -604,10 +604,23 @@ Raise with `throw` (any value) or `error` (a formatted message), and handle with
 `catch` binds `e` to the thrown value: a `throw` hands back its argument verbatim
 (a bare string from `error`, a keyword, a `[:tag …]` vector, …), while a built-in
 error (like division by zero) binds the kernel's canonical **error map** —
-`{:kind :message [:code :file :line :col :hint]}` — so a handler can branch on
-`(get e :kind)` without parsing strings. A `try` with no `catch` is just a `do`.
-Under the hood `throw` and `%try` are primitives and `try`/`catch`/`error` are
-written in Brood (`std/prelude.blsp`) — see [primitives.md](primitives.md).
+`{:kind :message [:code :file :line :col :hint :trace]}` — so a handler can
+branch on `(get e :kind)` without parsing strings. A `try` with no `catch` is
+just a `do`. Under the hood `throw` and `%try` are primitives and
+`try`/`catch`/`error` are written in Brood (`std/prelude.blsp`) — see
+[primitives.md](primitives.md).
+
+**`:trace` is the call stack at the raise** — a list of frames, innermost first,
+each a `{:fn <name> [:file <file> :line <l> :col <c>]}` map whose location is the
+**call site that entered the frame** (absent fields are omitted; anonymous frames
+have no `:fn`). It covers the frames between the raise and the `catch` that
+caught it, capped at 32 (deep recursion keeps the innermost frames — the end
+that shows the cycle). Proper tail calls collapse into their caller's frame, so
+a tail chain `outer → middle → boom` shows one frame named for where the chain
+ended — the Erlang behaviour, and a direct picture of the real (O(1)-stack)
+frame structure. Uncaught errors print it as `at fn (file:line:col)` lines under
+the diagnostic; it costs nothing on the non-throwing path. A user `(throw v)`
+carries `v` verbatim (no map, so no `:trace` on the caught value).
 
 Because a caught value has no single shape, **`(error-message e)`** is the
 shape-agnostic accessor: a raised string as-is, the `:message` of an error map,
@@ -1013,7 +1026,11 @@ When that process dies, the watcher receives one message:
 [:down <monitor-ref> <pid> <reason>]
 ```
 
-`reason` is `:normal` for a clean return, `[:error <message>]` for a crash, and
+`reason` is `:normal` for a clean return, `[:error <error-map>]` for a crash —
+the same structured `{:kind :message [:code :file :line :col :hint :trace]}` map
+a `catch` binds (call `:trace` included — BEAM's `{Reason, Stacktrace}`), so a
+supervisor can log `(get m :message)` and walk `(get m :trace)` from the reason
+alone — and
 `:noproc` if `pid` was *already* dead when you called `monitor` (the DOWN is then
 delivered immediately). The monitor is **unidirectional** (it never affects the
 watched process) and **one-shot** (it fires once). `(demonitor mref)` drops it,
@@ -1030,7 +1047,49 @@ specific process's death and ignore unrelated messages:
 
 Monitors are the one kernel mechanism a **supervisor** is built from: watch your
 children, and on a non-`:normal` DOWN, restart per a strategy — all expressible
-in Brood. (Bidirectional `link`s are not implemented yet.)
+in Brood.
+
+### Links
+
+`(link pid)` ties the current process and `pid` together **symmetrically**
+(Erlang `link/1`; `(unlink pid)` unties, `spawn-link` spawns pre-linked). When
+either side dies abnormally, the other is notified: a process that set
+`(trap-exit true)` receives a trappable `[:EXIT pid reason]` message; a
+non-trapping process **dies too** — propagation, cascading through *its* links
+in turn. A `:normal` exit never kills a non-trapping peer. The propagated death
+carries the **originating reason**: if `a` crashes with `[:error {…}]`, a linked
+non-trapping `b` dies with that same reason (and so does `c` linked to `b`), so
+monitors anywhere in the fallen tree report the root cause — not a blanket
+`:kill`. Links are what `proc/supervisor`'s trapping supervisor loop is built
+on; remote (cross-node) links deliver the same shapes, plus `:noconnection` on
+a net-split.
+
+### Per-process limits (`process-flag`)
+
+`(process-flag flag [value])` reads or sets a runtime flag on the **current**
+process (Erlang's `process_flag/2` shape) and returns the previous — or, with no
+value, current — setting. The first flag is **`:max-heap`**: a per-process heap
+limit in bytes, the BEAM `max_heap_size` analogue.
+
+```clojure
+(process-flag :max-heap 8000000)   ; cap this process at ~8 MB; returns previous
+(process-flag :max-heap)           ; read it
+(process-flag :max-heap nil)       ; clear it (also cancels a pending trip)
+```
+
+The limit is checked after each of the process's own GC collections against the
+**live** (post-collection) footprint, so transient garbage never trips it. When
+exceeded, the next safepoint raises a catchable error (`E0045`) **in that
+process only** — uncaught, it kills just the offender, and every other process
+(and the runtime) is untouched. That's the isolation the global
+`BROOD_MEM_LIMIT` cap can't give: its hard tier aborts the whole OS process.
+
+Policy stays in Brood: to spawn a capped worker, set the flag first thing in
+the spawned fn —
+
+```clojure
+(spawn (fn () (process-flag :max-heap 8000000) (work)))
+```
 
 ### Distributed nodes
 
@@ -1062,9 +1121,19 @@ transparently.
 | `(monitor-node name)` | Deliver `[:nodedown name]` when the link to `name` goes down (clean close or heartbeat timeout). |
 | `(pid? x)` | True if `x` is a process id. |
 
-The cookie is a shared secret (Erlang-style) — **not real security yet**. One node
-per OS process. Remote `spawn`/code-shipping, distributed monitors, and node-down
-detection are deferred. Full reference: [distribution.md](distribution.md).
+The cookie is a shared secret (Erlang-style; links are encrypted — ADR-089). One
+node per OS process. Remote `spawn`/code-shipping, distributed monitors/links,
+heartbeat node-down detection, and mesh join have all shipped — full reference:
+[distribution.md](distribution.md).
+
+**Send semantics across a net-split:** `send` to a *disconnected* node silently
+drops the message (Erlang's default). A process that must not lose messages opts
+in with `(process-flag :send-errors true)` — its sends then raise a catchable
+`E0060` noconnection error, so it can queue and resend. Pair it with
+**`net/reconnect`** (`(require 'net/reconnect)`): `(net/reconnect/watch spec)`
+keeps the link alive with exponential-backoff reconnects, and
+`(net/reconnect/subscribe spec)` delivers `[:nodedown name]` / `[:nodeup name]`
+to your mailbox — resend the queue on `[:nodeup …]`.
 
 ## Builtins
 
@@ -1226,14 +1295,20 @@ in **O(1)** — the CHAMP root node tracks its size (exposed by the `map-count`
 kernel primitive), so neither walks nor materialises the entries.
 
 ### Higher-order
-`map`  `filter`  `reduce`  `apply`
+`map`  `filter`  `mapv`  `filterv`  `reduce`  `apply`
 
 ```clojure
 (map inc (list 1 2 3))        ;=> (2 3 4)
 (filter positive? (list -1 2 -3 4)) ;=> (2 4)
+(mapv inc (list 1 2 3))       ;=> [2 3 4]   (vector result)
+(filterv even? (range 5))     ;=> [0 2 4]   (vector result)
 (reduce + 0 (list 1 2 3 4))   ;=> 10
 (apply + (list 1 2 3))        ;=> 6
 ```
+
+`map`/`filter` return lists; `mapv`/`filterv` are the vector-returning variants
+for when the caller needs indexed access — the named form of
+`(into [] (map …))`.
 
 ### Predicates
 `nil?`  `pair?`  `list?`  `symbol?`  `keyword?`  `string?`  `number?`  `int?`

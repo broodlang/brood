@@ -1,7 +1,7 @@
 # Native primitive kernel
 
 The **complete set of functions implemented in Rust** (every `Value::Native`
-registered in `crates/lisp/src/builtins.rs`). Everything else in the language —
+registered in `crates/lisp/src/builtins/`, split by domain). Everything else in the language —
 `+ - * / < = map filter reduce defn -> …` — is written *in Brood*
 (`std/prelude.blsp`) on top of these. Keeping this list small is a deliberate,
 load-bearing choice (ADR-006 "write the language in the language", ADR-008
@@ -15,7 +15,7 @@ gate (`eval::call_native`), before the primitive runs — so a wrong-count call 
 a clean arity error (`type-of: expected 1 argument, got 0`) rather than a missing
 arg silently becoming `nil`.
 
-## Native primitive functions (100)
+## Native primitive functions
 
 | Category | Primitive | Arity | Purpose |
 |---|---|---|---|
@@ -37,12 +37,29 @@ arg silently becoming `nil`.
 | | `map-assoc` | 3 | a fresh map with `key`→`val` added/updated |
 | | `map-dissoc` | 2 | a fresh map with a key removed |
 | | `map-pairs` | 1 | entries as a list of `[k v]` vectors, insertion order, one O(n) pass — the sole enumerator; `keys`/`vals`/`contains?`/`reduce-kv` are all Brood over it |
+| | `map-count` | 1 | the number of entries in a map — O(1) (the CHAMP root tracks its size) |
+| | `map-int-add` | 3 | `(map-int-add m k delta)` → a fresh map with key `k`'s integer value incremented by `delta` (inserts `delta` when `k` is absent) — a single trie traversal, equivalent to `(assoc m k (+ (get m k 0) delta))` without the extra walk |
 | **String** | `string-length` | 1 | char count |
 | | `substring` | 2-3 | characters `[start, end)`, char-indexed; `end` defaults to `(string-length s)` |
 | | `%str-index-of` | 2 | char index of the first occurrence of a substring (or -1; empty needle → 0). Linear (byte-level `find` → char index) — the search counterpart of `substring`, needed in Rust because Brood has no O(1) char access (a pure-Brood scan is O(n²)). `index-of` / `string-contains?` / `includes?` ride on it |
 | | `upper` | 1 | `s` upper-cased (Unicode-aware, e.g. `ß` → `SS`) |
 | | `lower` | 1 | `s` lower-cased (Unicode-aware) |
 | | `string->number` | 1 | strict parse → int, else float, else `nil` (`"3abc"` → `nil`, unlike `read-string`) |
+| | `string->codepoints` | 1 | the characters of `s` as a vector of integer Unicode codepoints, one O(n) pass — the random-access form text parsers index with `nth` and compare as ints (`codepoints->string` is its Brood inverse) |
+| | `string-span` | 3 | `(string-span s start chars)` → the char index just past the maximal run of chars in the set `chars` (a string) starting at char `start` — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native |
+| | `string-span-until` | 3 | the char index of the first char of `s` in the set `chars` at or after `start`, or `(string-length s)` if none — the maximal run of chars *not* in the set, for scanning up to a delimiter. The complement of `string-span` |
+| **Bytes** (immutable byte sequences; `crates/lisp/src/builtins/bytes.rs`) | `byte-at` | 2 | `(byte-at b i)` → the byte at index `i` as an int 0–255 (out of range errors) |
+| | `subbytes` | 2–3 | the byte slice `[start, end)` (`end` defaults to the length) as a fresh bytes value |
+| | `bytes-index-of` | 2–3 | the first index of the `needle` bytes in `haystack` at or after `from` (default 0), or -1 if not present — the byte-protocol workhorse (find a `\r\n\r\n`, a frame delimiter, …) |
+| **Table** (Brood's ETS — the one identity-mutable structure; shared by identity, deep-clones in/out) | `table` | 0 | create a new empty in-memory table: a shared, mutable key→value store behind an opaque handle — mutated in place and shared by identity (the handle can be sent to other processes, which all see the same store); keys/values are deep-cloned in and out, so no two processes alias stored data. Local to this runtime; returns the handle |
+| | `table-put` | 3 | store `v` under key `k` (overwriting; structural key equality); returns `t` for threading |
+| | `table-get` | 2–3 | a fresh copy of the value stored under `k`, or the default (nil if omitted) when absent |
+| | `table-has?` | 2 | true if the table has an entry for key `k` |
+| | `table-delete` | 2 | remove key `k` if present; returns `t` |
+| | `table-incr` | 2–3 | atomically add `delta` (default 1) to the integer at key `k` (absent → 0) and return the new value — the read-modify-write is atomic under the table lock, so concurrent increments never lose an update; errors if the existing value is not an integer |
+| | `table-count` | 1 | the number of entries |
+| | `table-snapshot` | 1 | a consistent point-in-time copy of the whole table as an immutable map — atomic, O(n), unaffected by later mutation |
+| | `table-drop` | 1 | remove the table from the registry, freeing its store; idempotent, returns true if it existed (other handles then error on use) |
 | **Rope** (editor buffer text; immutable, char-indexed — ADR-045) | `string->rope` | 1 | a rope holding the characters of a string — the constructor |
 | | `rope->string` | 1 | the full text of a rope as a string (the only way a rope's content crosses a process: ropes are process-local) |
 | | `rope-length` | 1 | character count |

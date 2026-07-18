@@ -453,7 +453,7 @@ out-of-scope for v1.
 
 ## Implementation sketch (when it lands)
 
-**Rust primitives** (`crates/lisp/src/builtins.rs`):
+**Rust primitives** (`crates/lisp/src/builtins/io.rs`):
 
 - `(%git-clone url dest ref commit)` — shell out to `git`: clone the ref
   shallowly into `dest`, then **check out the exact `commit`**. (A plain

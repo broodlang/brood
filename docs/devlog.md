@@ -4884,3 +4884,264 @@ What bintree's profile says is LEFT: ~17 % `jit_run_fast_link` + ~11 %
 inlining" FRONTIER lever), ~10 % allocation FFI. Those are the deferred
 big-ticket JIT items, not regressions. Validated: effects test, GC_STRESS
 checksum, suite 784/784, 300 fuzz seeds across engines.
+
+## 2026-07-18 — Docs brought back to 100%: the full staleness sweep
+
+A five-cluster audit of every living doc against the code (concurrency/dist,
+VM/JIT/perf, language/core, types/LSP, editor/misc), then fixes across ~40
+files. The recurring root causes, so the next sweep knows where drift
+accumulates:
+
+1. **The 2026-06-08 state-capture cutover (ADR-100) had never been folded back**
+   into the docs that predate it. `scheduler.md`, `concurrency.md`,
+   `memory-model.md`, `architecture.md`, `components.md`, `testing.md`, and
+   `ROADMAP.md` all still described corosensei coroutines, fresh-only stealing,
+   pinned processes, or "work-stealing deferred" as current. All now state the
+   shipped reality (general stealing + live migration, dirty-block carve-out)
+   and mark the coroutine era as history.
+2. **ROADMAP lagged the July perf sprint**: the 7/7 priority set (nbody, regex,
+   sieve, persistent-map) is cleared — rows updated with the dated fixes; the
+   "runtime housekeeping" items (tracing GC, work-stealing) and the **package
+   manager** (`:git` deps + verbs shipped 2026-05-30 — packages.md was right,
+   the roadmap wasn't) flipped to ✅; the stability backlog now credits the
+   cargo-fuzz targets + stress kit and the `run_one` catch_unwind.
+3. **Gap B0 (2026-07-10) reverted-then-shipped literal precision** was still
+   described as "tried, reverted, deferred" in five type docs; all now carry
+   the B0 resolution. types.md's intro adopts the revised contract-#5 phrasing
+   (never gates the live image; `nest check` is the batch-only hard reject).
+4. **Path drift**: `eval/compile.rs` → `eval/compile/{mod,ir,jit_lower}.rs` and
+   `builtins.rs` → `builtins/` fixed in every living nav pointer (~15 docs);
+   `let*` removed from the three docs still listing it; stale "16-byte
+   `Value`" → 24 bytes where presented as current.
+5. **Docs that undersold shipped features**: mcp.md (17 tools incl. write/edit;
+   process-scoped stdout capture), gui-font-gaps.md (all gaps resolved —
+   ADR-079 `:scale`, per-window `gui-font!`), linear-map-accumulator.md and
+   type-map-kv.md (marked shipped), primitives.md (bytes/table/codepoints rows
+   added, false "(100)" count dropped).
+
+Historical records (devlog, decisions, archive/, dated audits/postmortems)
+were left as-is per the dated-narration rule; transients.md's overruled
+"Phase 2 shipped" block got an explicit REVERTED banner instead of deletion.
+
+## 2026-07-18 — Stack traces in error values (BEAM/.NET gap #1 closed)
+
+First item off the 2026-07-18 runtime-survey list ("Robustness gaps vs BEAM /
+.NET"). Every kernel error now carries the call stack at the raise, surfaced as
+`:trace` on the caught error map (innermost-first `{:fn [:file :line :col]}`
+entries, capped at 32) and printed as `at fn (file:line:col)` lines for
+uncaught errors (CLI report + REPL).
+
+Design: an entry pairs a frame's fn name with the **call site that entered
+it** — buildable from purely local frame state in both engines, and tail calls
+collapse into their caller's frame identically (the BEAM behaviour, and an
+honest picture of the real O(1)-stack frame structure).
+
+- **VM**: `attach_vm_trace` at `vm_run_bc`'s error-return sites walks `cur_arm`
+  + the live `BcFrame`s — a caller's saved `ip` is the return address, so
+  `code[ip-1]` is the `Inst::Call` carrying the call-site pos. `CompiledArm`
+  gained unconditional `fn_name` (any named closure — distinct from the
+  jit-only `dbg_name`, whose symbol keys semantic tables) and `src_file`
+  (from `form_pos` at compile time). Nested drivers (native callbacks) each
+  append their frames as the error crosses them. Also fires for the
+  memory-limit / deadline / `MAX_BC_FRAMES` raises — a recursion-depth error
+  now shows the cycle.
+- **Tree-walker**: `eval` split into a thin wrapper + `eval_tail_loop` carrying
+  an `entered` tracker; one entry per eval frame that entered a closure body
+  (tail entries rename the frame, the first entry keeps the call site —
+  matching VM frame reuse exactly). `apply_closure` runs its last body form on
+  the loop with the tracker **seeded**, so native-boundary callbacks merge
+  with their tail chain instead of double-counting.
+- **Parity**: information-free synthetic frames (no name/file/pos — the
+  top-level program thunk, anonymous boundary thunks) are suppressed in
+  `push_trace`; `error_format_parity` (4 tests) green, engines byte-identical
+  on the corpus. JIT'd arms trace via their deopt re-raise (verified
+  jit/no-jit/TW identical on hot-loop + deep-recursion errors).
+- **Bonus fix**: the ADR-135 program-exit seam (`ProgramExit`) carried
+  `Err(String)` — a flattened `located()` line — so `brood FILE` errors had
+  **lost the caret/hint since the top-level-as-green-process cutover**. It now
+  publishes the structured `LispError` (payload stripped at the process
+  boundary), restoring the full report and carrying the new trace.
+
+Tests: `tests/try_catch_test.blsp` §11 (6 cases: innermost order, tail
+collapse, call-site fields, 32-cap, native-boundary naming, helper-chain
+attribution) — green on VM/TW/GC_STRESS+VERIFY. Follow-ups tracked in
+ROADMAP/tasks: structured error (incl. `:trace`) in process death reasons;
+per-process resource limits (survey gap #2) is next.
+
+## 2026-07-18 — Per-process heap limits: `(process-flag :max-heap n)` (survey gap #2, lever 1)
+
+Second item off the runtime-survey list. Before this the only memory cap was
+the global ADR-043 pair, whose *hard* tier aborts the **whole OS process** —
+BEAM kills just the offender. Now a process can cap itself:
+
+- **Mechanism** (kernel): `Heap::proc_mem_limit` (per-process, default
+  unlimited) + a `note_proc_limit` check at the end of **both** collection
+  paths (legacy flip + generational), where the slabs hold exactly the
+  survivors — so the figure is *live* data and transient garbage a collection
+  reclaims never trips it. O(1) (slab lens × sizes), no-op unless set. Over
+  the limit arms a **sticky flag** probed at the four eval/VM safepoints
+  (tree-walker loop top, `vm_run_bc` loop top with trace attach, both
+  `exec_chunk` SelfCall safepoints), which raise a catchable `E0045`
+  ("process heap limit exceeded", hint included) in that process only.
+  Sticky matters: a JIT-resident register loop can't allocate (out of
+  subset), so any heap-growing path necessarily revisits a safepoint; a
+  parked/preempted resume also passes the probe.
+- **API** (Erlang `process_flag/2` shape): `(process-flag :max-heap n)` sets
+  (positive int), `nil` clears (also cancels a pending trip — a `catch` that
+  clears the limit genuinely rescues the process), absent reads; returns the
+  previous value. Unknown flags error and name the known set — future flags
+  (`:max-mailbox`?) slot in.
+- **Policy** (Brood): no spawn option — cap a worker by setting the flag
+  first thing in the spawned fn.
+
+Lever (2), mailbox bounds, stays deferred per ADR-011 (drop-vs-error-vs-park
+has real design surface, and remote delivery can't error the sender) until a
+concrete consumer picks the policy.
+
+Tests: `tests/process_limit_test.blsp` — flag protocol, catchable E0045,
+rescue-after-clear, capped-process-dies-alone (parent + uncapped sibling
+unaffected) — green on VM / tree-walker / no-JIT / GC_STRESS+VERIFY.
+
+## 2026-07-18 — Death reasons carry the structured error (trace follow-up)
+
+Completes the stack-trace item across the process boundary: an uncaught error
+now retires its process with reason `[:error {:kind :message [:code :file
+:line :col :hint :trace]}]` instead of `[:error "<flattened string>"]` — the
+same map a `catch` binds, so a monitor's `[:down …]`, a trapping link's
+`[:EXIT …]`, and a supervisor all get BEAM's `{Reason, Stacktrace}`.
+`message::error_reason` builds it directly as a heap-independent `Message`
+(the dying heap is about to drop), so it deep-copies into any receiver and
+crosses the dist wire (Map/List are wire-encodable). Shape-agnostic consumers
+(`[:error _]` matches, supervisor `:transient` policy) were untouched; the one
+string-exact assertion (chaos_test) updated, plus a new test proving `:trace`
+frame names survive into the receiver's heap. Suite 784/784 (2782 in-language),
+both engines.
+
+## 2026-07-18 — Link propagation carries the originating reason (survey housekeeping)
+
+The last exit-signal gap from the runtime survey: link propagation hard-killed
+a non-trapping peer with a literal `:kill`, so the peer's monitors — and every
+further cascade — reported `:kill` instead of why the tree fell. Root cause: a
+kill's **hardness** (die at the next reduction tick vs the next `receive`) was
+keyed off the *reason value* (`is_kill_reason`), conflating the two.
+
+Fix: hardness is now a property of the request — `MailboxState.kill_hard`,
+`request_kill(reason, hard)` — with `(exit pid :kill)` hard-with-`:kill` as
+before, and `links::deliver_exit_to` requesting `exit_propagate` = hard with
+the **originating reason** (BEAM semantics; with the same-day death-reason
+work, the whole chain now reports `[:error {… :trace}]` end to end). The
+sticky-latch guarantee ("a racing soft exit can't downgrade a kill") keys on
+the hard flag; the loop-top probe is `pending_hard_kill()`. Remote links ride
+the same `deliver_exit_to`, so cross-node propagation is fixed too.
+
+Also un-staled `docs/language.md`, which still claimed "bidirectional links
+are not implemented yet" (ADR-067 shipped long ago) — it now has a Links
+section documenting trap/propagate + the reason-carrying cascade.
+
+Tests: two new link_test cases (propagated reason; chain cascade), the sticky
+unit test extended with the hard-with-soft-reason case; exit/supervisor/serve
+suites unchanged-green.
+
+## 2026-07-18 — Dirty-CPU accounting: long natives charge reductions + named stalls
+
+Survey gap #6, the cheap half. A CPU-bound native can't be preempted mid-call;
+now it at least pays for the time it held the worker: in a green process
+(`in_capture_run` — one TLS bool, the root thread pays nothing), `call_native`
+times the call and `scheduler::charge_native` debits the reduction budget at
+~2 reductions/µs (saturating: ≥~1 ms of native work drains the 2000-reduction
+quantum), so the next safepoint yields promptly instead of the process keeping
+its quantum as if the call were one reduction. And the `BROOD_STALL_MS` tracer
+— which could name minor-gc/compaction/quantum but never the actual builtin —
+now logs `[stall] native <name> took Nms` at the call site.
+
+**Revised same day by a fuller A/B** (the first measurement used a JIT-fused
+bench that never exercised `call_native` — a bad probe): always-on per-call
+timing cost **8–22% on the message-heavy rows** (pingpong +22%, ring +11%,
+json +8%; confirmed by neutralize-and-rerun), while the fairness win was
+marginal — reduction preemption already bounds post-native hogging to ~one
+quantum (~1 ms of Brood work), and the un-preemptible time *inside* a long
+native is only fixed by the M4 offload pool. So the per-call timing+charging
+is now **gated behind `BROOD_STALL_MS`** (the diagnostic mode where the named
+stall trace lives); the default path pays one TLS bool + a cached-env load,
+and the full-row A/B is flat. Unit test:
+`charge_native_drains_reductions_proportionally`. The offload pool stays the
+M4 item.
+
+Also shipped today, smaller: `mapv`/`filterv` (hatch ergonomics — prelude
+one-liners, vector-returning `map`/`filter`; tests + language.md), and the
+`let`-vector-destructure-of-a-list hatch item was verified to already raise a
+clean match-error (the "or erroring" arm of the ask — resolved).
+
+## 2026-07-18 — Dist self-healing: net/reconnect + opt-in :send-errors (survey gap #5)
+
+The last mid-size survey gap. Two halves, mechanism/policy split:
+
+- **Kernel seam:** `dist::route` now reports whether a route existed (local, or
+  remote with a live link) vs the message being dropped for an
+  unknown/disconnected node; `process::send` turns that into a catchable
+  **E0060 noconnection** error when the sending process opted in via
+  `(process-flag :send-errors true)` (the third `process-flag`). Default stays
+  Erlang-silent, and process *liveness* stays silent either way — the flag is
+  about the link.
+- **Brood policy:** `std/net/reconnect` (bundled, `(require 'net/reconnect)`) —
+  one named, idempotent watcher process per connect spec: connect, arm
+  `monitor-node`, and on `[:nodedown]` retry `(connect spec)` on exponential
+  backoff (`:min-ms` 500 → `:max-ms` 30000), then re-arm and notify
+  subscribers `[:nodeup name]`. A stale/duplicate `[:nodedown]` while still
+  linked is ignored (re-armed monitors can double-fire). ~90 lines of Brood
+  over existing primitives — no new kernel surface beyond the send signal.
+
+Test: `reconnect_watcher_heals_a_fallen_link` (cli::distribution) — B falls, A
+sees `[:nodedown]`, an opted-in send raises E0060, B restarts on the same
+port, the watcher heals the link, A gets `[:nodeup]` and a registered-name
+send round-trips. Also un-staled language.md's dist section ("monitors/
+node-down deferred" — they shipped long ago) and documented the net-split
+send semantics.
+
+## 2026-07-18 — Review pass over the day's work: ensure-link consolidation + fixes
+
+Self-review of the whole day's diff (the code-review sweep). Findings + fixes:
+
+1. **Duplication caught: the prelude already had `ensure-link`** (a fixed
+   200ms-backoff reconnect supervisor) — the roadmap's "nothing reconnects"
+   was stale, and today's `net/reconnect` overlapped it. Consolidated per the
+   one-coherent-design rule: **`ensure-link` removed from the prelude**
+   (helpers too; `sleep` kept), `std/net/reconnect` is the sole reconnector,
+   the `ensure_link_reconnects_across_a_node_restart` test ported to
+   `net/reconnect/watch` (green), distribution.md/decisions.md updated with
+   supersession notes.
+2. **Watcher mailbox hygiene:** the reconnect watcher is a registered-name
+   process but its `receive`s had no catch-all — arbitrary messages would
+   have accumulated forever. Both states now drop unknown messages (the same
+   discipline the old ensure-link loop had).
+3. **Verified non-issues:** `monitor-node` is per-pid **deduped** in the
+   kernel, so the watcher's re-arm after each reconnect cannot accumulate
+   monitors; remote link exits funnel through the same `deliver_exit_to` as
+   local ones, so the hardness/reason split behaves identically across the
+   wire; MCP error JSON derives from `to_value_map` by construction, so
+   `:trace` flows through it; the test framework flattens caught maps to
+   kind+message, so failure output stays clean.
+
+## 2026-07-18 — Benchmark regression sweep over the day's work
+
+Full A/B (release `--bin brood`, HEAD-worktree baseline binary vs the working
+tree, best-of-N wall time across the 18 `brood-benchmarks` rows): after the
+`charge_native` gating fix above, **all rows are flat within noise** —
+pingpong/ring/json recovered from +22/+11/+8% to ±2-4%, loop/sieve/bintree/
+nqueens/errors-deep/persistent-map/spawn/base64/reduce/startup unchanged, and
+the sub-100 ms rows' ±10% single-run wobbles vanish at 7 reps. The named
+stall tracer (`BROOD_STALL_MS=5` → `[stall] native %range-reduce took 69ms`)
+still fires when armed. Method note for next time: a "native-call-heavy"
+probe must be verified to actually route through `call_native` — the first
+probe (`reduce +`/`bit-and` loops) was JIT-fused to ~1.5 ns/iter and measured
+nothing.
+
+**Archive caveat (same day):** the fresh divan archive
+(`docs/benchmarks/2026-07-18T15-57-30Z.md`) was taken on a thermally
+saturated laptop (package 99 °C against a 100 °C limit, `powersave`
+governor, hours of builds prior) — unrelated micro-rows read ~2× the
+cold-machine 2026-07-11 archive (fib-VM, maps), while the encoding rows
+show the July sprint's real −35…−58%. Cross-archive comparison is
+meaningless under that skew; the interleaved same-conditions A/B above is
+the regression instrument that counts (flat). Lesson recorded: archive runs
+belong on a cold, `performance`-governor machine.

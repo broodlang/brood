@@ -138,7 +138,7 @@ None is a safe small change — it's a focused project.
 ## What's committed on this branch
 
 `crates/lisp/src/core/value.rs` (+`TAG_FLOAT` layout const & test) and
-`crates/lisp/src/eval/compile.rs` (all of the above). Correctness gates: `mandelbrot`/`matmul`
+`crates/lisp/src/eval/compile/` (all of the above). Correctness gates: `mandelbrot`/`matmul`
 exact-bit vs `BROOD_VM=0`, no hang; differential `engines_agree_on_corpus` passes; 263 unit
 tests pass. (Two jit unit tests — `jit_lowers_an_arm_ending_in_a_tail_call`,
 `jit_tier_compiles_a_hot_arm_then_runs_native` — fail, but they **already fail at the base
@@ -148,6 +148,10 @@ commit `b9e2173`** with `--features jit`: pre-existing, not from this work.) **N
 ---
 
 # Float-across-calls — design (2026-07-12, `nbody` 43× vs Elixir)
+
+> **Note:** the nbody gap this design targeted was subsequently fixed by other means (bodies
+> list→vector + the vector-read/float-handle deopt fixes + fsqrt inline — devlog 2026-07-14/15);
+> Layer B stays deprioritised.
 
 The float codegen above (unboxed `f64` SSA, `as_f64`, `emit_float_arith`, `box_float`)
 **landed on main** and put `mandelbrot` at Elixir parity — a *self-tail* pure-`f64` loop

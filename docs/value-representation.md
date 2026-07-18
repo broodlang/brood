@@ -1,5 +1,9 @@
 # Value representation — shrinking the 24-byte `Value` (scope)
 
+*See also [`value-repr.md`](value-repr.md) — despite the similar name it is a distinct doc
+(the pre-JIT "keep the enum" decision); this one scopes the post-JIT 8-byte shrink,
+unstarted.*
+
 > **Status: SCOPE / design (2026-06-17).** Not implemented. The "decide before 1.0" call
 > flagged in `docs/vm-perf-and-jit-runway.md` §4.E. Targets the **memory-traffic** tax that
 > the alloc-bound benchmarks (bintree ~17×, wordcount ~20×) pay and that no dispatch/JIT
@@ -139,7 +143,7 @@ cross-process suite blocks. Bench A/B on the alloc-bound set is the go/no-go.
   `jit_layout` (`:820`: `PAYLOAD_OFFSET`/`TAG_INT`/`TAG_PAIR`), `value_layout_is_stable_for_the_jit`
   (`:855`), the handle macro (`:231` `local_gen`/`REGION_SHIFT`/`GEN_MASK`), `Value::Pid` (the box
   target).
-- `crates/lisp/src/eval/compile.rs` — the JIT `Op` model / `read_words`/`store_words` / `STRIDE`
+- `crates/lisp/src/eval/compile/` — the JIT `Op` model / `read_words`/`store_words` / `STRIDE`
   (3-word → 2-word for the 16 B step).
 - `crates/lisp/src/process/` — the `Pid` registry + message codec (the `Pid`-boxing surface).
 - Background: `docs/vm-perf-and-jit-runway.md` §4.E (the original flag), `docs/jit-tier2.md` §3

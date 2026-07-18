@@ -727,17 +727,26 @@ pub(crate) enum Target {
 /// Deliver `msg` to `target` on `node`, location-transparently: a local node
 /// delivers in-process; a remote one forwards over the link. Unknown name,
 /// unknown/disconnected node, or a dead pid is a silent no-op (Erlang semantics).
-pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
+///
+/// Returns whether a route existed at all: `true` for any local target (even a
+/// dead pid — process liveness stays Erlang-silent) and for a remote node with
+/// a live link; `false` when the node is **unknown/disconnected** (the message
+/// was dropped on the floor). `send` surfaces that as a catchable
+/// `:noconnection` error when the sending process opted in via
+/// `(process-flag :send-errors true)` — so a caller can queue-and-retry instead
+/// of silently losing messages until the reconnect (the dist self-healing
+/// seam); every other caller ignores it.
+pub(crate) fn route(node: Symbol, target: Target, msg: Message) -> bool {
     if is_local(node) {
         let id = match target {
             Target::Pid(id) => id,
             Target::Name(name) => match crate::core::sync::read(&NAMES).get(&name).copied() {
                 Some(id) => id,
-                None => return,
+                None => return true,
             },
         };
         process::deliver(id, msg);
-        return;
+        return true;
     }
     // Remote: encode a Send frame and hand it to the peer's writer thread.
     let bytes: Arc<[u8]> = match encode_payload(&Frame::Send { target, msg }) {
@@ -748,11 +757,14 @@ pub(crate) fn route(node: Symbol, target: Target, msg: Message) {
                 value::symbol_name(node),
                 e
             );
-            return;
+            return true; // a link exists; the payload was the problem
         }
     };
     if let Some(conn) = crate::core::sync::read(&NODES).get(&node) {
         let _ = conn.enqueue(bytes); // severs the link if the writer is gone/stalled
+        true
+    } else {
+        false
     }
 }
 

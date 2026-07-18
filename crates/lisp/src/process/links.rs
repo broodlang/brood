@@ -137,13 +137,15 @@ pub(super) fn notify_peers(dead: u64, reason: &Message) {
 /// Notify one **local** `peer` that linked process `dead` (given as its
 /// `Message::Pid`, local or remote) exited with `reason`: a trappable
 /// `[:EXIT dead reason]` if `peer` traps, otherwise — for an abnormal reason —
-/// propagate by hard-killing `peer`. A `:normal` reason to a non-trapping peer
-/// does nothing (Erlang semantics).
+/// propagate by hard-killing `peer` **with the originating reason** (BEAM
+/// semantics: the peer's monitors and its own cascading links see *why* the
+/// tree fell, not a blanket `:kill`). A `:normal` reason to a non-trapping
+/// peer does nothing (Erlang semantics).
 fn deliver_exit_to(peer: u64, dead_msg: Message, reason: Message) {
     if traps_exit(peer) {
         deliver(peer, exit_message(dead_msg, reason));
     } else if !is_normal(&reason) {
-        scheduler::exit(peer, Message::Keyword(value::intern(pk::KILL)));
+        scheduler::exit_propagate(peer, reason);
     }
 }
 

@@ -175,7 +175,7 @@ a status line, the visible buffer lines, and the cursor."
 ```
 
 Because `render-frame` takes plain data and returns plain data, you can
-**unit-test it without a terminal** — exactly how `tests/observe_test.blsp` tests
+**unit-test it without a terminal** — exactly how `tests/observer_test.blsp` tests
 the process observer. That's the payoff of the pure-core / thin-IO split.
 
 ## 5. Keymaps and commands
@@ -322,9 +322,11 @@ Everything except the loop is pure, so test it like any other Brood code:
   redefine them from a running editor (a REPL buffer, or `nest run --watch`) and
   the change takes effect on the next keystroke — the Emacs superpower, with no
   host-language hot-reload machinery (it's just `def`).
-- **Remote / web frontend (M4/M5).** Your `render-frame` already emits a
+- **Remote frontend (M4 — shipped).** Your `render-frame` already emits a
   serialisable frame; a socket frontend interprets the *same* ops. Nothing in the
-  editor changes.
+  editor changes — `nest attach` + `std/editor/serve.blsp` (ADR-090) are that
+  frontend today. A web frontend (M5) on the same ops is the remaining future
+  piece.
 - **Drop in a process observer.** Your editor is a runtime full of processes
   (buffers-as-processes, timers, jobs). `(require 'observe)` then bind a key/command
   to `(observe-attach)` — it brings up the full-screen process viewer over *your
@@ -343,6 +345,6 @@ Everything except the loop is pure, so test it like any other Brood code:
   [`primitives.md`](primitives.md) (the **Terminal** section), ADR-046 in
   [`decisions.md`](decisions.md).
 - A complete, smaller worked example on the same seam: the process observer,
-  [`std/tool/observer.blsp`](../std/tool/observer.blsp) + [`tests/observe_test.blsp`](../tests/observe_test.blsp).
+  [`std/tool/observer.blsp`](../std/tool/observer.blsp) + [`tests/observer_test.blsp`](../tests/observer_test.blsp).
 - The immutable-data rule that makes the buffer model what it is: ADR-026
   (`docs/language.md` §Immutability).

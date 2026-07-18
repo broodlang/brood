@@ -87,8 +87,9 @@ terminated and dropped, not revived).")
 (defn supervisor--restartable? (restart reason)
   "Should a child of the given `:restart` type be restarted after exiting with
 `reason`? `:permanent` always; `:transient` only on abnormal exit; `:temporary`
-never. An uncaught throw exits with reason `[:error msg]`, a clean return with
-`:normal`, so `:transient` restarts everything except a clean `:normal` exit."
+never. An uncaught throw exits with reason `[:error {:kind :message … :trace}]`
+(the structured error map), a clean return with `:normal`, so `:transient`
+restarts everything except a clean `:normal` exit."
   (cond
     (= restart :temporary) false
     (= restart :transient) (not (= reason :normal))

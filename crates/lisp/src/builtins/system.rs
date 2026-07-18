@@ -595,15 +595,16 @@ pub(super) fn run_program_file(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
         .map_err(|e| e.or_file(path.clone()))?;
     match exit.wait() {
         Ok(()) => Ok(Value::nil()),
-        // The program raised. The message is already `FILE:LINE:COL:`-tagged by the
-        // program driver, so print it and exit 1 exactly as `brood FILE` does (run_files)
-        // rather than returning an error the caller would re-decorate with a meaningless
-        // position inside the generated run script. Restore the terminal first (a TUI that
-        // threw before its `term-leave` would otherwise wedge the shell); `process::exit`
-        // skips Drop, so do it explicitly — the same no-op-unless-raw call the CLI makes.
-        Err(msg) => {
+        // The program raised. The error is already file/pos-tagged by the program
+        // driver, so render the full report (caret, hint, call trace) and exit 1
+        // exactly as `brood FILE` does (run_files) rather than returning an error the
+        // caller would re-decorate with a meaningless position inside the generated run
+        // script. Restore the terminal first (a TUI that threw before its `term-leave`
+        // would otherwise wedge the shell); `process::exit` skips Drop, so do it
+        // explicitly — the same no-op-unless-raw call the CLI makes.
+        Err(e) => {
             crate::builtins::restore_terminal_on_exit();
-            eprintln!("{}", msg);
+            crate::cli_support::report_error(&e);
             std::process::exit(1);
         }
     }
@@ -724,6 +725,13 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
     ("json", include_str!("../../../../std/json.blsp")),
+    // Supervised node auto-reconnect (dist self-healing): `watch` keeps a peer
+    // link alive with exponential-backoff `(connect …)` retries; subscribers get
+    // [:nodeup]/[:nodedown]. Pure Brood over connect/monitor-node/nodes. Opt-in.
+    (
+        "net/reconnect",
+        include_str!("../../../../std/net/reconnect.blsp"),
+    ),
     // Server-Sent Events (text/event-stream): a client reader process that streams
     // events to a subscriber's mailbox (pairs with ui's `with-events`) + server-side
     // framing. Pure frame parsing + a thin IO loop over tcp; reuses http's URL/header
@@ -1751,6 +1759,65 @@ pub(super) fn unlink_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult 
             Ok(Value::nil())
         }
         _ => Err(LispError::type_err("unlink: argument must be a pid")),
+    }
+}
+
+/// `(process-flag flag [value])` — read or set a per-process runtime flag on the
+/// **current** process (the Erlang `process_flag/2` shape), returning the
+/// previous (read: current) value. Flags:
+///
+/// - `:max-heap` — this process's heap limit in bytes (BEAM `max_heap_size`).
+///   With a positive int: set it; with `nil`: clear it; with no value: read it.
+///   Checked after each collection against the *live* (post-GC) footprint; when
+///   exceeded, the next safepoint raises a catchable `E0045` error in this
+///   process only — uncaught, it kills just the offender, unlike the global
+///   ADR-043 hard cap (whole-OS-process abort). Policy lives in Brood: a spawn
+///   wrapper that sets the limit first is `(spawn (fn () (process-flag
+///   :max-heap n) (work)))`.
+pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let flag = match arg(args, 0) {
+        Value::Keyword(k) => k,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "process-flag",
+                "keyword",
+                other,
+            ))
+        }
+    };
+    match value::symbol_name_ref(flag) {
+        "max-heap" => {
+            let prev = if args.len() < 2 {
+                heap.proc_mem_limit()
+            } else {
+                match arg(args, 1) {
+                    Value::Int(n) if n > 0 => heap.set_proc_mem_limit(Some(n as usize)),
+                    Value::Nil => heap.set_proc_mem_limit(None),
+                    other => {
+                        return Err(LispError::wrong_type(
+                            heap,
+                            "process-flag :max-heap",
+                            "positive int (bytes) or nil",
+                            other,
+                        ))
+                    }
+                }
+            };
+            Ok(prev.map(|n| Value::int(n as i64)).unwrap_or(Value::nil()))
+        }
+        "send-errors" => {
+            let prev = if args.len() < 2 {
+                heap.proc_send_errors()
+            } else {
+                let on = !matches!(arg(args, 1), Value::Nil | Value::Bool(false));
+                heap.set_proc_send_errors(on)
+            };
+            Ok(Value::boolean(prev))
+        }
+        other => Err(LispError::runtime(format!(
+            "process-flag: unknown flag :{other} (known: :max-heap, :send-errors)"
+        ))),
     }
 }
 

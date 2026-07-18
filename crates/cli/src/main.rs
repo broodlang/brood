@@ -289,13 +289,13 @@ fn run_files(interp: &mut Interp, files: &[String]) {
         // talking to a spawned worker then uses the userspace direct-handoff path (no
         // per-message cross-thread futex) and its top-level `receive`s park-and-capture,
         // instead of the root thread blocking on its mailbox condvar.
-        if let Err(msg) = interp.run_program(&src, Some(path.clone())) {
+        if let Err(e) = interp.run_program(&src, Some(path.clone())) {
             // Restore the terminal first: a TUI program that entered raw mode and
             // then threw never reached its `term-raw-leave`, and `process::exit`
             // skips Drop guards. Without this the shell is left wedged in raw mode
             // after an erroring full-screen run.
             brood::builtins::restore_terminal_on_exit();
-            eprintln!("{}", msg);
+            report_error(&e);
             std::process::exit(1);
         }
     }

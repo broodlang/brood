@@ -251,14 +251,14 @@ Three things are entangled, and the heap choice constrains the other two:
   "stop stepping," and migration is trivial (move the data). This pairs
   naturally with an arena/GC heap.
 
-> We shipped the **recursive** arm (option B below: hand-rolled `Send` arena +
-> `corosensei` stackful coroutines), and the VM (ADR-076) later reified the
-> *operand* stack but kept native recursion for the *call* stack. That is exactly
-> why a *running* process can't migrate across workers today — its call
-> continuation is a native stack. The stepping-VM arm (reify the call/frame stack
-> too) is the committed way to unblock both **live-process migration** and the
-> **fully precise mid-eval GC** this section wants; the full design is in
-> [`concurrency-v2.md`](concurrency-v2.md) §7 (ADR-100).
+> We shipped the **recursive** arm first (option B below: hand-rolled `Send`
+> arena + `corosensei` stackful coroutines); the VM (ADR-076) then reified the
+> *operand* stack, and on **2026-06-08 the stepping-VM arm completed** (ADR-100):
+> the call/frame stack is reified heap data too, corosensei is deleted, and a
+> paused process is exactly `(frames, operands, ip)` — plain `Send` data. Both
+> payoffs this section wanted are in: **live-process migration** (any worker
+> resumes any process) and **fully precise mid-eval GC** (the safepoint fires at
+> any depth, ADR-061). Full history in [`concurrency-v2.md`](concurrency-v2.md) §8.
 
 ## Options
 
@@ -365,14 +365,16 @@ semantics) is **ours**.
    `heap_is_send` test asserts it.
 4. ✅ **Multi-core processes.** Each process owns its `Heap`; messages are
    deep-copied; symbols share a global interner. Green M:N on a worker pool
-   via [`corosensei`] stackful coroutines, with reduction-counted preemption
+   via [`corosensei`] stackful coroutines (the substrate later replaced by
+   state capture, ADR-100), with reduction-counted preemption
    and selective `receive`. See `concurrency.md` / `scheduler.md`.
 5. ✅ **Per-process mark-sweep GC** (ADR-035; "Implemented: per-process tracing
    GC" above). Fires at the outermost-eval safepoint, gated by `GC_BLOCK == 1`;
    roots are `expr`/`env`/`heap.roots`/`heap.dynamics`. Free lists per slab,
    adaptive threshold, stress mode for testing.
 6. ✅ **Suspension** via stackful coroutines for blocking `receive` (landed
-   with step 4b).
+   with step 4b; since 2026-06-08 suspension is state capture — the reified
+   frame stack returns out of the VM loop, no coroutine — ADR-100).
 
 > Step 2/3 made the heap a `Send`, self-contained unit. Step 4 made each
 > process own one. Step 5 finally bounded a long-lived process's footprint.

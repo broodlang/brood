@@ -25,7 +25,7 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
    ───────────────────────────────────────────────────────────────────────────────────────────────
    MECHANISM (Rust)        language pipeline                          advisory types
         reader → macros → eval → printer                              types  ←  check
-                          builtins (the primitive kernel)
+                          builtins/ (the primitive kernel, split by domain)
    ─────────────────────────────────── substrate ───────────────────────────────────────────────
         value (Value, Tag, handles, interner)      heap (regions, env, promotion, equality)
         error      alloc (byte counter)            process (green-process scheduler)
@@ -34,7 +34,7 @@ one with e.g. *"do backlog item W2 from docs/components.md."*
 On disk the `crates/lisp/src` tree mirrors these layers, so the listing reads as
 the architecture: `core/` (value, heap, alloc), `syntax/` (reader, printer),
 `eval/` (evaluator + macros), `types/` (lattice + checker), with `error.rs`,
-`process.rs`, `builtins.rs`, and `lib.rs` at the top level. `lib.rs`'s module
+`process.rs`, `builtins/`, and `lib.rs` at the top level. `lib.rs`'s module
 block is the annotated table of contents.
 
 Two boundaries do most of the structural work:
@@ -111,15 +111,17 @@ before working in any Rust component:
 - **Work here independently:** isolated; the only coupling is that `lib.rs`
   installs it as the global allocator.
 
-### `process.rs` — the green-process scheduler · ~431 LOC
-- **Owns:** `spawn`/`send`/`receive`/`self`, mailboxes, the work-stealing worker
-  pool, `corosensei` coroutines, and `Message` (the `Send` deep-copy that crosses
-  heaps). Counters behind `spawn-count`/`peak-threads`/`worker-threads`.
-- **Depends on:** `heap`, `eval`, `value`, `error`, `corosensei`.
+### `process.rs` + `process/` — the green-process scheduler
+- **Owns:** `spawn`/`send`/`receive`/`self` and `Message` (the `Send` deep-copy
+  that crosses heaps), split across the `process/` subsystem: `scheduler.rs` (the
+  work-stealing worker pool), `mailbox.rs`, `monitor.rs`, `links.rs`, `timer.rs`,
+  and `message.rs`. Processes are **state-capture** continuations — plain heap
+  data, no coroutines (ADR-100). Counters behind
+  `spawn-count`/`peak-threads`/`worker-threads`.
+- **Depends on:** `heap`, `eval`, `value`, `error`.
 - **Exposes:** the functions `builtins` wraps, plus `set_max_parallel` (CLI).
-- **Work here independently:** well isolated behind those builtins. The `unsafe
-  impl Send for Process` and the receive/park handshake are the subtle parts —
-  see [scheduler.md](scheduler.md) / ADR-018.
+- **Work here independently:** well isolated behind those builtins. The receive/
+  park handshake is the subtle part — see [scheduler.md](scheduler.md) / ADR-018.
 
 ## Rust kernel — language pipeline
 
@@ -138,8 +140,11 @@ before working in any Rust component:
 
 ### `eval/mod.rs` — the evaluator · ~539 LOC
 - **Owns:** the `'tail: loop` tree-walker, **special forms** (`quote if do def
-  fn/lambda quasiquote defmacro let/let*`), closure application,
+  fn/lambda quasiquote defmacro let`), closure application,
   parameter binding (`&optional`/`& rest`), and the native-call arity gate.
+  Alongside it sits `eval/compile/` (`mod.rs`, `ir.rs`, `jit_lower.rs`) — the
+  closure-compiling bytecode VM + tier-1 JIT, the **default engine** (ADR-076);
+  the tree-walker is the legacy/fallback path.
 - **Depends on:** `heap`, `value`, `macros` (lazy expansion + `fn`/`let` lowering
   fallback), `printer`, `error`.
 - **Exposes:** `eval`, `apply`, `apply_closure`, `truthy`.
@@ -160,14 +165,15 @@ before working in any Rust component:
   (eval calls back for the lowering fallback). Pattern-match *policy* is in the
   prelude; this file only lowers the surface to `match*`.
 
-### `builtins.rs` — the primitive kernel · ~825 LOC (heaviest, multi-domain)
+### `builtins/` — the primitive kernel (split by domain)
 - **Owns:** every Rust-implemented primitive, registered into the prelude builder
-  by `register`. Spans ~10 domains: numeric (`%add`…`rem`), pair/sequence,
-  vector, string, type reflection (`type-of`), value↔text + I/O, time, memory,
-  self-hosting (`eval`/`read-string`/`load`/`eval-string`/`%builtin-module`),
-  symbols, filesystem (`cwd`/`file-exists?`/`dir?`/`list-dir`/`make-dir`/`spit`),
-  system (`getenv`/`run-process`), macros, the type-`check` hook, source positions,
-  errors/control (`throw`/`%try`/`%isolate`), and processes.
+  by `register`. One file per domain: `mod.rs` (the `Reg` struct, the single
+  `register` table, `PRIMITIVE_DOCS`, and the shared helpers), `numeric.rs`
+  (numeric/bitwise/bitset/math), `sequences.rs` (pair/list/range/vector/map/
+  string/rope), `io.rs` (TCP/table/print/time/fs/hashing/git/crypto),
+  `terminal.rs` (terminal + GUI, feature-gated), `system.rs` (eval/load/macros/
+  introspection/errors/processes/dist/dynamic/namespaces), and `bytes.rs`
+  (the raw-bytes surface).
 - **Depends on:** nearly everything — `heap`, `eval`, `value`, `printer`,
   `reader`, `macros`, `check`, `process`, `alloc`, `error`.
 - **Exposes:** `register(&mut Heap, EnvId)` — the single install point.
@@ -287,18 +293,15 @@ before working in any Rust component:
    frames) and move `form_pos`/`current_file` to a small `source.rs` (or onto the
    reader/load path). Equality could also move to a `value`-adjacent module.
 
-2. **`builtins.rs` is a 10-domain monolith (~825 LOC) with dead code.** Ten
-   domains in one file means edits to, say, the filesystem primitives sit next to
-   unrelated numeric code. And `is_nil`/`is_pair`/`is_int`/`is_float`/`is_bool`/
-   `is_string`/`is_symbol`/`is_keyword`/`is_vector`/`is_fn` plus `println` are
-   **defined but never registered or called** — the predicates moved to Brood
-   over `type-of`, but the Rust versions were left behind (dead-code warnings).
-   *Recommendation:* delete the dead functions now; optionally split into a
-   `builtins/` module-per-domain with a single `register` in `mod.rs`.
+2. **`builtins.rs` monolith — resolved.** *(Resolved.)* The old 10-domain
+   single file is now the `builtins/` directory, one file per domain
+   (`mod.rs`/`numeric.rs`/`sequences.rs`/`io.rs`/`terminal.rs`/`system.rs`/
+   `bytes.rs`) with the single `register` table in `mod.rs`, and the dead
+   never-registered functions were deleted along the way (backlog W1/W4).
 
 3. **`docs/architecture.md` — now current.** *(Resolved.)* Its layout/component
    map matches the `core`/`syntax`/`eval`/`types` tree (no more `env.rs`), the
-   relaxed-dependency note (`boxcar`/`corosensei`/`rustyline`/`divan`), the `Send`
+   relaxed-dependency note (`boxcar`/`rustyline`/`divan`), the `Send`
    handle-heap memory model, and the `nest` + `lsp` crates.
 
 4. **`nest` ↔ Brood string coupling (low priority).** `crates/nest/src/main.rs`
@@ -309,19 +312,14 @@ before working in any Rust component:
 ## Work backlog (dispatchable)
 
 Each item is self-contained: hand Claude the item ID plus this file and it has
-everything it needs. Two pairs share a file — **coordinate or sequence them**:
-W2 and W3 both edit `core/heap.rs`; W1 is subsumed by W4 (both edit `builtins.rs`).
+everything it needs. One pair shares a file — **coordinate or sequence them**:
+W2 and W3 both edit `core/heap.rs`. (W1 and W4 — the `builtins/` split — are done.)
 
-### W1 — Delete dead primitive functions · `builtins.rs` · trivial, no behaviour change
-- **Goal:** remove dead code.
-- **Do:** delete `is_nil` `is_pair` `is_int` `is_float` `is_bool` `is_string`
-  `is_symbol` `is_keyword` `is_vector` `is_fn` and `println` from
-  `crates/lisp/src/builtins.rs`.
-- **Why:** defined but never registered or called — the tag predicates are Brood
-  over `type-of` and `println` is Brood over `print`; the Rust versions linger as
-  dead-code warnings.
-- **Verify:** `grep` shows no references; `cargo build` warns less; `cargo test` green.
-- **Risk:** none. Independent of W2/W3. **Folded into W4** — skip if doing W4.
+### W1 — Delete dead primitive functions · ✅ done
+- **Was:** delete the never-registered `is_*` predicates and `println` from the
+  old `builtins.rs` (the tag predicates are Brood over `type-of`, `println` is
+  Brood over `print`).
+- **Done** as part of W4 — the dead functions were not carried into `builtins/`.
 
 ### W2 — Extract `env.rs` from `core/heap.rs` · medium, mechanical
 - **Goal:** give the environment chain its own module.
@@ -348,19 +346,11 @@ W2 and W3 both edit `core/heap.rs`; W1 is subsumed by W4 (both edit `builtins.rs
   source-line capture works; `cargo test` green.
 - **Risk:** low–medium. **Shares `core/heap.rs` with W2.**
 
-### W4 — Split `builtins.rs` into `builtins/` by domain · medium, large but mechanical
-- **Goal:** one cohesive file per primitive domain.
-- **Do:** convert `crates/lisp/src/builtins.rs` into a `builtins/` directory:
-  `mod.rs` (the single `register` table + shared helpers `arg`/`two`/`expect_*`)
-  plus `numeric`, `collection` (pair/seq/vector/string), `text`
-  (`str`/`pr-str`/`print`/`stdout-tty?`/`type-of`/`name`), `host` (fs +
-  `getenv`/`run-process` + `now` + `mem-*`), `selfhost`
-  (`eval`/`read-string`/`eval-string`/`load`/`%builtin-module`/`apply`/`macroexpand*`/`gensym`),
-  `tooling` (`check`/`form-pos`/`current-file`), `control` (`throw`/`%try`/`%isolate`),
-  `concurrency` (`spawn`/`send`/`receive`/`self`/counters). Keep the full `register`
-  table in `mod.rs` so every primitive + arity stays visible in one place.
-  **Includes W1** — don't carry the dead fns over.
-- **Why:** a 10-domain monolith means unrelated edits collide.
-- **Verify:** the set of registered names + arities is unchanged (diff the
-  `register` calls before/after); `cargo test` green; `primitives.md` still accurate.
-- **Risk:** medium (large diff, no logic change). Independent of W2/W3 (different file).
+### W4 — Split `builtins.rs` into `builtins/` by domain · ✅ done
+- **Was:** convert the single `crates/lisp/src/builtins.rs` into a directory,
+  one cohesive file per primitive domain, keeping the full `register` table in
+  `mod.rs` so every primitive + arity stays visible in one place.
+- **Done:** the split exists on disk as `crates/lisp/src/builtins/` — `mod.rs`
+  (the `register` table + `PRIMITIVE_DOCS` + shared helpers), `numeric.rs`,
+  `sequences.rs`, `io.rs`, `terminal.rs`, `system.rs`, `bytes.rs`. Includes W1
+  (the dead functions were not carried over).

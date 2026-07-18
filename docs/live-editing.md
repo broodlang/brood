@@ -101,7 +101,7 @@ already bound*; otherwise leave the existing binding untouched. This is Emacs's
 behaviour uses `defn`/`def`.
 
 It's a **pure prelude macro — no kernel change at all**, because the needed
-predicate `(bound? 'sym)` already exists (`builtins.rs:622`) and `unless` is in
+predicate `(bound? 'sym)` already exists (`crates/lisp/src/builtins/system.rs`) and `unless` is in
 the prelude:
 
 ```clojure
@@ -140,13 +140,13 @@ green. → **ADR-042 (shipped 2026-05-29).**
 
 ## Stage 2 — `reload-defs` hardening: atomic, honest detection
 
-**Problem.** Two sub-issues with `reload-defs` (`builtins.rs:1552`):
+**Problem.** Two sub-issues with `reload-defs` (`crates/lisp/src/builtins/system.rs`):
 - **Atomicity.** It evals forms one at a time and `break`s on the first error,
   which *can* leave a file half-reloaded. (Note: a **syntax error is already
   atomic** — `read_all_positioned` parses the whole file before any eval, so a
   half-saved/unparseable file applies *zero* defs. The residual window is a
   *runtime* error while evaluating form N, after forms 1..N-1 already landed.)
-- **Detection.** `head.starts_with("def")` (`builtins.rs:1573`) over-matches a
+- **Detection.** `head.starts_with("def")` (`crates/lisp/src/builtins/system.rs`) over-matches a
   top-level call to a user fn named `default-…` and under-matches a definition
   produced by a user macro whose name doesn't start with `def`.
 

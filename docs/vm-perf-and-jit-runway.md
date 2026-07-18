@@ -58,7 +58,7 @@
 Both are "compile, then execute." The difference is **what executes the
 compiled artifact**:
 
-- **The VM we have** (`crates/lisp/src/eval/compile.rs`): a form compiles once
+- **The VM we have** (`crates/lisp/src/eval/compile/`): a form compiles once
   into a `Node` tree; *Rust code interprets that tree* — `exec_node` is a
   recursive `match` over `Node` variants. Every operation pays interpretive
   overhead: a branch on the node kind, `Box` pointer-chasing, `Step` enum
@@ -173,7 +173,7 @@ JIT on-ramp proper.
   64-bit `Value` (NaN-box / tagged bits) would halve operand-stack traffic and
   is what JIT'd code wants in a register. It touches everything, which is
   exactly why pre-alpha is the cheapest it will ever be. Not part of this
-  round; decide before 1.0. (Today `Value` is a 16-byte Rust enum.)
+  round; decide before 1.0. (Today `Value` is a 24-byte Rust enum.)
 
 ## 5. Benchmark protocol (every step, no exceptions)
 
@@ -307,7 +307,7 @@ so default builds and `nest release` bundles (ADR-038) are unaffected.
 
 1. **Bytecode lowering** (§2 above, the JIT on-ramp) — Cranelift IR is
    generated from flat bytecode ops, not from the `Node` tree.
-2. **`Value` representation** (§4.E — NaN-box vs 16-byte enum) — the calling
+2. **`Value` representation** (§4.E — NaN-box vs 24-byte enum) — the calling
    convention above assumes a single-word `Value` in registers; the tier-1
    design with values in `Heap::roots` works with either rep, but a 64-bit
    tagged `Value` is what JIT'd register code *wants* and pre-alpha is the
@@ -319,6 +319,6 @@ ADR-096 (this plan), ADR-101 (JIT architecture decision), ADR-076
 (closure-compiling VM), ADR-069 (dispatch perf: passthrough + inline cache),
 ADR-091 (RUNTIME compaction — why in-place patching can't survive a JIT),
 ADR-026 (immutability), ADR-038 (bundles — the Cranelift size concern).
-Key files: `crates/lisp/src/eval/compile.rs` (the whole work list),
+Key files: `crates/lisp/src/eval/compile/` (the whole work list),
 `crates/lisp/src/core/heap.rs` (`global_epoch`, `vm_cache_*`, `roots`),
 `docs/bytecode-vm.md` (§2.4 bytecode lowering, §7 staging).
