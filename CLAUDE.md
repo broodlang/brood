@@ -421,7 +421,6 @@ The later milestones are already underway (vertical-slice style, ADR-045/046):
 process viewer; **M4 server/daemon** — distributed nodes (TCP, location-transparent
 `send`, monitors, closure-shipping, HMAC handshake) plus a userland
 `std/proc/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
-roadmap/ADR-039). The editor app itself already exists as the separate
-**`brood-edit`** project (a `nest` project consuming this language + `std/editor/*`);
-it's not part of Brood's own roadmap. Still ahead here: server-mode socket serving
+roadmap/ADR-039). The editor app itself is a separate downstream project, out of
+scope for this repo and its roadmap. Still ahead here: server-mode socket serving
 and the M5 web frontend.

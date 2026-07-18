@@ -1,11 +1,11 @@
 # ROADMAP
 
 Brood is the **language and runtime** for a modern, Emacs-like editor — a fast
-native app locally, a server for remote instances. **The editor app itself is a
-separate project — [`brood-edit`](../brood-edit) — and it already exists**; it
-consumes this language and the `std/editor/*` framework. Brood's job here is the
-language core, runtime, and that framework. We get there in milestones (M1–M5),
-each shippable and useful on its own.
+native app locally, a server for remote instances. The editor app itself is a
+separate downstream project (out of scope here); it consumes this language and
+the `std/editor/*` framework. Brood's job is the language core, runtime, and
+that framework. We get there in milestones (M1–M5), each shippable and useful
+on its own.
 
 Guiding constraints (see `CLAUDE.md`): keep the **language core small** — prefer
 adding a primitive function or a prelude macro over a new special form — and write
@@ -250,7 +250,7 @@ Compressed; per-item history is in [`docs/devlog.md`](docs/devlog.md) and
   delta pushes, edit-surviving markers (presence cursors ride them, pid-keyed
   cleanup on subscriber death), structured `buffer-splice`/`buffer-marker-move`,
   and concurrent-splice **transforms** (`splice-transform` — exact merges for
-  disjoint edits, no CRDT) — what brood-edit's multiplayer editing runs on.
+  disjoint edits, no CRDT) — what a downstream editor's multiplayer editing runs on.
 - **M3 — display protocol + native frontend.** Serialisable render-op protocol
   (ADR-046); input events; in-process terminal frontend; per-op/per-window fonts
   (ADR-079); `nest observe` (inline + remote, ADR-053); telemetry core

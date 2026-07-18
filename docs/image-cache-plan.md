@@ -4,7 +4,7 @@ Skip re-evaluating a project's modules on every launch by caching the **evaluate
 global table** (the "image") to disk and re-hydrating it when the sources are
 unchanged. Cold launch stays correct; warm launch skips the eval.
 
-## Motivation (measured on brood-edit, 25 modules)
+## Motivation (measured on a 25-module downstream app)
 
 `nest run` → `main`-entry is ~**1.17 s**; the in-`main` setup (config, project,
 buffer, `gui-display`, model, theme, logging) is only **53 ms**. The rest is the
@@ -113,7 +113,7 @@ fire; the guard is a safety net, not an expected path.
   path; cold-path rewrite kept off the critical path (best-effort, never fatal).
 - **Stage 4 — integration + flags.** Hook the load path; bypass flags;
   write-on-cold / read-on-warm; corrupt/partial image → clean cold fallback.
-- **Stage 5 — validation.** Full brood + brood-edit suites pass when the image is
+- **Stage 5 — validation.** The full brood suite + a real multi-module app's suite pass when the image is
   loaded from cache; a diff test that a hydrated runtime's globals are behaviorally
   identical to a source-evaled one; warm-startup target **< 150 ms**; stale/corrupt
   image → fallback, never a crash or a wrong result.
