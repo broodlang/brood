@@ -30,6 +30,13 @@ real-tcp = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(distribution)'
 test-group = 'real-tcp'
+# One retry: these spin real TCP node pairs with ~5s connect/receive timeouts, and
+# a loaded runner (CI shares 2 cores with the rest of the workspace build) can blow
+# a deadline with no code at fault (`reconnect_watcher_heals_a_fallen_link`
+# "TIMEOUT-no-pong", 2026-07-19 — passed untouched on rerun). A deterministic
+# regression still fails both attempts and stays red; nextest marks a pass-on-retry
+# as FLAKY in the summary so it stays visible rather than silently absorbed.
+retries = 1
 
 # `serve_attach` (ADR-090) likewise spins two real `brood` child processes over
 # loopback (a daemon + an attaching client); same reasoning as `distribution` — pin
@@ -37,6 +44,8 @@ test-group = 'real-tcp'
 [[profile.default.overrides]]
 filter = 'binary(serve_attach)'
 test-group = 'real-tcp'
+# Same real-network timing exposure as `distribution` above — same one-retry policy.
+retries = 1
 
 # `brood_suite_passes` (tests/suite.rs) runs the ENTIRE in-language suite (~1200
 # cases) inside ONE nextest case, so the 120s default cap is the wrong scale: under
