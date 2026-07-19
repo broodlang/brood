@@ -101,6 +101,14 @@ pub enum PrimOp1 {
     // wrapper. This is nbody's 2M-calls-per-run `(sqrt dsq)` without the per-call
     // wrapper activation (whose error branch keeps its own arm off the JIT).
     Sqrt,
+    // `type-of`: total over every operand (tag → cached keyword id, no error, no
+    // allocation), so the inline covers ALL shapes — a tag read in the VM, a
+    // tag-indexed table load in the JIT. This is what every type predicate
+    // (`vector?`/`int?`/`string?`/…) bottoms out in (they are Brood wrappers over
+    // `type-of` — hit per candidate by `match`/`receive` pattern dispatch and per
+    // element by the seq predicates), and making it call-free also makes those
+    // one-line wrappers leaf-inlinable (their bodies lose their last `Call`).
+    TypeOf,
 }
 
 impl PrimOp1 {
@@ -111,6 +119,7 @@ impl PrimOp1 {
             "nil?" => PrimOp1::IsNil,
             "pair?" => PrimOp1::IsPair,
             "empty?" => PrimOp1::IsEmpty,
+            "type-of" => PrimOp1::TypeOf,
             _ => return None,
         })
     }

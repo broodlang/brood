@@ -291,9 +291,15 @@ track); `base64` is the residual coin-flip last place.
   2026-07-13) and closure-template caching (2026-07-11), then the mailbox
   mutex trimmed to ONE acquisition per matched message (was three: peek+copy
   under lock, remove, deadline-clear — optimistic first-candidate pop +
-  copy-outside-lock; pingpong ~2–4%, 2026-07-19); the remainder is
-  per-message `to_message`/`from_message` copy + continuation capture/restore.
-  Trim the copy for small scalar messages; shrink the capture. **[kernel]**
+  copy-outside-lock; pingpong ~2–4%, 2026-07-19); `type-of` became a compiled
+  prim (matcher dispatch cheaper everywhere; type-dispatch loops ~25–30%,
+  pingpong ~1–2%, 2026-07-19 — profiling REFUTED the copy hypothesis: the
+  `to_message`/`from_message` copy is ~2% of a pingpong RT). The measured
+  remainder is the matcher execution protocol itself (`hof_apply_step` →
+  full `vm_apply` per candidate + a fresh body-thunk closure per match) and
+  scheduler/capture — the deep lever is a BEAM-style inline receive (clauses
+  compiled into the owning arm's bytecode, no matcher closure, no thunk).
+  **[kernel]**
 - ⬜ **`bintree` — GC / allocation pressure.** Build+walk trees; per-node alloc +
   minor-GC throughput vs BEAM. Inline small-vector storage (2026-07-01) and the
   checkpoint purity exemption + nursery capacity seeding (2026-07-18) trimmed it;

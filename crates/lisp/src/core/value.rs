@@ -1139,6 +1139,91 @@ pub(crate) mod jit_layout {
     /// small-vector element read (`Range`/`SeqView` share the backing slab but
     /// carry their own tags, so they deopt to the VM). Pinned by the layout test.
     pub const TAG_VECTOR: u8 = 10;
+
+    /// Discriminant-byte → `type-of` keyword id, for the JIT's `PrimOp1::TypeOf`
+    /// lowering: one `u32` load indexed by a value's tag byte replaces the whole
+    /// native-dispatch protocol. Built from one exemplar per `Value` variant
+    /// (dummy handles — only the discriminant byte is ever read, never the
+    /// payload) mapped through the canonical [`super::tag`] + [`super::Tag::
+    /// keyword`], so the collapsing rules (`BigInt`→`int`, `Range`/`SeqView`→
+    /// `pair`) hold by construction and a new variant is covered the moment the
+    /// exemplar list is (the exhaustive-`match` test below forces that).
+    pub(crate) fn type_of_kw_table() -> &'static [u32; 256] {
+        use super::*;
+        static T: LazyLock<[u32; 256]> = LazyLock::new(|| {
+            let mut out = [0u32; 256];
+            for v in exemplars() {
+                let d = unsafe { *(&v as *const Value as *const u8) };
+                out[d as usize] = tag(v).keyword();
+            }
+            out
+        });
+        &T
+    }
+
+    /// One dummy-handle exemplar per `Value` variant. The `match` on a probe
+    /// value is exhaustive, so adding a `Value` variant fails compilation here
+    /// until its exemplar (and thus its `type_of_kw_table` entry) exists.
+    fn exemplars() -> Vec<super::Value> {
+        use super::*;
+        let all = vec![
+            Value::Nil,
+            Value::Bool(false),
+            Value::Int(0),
+            Value::BigInt(BigIntId::local(0)),
+            Value::Float(0.0),
+            Value::Sym(0),
+            Value::Keyword(0),
+            Value::Str(StrId::local(0)),
+            Value::Rope(RopeId::local(0)),
+            Value::Pair(PairId::local(0)),
+            Value::Vector(VecId::local(0)),
+            Value::Range(VecId::local(0)),
+            Value::SeqView(VecId::local(0)),
+            Value::Map(MapId::local(0)),
+            Value::Fn(ClosureId::local(0)),
+            Value::Macro(ClosureId::local(0)),
+            Value::Native(NativeId::local(0)),
+            Value::Ref(0),
+            Value::Pid { node: 0, id: 0 },
+            Value::Socket(0),
+            Value::Subprocess(0),
+            Value::Table(0),
+            Value::Bytes(BytesId::local(0)),
+            Value::Decimal(DecimalId::local(0)),
+        ];
+        // Exhaustiveness guard: this match must name every variant. When a new
+        // variant appears, add it here AND to `all` above.
+        for v in &all {
+            match v {
+                Value::Nil
+                | Value::Bool(_)
+                | Value::Int(_)
+                | Value::BigInt(_)
+                | Value::Float(_)
+                | Value::Sym(_)
+                | Value::Keyword(_)
+                | Value::Str(_)
+                | Value::Rope(_)
+                | Value::Pair(_)
+                | Value::Vector(_)
+                | Value::Range(_)
+                | Value::SeqView(_)
+                | Value::Map(_)
+                | Value::Fn(_)
+                | Value::Macro(_)
+                | Value::Native(_)
+                | Value::Ref(_)
+                | Value::Pid { .. }
+                | Value::Socket(_)
+                | Value::Subprocess(_)
+                | Value::Table(_)
+                | Value::Bytes(_)
+                | Value::Decimal(_) => {}
+            }
+        }
+        all
+    }
 }
 
 #[cfg(test)]

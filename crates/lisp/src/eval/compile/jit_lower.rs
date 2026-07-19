@@ -3677,6 +3677,24 @@ fn jit_lower_arm_inner(
             || matches!(op, Op::Int(v) if b.func.dfg.value_type(v) == types::I8)
             || matches!(op, Op::Slot(k) if slot_bool.borrow().get(k).copied().unwrap_or(false))
     };
+    // Record an edge's per-entry bool-ness flags for its target block, returning whether
+    // this edge AGREES with the typing the block already has. The first edge to reach a
+    // join fixes the typing; a later edge whose flags differ must NOT jump there — a
+    // single-i64 block param can't distinguish `Int 1` from `true`, so a type-mixed join
+    // (e.g. `(if c 7 (< a b))` flowing into a call argument) would either box the int
+    // edge's raw value as a `Value::Bool` (the `Bool(7)` staging miscompile) or strip the
+    // bool edge to a raw truthy int, depending on which edge lowered last. The caller
+    // routes a disagreeing edge to `deopt` instead — the VM runs that iteration with the
+    // real tagged value, bit-identical.
+    fn record_block_flags(slot: &mut Option<Vec<bool>>, flags: Vec<bool>) -> bool {
+        match slot {
+            None => {
+                *slot = Some(flags);
+                true
+            }
+            Some(prev) => *prev == flags,
+        }
+    }
 
     // Translate each leader block in ip order.
     for ip in 0..len {
@@ -4304,6 +4322,50 @@ fn jit_lower_arm_inner(
                                 }
                             }
                         }
+                        PrimOp1::TypeOf => {
+                            // Total over every operand — no deopt. An unboxed
+                            // operand's tag is known at compile time (constant
+                            // keyword); a boxed one loads its keyword id from the
+                            // 256-entry discriminant-byte table (`type_of_kw_table`,
+                            // 'static — the address is stable for the process
+                            // lifetime) and boxes TAG_KEYWORD + the id.
+                            let kw_const = |b: &mut FunctionBuilder, t: crate::core::value::Tag| {
+                                let w0 = b.ins().iconst(types::I64, TAG_KEYWORD as i64);
+                                let w1 = b.ins().iconst(types::I64, t.keyword() as i64);
+                                let w2 = b.ins().iconst(types::I64, 0);
+                                Op::Handle(w0, w1, w2)
+                            };
+                            match operand {
+                                Op::Int(v) if b.func.dfg.value_type(v) == types::I64 => {
+                                    let op = kw_const(&mut b, crate::core::value::Tag::Int);
+                                    stack.push(op);
+                                }
+                                Op::Float(_) => {
+                                    let op = kw_const(&mut b, crate::core::value::Tag::Float);
+                                    stack.push(op);
+                                }
+                                Op::Bool(_) => {
+                                    let op = kw_const(&mut b, crate::core::value::Tag::Bool);
+                                    stack.push(op);
+                                }
+                                _ => {
+                                    // Type-erased (slot / call result / i8 compare):
+                                    // tag byte → table load → boxed keyword.
+                                    let [w0, _, _] = read_words(&mut b, operand);
+                                    let tagb = b.ins().band_imm(w0, 0xff);
+                                    let table = crate::core::value::jit_layout::type_of_kw_table();
+                                    let base = b.ins().iconst(ptr_ty, table.as_ptr() as i64);
+                                    let off = b.ins().imul_imm(tagb, 4);
+                                    let addr = b.ins().iadd(base, off);
+                                    let sym =
+                                        b.ins().load(types::I32, MemFlagsData::new(), addr, 0);
+                                    let w1 = b.ins().uextend(types::I64, sym);
+                                    let w0k = b.ins().iconst(types::I64, TAG_KEYWORD as i64);
+                                    let w2 = b.ins().iconst(types::I64, 0);
+                                    stack.push(Op::Handle(w0k, w1, w2));
+                                }
+                            }
+                        }
                     }
                 }
                 Inst::MakeVector(n) => {
@@ -4894,12 +4956,18 @@ fn jit_lower_arm_inner(
                             b.ins().jump(deopt, &[]);
                         }
                     } else {
-                        bool_param[*t] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
-                        let args: Vec<BlockArg> = stack
-                            .iter()
-                            .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
-                            .collect();
-                        b.ins().jump(leader_block[*t]?, &args);
+                        let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op)).collect();
+                        if record_block_flags(&mut bool_param[*t], flags) {
+                            let args: Vec<BlockArg> = stack
+                                .iter()
+                                .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
+                                .collect();
+                            b.ins().jump(leader_block[*t]?, &args);
+                        } else {
+                            // Type-mixed join (see `record_block_flags`): this edge's
+                            // scalar typing disagrees with the block's — deopt to the VM.
+                            b.ins().jump(deopt, &[]);
+                        }
                     }
                     break;
                 }
@@ -5103,23 +5171,28 @@ fn jit_lower_arm_inner(
                 }
                 Inst::JumpIfFalse(t) => {
                     let cond = stack.pop()?;
-                    let tgt = leader_block[*t]?; // falsy → else
-                    let fall = leader_block[j + 1]?; // truthy → fall-through
-                    bool_param[*t] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
-                    bool_param[j + 1] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
+                    let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op)).collect();
+                    // A side whose typing disagrees with its join's recorded flags routes
+                    // to `deopt` (no args) instead — see `record_block_flags`.
+                    let t_ok = record_block_flags(&mut bool_param[*t], flags.clone());
+                    let f_ok = record_block_flags(&mut bool_param[j + 1], flags);
+                    let tgt = if t_ok { leader_block[*t]? } else { deopt }; // falsy → else
+                    let fall = if f_ok { leader_block[j + 1]? } else { deopt }; // truthy → fall-through
                     let args: Vec<BlockArg> = stack
                         .iter()
                         .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
                         .collect();
+                    let targs: Vec<BlockArg> = if t_ok { args.clone() } else { Vec::new() };
+                    let fargs: Vec<BlockArg> = if f_ok { args } else { Vec::new() };
                     match cond {
                         // A comparison result (`i8`) or a boolean that crossed a block
                         // boundary (`Op::Bool`, already `i64`): branch directly — nonzero
                         // (true) → truthy → fall-through, zero → else.
                         Op::Int(v) if b.func.dfg.value_type(v) != types::I64 => {
-                            b.ins().brif(v, fall, &args, tgt, &args);
+                            b.ins().brif(v, fall, &fargs, tgt, &targs);
                         }
                         Op::Bool(v) => {
-                            b.ins().brif(v, fall, &args, tgt, &args);
+                            b.ins().brif(v, fall, &fargs, tgt, &targs);
                         }
                         // A boxed condition in a slot/handle — e.g. `(and a b)` boxes its
                         // result to a temp slot (`box_scalar` tags it `Bool`), then reads it
@@ -5164,7 +5237,7 @@ fn jit_lower_arm_inner(
                             let pl_false = b.ins().icmp_imm(IntCC::Equal, pl_byte, 0);
                             let false_bool = b.ins().band(is_bool, pl_false);
                             let falsy = b.ins().bor(is_nil, false_bool);
-                            b.ins().brif(falsy, tgt, &args, fall, &args);
+                            b.ins().brif(falsy, tgt, &targs, fall, &fargs);
                         }
                         // A raw `Op::Int(i64)` here is AMBIGUOUS: it is either a genuine
                         // unboxed int (always truthy in Brood) OR a boolean/comparison result
@@ -5183,7 +5256,7 @@ fn jit_lower_arm_inner(
                         // `Op::Float`/`Op::HoistedVec`: unambiguously truthy (a float / a vector
                         // is never a boolean), so branch to the truthy edge directly.
                         _ => {
-                            b.ins().jump(fall, &args);
+                            b.ins().jump(fall, &fargs);
                         }
                     }
                     break;
@@ -5215,12 +5288,17 @@ fn jit_lower_arm_inner(
                 break;
             }
             if is_leader[j] {
-                bool_param[j] = Some(stack.iter().map(|&op| is_bool_op(&b, op)).collect());
-                let args: Vec<BlockArg> = stack
-                    .iter()
-                    .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
-                    .collect();
-                b.ins().jump(leader_block[j]?, &args);
+                let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op)).collect();
+                if record_block_flags(&mut bool_param[j], flags) {
+                    let args: Vec<BlockArg> = stack
+                        .iter()
+                        .map(|&op| BlockArg::Value(as_block_arg(&mut b, op)))
+                        .collect();
+                    b.ins().jump(leader_block[j]?, &args);
+                } else {
+                    // Type-mixed join (see `record_block_flags`): deopt to the VM.
+                    b.ins().jump(deopt, &[]);
+                }
                 break;
             }
         }

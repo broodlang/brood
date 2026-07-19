@@ -1968,7 +1968,8 @@ fn node_touches_heap(node: &Node) -> bool {
             ..
         } => true,
         Node::Prim1 {
-            op: PrimOp1::IsNil | PrimOp1::IsPair | PrimOp1::IsEmpty | PrimOp1::Sqrt,
+            op:
+                PrimOp1::IsNil | PrimOp1::IsPair | PrimOp1::IsEmpty | PrimOp1::Sqrt | PrimOp1::TypeOf,
             ..
         } => false,
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
@@ -3485,6 +3486,11 @@ fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) ->
                     (PrimOp1::IsEmpty, ValueRef::Pair(_) | ValueRef::Range(_)) => {
                         crate::perf_bump!(prim1_inline);
                         return Ok(Value::boolean(false));
+                    }
+                    // `type-of` is total: tag → cached keyword, every operand shape.
+                    (PrimOp1::TypeOf, _) => {
+                        crate::perf_bump!(prim1_inline);
+                        return Ok(Value::keyword(crate::core::value::tag(sa).keyword()));
                     }
                     _ => {} // vectors/ranges/type errors → the native owns them
                 }
@@ -5108,6 +5114,14 @@ fn exec_chunk(
                             crate::perf_bump!(prim1_inline);
                             heap.truncate_roots(n - 1);
                             heap.push_root(Value::Float((i as f64).sqrt()));
+                            continue;
+                        }
+                        // `type-of` is total: tag → cached keyword, every operand shape.
+                        (PrimOp1::TypeOf, _) => {
+                            crate::perf_bump!(prim1_inline);
+                            let result = Value::keyword(crate::core::value::tag(sa).keyword());
+                            heap.truncate_roots(n - 1);
+                            heap.push_root(result);
                             continue;
                         }
                         _ => {}
@@ -8864,27 +8878,38 @@ mod tests {
             "an elided free-global tail call must lower (callee staged via globic_ref, c99f539)"
         );
 
-        // ...and a *thin* tail-call arm (2 work ops: `=`, `-`) is gated out — stays on the
-        // VM, where the per-hop round-trip would otherwise cost more than it saves.
+        // ...and a *thin* SELF-recursive arm with a tail call (2 work ops: `=`, `-`) is
+        // gated out (§6.2 `TAIL_CALL_MIN_WORK`) — stays on the VM, where the per-hop
+        // native↔driver round-trip would otherwise cost more than it saves. The gate
+        // applies only to self-recursive arms (a pure thin delegator lowers fine since
+        // outcome-4 follow-through); this chunk is `(defn f (n) (if (= n 0) (f 9)
+        // (fb (- n 1))))` — a SelfCall loop whose exit is a thin tail call.
+        //
+        // (History: this case used to be a non-self-recursive delegator whose `is_none`
+        // came not from the gate but from a malformed hand-written join — a `Jump` into
+        // the middle of the else block with mismatched stack depths — that failed the
+        // Cranelift verifier. The 2026-07-19 type-mixed-join fix routes a disagreeing
+        // edge to deopt, producing *valid* IR, so that accidental bail disappeared and
+        // the test now exercises the real gate.)
         let thin = Chunk {
             code: vec![
-                Inst::Local(0),
-                Inst::Const(ConstVal::new(Value::int(0))),
-                prim2(PrimOp::Eq, "="),
-                Inst::JumpIfFalse(6),
-                Inst::Local(1),
-                Inst::Jump(10),
-                Inst::Global(fb),
-                Inst::Local(0),
-                Inst::Const(ConstVal::new(Value::int(1))),
-                prim2(PrimOp::Sub, "-"),
+                Inst::Local(0),                            // 0: n
+                Inst::Const(ConstVal::new(Value::int(0))), // 1: 0
+                prim2(PrimOp::Eq, "="),                    // 2: (= n 0)   (work 1)
+                Inst::JumpIfFalse(6),                      // 3: false → else (ip 6)
+                Inst::Const(ConstVal::new(Value::int(9))), // 4: then: 9
+                Inst::SelfCall { argc: 1 },                // 5: (f 9) — the self loop
+                Inst::Global(fb),                          // 6: else: callee `fb`
+                Inst::Local(0),                            // 7: n
+                Inst::Const(ConstVal::new(Value::int(1))), // 8: 1
+                prim2(PrimOp::Sub, "-"),                   // 9: (- n 1)   (work 2)
                 Inst::Call {
                     argc: 1,
                     tail: true,
                     pos: None,
                     site: NO_SITE,
                     head: Some(fb),
-                },
+                }, // 10
             ],
         };
         let thin_arm = CompiledArm {

@@ -5457,3 +5457,55 @@ the roadmap's remaining lever). Small because uncontended lock ops are
 per matched msg" increment; the copy-trim for small scalar messages stays
 the next rung. Gates: full `make test`, CI-equivalent clippy, targeted
 proc/gen/supervisor/message-roundtrip smoke on the release binary.
+
+## 2026-07-19 — `type-of` as `PrimOp1::TypeOf`; a type-mixed-join JIT miscompile found and fixed
+
+**Where the ping-pong time actually goes.** gdb SIGINT-sampling (perf and
+valgrind are both unavailable on this box; `gdb` as parent + external
+`kill -INT` loop works under `ptrace_scope=1`) attributed the ~2.35 µs RT:
+`to_message`/`from_message` is ~2% — the roadmap's "trim the copy" lever is
+NOT worth chasing for pingpong. The weight is the receive **matcher execution
+path** (`hof_apply_step → vm_apply → vm_run_bc` per candidate, plus the
+matched clause allocating its body thunk closure per message) and the
+scheduler. En route, the samples showed `type-of` dispatching through the
+tree-walking `eval::apply` fallback inside matcher arms.
+
+**`type-of` is now a compiled prim** (the `Sqrt` discipline): total over every
+operand — a tag read + the per-tag cached keyword in the VM, and in the JIT a
+256-entry discriminant-byte → keyword-id table load (`jit_layout::
+type_of_kw_table`, built from one dummy-handle exemplar per `Value` variant so
+the collapsing rules `BigInt`→`:int`, `Range`/`SeqView`→`:pair` hold by
+construction; an exhaustive match forces a new variant to update it).
+Compile-time-known operands (int/float/bool consts) fold to constant keywords;
+no shape deopts. Epoch-guarded like every prim, so a user `(def type-of …)`
+still wins (tested). This is what every type predicate bottoms out in
+(`vector?`/`int?`/… are one-line Brood wrappers, hit per candidate by
+`match`/`receive` dispatch and per element by the seq predicates) — and it
+makes those wrappers' bodies call-free, i.e. leaf-inlinable (2026-07-19 leaf
+entry). Measured: a 3-way type-dispatch loop **1.41–1.65 → 1.10 s (~25–30%)**;
+pingpong ~1–2% (only one side's matcher tests a shape); all benchmark rows
+flat-or-better.
+
+**The new test's failure was a real, pre-existing JIT miscompile.** The
+hand-written expectation "diverged" — but TW = VM = 180000 while the JIT gave
+180344 *and the untouched HEAD binary gave 180364* (deterministic each).
+Minimal repro (no `type-of` involved): `(defn code (x) (if (%eq x 7) 1 (if
+(%eq x true) 5 0)))` fed `(if (%eq (rem i 2) 0) 7 (< 1 2))` — a **join whose
+edges disagree on scalar typing** (unboxed int vs i8 comparison). Each edge
+jumping to a join *overwrote* `bool_param[t]`, so the LAST-lowered edge's
+typing won for every edge. `BROOD_JIT_VERIFY_FN=code` then showed the smoking
+gun in one line: `arg[0] = bool raw=[0x1,0x7,0x0]` — the int edge's raw 7
+staged as `Value::Bool(7)`. (Mistyped the other way, the bool edge strips to a
+raw truthy `Int 1`.) The branch-condition side of this ambiguity was already
+known and deopted (the `nest format` non-idempotency fix); the param-boxing
+side was unsound. **Fix:** the first edge to reach a join fixes its typing
+(`record_block_flags`); a later edge whose flags disagree routes to `deopt`
+(args dropped) — the VM runs that iteration on the real tagged value. All
+three edge sites (`Jump`, both `JumpIfFalse` successors, leader fall-through)
+now agree-or-deopt. Rows flat; `pred_loop`/repros bit-identical across
+TW/VM/JIT.
+
+Lesson repeated from 2026-07-19 (leaf entry): verify hand-computed test
+expectations against the interpreter FIRST — this time the "wrong arithmetic"
+was a genuine engine divergence, and the discipline of checking TW/VM/JIT
+separately is what surfaced it.

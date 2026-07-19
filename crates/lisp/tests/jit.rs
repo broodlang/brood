@@ -609,3 +609,62 @@ fn leaf_inline_residual_call_gate_keeps_correctness() {
         "200070000",
     );
 }
+
+#[test]
+fn type_of_prim_covers_every_shape_hot() {
+    // `type-of` is now `PrimOp1::TypeOf` (total — no deopt): a hot arm classifying a
+    // mix of shapes must agree with the interpreter across compile-time-known
+    // operands (int/float/bool consts) AND type-erased ones (slot reads whose tag is
+    // resolved by the discriminant-byte table at runtime), including the collapsing
+    // rules (Range → :pair) and an i8 comparison result boxing as :bool, not :int.
+    is(
+        "(defn code (x) (if (%eq (type-of x) :int) 1
+                        (if (%eq (type-of x) :vector) 2
+                         (if (%eq (type-of x) :pair) 3
+                          (if (%eq (type-of x) :string) 4
+                           (if (%eq (type-of x) :bool) 5 0))))))
+         (defn work (i acc)
+           (if (>= i 60000) acc
+             (work (+ i 1)
+               (+ acc (code (if (%eq (rem i 5) 0) 7
+                             (if (%eq (rem i 5) 1) [1]
+                              (if (%eq (rem i 5) 2) (range 3)
+                               (if (%eq (rem i 5) 3) \"s\"
+                                (< 1 2))))))))))
+         (work 0 0)",
+        "180000", // 12000 × (1+2+3+4+5)
+    );
+}
+
+#[test]
+fn type_of_prim_redef_falls_back() {
+    // Late binding: warm the arm (the TypeOf prim is epoch-guarded like every
+    // PrimOp1), then shadow `type-of` with a user defn — the guard must miss and
+    // dispatch the NEW binding, not the baked-in prim.
+    is(
+        "(defn probe (i acc) (if (>= i 50000) acc (probe (+ i 1) (+ acc (if (%eq (type-of i) :int) 1 0)))))
+         (probe 0 0)
+         (def type-of (fn (x) :shadowed))
+         (probe 49998 0)",
+        "0", // the NEW type-of yields :shadowed, never :int
+    );
+}
+
+#[test]
+fn type_mixed_join_edges_stay_exact() {
+    // A join whose edges disagree on scalar typing — `(if c 7 (< 1 2))` merges an
+    // unboxed int with an i8 comparison result — used to let the LAST-lowered edge
+    // overwrite the block's `bool_param` typing, so the int edge's raw 7 was boxed
+    // as `Value::Bool(7)` when staged as a call argument (or the bool edge stripped
+    // to a raw truthy int, depending on lowering order). Now the first edge fixes
+    // the typing and a disagreeing edge deopts to the VM. The classifier must see
+    // Int 7 and Bool true — bit-identical to the interpreter.
+    is(
+        "(defn code (x) (if (%eq x 7) 1 (if (%eq x true) 5 0)))
+         (defn work (i acc)
+           (if (>= i 60000) acc
+             (work (+ i 1) (+ acc (code (if (%eq (rem i 2) 0) 7 (< 1 2)))))))
+         (work 0 0)",
+        "180000", // 30000×1 + 30000×5 — verified against BROOD_VM=0
+    );
+}
