@@ -66,26 +66,26 @@ mechanism/policy split: kernel primitive, Brood policy.
   consumer picks the policy (drop vs error vs park has real design surface,
   incl. remote delivery which can't error the sender). **[kernel mechanism,
   Brood policy]**
-- ⬜ **Startup image snapshot (ReadyToRun / `.beam` analogue).** Cold start
-  re-parses + re-evals the prelude from source every run (amortised
-  per-OS-process via `LazyLock`, but paid by every CLI invocation, test shard,
-  and `nest` subcommand). **Measured 2026-07-19** (`BROOD_BOOT_TRACE=1`,
-  release): total ~31 ms = builtins 0.3 ms + read 2.3 ms + **macro-expansion
-  27 ms** + eval 0.9 ms + freeze 0.7 ms. The cost is NOT evaluation — it's
-  `eval::macros::compile` (spread evenly; the 14 worst forms sum to only
-  ~6.5 ms). Second-level split (temporary `BROOD_BOOT_SPLIT` instrumentation,
-  same day): `macroexpand_all` 28.9 ms = **744 expander invocations at
-  25.1 ms** + tree walk 3.8 ms; resolve 7 µs, static-quasiquote 1.1 ms. The
-  expanders ALREADY run on the VM (`apply_engine`, ADR-119) — the ~34 µs/call
-  average is genuine Brood work per expansion (`defn`/`match` bodies churning
-  lists), so there is no cheap dispatch fix; making it faster is the same
-  VM-on-allocation-heavy-code frontier as `pipeline`/`nqueens`. The startup
-  lever is therefore the **expanded-prelude cache**: print the post-expansion
-  forms once to an mtime/build-id-keyed disk cache (ADR-129 solves
-  invalidation) and boot from that — ~6 ms cold start, no binary heap format
-  (full `SharedCode` serialization is unnecessary — freeze is only 0.7 ms).
-  Design care: `note_definition` positions (LSP `M-.`) and autogensym
-  round-tripping. Target: single-digit-ms cold start. **[kernel]**
+- ✅ **Startup image snapshot (ReadyToRun / `.beam` analogue).** Shipped
+  2026-07-19 as the **expanded-prelude boot cache** (ADR-138). Cold start
+  re-parsed + re-expanded the prelude every run (~31 ms, of which
+  macro-expansion was ~27 ms — 744 expander invocations of genuine Brood work,
+  already VM-run; see the 2026-07-19 devlog measurements). The fix: the source
+  boot prints each post-`compile` (expanded + resolved) prelude form to
+  `~/.cache/brood/prelude-expanded-<hash>.blsp`, keyed by `build-id` (the
+  ADR-129 staleness key — the prelude is `include_str!`'d, so any binary
+  change invalidates), and the next boot reads those forms and skips
+  `eval::macros::compile` entirely. **Measured: ~38 ms source boot → ~6.5 ms
+  cache hit** — single-digit-ms target met with no binary heap format (freeze
+  is only 0.7 ms, so full `SharedCode` serialization stays unnecessary). The
+  design-care items both handled: the raw prelude is still read positioned so
+  `note_definition`/LSP `M-.` are identical on both paths, and the caching
+  boot's final gensym counter is stored in the header + floored at cache boot
+  (`gensym_floor`) so runtime gensyms can't collide with cached expansions.
+  Per-form print→read→print fixpoint check gates writing (an unprintable form
+  poisons the cache and the source boot just runs); any read/eval failure
+  deletes the file and falls back. `BROOD_NO_BOOT_CACHE=1` opts out.
+  **[kernel]**
 - 🟡 **Observability: timing tier + trace pipeline + profiler.** Slice 1
   shipped 2026-07-18 — the survey's two named holes are closed: **GC pause
   durations** (`gc-stats` `:pause-total-us`/`:pause-max-us`/`:pause-last-us`,
@@ -447,11 +447,27 @@ Runtime housekeeping (both items landed):
 - ⬜ **JIT Stage 4 — RUNTIME compaction survival** (ADR-091) — a constant-pool
   indirection table (ADR-096 §4.C) lets `runtime_collect` rewrite handles without
   invalidating machine code.
-- ⬜ **Leaf-callee inlining** (the real call-heavy lever) — splice a small
-  non-recursive callee's body into the caller so `(add1 n)` in a hot loop needs no
-  call/frame/dispatch. Infra (`shift_slots`/`build_inlined_body`) exists; hot-reload
-  safety is free via `compile_epoch`. Measure-first behind `BROOD_JIT_LEAF_INLINE`;
-  a fresh focused effort ([`docs/jit-tier2.md`](docs/jit-tier2.md) §7).
+- 🟡 **Leaf-callee inlining** (the real call-heavy lever) — **implemented 2026-07-19,
+  opt-in `BROOD_JIT_LEAF_INLINE=1` while being measured.** A hot fixed-arity `defn`
+  whose non-tail static-head calls all resolve to small, calls-free, non-capturing
+  callees gets a stored derivation (args → `LetBind` into shifted callee slots,
+  callee body spliced above the caller's frame) that rides the existing two-stage
+  deferred-upgrade channel. Soundness: derivation happens once at arm-compile time
+  (heap access for callee resolution, reentrancy-guarded), is epoch-stamped, and
+  the lowerer refuses any other epoch — hot reload wins by construction (tested:
+  a post-warm `def` of a spliced callee takes effect). The inlined engine has no
+  deopt checkpoint, so derivation requires ZERO residual non-tail calls (from-ip-0
+  re-run stays effect-free); `jit_ckpt_read` now also refuses the inlined engine
+  (the small layout's ckpt slot lies inside the spliced range — a real Int there
+  faked a journal). `inline_nslots` is floored at the small frame (spill+ckpt
+  reserves made it possible for the "grow" to be an underflowing shrink).
+  **Measured: ~30% on the scalar-helper loop shape** (`(+ acc (sq (add1 i)))`
+  1.65 → 1.2 s); benchmark-suite rows flat (they're recursive/HOF/alloc-bound —
+  the remaining shapes need closure-arm support (defn-gate today) + Phase 3/4).
+  Gates green with the flag on: JIT≡VM differential under GC_STRESS+VERIFY,
+  VM≡TW differential, 3 dedicated tests incl. hot-reload + residual-call gate.
+  ⬜ Next: closure arms (needs a fast-link invalidation story without a defn
+  name), measure on macro expansion / `require`, then flip to default-on.
 - ⬜ **Layer-2 computed-goto dispatch** (`std::arch::asm!`, x86-64, `#[cfg]`-gated,
   pure-Rust fallback) — only if profiling still shows dispatch overhead. Additive.
 - ⬜ **Heap-walking benchmark gap** — `bintree`/`nqueens` run interpreted (~39×/187×

@@ -5346,3 +5346,82 @@ maps 67/67, sysmon 8/8, gen 18/18, concurrency 33/33, capture 8/8,
 dynamic 16/16 — the full VM suite 786/786 (including the two
 migration/drain canaries), and a 150-seed differential-fuzzer batch
 (tree-walk leg included).
+
+## 2026-07-19 — Boot cache shipped: ~38 ms → ~6.5 ms cold start (ADR-138)
+
+The morning's measurement chain (31 ms boot → 27 ms is expansion → 744
+expander calls of genuine Brood work, no dispatch fix) ends in the predicted
+lever, implemented: the **expanded-prelude boot cache**. `boot_from_source`
+now prints each post-`compile` prelude form (expanded + resolved +
+static-quasiquote) and writes them to
+`~/.cache/brood/prelude-expanded-<hash(build-id)>.blsp` after a successful
+boot; `boot_from_cache` reads them back and skips `eval::macros::compile`
+entirely. Measured on this machine (release): **source boot 38.6 ms (incl.
+cache write) → cache hit 6.5 ms**; `BROOD_NO_BOOT_CACHE=1` opts out (32.8 ms,
+the pre-cache baseline).
+
+Safety rails, per ADR-138: `build-id` as the staleness key (header +
+filename — per-binary files since the id embeds each executable's mtime; ~7-day
+age-prune of stale siblings), a per-form print→read→print fixpoint gate before
+anything is written (one unprintable form poisons the write; the boot just
+stays on source), delete-on-any-failure fallback to the source boot, the
+caching boot's gensym counter floored at cache boot so runtime gensyms can't
+collide with cached expansions, and a positioned raw-prelude read on the cache
+path so `note_definition`/LSP `M-.` are identical on both paths. Writes go
+temp-file + rename for nextest's many-processes-one-binary boot storm.
+
+Validation: `make test` **786/786** green with the cache active — and under
+nextest every test runs in its own process off one binary, so after the first
+shard writes the cache virtually the whole suite *boots through it*, making
+the run itself a broad cache-boot correctness check (the Brood suite's 96 s
+in-language pass included).
+
+## 2026-07-19 — Leaf-callee inlining behind BROOD_JIT_LEAF_INLINE (~30% on helper-loop shape)
+
+The deferred Phase-2 lever from `docs/jit-optimizing-tier.md` implemented as the
+self-inliner's sibling: a non-tail call to a statically-known, small, calls-free
+top-level `defn` is spliced into the caller (`LetBind` binds the args into the
+callee's shifted slot range; `shift_slots` relocates the body above the caller's
+frame), removing that call's whole protocol. Derivation happens ONCE at
+arm-compile time — the only moment with `&Heap` to resolve callee symbols — and
+is stored on the arm (`CompiledArm::leaf`), riding the existing two-stage
+deferred-upgrade channel (`inline_name`/`inline_nslots`/`inline_code`, mutually
+exclusive with self-inlining).
+
+Hot-reload correctness is the interesting bit: the stored derivation is
+epoch-stamped, and `jit_lower_inlined_arm` refuses to lower it at any other
+epoch. Any `def` between derivation and lowering (or after install, via the
+per-entry `compile_epoch` guard) invalidates; the arm falls back to its small
+native permanently until its closure recompiles. Tested: a post-warm `def` of a
+spliced callee takes effect (late binding exact).
+
+Three bugs found and fixed building it, each a general lesson:
+1. **Probe reentrancy walks the whole call graph.** Resolving a callee compiles
+   it, whose own probe resolves *its* callees … and never terminates on mutual
+   recursion (instant boot stack-overflow). Fixed with a thread-local
+   `LEAF_RESOLVING` guard: a nested compile skips probing (depth 1 by
+   construction — a qualifying callee is calls-free anyway).
+2. **The inlined engine must not read the small layout's deopt checkpoint.**
+   `ckpt_slot` sits at `scope.max + spill` — INSIDE the spliced slot range,
+   where a callee's Int param faked a packed journal → garbage resume ip →
+   capacity-overflow panic. `jit_ckpt_read` now refuses when
+   `inline_installed` (a latent hazard for the self-inliner too — its block 1
+   starts at `m` — now closed for both). Derivation therefore requires ZERO
+   residual non-tail calls, keeping the from-ip-0 deopt re-run effect-free by
+   construction.
+3. **`inline_nslots` must be floored at the small frame size.** The small
+   `nslots` includes spill + checkpoint reserves, so a lean spliced layout came
+   out SMALLER — and the per-engine sizing hook's "grow to `inline_nslots`" on a
+   post-swap entry became an underflowing shrink (`extend_roots_to_nil`
+   capacity overflow). Floored at construction for both inliners.
+
+Measured (release, da=off): the target shape `(+ acc (sq (add1 i)))` ×5M:
+**1.65 → 1.20 s (~30%)**. Benchmark-suite rows (fib/bintree/nqueens/loop/
+collatz/spawn/pipeline) flat — as diagnosed, those are recursive/HOF/alloc-bound,
+not scalar-helper-bound; reaching them needs closure-arm support (the v1 gate
+requires a `defn` name for the swap's fast-link invalidation) and Phase 3/4.
+Gates green WITH the flag: JIT≡VM differential 28/28 under
+GC_STRESS+GC_VERIFY, VM≡TW differential, three new `tests/jit.rs` cases
+(exactness across the small→leaf swap, hot-reload redef, residual-call gate),
+full `make test`. Opt-in until measured on expansion/`require`-heavy loads;
+flip to `BROOD_NO_LEAF_INLINE` opt-out then.
