@@ -139,7 +139,12 @@
       (append-bytes path [[68] "E"])
       (is (= (slurp-bytes path) #b"ABCDE"))
       (delete-file path)))
-  (test "deep nesting flattens iteratively (no stack overflow)"
-    ;; 40k-deep left-nested list — the iterative walker must not recurse natively.
-    (let (deep (fold (fn (acc _) (list acc)) (list "x") (range 40000)))
+  (test "deep nesting flattens iteratively"
+    ;; 2k-deep left-nested list — enough to prove the flattener's explicit
+    ;; worklist. NOT deeper: the value must also survive the kernel's heap
+    ;; walkers (GC tracing / promote), which recurse per pair natively — a 40k
+    ;; depth here blew the CI worker's stack in GC, not in the flattener
+    ;; (devlog 2026-07-19 iolists entry; deep-structure walker hardening is a
+    ;; separate roadmap item).
+    (let (deep (fold (fn (acc _) (list acc)) (list "x") (range 2000)))
       (is (= (bytes-concat deep) #b"x")))))

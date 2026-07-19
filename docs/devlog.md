@@ -5569,3 +5569,16 @@ describe-block in `tests/bytes_test.blsp` (nesting, empties, improper tail,
 rejects, spit/append round-trips, the 40k-deep case), green on VM and TW.
 Next rungs from the same roadmap cluster: port the HTTP/WS parsers off the
 carrier-string bridge, and the growable read buffer (input-side twin).
+
+## 2026-07-19 — Iolists follow-up: the deep-nesting test found a real kernel limit
+
+CI's `brood_suite_passes` died SIGABRT — `fatal runtime error: stack overflow`
+— on the new "40k-deep nesting flattens iteratively" test. The flattener is
+NOT the culprit (explicit worklist, by construction): the depth stresses the
+kernel's **recursive heap walkers** — GC tracing / `promote` recurse per pair
+natively, so a deep-but-legal immutable value can blow a worker's stack if a
+collection lands while it is live (nondeterministic: the same test passed
+locally and on one CI-shaped rerun — it depends on when GC fires). Filed as a
+roadmap housekeeping item (make the tracers iterative, like the flattener);
+the test caps at 2k depth meanwhile — still deep enough to prove the
+flattener's worklist, shallow enough for the recursive tracers.

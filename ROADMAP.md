@@ -133,7 +133,14 @@ mechanism/policy split: kernel primitive, Brood policy.
   offload pool. **[kernel]**
 - 🟡 **Housekeeping found by the survey:** ⬜ permanently-parked `receive`
   waiters (nothing will ever send) leak their mailbox slot in a long-lived
-  embedded host (`mailbox.rs`). ✅ Exit-signal propagation fixed (2026-07-18):
+  embedded host (`mailbox.rs`). ⬜ **Deep-structure hardening of the recursive
+  heap walkers** (found 2026-07-19 by the iolist deep-nesting test): a ~40k-deep
+  nested list is perfectly legal immutable data, but GC tracing / `promote`
+  recurse per pair natively, so deep values can blow a worker's native stack
+  (`fatal runtime error: stack overflow` in CI's suite wrapper — nondeterministic,
+  fires only if a collection lands while the value is live). Either make the
+  tracers iterative (explicit worklist, like `flatten_iolist`) or document a
+  depth bound; the test caps at 2k depth meanwhile. **[kernel]** ✅ Exit-signal propagation fixed (2026-07-18):
   kill **hardness** is now a request property separate from the reason
   (`MailboxState.kill_hard`), so link propagation stays hard (dies at the next
   reduction tick) but carries the **originating reason** — a cascading death

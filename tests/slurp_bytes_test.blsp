@@ -58,10 +58,13 @@
                (encoding/hex-encode-bytes (hash/sha256-raw (slurp-bytes path)))))))
 
 (describe "spit-bytes: byte-faithful file writes (the write side of slurp-bytes)"
-  (test "round-trips a bytes value that spit itself would reject"
+  (test "round-trips a bytes value (spit accepts it too — ADR-139 iolists)"
     (let (p (path-join (sb-tmp) "w.bin")
           data (string->utf8-bytes "PNG\0\1\2 héllo ☃"))
-      (assert-error (spit p data))               ; spit is UTF-8 string-only
+      ;; Since ADR-139 every write boundary takes an iolist, so plain `spit`
+      ;; writes a bytes value byte-faithfully as well — same file either way.
+      (spit p data)
+      (assert= (slurp-bytes p) data)
       (spit-bytes p data)
       (assert= (slurp-bytes p) data)))
 
