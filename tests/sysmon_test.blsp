@@ -10,10 +10,8 @@
 ;; so a backlog from an earlier test would otherwise satisfy a later receive
 ;; (surfaced by BROOD_GC_STRESS flooding :gc events).
 ;;
-;; Engine note: under the legacy tree-walker (BROOD_VM=0) an :isolated test that
-;; parks in `receive` misbehaves in the runner (pre-existing framework
-;; limitation — tests/maps_test.blsp hangs the same way there); the suite's
-;; supported engine is the VM, where all of these pass, GC_STRESS included.
+;; (These also pass under BROOD_VM=0 since the TreeWalkGuard fix — a
+;; native-nested receive under the tree-walker used to re-run its thunk.)
 
 (defmodule sysmon-test (:use test))
 

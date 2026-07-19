@@ -612,6 +612,34 @@ pub(crate) fn set_capture_top_level(on: bool) -> bool {
     CAPTURE_TOP_LEVEL.with(|c| c.replace(on))
 }
 
+/// RAII guard marking "the innermost frames are TREE-WALKED": clears
+/// [`CAPTURE_TOP_LEVEL`] for its lifetime, restoring the previous value on drop.
+///
+/// A tree-walker frame is a *native* frame for capture purposes — the capture
+/// driver can't reify it — so a `receive` reached through one must take the
+/// blocking (§7.4 dirty-scheduler) path, never the capture path. Without this,
+/// TW code reached from inside a capture-mode VM driver (`BROOD_VM=0` runs of
+/// `%isolate`/`%try`/HOF callbacks, or a VM tw-defer) saw the driver's stale
+/// `true`, "captured" across the un-reifiable TW frames, and the resume
+/// **re-ran the whole native thunk from the top** — repeating its side effects
+/// (the §8.1 footgun; surfaced 2026-07-19 as the test runner re-running
+/// `:isolated` bodies under `BROOD_VM=0`). Entered at the tree-walker's two
+/// entry points (`eval::eval`, `eval::apply`), so every seam into the TW is
+/// covered; nested entries are cheap no-op re-clears.
+pub(crate) struct TreeWalkGuard(bool);
+
+impl TreeWalkGuard {
+    pub(crate) fn enter() -> Self {
+        TreeWalkGuard(set_capture_top_level(false))
+    }
+}
+
+impl Drop for TreeWalkGuard {
+    fn drop(&mut self) {
+        set_capture_top_level(self.0);
+    }
+}
+
 /// Reduction tick for the capture-mode VM driver: like [`tick`] but **returns**
 /// whether the budget is exhausted (so the driver captures + yields a `Preempted`).
 /// Decrements otherwise. The budget is refreshed by `run_one` at the next resume.

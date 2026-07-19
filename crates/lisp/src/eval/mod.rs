@@ -132,6 +132,9 @@ fn record_tw_entry(
 }
 
 pub fn eval(heap: &mut Heap, expr: Value, env: EnvId) -> LispResult {
+    // Tree-walked frames can't be captured: while this eval is live, a parking
+    // `receive` must block its worker, not capture (see `TreeWalkGuard`).
+    let _tw = crate::process::TreeWalkGuard::enter();
     let mut entered: Option<TwFrame> = None;
     let r = eval_tail_loop(heap, expr, env, &mut entered);
     match (r, entered) {
@@ -921,6 +924,12 @@ fn eval_arguments(
 }
 
 pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> LispResult {
+    // No TreeWalkGuard here: `apply` is also the VM dispatch fallback, and its
+    // Native branch is a thin shim — `(%receive …)` reached through it is still
+    // bytecode-reachable and MUST keep its capture eligibility (clearing here
+    // turned every VM receive into a worker-blocking one and killed
+    // migration). The guard lives in `apply_closure`/`eval`, the two places
+    // frames genuinely become tree-walked.
     match callee.unpack() {
         ValueRef::Native(id) => call_native(heap, id, argv, env),
         ValueRef::Fn(id) => apply_closure(heap, id, argv),
@@ -938,6 +947,12 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
 }
 
 pub fn apply_closure(heap: &mut Heap, cl: ClosureId, argv: &[Value]) -> LispResult {
+    // The closure body runs on the tree-walker: its frames can't be captured,
+    // so a `receive` parking inside must block its worker, never capture (see
+    // `TreeWalkGuard` — clearing at this boundary rather than in `apply`
+    // keeps native calls shimmed through `apply`, e.g. `%receive` itself,
+    // capture-eligible).
+    let _tw = crate::process::TreeWalkGuard::enter();
     // Error-trace bookkeeping: this native-boundary entry into `cl` (a `map`/`try`/
     // macro-expansion callback) is one logical frame, mirrored on the VM by a
     // `vm_apply` driver whose arm0 is `cl`. The call site is native code, so the

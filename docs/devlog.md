@@ -5304,3 +5304,45 @@ work) — the cost is genuine Brood list-churn inside the macro bodies
 as `pipeline`/`nqueens`, not a dispatch gap. The startup item's practical
 lever is therefore the expanded-prelude disk cache (~6 ms, build-id-keyed);
 the ROADMAP entry now says so.
+
+## 2026-07-19 — Fix: tree-walked frames are native for capture purposes (TreeWalkGuard)
+
+The morning's "pre-existing TW runner hang" diagnosed and fixed. Root cause:
+`CAPTURE_TOP_LEVEL` is maintained by `vm_run_bc` (set on the top-level body
+driver, cleared for nested VM runs) — but **entering the tree-walker never
+cleared it**. So under `BROOD_VM=0`, TW code reached from a capture-mode
+driver (a `%isolate`/`%try`/HOF callback via `apply_engine`'s TW branch, or a
+VM tw-defer) ran with the driver's stale `true`: a parking `receive` inside it
+took the CAPTURE path instead of the mandated §7.4 block. The suspend signal
+unwound the un-reifiable native/TW frames, the capture resumed at the
+bytecode call instruction — and **re-ran the whole native thunk**, repeating
+its side effects (the §8.1 footgun verbatim). Visible as the test runner
+re-running `:isolated` bodies (fresh spawns each round, children killed by
+`%isolate`'s reaper) until the 120 s hard kill; invisible (but real) wherever
+the re-run happened to be idempotent.
+
+Fix: `process::TreeWalkGuard` — an RAII clear-and-restore of
+`CAPTURE_TOP_LEVEL`, entered where frames genuinely become tree-walked:
+`eval::eval` (form evaluation — tw-defer, the BROOD_VM=0 program branch) and
+`eval::apply_closure` (closure bodies applied from natives/HOFs). Nested
+entries are no-op re-clears. A TW-nested `receive` now blocks its worker
+exactly like any native-nested receive.
+
+**Placement matters — the first cut caused a real regression.** Guarding all
+of `eval::apply` (including its Native branch) cleared the flag around the
+VM's *dispatch-fallback shim* too, and `(%receive …)` reached through that
+shim is still bytecode-reachable: every VM receive became a worker-blocking
+one. Caught immediately by two Rust suite tests —
+`deep_receive_continuations_resume_correctly_across_workers` ("no live
+migration observed") and `runtime_drain::parked_process_clean_…` — capture
+and migration were effectively disabled. The guard moved to `apply_closure`
+(the actual TW body evaluation, which `eval` does not cover — it runs
+`eval_at`/`eval_tail_loop` directly), and the Native branch stays unguarded.
+
+Minimal repro (fixed): green process → `%isolate` thunk → `println` +
+`receive` under `BROOD_VM=0` printed twice, now once. Validation: the
+previously-hanging `--test` runs under BROOD_VM=0 now pass whole —
+maps 67/67, sysmon 8/8, gen 18/18, concurrency 33/33, capture 8/8,
+dynamic 16/16 — the full VM suite 786/786 (including the two
+migration/drain canaries), and a 150-seed differential-fuzzer batch
+(tree-walk leg included).
