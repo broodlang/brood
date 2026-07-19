@@ -616,7 +616,7 @@ pub struct CompiledArm {
     /// within an epoch; reset on epoch invalidation. See `active_nslots`.
     #[cfg(feature = "jit")]
     pub inline_installed: std::sync::atomic::AtomicBool,
-    /// Leaf-callee inlining (`BROOD_JIT_LEAF_INLINE=1`, measure-first): the body with
+    /// Leaf-callee inlining (default ON; `BROOD_NO_LEAF_INLINE=1` opts out): the body with
     /// each qualifying small non-recursive callee's body spliced in, derived ONCE at
     /// arm-compile time (the only moment a `&Heap` can resolve the callee symbols).
     /// Rides the same two-stage deferred-upgrade channel as self-inlining

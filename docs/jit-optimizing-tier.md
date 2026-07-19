@@ -207,8 +207,9 @@ per-engine frame sizing + a deferred lower-priority inlined upgrade — see
 `crates/lisp/src/eval/compile/mod.rs` around `jit_tier`). `BROOD_JIT_INLINE=1` is gone; the lever is
 now the opt-*out* `BROOD_NO_INLINE=1`.
 
-**UPDATE (2026-07-19): Phase 2 (leaf-callee inlining) implemented, opt-in
-`BROOD_JIT_LEAF_INLINE=1`.** The self-inliner's sibling for *different* callees: a non-tail
+**UPDATE (2026-07-19): Phase 2 (leaf-callee inlining) implemented; default ON since the same
+evening (`BROOD_NO_LEAF_INLINE=1` opts out — boot/`require`/`nest check`/suite/benchmark rows all
+measured flat, helper loops ~30%).** The self-inliner's sibling for *different* callees: a non-tail
 static-head call whose callee is a small, calls-free, non-capturing fixed-arity `defn` splices the
 callee's body into the caller (per-callee slot ranges above the caller's frame — a running base,
 not the self-inliner's uniform stride). Derivation is done ONCE at arm-compile time (heap access

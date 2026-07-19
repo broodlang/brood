@@ -456,8 +456,14 @@ Runtime housekeeping (both items landed):
 - ⬜ **JIT Stage 4 — RUNTIME compaction survival** (ADR-091) — a constant-pool
   indirection table (ADR-096 §4.C) lets `runtime_collect` rewrite handles without
   invalidating machine code.
-- 🟡 **Leaf-callee inlining** (the real call-heavy lever) — **implemented 2026-07-19,
-  opt-in `BROOD_JIT_LEAF_INLINE=1` while being measured.** A hot fixed-arity `defn`
+- ✅ **Leaf-callee inlining** (the real call-heavy lever) — **implemented 2026-07-19;
+  DEFAULT ON since the same evening (`BROOD_NO_LEAF_INLINE=1` opts out)** after the
+  gating measurements came back flat everywhere they had to (boot / 100×-hello
+  batch, `require`-heavy loads incl. editor/buffer+sexp+json+regex, `nest check`
+  over std/, the in-language suite wall, every benchmark row) and the wins held:
+  ~30% on the scalar-helper loop shape, a further ~8% on type-predicate dispatch
+  compounding with `PrimOp1::TypeOf` (predicates are call-free now, so they
+  splice into hot matchers). A hot fixed-arity `defn`
   whose non-tail static-head calls all resolve to small, calls-free, non-capturing
   callees gets a stored derivation (args → `LetBind` into shifted callee slots,
   callee body spliced above the caller's frame) that rides the existing two-stage
@@ -476,7 +482,7 @@ Runtime housekeeping (both items landed):
   Gates green with the flag on: JIT≡VM differential under GC_STRESS+VERIFY,
   VM≡TW differential, 3 dedicated tests incl. hot-reload + residual-call gate.
   ⬜ Next: closure arms (needs a fast-link invalidation story without a defn
-  name), measure on macro expansion / `require`, then flip to default-on.
+  name) — the expansion/`require` measurement + default-flip are done.
 - ⬜ **Layer-2 computed-goto dispatch** (`std::arch::asm!`, x86-64, `#[cfg]`-gated,
   pure-Rust fallback) — only if profiling still shows dispatch overhead. Additive.
 - ⬜ **Heap-walking benchmark gap** — `bintree`/`nqueens` run interpreted (~39×/187×

@@ -2054,7 +2054,7 @@ fn rederive_inlined_body(
     Some(build_inlined_body(body, defn_name, nrequired, m)?.0)
 }
 
-// ===================== leaf-callee inlining (BROOD_JIT_LEAF_INLINE) =====================
+// ===================== leaf-callee inlining (BROOD_NO_LEAF_INLINE opts out) ==============
 //
 // The self-inliner's sibling for *different* callees (`docs/jit-optimizing-tier.md`
 // Phase 2): a non-tail call to a statically-known, small, calls-free top-level `defn`
@@ -2065,14 +2065,17 @@ fn rederive_inlined_body(
 // ([`CompiledArm::leaf`]); it rides the existing two-stage deferred-upgrade channel.
 // Hot-reload safety: the stored derivation carries its epoch, and lowering refuses any
 // other epoch — a `def` between derivation and lowering (or after install, via the
-// per-entry `compile_epoch` guard) always wins. Opt-IN while being measured.
+// per-entry `compile_epoch` guard) always wins.
 
-/// Is leaf-callee inlining enabled? **Opt-in** (`BROOD_JIT_LEAF_INLINE=1`) while the
-/// win is being measured — flip to opt-out once benchmarked (like `BROOD_NO_INLINE`).
+/// Is leaf-callee inlining enabled? **Default ON** since 2026-07-19 (measured: boot,
+/// `require`-heavy loads, `nest check`, the in-language suite, and every benchmark row
+/// flat; scalar-helper loops ~30%, type-predicate dispatch a further ~8% on top of
+/// `PrimOp1::TypeOf`). `BROOD_NO_LEAF_INLINE=1` opts out — the A/B / bisect lever,
+/// like `BROOD_NO_INLINE` for the self-inliner.
 #[cfg(feature = "jit")]
 fn leaf_inline_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BROOD_JIT_LEAF_INLINE").is_some())
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_LEAF_INLINE").is_none())
 }
 
 /// Largest callee body (node count) worth splicing. Leaf helpers are tiny; a larger

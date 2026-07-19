@@ -546,18 +546,13 @@ fn redefining_a_fast_linked_callee_is_honored() {
     );
 }
 
-// ===== leaf-callee inlining (BROOD_JIT_LEAF_INLINE, opt-in) =====
+// ===== leaf-callee inlining (default ON since 2026-07-19; BROOD_NO_LEAF_INLINE opts out) =====
 //
-// These set the env flag in-process before building the `Interp`. The flag is cached
-// once (OnceLock) per process; under nextest each test is its own process, and under
-// plain `cargo test` a sibling test picking the flag up early is harmless — leaf
-// inlining must be semantics-preserving, which is exactly what every test here (and
-// every other test in this file) asserts.
-
-/// Enable leaf inlining for this process (idempotent).
-fn enable_leaf_inline() {
-    std::env::set_var("BROOD_JIT_LEAF_INLINE", "1");
-}
+// Leaf inlining is on by default, so these tests exercise the shipping configuration
+// directly — no env flag needed. (They used to set the opt-in `BROOD_JIT_LEAF_INLINE`;
+// the lever is now the opt-out `BROOD_NO_LEAF_INLINE`, cached once per process.)
+// Leaf inlining must be semantics-preserving, which is exactly what every test here
+// (and every other test in this file) asserts.
 
 #[test]
 fn leaf_inlined_helpers_stay_correct() {
@@ -566,7 +561,6 @@ fn leaf_inlined_helpers_stay_correct() {
     // gate requires ALL non-tail calls gone), the arm tiers small-native, then the
     // deferred leaf upgrade swaps in with its (floored) `inline_nslots` frame. The sum
     // must be bit-identical to the interpreter across the whole small→leaf transition.
-    enable_leaf_inline();
     is(
         "(defn add1 (n) (+ n 1))
          (defn sq (x) (* x x))
@@ -583,7 +577,6 @@ fn leaf_inlined_helper_redef_takes_effect() {
     // The def bumps the global epoch → the installed native (epoch-guarded per entry)
     // invalidates, and the re-lower refuses the stale derivation (`leaf.epoch`
     // mismatch), so the post-def call runs the NEW add1 — late binding exact.
-    enable_leaf_inline();
     is(
         "(defn add1 (n) (+ n 1))
          (defn work (i acc) (if (>= i 100000) acc (work (+ i 1) (+ acc (add1 i)))))
@@ -600,7 +593,6 @@ fn leaf_inline_residual_call_gate_keeps_correctness() {
     // the residual-call gate refuses the derivation (a remaining non-tail call would
     // make the checkpoint-less from-ip-0 deopt re-run unsafe), so the arm keeps its
     // small native + checkpointing. Either way the answer must match the interpreter.
-    enable_leaf_inline();
     is(
         "(defn add1 (n) (+ n 1))
          (defn deep (n) (if (< n 1) 0 (+ 1 (deep (- n 1)))))

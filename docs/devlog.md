@@ -5526,3 +5526,26 @@ binary runs the smoke programs + proc/gen/message test files, bit-identical to
 the tree-walker on the type-of/mixed-join repros. CI's build-test job gained a
 `cargo check --workspace --no-default-features` step — a seam like this can't
 rot silently again for the cost of one cached check.
+
+## 2026-07-19 — Leaf-callee inlining flipped to default ON (`BROOD_NO_LEAF_INLINE` opts out)
+
+The morning's "opt-in until measured on expansion/`require`-heavy loads" gate is
+met. Measured flag-on vs flag-off on the same binary: **cold start** (boot
+cache; 100×-hello batch 0.89 vs 0.88 s), **`require`-heavy load**
+(editor/buffer + sexp + json + regex, 20 ms both), **`nest check` over std/**
+(~0.5 s both), **the in-language suite wall** (13.6 s both), and **every
+benchmark row** (fib/nbody/json/wordcount/sieve/loop/bintree/nqueens/spawn/
+pipeline/collatz) — all flat. The wins hold and now COMPOUND with the same
+day's `PrimOp1::TypeOf`: scalar-helper loops ~30% (1.5–1.6 → 1.10–1.15 s), and
+type-predicate dispatch a further ~8% on top of the prim (predicates'
+bodies are call-free now, so `vector?`/`int?`-class wrappers splice into hot
+matcher/classifier arms — the exact shape `match`/`receive` dispatch runs).
+
+The flip inverts the lever to the self-inliner's convention:
+`leaf_inline_enabled()` defaults true, `BROOD_NO_LEAF_INLINE=1` is the A/B /
+bisect opt-out (CLAUDE.md env table row added; ROADMAP item ✅). The
+tests/jit.rs leaf cases now exercise the shipping default (the
+`enable_leaf_inline` env helper is gone). Verified the lever both ways on the
+target shape (1.15 s default, 1.56 s opted out). Gates on the new default:
+full `make test`, tier_transition + metamorphic differential fuzz rounds
+(armed build, fresh seed base), clippy/fmt.
