@@ -5292,3 +5292,15 @@ ADR-006 "build the language up" shape; the fallback is an expanded-prelude
 disk cache (print post-expansion forms, key by ADR-129 build-id) which reaches
 ~6 ms with no binary heap format. Full SharedCode serialization is
 unnecessary.
+
+**Follow-up (same day) — second-level split; the "make expansion fast" lever is
+NOT cheap.** A temporary `BROOD_BOOT_SPLIT` instrumentation (reverted after
+measuring) split the 28.9 ms `macroexpand_all`: **744 expander invocations,
+25.1 ms** (~34 µs/call avg); the recursive walk itself 3.8 ms; `resolve` 7 µs;
+static-quasiquote expansion 1.1 ms. Key correction to the entry above: macro
+bodies ALREADY run through the active engine (`apply_engine`, the ADR-119
+work) — the cost is genuine Brood list-churn inside the macro bodies
+(`defn`, `match` pattern lowering), i.e. the same allocation-heavy-VM frontier
+as `pipeline`/`nqueens`, not a dispatch gap. The startup item's practical
+lever is therefore the expanded-prelude disk cache (~6 ms, build-id-keyed);
+the ROADMAP entry now says so.
