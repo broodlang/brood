@@ -5549,3 +5549,23 @@ tests/jit.rs leaf cases now exercise the shipping default (the
 target shape (1.15 s default, 1.56 s opted out). Gates on the new default:
 full `make test`, tier_transition + metamorphic differential fuzz rounds
 (armed build, fresh seed base), clippy/fmt.
+
+## 2026-07-19 — Iolists at the write boundary (ADR-139)
+
+The roadmap's "highest-leverage" stability item: `tcp-send`, `proc-send`,
+`spit`, `spit-append`, `spit-bytes`, `append-bytes`, and `bytes-concat` now
+accept arbitrarily nested string/bytes/byte-int trees, flattened exactly once
+at the write by one shared iterative walker (`flatten_iolist` — immutability
+means no cycles, so no visited set; explicit worklist, so 40k-deep nesting is
+heap-bounded, tested). Additive: every one of these previously REJECTED lists,
+so no behavior changed for existing callers — `spit-bytes`/`append-bytes`'s
+old bytes/vector/list-of-ints surface is a strict subset of iolists.
+Binary-mode sockets keep the Latin-1 byte-string rule per string LEAF.
+`str`/`join` deliberately stay display-rendering (recorded in the ADR).
+Checker signatures widened to the shallow iolist union (the `Ty` lattice can't
+express recursion; the runtime flattener owns the leaves). Docs: language.md
+§Iolists, PRIMITIVE_DOCS rewritten for all six, ADR-139. Tests: an iolists
+describe-block in `tests/bytes_test.blsp` (nesting, empties, improper tail,
+rejects, spit/append round-trips, the 40k-deep case), green on VM and TW.
+Next rungs from the same roadmap cluster: port the HTTP/WS parsers off the
+carrier-string bridge, and the growable read buffer (input-side twin).

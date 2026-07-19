@@ -1421,6 +1421,30 @@ language" principle.
   string escape. For a structured render-op frame buffer instead, use
   `std/display` (`term-draw`/`term-emit`).
 
+### Iolists (write-boundary trees)
+
+The byte-producing write boundaries — `tcp-send`, `proc-send`, `spit`,
+`spit-append`, `spit-bytes`, `append-bytes`, and the in-memory materialiser
+`bytes-concat` — accept any **iolist** (ADR-139, the Erlang/Elixir model): a
+**string**, a **`bytes`** value, a **byte int 0–255**, or an arbitrarily nested
+**list/vector** of iolists (`nil` is empty; an improper tail is a final leaf).
+Describe the output as a tree and nothing is copied until the single flatten at
+the write:
+
+```lisp
+(tcp-send sock [status-line headers "\r\n\r\n" body])   ; no (str …) accumulation
+(bytes-concat ["ab" ["cd" nil "e"] (bytes 102) 103])    ; => #b"abcdefg"
+```
+
+String leaves are UTF-8 at text boundaries; a **binary**-mode socket/child
+(`tcp-set-binary`) keeps its byte-string rule — each string leaf's codepoints
+must be 0–255. Anything else as a leaf (a float, a keyword, an int > 255) is a
+type error. This deletes the O(n²) `(str acc chunk)` accumulation class:
+collect parts in a list and hand the tree to the boundary. `str`/`join` are
+**not** iolist-aware — they render display forms (a list argument prints as a
+list); use `bytes-concat` (or `utf8-bytes->string` of it) to materialise an
+iolist in memory.
+
 ### Time & memory
 `now`  `now-ns`  `bench`  `mem-bytes`  `mem-peak`
 

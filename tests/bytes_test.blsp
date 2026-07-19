@@ -112,3 +112,34 @@
   (test "non-linear: a repeated binder requires equal bytes"
     (is (= (match (bytes 5 5) ((bytes a a) :equal) (_ :diff)) :equal))
     (is (= (match (bytes 5 6) ((bytes a a) :equal) (_ :diff)) :diff))))
+
+;; ---- iolists (ADR-139): nested trees flattened once at the write boundary ----
+(describe "iolists"
+  (test "bytes-concat flattens nesting, strings (UTF-8), bytes, and byte ints"
+    (is (= (bytes-concat ["ab" ["cd" nil "e"] (bytes 102) 103])
+          #b"abcdefg"))
+    (is (= (bytes-concat "x" [(bytes 121)] [[122]]) #b"xyz")))
+  (test "empty iolists yield empty bytes"
+    (is (= (bytes-concat) #b""))
+    (is (= (bytes-concat nil [] [nil [nil]]) #b"")))
+  (test "an improper tail is a final leaf (Erlang iolist parity)"
+    (is (= (bytes-concat (cons "x" "y")) #b"xy")))
+  (test "a non-leaf value is rejected"
+    (is (= (try (bytes-concat [1.5]) (catch e :rejected)) :rejected))
+    (is (= (try (bytes-concat [999]) (catch e :rejected)) :rejected))
+    (is (= (try (bytes-concat [:kw]) (catch e :rejected)) :rejected)))
+  (test "spit/slurp round-trips an iolist tree; spit-append appends one"
+    (let (path (str "/tmp/brood-iolist-" (random-token 8) ".txt"))
+      (spit path ["a" ["b" nil "c"] (bytes 100) 101])
+      (is (= (slurp path) "abcde"))
+      (spit-append path [":" (bytes 120 121)])
+      (is (= (slurp path) "abcde:xy"))
+      (spit-bytes path ["A" [66] (bytes 67)])
+      (is (= (slurp-bytes path) #b"ABC"))
+      (append-bytes path [[68] "E"])
+      (is (= (slurp-bytes path) #b"ABCDE"))
+      (delete-file path)))
+  (test "deep nesting flattens iteratively (no stack overflow)"
+    ;; 40k-deep left-nested list — the iterative walker must not recurse natively.
+    (let (deep (fold (fn (acc _) (list acc)) (list "x") (range 40000)))
+      (is (= (bytes-concat deep) #b"x")))))

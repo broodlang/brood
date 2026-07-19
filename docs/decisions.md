@@ -8721,3 +8721,31 @@ directory is a plain-text mirror of the expanded prelude — useful for
 debugging expansion itself. If the printer/reader ever disagree on a form the
 cache silently degrades to source boots (correct, just slower), so printer
 regressions can't corrupt semantics.
+
+## ADR-139 — Iolists: write boundaries take nested string/bytes trees, flattened once
+
+**Decision.** Every byte-producing write boundary — `tcp-send`, `proc-send`,
+`spit`, `spit-append`, `spit-bytes`, `append-bytes` — and the in-memory
+materialiser `bytes-concat` accept any **iolist**: a string, a `bytes` value, a
+byte int 0–255, or an arbitrarily nested proper list/vector of iolists (`nil`
+empty; an improper tail is a final leaf, as in Erlang). One shared iterative
+flattener (`builtins::io::flatten_iolist`) lowers the tree to bytes exactly
+once, at the write. String leaves are UTF-8 at text boundaries; binary-mode
+sockets/children keep their 0–255-codepoint byte-string rule for string leaves.
+
+**Why.** The O(n²) `(str acc chunk)` accumulation class — the response builder,
+the log line, the chunked drain — exists only because the write boundaries
+demanded one contiguous value. Letting the boundary flatten makes the correct
+thing (collect parts, hand over the tree) the default, with zero intermediate
+copies. Erlang's model, and a natural fit for a process/`receive` language
+whose data is immutable — an immutable tree cannot be cyclic, so the walker
+needs no visited set, and flattening is structurally guaranteed to terminate.
+
+**Deliberately NOT included** (ADR-011): `str`/`join` stay display-rendering —
+making them flatten would change what `(str [1 2])` prints and conflate
+"render for humans" with "serialise for devices"; a future decision may add an
+explicit in-memory `iolist->string` if `utf8-bytes->string`+`bytes-concat`
+proves too clunky. The checker signature is the shallow surface
+(`string|bytes|int|pair|vector|nil` — the lattice can't express recursion);
+the flattener enforces the leaves at runtime. The read-side twin (a growable
+read buffer that freezes to `bytes`) stays a separate roadmap item.

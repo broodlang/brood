@@ -108,11 +108,14 @@ pub(super) fn subbytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(heap.alloc_bytes(SharedBlob::new(&slice)))
 }
 
-/// `(bytes-concat b1 b2 …)` — one bytes value joining all the arguments.
+/// `(bytes-concat io1 io2 …)` — one bytes value joining all the arguments, each
+/// an **iolist** (ADR-139): a string (UTF-8), a `bytes`, a byte int 0–255, or an
+/// arbitrarily nested list/vector of those. The in-memory materialiser of the
+/// iolist model — build the tree, flatten once here.
 pub(super) fn bytes_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mut out = Vec::new();
     for &v in args {
-        out.extend_from_slice(&as_bytes(heap, "bytes-concat", v)?);
+        super::io::flatten_iolist(heap, "bytes-concat", "bytes", v, false, &mut out)?;
     }
     Ok(heap.alloc_bytes(SharedBlob::new(&out)))
 }

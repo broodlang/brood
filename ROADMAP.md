@@ -151,15 +151,16 @@ list, `reverse` + `join` once), written five times across the HTTP/WebSocket sta
 would retire the bug class at the language level. See hatch's
 [`docs/tcp-http-audit.md`](../hatch/docs/tcp-http-audit.md) §16–§17.
 
-- ⬜ **Iolists — the highest-leverage one.** Let the I/O + join builtins
-  (`tcp-send`, `spit`/`append-bytes`, `join`, `str`, `bytes-concat`) accept
-  *arbitrarily nested lists of strings/bytes*, flattened only at the write boundary
-  — the Erlang/Elixir model, a natural fit given Brood's process/`receive` core.
-  You'd describe the structure (`[status-line headers "\r\n\r\n" [s0 d0 s1 …]]`)
-  and nothing is copied until the socket writes it flattened. Makes the correct
-  thing the default and deletes the whole accumulation bug class. **[kernel]**
-  flatten-on-write in the I/O builtins + teach `join`/`str`/`bytes-concat` to
-  accept nesting.
+- ✅ **Iolists — the highest-leverage one. Shipped 2026-07-19 (ADR-139).**
+  `tcp-send`/`proc-send`/`spit`/`spit-append`/`spit-bytes`/`append-bytes`/
+  `bytes-concat` accept arbitrarily nested string/bytes/byte-int trees
+  (`[status-line headers "\r\n\r\n" body]`), flattened exactly once at the
+  write by one shared iterative walker — the Erlang model; immutability means
+  no cycles, so termination is structural. Additive (all previously rejected
+  lists); binary-mode sockets keep the Latin-1 rule per string leaf.
+  `str`/`join` deliberately stay display-rendering (see the ADR) — an
+  explicit in-memory materialiser beyond `bytes-concat` is a future call.
+  Next: port `std/net` (http/sse/tcp) response builders onto iolist sends.
 - ⬜ **`bytes`-native HTTP/WebSocket parsing (kill the carrier-string bridge).**
   `bytes` is now a first-class value (`byte-at`/`subbytes`/`bytes-index-of`/…), but
   the string parsers predate it, so every socket read does
@@ -448,11 +449,16 @@ Runtime housekeeping (both items landed):
 
 ### VM & JIT
 
-- ⬜ **Fix the `let`-self-ref `send` divergence** — a VM `let`-self-ref closure
-  isn't structurally self-referential, so `send` accepts it where the tree-walker
-  rejects it (a correctness gap + differential blind spot).
+- ✅ **The `let`-self-ref `send` divergence no longer reproduces** (verified
+  2026-07-19): a `let`-bound self-recursive closure sent to a pid is rejected with
+  the same "cannot send a self-referential local closure" error by BOTH engines in
+  every shape tried — top level, created inside a VM-compiled `defn`, `send`
+  executed from inside a VM arm, and via `spawn` (identical die-uncaught behavior).
+  Presumably fixed en route by the capture/closure-template unification work; if a
+  diverging shape resurfaces, it belongs in the differential fuzzer corpus.
 - ⬜ **Route remaining native higher-order callbacks** (`try`/`binding`/`apply`/
-  `isolate`) through the VM like `%range-reduce` — blocked on the fix above.
+  `isolate`) through the VM like `%range-reduce` — previously blocked on the
+  divergence above, now unblocked.
 - ⬜ **JIT Stage 4 — RUNTIME compaction survival** (ADR-091) — a constant-pool
   indirection table (ADR-096 §4.C) lets `runtime_collect` rewrite handles without
   invalidating machine code.

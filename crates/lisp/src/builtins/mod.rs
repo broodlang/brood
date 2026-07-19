@@ -89,6 +89,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // `bytes` is seqable too: `first`/`rest`/`nth` iterate its octets at runtime.
     const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Bytes]);
     const callable: Ty = Ty::of_tags(&[Tag::Fn, Tag::Native]);
+    // An **iolist** (ADR-139): a string, a `bytes`, a byte int 0–255, or an
+    // arbitrarily nested list/vector of iolists (nil = empty). The lattice can't
+    // express the recursion, so this is the shallow surface — the runtime
+    // flattener (`flatten_iolist`) enforces the leaves.
+    const iolist: Ty = Ty::of_tags(&[
+        Tag::Str,
+        Tag::Bytes,
+        Tag::Int,
+        Tag::Pair,
+        Tag::Vector,
+        Tag::Nil,
+    ]);
 
     // numeric primitives — `%add`..`%div` accept and return the wider NUMBER
     // (int + int may overflow into Float; the others always do on a Float arg).
@@ -654,7 +666,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "bytes-concat",
         Arity::any(),
-        Sig::variadic(bytes_ty, bytes_ty),
+        Sig::variadic(iolist, bytes_ty),
         bytes_concat,
     );
     // String<->bytes conversion is UTF-8 (a Brood string is UTF-8, like Rust's),
@@ -925,7 +937,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "tcp-send",
         Arity::exact(2),
-        Sig::new(vec![socket_ty, string], nil_ty),
+        Sig::new(vec![socket_ty, iolist], nil_ty),
         tcp_send,
     );
     def(
@@ -963,11 +975,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "proc-send",
         Arity::exact(2),
-        // data may be a string (UTF-8 / codepoints) or a bytes value (verbatim).
-        Sig::new(
-            vec![subprocess_ty, Ty::of_tags(&[Tag::Str, Tag::Bytes])],
-            nil_ty,
-        ),
+        // data is any iolist (ADR-139); string leaves are UTF-8 in text mode,
+        // 0–255 codepoints in binary mode; bytes leaves go verbatim.
+        Sig::new(vec![subprocess_ty, iolist], nil_ty),
         proc_send,
     );
     def(
@@ -1723,14 +1733,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "spit",
         Arity::exact(2),
-        Sig::new(vec![string, string], nil_ty),
+        Sig::new(vec![string, iolist], nil_ty),
         spit,
     );
     def(
         heap,
         "spit-append",
         Arity::exact(2),
-        Sig::new(vec![string, string], nil_ty),
+        Sig::new(vec![string, iolist], nil_ty),
         spit_append,
     );
     def(
@@ -2591,13 +2601,13 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tls-request", &["host", "port", "request"], "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). Returns a socket id; pair with tcp-drain. Low-level — prefer http-get."),
     ("tls-listen", &["host", "port", "cert-pem", "key-pem"], "Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like tcp-listen, connections arrive as [:tcp-accept lsock client]; each accepted socket transparently decrypts inbound to [:tcp …] and encrypts tcp-send, so code above the transport is unchanged. Returns a socket."),
     ("tls-self-signed", &["host"], "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it)."),
-    ("tcp-send", &["sock", "data"], "Write data to sock (blocking). data may be a bytes value (sent verbatim) or a string. In text mode (default) a string is sent as UTF-8; in binary mode (see tcp-set-binary) a string's codepoints must be 0–255 and are written as raw bytes (a `bytes` value is preferred). Returns nil; throws on error."),
+    ("tcp-send", &["sock", "data"], "Write data to sock (blocking). data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139). In text mode (default) a string leaf is sent as UTF-8; in binary mode (see tcp-set-binary) a string leaf's codepoints must be 0–255 and are written as raw bytes (a `bytes` value is preferred). Returns nil; throws on error."),
     ("tcp-set-binary", &["sock", "on"], "Switch sock between text mode (default) and binary mode. In binary mode inbound [:tcp sock data] delivers data as a byte-faithful `bytes` value (not a string), and tcp-send accepts a bytes value — for length-prefixed / control-byte protocols like WebSocket framing or a database wire protocol. Text mode delivers a UTF-8 string. Returns nil; throws if sock is gone or a listener."),
     ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
     ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
     ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
     ("proc-spawn", &["prog", "args", "opts"], "Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. Its stdout/stderr arrive at the calling process as [:proc handle data] / [:proc-err handle data] messages, and [:proc-closed handle code] on exit (code is the exit status, or nil if signalled). Returns a subprocess handle. Throws if prog can't be spawned."),
-    ("proc-send", &["p", "data"], "Write data to subprocess p's stdin (blocking) and flush. data may be a bytes value (sent verbatim) or a string (UTF-8 in text mode; codepoints 0–255 as raw bytes in binary mode). Returns nil; throws if p is unknown/closed."),
+    ("proc-send", &["p", "data"], "Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139); string leaves are UTF-8 in text mode, 0–255 codepoints as raw bytes in binary mode. Returns nil; throws if p is unknown/closed."),
     ("proc-set-binary", &["p", "on"], "Switch subprocess p between text mode (default) and binary mode (mirrors tcp-set-binary). In binary mode inbound [:proc …]/[:proc-err …] delivers data as a byte-faithful `bytes` value (not a string) and proc-send accepts a bytes value — for a child speaking a binary protocol over stdio. Returns nil; throws if p is unknown/closed."),
     ("proc-close", &["p"], "Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner."),
     ("table", &[], "Create a new empty in-memory table (Brood's ETS): a shared, mutable key→value store behind an opaque handle. Unlike a map it is mutated in place (table-put/table-delete) and shared by identity — the handle can be sent to other processes, which all see the same store. Stores deep clones (keys/values are copied in and out), so no two processes alias a stored value. Local to this runtime; not node-portable. Returns the handle."),
@@ -2664,13 +2674,13 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("dir?", &["path"], "Whether path is a directory."),
     ("list-dir", &["path"], "The entry names directly under directory path, sorted."),
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
-    ("spit", &["path", "s"], "Write string s to the file at path, replacing any existing file."),
-    ("spit-append", &["path", "s"], "Append string s to the file at path, creating it if absent (unlike spit, which truncates). Returns nil. Opens in append mode so each write lands at end-of-file — the OS-atomic append that makes a log safe to write from several processes at once. The string sibling of append-bytes."),
+    ("spit", &["path", "s"], "Write s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, replacing any existing file."),
+    ("spit-append", &["path", "s"], "Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike spit, which truncates). Returns nil. Opens in append mode so each write lands at end-of-file — the OS-atomic append that makes a log safe to write from several processes at once. The string sibling of append-bytes."),
     ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
     ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),
-    ("spit-bytes", &["path", "bytes"], "Write a byte sequence (a bytes value, a vector, or a list of byte ints 0–255) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to slurp-bytes (spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk."),
-    ("append-bytes", &["path", "bytes"], "Append a byte sequence (a bytes value, a vector, or a list of byte ints 0–255) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory."),
+    ("spit-bytes", &["path", "bytes"], "Write any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to path byte-faithfully, replacing any existing file. Returns nil. The binary write-side counterpart to slurp-bytes (spit is UTF-8 string-only) — materialises a received image / archive / any binary asset to disk."),
+    ("append-bytes", &["path", "bytes"], "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
     ("%digest", &["algo", "bytes"], "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp."),
     ("%hmac", &["algo", "key-bytes", "msg-bytes"], "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp."),
