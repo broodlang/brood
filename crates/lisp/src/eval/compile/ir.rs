@@ -607,6 +607,28 @@ pub struct CompiledArm {
     /// within an epoch; reset on epoch invalidation. See `active_nslots`.
     #[cfg(feature = "jit")]
     pub inline_installed: std::sync::atomic::AtomicBool,
+    /// Leaf-callee inlining (`BROOD_JIT_LEAF_INLINE=1`, measure-first): the body with
+    /// each qualifying small non-recursive callee's body spliced in, derived ONCE at
+    /// arm-compile time (the only moment a `&Heap` can resolve the callee symbols).
+    /// Rides the same two-stage deferred-upgrade channel as self-inlining
+    /// (`inline_name`/`inline_nslots`/`inline_code`), mutually exclusive with it.
+    /// The stored derivation is valid only at [`LeafInline::epoch`] — `jit_lower_inlined_arm`
+    /// refuses to lower it at any other epoch (a `def`/compaction may have rebound a
+    /// spliced callee), so hot-reload correctness falls out of the existing epoch guard.
+    #[cfg(feature = "jit")]
+    pub leaf: Option<Box<LeafInline>>,
+}
+
+/// The stored leaf-inline derivation: see [`CompiledArm::leaf`].
+#[cfg(feature = "jit")]
+pub struct LeafInline {
+    /// The caller's body with callee bodies spliced (args → shifted callee param
+    /// slots via `LetBind`, callee body `shift_slots`-relocated above the caller's
+    /// frame). Cloned (via `shift_slots(_, 0)`) for lowering; the VM never runs it.
+    pub body: Node,
+    /// `heap.global_epoch()` at derivation. Lowering requires `compile_epoch ==`
+    /// this — i.e. no `def`/compaction between derivation and lowering.
+    pub epoch: u64,
 }
 
 #[cfg(feature = "jit")]

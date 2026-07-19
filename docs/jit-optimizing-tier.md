@@ -207,6 +207,19 @@ per-engine frame sizing + a deferred lower-priority inlined upgrade — see
 `crates/lisp/src/eval/compile/mod.rs` around `jit_tier`). `BROOD_JIT_INLINE=1` is gone; the lever is
 now the opt-*out* `BROOD_NO_INLINE=1`.
 
+**UPDATE (2026-07-19): Phase 2 (leaf-callee inlining) implemented, opt-in
+`BROOD_JIT_LEAF_INLINE=1`.** The self-inliner's sibling for *different* callees: a non-tail
+static-head call whose callee is a small, calls-free, non-capturing fixed-arity `defn` splices the
+callee's body into the caller (per-callee slot ranges above the caller's frame — a running base,
+not the self-inliner's uniform stride). Derivation is done ONCE at arm-compile time (heap access
+for symbol→arm resolution, thread-local reentrancy guard bounding it to depth 1) and stored on the
+arm (`CompiledArm::leaf`), epoch-stamped; `jit_lower_inlined_arm` refuses any other epoch, so hot
+reload wins by construction. Derivation requires ZERO residual non-tail calls — the inlined engine
+has no deopt checkpoint, and `jit_ckpt_read` now refuses the inlined engine outright (the small
+layout's `ckpt_slot` lies inside the spliced range; a spliced Int faked a journal). ~30% on the
+scalar-helper loop shape; suite rows flat (recursive/HOF/alloc-bound — closure arms + Phase 3/4
+are the reach). See devlog 2026-07-19.
+
 ## 6b. Phase 3 — recursive self-inlining (the fib lever), designed 2026-06-16 (see 6c: regressed)
 
 Confirmed the right lever for `fib`/recursive benchmarks: fib is **63% call protocol, 26%

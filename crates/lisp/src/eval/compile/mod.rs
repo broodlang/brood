@@ -2053,6 +2053,284 @@ fn rederive_inlined_body(
     Some(build_inlined_body(body, defn_name, nrequired, m)?.0)
 }
 
+// ===================== leaf-callee inlining (BROOD_JIT_LEAF_INLINE) =====================
+//
+// The self-inliner's sibling for *different* callees (`docs/jit-optimizing-tier.md`
+// Phase 2): a non-tail call to a statically-known, small, calls-free top-level `defn`
+// (`(add1 n)`, `(sq x)`, a scalar predicate) is replaced by the callee's body spliced
+// above the caller's frame — removing that call's entire protocol (frame setup +
+// dispatch + link trampoline). Derivation happens ONCE, at arm-compile time (the only
+// point with `&Heap` access to resolve the callee symbols), and is stored on the arm
+// ([`CompiledArm::leaf`]); it rides the existing two-stage deferred-upgrade channel.
+// Hot-reload safety: the stored derivation carries its epoch, and lowering refuses any
+// other epoch — a `def` between derivation and lowering (or after install, via the
+// per-entry `compile_epoch` guard) always wins. Opt-IN while being measured.
+
+/// Is leaf-callee inlining enabled? **Opt-in** (`BROOD_JIT_LEAF_INLINE=1`) while the
+/// win is being measured — flip to opt-out once benchmarked (like `BROOD_NO_INLINE`).
+#[cfg(feature = "jit")]
+fn leaf_inline_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_JIT_LEAF_INLINE").is_some())
+}
+
+/// Largest callee body (node count) worth splicing. Leaf helpers are tiny; a larger
+/// body's call protocol is proportionally cheaper and the splice bloats the caller.
+#[cfg(feature = "jit")]
+const LEAF_INLINE_MAX_BODY: usize = 24;
+
+/// Most call sites spliced per caller arm — bounds the frame + body growth.
+#[cfg(feature = "jit")]
+const LEAF_INLINE_MAX_BLOCKS: usize = 8;
+
+/// Does `body` qualify as a spliceable **leaf**? No calls of any kind (so no tail
+/// flags to demote and no recursion), no closure creation, no `try` (its handler
+/// protocol is frame-relative), no global reads (their IC sites belong to the callee's
+/// arm), no RUNTIME-handle consts (the stored derivation is never rewritten by
+/// `runtime_collect` — epoch gating makes that safe, but excluding them keeps the
+/// stored bits inert), and small. Prims, locals, consts, `if`/`do`/`let`, vector/map
+/// literals are all fine.
+#[cfg(feature = "jit")]
+fn leaf_body_qualifies(body: &Node) -> bool {
+    fn clean(n: &Node) -> bool {
+        match n {
+            Node::Call { .. }
+            | Node::SelfCall { .. }
+            | Node::MakeClosure { .. }
+            | Node::TryCatch { .. }
+            | Node::Global(_)
+            | Node::GlobalIc { .. } => false,
+            _ => {
+                let mut ok = true;
+                walk_children(n, |c| ok = ok && clean(c));
+                ok
+            }
+        }
+    }
+    node_count(body) <= LEAF_INLINE_MAX_BODY && clean(body) && !node_has_rt_handles(body)
+}
+
+// Reentrancy guard for `leaf_resolve_callee`: resolving a callee may COMPILE it
+// (`compiled_arm_for` → `compile_closure` → `compile_arm`), and that nested compile
+// must not run its own leaf probe — unguarded, the probe walks the entire call graph
+// (and never terminates on mutual recursion: `a`'s probe compiles `b`, whose probe
+// compiles `a`, … → the boot stack overflow this guard fixed). With the guard, a
+// nested compile skips probing: depth is bounded at 1, and since a *qualifying*
+// callee is calls-free, suppressing its (empty) probe changes nothing. The one wart:
+// a NON-qualifying callee compiled here is cached without its own leaf metadata, so
+// it forgoes its own upgrade in this process — metadata only, body/frame identical.
+#[cfg(feature = "jit")]
+thread_local! {
+    static LEAF_RESOLVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Resolve a call head `sym`/`argc` to a spliceable callee arm: the global must be a
+/// plain fixed-arity, non-capturing closure whose selected arm's body
+/// [qualifies](leaf_body_qualifies). `None` = leave the call alone.
+#[cfg(feature = "jit")]
+fn leaf_resolve_callee(heap: &Heap, sym: Symbol, argc: usize) -> Option<Arc<CompiledArm>> {
+    let v = heap.env_get(heap.global(), sym)?;
+    let id = match v.unpack() {
+        ValueRef::Fn(id) => id,
+        _ => return None,
+    };
+    LEAF_RESOLVING.with(|g| g.set(true));
+    let arm = compiled_arm_for(heap, id, argc);
+    LEAF_RESOLVING.with(|g| g.set(false));
+    let arm = arm?;
+    if arm.nrequired != argc
+        || arm.noptional != 0
+        || arm.rest_slot.is_some()
+        || !arm.capture_names.is_empty()
+        || !leaf_body_qualifies(&arm.body)
+    {
+        return None;
+    }
+    Some(arm)
+}
+
+/// Replace, in place, each qualifying non-tail static-head call in `node` with the
+/// callee's spliced body: `LetBind { binds: [(base + k, args[k])], body:
+/// shift_slots(callee_body, base) }`, where `base` starts at the caller's frame
+/// high-water mark and grows by each callee's `nslots` (unlike the self-inliner's
+/// uniform stride — callees have different frame sizes). Bottom-up, so a spliced
+/// argument expression is never re-scanned. Returns the number of sites spliced.
+#[cfg(feature = "jit")]
+fn leaf_inline_splice(
+    heap: &Heap,
+    node: &mut Node,
+    next_base: &mut usize,
+    blocks: &mut usize,
+    self_name: Option<Symbol>,
+) -> usize {
+    let mut count = 0;
+    match node {
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
+        Node::If(a, b, c) => {
+            count += leaf_inline_splice(heap, a, next_base, blocks, self_name);
+            count += leaf_inline_splice(heap, b, next_base, blocks, self_name);
+            count += leaf_inline_splice(heap, c, next_base, blocks, self_name);
+        }
+        Node::Do(xs) | Node::Vector(xs) => {
+            for n in xs.iter_mut() {
+                count += leaf_inline_splice(heap, n, next_base, blocks, self_name);
+            }
+        }
+        Node::Map(kvs) => {
+            for (k, v) in kvs.iter_mut() {
+                count += leaf_inline_splice(heap, k, next_base, blocks, self_name);
+                count += leaf_inline_splice(heap, v, next_base, blocks, self_name);
+            }
+        }
+        Node::Call { callee, args, .. } => {
+            count += leaf_inline_splice(heap, callee, next_base, blocks, self_name);
+            for n in args.iter_mut() {
+                count += leaf_inline_splice(heap, n, next_base, blocks, self_name);
+            }
+        }
+        Node::SelfCall { args, .. } => {
+            for n in args.iter_mut() {
+                count += leaf_inline_splice(heap, n, next_base, blocks, self_name);
+            }
+        }
+        Node::LetBind { binds, body } => {
+            for (_, n) in binds.iter_mut() {
+                count += leaf_inline_splice(heap, n, next_base, blocks, self_name);
+            }
+            count += leaf_inline_splice(heap, body, next_base, blocks, self_name);
+        }
+        Node::MakeClosure { captures, .. } => {
+            for (_, n) in captures.iter_mut() {
+                count += leaf_inline_splice(heap, n, next_base, blocks, self_name);
+            }
+        }
+        Node::Prim2 { a, b, .. } => {
+            count += leaf_inline_splice(heap, a, next_base, blocks, self_name);
+            count += leaf_inline_splice(heap, b, next_base, blocks, self_name);
+        }
+        Node::Prim3 { a, b, c, .. } => {
+            count += leaf_inline_splice(heap, a, next_base, blocks, self_name);
+            count += leaf_inline_splice(heap, b, next_base, blocks, self_name);
+            count += leaf_inline_splice(heap, c, next_base, blocks, self_name);
+        }
+        Node::Prim1 { a, .. } => {
+            count += leaf_inline_splice(heap, a, next_base, blocks, self_name);
+        }
+        Node::TryCatch { body, handler, .. } => {
+            count += leaf_inline_splice(heap, body, next_base, blocks, self_name);
+            count += leaf_inline_splice(heap, handler, next_base, blocks, self_name);
+        }
+    }
+    // Children handled; now this node. A tail call is left alone (replacing it would
+    // change what "the last thing in the frame" is; it's also already the cheap path).
+    if *blocks >= LEAF_INLINE_MAX_BLOCKS {
+        return count;
+    }
+    if let Node::Call {
+        callee,
+        args,
+        tail: false,
+        ..
+    } = node
+    {
+        let sym = match &**callee {
+            Node::Global(s) | Node::GlobalIc { sym: s, .. } => *s,
+            _ => return count,
+        };
+        // A self-call is the self-inliner's job (and during the defining `def` the
+        // name resolves to the PREVIOUS binding — never splice that).
+        if Some(sym) == self_name {
+            return count;
+        }
+        let Some(callee_arm) = leaf_resolve_callee(heap, sym, args.len()) else {
+            return count;
+        };
+        let base = *next_base;
+        *next_base += callee_arm.nslots;
+        *blocks += 1;
+        let args = match node {
+            Node::Call { args, .. } => std::mem::take(args),
+            _ => unreachable!(),
+        };
+        let binds: Box<[(usize, Node)]> = args
+            .into_vec()
+            .into_iter()
+            .enumerate()
+            .map(|(k, a)| (base + k, a))
+            .collect();
+        *node = Node::LetBind {
+            binds,
+            body: Box::new(shift_slots(&callee_arm.body, base)),
+        };
+        count += 1;
+    }
+    count
+}
+
+/// Probe + derive leaf-callee inlining for a caller arm: returns the spliced body and
+/// its frame size (`inline_nslots`), or `None` if nothing qualifies. The spliced
+/// chunk's ops are validated against the CURRENT globals here (`chunk_ops_native`) —
+/// equivalent to the tier-time validation the small chunk gets, because lowering is
+/// gated to this exact epoch (any intervening `def` bumps it and the derivation is
+/// refused).
+#[cfg(feature = "jit")]
+fn leaf_inline_probe(
+    heap: &Heap,
+    body: &Node,
+    m: usize,
+    self_name: Option<Symbol>,
+) -> Option<(Node, usize)> {
+    if !leaf_inline_enabled() {
+        return None;
+    }
+    // Nested compile during a resolution — don't probe (see [`LEAF_RESOLVING`]).
+    if LEAF_RESOLVING.with(|g| g.get()) {
+        return None;
+    }
+    // Don't splice into an oversized caller (i-cache + lowering limits — the same
+    // reasoning as the self-inliner's bound).
+    if node_count(body) > SELF_INLINE_MAX_BODY {
+        return None;
+    }
+    let mut spliced = shift_slots(body, 0);
+    let mut next_base = m;
+    let mut blocks = 0usize;
+    let n = leaf_inline_splice(heap, &mut spliced, &mut next_base, &mut blocks, self_name);
+    if n == 0 {
+        return None;
+    }
+    let chunk = compile_chunk(&spliced)?;
+    // Foreign prims arrived with the callee bodies — validate them now (see doc above).
+    if !chunk_ops_native(heap, &chunk) {
+        return None;
+    }
+    // Every non-tail call must have been spliced away: the inlined native has no
+    // deopt checkpoint (see `jit_ckpt_read`), so a deopt re-runs from ip 0 — only
+    // effect-free when nothing before the deopt point completed a call. A residual
+    // non-tail call (an unresolvable/large callee next to a spliced one) fails the
+    // derivation; the arm keeps its small native + checkpointing.
+    if chunk
+        .code
+        .iter()
+        .any(|i| matches!(i, Inst::Call { tail: false, .. }))
+    {
+        return None;
+    }
+    let nslots = next_base + jit_spill_reserve(&chunk.code);
+    if std::env::var("BROOD_INLINE_DBG").is_ok() {
+        eprintln!(
+            "[inline-dbg] leaf probe {} sites={} m={} leaf_nslots={}",
+            self_name
+                .map(crate::core::value::symbol_name)
+                .unwrap_or_else(|| "<anon>".into()),
+            n,
+            m,
+            nslots
+        );
+    }
+    Some((spliced, nslots))
+}
+
 fn compile_arm(
     heap: &Heap,
     required: &[Symbol],
@@ -2137,16 +2415,37 @@ fn compile_arm(
     // probe enforces the rest of the gate (no `SelfCall`/`MakeClosure`, body-size bound,
     // ≥1 qualifying call). Deterministic: same arm → same shifted IR.
     #[cfg(feature = "jit")]
-    let (inline_name, inline_stride, inline_nslots): (Option<Symbol>, usize, usize) = {
+    let (inline_name, inline_stride, inline_nslots, leaf): (
+        Option<Symbol>,
+        usize,
+        usize,
+        Option<Box<ir::LeafInline>>,
+    ) = {
         let m = scope.max;
         match defn_name {
             Some(name) if noptional == 0 && rest.is_none() => {
                 match self_inline_probe(&body, name, nrequired, m) {
-                    Some(inline_max) => (Some(name), m, inline_max),
-                    None => (None, 0, 0),
+                    Some(inline_max) => (Some(name), m, inline_max, None),
+                    // Mutually exclusive with self-inlining: the leaf derivation is
+                    // stored (not re-derived), stamped with the current epoch, and
+                    // rides the same deferred-upgrade channel (`inline_name` set so
+                    // the swap invalidates this caller's fast links; `inline_stride`
+                    // unused — the lowerer branches on `leaf` first).
+                    None => match leaf_inline_probe(heap, &body, m, Some(name)) {
+                        Some((spliced, leaf_nslots)) => (
+                            Some(name),
+                            0,
+                            leaf_nslots,
+                            Some(Box::new(ir::LeafInline {
+                                body: spliced,
+                                epoch: heap.global_epoch(),
+                            })),
+                        ),
+                        None => (None, 0, 0, None),
+                    },
                 }
             }
-            _ => (None, 0, 0),
+            _ => (None, 0, 0, None),
         }
     };
     let optional_defaults = optional_defaults.into_boxed_slice();
@@ -2184,12 +2483,13 @@ fn compile_arm(
             .any(|i| matches!(i, Inst::Call { tail: false, .. }))
             && !c.code.iter().any(|i| matches!(i, Inst::SelfCall { .. }))
     });
+    let nslots_total = scope.max + spill_reserve + ckpt_reserve;
     Some(CompiledArm {
         nrequired,
         noptional,
         optional_defaults,
         rest_slot: rest.map(|_| nrequired + noptional),
-        nslots: scope.max + spill_reserve + ckpt_reserve,
+        nslots: nslots_total,
         body,
         chunk,
         has_runtime_handles,
@@ -2215,14 +2515,27 @@ fn compile_arm(
         dbg_name: defn_name,
         #[cfg(feature = "jit")]
         inline_stride,
+        // Floored at the SMALL frame size: the VM/small-native frame is already
+        // `nslots_total` (locals + spill + ckpt reserves), and the per-engine sizing
+        // hook grows a live frame to `inline_nslots` on a post-swap entry — a smaller
+        // value would make that "grow" an underflowing shrink (hit by the leaf
+        // inliner, whose spliced layout can be smaller than the small layout's
+        // reserves; the spliced blocks overlap the small spill/ckpt area by design —
+        // each engine owns its layout exclusively per activation).
         #[cfg(feature = "jit")]
-        inline_nslots,
+        inline_nslots: if inline_name.is_some() {
+            inline_nslots.max(nslots_total)
+        } else {
+            inline_nslots
+        },
         #[cfg(feature = "jit")]
         inline_code: AtomicPtr::new(std::ptr::null_mut()),
         #[cfg(feature = "jit")]
         inline_queued: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "jit")]
         inline_installed: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "jit")]
+        leaf,
     })
 }
 
@@ -5806,7 +6119,7 @@ fn vm_run_bc(
                                     cur_arm
                                         .dbg_name
                                         .map(crate::core::value::symbol_name_ref)
-                                        .unwrap_or_else(|| "<closure>".into()),
+                                        .unwrap_or("<closure>"),
                                     cur_arm.deopt_watch,
                                     ckpt >> 16,
                                     ckpt & 0xffff
@@ -6164,6 +6477,8 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 inline_queued: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "jit")]
                 inline_installed: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "jit")]
+                leaf: None,
             });
             let arm_slot = if arm.has_runtime_handles {
                 heap.live_arm_push(arm.clone())
@@ -6540,6 +6855,13 @@ fn chunk_ops_all_native(heap: &Heap, arm: &CompiledArm) -> bool {
     let Some(chunk) = arm.chunk.as_ref() else {
         return true;
     };
+    chunk_ops_native(heap, chunk)
+}
+
+/// [`chunk_ops_all_native`]'s chunk-level core — also used by [`leaf_inline_probe`] to
+/// validate a spliced chunk's (foreign, callee-contributed) prims at derivation time.
+#[cfg(feature = "jit")]
+fn chunk_ops_native(heap: &Heap, chunk: &Chunk) -> bool {
     chunk.code.iter().all(|inst| match inst {
         Inst::Prim2 { op, map, head, .. } | Inst::Prim2SlotSlot { op, map, head, .. } => {
             // These store the head's *natural* arg-map (what `resolve_prim` returns).
@@ -7390,6 +7712,19 @@ fn jit_ckpt_read(heap: &Heap, arm: &CompiledArm, base: usize) -> Option<(usize, 
     if arm.ckpt_slot == u32::MAX {
         return None;
     }
+    // The INLINED native (self- or leaf-spliced) has no checkpoint area — its lowering
+    // never journals (`ckpt_active = inline.is_none()`), and the small layout's
+    // `ckpt_slot` points INTO the spliced slot range, where an ordinary value (a spliced
+    // callee's Int param) would fake a journal → a garbage resume ip. A deopt from the
+    // inlined engine must resume from ip 0 (the leaf probe keeps that effect-free by
+    // refusing derivations with residual non-tail calls; self-splices re-run only their
+    // pure-arith bodies).
+    if arm
+        .inline_installed
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return None;
+    }
     match heap.root_at(base + arm.ckpt_slot as usize) {
         Value::Int(p) if p > 0 => Some(((p >> 16) as usize, (p & 0xFFFF) as usize)),
         _ => None,
@@ -7911,6 +8246,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
 
         rewrite_arm_handles(&arm, &mut |v| bump(v, 100));
@@ -8038,6 +8375,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         });
 
         // First run: the native suspends, so the driver captures the continuation
@@ -8144,6 +8483,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -8222,6 +8563,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -8310,6 +8653,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
 
         let mut jit = crate::jit::Jit::new();
@@ -8440,6 +8785,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
         let mut jit = crate::jit::Jit::new();
         assert!(
@@ -8509,6 +8856,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
         assert!(
             jit_lower_arm(&mut jit, &elided_arm, &[]).is_some(),
@@ -8572,6 +8921,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
         assert!(
             jit_lower_arm(&mut jit, &thin_arm, &[]).is_none(),
@@ -8644,6 +8995,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
         let mut jit = crate::jit::Jit::new();
 
@@ -8804,6 +9157,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
         let sumto = Arc::new(mk_arm(
             Chunk {
@@ -8975,6 +9330,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         });
 
         // Warm it past the threshold so jit_tier hands it to the background compiler;
@@ -9086,6 +9443,8 @@ mod tests {
             inline_queued: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "jit")]
             inline_installed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "jit")]
+            leaf: None,
         };
         let n = 100_000i64; // iterations per sumto call
         let reps = 300;

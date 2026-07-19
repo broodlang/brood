@@ -1461,16 +1461,28 @@ pub(crate) fn jit_lower_inlined_arm(
     arm: &CompiledArm,
     slot_tags: &[u8],
 ) -> Option<*const u8> {
-    let name = arm.inline_name?;
     // Box the spliced body + chunk so their heap addresses (and the `ConstVal`s inside the
     // chunk) are stable once stored in the keepalive below — `jit_lower_arm_inner` bakes
     // those addresses into the native code, so they must not move after lowering.
-    let spliced: Box<Node> = Box::new(rederive_inlined_body(
-        &arm.body,
-        name,
-        arm.nrequired,
-        arm.inline_stride,
-    )?);
+    let spliced: Box<Node> = if let Some(leaf) = &arm.leaf {
+        // Leaf-callee upgrade: the stored derivation is valid ONLY at the epoch it was
+        // derived at — a `def`/compaction since then may have rebound a spliced callee
+        // (or a prim its body uses), and the derivation can't be re-checked here (no
+        // heap on this thread). Refuse → the upgrade BAILs and the small native keeps
+        // running; the caller re-derives fresh only when its closure is recompiled.
+        if arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire) != leaf.epoch {
+            return None;
+        }
+        Box::new(super::shift_slots(&leaf.body, 0))
+    } else {
+        let name = arm.inline_name?;
+        Box::new(rederive_inlined_body(
+            &arm.body,
+            name,
+            arm.nrequired,
+            arm.inline_stride,
+        )?)
+    };
     let chunk: Box<Chunk> = Box::new(compile_chunk(&spliced)?);
     let ptr = jit_lower_arm_inner(
         jit,
