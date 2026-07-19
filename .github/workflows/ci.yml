@@ -67,6 +67,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # The no-JIT configuration (`BROOD_NO_JIT` has a build-level counterpart —
+      # CLAUDE.md documents `--no-default-features` as supported). It broke silently
+      # once (ungated `crate::jit` refs, found 2026-07-19); this check keeps every
+      # `#[cfg(feature = "jit")]` seam honest without a second full test run.
+      - name: Check (no default features)
+        run: cargo check --workspace --no-default-features
+
       # Same as `make test`: nextest process-isolates each case (a green-process
       # stack overflow can SIGSEGV, so isolation keeps one bad case from taking the
       # whole run down) and the grammar tests need the vendored tree-sitter parsers.

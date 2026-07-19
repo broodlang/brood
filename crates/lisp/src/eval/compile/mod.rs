@@ -2468,7 +2468,7 @@ fn compile_arm(
     // the spill slots; zero cost for call-free arms (`ckpt_depth` is None).
     let ckpt_depth = chunk
         .as_ref()
-        .and_then(|c| jit_lower::jit_ckpt_depth(&c.code, defn_name));
+        .and_then(|c| jit_ckpt_depth(&c.code, defn_name));
     let (ckpt_slot, ckpt_reserve) = match ckpt_depth {
         Some(d) => ((scope.max + spill_reserve) as u32, 1 + d),
         None => (u32::MAX, 0),
@@ -6551,11 +6551,17 @@ pub fn apply_engine(heap: &mut Heap, callee: Value, args: &[Value], genv: EnvId)
 #[cfg(feature = "jit")]
 mod jit_lower;
 #[cfg(feature = "jit")]
+use jit_lower::jit_ckpt_depth;
+#[cfg(feature = "jit")]
 pub(crate) use jit_lower::{jit_lower_arm, jit_lower_inlined_arm, jit_spill_reserve};
-// When JIT is disabled, provide a zero stub so callers don't need cfg guards.
+// When JIT is disabled, provide zero stubs so callers don't need cfg guards.
 #[cfg(not(feature = "jit"))]
 fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
+}
+#[cfg(not(feature = "jit"))]
+fn jit_ckpt_depth(_code: &[Inst], _self_name: Option<Symbol>) -> Option<usize> {
+    None
 }
 
 /// The background JIT compiler (ADR-101 1b). A single dedicated OS thread, lazily spawned,
@@ -6591,6 +6597,7 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
 /// spawning process on the module lock the flood was holding).
 type JitWorkItem = (Arc<CompiledArm>, Vec<u8>, u64);
 
+#[cfg(feature = "jit")]
 struct JitCompiler {
     /// Primary (initial-tier) queue: the small ORIGINAL arm. Drained first, always.
     primary: std::sync::mpsc::SyncSender<JitWorkItem>,
@@ -6679,6 +6686,7 @@ fn jit_compile_now(heap: &Heap, arm: &Arc<CompiledArm>, base: usize) {
     }
 }
 
+#[cfg(feature = "jit")]
 static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::LazyLock::new(|| {
     use std::sync::atomic::Ordering::Release;
     use std::sync::mpsc::{sync_channel, TryRecvError};

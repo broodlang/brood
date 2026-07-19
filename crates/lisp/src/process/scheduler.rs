@@ -659,6 +659,8 @@ pub(crate) fn tick_capture() -> bool {
 /// polls every N iterations with an in-register countdown (BEAM-style reduction
 /// batching) instead of one FFI per iteration, and settles the account here so
 /// scheduler fairness is unchanged (the budget depletes at the same reduction rate).
+/// Only the JIT runtime callback calls it, so it is compiled out with the feature.
+#[cfg(feature = "jit")]
 pub(crate) fn tick_capture_n(n: u32) -> bool {
     REDUCTIONS.with(|r| {
         let cur = r.get();

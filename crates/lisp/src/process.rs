@@ -82,8 +82,12 @@ pub use scheduler::{
 // `receive` gate to tell a capturable top-level receive from a native-nested one.
 pub(crate) use scheduler::{
     capture_hard_kill_pending, capture_top_level, charge_native, dirty_block, in_capture_run,
-    set_capture_top_level, tick_capture, tick_capture_n, TreeWalkGuard,
+    set_capture_top_level, tick_capture, TreeWalkGuard,
 };
+// The batched variant is called only from the JIT's runtime callback (`crate::jit`),
+// so its re-export is feature-gated to keep the no-`jit` build warning-free.
+#[cfg(feature = "jit")]
+pub(crate) use scheduler::tick_capture_n;
 // Test-only: the JIT preempt unit test (`compile.rs`) drives a tiered arm as if it
 // were a capture-mode green process. That test is itself `#[cfg(feature = "jit")]`,
 // so the re-export must match — gating on bare `test` leaves it unused (and warned)

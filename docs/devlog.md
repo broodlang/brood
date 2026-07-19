@@ -5509,3 +5509,20 @@ Lesson repeated from 2026-07-19 (leaf entry): verify hand-computed test
 expectations against the interpreter FIRST — this time the "wrong arithmetic"
 was a genuine engine divergence, and the discipline of checking TW/VM/JIT
 separately is what surfaced it.
+
+## 2026-07-19 — The no-JIT build compiles again (and CI now keeps it honest)
+
+`cargo build --no-default-features` — the documented build-level counterpart of
+`BROOD_NO_JIT` — had rotted: 18 errors, all in `eval/compile/mod.rs` (the
+background-compiler machinery — `JitCompiler`/`JIT_COMPILER`/the `crate::jit`
+refs inside it — plus the `jit_ckpt_depth` call) landed without `#[cfg(feature
+= "jit")]` gates, and nothing built the configuration. Fixed with the existing
+stub discipline (`jit_ckpt_depth` gets a `None` stub beside `jit_spill_reserve`'s
+zero stub; the compiler struct/static gated whole), plus three warning cleanups
+(`tick_capture_n` re-export + defn gated — only the JIT callback calls it;
+`RuntimeCode.runtime_tag` allowed-dead in no-jit, kept unconditional so the
+struct layout doesn't fork). Verified: no-jit workspace check clean, the no-jit
+binary runs the smoke programs + proc/gen/message test files, bit-identical to
+the tree-walker on the type-of/mixed-join repros. CI's build-test job gained a
+`cargo check --workspace --no-default-features` step — a seam like this can't
+rot silently again for the cost of one cached check.

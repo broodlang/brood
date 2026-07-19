@@ -1063,7 +1063,10 @@ pub struct RuntimeCode {
     /// inside compile work items INSTEAD of the runtime `Arc` (or a `Weak`):
     /// either would park a reference in the queue and break the single-process
     /// RUNTIME compactor's `Arc::get_mut` uniqueness gate. Distinct per runtime,
-    /// so shared native code never leaks across independent runtimes.
+    /// so shared native code never leaks across independent runtimes. (Read only
+    /// by the JIT publish path — dead in a no-`jit` build, but kept unconditional
+    /// so the struct layout and construction don't fork on the feature.)
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     runtime_tag: u64,
     /// Monotonic version of the `gens` **`Arc` identities**, bumped only when a slot's
     /// `Arc<CodeSlabs>` is *replaced* — a Stage-4 free or a compaction store, both rare
