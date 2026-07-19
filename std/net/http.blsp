@@ -172,22 +172,29 @@ you want text. Text mode is restored before returning so the response send path
   (apply str (map (fn (kv) (str (first kv) ": " (second kv) "\r\n")) (map-pairs headers))))
 
 (defn render-response (resp)
-  "Render a response map into the HTTP/1.0 wire string (adds Content-Length + Connection: close)."
+  "Render a response map into the HTTP/1.0 wire **iolist** (ADR-139) — hand it to
+`tcp-send`; `(bytes-concat …)` materialises it for inspection. Adds Connection:
+close and Content-Length as the body's **byte** count (UTF-8 bytes for a string
+body — `string-length` counts codepoints and understated the length of any
+non-ASCII body, truncating it at spec-honoring clients). The `:body` may be any
+iolist: a string, a `bytes` value (binary bodies — images, archives), or a
+nested tree of those; it is materialised once here so the length and the sent
+bytes can never disagree."
   (let (status (get resp :status 200)
-        body (or (get resp :body) "")
+        body-bytes (bytes-concat (or (get resp :body) ""))
         headers (assoc (or (get resp :headers) {})
                   "Content-Length"
-                  (str (string-length body))
+                  (str (count body-bytes))
                   "Connection"
                   "close"))
-    (str "HTTP/1.0 "
-      status
-      " "
-      (get *http-status-text* status "OK")
-      "\r\n"
-      (http--render-headers headers)
-      "\r\n"
-      body)))
+    ["HTTP/1.0 "
+     (str status)
+     " "
+     (get *http-status-text* status "OK")
+     "\r\n"
+     (http--render-headers headers)
+     "\r\n"
+     body-bytes]))
 
 ;; ---- streaming responses (the connection-handoff seam) ----------------------
 ;; A handler that returns `(stream-response …)` keeps the connection open: the
@@ -196,16 +203,17 @@ you want text. Text mode is restored before returning so the response send path
 ;; downloads — is a `stream-fn`, not a new server feature.
 
 (defn render-head (status headers)
-  "Render just the HTTP/1.0 status line + `headers` + the blank line — no body and
-no Content-Length. For a streaming response whose body is written incrementally
-over the socket afterwards (see `stream-response`)."
-  (str "HTTP/1.0 "
-    status
-    " "
-    (get *http-status-text* status "OK")
-    "\r\n"
-    (http--render-headers headers)
-    "\r\n"))
+  "Render just the HTTP/1.0 status line + `headers` + the blank line as a wire
+**iolist** (ADR-139) — no body and no Content-Length. For a streaming response
+whose body is written incrementally over the socket afterwards (see
+`stream-response`). `(bytes-concat …)` materialises it for inspection."
+  ["HTTP/1.0 "
+   (str status)
+   " "
+   (get *http-status-text* status "OK")
+   "\r\n"
+   (http--render-headers headers)
+   "\r\n"])
 
 (defn stream-response (status headers stream-fn)
   "A streaming response `{:status :headers :stream}`. After the head is sent the
@@ -349,7 +357,12 @@ socket is registered *passive* (no reader until the worker calls
 Content-Length when `body` is non-empty, with the caller's `extra` headers merged
 on top (so any of those can be overridden). `extra` is a name→value map (or nil)."
   (let (base {"Host" (get u :host) "User-Agent" "brood" "Connection" "close"}
-        base2 (if (= body "") base (assoc base "Content-Length" (str (string-length body)))))
+        ;; Byte count, not `string-length` (codepoints): a non-ASCII body's UTF-8
+        ;; form is longer, and an understated Content-Length truncates it at the
+        ;; server.
+        base2 (if (= body "")
+                base
+                (assoc base "Content-Length" (str (count (string->utf8-bytes body))))))
     (merge base2 (or extra {}))))
 
 (defn http-request (method url &optional (opts {}))
@@ -358,9 +371,9 @@ and `opts` `{:headers <name→value map> :body <string>}`. Always returns a resp
 map `{:status :headers :body}`; a transport failure yields `{:status 0 :error msg
 :headers {} :body \"\"}`. Adds Host / User-Agent / Connection: close, and (with a
 body) Content-Length — each overridable via `:headers`. Must run in a process (it
-`receive`s the response); the root process counts. (Content-Length is the body's
-character count — correct for ASCII/Latin-1 bodies; this client targets a local
-JSON API, not arbitrary multi-byte payloads.)"
+`receive`s the response); the root process counts. Content-Length is the body's
+**UTF-8 byte count** (2026-07-19 — it was the codepoint count, which understated
+any multi-byte body)."
   (let (u (http--parse-url url)
         body (or (get opts :body) "")
         headers (http--request-headers u body (get opts :headers))

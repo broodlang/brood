@@ -5582,3 +5582,24 @@ locally and on one CI-shaped rerun — it depends on when GC fires). Filed as a
 roadmap housekeeping item (make the tracers iterative, like the flattener);
 the test caps at 2k depth meanwhile — still deep enough to prove the
 flattener's worklist, shallow enough for the recursive tracers.
+
+## 2026-07-19 — std/net/http on iolists; a real Content-Length bug fixed
+
+Dogfooding ADR-139 immediately paid: porting `render-response`/`render-head`
+to return wire **iolists** surfaced that `Content-Length` was computed with
+`string-length` — **codepoints, not bytes** — so any non-ASCII body
+("héllo ☃" = 7 codepoints, 10 UTF-8 bytes) shipped an understated length and
+spec-honoring clients truncated it. Now the body is materialised ONCE
+(`bytes-concat` — so `:body` may be a string, a `bytes` value, or any iolist
+tree; binary bodies ride the plain-response path), `Content-Length` is that
+bytes value's count, and the length and the sent bytes can never disagree.
+Bonus fix en route: a non-Latin-1 string body over the server's binary-mode
+socket used to trip the per-codepoint byte-string check inside the one big
+wire string; as a flattened bytes leaf it now goes out verbatim as UTF-8.
+The client's request `Content-Length` got the same byte-count fix (its
+docstring had honestly documented the approximation; no longer needed).
+`http--render-headers` deliberately stays a string (small, and `sse.blsp` +
+the client compose it into string requests — `tls-request`'s Rust signature
+takes a string). Tests: render cases materialise via
+`bytes-concat`/`utf8-bytes->string`; new cases pin the byte-count
+Content-Length and a binary `bytes` body end-to-end. 792/792.
