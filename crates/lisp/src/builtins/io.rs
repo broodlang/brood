@@ -228,6 +228,22 @@ pub(super) fn gc_stats_map(heap: &mut Heap) -> Value {
             value::kw("threshold"),
             Value::int(heap.gc_threshold() as i64),
         ),
+        // Pause durations (the observability timing tier): cumulative wall time
+        // spent in this process's collections, the worst single pause, and the
+        // most recent one — µs so the numbers stay readable ints (a minor
+        // collection is µs-scale; a bad pause ms-scale).
+        (
+            value::kw("pause-total-us"),
+            Value::int((heap.gc_pause_ns().0 / 1_000) as i64),
+        ),
+        (
+            value::kw("pause-max-us"),
+            Value::int((heap.gc_pause_ns().1 / 1_000) as i64),
+        ),
+        (
+            value::kw("pause-last-us"),
+            Value::int((heap.gc_pause_ns().2 / 1_000) as i64),
+        ),
         // The shared RUNTIME code region (not per-process — every process sees the
         // same figure). `:runtime-closures` is its total promoted-closure count
         // (cheap — a slab length); it grows with hot-reload churn and the eval

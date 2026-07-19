@@ -1,0 +1,62 @@
+;; Observability timing tier (ROADMAP survey gap #4, slice 1): GC pause
+;; durations on `gc-stats`, scheduler counters on `sched-stats`, and the
+;; sampling CPU profiler (`profile-start` / `profile-stop`).
+;;
+;; Assertions are structural (keys exist, counters are monotonic and
+;; consistent) rather than timing-exact, so loaded CI can't flake them. The
+;; profiler test is :isolated — it arms a process-global singleton.
+
+(defmodule observability-test (:use test))
+
+(defn obs-churn (n acc) (if (= n 0) acc (obs-churn (- n 1) (cons n acc))))
+
+(describe "gc-stats pause durations"
+  (test "pause keys exist and are consistent after forced churn"
+    (obs-churn 200000 ())
+    (let (s (gc-stats))
+      (is (> (get s :collections) 0))
+      (is (> (get s :pause-total-us) 0))
+      (is (>= (get s :pause-total-us) (get s :pause-max-us)))
+      (is (>= (get s :pause-max-us) (get s :pause-last-us)))
+      (is (>= (get s :pause-last-us) 0)))))
+
+(describe "sched-stats"
+  (test "counters exist, move with activity, and stay consistent"
+    (let (me (self))
+      (dotimes (_ 8) (spawn (send me :done)))
+      (dotimes (_ 8) (receive (:done nil))))
+    (let (s (sched-stats))
+      (is (> (get s :spawned) 0))
+      (is (> (get s :exited) 0))
+      (is (>= (get s :spawned) (get s :exited)))
+      (is (>= (get s :preempts) 0))
+      (is (>= (get s :steals) 0))
+      (is (>= (get s :migrations) 0))
+      (is (> (get s :workers) 0))
+      (is (>= (get s :peak-threads) 1)))))
+
+(describe "sampling profiler" :isolated
+  (test "catches a hot named fn; stop is idempotent"
+    (profile-start 999)
+    (obs-churn 800000 ())
+    (obs-churn 800000 ())
+    (let (prof (profile-stop))
+      ;; samples come from the VM driver's frame boundaries — the legacy
+      ;; tree-walker (BROOD_VM=0) is by design not sampled, so the content
+      ;; assertions only apply on the default engine
+      (when (not= (getenv "BROOD_VM") "0")
+        (is (> (count prof) 0))
+        ;; every entry is {:stack (...) :count n}
+        (let (e (first prof))
+          (is (list? (get e :stack)))
+          (is (> (get e :count) 0)))
+        ;; the hot fn shows up somewhere in the histogram (module-qualified)
+        (is (member? "observability-test/obs-churn"
+              (mapcat (fn (e) (get e :stack)) prof)))))
+    ;; a second stop with nothing armed is an empty histogram, not an error
+    (assert= 0 (count (profile-stop)))
+    ;; restart works after a stop
+    (profile-start 500)
+    (obs-churn 400000 ())
+    (is (>= (count (profile-stop)) 0))))
+

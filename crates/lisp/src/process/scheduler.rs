@@ -858,6 +858,21 @@ pub fn migrate_count() -> u64 {
     MIGRATED.load(Ordering::SeqCst)
 }
 
+/// Cumulative quantum preemptions (a process exhausted its reduction budget
+/// and was re-enqueued) — the scheduler half of the observability timing tier.
+/// Read by `(sched-stats)`.
+static PREEMPTED: AtomicU64 = AtomicU64::new(0);
+/// Cumulative green-process exits (any reason). Read by `(sched-stats)`;
+/// `spawn_count() - exit_count()` is the live-process figure.
+static EXITED: AtomicU64 = AtomicU64::new(0);
+
+pub fn preempt_count() -> u64 {
+    PREEMPTED.load(Ordering::Relaxed)
+}
+pub fn exit_count() -> u64 {
+    EXITED.load(Ordering::Relaxed)
+}
+
 /// Set the worker-pool size (0 = default ≈ `nproc`). Call once at startup, before
 /// any spawning — once the `WORKERS` pool has initialised the size is committed
 /// and this has no further effect (everything indexes by `WORKERS.len()`).
@@ -932,6 +947,7 @@ fn proc_descr(pid: u64) -> String {
 /// routes over the link). Same `[:down …]` shape in both cases — the
 /// receiver code on the wire side is unchanged from local.
 fn deregister(pid: u64, reason: Message, heap: &Heap) {
+    EXITED.fetch_add(1, Ordering::Relaxed);
     // The three tables are taken **sequentially**, not nested: REGISTRY first,
     // released, then NAMES, released, then MONITORS. `add_monitor` and
     // `spawn_or_get` take REGISTRY *nested* inside MONITORS / NAMES
@@ -1447,6 +1463,7 @@ fn handle_capture_outcome(
             // Budget hit: stash the continuation and re-queue on the **same** worker
             // (`enqueue`, not `wake_enqueue`) — a hot, actively-running process stays
             // put for cache locality; migration is for *idle* (parked) processes.
+            PREEMPTED.fetch_add(1, Ordering::Relaxed);
             proc.store_resume(s);
             enqueue(proc);
         }

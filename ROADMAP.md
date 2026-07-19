@@ -73,16 +73,21 @@ mechanism/policy split: kernel primitive, Brood policy.
   (post-parse, post-macro-expand, post-freeze) into the binary or an
   mtime-keyed cache — the ADR-129 `build-id` already solves the invalidation
   key. Target: single-digit-ms cold start. **[kernel]**
-- ⬜ **Observability: timing tier + trace pipeline + profiler.** Everything
-  today is *counts* (`gc-stats`, `vm-stats`, `process-info` reductions); there
-  are **no pause times, no consumable event stream, no Brood-level CPU
-  profile** (.NET has EventPipe/dotnet-trace; BEAM has `:fprof`/`recon`). This
-  is the telemetry roadmap item's missing half — fold in: GC collections with
-  **durations**, scheduler spawn/exit/preempt/steal events, deopt events, a
-  sampling profiler over the reified frame stacks (the state-capture rewrite
-  made cheap sampling possible: any process's `frames` are inspectable data at
-  a safepoint). See "Telemetry" under M3 below (ADR-106). **[kernel sources,
-  Brood aggregation]**
+- 🟡 **Observability: timing tier + trace pipeline + profiler.** Slice 1
+  shipped 2026-07-18 — the survey's two named holes are closed: **GC pause
+  durations** (`gc-stats` `:pause-total-us`/`:pause-max-us`/`:pause-last-us`,
+  timed around `collect`), **scheduler counters** (`(sched-stats)` —
+  spawned/exited/preempts/steals/migrations/workers/peak), and the **sampling
+  CPU profiler** (`profile-start`/`profile-stop`): an epoch ticker + a
+  frame-boundary probe in `vm_run_bc` that records each process's reified
+  named-frame stack into a histogram — no signals, one relaxed load per frame
+  boundary when off (exactly what the state-capture rewrite made possible).
+  JIT-resident loops attribute at their quantum preempt; the tree-walker isn't
+  sampled. `tests/observability_test.blsp`. ⬜ Remaining: the consumable
+  **event stream** (fold gc/sched/deopt/dist events + these snapshots behind
+  the ADR-106 telemetry stream so `nest observe`/`nest mcp` consume it),
+  `defevent` schemas, aggregators, and the remote tier — see "Telemetry"
+  under M3 below. **[kernel sources, Brood aggregation]**
 - ✅ **Distribution self-healing: auto-reconnect + backoff.** Shipped
   2026-07-18. Brood policy: **`std/net/reconnect`** — a named, idempotent
   watcher process per node spec that connects, arms `monitor-node`, and on
@@ -470,10 +475,14 @@ Runtime housekeeping (both items landed):
 
 - ⬜ **Inbound (server-side) TLS** — rustls streams don't split read/write across
   threads; plus a **`mio` reactor** for socket scale.
-- ⬜ **OTP near-term** (additive, pure Brood or a thin dist seam, gated on a need):
-  **`send-after`/`send-interval`** timers; a synchronous **`remote-spawn` returning
-  the child pid** (makes cross-node supervision turnkey); a **`terminate`-style
-  worker-cleanup convention** on `[:$stop]`.
+- ✅ **OTP near-term** — all three closed as of 2026-07-18:
+  **`send-after`/`send-interval`/`cancel-timer`** shipped (pure Brood in the
+  prelude — a timer is a green process on the scheduler's timer wheel; the
+  interval variant monitors its target and self-cleans; `tests/timer_test.blsp`).
+  The other two turned out to be **stale roadmap entries** — a synchronous
+  **`remote-spawn-sync` returning the child pid** and the **`[:$stop]`
+  graceful-teardown convention** (supervisor `:shutdown` policies + `defprocess`
+  `terminate`) had both already shipped.
 - ⬜ **OTP deferred** (ADR-011, gated on a real consumer): **`gen_statem`** state
   machines; an Elixir-style **`Registry`**/via-tuples + **process groups (`pg`)**; an
   **`Application`** behaviour; **synchronous, ordered, rollback-on-failure** supervisor

@@ -1652,6 +1652,42 @@ runtime isn't a node yet."
   "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread."
   (let (never (ref)) (receive (~never nil) (after ms nil))))
 
+;; ---- timers: send-after / send-interval / cancel-timer (Erlang parity) -----
+;; Pure Brood policy: a timer is a tiny green process parked on the scheduler's
+;; timer wheel (the same mechanism `sleep` rides), so a pending timer costs no
+;; worker thread. The handle is the timer's pid — inspectable with
+;; `process-info`, cancellable with `cancel-timer` (a hard exit, so it stops
+;; even mid-fire).
+
+(defn send-after (ms pid msg)
+  "Send `msg` to `pid` after `ms` milliseconds (Erlang `send_after/3` — same
+argument order). Returns a timer handle; `(cancel-timer h)` stops it if it
+hasn't fired. One-shot; fires even if `pid` is already dead (the send is then
+a silent no-op, like any send to a dead process)."
+  (spawn (do (sleep ms) (send pid msg))))
+
+(defn send-interval (ms pid msg)
+  "Send `msg` to `pid` every `ms` milliseconds (Erlang `timer:send_interval/3`)
+until cancelled. Returns a timer handle for `(cancel-timer h)`. Self-cleaning:
+the timer monitors `pid` and exits when it dies, so a forgotten interval can't
+tick against a dead process forever."
+  (spawn
+    (let (target pid interval ms payload msg)
+      (monitor target)
+      (letrec (tick (fn ()
+                      (receive
+                        ([:down _ ~target _] nil)  ; target died — stop ticking
+                        (after interval (do (send target payload) (tick))))))
+        (tick)))))
+
+(defn cancel-timer (timer)
+  "Cancel a `send-after`/`send-interval` timer by its handle. Idempotent (a
+fired or already-cancelled timer is a dead process; the exit is a no-op).
+Returns nil. Note: like Erlang, cancellation races an in-flight fire — a
+message already sent stays sent."
+  (exit timer :kill)
+  nil)
+
 ;; Node-link auto-reconnect moved to `std/net/reconnect` (2026-07-18):
 ;; `(require 'net/reconnect)` then `(net/reconnect/watch "name@host:port")` —
 ;; exponential backoff, [:nodeup]/[:nodedown] subscriber events, idempotent

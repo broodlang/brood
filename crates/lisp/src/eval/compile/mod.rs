@@ -5597,7 +5597,30 @@ fn vm_run_bc(
     #[cfg(not(feature = "jit"))]
     let _ = fresh; // silence unused warning when the JIT is off
 
+    // Sampling profiler (observability timing tier): the epoch this driver last
+    // sampled at. Loop-local — a resume simply re-samples on its next epoch tick.
+    let mut profiled_epoch: u64 = 0;
+
     loop {
+        // Profiler sample: when armed and the ticker's epoch moved, record this
+        // driver's named-frame stack (cur + pending callers, innermost first).
+        // Off (the default): one relaxed bool load per frame boundary.
+        if crate::profile::armed() {
+            let ep = crate::profile::epoch();
+            if ep != profiled_epoch {
+                profiled_epoch = ep;
+                let mut stack: Vec<value::Symbol> = Vec::with_capacity(frames.len() + 1);
+                if let Some(n) = cur_arm.fn_name {
+                    stack.push(n);
+                }
+                for f in frames.iter().rev() {
+                    if let Some(n) = f.arm.fn_name {
+                        stack.push(n);
+                    }
+                }
+                crate::profile::record(&stack);
+            }
+        }
         // Per-iteration safepoint / preemption / deadline — relocates every frame's
         // slots and env in place (all on `Heap::roots`/`env_roots`). Mirrors the
         // `Node` trampoline's loop top.

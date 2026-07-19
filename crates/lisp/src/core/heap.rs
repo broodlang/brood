@@ -1675,6 +1675,17 @@ pub struct Heap {
     gc_runs: u64,
     gc_copied: u64,
     gc_reclaimed: u64,
+    /// GC **pause durations** (the observability timing tier, ROADMAP survey
+    /// gap #4 — counts alone can't answer "is GC why this frame stuttered").
+    /// Cumulative / max / most-recent collection wall time in nanoseconds,
+    /// measured around [`collect`](Self::collect)'s body (covers both the
+    /// legacy flip and the generational path). Timing cost is two `Instant`
+    /// reads per *collection* — noise against the µs–ms the collection itself
+    /// takes. Surfaced by `(gc-stats)` as `:pause-total-us` / `:pause-max-us` /
+    /// `:pause-last-us`.
+    gc_ns_total: u64,
+    gc_ns_max: u64,
+    gc_ns_last: u64,
     /// Per-process heap limit (bytes), the BEAM `max_heap_size` analogue — set by
     /// this process on itself via `(process-flag :max-heap n)`, `None` = unlimited
     /// (the default; the ADR-043 global soft/hard cap is separate). Checked
@@ -2120,6 +2131,9 @@ impl Heap {
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
+            gc_ns_total: 0,
+            gc_ns_max: 0,
+            gc_ns_last: 0,
             proc_mem_limit: None,
             proc_limit_hit: None,
             proc_send_errors: false,
@@ -2185,6 +2199,9 @@ impl Heap {
             gc_runs: 0,
             gc_copied: 0,
             gc_reclaimed: 0,
+            gc_ns_total: 0,
+            gc_ns_max: 0,
+            gc_ns_last: 0,
             proc_mem_limit: None,
             proc_limit_hit: None,
             proc_send_errors: false,
@@ -7213,6 +7230,13 @@ impl Heap {
         (self.gc_runs, self.gc_copied, self.gc_reclaimed)
     }
 
+    /// GC pause durations `(total_ns, max_ns, last_ns)` — the timing tier's
+    /// per-process figures (cumulative wall time in collections, worst single
+    /// pause, most recent pause). Backs `(gc-stats)`'s `:pause-*-us` keys.
+    pub fn gc_pause_ns(&self) -> (u64, u64, u64) {
+        (self.gc_ns_total, self.gc_ns_max, self.gc_ns_last)
+    }
+
     /// The current adaptive GC threshold (LOCAL live-object count that triggers
     /// the next safepoint collection). The slow/stable dial — exposed so an
     /// observer can see how close the heap is to its next collection.
@@ -7640,6 +7664,23 @@ impl Heap {
     /// machinery — and the no-slot-reuse safety — with the [`flush`](Self::flush) helper.
     // (stall_guard defined at module scope, below)
     pub fn collect(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
+        // Pause-duration accounting (the observability timing tier): time the
+        // whole collection and fold it into the per-process totals `(gc-stats)`
+        // reports. Only recorded when a collection actually ran (`gc_runs`
+        // moved) — a gated no-op call isn't a pause. Two `Instant` reads per
+        // collection: noise against the collection itself.
+        let runs_before = self.gc_runs;
+        let t0 = std::time::Instant::now();
+        self.collect_inner(extra_roots, extra_envs);
+        if self.gc_runs != runs_before {
+            let ns = t0.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            self.gc_ns_total = self.gc_ns_total.saturating_add(ns);
+            self.gc_ns_max = self.gc_ns_max.max(ns);
+            self.gc_ns_last = ns;
+        }
+    }
+
+    fn collect_inner(&mut self, extra_roots: &mut [Value], extra_envs: &mut [EnvId]) {
         // Stall trace (BROOD_STALL_MS=<n>): log if this minor collection takes ≥ n ms — to
         // pinpoint a gameplay lag spike. Works in release; zero cost unless the env is set.
         let _sg = stall_guard("minor-gc");

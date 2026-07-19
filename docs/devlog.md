@@ -5178,3 +5178,56 @@ show the July sprint's real −35…−58%. Cross-archive comparison is
 meaningless under that skew; the interleaved same-conditions A/B above is
 the regression instrument that counts (flat). Lesson recorded: archive runs
 belong on a cold, `performance`-governor machine.
+
+## 2026-07-18 — Feature-parity push: Erlang timers land; two "missing" OTP items were already shipped
+
+Working the BEAM/.NET feature list top-down (perf deferred to a second pass):
+
+- **Timers** — the genuinely missing piece: `send-after` / `send-interval` /
+  `cancel-timer` in the prelude, pure Brood (a timer is a green process parked
+  on the scheduler's timer wheel — `sleep`'s mechanism — so pending timers
+  cost no worker thread; the handle is the timer's pid). `send-interval`
+  monitors its target and exits when it dies (no orphan tickers);
+  `cancel-timer` is an idempotent hard exit. `tests/timer_test.blsp` (7 cases,
+  loose timing bounds for loaded CI).
+- **Stale roadmap discoveries:** the other two "OTP near-term" items already
+  existed — `remote-spawn-sync` (returns the remote child's pid) and the
+  `[:$stop]` graceful-teardown convention (supervisor `:shutdown`
+  `:brutal-kill`/`:infinity`/ms policies + `defprocess` `terminate`). Roadmap
+  ticked accordingly.
+
+Remaining feature-parity gaps after this: the observability timing tier
+(pause durations / event stream / sampling profiler — next), the
+parked-waiter leak, and the deliberately consumer-gated set (gen_statem,
+Registry/pg, Application, inbound TLS, mailbox bounds — the last arguably
+not a parity gap at all: BEAM doesn't bound mailboxes either).
+
+## 2026-07-18 — Observability timing tier, slice 1: GC pauses, sched counters, a sampling profiler
+
+Survey gap #4's two named holes ("no pause times, no Brood-level CPU
+profile") closed:
+
+- **GC pause durations** — `Heap::collect` is now timed (two `Instant` reads
+  per *collection* — noise against the collection itself; only recorded when
+  `gc_runs` actually moved) into per-process total/max/last, surfaced as
+  `(gc-stats)`'s `:pause-total-us`/`:pause-max-us`/`:pause-last-us`.
+- **Scheduler counters** — new `PREEMPTED`/`EXITED` atomics (quantum
+  exhaustions in `handle_capture_outcome`, exits in `deregister`) join the
+  existing spawn/steal/migrate counts behind one `(sched-stats)` snapshot map.
+- **Sampling CPU profiler** — `crates/lisp/src/profile.rs` + a frame-boundary
+  probe in `vm_run_bc`: a ticker thread bumps an epoch at the requested rate
+  (`profile-start [hz]`, default 99); each driver compares a loop-local
+  last-seen epoch at its safepoint and, on change, records its reified
+  named-frame stack (cur + pending `BcFrame`s — the data ADR-100 already
+  reifies) into a global histogram; `(profile-stop)` returns
+  `{:stack (…) :count n}` entries, most-sampled first. No signals, no
+  unwinder; off = one relaxed bool load per frame boundary. JIT-resident
+  loops attribute at their reduction-budget preempt (~once a quantum); the
+  legacy tree-walker isn't sampled (documented). Start/stop cycles retire the
+  ticker via a generation counter — no thread leaks.
+
+Tests: `tests/observability_test.blsp` (structural, engine-aware — the
+profiler content assertions gate on the VM engine). This closes the kernel
+*sources* half; the ⬜ remainder is the ADR-106 event-stream unification
+(gc/sched/deopt/dist events consumable by `nest observe`/mcp), `defevent`
+schemas, aggregators, and the remote tier.

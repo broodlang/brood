@@ -1064,6 +1064,23 @@ monitors anywhere in the fallen tree report the root cause — not a blanket
 on; remote (cross-node) links deliver the same shapes, plus `:noconnection` on
 a net-split.
 
+### Timers
+
+`(send-after ms pid msg)` delivers `msg` to `pid` after `ms` milliseconds
+(Erlang `send_after/3`, same argument order); `(send-interval ms pid msg)`
+delivers it every `ms` until cancelled. Both return a **timer handle** (the
+timer's pid — a tiny green process parked on the scheduler's timer wheel, so a
+pending timer costs no worker thread); `(cancel-timer h)` stops it, idempotently
+(and, like Erlang, cancellation races an in-flight fire — a message already sent
+stays sent). An interval timer monitors its target and exits when the target
+dies, so a forgotten interval can't tick forever.
+
+```clojure
+(def t (send-interval 1000 (self) :heartbeat))
+(receive (:heartbeat (redraw)))
+(cancel-timer t)
+```
+
 ### Per-process limits (`process-flag`)
 
 `(process-flag flag [value])` reads or sets a runtime flag on the **current**
@@ -1421,10 +1438,25 @@ language" principle.
   "how much memory did this use." The test runner prints the peak alongside the
   time.
 - `(gc-stats)` returns a snapshot map of this process's garbage collection —
-  `{:collections :copied :reclaimed :live :live-bytes :threshold :debug-build}` —
-  for observing reclamation (`:debug-build` is `true` when the binary carries debug
-  assertions, i.e. *not* a performance build); `process-info` carries the
-  per-process `:collections` count too. `(gc-collect)` forces a collection now and returns that same map
+  `{:collections :copied :reclaimed :live :live-bytes :threshold
+  :pause-total-us :pause-max-us :pause-last-us :debug-build}` —
+  for observing reclamation *and* pause behaviour: the `:pause-*` trio is
+  cumulative wall time spent in this process's collections, the worst single
+  pause, and the most recent one (µs). `:debug-build` is `true` when the binary
+  carries debug assertions (i.e. *not* a performance build); `process-info`
+  carries the per-process `:collections` count too.
+- `(sched-stats)` returns the scheduler's cumulative counters —
+  `{:spawned :exited :preempts :steals :migrations :workers :peak-threads}` —
+  `:spawned − :exited` is the live-process figure, `:preempts` counts
+  reduction-budget quantum exhaustions, `:steals`/`:migrations` count
+  work-stealing activity.
+- `(profile-start [hz])` / `(profile-stop)` — the **sampling CPU profiler**:
+  arm at `hz` samples/sec (default 99), run the workload, and `profile-stop`
+  returns a histogram — a list of `{:stack (fn-names… innermost-first)
+  :count n}` maps, most-sampled first. Sampling walks each process's reified
+  call stack at its next VM frame boundary after every tick: no signals, and
+  near-zero cost when off. (A JIT-resident loop is attributed when it yields
+  at its reduction-budget preempt; the legacy tree-walker isn't sampled.) `(gc-collect)` forces a collection now and returns that same map
   (an observability/test aid, *not* a load-bearing trigger), and `(gc-trace on?)`
   toggles per-collection stderr logging for the calling process (no arg = query;
   defaulted from `BROOD_GC_TRACE`). **Memory is reclaimed automatically:** the

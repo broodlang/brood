@@ -1,0 +1,59 @@
+;; Timers — `send-after` / `send-interval` / `cancel-timer` (Erlang parity,
+;; ROADMAP "OTP near-term"). Pure Brood policy: each timer is a green process
+;; parked on the scheduler's timer wheel; the handle is its pid.
+;;
+;; Timing assertions here are deliberately loose (lower bounds + generous
+;; receive timeouts) so a loaded CI worker can't flake them.
+
+(defmodule timer-test (:use test))
+
+(describe "send-after"
+  (test "delivers the message after the delay"
+    (let (me (self))
+      (send-after 30 me [:tick :a])
+      (assert= [:tick :a] (receive ([:tick x] [:tick x]) (after 5000 :timeout)))))
+
+  (test "does not deliver early"
+    (let (me (self))
+      (send-after 200 me :late)
+      ;; nothing should arrive in the first ~40ms
+      (assert= :quiet (receive (:late :EARLY) (after 40 :quiet)))
+      (assert= :late (receive (:late :late) (after 5000 :timeout)))))
+
+  (test "the handle is a pid"
+    (let (t (send-after 1000 (self) :x))
+      (is (pid? t))
+      (cancel-timer t)))
+
+  (test "cancel-timer stops a pending fire"
+    (let (me (self) t (send-after 100 me :cancelled-fire))
+      (cancel-timer t)
+      (assert= :quiet (receive (:cancelled-fire :FIRED) (after 300 :quiet)))))
+
+  (test "cancel-timer is idempotent and safe on a fired timer"
+    (let (me (self) t (send-after 10 me :fired))
+      (assert= :fired (receive (:fired :fired) (after 5000 :timeout)))
+      (cancel-timer t)     ; already dead — no-op
+      (cancel-timer t))))  ; twice — still fine
+
+(describe "send-interval"
+  (test "ticks repeatedly until cancelled"
+    (let (me (self) t (send-interval 20 me :beat))
+      ;; collect three beats, then cancel
+      (assert= :beat (receive (:beat :beat) (after 5000 :timeout)))
+      (assert= :beat (receive (:beat :beat) (after 5000 :timeout)))
+      (assert= :beat (receive (:beat :beat) (after 5000 :timeout)))
+      (cancel-timer t)
+      ;; drain any in-flight beat, then confirm silence
+      (sleep 60)
+      (letrec (drain (fn () (receive (:beat (drain)) (after 0 nil)))) (drain))
+      (assert= :quiet (receive (:beat :STILL-TICKING) (after 100 :quiet)))))
+
+  (test "self-cleans when the target process dies"
+    ;; interval targets a short-lived process; after it dies the timer's own
+    ;; monitor fires and the timer exits — observable via monitoring the timer
+    (let (victim (spawn (receive (:never :x) (after 80 :done))))
+      (let (t (send-interval 20 victim :beat)
+            m (monitor t))
+        (assert= :timer-exited
+          (receive ([:down ~m ~t _] :timer-exited) (after 5000 :timeout)))))))

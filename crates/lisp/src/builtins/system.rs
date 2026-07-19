@@ -2111,6 +2111,92 @@ pub(super) fn worker_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult 
     Ok(Value::int(crate::process::worker_threads() as i64))
 }
 
+/// `(sched-stats)` — one snapshot map of the scheduler's cumulative counters
+/// (the scheduler half of the observability timing tier): `:spawned`/`:exited`
+/// totals (their difference is the live-process figure), `:preempts` (quantum
+/// exhaustions), `:steals` + `:migrations` (work-stealing activity),
+/// `:workers` and `:peak-threads` (pool size / high-water parallelism).
+pub(super) fn sched_stats(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let pairs = vec![
+        (
+            value::kw("spawned"),
+            Value::int(crate::process::spawn_count() as i64),
+        ),
+        (
+            value::kw("exited"),
+            Value::int(crate::process::exit_count() as i64),
+        ),
+        (
+            value::kw("preempts"),
+            Value::int(crate::process::preempt_count() as i64),
+        ),
+        (
+            value::kw("steals"),
+            Value::int(crate::process::steal_count() as i64),
+        ),
+        (
+            value::kw("migrations"),
+            Value::int(crate::process::migrate_count() as i64),
+        ),
+        (
+            value::kw("workers"),
+            Value::int(crate::process::worker_threads() as i64),
+        ),
+        (
+            value::kw("peak-threads"),
+            Value::int(crate::process::peak_threads() as i64),
+        ),
+    ];
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// `(profile-start [hz])` — arm the sampling CPU profiler at `hz` samples/sec
+/// (default 99, clamped 1..10000). Resets the histogram; see `profile-stop`.
+pub(super) fn profile_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let hz = match arg(args, 0) {
+        Value::Nil => 99,
+        Value::Int(n) if n > 0 => n.min(10_000) as u32,
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "profile-start",
+                "positive int (hz) or absent",
+                other,
+            ))
+        }
+    };
+    crate::profile::start(hz);
+    Ok(Value::nil())
+}
+
+/// `(profile-stop)` — disarm the sampling profiler and return the histogram: a
+/// list of `{:stack (fn-names… innermost-first) :count n}` maps, most-sampled
+/// first. A sample whose frames were all anonymous appears with `:stack
+/// ("<anonymous>")`.
+pub(super) fn profile_stop(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let entries = crate::profile::stop();
+    let items: Vec<Value> = entries
+        .iter()
+        .map(|(stack, count)| {
+            let names: Vec<Value> = if stack.is_empty() {
+                vec![heap.alloc_string("<anonymous>")]
+            } else {
+                stack
+                    .iter()
+                    .map(|&s| heap.alloc_string(value::symbol_name_ref(s)))
+                    .collect()
+            };
+            let stack_list = heap.list(names);
+            let pairs = vec![
+                (value::kw("stack"), stack_list),
+                (value::kw("count"), Value::int(*count as i64)),
+            ];
+            heap.map_from_pairs(pairs)
+        })
+        .collect();
+    Ok(heap.list(items))
+}
+
 /// `(build-id)` — this `brood` build's identity, `"<version>+<git-sha>+<binary-
 /// stamp>"` (e.g. `"0.1.0+dcab7ca+18f2e1a9b3c4d5e6"`). The correct staleness
 /// stamp for an on-disk cache of anything the kernel computes (the checker's
