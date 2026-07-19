@@ -288,7 +288,10 @@ track); `base64` is the residual coin-flip last place.
 - ⬜ **`ring` / `pingpong` — residual message machinery.** Already cut from ~13×
   (ADR-135 top-level-as-green-process, 6.5 → 3.3 µs/RT + wake elision), then
   closure arms shared behind an `Arc` (ring 2.02 → 1.50 s, pingpong ~18%,
-  2026-07-13) and closure-template caching (2026-07-11); the remainder is
+  2026-07-13) and closure-template caching (2026-07-11), then the mailbox
+  mutex trimmed to ONE acquisition per matched message (was three: peek+copy
+  under lock, remove, deadline-clear — optimistic first-candidate pop +
+  copy-outside-lock; pingpong ~2–4%, 2026-07-19); the remainder is
   per-message `to_message`/`from_message` copy + continuation capture/restore.
   Trim the copy for small scalar messages; shrink the capture. **[kernel]**
 - ⬜ **`bintree` — GC / allocation pressure.** Build+walk trees; per-node alloc +

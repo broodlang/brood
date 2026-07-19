@@ -473,8 +473,10 @@ pub fn receive_match(
         match scan_mailbox(heap, &ctx, rbase, &mut i) {
             Ok(Some(thunk)) => {
                 // The receive completed (a clause matched) — clear any persisted
-                // capture-mode deadline so the next receive starts fresh.
-                if capture {
+                // capture-mode deadline so the next receive starts fresh. A nil-timeout
+                // receive (`deadline` None) never persisted one, so it skips the lock —
+                // the previous receive's exit already cleared the slot.
+                if capture && deadline.is_some() {
                     crate::core::sync::lock(&ctx.mailbox.state).recv_deadline = None;
                 }
                 heap.truncate_roots(rbase);
@@ -562,7 +564,8 @@ pub fn receive_match(
                 // A control signal (suspend) keeps the in-progress receive's persisted
                 // deadline; a real error (e.g. the matcher threw) ends this receive, so
                 // clear it lest a later receive in this process reuse a stale deadline.
-                if capture && !e.is_control() {
+                // (Nothing to clear when this receive had no deadline — see the match arm.)
+                if capture && deadline.is_some() && !e.is_control() {
                     crate::core::sync::lock(&ctx.mailbox.state).recv_deadline = None;
                 }
                 heap.truncate_roots(rbase);
@@ -600,51 +603,96 @@ fn scan_mailbox(
     // the scan on the general path. Lazy so an empty-mailbox scan (the common suspend
     // entry — no candidate to match) pays nothing. `Some(None)` = resolved-to-unusable.
     let mut hof: Option<Option<crate::eval::compile::HofArm>> = None;
+    // Single-lock fast path for the FIRST candidate of a scan (the common case: the
+    // first queued / just-delivered message matches): pop it out under the one lock,
+    // then build (`from_message`) and match it with the mutex RELEASED — a match is
+    // done with no second acquisition, and the sender never contends with the deep
+    // copy into the receiver's heap. Sound because only the owner removes from its
+    // own mailbox (`send` only appends), so position `*i` is stable across the
+    // unlocked window. A non-match pays one extra lock to re-insert the message at
+    // `*i` (arrival order preserved) and reverts the rest of the scan to
+    // peek-in-place, so a long selective-receive backlog isn't popped/re-inserted
+    // per candidate — the scan's lock count stays ≤ the peek-only scheme's for
+    // every backlog length.
+    let mut optimistic = true;
     loop {
         // (A hard `:kill` is caught at the VM driver's loop top; a soft exit at the
         // `park_on_receive` boundary — not here, since there's no coroutine to suspend.)
         // Rebuild candidate `*i` into the heap (no eval here → no collection).
-        let candidate = {
-            let st = crate::core::sync::lock(&ctx.mailbox.state);
-            if *i < st.queue.len() {
-                Some(from_message(heap, &st.queue[*i]))
+        let (popped, v) = {
+            let mut st = crate::core::sync::lock(&ctx.mailbox.state);
+            if *i >= st.queue.len() {
+                return Ok(None); // scanned to the end with no match
+            }
+            if optimistic {
+                let m = st.queue.remove(*i).expect("bounds checked above");
+                drop(st);
+                let v = from_message(heap, &m);
+                (Some(m), v)
             } else {
-                None
+                (None, from_message(heap, &st.queue[*i]))
             }
         };
-        match candidate {
-            Some(v) => {
-                let matcher = heap.root_at(rbase);
-                if hof.is_none() {
-                    hof = Some(crate::eval::compile::hof_resolve(heap, matcher, 1));
-                }
-                // Apply the matcher via the VM / JIT fast-frame when it resolved to a plain
-                // arm, falling back to the tree-walking `eval::apply` otherwise (or when
-                // `hof_apply_step` deopts on an identity miss — e.g. a mid-scan GC relocated
-                // the matcher). Same semantics either way: returns the clause body thunk on
-                // a match, a non-`Fn` value on no-match.
-                let thunk = match hof.as_ref().unwrap() {
-                    Some(h) => match crate::eval::compile::hof_apply_step(heap, h, matcher, &[v]) {
-                        Some(r) => r?,
-                        None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?,
-                    },
-                    None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL)?,
-                };
-                if matches!(thunk, Value::Fn(_)) {
-                    // Matched — remove exactly this message and hand the body thunk
-                    // *back* (don't run it here). The `receive` macro applies it in
-                    // TAIL position — `((%receive …))` — so a loop that tail-calls back
-                    // into `receive` trampolines through eval's TCO and stays O(1)
-                    // native stack (running it here instead nests a `receive_match` per
-                    // message → worker-stack overflow).
-                    crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i);
-                    return Ok(Some(thunk));
-                }
-                *i += 1; // no clause matched — leave it queued, try the next message
-            }
-            None => return Ok(None), // scanned to the end with no match
+        let matcher = heap.root_at(rbase);
+        if hof.is_none() {
+            hof = Some(crate::eval::compile::hof_resolve(heap, matcher, 1));
         }
+        // Apply the matcher via the VM / JIT fast-frame when it resolved to a plain
+        // arm, falling back to the tree-walking `eval::apply` otherwise (or when
+        // `hof_apply_step` deopts on an identity miss — e.g. a mid-scan GC relocated
+        // the matcher). Same semantics either way: returns the clause body thunk on
+        // a match, a non-`Fn` value on no-match.
+        let applied = match hof.as_ref().unwrap() {
+            Some(h) => match crate::eval::compile::hof_apply_step(heap, h, matcher, &[v]) {
+                Some(r) => r,
+                None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL),
+            },
+            None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL),
+        };
+        let thunk = match applied {
+            Ok(t) => t,
+            Err(e) => {
+                // An erroring matcher must not lose the candidate: put an
+                // optimistically-popped message back before propagating.
+                if let Some(m) = popped {
+                    reinsert_candidate(ctx, *i, m);
+                }
+                return Err(e);
+            }
+        };
+        if matches!(thunk, Value::Fn(_)) {
+            // Matched — remove exactly this message and hand the body thunk
+            // *back* (don't run it here). The `receive` macro applies it in
+            // TAIL position — `((%receive …))` — so a loop that tail-calls back
+            // into `receive` trampolines through eval's TCO and stays O(1)
+            // native stack (running it here instead nests a `receive_match` per
+            // message → worker-stack overflow). An optimistically-popped match
+            // is already out of the queue — nothing left to do.
+            if popped.is_none() {
+                crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i);
+            }
+            return Ok(Some(thunk));
+        }
+        if let Some(m) = popped {
+            reinsert_candidate(ctx, *i, m);
+            optimistic = false; // one non-match → peek-in-place for the rest of the scan
+        }
+        *i += 1; // no clause matched — leave it queued, try the next message
     }
+}
+
+/// Put an optimistically-popped candidate back at its scan position. The index is
+/// clamped: a matcher that itself ran a nested `receive` (native-nested — a guard
+/// calling into arbitrary code) may have removed earlier messages during the
+/// unlocked window, leaving the recorded position past the end; clamping appends
+/// instead of panicking. (Queue order around such a nested consume was already
+/// perturbed before the optimistic-pop scheme — the scan index points at shifted
+/// content either way — so the clamp preserves the message, not a stronger
+/// ordering guarantee than the peek-era code had.)
+fn reinsert_candidate(ctx: &Ctx, i: usize, m: Message) {
+    let mut st = crate::core::sync::lock(&ctx.mailbox.state);
+    let idx = i.min(st.queue.len());
+    st.queue.insert(idx, m);
 }
 
 /// Block until a message beyond index `i` might be available, honouring `deadline`,

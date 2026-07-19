@@ -5425,3 +5425,35 @@ GC_STRESS+GC_VERIFY, VM≡TW differential, three new `tests/jit.rs` cases
 (exactness across the small→leaf swap, hot-reload redef, residual-call gate),
 full `make test`. Opt-in until measured on expansion/`require`-heavy loads;
 flip to `BROOD_NO_LEAF_INLINE` opt-out then.
+
+## 2026-07-19 — Mailbox receive: one lock per matched message (was three)
+
+The `receive` fast path (message already queued / just delivered, first
+candidate matches — pingpong's every iteration) took **three** mailbox-mutex
+acquisitions per matched message: peek + `from_message` **under the lock**,
+a second lock to remove the matched message, and a third clearing a
+`recv_deadline` that a nil-timeout receive never persisted. Now one:
+
+1. **Optimistic pop for the first candidate of a scan** (`scan_mailbox`):
+   take the message out under the one lock, run `from_message` and the
+   matcher with the mutex *released* — a match is done with no second
+   acquisition, and `send` never contends with the deep copy into the
+   receiver's heap. Sound because only the owner removes from its own
+   mailbox (send only appends), so the position is stable across the
+   unlocked window. A non-match re-inserts at the same position (arrival
+   order preserved — and on a matcher *error* too, so an erroring matcher
+   can't lose the candidate) and reverts the rest of the scan to
+   peek-in-place: a long selective-receive backlog isn't popped/re-inserted
+   per candidate, keeping every scan's lock count ≤ the old scheme's.
+2. **`recv_deadline` clears only when this receive persisted one**
+   (`deadline.is_some()`): a nil-timeout capture-mode receive skips the
+   lock — the previous receive's exit already left the slot `None`.
+
+Measured (release, interleaved A/B vs HEAD baseline built in a worktree,
+min-of-5): **pingpong (N=2M) 4.80 → 4.60–4.70 s (~2–4%, new ≤ base in all
+five pairs)**; ring flat (its per-hop cost sits in copy + capture/restore,
+the roadmap's remaining lever). Small because uncontended lock ops are
+~20 ns against a ~2.4 µs RT — this closes the "double mailbox mutex-lock
+per matched msg" increment; the copy-trim for small scalar messages stays
+the next rung. Gates: full `make test`, CI-equivalent clippy, targeted
+proc/gen/supervisor/message-roundtrip smoke on the release binary.
