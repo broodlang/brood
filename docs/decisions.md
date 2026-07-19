@@ -8595,3 +8595,66 @@ theoretically re-enterable — acceptable while module loads are sub-second; rev
 the module-cache work. Load-once state now lives in two places (`*features*`,
 `*features-loading*`); a single load-state map would be cleaner if a third state ever
 appears.
+
+## ADR-137 — Runtime events: a push system monitor (`system-monitor`), consumed by telemetry
+
+**Status:** accepted (2026-07-19). Implemented: `crates/lisp/src/process/sysmon.rs`,
+the `system-monitor` builtin (`builtins/system.rs`), emit sites in
+`scheduler.rs` (spawn/exit), `core/heap.rs` (post-collect), and the VM driver's
+deopt branch (`eval/compile/mod.rs`); Brood policy `telemetry/watch-runtime`
+(`std/telemetry.blsp`); tested by `tests/sysmon_test.blsp`. Deferred follow-ons:
+node up/down through this stream, `defevent` schemas, aggregators, the
+`nest observe`/`nest mcp` consumers, the remote tier (ADR-011 — see roadmap).
+
+**Context.** The observability timing tier (2026-07-18) added *counts and
+snapshots* — `gc-stats` pauses, `sched-stats`, the sampling profiler — but no
+way to *consume events as they happen*: an operator watching for long GC
+pauses or a supervisor-dashboard tracking process churn had to poll. BEAM
+answers this with `erlang:system_monitor/2` (+ trace); .NET with
+EventPipe/EventSource. The ADR-106 telemetry seam already gives Brood
+apps an attach/handler stream; what was missing was the **kernel emitting into
+it**.
+
+**Decision.** A **push** monitor with BEAM's shape, not an EventPipe-style
+ring buffer:
+
+- The kernel delivers each selected event the moment it happens as an
+  ordinary mailbox message — `[:system kind subject-pid detail]` — to **one**
+  subscriber pid, via the same `process::deliver` seam monitor/link/dist
+  delivery already uses. No ring buffer, no polling primitive, no new wait
+  machinery; the subscriber is a plain process using `receive`, and fan-out /
+  aggregation is Brood policy on top.
+- One uniform 4-element shape for every kind (`:gc`/`:spawn`/`:exit`/`:deopt`)
+  so a single `receive` arm routes all of them; details carry existing
+  structured values (the exit reason is exactly what monitors see).
+- Config is explicit selection: `(system-monitor pid)` = everything;
+  an opts map = exactly its truthy keys; `:gc-min-pause-us` is BEAM's
+  `long_gc` threshold. Arming returns the previous config (save/restore).
+- Two load-bearing guards: events **about the subscriber are never emitted**
+  (its own event-triggered GC would otherwise feed itself forever), and the
+  subscriber's **death disarms** the monitor in `deregister` (a dead
+  subscriber must not keep charging every spawn/exit/GC in the runtime).
+- Cost when off: one relaxed `AtomicBool` load per emit site — the same
+  budget class as the profiler's armed check.
+- Policy lives in `std/telemetry.blsp`: `watch-runtime` re-emits each kernel
+  event as a `[:runtime kind]` telemetry event, unifying runtime and app
+  observability behind the ADR-106 listener (its emitter-isolation guarantee
+  carries over: a bad handler can't hurt the runtime, only the listener).
+
+**Alternatives rejected.** (1) **A ring buffer + drain builtin** (EventPipe
+shape) — cheaper per event under flood, but adds a polling loop, a second
+consumption model beside `receive`, and buffer-sizing/overflow policy; the
+mailbox already IS a bounded-cost event queue and BEAM demonstrates the push
+model at scale. (2) **Emitting telemetry directly from Rust** — would wire the
+kernel to a Brood-defined global handler table and run policy inside the
+runtime; the pid seam keeps mechanism/policy split and works with no telemetry
+loaded. (3) **Multiple subscribers in the kernel** — fan-out is one `send` in
+Brood; last-caller-wins matches BEAM and keeps the hot path to one config read.
+
+**Consequences.** A subscriber that selects `:spawn`/`:exit` on a
+spawn-heavy workload opts into that message volume (as with BEAM trace) —
+use the threshold/selection knobs. Events are fire-and-forget: a slow
+subscriber's mailbox grows (mailbox bounds remain a separate roadmap item).
+The `:deopt` kind fires from the VM driver's deopt-observation branch only —
+JIT-internal fast-link deopts that re-enter without passing it are uncounted
+(same undercount the perf-stats counter accepts).

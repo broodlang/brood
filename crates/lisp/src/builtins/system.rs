@@ -2197,6 +2197,95 @@ pub(super) fn profile_stop(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(heap.list(items))
 }
 
+/// The `(system-monitor)` return shape: the armed config as a map, or nil.
+fn sysmon_config_map(heap: &mut Heap, m: Option<crate::process::sysmon::SysMon>) -> Value {
+    match m {
+        None => Value::nil(),
+        Some(m) => {
+            let pairs = vec![
+                (value::kw("pid"), crate::process::pid_value(m.pid)),
+                (value::kw("gc"), Value::boolean(m.gc)),
+                (
+                    value::kw("gc-min-pause-us"),
+                    Value::int(m.gc_min_pause_us as i64),
+                ),
+                (value::kw("spawn"), Value::boolean(m.spawn)),
+                (value::kw("exit"), Value::boolean(m.exit)),
+                (value::kw("deopt"), Value::boolean(m.deopt)),
+            ];
+            heap.map_from_pairs(pairs)
+        }
+    }
+}
+
+/// `(system-monitor [pid opts])` — read, arm, or clear the kernel **system
+/// monitor**: runtime events (`:gc`/`:spawn`/`:exit`/`:deopt`) delivered to one
+/// subscriber process as `[:system kind subject-pid detail]` messages (BEAM
+/// `system_monitor` shape; see `process/sysmon.rs`). No args reads the current
+/// config; `nil` clears; a local pid arms it — with no opts map every event is
+/// selected, with one exactly the truthy keys are. Arming/clearing returns the
+/// *previous* config (map or nil), so callers can save/restore.
+pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use crate::process::sysmon::{self, SysMon};
+    if args.is_empty() {
+        return Ok(sysmon_config_map(heap, sysmon::current()));
+    }
+    let prev = match arg(args, 0) {
+        Value::Nil => sysmon::install(None),
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            let mut m = SysMon {
+                pid: id,
+                gc: true,
+                gc_min_pause_us: 0,
+                spawn: true,
+                exit: true,
+                deopt: true,
+            };
+            if args.len() > 1 {
+                match arg(args, 1) {
+                    // An explicit opts map selects exactly its truthy keys.
+                    Value::Map(opts) => {
+                        let sel = |heap: &Heap, name: &str| {
+                            heap.map_get(opts, value::kw(name))
+                                .is_some_and(crate::eval::truthy)
+                        };
+                        m.gc = sel(heap, "gc");
+                        m.spawn = sel(heap, "spawn");
+                        m.exit = sel(heap, "exit");
+                        m.deopt = sel(heap, "deopt");
+                        if let Some(Value::Int(n)) =
+                            heap.map_get(opts, value::kw("gc-min-pause-us"))
+                        {
+                            if n > 0 {
+                                m.gc_min_pause_us = n as u64;
+                            }
+                        }
+                    }
+                    Value::Nil => {}
+                    other => {
+                        return Err(LispError::wrong_type(
+                            heap,
+                            "system-monitor",
+                            "options map or nil",
+                            other,
+                        ))
+                    }
+                }
+            }
+            sysmon::install(Some(m))
+        }
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "system-monitor",
+                "local pid or nil",
+                other,
+            ))
+        }
+    };
+    Ok(sysmon_config_map(heap, prev))
+}
+
 /// `(build-id)` — this `brood` build's identity, `"<version>+<git-sha>+<binary-
 /// stamp>"` (e.g. `"0.1.0+dcab7ca+18f2e1a9b3c4d5e6"`). The correct staleness
 /// stamp for an on-disk cache of anything the kernel computes (the checker's

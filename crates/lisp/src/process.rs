@@ -42,6 +42,10 @@ mod mailbox;
 mod message;
 mod monitor;
 mod scheduler;
+/// The system monitor (kernel runtime events → one subscriber's mailbox).
+/// `pub` so the GC (`core/heap.rs`) and VM (`eval/compile`) emit sites and the
+/// `(system-monitor …)` builtin reach it without per-fn re-exports.
+pub mod sysmon;
 mod timer;
 
 pub use mailbox::{

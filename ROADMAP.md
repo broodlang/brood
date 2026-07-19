@@ -83,10 +83,15 @@ mechanism/policy split: kernel primitive, Brood policy.
   named-frame stack into a histogram — no signals, one relaxed load per frame
   boundary when off (exactly what the state-capture rewrite made possible).
   JIT-resident loops attribute at their quantum preempt; the tree-walker isn't
-  sampled. `tests/observability_test.blsp`. ⬜ Remaining: the consumable
-  **event stream** (fold gc/sched/deopt/dist events + these snapshots behind
-  the ADR-106 telemetry stream so `nest observe`/`nest mcp` consume it),
-  `defevent` schemas, aggregators, and the remote tier — see "Telemetry"
+  sampled. `tests/observability_test.blsp`. Slice 2 shipped 2026-07-19 — the
+  **kernel event stream** (ADR-137): `(system-monitor pid opts)` pushes
+  `:gc`/`:spawn`/`:exit`/`:deopt` events to one subscriber as
+  `[:system kind subject-pid detail]` messages (BEAM `system_monitor` shape,
+  `:gc-min-pause-us` = `long_gc`); `telemetry/watch-runtime` re-emits them as
+  `[:runtime kind]` telemetry events, so runtime + app events share the
+  ADR-106 attach seam. `tests/sysmon_test.blsp`. ⬜ Remaining: node up/down
+  events (today via `monitor-node`), `defevent` schemas, aggregators, the
+  `nest observe`/`nest mcp` consumers, and the remote tier — see "Telemetry"
   under M3 below. **[kernel sources, Brood aggregation]**
 - ✅ **Distribution self-healing: auto-reconnect + backoff.** Shipped
   2026-07-18. Brood policy: **`std/net/reconnect`** — a named, idempotent
@@ -464,12 +469,14 @@ Runtime housekeeping (both items landed):
 - ⬜ **Mouse / resize input events** — deferred until a feature needs them.
 - ⬜ **GPU-window frontend** — a later additive path speaking the same display
   protocol; arbitrary per-px buffer sizing rides with it.
-- 🟡 **Telemetry** (ADR-106) — core landed; still to fold in: kernel-internal event
-  *sources* (GC collections, scheduler spawn/exit/preempt, dist node up/down — a Rust
-  emit seam); unifying `gc-stats`/`vm-stats`/`process-info` snapshots behind the
-  stream so `nest observe` + `nest mcp` consume it; `defevent` + checker-validated
-  event schemas; built-in aggregators (counter/gauge/summary/histogram) + sampling;
-  and the location-transparent remote tier over the dist link.
+- 🟡 **Telemetry** (ADR-106) — core landed, and the kernel event *sources* shipped
+  2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
+  deopt as `[:runtime kind]` events). Still to fold in: node up/down through the same
+  stream (today `monitor-node`); unifying `gc-stats`/`vm-stats`/`process-info`
+  snapshots behind it so `nest observe` + `nest mcp` consume the stream; `defevent` +
+  checker-validated event schemas; built-in aggregators
+  (counter/gauge/summary/histogram) + sampling; and the location-transparent remote
+  tier over the dist link.
 
 ### Server / daemon (M4)
 

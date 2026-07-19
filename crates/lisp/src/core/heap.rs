@@ -7677,6 +7677,21 @@ impl Heap {
             self.gc_ns_total = self.gc_ns_total.saturating_add(ns);
             self.gc_ns_max = self.gc_ns_max.max(ns);
             self.gc_ns_last = ns;
+            // System-monitor GC event (the observability event stream). Emitted
+            // *after* the collection completes — the heap is consistent and the
+            // event build/deliver touches only Rust data, never this heap. The
+            // subscriber's own collections are excluded inside emit_gc (its
+            // event traffic would otherwise re-trigger itself forever).
+            if crate::process::sysmon::armed() {
+                if let Some(pid) = crate::process::current_pid() {
+                    crate::process::sysmon::emit_gc(
+                        pid,
+                        ns,
+                        self.gc_runs,
+                        self.local_live_count() as u64,
+                    );
+                }
+            }
         }
     }
 

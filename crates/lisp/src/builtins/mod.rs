@@ -2328,6 +2328,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "system-monitor",
+        Arity::range(0, 2),
+        Sig::new(vec![any, any], any),
+        system_monitor,
+    );
+    def(
+        heap,
         "spawn-count",
         Arity::exact(0),
         Sig::nullary(int),
@@ -2746,6 +2753,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("sched-stats", &[], "A snapshot map of the scheduler's cumulative counters: {:spawned :exited :preempts :steals :migrations :workers :peak-threads}. :spawned - :exited is the live-process figure; :preempts counts reduction-budget quantum exhaustions; :steals/:migrations count work-stealing activity. The scheduler half of the observability timing tier (pairs with gc-stats' :pause-* keys)."),
     ("profile-start", &["&optional", "hz"], "Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). A JIT-resident loop is attributed when it yields at its reduction-budget preempt (~once a quantum); the legacy tree-walker isn't sampled. Stop and read with (profile-stop)."),
     ("profile-stop", &[], "Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count n} maps, most-sampled first. Empty list if never armed. A sample whose frames were all anonymous appears with :stack (\"<anonymous>\")."),
+    ("system-monitor", &["&optional", "pid", "opts"], "Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see), :deopt (detail = the JIT arm's fn name, or nil). No args reads the current config map (nil if unarmed); (system-monitor nil) clears; (system-monitor pid) arms every event at pid; (system-monitor pid {:gc true :gc-min-pause-us 1000 :exit true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long, BEAM's long_gc). Arming/clearing returns the PREVIOUS config. One subscriber at a time (last wins); events about the subscriber itself are never sent (no feedback loops), and the subscriber's death disarms the stream. Policy lives in telemetry/watch-runtime, which re-emits these as telemetry events."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
     ("build-id", &[], "This brood build's identity as \"<version>+<git-sha>+<binary-stamp>\" (e.g. \"0.1.0+dcab7ca+18f2e1a9b3c4d5e6\") — the correct staleness stamp for an on-disk cache of anything the kernel computes. Changes on any rebuild, committed or not: the binary-stamp half is this executable's own mtime, read at runtime, so it can't go stale the way a git-sha-only stamp would across an uncommitted local rebuild."),

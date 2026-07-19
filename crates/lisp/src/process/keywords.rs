@@ -28,6 +28,20 @@ pub const EXIT: &str = "EXIT";
 /// `[:nodedown name]` — a `monitor-node`'d node link dropped.
 pub const NODEDOWN: &str = "nodedown";
 
+// --- System-monitor event tags (`[:system <kind> <subject-pid> <detail>]`,
+// delivered to the `(system-monitor pid opts)` subscriber — `sysmon.rs`). ---
+
+/// The leading tag of every system-monitor event.
+pub const SYSTEM: &str = "system";
+/// `[:system :gc pid {:pause-us … :collections … :live …}]` — a collection ran.
+pub const SYS_GC: &str = "gc";
+/// `[:system :spawn child-pid parent-pid]` — a green process was spawned.
+pub const SYS_SPAWN: &str = "spawn";
+/// `[:system :exit pid reason]` — a green process exited (any reason).
+pub const SYS_EXIT: &str = "exit";
+/// `[:system :deopt pid fn-name-or-nil]` — a JIT'd arm fell back to the VM.
+pub const SYS_DEOPT: &str = "deopt";
+
 // --- Exit / down reasons. ---
 
 /// Clean exit — does not propagate to non-trapping linked peers.

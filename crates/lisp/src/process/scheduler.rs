@@ -948,6 +948,13 @@ fn proc_descr(pid: u64) -> String {
 /// receiver code on the wire side is unchanged from local.
 fn deregister(pid: u64, reason: Message, heap: &Heap) {
     EXITED.fetch_add(1, Ordering::Relaxed);
+    if super::sysmon::armed() {
+        // Exit event first, then the death-disarm check — so a monitor watching
+        // :exit still sees every *other* process die, and its own death (never
+        // self-reported) cleanly disarms the stream.
+        super::sysmon::emit_exit(pid, &reason);
+        super::sysmon::clear_if(pid);
+    }
     // The three tables are taken **sequentially**, not nested: REGISTRY first,
     // released, then NAMES, released, then MONITORS. `add_monitor` and
     // `spawn_or_get` take REGISTRY *nested* inside MONITORS / NAMES
@@ -1631,6 +1638,9 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
 
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     SPAWNED.fetch_add(1, Ordering::SeqCst);
+    if super::sysmon::armed() {
+        super::sysmon::emit_spawn(pid, parent);
+    }
     // Live green-process gauge: drives the process-count-aware `gc_floor` so a
     // fan-out of many churny processes doesn't each climb to the single-process
     // GC ceiling. Balanced by the `live_process_dec` in `deregister`.

@@ -1456,7 +1456,23 @@ language" principle.
   :count n}` maps, most-sampled first. Sampling walks each process's reified
   call stack at its next VM frame boundary after every tick: no signals, and
   near-zero cost when off. (A JIT-resident loop is attributed when it yields
-  at its reduction-budget preempt; the legacy tree-walker isn't sampled.) `(gc-collect)` forces a collection now and returns that same map
+  at its reduction-budget preempt; the legacy tree-walker isn't sampled.)
+- `(system-monitor [pid opts])` — the **runtime event stream** (Erlang
+  `system_monitor/2` shape): the kernel pushes selected runtime events to one
+  subscriber process as ordinary `[:system kind subject-pid detail]` mailbox
+  messages — `:gc` (a collection finished; detail
+  `{:pause-us :collections :live}`, filtered by `:gc-min-pause-us`, BEAM's
+  `long_gc`), `:spawn` (detail = parent pid), `:exit` (detail = the structured
+  exit reason monitors see), and `:deopt` (detail = the JIT arm's fn name).
+  No args reads the config; `nil` clears; `(system-monitor pid)` arms every
+  event, `(system-monitor pid {:gc true :gc-min-pause-us 1000})` selects
+  exactly the truthy keys. One subscriber at a time (last wins); events about
+  the subscriber itself are never sent, and its death disarms the stream. Off,
+  the cost is one relaxed flag load per event site. **Policy lives in
+  telemetry**: `(telemetry/watch-runtime [opts])` spawns a watcher that
+  re-emits each kernel event as a `[:runtime kind]` telemetry event, so
+  operators consume runtime and app events through one attach/handler seam.
+- `(gc-collect)` forces a collection now and returns the `gc-stats` map
   (an observability/test aid, *not* a load-bearing trigger), and `(gc-trace on?)`
   toggles per-collection stderr logging for the calling process (no arg = query;
   defaulted from `BROOD_GC_TRACE`). **Memory is reclaimed automatically:** the

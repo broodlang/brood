@@ -5780,6 +5780,14 @@ fn vm_run_bc(
                         }
                         Some(1) => {
                             crate::perf_bump!(jit_deopt);
+                            // System-monitor deopt event (observability stream):
+                            // deopts are rare, so the armed() check runs only on
+                            // this already-cold branch.
+                            if crate::process::sysmon::armed() {
+                                if let Some(pid) = crate::process::current_pid() {
+                                    crate::process::sysmon::emit_deopt(pid, cur_arm.dbg_name);
+                                }
+                            }
                             #[cfg(feature = "perf-stats")]
                             if std::env::var_os("BROOD_DEOPT_TRACE").is_some() {
                                 // The checkpoint journal (ckpt_slot) packs

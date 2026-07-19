@@ -5231,3 +5231,39 @@ profiler content assertions gate on the VM engine). This closes the kernel
 *sources* half; the ⬜ remainder is the ADR-106 event-stream unification
 (gc/sched/deopt/dist events consumable by `nest observe`/mcp), `defevent`
 schemas, aggregators, and the remote tier.
+
+## 2026-07-19 — Observability slice 2: the kernel event stream (`system-monitor` → telemetry)
+
+The ⬜ half of the timing tier: runtime events are now *consumable*, not just
+countable. Design (ADR-137): BEAM `system_monitor/2` shape — **push, not
+poll** — the kernel delivers each selected event as an ordinary mailbox
+message `[:system kind subject-pid detail]` to ONE subscriber process, via
+the same `process::deliver` seam monitors/dist already use. No ring buffer,
+no new wait primitive.
+
+- **Kernel** (`process/sysmon.rs`): `(system-monitor pid opts)` arms; events
+  `:gc` (emitted after `Heap::collect`, detail `{:pause-us :collections
+  :live}`, filtered by `:gc-min-pause-us` — BEAM's `long_gc`), `:spawn`
+  (detail = parent), `:exit` (detail = the structured reason monitors see —
+  rides the existing `deregister` reason), `:deopt` (the VM driver's
+  `Some(1)` outcome branch; detail = arm fn name). Guards: events about the
+  subscriber itself are never emitted (else its own GC would feed itself
+  forever), and `deregister` disarms when the subscriber dies (a dead
+  monitor must not keep charging every event site). Off = one relaxed
+  `AtomicBool` load per site.
+- **Policy** (`std/telemetry.blsp`): `watch-runtime` spawns a watcher that
+  arms the monitor on itself and re-emits each kernel event as a
+  `[:runtime kind]` telemetry event — so operators observe the runtime
+  through the exact ADR-106 attach/handler seam their app events use.
+  `stop-watch-runtime` (or killing the watcher) disarms.
+- **Tests**: `tests/sysmon_test.blsp` (8 cases: arm/clear round-trip,
+  opts selection, spawn/exit/gc event shapes, the `long_gc` threshold,
+  self-exclusion + death-disarm, and the end-to-end telemetry flow). Green
+  on the VM and under `BROOD_GC_STRESS` — the stress run caught a real test
+  bug (an isolated unit's tests share one worker mailbox, so a previous
+  test's event backlog must be flushed). Under `BROOD_VM=0` the runner's
+  :isolated+`receive` combination misbehaves — **pre-existing** (maps_test
+  hangs identically there at the pre-change binary), noted in the test file.
+
+Still open on this axis: node up/down through the same stream, `defevent`
+schemas, aggregators, `nest observe`/mcp consuming it, the remote tier.
