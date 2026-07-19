@@ -85,12 +85,14 @@ struct SharedBundle {
 }
 
 static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
+    let t_start = std::time::Instant::now();
     // Build the prelude + builtins in a throwaway builder heap, then relocate it
     // all into the shared region. Done once for the whole process.
     let mut heap = Heap::new();
     let root = heap.new_env(None);
     heap.set_global(root);
     builtins::register(&mut heap, root);
+    let t_builtins = t_start.elapsed();
     // Record each prelude def's source location against a materialized, on-disk
     // copy of the prelude, so the LSP can jump `M-.` into the standard library
     // (the prelude is `include_str!`'d — there's no source file at runtime
@@ -99,8 +101,12 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     // unavailable (everything else is unaffected). See `prelude_source_path`.
     let prelude_file = prelude_source_path();
     heap.set_current_file(prelude_file);
+    let t_mark = std::time::Instant::now();
     // Positioned read so each def carries the line/col goto-definition lands on.
     let forms = syntax::reader::read_all_positioned(&mut heap, PRELUDE).expect("read prelude");
+    let t_read = t_mark.elapsed();
+    let t_mark = std::time::Instant::now();
+    let mut t_expand = std::time::Duration::ZERO;
     for (form, pos) in forms {
         // Try the raw form first — catches `defn`/`defmacro` before lowering
         // discards their source positions. Then also try the expanded form so
@@ -112,13 +118,33 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
         // Compile pass (expand macros, then namespace-resolve — a no-op here since
         // the prelude is the root namespace), then evaluate. Form-by-form so a
         // macro defined by one form is visible to the next.
+        let t_e = std::time::Instant::now();
         let form = eval::macros::compile(&mut heap, form, root)
             .unwrap_or_else(|e| panic!("prelude expand: {}", e));
+        let d = t_e.elapsed();
+        if d.as_micros() > 300 && std::env::var_os("BROOD_BOOT_TRACE").is_some() {
+            eprintln!("[boot-form] {:?} at {:?}", d, pos);
+        }
+        t_expand += d;
         heap.note_definition(form, pos);
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
     heap.set_current_file(None);
+    let t_eval = t_mark.elapsed();
+    let t_mark = std::time::Instant::now();
     let (code, bindings) = heap.freeze_as_shared_code(root);
+    let t_freeze = t_mark.elapsed();
+    if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
+        eprintln!(
+            "[boot] builtins={:?} read={:?} expand={:?} eval={:?} freeze={:?} total={:?}",
+            t_builtins,
+            t_read,
+            t_expand,
+            t_eval - t_expand,
+            t_freeze,
+            t_start.elapsed()
+        );
+    }
     SharedBundle {
         code: Arc::new(code),
         bindings,

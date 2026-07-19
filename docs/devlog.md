@@ -5267,3 +5267,28 @@ no new wait primitive.
 
 Still open on this axis: node up/down through the same stream, `defevent`
 schemas, aggregators, `nest observe`/mcp consuming it, the remote tier.
+
+## 2026-07-19 — Cold-start measured: it's macro expansion (27 of 31 ms), not eval
+
+Scoping the startup-image-snapshot roadmap item (ReadyToRun analogue) began
+with instrumentation instead of a design: a permanent `BROOD_BOOT_TRACE=1`
+flag now prints the shared-prelude build's phase breakdown (works in
+release). Result, three stable runs:
+
+    builtins 0.3 ms · read 2.3 ms · macro-EXPANSION 27 ms · eval 0.9 ms · freeze 0.7 ms
+
+The assumed shape ("serialize the frozen SharedCode bundle") was aimed at the
+wrong cost: evaluation + freeze together are ~1.6 ms. The entire boot cost is
+`eval::macros::compile` — hundreds of interpreted macro invocations (every
+`defn` runs the `defn` macro body on the tree-walker), spread evenly across
+the prelude (the 14 slowest forms >300µs sum to just ~6.5 ms; no single
+pathological form — the exponential match-lowering class was already fixed
+2026-07-16).
+
+Consequences for the roadmap item (updated there): the preferred lever is now
+**making macro expansion itself fast** (e.g. running macro bodies on the VM) —
+a general capability that speeds every `require` and reload, exactly the
+ADR-006 "build the language up" shape; the fallback is an expanded-prelude
+disk cache (print post-expansion forms, key by ADR-129 build-id) which reaches
+~6 ms with no binary heap format. Full SharedCode serialization is
+unnecessary.

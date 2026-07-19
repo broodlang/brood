@@ -218,6 +218,7 @@ contention races).
 | `BROOD_VM_TRACE=1` | Trace each bytecode instruction to stderr as it executes (`[vm-trace ip=N] InstName(...)`). Debug builds only. For debugging VM/JIT correctness divergences. |
 | `BROOD_GC_TRACE=1` | Log each minor GC collection's nursery/old-gen stats to stderr (`[gc-trace] collect: ...`). Debug builds only. |
 | `BROOD_EVAL_TRACE=1` | Trace each form entering the tree-walking evaluator to stderr (`[eval-trace] <form>`). Debug builds only. Use to see which forms the VM defers to the tree-walker. |
+| `BROOD_BOOT_TRACE=1` | Print the cold-start phase breakdown of the shared prelude build to stderr (`[boot] builtins=… read=… expand=… eval=… freeze=…`), plus a `[boot-form]` line for any single form whose expansion takes >300µs. Works in release. The startup-snapshot roadmap item's measurement tool (2026-07-19: expansion is ~27ms of the ~31ms boot). |
 | `BROOD_JIT_CB_TRACE=1` | Trace JIT runtime-callback invocations to stderr (`[jit-cb] brood_rt_<name>(...)`). Debug builds only. Useful for diagnosing JIT-compiled code calling back into Rust (global lookup, slow calls, GC). |
 | `RUST_BACKTRACE` | `brood`/`nest` **default it to `1`** (set in each `main`); `RUST_BACKTRACE=0` opts out, `full` for verbose. |
 

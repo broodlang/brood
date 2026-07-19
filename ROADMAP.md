@@ -67,12 +67,23 @@ mechanism/policy split: kernel primitive, Brood policy.
   incl. remote delivery which can't error the sender). **[kernel mechanism,
   Brood policy]**
 - ⬜ **Startup image snapshot (ReadyToRun / `.beam` analogue).** Cold start
-  re-parses + re-evals the prelude from source every run (~28 ms; amortised
+  re-parses + re-evals the prelude from source every run (amortised
   per-OS-process via `LazyLock`, but paid by every CLI invocation, test shard,
-  and `nest` subcommand). Lever: serialize the frozen `SharedCode` bundle
-  (post-parse, post-macro-expand, post-freeze) into the binary or an
-  mtime-keyed cache — the ADR-129 `build-id` already solves the invalidation
-  key. Target: single-digit-ms cold start. **[kernel]**
+  and `nest` subcommand). **Measured 2026-07-19** (`BROOD_BOOT_TRACE=1`,
+  release): total ~31 ms = builtins 0.3 ms + read 2.3 ms + **macro-expansion
+  27 ms** + eval 0.9 ms + freeze 0.7 ms. The cost is NOT evaluation — it's
+  `eval::macros::compile` running hundreds of interpreted macro invocations
+  (every `defn`/`defmacro` form; spread evenly, the 14 worst forms sum to only
+  ~6.5 ms). Two levers, in preference order (ADR-006 — build the language up):
+  (1) **make macro expansion itself fast** (run macro bodies on the VM instead
+  of the tree-walker?) — a general win for every `require`/reload, not just
+  boot; (2) **cache the *expanded* prelude** — print the post-expansion forms
+  once to an mtime/build-id-keyed disk cache (ADR-129 solves invalidation) and
+  boot from that: ~6 ms cold start with no binary heap format at all (the
+  full `SharedCode` serialization the original note assumed is unnecessary —
+  freeze is only 0.7 ms). Design care for (2): `note_definition` positions
+  (LSP `M-.`) and autogensym round-tripping. Target: single-digit-ms cold
+  start. **[kernel]**
 - 🟡 **Observability: timing tier + trace pipeline + profiler.** Slice 1
   shipped 2026-07-18 — the survey's two named holes are closed: **GC pause
   durations** (`gc-stats` `:pause-total-us`/`:pause-max-us`/`:pause-last-us`,
