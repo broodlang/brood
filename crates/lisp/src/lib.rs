@@ -85,6 +85,149 @@ struct SharedBundle {
 }
 
 static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
+    // Fast path: boot from the expanded-prelude cache (ReadyToRun-lite). The
+    // full source boot costs ~31 ms, ~27 ms of which is macro-EXPANSION of the
+    // prelude (measured 2026-07-19; see the devlog) — parse, eval, and freeze
+    // together are ~4 ms. So the cache stores the *post-compile* (expanded +
+    // resolved + static-quasiquote) forms as plain text, keyed by `build-id`
+    // (the prelude is `include_str!`'d, so any binary change invalidates), and
+    // a warm boot skips `eval::macros::compile` entirely. Any mismatch or
+    // failure falls back to the source boot, which rewrites the cache.
+    if std::env::var_os("BROOD_NO_BOOT_CACHE").is_none() {
+        if let Some(bundle) = boot_from_cache() {
+            return bundle;
+        }
+    }
+    boot_from_source()
+});
+
+/// The expanded-prelude cache file for THIS binary:
+/// `~/.cache/brood/prelude-expanded-<hash-of-build-id>.blsp`. Per-binary
+/// naming (not one shared file) because the staleness key — `build-id` —
+/// embeds each executable's own mtime: `brood`, `nest`, and every test binary
+/// carry different stamps, and a single shared file would be endlessly
+/// overwritten by whichever booted last, never hitting. Old builds' files are
+/// pruned by age at write time (see `boot_cache_prune`).
+fn boot_cache_path() -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    use std::path::PathBuf;
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+    // DefaultHasher is deterministic across processes (fixed keys — unlike
+    // RandomState), so every run of the same binary derives the same name.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    builtins::build_id_string().hash(&mut h);
+    Some(
+        base.join("brood")
+            .join(format!("prelude-expanded-{:016x}.blsp", h.finish())),
+    )
+}
+
+/// Best-effort prune of OTHER builds' expanded-prelude caches: any
+/// `prelude-expanded-*.blsp` (except `keep`) not modified in ~7 days. Keeps a
+/// dev machine's rebuild churn from accumulating one ~90 KB file per binary
+/// per build forever, without deleting the caches other live binaries
+/// (`nest`, an older installed `brood`) are actively hitting.
+fn boot_cache_prune(dir: &std::path::Path, keep: &std::path::Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p == keep {
+            continue;
+        }
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("prelude-expanded-") && name.ends_with(".blsp")) {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// The boot cache's header line for THIS binary: `;; brood-boot-cache v1
+/// <build-id> gensym=` (the caching boot's final gensym counter follows). A
+/// cache whose header doesn't match byte-for-byte is stale and ignored.
+fn boot_cache_header_prefix() -> String {
+    format!(
+        ";; brood-boot-cache v1 {} gensym=",
+        builtins::build_id_string()
+    )
+}
+
+/// Boot the shared bundle from the expanded-prelude cache. `None` (fall back
+/// to [`boot_from_source`]) if the cache is absent, stale, or fails ANY step —
+/// a failing cache file is deleted so the source boot's rewrite starts clean.
+/// The raw prelude is still read (positioned) for `note_definition`, so LSP
+/// stdlib navigation is identical on both paths; only the ~27 ms compile pass
+/// is skipped.
+fn boot_from_cache() -> Option<SharedBundle> {
+    let t_start = std::time::Instant::now();
+    let path = boot_cache_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let (header, body) = text.split_once('\n')?;
+    // A non-matching header is a stale build — leave the file; the source boot
+    // rewrites it.
+    let gensym_max: u64 = header
+        .strip_prefix(&boot_cache_header_prefix())?
+        .trim()
+        .parse()
+        .ok()?;
+    let run = || -> Option<SharedBundle> {
+        let mut heap = Heap::new();
+        let root = heap.new_env(None);
+        heap.set_global(root);
+        builtins::register(&mut heap, root);
+        heap.set_current_file(prelude_source_path());
+        // Raw positioned read for definition sites only (M-. parity with the
+        // source boot); the cached forms drive evaluation. 1:1 by construction
+        // (compile never splits a top-level form) — any drift is a stale file.
+        let raw = syntax::reader::read_all_positioned(&mut heap, PRELUDE).ok()?;
+        let cached = syntax::reader::read_all(&mut heap, body).ok()?;
+        if raw.len() != cached.len() {
+            return None;
+        }
+        // The cached expansions embed gensyms minted up to `gensym_max` in the
+        // caching boot; floor the counter so runtime gensyms can't collide.
+        core::value::gensym_floor(gensym_max);
+        for ((raw_form, pos), form) in raw.into_iter().zip(cached) {
+            heap.note_definition(raw_form, pos);
+            heap.note_definition(form, pos);
+            eval::eval(&mut heap, form, root).ok()?;
+        }
+        heap.set_current_file(None);
+        let (code, bindings) = heap.freeze_as_shared_code(root);
+        Some(SharedBundle {
+            code: Arc::new(code),
+            bindings,
+        })
+    };
+    let bundle = run();
+    if bundle.is_none() {
+        // Current-build header but the body failed to read/eval: the file is
+        // corrupt — remove it so the next source boot rewrites from scratch.
+        let _ = std::fs::remove_file(&path);
+    } else if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
+        eprintln!("[boot] cache hit — total={:?}", t_start.elapsed());
+    }
+    bundle
+}
+
+/// The full source boot: parse + macro-expand + eval + freeze the prelude,
+/// then (best-effort) write the expanded-prelude cache for the next boot.
+fn boot_from_source() -> SharedBundle {
     let t_start = std::time::Instant::now();
     // Build the prelude + builtins in a throwaway builder heap, then relocate it
     // all into the shared region. Done once for the whole process.
@@ -107,6 +250,12 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     let t_read = t_mark.elapsed();
     let t_mark = std::time::Instant::now();
     let mut t_expand = std::time::Duration::ZERO;
+    // The boot cache's payload: each compiled form, printed. A form whose
+    // print→read→print round-trip isn't a fixpoint poisons the whole cache
+    // (never write a file we can't provably re-read into the same forms).
+    let write_cache = std::env::var_os("BROOD_NO_BOOT_CACHE").is_none();
+    let mut cache_ok = write_cache;
+    let mut printed_forms: Vec<String> = Vec::new();
     for (form, pos) in forms {
         // Try the raw form first — catches `defn`/`defmacro` before lowering
         // discards their source positions. Then also try the expanded form so
@@ -126,6 +275,15 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
             eprintln!("[boot-form] {:?} at {:?}", d, pos);
         }
         t_expand += d;
+        if cache_ok {
+            let printed = syntax::printer::print(&heap, form);
+            match syntax::reader::read_all(&mut heap, &printed) {
+                Ok(v) if v.len() == 1 && syntax::printer::print(&heap, v[0]) == printed => {
+                    printed_forms.push(printed);
+                }
+                _ => cache_ok = false,
+            }
+        }
         heap.note_definition(form, pos);
         eval::eval(&mut heap, form, root).unwrap_or_else(|e| panic!("prelude: {}", e));
     }
@@ -134,22 +292,45 @@ static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
     let t_mark = std::time::Instant::now();
     let (code, bindings) = heap.freeze_as_shared_code(root);
     let t_freeze = t_mark.elapsed();
+    if cache_ok {
+        if let Some(path) = boot_cache_path() {
+            // Atomic-enough for the purpose: write to a sibling temp file and
+            // rename, so a concurrent booting process never reads a torn file.
+            let _ = (|| -> std::io::Result<()> {
+                let dir = path.parent().expect("cache path has a dir");
+                std::fs::create_dir_all(dir)?;
+                let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+                let mut payload = format!(
+                    "{}{}\n",
+                    boot_cache_header_prefix(),
+                    core::value::gensym_counter()
+                );
+                payload.push_str(&printed_forms.join("\n"));
+                payload.push('\n');
+                std::fs::write(&tmp, payload)?;
+                std::fs::rename(&tmp, &path)?;
+                boot_cache_prune(dir, &path);
+                Ok(())
+            })();
+        }
+    }
     if std::env::var_os("BROOD_BOOT_TRACE").is_some() {
         eprintln!(
-            "[boot] builtins={:?} read={:?} expand={:?} eval={:?} freeze={:?} total={:?}",
+            "[boot] builtins={:?} read={:?} expand={:?} eval={:?} freeze={:?} total={:?} (source boot{})",
             t_builtins,
             t_read,
             t_expand,
             t_eval - t_expand,
             t_freeze,
-            t_start.elapsed()
+            t_start.elapsed(),
+            if cache_ok { ", cache written" } else { "" }
         );
     }
     SharedBundle {
         code: Arc::new(code),
         bindings,
     }
-});
+}
 
 /// The byte-counting allocator (see [`core::alloc`]) backs the whole process, so
 /// `(mem-bytes)` / `(mem-peak)` see every Rust allocation. Declared here in the

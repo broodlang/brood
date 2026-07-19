@@ -19,6 +19,9 @@ mod sequences;
 mod system;
 mod terminal;
 
+// The boot cache (`lib.rs`) keys its expanded-prelude file on the build id.
+pub(crate) use system::build_id_string;
+
 use bytes::*;
 use io::*;
 use numeric::*;

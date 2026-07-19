@@ -1088,6 +1088,21 @@ pub fn gensym(prefix: &str) -> Value {
     sym(&format!("{}__{}", prefix, n))
 }
 
+/// The gensym counter's current value — recorded into the boot cache so a
+/// cache-booted process can [`gensym_floor`] past every name the cached
+/// expansion minted.
+pub fn gensym_counter() -> u64 {
+    GENSYM_COUNTER.load(Ordering::Relaxed)
+}
+
+/// Raise the gensym counter to at least `n` (never lowers it). A cache-booted
+/// process starts its counter at 0 but evaluates prelude expansions whose
+/// gensyms were minted up to `n` in the caching boot — without this floor, a
+/// runtime `gensym` could re-mint one of those names and capture it.
+pub fn gensym_floor(n: u64) {
+    GENSYM_COUNTER.fetch_max(n, Ordering::Relaxed);
+}
+
 /// JIT layout constants for [`Value`] (`#[repr(C, u8)]`). JIT codegen hardcodes these
 /// to read a `Value` out of a `Heap::roots` slot — the discriminant byte at offset 0,
 /// the payload at [`jit_layout::PAYLOAD_OFFSET`]. Pinned by the layout test below; a

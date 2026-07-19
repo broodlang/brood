@@ -2303,12 +2303,20 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 /// needed — correct by construction rather than by tracking which source
 /// files matter to which cache.
 pub(super) fn build_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    Ok(heap.alloc_string(&format!(
+    let id = build_id_string();
+    Ok(heap.alloc_string(&id))
+}
+
+/// The `(build-id)` string as plain Rust — shared with the boot cache
+/// (`lib.rs`), which uses it as the staleness key for the expanded-prelude
+/// cache (the prelude is `include_str!`'d, so any binary change covers it).
+pub(crate) fn build_id_string() -> String {
+    format!(
         "{}+{}+{}",
         env!("CARGO_PKG_VERSION"),
         env!("BROOD_GIT_SHA"),
         binary_stamp()
-    )))
+    )
 }
 
 /// This running executable's own last-modified time, as a hex nanosecond

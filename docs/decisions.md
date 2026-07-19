@@ -8658,3 +8658,66 @@ subscriber's mailbox grows (mailbox bounds remain a separate roadmap item).
 The `:deopt` kind fires from the VM driver's deopt-observation branch only —
 JIT-internal fast-link deopts that re-enter without passing it are uncounted
 (same undercount the perf-stats counter accepts).
+
+## ADR-138 — The boot cache: expanded-prelude text, not a binary heap snapshot
+
+**Status:** accepted (2026-07-19). Implemented in `crates/lisp/src/lib.rs`
+(`boot_from_cache`/`boot_from_source` around the `SHARED` bundle), with
+`build_id_string` shared from `builtins/system.rs` and
+`gensym_counter`/`gensym_floor` in `core/value.rs`. Opt-out:
+`BROOD_NO_BOOT_CACHE=1`.
+
+**Context.** Every OS-process boot (each CLI invocation, `nest` subcommand,
+and nextest test shard) rebuilt the shared prelude from source: ~31 ms, of
+which ~27 ms was macro expansion — 744 expander invocations of genuine Brood
+list-work, already running on the VM (ADR-119), so no cheap dispatch fix
+exists (see the 2026-07-19 devlog measurements). Parse, eval, and freeze
+together are only ~4 ms.
+
+**Decision.** Cache the *post-compile text*, not the heap. The source boot
+prints each prelude form after `eval::macros::compile` (expanded +
+namespace-resolved + static-quasiquote) to
+`~/.cache/brood/prelude-expanded-<hash(build-id)>.blsp`; a warm boot reads
+those forms back and evaluates them directly, skipping the compile pass —
+**~38 ms → ~6.5 ms** measured. Load-bearing choices:
+
+- **`build-id` is the staleness key** (ADR-129's insight reused): the prelude
+  is `include_str!`'d, so "the binary changed" covers every input the cache
+  depends on. The key is embedded in the header line *and* hashed into the
+  filename — per-binary files, because `build-id` embeds each executable's own
+  mtime (`brood`, `nest`, and every test binary differ; one shared file would
+  thrash). Stale siblings are age-pruned (~7 days) at write time.
+- **Text, not a binary heap format.** Freeze is 0.7 ms — serializing
+  `SharedCode` would buy nothing and cost a versioned format. The reader is
+  the deserializer; the printer is the serializer; both already exist and are
+  fuzzed.
+- **Provably round-trippable or not written.** Each form must satisfy the
+  print→read→print fixpoint before it's added; one failure poisons the whole
+  cache write and the boot simply stays on the source path. A cache that
+  *reads* but fails any later step is deleted and the boot falls back.
+- **Gensym safety.** The header records the caching boot's final gensym
+  counter; a cache boot floors its counter there (`gensym_floor`) so a runtime
+  `gensym` can never re-mint a name embedded in the cached expansions
+  (ADR-133 bar-quoting makes the `name__N` symbols print/read cleanly).
+- **LSP parity.** The raw prelude is still read positioned on the cache path
+  purely for `note_definition` — stdlib `M-.` is identical on both paths; only
+  the compile pass is skipped. The raw/cached form streams are zipped 1:1
+  (compile never splits a top-level form); any length drift rejects the cache.
+- **Concurrent boots** (nextest: many processes, one binary) write via
+  pid-suffixed temp file + rename, so a reader never sees a torn file.
+
+**Alternatives rejected.** (1) **Full `SharedCode`/heap serialization**
+(ReadyToRun proper) — 0.7 ms upside, a binary format + relocation story
+downside. (2) **Making expansion itself fast** — the right long-term lever
+(it speeds every `require`/reload) but it's the same VM-on-allocation-heavy
+frontier as `pipeline`/`nqueens`, not a startup-sized job; the cache is
+orthogonal and doesn't remove that incentive. (3) **Shipping the expanded
+prelude inside the binary at build time** — build.rs would need a bootstrapped
+interpreter (chicken-and-egg) and every `cargo build` would pay the expansion.
+
+**Consequences.** First boot after a rebuild pays ~38 ms (source boot + cache
+write, the write itself trivial); every later boot is ~6.5 ms. The cache
+directory is a plain-text mirror of the expanded prelude — useful for
+debugging expansion itself. If the printer/reader ever disagree on a form the
+cache silently degrades to source boots (correct, just slower), so printer
+regressions can't corrupt semantics.
