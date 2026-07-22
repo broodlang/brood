@@ -400,6 +400,22 @@ const P2_REVALIDATE_STRIDE: u32 = 64;
 /// sitting far above real build working sets (~8M objects ≈ a few hundred MB).
 const NURSERY_MAX: usize = 8 * 1024 * 1024;
 
+/// Deep-value guard for the recursive heap walkers (`promote_in`, the GC
+/// `flush_value`, `equal`, `hash_value_into`): each recurses per **car**-nesting
+/// level (their cdr spines are already iterative), so a deep-but-legal immutable
+/// value — a 60k-deep nested list is just data — overflowed the native stack
+/// (found 2026-07-19/20 by the iolist deep-nesting test; CI SIGABRT). Each
+/// recursion entry checks the remaining stack and, inside the red zone, grows in
+/// a heap-backed segment (`stacker::maybe_grow`, rustc's own approach) instead
+/// of overflowing. Cost when not growing: one thread-local read + compare per
+/// level. The alternative — rewriting four bottom-up builders as explicit
+/// two-phase stack machines — was rejected as far more complexity for the same
+/// guarantee.
+const WALKER_RED_ZONE: usize = 64 * 1024;
+/// Segment size for a deep-walker stack grow — large enough that even a
+/// million-deep value grows a handful of times, small enough to stay cheap.
+const WALKER_STACK_CHUNK: usize = 1024 * 1024;
+
 fn major_growth() -> usize {
     static G: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *G.get_or_init(|| {
@@ -3854,6 +3870,13 @@ impl Heap {
     /// acyclic by construction (immutable, built bottom-up), so they aren't
     /// forwarded — they just recurse through `fwd` to reach any closures inside.
     fn promote_in(&self, v: Value, fwd: &mut PromoteForward) -> Value {
+        // Deep-car-nesting guard — see `WALKER_RED_ZONE`.
+        stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+            self.promote_in_grown(v, fwd)
+        })
+    }
+
+    fn promote_in_grown(&self, v: Value, fwd: &mut PromoteForward) -> Value {
         match v.unpack() {
             ValueRef::Str(id) if id.region() == LOCAL => {
                 let s = self.string(id).to_string();
@@ -4585,6 +4608,25 @@ impl Heap {
     }
 
     fn hash_value_into<H: std::hash::Hasher>(&self, v: Value, h: &mut H) {
+        // Deep-car-nesting guard — see `WALKER_RED_ZONE`. Scalars never recurse,
+        // so skip the check for them (the common map/table key).
+        if matches!(
+            v.unpack(),
+            ValueRef::Nil
+                | ValueRef::Bool(_)
+                | ValueRef::Int(_)
+                | ValueRef::Float(_)
+                | ValueRef::Sym(_)
+                | ValueRef::Keyword(_)
+        ) {
+            return self.hash_value_into_grown(v, h);
+        }
+        stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+            self.hash_value_into_grown(v, h)
+        })
+    }
+
+    fn hash_value_into_grown<H: std::hash::Hasher>(&self, v: Value, h: &mut H) {
         use std::hash::{Hash, Hasher};
         // A leading byte tags the variant so a `Sym(0)` and an `Int(0)` never
         // collide on the *exact* same hash by accident.
@@ -4820,6 +4862,26 @@ impl Heap {
     }
 
     pub fn equal(&self, a: Value, b: Value) -> bool {
+        // Fast path: identical immediates/handles (and the common scalar pairs)
+        // never need the guard; only compound shapes recurse. Checking here
+        // keeps the per-call cost of the deep-nesting guard off the hot
+        // scalar-compare path (map/table lookups hash to scalars mostly).
+        match (a.unpack(), b.unpack()) {
+            (ValueRef::Int(x), ValueRef::Int(y)) => return x == y,
+            (ValueRef::Sym(x), ValueRef::Sym(y)) => return x == y,
+            (ValueRef::Keyword(x), ValueRef::Keyword(y)) => return x == y,
+            (ValueRef::Nil, ValueRef::Nil) => return true,
+            (ValueRef::Bool(x), ValueRef::Bool(y)) => return x == y,
+            (ValueRef::Float(x), ValueRef::Float(y)) => return x == y,
+            _ => {}
+        }
+        // Deep-car-nesting guard — see `WALKER_RED_ZONE`.
+        stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+            self.equal_grown(a, b)
+        })
+    }
+
+    fn equal_grown(&self, a: Value, b: Value) -> bool {
         use Value::*; // Stage 1: -> use ValueRef::*; (matched via .unpack())
         match (a.unpack(), b.unpack()) {
             (Nil, Nil) => true,
@@ -8591,6 +8653,15 @@ pub(crate) fn stall_guard_pid(label: &'static str, pid: u64) -> Option<StallGuar
 }
 
 fn flush_value(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
+    // Deep-car-nesting guard — see `WALKER_RED_ZONE`. The GC copies live values
+    // at every collection, so a deep value must survive the walk regardless of
+    // how much native stack the collecting thread has left.
+    stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+        flush_value_grown(old, new, fwd, v)
+    })
+}
+
+fn flush_value_grown(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Value) -> Value {
     match v.unpack() {
         ValueRef::Pair(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::pair(flush_pair(old, new, fwd, id))

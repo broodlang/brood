@@ -114,6 +114,14 @@ tree-sitter-elixir = { version = "0.3", optional = true }
 # bodies lock-free while `def` appends new code (old versions never move/free —
 # in-flight calls keep running them; Erlang-style hot reload). See docs/shared-code.md.
 boxcar = "0.2"
+# Segmented stack growth (rustc's own approach) for the recursive heap walkers —
+# promote / GC flush / structural equal / hash recurse per *car* nesting level, so
+# a deep-but-legal immutable value (a 60k-deep nested list) overflowed the native
+# stack. `maybe_grow` checks remaining stack per level and grows in heap-backed
+# segments instead. The cdr spines were already iterative; making the car walks
+# fully iterative would mean rewriting four bottom-up builders as two-phase stack
+# machines — this removes that complexity instead (the CLAUDE.md crate bar).
+stacker = "0.1"
 # Atomic Arc swap for the two RUNTIME code generations (ADR-091 Stage 4). A dead
 # generation is freed by storing a fresh empty slab; readers hold a guard so the old
 # slab can't drop while in use — lock-free reads, safe whole-generation reclamation.
@@ -193,7 +201,7 @@ ropey = "1.6"
 # platforms — the irreducible "drawing, I/O" mechanism architecture.md groups
 # with the rope. The display *protocol* is Brood data (a vector of render ops);
 # the `term-*` primitives are just the in-process frontend that paints it, so a
-# remote/web frontend can implement the identical protocol later.
+# remote frontend can implement the identical protocol later.
 crossterm = "0.29"
 # TLS for `https` (ADR-062): rustls is pure-Rust (no system OpenSSL). webpki-roots
 # bundles the Mozilla CA set, so no system trust store is needed. The socket layer

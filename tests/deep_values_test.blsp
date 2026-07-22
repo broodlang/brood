@@ -1,0 +1,29 @@
+;; Deep-but-legal values (a 60k-deep nested list is just immutable data) must
+;; survive every kernel walker. The walkers recurse per *car*-nesting level
+;; (cdr spines are iterative); since 2026-07-20 each recursion entry grows the
+;; native stack in heap-backed segments (`stacker::maybe_grow`) instead of
+;; overflowing — this file pins that for promote (`def`), GC flush, structural
+;; equality, and hashing (map keys). Each test body runs in its own green
+;; process, so the depths here also prove the guard works on worker stacks.
+(defmodule deep-values-test (:use test))
+
+(defn build (n acc) (if (< n 1) acc (build (- n 1) (list acc))))
+(defn churn (i) (if (< i 1) :done (do (reverse (range 100)) (churn (- i 1)))))
+
+;; def at module load → promoted into the shared RUNTIME region (the walker
+;; that overflowed first in the wild — a 60k-deep `def` died at the def).
+(def *deep-global* (build 60000 (list "x")))
+
+(describe "deep values survive the kernel walkers"
+  (test "promote: the 60k-deep def'd global is intact"
+    (is (= (count *deep-global*) 1)))
+  (test "GC flush: a deep young value survives collections while live"
+    (let (deep (build 30000 (list "y")))
+      (churn 300)
+      (is (= (count deep) 1))))
+  (test "structural equality on two 30k-deep values"
+    (is (= (build 30000 (list "z")) (build 30000 (list "z"))))
+    (refute (= (build 30000 (list "z")) (build 30000 (list "w")))))
+  (test "a deep value works as a map key (hashing)"
+    (let (k (build 20000 (list "k")))
+      (is (= (get {k :hit} k) :hit)))))
