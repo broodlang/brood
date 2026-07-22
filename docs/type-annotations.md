@@ -103,6 +103,13 @@ an over-approximated-but-precise type narrowed to `never` genuinely proves the
 branch dead. A negative test that *deliberately* writes a dead clause opts out
 with `(check-allow :unreachable-clause …)`.
 
+**`:unbound` (ADR-145).** `(check-allow :unbound …)` suppresses the
+unbound-symbol lints over the wrapped forms — for globals defined at
+*runtime* that the source checker cannot see: an `eval`-driven `def`, the
+wasm `use-native` binding (which defines a Brood fn per component export at
+load time). The one lint whose ground truth is the live image rather than
+the source; everywhere else, prefer fixing the reference.
+
 **`&optional` params (ADR-127).** `(sig f (int &optional string -> int))`
 declares `f`'s second argument as optional, mirroring a closure's own
 `(a &optional b)` shape; combine with a trailing `& rest` for all three

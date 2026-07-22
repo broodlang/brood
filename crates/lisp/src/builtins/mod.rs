@@ -2264,6 +2264,40 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![any, any], int),
         offload_start,
     );
+    // WASM component interop (ADR-071/145, feature `wasm`): the sandboxed
+    // native-extension host. Policy — file loading, `use-native` binding —
+    // lives in std/wasm.blsp.
+    #[cfg(feature = "wasm")]
+    {
+        def(
+            heap,
+            "%wasm-load",
+            Arity::exact(1),
+            Sig::new(vec![any], int),
+            wasm_load,
+        );
+        def(
+            heap,
+            "%wasm-call",
+            Arity::exact(3),
+            Sig::new(vec![int, string, any], any),
+            wasm_call,
+        );
+        def(
+            heap,
+            "%wasm-exports",
+            Arity::exact(1),
+            Sig::new(vec![int], any),
+            wasm_exports,
+        );
+        def(
+            heap,
+            "%wasm-close",
+            Arity::exact(1),
+            Sig::new(vec![int], nil_ty),
+            wasm_close,
+        );
+    }
     def(
         heap,
         "self",

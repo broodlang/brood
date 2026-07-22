@@ -21,7 +21,7 @@ loom-model = []
 # `cargo build`/`cargo test`/rust-analyzer and the shipped `brood`/`nest` binaries.
 # The lean `nest release` bundle and unsupported hosts strip it via
 # `--no-default-features` (then re-add what they need), same as `dev-tools`/`treesit`.
-default = ["dev-tools", "treesit", "jit"]
+default = ["dev-tools", "treesit", "jit", "wasm"]
 # Dev/tooling surface baked into the runtime: the test framework (`test`), the
 # process observer (`observer`), the agent/doc/hot-reload tooling (`mcp`/`docs`/
 # `reload`), the interactive REPL (`repl`/`lineedit`), and the GC debug builtins
@@ -93,6 +93,13 @@ treesit-elixir = ["treesit", "dep:tree-sitter-elixir"]
 # Convenience bundle: every demo grammar. The test suite + `make install` build
 # with this so the grammar-dependent tests run and a shipped editor keeps Ruby/Elixir.
 treesit-grammars = ["treesit-ruby", "treesit-elixir"]
+# WASM component interop (ADR-071/145): the embedded `wasmtime` host behind the
+# `%wasm-*` primitives — packages ship sandboxed native code as hash-pinned
+# `.wasm` data, never kernel code. Default-on like `jit`; `--no-default-features`
+# builds (lean bundles, unsupported hosts) skip the engine entirely. The engine
+# is compiled in exactly once — adding/updating a native extension never
+# rebuilds the runtime (docs/interop.md).
+wasm = ["dep:wasmtime"]
 
 [dependencies]
 # Allocator backend for the counting global allocator (core/alloc.rs). Brood is a
@@ -267,6 +274,7 @@ cranelift-jit = { version = "0.133", optional = true }
 cranelift-module = { version = "0.133", optional = true }
 cranelift-codegen = { version = "0.133", optional = true }
 cranelift-frontend = { version = "0.133", optional = true }
+wasmtime = { version = "47.0.2", default-features = false, features = ["runtime", "component-model", "cranelift", "wat"], optional = true }
 
 # uid/gid → owner/group name resolution for `file-stat`'s `ls -l`-style listing
 # (getpwuid/getgrgid). Unix-only; already in the dependency tree (transitive).

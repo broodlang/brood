@@ -1,0 +1,71 @@
+;; std/wasm.blsp — WASM component interop, the Brood layer (ADR-071/145).
+;; (require 'wasm).
+;;
+;; A **component** is sandboxed native code: hash-pinned `.wasm` data a package
+;; ships, instantiated by the embedded wasmtime host — linear memory only (it
+;; cannot touch the Brood heap), no capabilities wired (pure compute in this
+;; slice), fuel-metered (a runaway guest is a catchable error, never a wedged
+;; worker). Values marshal across the boundary by the export's WIT types
+;; (ints/floats/bools/strings/chars, lists, tuples, options; results lift
+;; records → maps, variants → tagged vectors, enums → keywords, and a WIT
+;; `result` error raises).
+;;
+;; An instance is MUTABLE STATE, so it follows the language's rule for mutable
+;; state: an opaque handle behind primitives — never a `Value` you can `send`.
+;; Share one by giving it to a process and talking to that process by message.
+;;
+;; Mechanism is the `%wasm-*` primitives; this module is the policy: file
+;; loading, ergonomic calls, and `use-native` — the "use Rustler" moment that
+;; binds every export as an ordinary Brood function.
+
+(require 'file)
+
+(defmodule wasm
+  "WASM component interop (ADR-071/145): load sandboxed native components and
+call their exports as ordinary functions. `wasm-load` a `.wasm` (or WAT text
+via `wasm-instantiate`), `wasm-call` its exports, or `use-native` to bind every
+export as a named Brood function. Calls are fuel-metered and sandboxed; long
+calls go through the dirty-offload pool (`wasm-call-blocking`)."
+  (:use file))
+
+(defn wasm-load (path)
+  "Instantiate the compiled WASM component at `path` (a `.wasm` file). Returns
+an instance handle for `wasm-call`/`use-native`; `wasm-close` frees it."
+  (%wasm-load (slurp-bytes path)))
+
+(defn wasm-instantiate (source)
+  "Instantiate a WASM component from in-memory `source`: a `bytes` value (a
+compiled component) or a string of WAT text — the REPL/testing path."
+  (%wasm-load source))
+
+(defn wasm-exports (inst)
+  "The instance's exported functions, as a vector of `[name arity]` pairs."
+  (%wasm-exports inst))
+
+(defn wasm-call (inst name & args)
+  "Call export `name` (a string) of `inst` with `args`, marshalled by the
+export's WIT parameter types. Runs inline, fuel-capped — for short compute.
+A trap (including out-of-fuel) raises a catchable error."
+  (%wasm-call inst name (into [] args)))
+
+(defn wasm-call-blocking (inst name & args)
+  "Like `wasm-call`, but on the dirty-offload OS pool (ADR-144): only this
+process waits, never a scheduler worker. For long-running guest calls."
+  (offload %wasm-call inst name (into [] args)))
+
+(defn wasm-close (inst)
+  "Drop `inst`: the sandbox and everything the guest owns is freed. Idempotent."
+  (%wasm-close inst))
+
+(defn use-native (inst)
+  "Bind every export of `inst` as a global Brood function of the same name —
+the `use Rustler` moment, driven by the component's own interface. Returns the
+list of names bound. The bindings are ordinary `def`s (hot-reloadable); each
+calls the export inline — wrap with `wasm-call-blocking` yourself for exports
+that run long."
+  (map (fn (e)
+         (let (name (first e))
+           (eval (list 'defn (string->symbol name) '(& args)
+                   (list '%wasm-call inst name '(into [] args))))
+           (string->symbol name)))
+    (wasm-exports inst)))

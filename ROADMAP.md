@@ -529,12 +529,17 @@ Runtime housekeeping (both items landed):
   hierarchical module names shipped; the model is batteries-included (frameworks ship
   in the default install, not fetched). ⬜ Next: a future GUI framework ships bundled
   too; gated on the first real consumer.
-- ⬜ **Native interop — WASM components** (ADR-071, [`docs/interop.md`](docs/interop.md))
-  — a package ships native code as a `:native` WASM component built from source at
-  fetch time, hash-pinned in the lock, cached under `_deps/`, instantiated sandboxed
-  via embedded `wasmtime`; a `use-native` macro (WIT-driven) binds exports. Needs the
-  package manager and the M4 blocking-offload pool first; realistically lands during
-  M2+ editor-plugin work.
+- 🟡 **Native interop — WASM components** (ADR-071/145,
+  [`docs/interop.md`](docs/interop.md)). ✅ **Slice 1 shipped 2026-07-22
+  (ADR-145): the sandboxed host.** Embedded `wasmtime` (default-on `wasm`
+  feature), `%wasm-load`/`%wasm-call`/`%wasm-exports`/`%wasm-close` with
+  WIT-typed marshalling + fuel metering, `std/wasm.blsp` (`wasm-load`,
+  `wasm-call`, `wasm-call-blocking` on the ADR-144 pool, `use-native` binding
+  every export as a Brood fn), the `:unbound` checker category, and
+  toolchain-free WAT-component tests. ⬜ Remaining slices: the
+  package-manager `:native` manifest/lock/build-on-fetch integration
+  (`%wasm-build`), WASI capability grants, guest `resource` handles, epoch
+  preemption, blob zero-copy.
 
 ### VM & JIT
 

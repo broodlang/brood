@@ -277,8 +277,10 @@ for variadic tails."
   value)
 (defmacro check-allow (category & body)
   "Suppress an advisory checker lint over the wrapped forms. `category` is a
-keyword: `:non-tail-recursion`, `:unreachable-clause`, or `:type-mismatch`. A
-runtime no-op; the marker is read only by the type checker (`nest check`)."
+keyword: `:non-tail-recursion`, `:unreachable-clause`, `:type-mismatch`, or
+`:unbound` (globals defined at runtime — an `eval`-driven `def`, the wasm
+`use-native` binding — that the checker cannot see in source). A runtime
+no-op; the marker is read only by the type checker (`nest check`)."
   `(%lint-allow ~category (do ~@body)))
 
 ;; ---- runtime contracts: `(sig! …)` enforces a signature at call time --------

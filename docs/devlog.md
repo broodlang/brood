@@ -5766,3 +5766,44 @@ clean, `nest check` zero warnings. (Separate, noted not fixed: boot garbage
 is *frozen into* the shared prelude region — a size cost, not a correctness
 one; a compacting freeze would need handle rewriting and is not worth it
 until the prelude's frozen size matters.)
+
+## 2026-07-22 — Validation pass over the day's kernel changes
+
+The reactor (ADR-143), offload pool (ADR-144), and freeze fix all cleared
+the full arsenal: **`make stress` 32/32** (3-oracle differential program
+fuzzer 25 seeds × 4 configs, chaos preemption, GC-stress passes,
+checker-soundness corpus, cross-language table digest, 1500 adversarial
+reader inputs), and a **reactor scale soak** the suite doesn't attempt —
+one `serve-loop`, 400 then **1000 concurrent `http-get` clients** in one
+runtime (both ends green processes), **zero failures** at both scales
+(~0.9 s / ~3.7 s wall in a debug build; the old model would have needed
+~2N OS threads — the reactor runs it on one poll thread + the worker
+pool).
+
+## 2026-07-22 — WASM component interop, slice 1 (ADR-145): sandboxed native extensions
+
+The ADR-071 design note becomes running code — the biggest remaining
+capability item, unblocked by yesterday's offload pool. The kernel embeds
+`wasmtime` (Component Model, fuel metering) behind a default-on `wasm`
+feature (the `jit` precedent): `%wasm-load` instantiates a component from
+bytes or WAT text, `%wasm-call` calls an export with args marshalled by the
+export's OWN WIT parameter types (ints range-checked per width, floats,
+bools, chars, strings, lists, tuples, options; results lift records→maps,
+variants→tagged vectors, enums→keywords, WIT `result` errors raise),
+`%wasm-exports`/`%wasm-close` round it out. A runaway guest hits the fuel
+cap and raises a catchable error — the sandbox holds by construction (linear
+memory only; no WASI wired: pure compute, deny-everything). An instance is
+an opaque token (mutable state → handle behind primitives, never a sendable
+Value); calls serialize per instance; `%wasm-call` is offload-allowed so a
+long guest call parks the process, not a worker. Policy is `std/wasm.blsp`:
+`wasm-load`/`wasm-instantiate`/`wasm-call`/`wasm-call-blocking`/`wasm-exports`/
+`wasm-close` and **`use-native`** — every export `def`d as an ordinary Brood
+fn, no hand-written stubs. En route the checker gained the
+**`(check-allow :unbound …)`** category (runtime-defined globals the source
+checker can't see — exactly what `use-native` produces). Tests are
+hand-written **WAT components** (wasmtime parses WAT — no toolchain needed):
+scalars, a memory+realloc guest proving strings (incl. UTF-8) and
+`list<s32>` cross the canonical ABI byte-faithfully, the fuel-meter trap,
+error paths, `use-native`, 8-process concurrent calls, an offloaded call —
+11/11. Deferred slices per the ADR: package-manager `:native` integration,
+WASI grants, guest resources, epoch preemption, blob zero-copy.

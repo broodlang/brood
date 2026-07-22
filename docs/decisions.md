@@ -8934,3 +8934,46 @@ long tail the `BROOD_STALL_MS` tracer was built to find.
 **Also unlocked.** The ADR-071 WASM interop story listed the offload pool as
 its gate (a sandboxed component call is a long native); that gate is now
 open.
+
+## ADR-145 — WASM component interop, slice 1: the sandboxed native-extension host
+
+**Decision.** ADR-071 (proposed 2026-05-30, docs/interop.md) moves to
+**accepted and partially implemented**. The kernel embeds `wasmtime`
+(Component Model + Cranelift, fuel metering on) behind a **default-on `wasm`
+cargo feature** (the `jit` precedent; `--no-default-features` strips the
+engine). Slice 1 is the runtime capability:
+
+- **Primitives** (mechanism): `%wasm-load` (bytes of a compiled component or
+  WAT text → instance token), `%wasm-call` (export by name, args marshalled
+  by the export's own WIT parameter types, **fuel-capped** — a runaway guest
+  traps to a catchable error), `%wasm-exports`, `%wasm-close`. Marshalling:
+  ints (range-checked per WIT width), floats, bools, chars, strings, lists,
+  tuples, options lower; results additionally lift records → keyword maps,
+  variants → tagged vectors, enums → keywords, and a WIT `result` error
+  raises. No WASI is wired — **pure compute, deny-everything** in this slice.
+- **An instance is mutable state** and follows the language's rule for it: an
+  opaque token behind primitives, never a sendable `Value`. Calls serialize
+  per instance (the store is single-threaded, a mutex enforces it);
+  instances are independent. `%wasm-call` is on the ADR-144 offload
+  allowlist — a long guest call parks the process, not a worker.
+- **Policy in Brood** (`std/wasm.blsp`): `wasm-load` (file) /
+  `wasm-instantiate` (in-memory), `wasm-call`, `wasm-call-blocking` (offload),
+  `wasm-exports`, `wasm-close`, and **`use-native`** — the `use Rustler`
+  moment: every component export `def`d as an ordinary (hot-reloadable) Brood
+  function, driven by the component's own interface, no hand-written stubs.
+- **Checker**: a new `(check-allow :unbound …)` category — `use-native`'s
+  bindings are runtime `def`s the source checker cannot see; the category
+  exists for exactly that class (ground truth = the live image).
+
+**Tests without a toolchain.** `wasmtime` parses WAT text directly, so the
+suite's guests are hand-written WAT components (`tests/wasm_test.blsp`) —
+including a memory+realloc component that proves strings and `list<s32>`
+cross the canonical ABI byte-faithfully, and a spin loop the fuel meter
+kills. No wasm toolchain is needed to build or test Brood.
+
+**Deferred to later slices** (the rest of docs/interop.md): the
+package-manager `:native` manifest/lock/build-on-fetch integration
+(`%wasm-build`), WASI capability grants (deny-by-default stays until then),
+guest `resource` handles (opaque stateful guest objects), epoch-based
+preemption of in-flight calls, and `Value::Bytes` zero-copy into linear
+memory.

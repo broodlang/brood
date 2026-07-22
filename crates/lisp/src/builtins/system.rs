@@ -725,6 +725,11 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
     ("json", include_str!("../../../../std/json.blsp")),
+    // WASM component interop (ADR-071/145): load sandboxed native components,
+    // call exports (marshalled by WIT types), `use-native` binding. Policy over
+    // the `%wasm-*` primitives (feature `wasm`; without it the primitives are
+    // unbound and requiring this module errors clearly). Opt-in.
+    ("wasm", include_str!("../../../../std/wasm.blsp")),
     // Supervised node auto-reconnect (dist self-healing): `watch` keeps a peer
     // link alive with exponential-backoff `(connect …)` retries; subscribers get
     // [:nodeup]/[:nodedown]. Pure Brood over connect/monitor-node/nodes. Opt-in.
@@ -2648,6 +2653,10 @@ const OFFLOAD_ALLOWED: &[&str] = &[
     "spit-append",
     "append-bytes",
     "tls-self-signed",
+    // A long guest call is exactly what the pool is for (docs/interop.md):
+    // the handle is an int token, args/results are data, and the instance
+    // registry is global with a per-instance mutex — off-worker is sound.
+    "%wasm-call",
 ];
 
 struct OffloadJob {
@@ -2769,4 +2778,70 @@ pub(super) fn offload_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     };
     let _ = offload_pool().lock().expect("offload queue").send(job);
     Ok(Value::Int(token))
+}
+
+// ---------- WASM component interop (ADR-071/145, feature `wasm`) ----------
+
+/// `(%wasm-load content)` — instantiate a sandboxed WASM component from
+/// `content`: a `bytes` value (a compiled `.wasm` component) or a string (WAT
+/// text — handy for tests and the REPL). Returns the instance token.
+#[cfg(feature = "wasm")]
+pub(super) fn wasm_load(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let bytes: Vec<u8> = match arg(args, 0) {
+        Value::Bytes(id) => heap.bytes(id).as_bytes().to_vec(),
+        Value::Str(id) => heap.string(id).as_bytes().to_vec(),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%wasm-load",
+                "bytes (a compiled .wasm component) or string (WAT source)",
+                other,
+            ))
+        }
+    };
+    crate::wasm::load(&bytes).map(|id| Value::Int(id as i64))
+}
+
+/// `(%wasm-call inst name args)` — call export `name` of instance `inst` with
+/// `args` (a vector), marshalled by the export's WIT types. Fuel-metered.
+#[cfg(feature = "wasm")]
+pub(super) fn wasm_call(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_int(heap, "%wasm-call", arg(args, 0))? as u64;
+    let name = expect_string(heap, "%wasm-call", arg(args, 1))?.to_string();
+    let call_args: Vec<Value> = match arg(args, 2) {
+        Value::Vector(vid) => heap.vector(vid).to_vec(),
+        Value::Nil => Vec::new(),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%wasm-call",
+                "vector of arguments",
+                other,
+            ))
+        }
+    };
+    crate::wasm::call(heap, id, &name, &call_args)
+}
+
+/// `(%wasm-exports inst)` — the instance's exported functions, as a vector of
+/// `[name arity]` pairs (sorted by name).
+#[cfg(feature = "wasm")]
+pub(super) fn wasm_exports(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_int(heap, "%wasm-exports", arg(args, 0))? as u64;
+    let entries = crate::wasm::exports(id)?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (name, arity) in entries {
+        let n = heap.alloc_string(&name);
+        out.push(heap.alloc_vector(vec![n, Value::Int(arity as i64)]));
+    }
+    Ok(heap.alloc_vector(out))
+}
+
+/// `(%wasm-close inst)` — drop the instance (idempotent); the sandbox and
+/// everything the guest owns is freed. Returns nil.
+#[cfg(feature = "wasm")]
+pub(super) fn wasm_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_int(heap, "%wasm-close", arg(args, 0))? as u64;
+    crate::wasm::close(id);
+    Ok(Value::nil())
 }

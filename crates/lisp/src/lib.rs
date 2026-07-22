@@ -70,6 +70,8 @@ pub mod profile; // sampling CPU profiler over the VM's reified frames (observab
 pub mod table; // in-memory shared table — Brood's ETS (ADR-107): a sendable handle into a global store of deep clones
 pub mod text_width; // grapheme-cluster display-cell width (the `display-width` builtin + the GUI grid)
 pub mod treesit; // optional tree-sitter parsing for foreign languages (feature "treesit") — ROADMAP §C
+#[cfg(feature = "wasm")]
+pub mod wasm; // WASM component interop host (ADR-071/145); policy lives in std/wasm.blsp
 
 use std::sync::{Arc, LazyLock};
 

@@ -277,6 +277,8 @@ fn lint_allow_mask(category: Option<Value>) -> u8 {
         super::ctx::SUPPRESS_UNREACHABLE
     } else if value::symbol_is(k, "type-mismatch") {
         super::ctx::SUPPRESS_TYPE_MISMATCH
+    } else if value::symbol_is(k, "unbound") {
+        super::ctx::SUPPRESS_UNBOUND
     } else {
         0
     }
@@ -372,7 +374,7 @@ fn check_value_leaf(
         return;
     }
     if let Value::Sym(s) = form {
-        if is_unbound(heap, ctx, s) {
+        if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
             out.push((heap.form_pos_only(parent), unbound_msg(&name_of(s))));
         }
     }
@@ -749,7 +751,7 @@ pub(super) fn check_into(
         // `is_syntactic_keyword` is the one piece that still wants the
         // spelling — but only when every other short-circuit has failed.
         // Compute it lazily.
-        if is_unbound(heap, ctx, s) {
+        if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
             out.push((heap.form_pos_only(form), unbound_msg(&name_of(s))));
             // Still recurse into args below — they may carry their own issues.
         }

@@ -1715,6 +1715,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/csv.blsp` | `'csv` | CSV parse and emit: `csv-parse`, `csv-parse-maps`, `csv-emit`, `csv-emit-maps` |
 | `std/uuid.blsp` | `'uuid` | UUID generation: `uuid-v4` (random), `uuid-v7` (time-ordered, RFC 9562), `uuid-nil`, `uuid?` |
 | `std/template.blsp` | `'template` | `{{var}}` string templating: `render`, `render-all` |
+| `std/wasm.blsp` | `'wasm` | WASM component interop (ADR-071/145): `wasm-load`/`wasm-instantiate` a sandboxed component, `wasm-call` its exports (marshalled by WIT types, fuel-metered), `wasm-call-blocking` (the offload pool), `use-native` (bind every export as a Brood fn), `wasm-exports`, `wasm-close` |
 | `std/queue.blsp` | `'queue` | Purely functional FIFO queue and min-priority queue |
 | `std/multimap.blsp` | `'multimap` | Multi-valued map (one key → multiple values) |
 | `std/hash.blsp` | `'hash` | `sha256`/`sha1`/`sha384`/`sha512`/`md5` (hex over strings or byte vectors), raw-byte digests (`sha256-raw` … → byte vectors, for chaining over bytes), `bytes->hex` (byte seq → lowercase hex), `hmac-sha256` (RFC 2104) and raw-byte `hmac-sha256-raw`/`-sha1-raw`/`-sha512-raw` (byte-vector key+msg → byte vector, for binary-protocol auth), `hash-string` (djb2). All Brood over two Rust prims (`%digest`/`%hmac`). |

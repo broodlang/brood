@@ -191,6 +191,11 @@ pub(super) const SUPPRESS_UNREACHABLE: u8 = 1 << 1;
 /// declared type. Deliberately-wrong code under test (a negative test proving a
 /// `sig!` runtime contract throws) suppresses it with `(check-allow :type-mismatch …)`.
 pub(super) const SUPPRESS_TYPE_MISMATCH: u8 = 1 << 2;
+/// `(check-allow :unbound …)` — the wrapped forms reference globals the checker
+/// cannot see because they are defined at *runtime* (`eval`-driven `def`s: the
+/// wasm `use-native` binding, a plugin loader). The one lint whose ground truth
+/// is the live image, not the source.
+pub(super) const SUPPRESS_UNBOUND: u8 = 1 << 3;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).

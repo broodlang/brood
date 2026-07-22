@@ -1,12 +1,20 @@
 # Native interop: WASM components, shipped and built with packages
 
-> **Status:** design note (2026-05-30). Backs **ADR-071** (proposed). Nothing
-> here is implemented yet. This is the long-term answer to "how does a Brood
-> package use code from another ecosystem (or ship a perf-critical native
-> kernel) without forking the Rust kernel?" The short answer: **a package may
-> ship a WebAssembly component; the package manager builds/fetches it and pins
-> it in the lock file; the runtime instantiates it sandboxed and surfaces its
-> exports through a Brood wrapper module.**
+> **Status:** design note (2026-05-30); **slice 1 implemented 2026-07-22
+> (ADR-145)** — the embedded `wasmtime` host (feature `wasm`, default-on),
+> the `%wasm-load`/`%wasm-call`/`%wasm-exports`/`%wasm-close` primitives with
+> WIT-typed marshalling and fuel metering, `std/wasm.blsp` (`wasm-load`,
+> `wasm-call`, `wasm-call-blocking` via the ADR-144 offload pool,
+> `use-native`), and the `:unbound` checker category for runtime-defined
+> bindings. Still ahead (the rest of this note): the package-manager
+> `:native` manifest/lock/build-on-fetch integration, WASI capability
+> grants, guest `resource` handles, and blob zero-copy. This is the
+> long-term answer to "how does a Brood package use code from another
+> ecosystem (or ship a perf-critical native kernel) without forking the Rust
+> kernel?" The short answer: **a package may ship a WebAssembly component;
+> the package manager builds/fetches it and pins it in the lock file; the
+> runtime instantiates it sandboxed and surfaces its exports through a Brood
+> wrapper module.**
 
 ## The hard guarantee: zero kernel recompilation
 

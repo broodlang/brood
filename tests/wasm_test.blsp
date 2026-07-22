@@ -1,0 +1,151 @@
+;; WASM component interop (ADR-071/145): sandboxed native extensions via the
+;; embedded wasmtime host. The guests here are hand-written WAT components
+;; (wasmtime parses WAT directly), so the suite needs no wasm toolchain.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule wasm-test (:use test) (:use wasm))
+
+;; A component exporting scalar math: add(s32,s32)->s32 and scale(f64,f64)->f64.
+(def *scalars-wat*
+  "(component
+     (core module $m
+       (func (export \"add\") (param i32 i32) (result i32)
+         local.get 0 local.get 1 i32.add)
+       (func (export \"scale\") (param f64 f64) (result f64)
+         local.get 0 local.get 1 f64.mul))
+     (core instance $i (instantiate $m))
+     (func $add (param \"a\" s32) (param \"b\" s32) (result s32)
+       (canon lift (core func $i \"add\")))
+     (func $scale (param \"x\" float64) (param \"y\" float64) (result float64)
+       (canon lift (core func $i \"scale\")))
+     (export \"add\" (func $add))
+     (export \"scale\" (func $scale)))")
+
+;; A component with memory + realloc: echo(string)->string (identity — the
+;; host lowers the argument into linear memory via realloc; echo returns a
+;; (ptr,len) pair pointing at it) and sum(list<s32>)->s32 (walks the lowered
+;; list in memory).
+(def *memory-wat*
+  "(component
+     (core module $m
+       (memory (export \"mem\") 1)
+       (global $next (mut i32) (i32.const 1024))
+       (func (export \"realloc\") (param i32 i32 i32 i32) (result i32)
+         (local $p i32)
+         global.get $next
+         local.set $p
+         global.get $next
+         local.get 3
+         i32.add
+         global.set $next
+         local.get $p)
+       (func (export \"echo\") (param i32 i32) (result i32)
+         (i32.store (i32.const 16) (local.get 0))
+         (i32.store (i32.const 20) (local.get 1))
+         (i32.const 16))
+       (func (export \"sum\") (param i32 i32) (result i32)
+         (local $acc i32) (local $i i32)
+         (block $done
+           (loop $loop
+             (br_if $done (i32.ge_u (local.get $i) (local.get 1)))
+             (local.set $acc
+               (i32.add (local.get $acc)
+                 (i32.load (i32.add (local.get 0)
+                             (i32.mul (local.get $i) (i32.const 4))))))
+             (local.set $i (i32.add (local.get $i) (i32.const 1)))
+             (br $loop)))
+         (local.get $acc)))
+     (core instance $i (instantiate $m))
+     (func $echo (param \"s\" string) (result string)
+       (canon lift (core func $i \"echo\") (memory $i \"mem\")
+         (realloc (func $i \"realloc\"))))
+     (func $sum (param \"xs\" (list s32)) (result s32)
+       (canon lift (core func $i \"sum\") (memory $i \"mem\")
+         (realloc (func $i \"realloc\"))))
+     (export \"echo\" (func $echo))
+     (export \"sum\" (func $sum)))")
+
+;; A component whose export loops forever — the fuel meter must trap it.
+(def *spin-wat*
+  "(component
+     (core module $m
+       (func (export \"spin\") (loop $l (br $l))))
+     (core instance $i (instantiate $m))
+     (func $spin (canon lift (core func $i \"spin\")))
+     (export \"spin\" (func $spin)))")
+
+(describe "wasm: scalar exports round-trip"
+  (test "s32 add and f64 scale"
+    (let (inst (wasm-instantiate *scalars-wat*))
+      (assert= (wasm-call inst "add" 2 40) 42)
+      (assert= (wasm-call inst "scale" 2.5 4.0) 10.0)
+      (wasm-close inst)))
+  (test "exports are introspectable as [name arity]"
+    (let (inst (wasm-instantiate *scalars-wat*))
+      (assert= (wasm-exports inst) [["add" 2] ["scale" 2]])
+      (wasm-close inst)))
+  (test "an s32 out-of-range argument is a clean error, not a wrap"
+    (let (inst (wasm-instantiate *scalars-wat*))
+      (is (= (try (wasm-call inst "add" 5000000000 1) (catch e :range))
+            :range))
+      (wasm-close inst))))
+
+(describe "wasm: strings and lists cross the canonical ABI"
+  (test "a string round-trips through guest linear memory"
+    (let (inst (wasm-instantiate *memory-wat*))
+      (assert= (wasm-call inst "echo" "hello from the brood") "hello from the brood")
+      ;; non-ASCII UTF-8 crosses byte-faithfully
+      (assert= (wasm-call inst "echo" "héllo ☃") "héllo ☃")
+      (wasm-close inst)))
+  (test "a list<s32> lowers from a vector or a list"
+    (let (inst (wasm-instantiate *memory-wat*))
+      (assert= (wasm-call inst "sum" [1 2 3 4 5]) 15)
+      (assert= (wasm-call inst "sum" (list 10 20 30)) 60)
+      (assert= (wasm-call inst "sum" []) 0)
+      (wasm-close inst))))
+
+(describe "wasm: the sandbox holds"
+  (test "a runaway guest is stopped by the fuel meter — a catchable error"
+    (let (inst (wasm-instantiate *spin-wat*))
+      (is (= (try (wasm-call inst "spin") (catch e :trapped)) :trapped))
+      ;; the instance survives the trap for further (well-behaved) use? A
+      ;; trapped store is poisoned — a later call errors cleanly, not UB.
+      (wasm-close inst)))
+  (test "an unknown export and a closed instance are clean errors"
+    (let (inst (wasm-instantiate *scalars-wat*))
+      (is (= (try (wasm-call inst "nope" 1) (catch e :no-export)) :no-export))
+      (wasm-close inst)
+      (wasm-close inst)   ; idempotent
+      (is (= (try (wasm-call inst "add" 1 2) (catch e :closed)) :closed))))
+  (test "garbage source is a clean load error"
+    (is (= (try (wasm-instantiate "(component (bogus") (catch e :bad)) :bad))))
+
+(describe "wasm: use-native binds exports as Brood functions"
+  (test "bound names call straight through"
+    ;; `add`/`scale` are defined at RUNTIME by use-native — invisible to the
+    ;; source checker, hence :unbound (the category exists for exactly this).
+    (check-allow :unbound
+      (let (inst (wasm-instantiate *scalars-wat*))
+        (let (names (use-native inst))
+          (is (member? 'add names))
+          (assert= (add 20 22) 42)
+          (assert= (scale 3.0 3.0) 9.0))
+        (wasm-close inst)))))
+
+(describe "wasm: concurrency"
+  (test "calls from many processes serialize safely on one instance"
+    (let (inst (wasm-instantiate *scalars-wat*)
+          me (self)
+          n 8)
+      (dotimes (i n)
+        (spawn (do (send me [:r i (wasm-call inst "add" i i)]))))
+      (dotimes (_ n)
+        (receive
+          ([:r i r] (assert= r (* 2 i)))
+          (after 10000 (is false))))
+      (wasm-close inst)))
+  (test "a long call rides the offload pool (wasm-call-blocking)"
+    (let (inst (wasm-instantiate *scalars-wat*))
+      (assert= (wasm-call-blocking inst "add" 1000 337) 1337)
+      (wasm-close inst))))
