@@ -724,7 +724,7 @@ pub(super) fn proc_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 // The thin crossterm seam: enter/leave the alternate screen, read keys, and
 // paint a *frame* — a Brood vector of render ops. The protocol's meaning is
 // data (the ops); these primitives are the in-process frontend that interprets
-// it, so a remote/web frontend can implement the identical op vocabulary later.
+// it, so a remote frontend can implement the identical op vocabulary later.
 // Errors surface as clean `LispError`s (never a crossterm panic), mirroring the
 // rope primitives' discipline.
 

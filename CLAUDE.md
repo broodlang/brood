@@ -395,7 +395,7 @@ co-author trailer, overriding any default that would append one.
 
 ## Known next steps (see roadmap)
 
-The language core (M1) is essentially complete: macros/quasiquote, in-language
+The language core (M1) is complete: macros/quasiquote, in-language
 `try`/`catch`, maps (CHAMP trie), the string/math/sequence libraries, pattern
 matching, modules, project tooling, **dynamic variables** (`defdyn`/`binding`),
 the set-theoretic **type checker** (Steps 0–4 + Step 5 structured types — arrows,
@@ -416,13 +416,12 @@ type to the return check (`(+ x 1.5)` declared `int` → warns "yields float"). 
 e.g. `(/ x 2)` which is genuinely int-or-float): pinning it would need occurrence/range
 analysis and flagging it would false-positive, so it stays out (ADR-011).
 
-The later milestones are already underway (vertical-slice style, ADR-045/046):
-**M2 editor data model** — the `ropey`-backed `Value::Rope` kernel + the
-`std/editor/buffer.blsp` immutable-buffer framework are in; **M3 display protocol** —
+The later milestones are underway (vertical-slice style, ADR-045/046):
+**M2 editor data model is done** — the `ropey`-backed `Value::Rope` kernel + the
+`std/editor/buffer.blsp` immutable-buffer framework; **M3 display protocol** —
 `std/editor/display.blsp` render-op vocabulary + `term-*` primitives + the `nest observe`
 process viewer; **M4 server/daemon** — distributed nodes (TCP, location-transparent
 `send`, monitors, closure-shipping, HMAC handshake) plus a userland
 `std/proc/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
 roadmap/ADR-039). The editor app itself is a separate downstream project, out of
-scope for this repo and its roadmap. Still ahead here: server-mode socket serving
-and the M5 web frontend.
+scope for this repo and its roadmap. Still ahead here: server-mode socket serving.

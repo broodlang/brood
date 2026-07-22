@@ -5,7 +5,7 @@
 ;;    frontend consumes a serialisable stream of "render this" ops and emits input
 ;;    events. This module defines that op vocabulary as plain Brood **data** —
 ;;    each constructor just builds a tagged vector. The `term-*` primitives are
-;;    the in-process (crossterm) frontend that paints it; a remote or web frontend
+;;    the in-process (crossterm) frontend that paints it; a remote frontend
 ;;    would interpret the identical ops over a socket. That sameness is what makes
 ;;    "fast native locally" and "server for other instances" one code path (M3/M4).
 ;;  - Pure: every constructor returns a fresh value, no IO, no kernel surface.

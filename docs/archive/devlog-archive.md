@@ -6457,7 +6457,7 @@ session's recommended first step; resumed from another Claude profile's session.
 The render frame is **Brood data** — a vector of tagged ops (`[:clear]`, `[:text
 row col s]`, `[:text row col s face]`, `[:cursor row col]`; a face is a map of
 `:fg`/`:bg`/`:bold`/`:reverse`). Rust supplies only the *frontend that paints it*:
-five `term-*` primitives over `crossterm`. So a remote/web frontend re-implements
+five `term-*` primitives over `crossterm`. So a remote frontend re-implements
 the identical ops over a socket later — the seam that makes local-fast and
 server-mode one code path. Mechanism in Rust, protocol-meaning + observer policy
 in Brood.

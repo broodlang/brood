@@ -43,7 +43,7 @@ Two commitments we make from the start, even though only the left box exists tod
 2. **The frontend is a protocol, not a library.** The display layer will emit a
    serialisable stream of "render this" operations and consume input events. The
    local native frontend implements that protocol *in-process* (the fast path);
-   a remote or web frontend implements the *identical* protocol over a socket.
+   a remote frontend implements the *identical* protocol over a socket.
    That is what lets "fast native locally" and "server for other instances" be
    the same code.
 

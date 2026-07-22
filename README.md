@@ -276,7 +276,7 @@ location-transparent `send`, remote monitors, closure-shipping, and an HMAC
 handshake. Supervision is **userland** for now (the `brood-supervisor` package
 over `spawn`/`monitor`); a kernel-supervisor was tried and reverted.
 
-The language core is essentially complete — immutable maps, in-language error
+The language core is complete — immutable maps, in-language error
 handling, pattern matching, modules, the string/math/sequence libraries,
 **dynamic variables**, an advisory set-theoretic **type checker**, a per-process
 tracing **GC**, the **package manager** (`nest add`/`fetch`/`tree`), the
@@ -284,14 +284,14 @@ tracing **GC**, the **package manager** (`nest add`/`fetch`/`tree`), the
 semantic tokens, cross-file nav) are all done — as is the bytecode VM and the
 tier-1 JIT mentioned above.
 
-The editor milestones are well underway as vertical slices: a `ropey`-backed
+The editor data model milestone is done, and display + server are well underway
+as vertical slices: a `ropey`-backed
 **rope kernel** + an immutable **buffer framework** (`std/editor/buffer.blsp`); a
 serialisable **display protocol** (`std/editor/display.blsp`) with a terminal
 frontend (and an optional native GUI window), demoed end-to-end by `nest observe`
-(a live process viewer) and `nest attach` (a thin client frontend for a daemon). The **editor app itself is a separate project**,
-`brood-edit`, which already exists and consumes this language and the
-`std/editor/*` framework. Still ahead here: full server/daemon serving and a **web
-frontend**.
+(a live process viewer) and `nest attach` (a thin client frontend for a daemon).
+The **editor app itself is a separate downstream project** that consumes this
+language and the `std/editor/*` framework. Still ahead here: full server/daemon serving.
 
 The full plan is in [`ROADMAP.md`](ROADMAP.md).
 

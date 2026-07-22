@@ -325,8 +325,7 @@ Everything except the loop is pure, so test it like any other Brood code:
 - **Remote frontend (M4 — shipped).** Your `render-frame` already emits a
   serialisable frame; a socket frontend interprets the *same* ops. Nothing in the
   editor changes — `nest attach` + `std/editor/serve.blsp` (ADR-090) are that
-  frontend today. A web frontend (M5) on the same ops is the remaining future
-  piece.
+  frontend today.
 - **Drop in a process observer.** Your editor is a runtime full of processes
   (buffers-as-processes, timers, jobs). `(require 'observe)` then bind a key/command
   to `(observe-attach)` — it brings up the full-screen process viewer over *your
