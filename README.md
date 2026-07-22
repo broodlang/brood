@@ -5,14 +5,19 @@
 > change dramatically (and break) without notice or migration path. Explore and
 > experiment freely, but don't build anything you depend on against it yet.
 
-**Brood** is a small, dynamic **Lisp implemented in Rust**, built for one
-purpose: to be the language a modern, Emacs-like text editor is *written in* —
-so that a running editor can redefine its own behaviour on the fly.
+**Brood** is a dynamic **Lisp implemented in Rust** with a deliberately small
+core — a handful of special forms under a standard library, REPL, and toolchain
+written in Brood itself. It began as the language a modern, Emacs-like,
+self-editing text editor would be written in, and grew past that intent into a
+general-purpose language and runtime: share-nothing concurrency across all
+cores, distributed nodes, a bytecode VM with a tier-1 native JIT, an advisory
+set-theoretic type checker, and batteries included. Live redefinition — a
+running program rewriting its own behaviour — remains the design center.
 
 It is an **immutable** language: data never changes once made and there is no
 local mutation (no `set!`, no `while`), so loops are recursion. The single
 exception is `def`, which rebinds a global — that *is* live redefinition, the
-whole point of an editor that can rewrite itself while running.
+whole point of a program that can rewrite itself while running.
 
 Under the Lisp sits share-nothing, message-passing concurrency: a *brood* of
 cheap, supervised processes that share nothing and talk by messages. That swarm is where
@@ -34,14 +39,13 @@ race on.
 > reference to "blsp", means **Brood-language source**, as distinct from the Rust
 > kernel.
 
-The editor app itself lives in a separate project (`brood-edit`) and already
-exists; it consumes this language and the `std/editor/*` framework. This
-repository is the **language core and runtime** — a reader, a closure-compiling
-**bytecode VM** with proper tail calls and lexical closures (with a tier-1
-**JIT** that compiles hot loops to native code), a Brood-written standard
-library, and a self-hosted REPL — plus the **concurrency** and
-**distributed-node** runtime, and the editor framework (a rope/buffer data model
-and a display protocol) those vertical slices grew into.
+This repository is **Brood** — the language and its runtime: a reader, a
+closure-compiling **bytecode VM** with proper tail calls and lexical closures
+(with a tier-1 **JIT** that compiles hot loops to native code), a Brood-written
+standard library and self-hosted REPL, the **concurrency** and
+**distributed-node** runtime, and the `std/editor/*` framework (a rope/buffer
+data model and a serialisable display protocol) for building interactive,
+self-editing applications on top.
 
 ```lisp
 (+ 1 2)                          ;=> 3
@@ -284,14 +288,12 @@ tracing **GC**, the **package manager** (`nest add`/`fetch`/`tree`), the
 semantic tokens, cross-file nav) are all done — as is the bytecode VM and the
 tier-1 JIT mentioned above.
 
-The editor data model milestone is done, and display + server are well underway
-as vertical slices: a `ropey`-backed
-**rope kernel** + an immutable **buffer framework** (`std/editor/buffer.blsp`); a
+The interactive-application stack is in as well: a `ropey`-backed **rope
+kernel** + an immutable **buffer framework** (`std/editor/buffer.blsp`), and a
 serialisable **display protocol** (`std/editor/display.blsp`) with a terminal
-frontend (and an optional native GUI window), demoed end-to-end by `nest observe`
-(a live process viewer) and `nest attach` (a thin client frontend for a daemon).
-The **editor app itself is a separate downstream project** that consumes this
-language and the `std/editor/*` framework. Still ahead here: full server/daemon serving.
+frontend (and an optional native GUI window), demoed end-to-end by `nest
+observe` (a live process viewer) and `nest attach` (a thin client frontend for
+a daemon). Still ahead here: full server/daemon serving.
 
 The full plan is in [`ROADMAP.md`](ROADMAP.md).
 

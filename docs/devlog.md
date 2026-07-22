@@ -5676,3 +5676,41 @@ binary mode now delivers `0xCF 0x80` instead of erroring); the old
 Latin-1-carrier client trick in the binary-request e2e replaced with a
 `bytes` iolist leaf. tcp/http/sse/proc/bytes files: 104/104; full suite
 green; `nest check` zero warnings.
+
+## 2026-07-22 — Identity: general-purpose language; README/CLAUDE.md/ROADMAP reframed
+
+"This is just brood now. It developed a bit more than the initial intent."
+The docs no longer frame Brood as a *small* language built solely as an
+editor substrate: it is a general-purpose language and runtime with a
+deliberately small **core** (the design principle stays), and the editor is
+origin story. README rewritten accordingly (also dropped the last stray
+reference to the old separate editor-app project).
+
+## 2026-07-22 — Tier 1 items 2+3: no read-buffer transient (ADR-142); the socket reactor (ADR-143)
+
+**ADR-142** closes the "growable read buffer" item by design: a buffer value
+is a transient (ADR-026 forbids it, permanently), and the chunk-list +
+join-once idiom is already O(n) — what was quadratic was the head reader's
+per-chunk *rescan*, now incremental (`bytes-index-of :from`, backing up
+marker−1 bytes across chunk boundaries) with a 64 KiB head cap; both pinned
+by tests (a dripped head whose `\r\n\r\n` straddles chunks; a 70 KiB
+terminator-less head is dropped).
+
+**ADR-143** rebuilds `crate::net` on one mio reactor thread — plaintext
+streams, TLS client + server, and listeners all as reactor state machines,
+replacing thread-per-socket (and the TLS actor's 10 ms poll, and the accept
+loop's 2 ms nap). Same mailbox contract end to end; the deliberate semantic
+changes: `tcp-send` queues (drain-before-close kills the send-then-close
+truncation footgun; 16 MiB cap bounds a stuck reader; write errors surface
+as `[:tcp-closed]`), peer half-close leaves the write side usable (Erlang),
+and TLS became a first-class stream — `tcp-set-binary` honored everywhere,
+`tls-request` takes iolists + an optional `ca-pem` trust anchor, and
+`http-get`/`http-post` gained `:ca` and are byte-faithful over https (the
+ADR-141 seam is closed). `serve-loop` handed a `tls-listen` socket serves
+https with zero changes — pinned by the new e2e. Tests: `tests/tls_test.blsp`
+is the first in-tree end-to-end TLS coverage (handshake round trip, binary
+mode, iolist requests, clean `[:tcp-error]` on an untrusted cert), plus two
+https-through-the-std-server cases in http_test; 56 net tests + suite
+792/792, VM/TW + GC_STRESS green, `nest check` zero warnings. `SubscriberHandle`
+and the per-source thread machinery for sockets are gone (`sink_pair` cells
+replace retargeting); `proc.rs` keeps `spawn_io_source` for subprocess pipes.

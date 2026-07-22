@@ -6,11 +6,13 @@ machine setup (Ubuntu, apt, Rust via rustup, etc.) see the global
 
 ## What this project is
 
-Brood is a small dynamic **Lisp implemented in Rust**. Its purpose is to be the
-language a modern, Emacs-like, self-editing, remotely-hostable text editor is
-written in. Today the repo is the **language core**; the editor, display
-protocol, and server come later. Read `docs/` before making non-trivial changes
-— especially `docs/architecture.md`, `ROADMAP.md`, and `docs/decisions.md`.
+Brood is a dynamic **Lisp implemented in Rust** with a deliberately small core.
+It began as the language a modern, Emacs-like, self-editing, remotely-hostable
+editor would be written in, and has grown into a general-purpose language and
+runtime; this repo is all of Brood — the language core, the runtime (processes,
+distribution, VM + JIT), the standard library, and the `std/editor/*` framework
+for interactive applications. Read `docs/` before making non-trivial changes —
+especially `docs/architecture.md`, `ROADMAP.md`, and `docs/decisions.md`.
 
 Brood source files carry the **`.blsp`** extension — a contraction of *Brood
 Lisp* (`.lisp` was dropped because it collides with Emacs' `lisp-mode`). Any

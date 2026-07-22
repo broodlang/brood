@@ -1,11 +1,11 @@
 # ROADMAP
 
-Brood is the **language and runtime** for a modern, Emacs-like editor — a fast
-native app locally, a server for remote instances. The editor app itself is a
-separate downstream project (out of scope here); it consumes this language and
-the `std/editor/*` framework. Brood's job is the language core, runtime, and
-that framework. We get there in milestones (M1–M4), each shippable and useful
-on its own.
+Brood is a general-purpose **language and runtime** — born as the substrate
+for a modern, Emacs-like, self-editing editor, grown past that intent into a
+language in its own right. This repo is all of it: the language core, the
+runtime, the standard library, and the `std/editor/*` framework for
+interactive applications. The foundation came in milestones (M1–M4), each
+shippable and useful on its own.
 
 Guiding constraints (see `CLAUDE.md`): keep the **language core small** — prefer
 adding a primitive function or a prelude macro over a new special form — and write
@@ -49,13 +49,21 @@ encrypted-by-default dist, and OSR exceed BEAM — and cached-boot startup
    `tcp-drain` returns `bytes`; SSE deliberately stays text-mode). Remaining
    seam: `tls-request` is string-typed both ways — rides item 3.
    **[Brood + a kernel rule deletion]**
-2. ⬜ **Growable read buffer** — the input-side twin of iolists (tracked in the
-   hatch findings below): an internal builder that freezes to an immutable
-   `bytes`; pairs with (1) to make head/chunk/frame readers trivially O(n).
-   **[kernel]**
-3. ⬜ **`mio` reactor + inbound TLS** — Node's core competency (multiplexed
-   sockets at scale) and the last M4 gap; the server-mode forward path
-   (tracked under "Server / daemon (M4)" below). **[kernel]**
+2. ✅ **Growable read buffer — resolved by NOT building it (ADR-142,
+   2026-07-22).** A mutable buffer value is a transient (forbidden, ADR-026),
+   and the chunk-list + `bytes-concat`-once idiom is already O(n) in copies;
+   what was still quadratic was the head reader's per-chunk rescan — fixed
+   with an incremental `bytes-index-of :from` scan + a 64 KiB head cap
+   (slow-loris guards, `std/net/http.blsp`). **[Brood]**
+3. ✅ **`mio` reactor + TLS everywhere — shipped 2026-07-22 (ADR-143).** One
+   reactor thread multiplexes every socket (plaintext, TLS client+server,
+   listeners), replacing thread-per-socket; same mailbox contract. `tcp-send`
+   is queued with drain-before-close (the truncation footgun is gone; 16 MiB
+   cap bounds slow readers); TLS streams honor `tcp-set-binary`; `tls-request`
+   takes iolists + an optional `ca-pem` trust anchor (private CAs — and the
+   first in-tree e2e TLS tests, `tests/tls_test.blsp`); `http-get`/`post`
+   accept `:ca` and are byte-faithful over https; `serve-loop` serves https
+   unchanged when handed a `tls-listen` socket. **[kernel]**
 4. ⬜ **Dirty-CPU offload pool** — BEAM dirty-scheduler / .NET blocking-pool
    parity: the one remaining un-preemptible-native hole (the `BROOD_STALL_MS`
    diagnostic tier already ships — survey below) and the explicit gate on the
@@ -594,8 +602,10 @@ Runtime housekeeping (both items landed):
 
 ### Server / daemon (M4)
 
-- ⬜ **Inbound (server-side) TLS** — rustls streams don't split read/write across
-  threads; plus a **`mio` reactor** for socket scale.
+- ✅ **Inbound (server-side) TLS + the `mio` reactor** — shipped 2026-07-22
+  (ADR-143, the parity program's item 3 above): one reactor thread for every
+  socket, full-duplex TLS driven sans-io (the read/write-split constraint
+  dissolved), `serve-loop` serves https unchanged. M4 is complete.
 - ✅ **OTP near-term** — all three closed as of 2026-07-18:
   **`send-after`/`send-interval`/`cancel-timer`** shipped (pure Brood in the
   prelude — a timer is a green process on the scheduler's timer wheel; the
