@@ -6,12 +6,15 @@
 ;; them with plain `receive` — no polling, and a socket waiting for data costs no
 ;; worker. The message shapes:
 ;;
-;;   [:tcp sock data]            inbound bytes (a string) on a connected socket
+;;   [:tcp sock data]            inbound data on a connected socket — a `bytes`
+;;                               value in binary mode (`tcp-set-binary`), a UTF-8
+;;                               string in text mode (the default)
 ;;   [:tcp-closed sock]          that socket reached EOF / errored
 ;;   [:tcp-accept lsock client]  a new connection on a listener (client is wired
 ;;                               to the same owner, so its [:tcp …] arrive here too)
 ;;
-;; Outbound is `(tcp-send sock str)` (writes it all); `(tcp-close sock)` shuts a
+;; Outbound is `(tcp-send sock iolist)` (writes it all; string leaves are always
+;; UTF-8, raw bytes ride as `bytes` values — ADR-141); `(tcp-close sock)` shuts a
 ;; stream or stops a listener. A socket handle is valid across this runtime's
 ;; processes but is never sent across nodes.
 
@@ -25,20 +28,21 @@ helper. Policy is Brood; only the syscalls are Rust.")
 (defn socket? (x) "True if `x` is a TCP socket." (%eq (type-of x) :socket))
 
 (defn tcp-drain (sock)
-  "Receive `[:tcp sock data]` messages for `sock`, concatenating the chunks, until `[:tcp-closed sock]`; return the full string. For request/response protocols where the peer closes when its reply is complete (e.g. HTTP/1.0). Must be called by the socket's owning process."
+  "Receive `[:tcp sock data]` messages for `sock`, concatenating the chunks, until `[:tcp-closed sock]`; return everything as one `bytes` value (byte-faithful in either socket mode — text-mode string chunks contribute their UTF-8 bytes; decode with `utf8-bytes->string` for text). For request/response protocols where the peer closes when its reply is complete (e.g. HTTP/1.0). Must be called by the socket's owning process."
   (tcp--drain-acc sock nil))
 
-;; `acc` is the chunks in reverse; join once at close. `(str acc d)` per chunk
-;; rebuilt the whole accumulator each message — O(total^2) over a large response.
+;; `acc` is the chunks in reverse; ONE `bytes-concat` at close (the reversed chunk
+;; list is itself an iolist). Per-chunk concatenation rebuilt the whole accumulator
+;; each message — O(total²) over a large response.
 (defn tcp--drain-acc (sock acc)
   (receive ([:tcp ~sock d] (tcp--drain-acc sock (cons d acc)))
-    ([:tcp-closed ~sock] (apply str (reverse acc)))))
+    ([:tcp-closed ~sock] (bytes-concat (reverse acc)))))
 
 (defn tcp-drain-timeout (sock ms)
-  "Like `tcp-drain`, but give up after `ms` milliseconds of silence and return whatever was collected (tagged `[:timeout acc]` vs `[:closed acc]` so the caller can tell)."
+  "Like `tcp-drain`, but give up after `ms` milliseconds of silence and return whatever was collected (tagged `[:timeout acc]` vs `[:closed acc]` so the caller can tell; `acc` is a `bytes` value)."
   (tcp--drain-to sock nil ms))
 
 (defn tcp--drain-to (sock acc ms)
   (receive ([:tcp ~sock d] (tcp--drain-to sock (cons d acc) ms))
-    ([:tcp-closed ~sock] [:closed (apply str (reverse acc))])
-    (after ms [:timeout (apply str (reverse acc))])))
+    ([:tcp-closed ~sock] [:closed (bytes-concat (reverse acc))])
+    (after ms [:timeout (bytes-concat (reverse acc))])))

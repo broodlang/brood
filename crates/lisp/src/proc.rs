@@ -63,10 +63,11 @@ struct Proc {
     /// locks it briefly to `kill`; the reader locks it briefly to `try_wait`.
     /// Never held across a blocking call, so the two never deadlock.
     child: Arc<Mutex<Child>>,
-    /// Binary mode (default off). Shared with the reader threads, which load it
-    /// per chunk, so `proc-set-binary` flips an already-running child mid-stream.
-    /// In binary mode inbound bytes are delivered as a Latin-1 byte-string and
-    /// `proc-send` writes codepoints as raw bytes (mirrors `net`'s socket flag).
+    /// Inbound decode mode (default text; mirrors `net`'s socket flag, ADR-141:
+    /// outbound `proc-send` is unaffected — string leaves are always UTF-8).
+    /// Binary mode delivers `[:proc …]` data as byte-faithful `bytes` values.
+    /// Shared with the reader threads, which load it per chunk, so
+    /// `proc-set-binary` flips an already-running child mid-stream.
     binary: Arc<AtomicBool>,
 }
 
@@ -253,14 +254,6 @@ pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
         }
         None => Err(bad_proc()),
     }
-}
-
-/// Whether `handle` is in binary mode (false for an unknown/closed handle).
-pub fn is_binary(id: u64) -> bool {
-    reg()
-        .get(&id)
-        .map(|p| p.binary.load(Ordering::Relaxed))
-        .unwrap_or(false)
 }
 
 /// `(proc-send handle data)` — write all of `data` to the child's stdin (blocking)

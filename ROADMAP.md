@@ -34,17 +34,21 @@ encrypted-by-default dist, and OSR exceed BEAM — and cached-boot startup
 
 **Tier 1 — scheduled, in order:**
 
-1. 🟡 **Binary pattern matching / bit syntax** — BEAM's flagship remaining
-   capability. ✅ **The pattern shipped 2026-07-22 (ADR-140), pure Brood:**
-   the existing byte-granular `(bytes seg…)` pattern gained typed integer
-   segments — `(x :u16)`/`(x :i32-le)`/`(_ :u32)`, u/i × 8/16/32/64 × be/le,
-   big-endian default — lowered onto new prelude reads
-   `bytes-uint`/`-le`/`bytes-int`/`-le` + encoders `int->bytes`/`-le`; `:u64`
-   past `i64` auto-widens to a big integer (exact Erlang semantics). Sub-byte
-   widths / float / UTF-8 segments deferred (ADR-140). ⬜ Remaining: port the
-   `std/net` HTTP/WS parsers onto `bytes` + these patterns (the
-   "`bytes`-native parsing" item in the hatch findings below — retires the
-   carrier-string bridge). **[Brood]**
+1. ✅ **Binary pattern matching / bit syntax + the parser port** — BEAM's
+   flagship remaining capability, both halves shipped 2026-07-22.
+   **The pattern (ADR-140), pure Brood:** the byte-granular `(bytes seg…)`
+   pattern gained typed integer segments — `(x :u16)`/`(x :i32-le)`/`(_ :u32)`,
+   u/i × 8/16/32/64 × be/le, big-endian default — lowered onto new prelude
+   reads `bytes-uint`/`-le`/`bytes-int`/`-le` + encoders `int->bytes`/`-le`;
+   `:u64` past `i64` auto-widens to a big integer (exact Erlang semantics).
+   Sub-byte widths / float / UTF-8 segments deferred (ADR-140).
+   **The parser port (ADR-141):** binary mode is now inbound-only — send
+   string leaves are ALWAYS UTF-8, the Latin-1 carrier send rule is deleted —
+   and `std/net` is bytes-native end to end (server sockets binary-for-life,
+   no flip-back race; client responses byte-faithful `bytes` + `body-text`;
+   `tcp-drain` returns `bytes`; SSE deliberately stays text-mode). Remaining
+   seam: `tls-request` is string-typed both ways — rides item 3.
+   **[Brood + a kernel rule deletion]**
 2. ⬜ **Growable read buffer** — the input-side twin of iolists (tracked in the
    hatch findings below): an internal builder that freezes to an immutable
    `bytes`; pairs with (1) to make head/chunk/frame readers trivially O(n).
@@ -219,19 +223,17 @@ would retire the bug class at the language level. See hatch's
   (`[status-line headers "\r\n\r\n" body]`), flattened exactly once at the
   write by one shared iterative walker — the Erlang model; immutability means
   no cycles, so termination is structural. Additive (all previously rejected
-  lists); binary-mode sockets keep the Latin-1 rule per string leaf.
+  lists). The ADR-139 Latin-1-per-string-leaf clause for binary-mode sockets
+  was superseded 2026-07-22 (ADR-141: string leaves are always UTF-8).
   `str`/`join` deliberately stay display-rendering (see the ADR) — an
   explicit in-memory materialiser beyond `bytes-concat` is a future call.
-  Next: port `std/net` (http/sse/tcp) response builders onto iolist sends.
-- ⬜ **`bytes`-native HTTP/WebSocket parsing (kill the carrier-string bridge).**
-  `bytes` is now a first-class value (`byte-at`/`subbytes`/`bytes-index-of`/…), but
-  the string parsers predate it, so every socket read does
-  `(str buf (bytes->carrier chunk))` — a Latin-1 "carrier string", one codepoint
-  per byte. That conversion is *why* the read buffer is a `(str)`-accumulated string
-  (the O(n²) source), and the text/binary mode-flip it forces is what caused the
-  original U+FFFD live-nav bug. Give `bytes` a fuller search/slice surface, then port
-  the parsers. **[kernel]** a few more `bytes` primitives, then **[Brood]** port the
-  parsers. (This is the "one bad abstraction", narrowed now that `bytes` exists.)
+  The `std/net` response builders were ported onto iolist sends 2026-07-19.
+- ✅ **`bytes`-native HTTP parsing (the carrier-string bridge is dead).**
+  Shipped 2026-07-22 (ADR-141) — see the parity program above: `std/net` reads
+  and parses `bytes` end to end, the Latin-1 carrier send rule is deleted from
+  the kernel, and the text/binary mode-flip races are structurally gone. The
+  WebSocket half lives downstream in hatch (no WS in this repo) — its port
+  onto `bytes` + bit syntax is hatch work, now unblocked. **[done]**
 - ⬜ **A growable read buffer (or `bytes` transient).** The input-side twin of
   iolists: an append buffer that freezes to immutable `bytes` on read would make the
   request head reader, chunked drain, and WS frame gather trivially O(n) — no manual

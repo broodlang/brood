@@ -61,7 +61,7 @@
 
 (describe "tcp: tcp-drain collects a request/response"
   :isolated
-  (test "drain concatenates chunks until the peer closes"
+  (test "drain concatenates chunks until the peer closes; returns bytes"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
@@ -73,4 +73,24 @@
         (let (reply (tcp-drain c))
           (tcp-close c)
           (tcp-close ls)
-          (assert= reply "hello, world"))))))
+          (is (bytes? reply))
+          (assert= (utf8-bytes->string reply) "hello, world"))))))
+
+(describe "tcp: binary mode is inbound-only (ADR-141)"
+  :isolated
+  (test "binary inbound is bytes; string leaves always go out as UTF-8"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        ;; one iolist send from the (text-mode) client: raw bytes + a non-ASCII
+        ;; string leaf — the string must arrive as its UTF-8 bytes, proving the
+        ;; send path ignores mode (no Latin-1 byte-string rule anymore)
+        (tcp-send c [(bytes 0 255 128) "é"])
+        (tcp-close c)
+        (let (got (tcp-drain s))
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= got (bytes 0 255 128 195 169)))))))

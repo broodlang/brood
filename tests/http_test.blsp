@@ -72,7 +72,7 @@
       (let (port (receive ([:port p] p) (after 5000 :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           (tcp-send c "GET /events HTTP/1.0\r\nHost: localhost\r\n\r\n")
-          (let (resp (tcp-drain c))
+          (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
             (is (string-contains? resp "text/event-stream"))
             (is (string-contains? resp "data: one"))
@@ -91,11 +91,17 @@
     (assert= (get (net/http/http--parse-url "http://example.com") :port) 80)
     (assert= (get (net/http/http--parse-url "http://example.com") :path) "/")
     (assert= (get (net/http/http--parse-url "http://h:8080/x") :port) 8080))
-  (test "parse-response reads the status line, headers, and body"
+  (test "parse-response reads the status line, headers, and body (a bytes value)"
     (let (r (parse-response "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhi there"))
       (assert= (get r :status) 200)
       (assert= (get (get r :headers) "content-type") "text/plain")
-      (assert= (get r :body) "hi there"))))
+      (is (bytes? (get r :body)))
+      (assert= (body-text r) "hi there")))
+  (test "parse-response takes wire bytes and keeps a binary body byte-faithful"
+    (let (r (parse-response (bytes-concat ["HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
+                                           (bytes 255 0 128)])))
+      (assert= (get r :status) 200)
+      (assert= (get r :body) (bytes 255 0 128)))))
 
 (describe "http: end-to-end over a loopback server"
   (test "a GET gets the handler's response back"
@@ -109,7 +115,7 @@
       (let (port (receive ([:port p] p) (after 5000 :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           (tcp-send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
-          (let (resp (tcp-drain c))
+          (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
             (is (string-contains? resp "200 OK"))
             (is (string-contains? resp "<h1>brood</h1>"))))))))
@@ -130,12 +136,12 @@
                        (pr-str (into [] (bytes->list (get req :body))))))))))
       (let (port (receive ([:port p] p) (after 5000 :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
-          ;; binary mode so we can put raw bytes 0xFF 0x80 0x41 in the body
-          (tcp-set-binary c true)
-          (let (body (str (int->char 255) (int->char 128) (int->char 65)))
-            (tcp-send c (str "POST /echo HTTP/1.0\r\nHost: localhost\r\n"
-                             "Content-Length: 3\r\n\r\n" body)))
-          (let (resp (tcp-drain c))
+          ;; raw body bytes 0xFF 0x80 0x41 ride as a `bytes` leaf in the request
+          ;; iolist — no mode games; sends are mode-independent (ADR-141)
+          (tcp-send c ["POST /echo HTTP/1.0\r\nHost: localhost\r\n"
+                       "Content-Length: 3\r\n\r\n"
+                       (bytes 255 128 65)])
+          (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
             (is (string-contains? resp "200 OK"))
             ;; the body round-tripped as the exact bytes, not U+FFFD (65533)
@@ -158,7 +164,7 @@
           (spawn (do
                    (let (path (str "/" i)
                          resp (http-get (str "http://127.0.0.1:" port path)))
-                     (send me [:done (get resp :status) (get resp :body)])))))
+                     (send me [:done (get resp :status) (body-text resp)])))))
         ;; Fan-in: every client reports a 200 whose body is its own requested path.
         (dotimes (_ n)
           (receive
@@ -169,15 +175,15 @@
 
 (describe "http: request building (http/http--request-headers)"
   (test "adds Host / User-Agent / Connection, and Content-Length when there's a body"
-    (let (h (net/http/http--request-headers {:host "localhost"} "abc" nil))
+    (let (h (net/http/http--request-headers {:host "localhost"} (string->utf8-bytes "abc") nil))
       (assert= (get h "Host") "localhost")
       (assert= (get h "User-Agent") "brood")
       (assert= (get h "Connection") "close")
       (assert= (get h "Content-Length") "3")))
   (test "no Content-Length for an empty body"
-    (refute (contains? (net/http/http--request-headers {:host "h"} "" nil) "Content-Length")))
+    (refute (contains? (net/http/http--request-headers {:host "h"} #b"" nil) "Content-Length")))
   (test "caller headers override the defaults and add new ones"
-    (let (h (net/http/http--request-headers {:host "h"} "" {"User-Agent" "bw" "X-Token" "k"}))
+    (let (h (net/http/http--request-headers {:host "h"} #b"" {"User-Agent" "bw" "X-Token" "k"}))
       (assert= (get h "User-Agent") "bw")  ; overridden
       (assert= (get h "X-Token") "k"))))  ; added
 
@@ -201,7 +207,7 @@
                      {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
           (assert= (get resp :status) 200)
           ;; method echoed as POST, the JSON body intact, the custom header received
-          (assert= (get resp :body) "POST|{\"a\":1}|secret")))))
+          (assert= (body-text resp) "POST|{\"a\":1}|secret")))))
   (test "http-get still works through http-request (delegation intact)"
     (let (me (self))
       (spawn (do
@@ -211,4 +217,48 @@
       (let (port (receive ([:port p] p) (after 5000 :timeout)))
         (let (resp (http-get (str "http://127.0.0.1:" port "/zen")))
           (assert= (get resp :status) 200)
-          (assert= (get resp :body) "got /zen"))))))
+          (assert= (body-text resp) "got /zen"))))))
+
+(describe "http: a binary RESPONSE body survives byte-faithfully (client side)"
+  ;; The client reads in binary mode (ADR-141), so a response body that isn't
+  ;; valid UTF-8 — an image, an archive — reaches the caller intact. Over the
+  ;; old text-mode client this was impossible: 0xFF/0x80 became U+FFFD.
+  (test "http-get returns the exact bytes the handler served"
+    (let (me (self))
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls
+                   (fn (req)
+                     (response 200 {"Content-Type" "application/octet-stream"}
+                       (bytes 255 128 65 0 7)))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (resp (http-get (str "http://127.0.0.1:" port "/blob")))
+          (assert= (get resp :status) 200)
+          (assert= (get (get resp :headers) "content-length") "5")
+          (assert= (get resp :body) (bytes 255 128 65 0 7))))))
+  (test "a non-ASCII text body round-trips: byte count on the wire, text to the caller"
+    (let (me (self))
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls (fn (req) (text-response "héllo ☃"))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (resp (http-get (str "http://127.0.0.1:" port "/")))
+          (assert= (get resp :status) 200)
+          ;; 7 codepoints, 10 UTF-8 bytes — the :body carries the bytes,
+          ;; body-text decodes them
+          (assert= (count (get resp :body)) 10)
+          (assert= (body-text resp) "héllo ☃")))))
+  (test "a bytes POST body reaches the handler intact through http-post"
+    (let (me (self))
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls
+                   (fn (req)
+                     (text-response (pr-str (into [] (bytes->list (get req :body))))))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (resp (http-post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7)))
+          (assert= (get resp :status) 200)
+          (assert= (body-text resp) "[0 255 7]"))))))

@@ -82,18 +82,16 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 (defn http-read-request (sock)
   "Read one HTTP request from `sock` (owned by the calling process): the head
 through the blank line, plus the body when `Content-Length` declares one. Returns
-the raw request string, or nil if the peer closed without sending anything.
+the raw request as a `bytes` value, or nil if the peer closed without sending
+anything.
 
-Reads in **binary mode** so the framing is byte-faithful: `Content-Length` counts
-BYTES, and in binary mode each wire byte is one codepoint, so the `string-length`
-top-up is exact (text mode miscounts a multi-byte UTF-8 body and silently corrupts
-a binary one). The returned body is a byte-string (Latin-1 carrier) — decode it if
-you want text. Text mode is restored before returning so the response send path
-(`tcp-send` of a UTF-8 string) is unaffected."
+The socket must be in **binary mode** (the server sets it once, for the
+connection's whole life) so the framing is byte-faithful: chunks arrive as
+`bytes` values, `Content-Length` counts bytes, and a binary body round-trips
+exactly. There is no mode flip-back — outbound writes are mode-independent
+(ADR-141), so the response path needs nothing."
   (tcp-set-binary sock true)
-  (let (raw (http--read-raw sock))
-    (tcp-set-binary sock false)
-    raw))
+  (http--read-raw sock))
 
 ;; ---- parsing ----------------------------------------------------------------
 (defn http--split-first (s sep)
@@ -285,13 +283,13 @@ socket is registered *passive* (no reader until the worker calls
   ;; head, then the socket is handed to its `:stream` fn (which owns it from here —
   ;; it writes over time and closes when done), so the worker does not close it.
   ;;
-  ;; Set binary mode BEFORE taking ownership: `tcp-controlling-process` is what
-  ;; starts the reader, and the reader decodes each chunk by the current flag.
-  ;; Setting binary *after* (as http-read-request also does) leaves a window —
-  ;; a chunk that arrives between handoff and that set-binary is decoded in text
-  ;; mode (UTF-8-lossy), mangling a binary body and miscounting Content-Length
-  ;; (the http binary-body flake). An accepted socket is passive until handoff,
-  ;; so nothing is read before this; doing it first makes the first read exact.
+  ;; Set binary mode BEFORE taking ownership, and for the connection's whole
+  ;; life: `tcp-controlling-process` is what starts the reader, and the reader
+  ;; decodes each chunk by the current flag — setting binary after the handoff
+  ;; left a window where a first chunk was decoded as lossy text (the old http
+  ;; binary-body flake). An accepted socket is passive until the handoff, so
+  ;; nothing is read before this; and outbound writes are mode-independent
+  ;; (ADR-141), so binary-for-life costs the response path nothing.
   (tcp-set-binary c true)
   (tcp-controlling-process c (self))
   (let (raw (http-read-request c))
@@ -312,7 +310,11 @@ socket is registered *passive* (no reader until the worker calls
 ;; `http-get` works over both `http://` (plaintext, via tcp-connect) and
 ;; `https://` (TLS, via tls-request). Either transport delivers the response as
 ;; `[:tcp sock data]` … `[:tcp-closed sock]` messages to this process, so the
-;; collection + parsing is shared.
+;; collection + parsing is shared. The plaintext socket runs in binary mode, so
+;; chunks are byte-faithful `bytes` values and a binary response body (an image,
+;; an archive) round-trips exactly; the TLS transport is a string seam today
+;; (`tls-request` takes and delivers strings — the remaining kernel constraint),
+;; so an https binary body is not byte-faithful until that seam learns bytes.
 
 (defn http--parse-url (url)
   "Parse `url` into {:scheme :host :port :path}. Defaults: scheme http, port 80/443, path \"/\"."
@@ -333,73 +335,98 @@ socket is registered *passive* (no reader until the worker calls
     {:scheme scheme :host host :port port :path path}))
 
 (defn parse-response (raw)
-  "Parse a raw HTTP response string into {:status :headers :body} (`:headers` keys lower-cased)."
-  (let (hb (http--split-first raw "\r\n\r\n")
-        head (first hb)
-        body (second hb)
+  "Parse a raw HTTP response (`bytes`, from the transport; a string is accepted
+too) into {:status :headers :body}: the head is decoded to strings (`:headers`
+keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
+`(body-text resp)` when you know it is text."
+  (let (raw (if (string? raw) (string->utf8-bytes raw) raw)
+        marker (bytes-index-of raw #b"\r\n\r\n")
+        head-end (if (< marker 0) (byte-length raw) marker)
+        head (utf8-bytes->string (subbytes raw 0 head-end))
+        body (if (< marker 0) #b"" (subbytes raw (+ marker 4) (byte-length raw)))
         lines (string-split head "\r\n")
         status (string-split (first lines) " "))
     {:status (let (n (string->number (nth status 1 "0"))) (if (nil? n) 0 n))
      :headers (http--parse-headers (rest lines))
      :body body}))
 
-;; Collect the response delivered as messages until close; [:ok body] or [:error msg].
-;; `acc` is the chunks in reverse; join once at close. `(str acc d)` per chunk was
-;; O(body^2) over a large response body.
+(defn body-text (resp)
+  "The `:body` of a response (or parsed request) decoded as UTF-8 text. A string
+body passes through; nil decodes to \"\". For the common case where the caller
+knows the body is text — the map itself always carries byte-faithful `bytes`."
+  (let (b (get resp :body))
+    (cond
+      (nil? b) ""
+      (string? b) b
+      else (utf8-bytes->string b))))
+
+;; Collect the response delivered as messages until close; [:ok bytes] or
+;; [:error msg]. `acc` is the chunks in reverse; ONE `bytes-concat` at close (the
+;; reversed chunk list is an iolist, so plaintext `bytes` chunks and TLS string
+;; chunks both land byte-faithfully). Per-chunk concatenation was O(body²).
 (defn http--collect (sock acc)
   (receive ([:tcp ~sock d] (http--collect sock (cons d acc)))
-    ([:tcp-closed ~sock] [:ok (apply str (reverse acc))])
+    ([:tcp-closed ~sock] [:ok (bytes-concat (reverse acc))])
     ([:tcp-error ~sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
 
-(defn http--request-headers (u body extra)
+(defn http--request-headers (u body-bytes extra)
   "The request header map: Host / User-Agent / Connection: close, plus
-Content-Length when `body` is non-empty, with the caller's `extra` headers merged
-on top (so any of those can be overridden). `extra` is a name→value map (or nil)."
+Content-Length (the body's **byte** count) when `body-bytes` is non-empty, with
+the caller's `extra` headers merged on top (so any of those can be overridden).
+`extra` is a name→value map (or nil)."
   (let (base {"Host" (get u :host) "User-Agent" "brood" "Connection" "close"}
-        ;; Byte count, not `string-length` (codepoints): a non-ASCII body's UTF-8
-        ;; form is longer, and an understated Content-Length truncates it at the
-        ;; server.
-        base2 (if (= body "")
+        base2 (if (= (count body-bytes) 0)
                 base
-                (assoc base "Content-Length" (str (count (string->utf8-bytes body))))))
+                (assoc base "Content-Length" (str (count body-bytes)))))
     (merge base2 (or extra {}))))
 
 (defn http-request (method url &optional (opts {}))
   "Make an HTTP/1.0 request: `method` (e.g. \"GET\"/\"POST\"), `url` (http or https),
-and `opts` `{:headers <name→value map> :body <string>}`. Always returns a response
-map `{:status :headers :body}`; a transport failure yields `{:status 0 :error msg
-:headers {} :body \"\"}`. Adds Host / User-Agent / Connection: close, and (with a
-body) Content-Length — each overridable via `:headers`. Must run in a process (it
-`receive`s the response); the root process counts. Content-Length is the body's
-**UTF-8 byte count** (2026-07-19 — it was the codepoint count, which understated
-any multi-byte body)."
+and `opts` `{:headers <name→value map> :body <string|bytes|iolist>}`. Always
+returns a response map `{:status :headers :body}` — `:body` is a byte-faithful
+`bytes` value (`(body-text resp)` decodes a text body); a transport failure
+yields `{:status 0 :error msg :headers {} :body #b\"\"}`. Adds Host / User-Agent /
+Connection: close, and (with a body) Content-Length as the body's byte count —
+each overridable via `:headers`. Over `https://` the body must be a string (the
+TLS transport is a string seam). Must run in a process (it `receive`s the
+response); the root process counts."
   (let (u (http--parse-url url)
         body (or (get opts :body) "")
-        headers (http--request-headers u body (get opts :headers))
-        req (str method
-              " "
-              (get u :path)
-              " HTTP/1.0\r\n"
-              (http--render-headers headers)
-              "\r\n"
-              body)
+        body-bytes (bytes-concat body)
+        headers (http--request-headers u body-bytes (get opts :headers))
+        head (str method
+               " "
+               (get u :path)
+               " HTTP/1.0\r\n"
+               (http--render-headers headers)
+               "\r\n")
         sock (if (= (get u :scheme) "https")
-               (tls-request (get u :host) (get u :port) req)
-               (let (s (tcp-connect (get u :host) (get u :port))) (tcp-send s req) s)))
+               (if (string? body)
+                 (tls-request (get u :host) (get u :port) (str head body))
+                 (error "http-request: an https body must be a string (the TLS transport takes a string request); http:// takes bytes/iolist bodies"))
+               (let (s (tcp-connect (get u :host) (get u :port)))
+                 ;; Binary mode before the request goes out: the peer cannot
+                 ;; respond before it has our request, so every response chunk
+                 ;; arrives as byte-faithful `bytes`.
+                 (tcp-set-binary s true)
+                 (tcp-send s [head body-bytes])
+                 s)))
     (let (result (http--collect sock nil))
       (if (= (first result) :error)
-        {:status 0 :error (second result) :headers {} :body ""}
+        {:status 0 :error (second result) :headers {} :body #b""}
         (parse-response (second result))))))
 
 (defn http-get (url &optional (opts {}))
   "GET `url` (http or https) — `http-request` with method \"GET\". `opts` may carry a
-`:headers` map. Returns `{:status :headers :body}` (`:status 0` + `:error` on a
-transport failure). Must run in a process."
+`:headers` map. Returns `{:status :headers :body}` with `:body` a byte-faithful
+`bytes` value — `(body-text resp)` decodes a text body (`:status 0` + `:error` on
+a transport failure). Must run in a process."
   (http-request "GET" url opts))
 
 (defn http-post (url body &optional (opts {}))
-  "POST `body` (a string) to `url` — `http-request` with method \"POST\". Set the
-content type yourself via `opts` `:headers`, e.g.
-`{:headers {\"Content-Type\" \"application/json\"}}`. Returns the response map."
+  "POST `body` (a string, `bytes` value, or iolist; https: string only) to `url` —
+`http-request` with method \"POST\". Set the content type yourself via `opts`
+`:headers`, e.g. `{:headers {\"Content-Type\" \"application/json\"}}`. Returns the
+response map (`:body` is `bytes`; see `body-text`)."
   (http-request "POST" url (assoc opts :body body)))

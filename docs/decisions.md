@@ -8781,3 +8781,45 @@ segments** (`:f32`/`:f64`) — no bits↔float primitive exists yet; add when a
 consumer appears. **UTF-8 string segments** — `(utf8-bytes->string sub)` after
 a sized segment is one call. Each is additive within the same spec-keyword
 namespace if a real need lands.
+
+## ADR-141 — Byte-faithful sockets: binary mode is inbound-only, carrier strings are gone
+
+**Decision.** Two coupled changes retire the Latin-1 "carrier string" era:
+
+1. **Kernel: a socket's/child's binary flag governs ONLY the inbound decode.**
+   Text mode delivers UTF-8 strings (split multibyte carried across reads);
+   binary mode delivers first-class `bytes` values. Outbound
+   `tcp-send`/`proc-send` take any iolist in either mode and a **string leaf is
+   always its UTF-8 bytes** — the Latin-1 send rule (each codepoint 0–255
+   written as one raw byte, an error above U+00FF) is deleted
+   (`flatten_iolist` loses `latin1_strings`; supersedes the ADR-139 clause
+   that kept it). Raw bytes go out as `bytes` values — that is what they are
+   for.
+2. **`std/net` is bytes-native end to end.** The http **server** socket is
+   binary for the connection's whole life — no read-then-flip-back-to-text,
+   so the flip-window race class (the original U+FFFD live-nav bug's shape)
+   is structurally gone, and since sends are mode-independent the response
+   path (plain, streaming, SSE frames) needs nothing. The http **client**
+   connects in binary mode: a response `:body` is a byte-faithful `bytes`
+   value (`body-text` decodes a text body; a binary download round-trips
+   exactly — impossible over the old text-mode client), and a request `:body`
+   may be a string, `bytes`, or iolist. `tcp-drain`/`tcp-drain-timeout`
+   return `bytes` (chunks joined once via `bytes-concat`; text-mode string
+   chunks contribute their UTF-8 bytes). **SSE deliberately stays on
+   text-mode reads**: `text/event-stream` is a UTF-8 text protocol, and the
+   kernel's text decode is exactly the right framing for it — binary mode is
+   for binary protocols, not a purity rule.
+
+**Why.** The hatch audit's "one bad abstraction": the Latin-1 byte-string +
+per-socket mode flag caused U+FFFD corruption, made every binary protocol flip
+modes at exactly the right moment (race-prone), and split "bytes" into two
+parallel notions. `bytes` values (inbound, ADR-137-era), iolists (outbound,
+ADR-139), and bit syntax (parsing, ADR-140) removed every reason it existed;
+this ADR deletes the last of it. One send rule everywhere: strings are UTF-8,
+bytes are bytes.
+
+**Remaining seam.** `tls-request` is string-typed in both directions (the
+request arg is a `String`; the response decode is hardcoded text), so an
+https binary body is still not byte-faithful — the client documents it, and
+the fix rides the server-mode TLS/reactor work where that surface is
+rebuilt anyway.

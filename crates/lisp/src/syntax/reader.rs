@@ -250,9 +250,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Read a `#b"…"` bytes literal. The body is scanned like a string, then each
-    /// codepoint becomes one byte (the Latin-1 carrier convention used throughout
-    /// Brood's binary I/O): printable ASCII is itself, other bytes are `\xHH`. A
-    /// codepoint > 255 is an error — use `\xHH`, or `string->utf8-bytes` for UTF-8 text.
+    /// codepoint becomes one byte: printable ASCII is itself, other bytes are
+    /// `\xHH`. A codepoint > 255 is an error — use `\xHH`, or
+    /// `string->utf8-bytes` for UTF-8 text.
     fn read_bytes(&mut self) -> Result<Value, LispError> {
         self.s.bump(); // opening quote
         let mut body = String::new();

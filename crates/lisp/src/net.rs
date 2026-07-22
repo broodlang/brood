@@ -66,12 +66,13 @@ enum Sock {
         stream: TcpStream,
         reader: Option<SubscriberHandle>,
         accepted_at: Option<Instant>,
-        /// Text mode (false, default): inbound is a UTF-8-lossy string, outbound
-        /// is UTF-8. Binary mode (true): inbound is a Latin-1 string (one
-        /// codepoint 0–255 per byte received) and `tcp-send` writes each codepoint
-        /// 0–255 as one raw byte — byte-faithful, for length-prefixed / control-
-        /// byte protocols (WebSocket framing). The reader thread reads this per
-        /// chunk, so `tcp-set-binary` flips an already-running socket mid-stream.
+        /// Inbound decode mode (ADR-141: it affects ONLY the inbound side —
+        /// `tcp-send` lowers string leaves as UTF-8 regardless). Text mode
+        /// (false, default): inbound is a UTF-8 string (split multibyte carried
+        /// across reads, invalid runs lossy). Binary mode (true): inbound is a
+        /// byte-faithful first-class `bytes` value — for length-prefixed /
+        /// control-byte protocols. The reader thread reads this per chunk, so
+        /// `tcp-set-binary` flips an already-running socket mid-stream.
         binary: Arc<AtomicBool>,
         /// The green-process pid that owns this socket. Set when the socket is
         /// created and updated by `controlling_process`; when that process dies
@@ -423,12 +424,12 @@ pub fn controlling_process(id: u64, pid: u64) -> std::io::Result<()> {
     }
 }
 
-/// `(tcp-set-binary sock on)` — switch `sock` between text mode (default) and
-/// binary mode. Binary mode is byte-faithful in both directions: inbound `[:tcp …]`
-/// data is a Latin-1 string (one codepoint 0–255 per byte received) and `tcp-send`
-/// writes each codepoint 0–255 as one raw byte. For length-prefixed / control-byte
-/// protocols (WebSocket framing). The reader reads the flag per chunk, so this
-/// takes effect for the next inbound chunk. Errors if `sock` is gone or a listener.
+/// `(tcp-set-binary sock on)` — switch `sock`'s **inbound decode** between text
+/// mode (default: UTF-8 strings) and binary mode (byte-faithful `bytes` values).
+/// Outbound is unaffected (ADR-141): `tcp-send` takes any iolist in either mode,
+/// string leaves always as UTF-8. For length-prefixed / control-byte protocols.
+/// The reader reads the flag per chunk, so this takes effect for the next
+/// inbound chunk. Errors if `sock` is gone or a listener.
 pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
     let reg = reg();
     match reg.get(&id) {
@@ -443,17 +444,6 @@ pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
             "tcp-set-binary: socket is a listener, not a stream",
         )),
         None => Err(bad_socket()),
-    }
-}
-
-/// Whether `sock` is in binary mode. A missing or listener socket reports `false`
-/// (text mode) — `tcp-send` then falls back to UTF-8 and surfaces the real error.
-pub fn is_binary(id: u64) -> bool {
-    match reg().get(&id) {
-        Some(Sock::Stream { binary, .. }) | Some(Sock::TlsStream { binary, .. }) => {
-            binary.load(Ordering::Relaxed)
-        }
-        _ => false,
     }
 }
 

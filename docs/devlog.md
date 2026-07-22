@@ -5648,3 +5648,31 @@ cross-process parse-and-send case; helper round-trips both endians), green on
 VM, tree-walker, and no-JIT; `nest check` stays zero-warnings. Next rung:
 port the `std/net` HTTP/WS parsers onto bytes + these patterns (kill the
 carrier-string bridge).
+
+## 2026-07-22 — The parser port: std/net bytes-native, carrier strings deleted (ADR-141)
+
+Tier 1 item 1's second half. The kernel rule change that unlocked it: **binary
+mode now governs only the inbound decode** — `tcp-send`/`proc-send` string
+leaves are ALWAYS UTF-8 (`flatten_iolist` loses `latin1_strings`; the
+codepoint-as-raw-byte Latin-1 send rule and its >U+00FF error are gone —
+raw bytes ride as `bytes` values). That made binary-for-life sockets free:
+the **http server** no longer flips back to text after reading a request (the
+flip-window race class — the original U+FFFD bug's shape — is structurally
+gone; SSE frames and user stream-fns send strings unchanged). The **http
+client** now reads in binary mode: response `:body` is byte-faithful `bytes`
+(new `body-text` decodes text bodies), request bodies may be
+string/`bytes`/iolist (https stays string — `tls-request` is a string seam in
+both directions, documented; fix rides the server-mode TLS work), and
+`parse-response` is a bytes parser. `tcp-drain`/`-timeout` return `bytes`
+(chunks joined once — the reversed chunk list is an iolist). **SSE read loops
+deliberately stay text-mode**: `text/event-stream` is UTF-8 text and the
+kernel's decode (longest-valid-prefix + multibyte carry) is the right framing
+— recorded in the module header. Stale Latin-1 docstrings scrubbed from
+net.rs/proc.rs/reader.rs/PRIMITIVE_DOCS. Tests: new client-side
+binary-response e2e (an octet-stream body of 0xFF/0x80/0x00 through http-get,
+byte-exact — impossible before), non-ASCII body round-trip, bytes POST via
+http-post, ADR-141 send-rule pins in tcp/proc tests (a `π` proc-send in
+binary mode now delivers `0xCF 0x80` instead of erroring); the old
+Latin-1-carrier client trick in the binary-request e2e replaced with a
+`bytes` iolist leaf. tcp/http/sse/proc/bytes files: 104/104; full suite
+green; `nest check` zero warnings.

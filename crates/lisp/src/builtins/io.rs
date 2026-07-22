@@ -513,18 +513,16 @@ pub(super) fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// in Erlang). Callers describe output as a tree
 /// (`[status-line headers "\r\n\r\n" body]`) and nothing is copied until this
 /// single flatten at the device write — which deletes the O(n²)
-/// `(str acc chunk)` accumulation class at its root. `latin1_strings` is the
-/// binary-mode socket/child rule: each string leaf must be a 0–255-codepoint
-/// byte-string (the pre-iolist `send_payload` contract, kept for byte-string
-/// builders); text writes lower string leaves as UTF-8. Iterative worklist, so
-/// nesting depth is heap-bounded — and immutable data cannot be cyclic, so
-/// termination is structural, no visited set needed.
+/// `(str acc chunk)` accumulation class at its root. A string leaf is **always
+/// its UTF-8 bytes**, whatever the device's mode — raw bytes are what `bytes`
+/// values are for (the pre-`bytes` "Latin-1 byte-string" send rule is gone with
+/// the carrier-string era, ADR-141). Iterative worklist, so nesting depth is
+/// heap-bounded — and immutable data cannot be cyclic, so termination is
+/// structural, no visited set needed.
 pub(super) fn flatten_iolist(
     heap: &Heap,
     who: &str,
-    kind: &str,
     root: Value,
-    latin1_strings: bool,
     out: &mut Vec<u8>,
 ) -> Result<(), LispError> {
     let mut stack: Vec<Value> = vec![root];
@@ -535,20 +533,7 @@ pub(super) fn flatten_iolist(
             Value::Bytes(b) => out.extend_from_slice(heap.bytes(b).as_bytes()),
             Value::Str(id) => {
                 let s = heap.string(id);
-                if latin1_strings {
-                    out.reserve(s.len());
-                    for c in s.chars() {
-                        let n = c as u32;
-                        if n > 0xFF {
-                            return Err(LispError::runtime(format!(
-                                "{who}: codepoint U+{n:04X} is not a byte (0–255); a binary-mode {kind} sends raw bytes (a `bytes` value or a 0–255 codepoint string)",
-                            )));
-                        }
-                        out.push(n as u8);
-                    }
-                } else {
-                    out.extend_from_slice(s.as_bytes());
-                }
+                out.extend_from_slice(s.as_bytes());
             }
             Value::Pair(p) => {
                 // Process car first; the cdr is the rest of the iolist (a leaf
@@ -580,30 +565,17 @@ pub(super) fn flatten_iolist(
 }
 
 /// Lower a tcp-send/proc-send payload to raw bytes: any **iolist** (ADR-139).
-/// String leaves are UTF-8 in text mode; in a **binary**-mode socket/child they
-/// take the Latin-1 byte-string form (codepoints 0–255) — kept for back-compat
-/// with callers that build byte-strings, alongside the preferred `bytes` value.
-fn send_payload(
-    heap: &Heap,
-    who: &str,
-    kind: &str,
-    v: Value,
-    binary: bool,
-) -> Result<Vec<u8>, LispError> {
+/// String leaves are always UTF-8 — the device's binary flag affects only the
+/// inbound decode (ADR-141); raw bytes go out as `bytes` values.
+fn send_payload(heap: &Heap, who: &str, v: Value) -> Result<Vec<u8>, LispError> {
     let mut out = Vec::new();
-    flatten_iolist(heap, who, kind, v, binary, &mut out)?;
+    flatten_iolist(heap, who, v, &mut out)?;
     Ok(out)
 }
 
 pub(super) fn tcp_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_socket(heap, "tcp-send", arg(args, 0))?;
-    let out = send_payload(
-        heap,
-        "tcp-send",
-        "socket",
-        arg(args, 1),
-        crate::net::is_binary(id),
-    )?;
+    let out = send_payload(heap, "tcp-send", arg(args, 1))?;
     crate::net::send(id, &out).map_err(|e| LispError::runtime(format!("tcp-send: {}", e)))?;
     Ok(Value::nil())
 }
@@ -694,13 +666,7 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-send", arg(args, 0))?;
-    let out = send_payload(
-        heap,
-        "proc-send",
-        "subprocess",
-        arg(args, 1),
-        crate::proc::is_binary(id),
-    )?;
+    let out = send_payload(heap, "proc-send", arg(args, 1))?;
     crate::proc::send(id, &out).map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
     Ok(Value::nil())
 }
@@ -903,7 +869,7 @@ pub(super) fn spit(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // Content is any iolist (ADR-139): describe the file as a tree of
     // strings/bytes and it is flattened exactly once, here at the write.
     let mut content = Vec::new();
-    flatten_iolist(heap, "spit", "file", arg(args, 1), false, &mut content)?;
+    flatten_iolist(heap, "spit", arg(args, 1), &mut content)?;
     std::fs::write(&path, content).map_err(|e| {
         LispError::runtime(format!("spit: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
@@ -922,14 +888,7 @@ pub(super) fn spit_append(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     let path = expect_string(heap, "spit-append", arg(args, 0))?;
     // Content is any iolist (ADR-139) — one flatten, one O_APPEND write.
     let mut content = Vec::new();
-    flatten_iolist(
-        heap,
-        "spit-append",
-        "file",
-        arg(args, 1),
-        false,
-        &mut content,
-    )?;
+    flatten_iolist(heap, "spit-append", arg(args, 1), &mut content)?;
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -955,7 +914,7 @@ pub(super) fn spit_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     // Any iolist (ADR-139) — a strict superset of the old bytes/vector/list-of-ints
     // surface (byte ints are iolist leaves), plus strings (UTF-8) and nesting.
     let mut bytes = Vec::new();
-    flatten_iolist(heap, "spit-bytes", "file", arg(args, 1), false, &mut bytes)?;
+    flatten_iolist(heap, "spit-bytes", arg(args, 1), &mut bytes)?;
     std::fs::write(&path, &bytes).map_err(|e| {
         LispError::runtime(format!("spit-bytes: {}: {}", path, e))
             .with_code(crate::error::error_codes::FILE_IO)
@@ -968,14 +927,7 @@ pub(super) fn append_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     let path = expect_string(heap, "append-bytes", arg(args, 0))?;
     // Any iolist (ADR-139) — see `spit_bytes`.
     let mut bytes = Vec::new();
-    flatten_iolist(
-        heap,
-        "append-bytes",
-        "file",
-        arg(args, 1),
-        false,
-        &mut bytes,
-    )?;
+    flatten_iolist(heap, "append-bytes", arg(args, 1), &mut bytes)?;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

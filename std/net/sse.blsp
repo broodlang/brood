@@ -17,6 +17,12 @@
 ;;  - **Integrates with `ui-run` via `with-events`** (in `std/ui.blsp`): wrap a
 ;;    display so its `:poll` surfaces queued `[:sse …]` messages as loop input — so
 ;;    pushed events drive the UI on the terminal *and* the GUI.
+;;  - **Text-mode reads are deliberate** (ADR-141): SSE is a UTF-8 *text*
+;;    protocol (`text/event-stream`), and the kernel's text decode — longest
+;;    valid prefix per chunk, split multibyte characters carried to the next
+;;    read — is exactly the right framing for it, so events surface as strings
+;;    with no decode step here. Binary-mode `bytes` reads are for *binary*
+;;    protocols (see net/http's request path).
 ;;  - Opt-in (`require`), never in the prelude. http (not https) for now — the
 ;;    target is a localhost daemon.
 

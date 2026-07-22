@@ -115,7 +115,7 @@ pub(super) fn subbytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 pub(super) fn bytes_concat(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mut out = Vec::new();
     for &v in args {
-        super::io::flatten_iolist(heap, "bytes-concat", "bytes", v, false, &mut out)?;
+        super::io::flatten_iolist(heap, "bytes-concat", v, &mut out)?;
     }
     Ok(heap.alloc_bytes(SharedBlob::new(&out)))
 }

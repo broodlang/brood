@@ -43,12 +43,13 @@
         (let (code (receive ([:proc-closed ~p c] c) (after 5000 :timeout)))
           (is (nil? code)))))))
 
-(describe "proc: binary mode is byte-faithful both directions"
+(describe "proc: binary mode is byte-faithful"
   :isolated
-  ;; In binary mode proc-send writes each codepoint 0–255 as one raw byte and the
-  ;; reader delivers each byte as one codepoint, so arbitrary bytes (incl. 0x00
-  ;; and bytes ≥ 0x80 that are NOT valid UTF-8) round-trip through `cat` exactly —
-  ;; the text-mode default would mangle them via from_utf8_lossy / UTF-8 re-encode.
+  ;; Binary mode governs the INBOUND decode only (ADR-141): the reader delivers
+  ;; chunks as first-class `bytes` values, so arbitrary bytes (incl. 0x00 and
+  ;; bytes ≥ 0x80 that are NOT valid UTF-8) round-trip through `cat` exactly —
+  ;; the text-mode default would mangle them via from_utf8_lossy. Outbound
+  ;; proc-send is mode-independent: bytes ride verbatim, strings as UTF-8.
   (test "raw bytes sent to `cat` come back unchanged in binary mode"
     (let (p (proc-spawn "cat" []))
       (proc-set-binary p true)
@@ -61,11 +62,13 @@
           (assert= (into [] (bytes->list got)) [0 255 128 65])
           (proc-close p)))))
 
-  (test "proc-send rejects a codepoint > 255 in binary mode"
+  (test "a string leaf is its UTF-8 bytes even in binary mode (ADR-141)"
     (let (p (proc-spawn "cat" []))
       (proc-set-binary p true)
-      (assert-error (proc-send p "π"))   ; U+03C0 is not a single byte
-      (proc-close p))))
+      (proc-send p "π")   ; U+03C0 = 0xCF 0x80 in UTF-8
+      (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
+        (assert= got (bytes 207 128))
+        (proc-close p)))))
 
 (describe "proc: stdout stream + exit code"
   :isolated
