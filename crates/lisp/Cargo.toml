@@ -203,6 +203,13 @@ ropey = "1.6"
 # the `term-*` primitives are just the in-process frontend that paints it, so a
 # remote frontend can implement the identical protocol later.
 crossterm = "0.29"
+# The socket reactor (ADR-143): one epoll/kqueue thread multiplexes every
+# socket — plaintext, TLS, listeners — replacing the thread-per-socket model
+# (a reader thread per stream, an accept thread per listener, an actor thread
+# per TLS connection). Runtime substrate, exactly the boxcar-class bar: mio is
+# the thin, zero-dependency readiness layer under tokio, not Lisp-callable
+# behaviour.
+mio = { version = "1", features = ["net", "os-poll"] }
 # TLS for `https` (ADR-062): rustls is pure-Rust (no system OpenSSL). webpki-roots
 # bundles the Mozilla CA set, so no system trust store is needed. The socket layer
 # (crate::net) wraps a rustls client connection behind the same `Value::Socket`

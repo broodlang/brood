@@ -915,8 +915,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "tls-request",
-        Arity::exact(3),
-        Sig::new(vec![string, int, string], socket_ty),
+        Arity::range(3, 4),
+        Sig::variadic(any, socket_ty),
         tls_request,
     );
     def(
@@ -2598,7 +2598,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("rope-line->char", &["r", "n"], "The character index where line n (0-based) begins."),
     ("tcp-connect", &["host", "port"], "Connect to host:port; inbound data is delivered to the calling process as [:tcp sock data] / [:tcp-closed sock] messages. Returns a socket. Throws on failure."),
     ("tcp-listen", &["host", "port"], "Bind a listening socket on host:port (port 0 = OS-assigned); connections arrive as [:tcp-accept lsock client] messages to the calling process. Returns a socket."),
-    ("tls-request", &["host", "port", "request"], "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). Returns a socket id; pair with tcp-drain. Low-level — prefer http-get."),
+    ("tls-request", &["host", "port", "request", "ca-pem"], "Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141); the socket honors tcp-set-binary for the response. Optional ca-pem (a PEM certificate) replaces the Mozilla roots as the trust anchor — for private CAs and tls-self-signed dev servers. Returns a socket id; pair with tcp-drain. Low-level — prefer http-get."),
     ("tls-listen", &["host", "port", "cert-pem", "key-pem"], "Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like tcp-listen, connections arrive as [:tcp-accept lsock client]; each accepted socket transparently decrypts inbound to [:tcp …] and encrypts tcp-send, so code above the transport is unchanged. Returns a socket."),
     ("tls-self-signed", &["host"], "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it)."),
     ("tcp-send", &["sock", "data"], "Write data to sock (blocking). data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139). A string leaf is always sent as its UTF-8 bytes, whatever the socket's mode (ADR-141); raw bytes go out as bytes values. Returns nil; throws on error."),

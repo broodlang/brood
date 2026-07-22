@@ -496,14 +496,26 @@ pub(super) fn tls_self_signed(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 }
 
 pub(super) fn tls_request(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let host = expect_string(heap, "tls-request", arg(args, 0))?;
+    let host = expect_string(heap, "tls-request", arg(args, 0))?.to_string();
     let port = socket_port(
         "tls-request",
         expect_int(heap, "tls-request", arg(args, 1))?,
     )?;
-    let request = expect_string(heap, "tls-request", arg(args, 2))?;
+    // The request is any iolist (ADR-141/143) — a string, bytes, or a nested
+    // tree — flattened once here, so binary https request bodies work.
+    let mut request = Vec::new();
+    flatten_iolist(heap, "tls-request", arg(args, 2), &mut request)?;
+    // Optional 4th arg: a PEM trust anchor replacing the Mozilla roots for
+    // this request (private CAs, tls-self-signed dev servers).
+    let ca = match args.get(3) {
+        Some(v) if !matches!(v, Value::Nil) => {
+            Some(expect_string(heap, "tls-request", *v)?.to_string())
+        }
+        _ => None,
+    };
     let owner = crate::process::self_pid();
-    let id = crate::net::tls_request(&host, port, request.to_string(), owner);
+    let id = crate::net::tls_request(&host, port, request, ca, owner)
+        .map_err(|e| LispError::runtime(format!("tls-request: {}", e)))?;
     Ok(Value::socket(id))
 }
 

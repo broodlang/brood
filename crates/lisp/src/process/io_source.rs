@@ -41,38 +41,35 @@ impl MailboxSink {
     }
 }
 
-/// A handle to retarget a running source's subscriber — e.g. to hand an accepted
-/// socket from the acceptor to a freshly `spawn`ed per-connection process. Cheap
-/// to keep; the source reads the current value on every `emit`.
-pub struct SubscriberHandle {
-    subscriber: Arc<AtomicU64>,
-}
-
-impl SubscriberHandle {
-    /// Redirect all future deliveries to process `pid`.
-    pub fn retarget(&self, pid: u64) {
-        // Release so the source thread's Acquire load in `emit` observes the new target.
-        self.subscriber.store(pid, Ordering::Release);
-    }
+/// A connected (sink, retarget-cell) pair over a fresh subscriber cell, without
+/// spawning a thread. Reactor-style sources use this (the net reactor
+/// multiplexes many sockets on one thread): they own the sink and hand the
+/// cell to the control plane, whose `tcp-controlling-process` retargets by
+/// storing a new pid into it (Release, pairing with `emit`'s Acquire).
+pub fn sink_pair(subscriber: u64) -> (MailboxSink, Arc<AtomicU64>) {
+    let cell = Arc::new(AtomicU64::new(subscriber));
+    (
+        MailboxSink {
+            subscriber: cell.clone(),
+        },
+        cell,
+    )
 }
 
 /// Run `body` on a fresh non-worker OS thread named `name`; it reads some blocking
 /// resource and `emit`s messages to `subscriber`'s mailbox until it returns. The
-/// caller returns immediately with a [`SubscriberHandle`] it can use to retarget
-/// delivery later. The spawned thread owns whatever it blocks on.
+/// spawned thread owns whatever it blocks on.
 ///
-/// This is the single place the thread-plus-`deliver` pattern lives — see ADR-059.
-pub fn spawn_io_source<F>(subscriber: u64, name: &str, body: F) -> SubscriberHandle
+/// This is the thread-per-resource shape of the ADR-059 pattern (subprocess
+/// pipes); sockets ride the net reactor's single thread instead (ADR-143) via
+/// [`sink_pair`].
+pub fn spawn_io_source<F>(subscriber: u64, name: &str, body: F)
 where
     F: FnOnce(&MailboxSink) + Send + 'static,
 {
-    let cell = Arc::new(AtomicU64::new(subscriber));
-    let sink = MailboxSink {
-        subscriber: cell.clone(),
-    };
+    let (sink, _cell) = sink_pair(subscriber);
     std::thread::Builder::new()
         .name(name.to_string())
         .spawn(move || body(&sink))
         .expect("spawn blocking-io source thread");
-    SubscriberHandle { subscriber: cell }
 }

@@ -219,6 +219,73 @@
           (assert= (get resp :status) 200)
           (assert= (body-text resp) "got /zen"))))))
 
+(describe "http: https end-to-end (a TLS serve-loop + http-get with :ca)"
+  ;; The std server needs NOTHING for TLS: serve-loop accepts on whatever
+  ;; listener it is given, and a tls-listen socket delivers the identical
+  ;; [:tcp-accept …] / [:tcp …] shapes with transparent en/decryption (ADR-143).
+  (test "the std server serves over TLS; http-get fetches with a private trust anchor"
+    (let (me (self))
+      (spawn (do
+               (let (ck (tls-self-signed "localhost")
+                     ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
+                 (send me [:ready (tcp-local-port ls) (first ck)])
+                 (serve-loop ls (router {"/" (fn (req) (ok "<h1>secure brood</h1>"))})))))
+      (let (pc (receive ([:ready p ct] [p ct]) (after 10000 :timeout)))
+        (let (resp (http-get (str "https://localhost:" (first pc) "/")
+                     {:ca (second pc)}))
+          (assert= (get resp :status) 200)
+          (is (string-contains? (body-text resp) "secure brood"))))))
+  (test "a binary body is byte-faithful over https too"
+    (let (me (self))
+      (spawn (do
+               (let (ck (tls-self-signed "localhost")
+                     ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
+                 (send me [:ready (tcp-local-port ls) (first ck)])
+                 (serve-loop ls
+                   (fn (req)
+                     (response 200 {"Content-Type" "application/octet-stream"}
+                       (bytes 255 128 0 7)))))))
+      (let (pc (receive ([:ready p ct] [p ct]) (after 10000 :timeout)))
+        (let (resp (http-get (str "https://localhost:" (first pc) "/blob")
+                     {:ca (second pc)}))
+          (assert= (get resp :status) 200)
+          (assert= (get resp :body) (bytes 255 128 0 7)))))))
+
+(describe "http: incremental head scan (ADR-142)"
+  (test "a head dripped in chunks parses — including a \\r\\n\\r\\n split across chunks"
+    (let (me (self))
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls (fn (req) (text-response (get req :path)))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (c (tcp-connect "127.0.0.1" port))
+          ;; three sends; the blank-line terminator straddles the 2nd/3rd chunk,
+          ;; exercising the scan-from backup of (marker-length - 1) bytes
+          (tcp-send c "GET /drip HTT")
+          (tcp-send c "P/1.0\r\nHost: x\r\n\r")
+          (tcp-send c "\n")
+          (let (resp (utf8-bytes->string (tcp-drain c)))
+            (tcp-close c)
+            (is (string-contains? resp "200 OK"))
+            (is (string-contains? resp "/drip")))))))
+  (test "a head over *http-max-head-bytes* with no terminator is dropped, not buffered"
+    (let (me (self))
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls (fn (req) (text-response "never"))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        (let (c (tcp-connect "127.0.0.1" port)
+              ;; 70 KiB of header-ish bytes, never a blank line
+              junk (bytes-concat (map (fn (_) "X-Junk: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n")
+                                   (range 0 1750))))
+          (tcp-send c ["GET / HTTP/1.0\r\n" junk])
+          ;; the server gives up and closes without ever responding
+          (let (got (tcp-drain c))
+            (tcp-close c)
+            (assert= (byte-length got) 0)))))))
+
 (describe "http: a binary RESPONSE body survives byte-faithfully (client side)"
   ;; The client reads in binary mode (ADR-141), so a response body that isn't
   ;; valid UTF-8 — an image, an archive — reaches the caller intact. Over the

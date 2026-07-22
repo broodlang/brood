@@ -397,6 +397,7 @@ dependencies = [
  "loom",
  "md-5",
  "mimalloc",
+ "mio",
  "num-bigint",
  "num-traits",
  "raw-window-handle",

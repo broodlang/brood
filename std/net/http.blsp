@@ -43,15 +43,29 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 ;; process — the per-connection handler). Accumulate until the head terminator,
 ;; then top up to Content-Length if a body is declared.
 
+;; A request head larger than this without its terminator is a bad/hostile
+;; request (slow-loris memory guard) — give up rather than buffer forever.
+(def *http-max-head-bytes* 65536)
+
 ;; The socket is in binary mode, so `[:tcp …]` chunks are `bytes` values: accumulate
 ;; with `bytes-concat`, scan with `bytes-index-of`. The head is ASCII (decoded for
 ;; parsing); the body stays raw `bytes` so a binary payload round-trips faithfully.
-(defn http--read-until (sock acc marker)
-  (if (>= (bytes-index-of acc marker) 0)
+;; `from` is where the next marker scan starts — everything before it was already
+;; scanned, so each inbound chunk is scanned once (a full rescan per chunk made a
+;; drip-fed head O(head²) CPU, the slow-loris amplifier; ADR-142). It backs up
+;; (byte-length marker - 1) bytes so a marker straddling a chunk boundary is found.
+(defn http--read-until (sock acc from marker)
+  (if (>= (bytes-index-of acc marker from) 0)
     acc
-    (receive ([:tcp ~sock d] (http--read-until sock (bytes-concat acc d) marker))
-      ([:tcp-closed ~sock] (if (= (byte-length acc) 0) nil acc))
-      (after *http-read-timeout-ms* (if (= (byte-length acc) 0) nil acc)))))
+    (if (> (byte-length acc) *http-max-head-bytes*)
+      nil
+      (receive
+        ([:tcp ~sock d]
+          (http--read-until sock (bytes-concat acc d)
+            (max 0 (- (byte-length acc) (- (byte-length marker) 1)))
+            marker))
+        ([:tcp-closed ~sock] (if (= (byte-length acc) 0) nil acc))
+        (after *http-read-timeout-ms* (if (= (byte-length acc) 0) nil acc))))))
 
 ;; Body read, O(n): collect chunks in a list (O(1) per chunk) and join **once** at
 ;; the end — never re-copy the growing buffer per chunk (that `(bytes-concat acc d)`
@@ -68,7 +82,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
       (after *http-read-timeout-ms* (apply bytes-concat (reverse chunks))))))
 
 (defn http--read-raw (sock)
-  (let (head (http--read-until sock #b"" #b"\r\n\r\n"))
+  (let (head (http--read-until sock #b"" 0 #b"\r\n\r\n"))
     (if (nil? head)
       nil
       (let (marker (bytes-index-of head #b"\r\n\r\n")
@@ -310,11 +324,10 @@ socket is registered *passive* (no reader until the worker calls
 ;; `http-get` works over both `http://` (plaintext, via tcp-connect) and
 ;; `https://` (TLS, via tls-request). Either transport delivers the response as
 ;; `[:tcp sock data]` … `[:tcp-closed sock]` messages to this process, so the
-;; collection + parsing is shared. The plaintext socket runs in binary mode, so
-;; chunks are byte-faithful `bytes` values and a binary response body (an image,
-;; an archive) round-trips exactly; the TLS transport is a string seam today
-;; (`tls-request` takes and delivers strings — the remaining kernel constraint),
-;; so an https binary body is not byte-faithful until that seam learns bytes.
+;; collection + parsing is shared. Both transports run in binary mode, so
+;; chunks are byte-faithful `bytes` values and a binary body (an image, an
+;; archive) round-trips exactly over http:// and https:// alike (`tls-request`
+;; takes an iolist and honors `tcp-set-binary` since ADR-143).
 
 (defn http--parse-url (url)
   "Parse `url` into {:scheme :host :port :path}. Defaults: scheme http, port 80/443, path \"/\"."
@@ -388,8 +401,9 @@ returns a response map `{:status :headers :body}` — `:body` is a byte-faithful
 `bytes` value (`(body-text resp)` decodes a text body); a transport failure
 yields `{:status 0 :error msg :headers {} :body #b\"\"}`. Adds Host / User-Agent /
 Connection: close, and (with a body) Content-Length as the body's byte count —
-each overridable via `:headers`. Over `https://` the body must be a string (the
-TLS transport is a string seam). Must run in a process (it `receive`s the
+each overridable via `:headers`. Over `https://`, `opts` may also carry `:ca` —
+a PEM certificate replacing the Mozilla roots as the trust anchor (private CAs,
+`tls-self-signed` dev servers). Must run in a process (it `receive`s the
 response); the root process counts."
   (let (u (http--parse-url url)
         body (or (get opts :body) "")
@@ -401,14 +415,15 @@ response); the root process counts."
                " HTTP/1.0\r\n"
                (http--render-headers headers)
                "\r\n")
+        ;; Binary mode before the request goes out (both transports): the peer
+        ;; cannot respond before it has our request, so every response chunk
+        ;; arrives as byte-faithful `bytes`.
         sock (if (= (get u :scheme) "https")
-               (if (string? body)
-                 (tls-request (get u :host) (get u :port) (str head body))
-                 (error "http-request: an https body must be a string (the TLS transport takes a string request); http:// takes bytes/iolist bodies"))
+               (let (s (tls-request (get u :host) (get u :port)
+                         [head body-bytes] (get opts :ca)))
+                 (tcp-set-binary s true)
+                 s)
                (let (s (tcp-connect (get u :host) (get u :port)))
-                 ;; Binary mode before the request goes out: the peer cannot
-                 ;; respond before it has our request, so every response chunk
-                 ;; arrives as byte-faithful `bytes`.
                  (tcp-set-binary s true)
                  (tcp-send s [head body-bytes])
                  s)))

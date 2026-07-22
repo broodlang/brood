@@ -1,0 +1,72 @@
+;; TLS sockets (tls-listen / tls-request / tls-self-signed) over the net
+;; reactor (ADR-143). Real loopback handshakes: the server runs on a
+;; tls-self-signed cert and the client trusts it via tls-request's ca-pem
+;; argument (the private-CA trust anchor) — the first in-tree end-to-end TLS
+;; coverage; before ca-pem the client could only talk to Mozilla-rooted hosts.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule tls-test (:use test) (:use net/tcp))
+
+(defn tls--serve-one (reply)
+  "Spawn a TLS echo-ish server: accept ONE connection, read one chunk, send
+`reply`, close. Returns [port cert] to the caller."
+  (let (me (self))
+    (spawn (do
+             (let (ck (tls-self-signed "localhost")
+                   cert (first ck)
+                   key (second ck)
+                   ls (tls-listen "127.0.0.1" 0 cert key))
+               (send me [:ready (tcp-local-port ls) cert])
+               (let (c (receive ([:tcp-accept ~ls cs] cs) (after 10000 :timeout)))
+                 (tcp-controlling-process c (self))
+                 (receive ([:tcp ~c _] nil) (after 10000 nil))
+                 (tcp-send c reply)
+                 (tcp-close c)))))
+    (receive ([:ready port cert] [port cert]) (after 10000 :timeout))))
+
+(describe "tls: loopback round trip (self-signed + ca-pem trust)"
+  :isolated
+  (test "handshake, request, response, close — full exchange"
+    (let (pc (tls--serve-one "secret reply")
+          port (first pc)
+          cert (second pc))
+      (let (s (tls-request "localhost" port "hello over tls" cert))
+        (let (resp (utf8-bytes->string (tcp-drain s)))
+          (assert= resp "secret reply")))))
+  (test "a binary-mode TLS response is byte-faithful bytes"
+    (let (pc (tls--serve-one (bytes 0 255 128 65))
+          port (first pc)
+          cert (second pc))
+      (let (s (tls-request "localhost" port "gimme bytes" cert))
+        (tcp-set-binary s true)
+        (assert= (tcp-drain s) (bytes 0 255 128 65)))))
+  (test "an iolist request (with a bytes leaf) reaches the server byte-faithfully"
+    (let (me (self))
+      (spawn (do
+               (let (ck (tls-self-signed "localhost")
+                     ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
+                 (send me [:ready (tcp-local-port ls) (first ck)])
+                 (let (c (receive ([:tcp-accept ~ls cs] cs) (after 10000 :timeout)))
+                   (tcp-controlling-process c (self))
+                   (tcp-set-binary c true)
+                   (let (got (receive ([:tcp ~c d] d) (after 10000 :timeout)))
+                     (tcp-send c (pr-str (into [] (bytes->list got))))
+                     (tcp-close c))))))
+      (let (port-cert (receive ([:ready p ct] [p ct]) (after 10000 :timeout))
+            s (tls-request "localhost" (first port-cert)
+                ["HEAD " (bytes 1 254) " TAIL"]
+                (second port-cert)))
+        (let (resp (utf8-bytes->string (tcp-drain s)))
+          ;; "HEAD " = 72 69 65 68 32, then 1 254, then " TAIL" = 32 84 65 73 76
+          (assert= resp "[72 69 65 68 32 1 254 32 84 65 73 76]")))))
+  (test "an untrusted cert is a clean [:tcp-error …], not a hang"
+    (let (pc (tls--serve-one "unreachable")
+          port (first pc))
+      ;; no ca-pem → the self-signed cert is rejected against the Mozilla roots
+      (let (s (tls-request "localhost" port "x"))
+        (let (out (receive
+                    ([:tcp-error ~s msg] [:error msg])
+                    ([:tcp-closed ~s] :closed)
+                    (after 10000 :timeout)))
+          (assert= (first out) :error))))))

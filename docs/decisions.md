@@ -8823,3 +8823,78 @@ request arg is a `String`; the response decode is hardcoded text), so an
 https binary body is still not byte-faithful — the client documents it, and
 the fix rides the server-mode TLS/reactor work where that surface is
 rebuilt anyway.
+
+## ADR-142 — No growable read-buffer value; reads are chunk lists, scans are incremental
+
+**Decision.** The roadmap's "growable read buffer (or `bytes` transient)" item
+is resolved by **not building it**. A mutable append-buffer *value* — however
+disguised — is a transient, and ADR-026 forbids transients absolutely (one was
+shipped and removed once already). And the need it targeted no longer exists:
+the read-side idiom is a **list of inbound chunks joined once** at the parse
+boundary (`bytes-concat` of the reversed chunk list — the list is itself an
+iolist), which is O(n) in copies, allocation-light, and already what every
+`std/net` read path does. What *was* still quadratic was CPU, not copying: the
+request-head reader re-scanned the whole accumulator for `\r\n\r\n` on every
+chunk (a drip-fed head made it O(head²) — the slow-loris amplifier). Fixed in
+Brood: `http--read-until` threads a `from` offset (`bytes-index-of` already
+takes one), backing up `marker-length − 1` bytes so a terminator straddling a
+chunk boundary is still found — each byte is scanned once. A companion
+`*http-max-head-bytes*` cap (64 KiB) bounds the memory a terminator-less head
+can pin.
+
+**Why record a non-build.** So the item doesn't resurface: the honest reading
+of the hatch audit's ask ("an append buffer that freezes to `bytes`") is that
+it predated iolists, `bytes`-native sockets, and bit syntax — with those three
+shipped, every concrete consumer it listed (head reader, chunked drain, frame
+gather) is already O(n) on the chunk-list idiom, and the only kernel-shaped
+alternative left standing violates the immutability contract for zero
+measured win.
+
+## ADR-143 — The socket reactor: one mio thread for every socket; queued writes; TLS everywhere
+
+**Decision.** `crate::net` is rebuilt around **one reactor thread** (mio /
+epoll) that multiplexes every socket the runtime owns — plaintext streams, TLS
+streams (server *and* the `tls-request` client), and listeners — replacing
+four families of dedicated threads (a blocking reader thread per stream, an
+accept thread per listener with a 2 ms nap loop, an actor thread per TLS
+connection with a 10 ms poll, a one-shot thread per `tls-request`). The
+mailbox contract is unchanged: the same `[:tcp …]`/`[:tcp-closed …]`/
+`[:tcp-accept …]`/`[:tcp-error …]` shapes, the same passive-accept
+`tcp-controlling-process` handoff (retargeting is a lock-free subscriber-cell
+store, as before), the same unclaimed-accept reaper, the same per-chunk
+binary-flag read. Structure: a **control plane** (the id registry the builtins
+validate against) and a **data plane** (the reactor's per-socket state
+machines), joined by a command channel + waker.
+
+**Semantic changes, deliberate:**
+- **`tcp-send` is asynchronous.** It lowers the iolist, queues to the reactor,
+  and returns; the reactor flushes as the peer accepts bytes. `tcp-close`
+  **drains the queue first** (bounded by a 5 s linger), so send-then-close can
+  never truncate a response — the old blocking-write model's documented
+  footgun (hatch audit #1), now structurally gone. A slow/stuck reader is
+  bounded by a 16 MiB per-socket queue cap (past it the connection drops);
+  write failures surface as `[:tcp-closed …]`. Callers that could be told
+  synchronously (unknown socket, a listener, an unclaimed TLS stream) still
+  error at the call.
+- **Peer half-close leaves the write side usable** (Erlang semantics): read
+  EOF emits `[:tcp-closed …]` but the request-then-FIN client still gets its
+  response; the entry lives until close/error/owner-death.
+- **TLS is a first-class stream everywhere.** The rustls connections are
+  driven sans-io on the reactor, so the old "read+write share state, can't
+  split across threads" constraint dissolved: TLS streams honor
+  `tcp-set-binary` (including `tls-request` responses), `tls-request` takes an
+  **iolist** request, and gains an optional **`ca-pem` trust anchor** argument
+  (private CAs; `tls-self-signed` dev servers — also what made in-tree
+  end-to-end TLS tests possible at all: `tests/tls_test.blsp` is the first).
+  `http-request`/`http-get`/`http-post` accept `:ca` and run binary-mode over
+  https, closing ADR-141's "remaining seam" — a binary body is byte-faithful
+  over both transports. And `serve-loop` needs *nothing* for TLS: handed a
+  `tls-listen` socket it serves https unchanged (pinned by test).
+
+**Why.** Thread-per-socket caps a server at thread-spawn rates and
+thread-stack memory (and the TLS actor added a 10 ms latency floor); one
+epoll thread is the standard shape for socket scale — the runtime's green
+processes were always the right consumer model on top (mailbox delivery,
+`receive` backpressure), so only the transport needed replacing. `mio` is
+runtime substrate under the boxcar bar: the readiness layer, no
+Lisp-callable behaviour.

@@ -59,7 +59,7 @@ pub use message::{from_message, to_message, ClosureArmMsg, ClosureMsg, Message};
 pub(crate) use message::MAX_MESSAGE_DEPTH;
 // The reusable blocking-IO → mailbox seam (ADR-059): any subsystem that must
 // block runs it on a non-worker thread and delivers to a process mailbox.
-pub(crate) use io_source::{spawn_io_source, MailboxSink, SubscriberHandle};
+pub(crate) use io_source::{sink_pair, spawn_io_source, MailboxSink};
 pub use monitor::{demonitor, monitor, monitored_by, next_ref};
 // Erlang-style links (ADR-067): symmetric failure coupling + `trap_exit`.
 pub use links::{link_count, link_self, set_trap_exit, unlink_self};
