@@ -5603,3 +5603,48 @@ the client compose it into string requests — `tls-request`'s Rust signature
 takes a string). Tests: render cases materialise via
 `bytes-concat`/`utf8-bytes->string`; new cases pin the byte-count
 Content-Length and a binary `bytes` body end-to-end. 792/792.
+
+## 2026-07-20 — Deep-value stack safety: segmented growth in the recursive heap walkers
+
+The 2026-07-19 filing closed: `promote_in`, the GC `flush_value`, `equal`, and
+`hash_value_into` each recurse per **car**-nesting level (their cdr spines were
+already iterative), so a deep-but-legal immutable value — `(def deep <60k-deep
+nested list>)` died in `promote_in` the moment it was defined; the same value
+under churn died in the GC copy; `(= deep deep2)` died in `equal`; a deep map
+key died in hashing. Four deterministic repros, one fix: each recursion entry
+now checks remaining native stack and grows in heap-backed segments
+(`stacker::maybe_grow`, 64 KB red zone / 1 MB chunks — rustc's own approach;
+new dep justified in Cargo.toml per the runtime-crate bar). The alternative —
+rewriting four bottom-up builders (promote/flush/equal/hash × pair/vector/map/
+closure/env) as explicit two-phase stack machines — was rejected as far more
+complexity and risk for the same guarantee. Scalar fast paths keep the guard
+off the hot compare/hash paths (`equal` returns before the guard for
+immediate/scalar pairs; `hash_value_into` skips it for scalar keys); the
+`verify_local_graph` debug walker was already worklist-based, `to_message` is
+depth-capped (256) and errors cleanly, and the printer survives 60k deep
+as-is. New `tests/deep_values_test.blsp` pins promote/GC/equal/hash at
+20k–60k depth (each test in its own green process, so worker stacks are the
+ones proven); the iolist deep-nesting test is restored to 40k.
+
+## 2026-07-22 — Bit syntax: typed integer segments in the bytes pattern (ADR-140)
+
+Tier 1, item 1 of the new runtime-feature parity program (documented at the
+top of ROADMAP.md today). The `(bytes seg…)` match pattern — which already
+existed byte-granular (and undocumented; now in `docs/language.md` §Bytes
+patterns + the two grammar tables) — gains **typed integer segments**:
+`(x :u16)`, `(x :i32-le)`, `(_ :u32)`-skip; u/i × 8/16/32/64 × be/le,
+big-endian default. Pure Brood end to end: `match-bytes-typed-seg` lowers
+onto new prelude reads `bytes-uint`/`bytes-uint-le`/`bytes-int`/`bytes-int-le`
+(1–8 bytes at an offset, over `byte-at`) and encoders
+`int->bytes`/`int->bytes-le` (truncating, so `(int->bytes -1 2)` =
+`#b"\xff\xff"`) — zero new Rust, no kernel surface. A pleasant discovery en
+route: an unsigned 8-byte read past `i64` **auto-widens to a big integer**
+(ints promote transparently now — the ROADMAP "no bignums" out-of-scope line
+was stale and is fixed), so `:u64` has exact Erlang semantics with no caveat.
+Deliberately deferred (ADR-140): sub-byte bit widths, float segments, UTF-8
+segments. Tests: two new describe blocks in `tests/bytes_test.blsp` (typed
+segments incl. TLV-driving-sized-segment, non-linear typed binders, a
+cross-process parse-and-send case; helper round-trips both endians), green on
+VM, tree-walker, and no-JIT; `nest check` stays zero-warnings. Next rung:
+port the `std/net` HTTP/WS parsers onto bytes + these patterns (kill the
+carrier-string bridge).

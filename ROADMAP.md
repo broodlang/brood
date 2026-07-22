@@ -4,7 +4,7 @@ Brood is the **language and runtime** for a modern, Emacs-like editor — a fast
 native app locally, a server for remote instances. The editor app itself is a
 separate downstream project (out of scope here); it consumes this language and
 the `std/editor/*` framework. Brood's job is the language core, runtime, and
-that framework. We get there in milestones (M1–M5), each shippable and useful
+that framework. We get there in milestones (M1–M4), each shippable and useful
 on its own.
 
 Guiding constraints (see `CLAUDE.md`): keep the **language core small** — prefer
@@ -21,6 +21,61 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 ---
 
 ## Active work — dated findings & backlogs
+
+### Runtime-feature parity program — BEAM / .NET / Node (2026-07-22)
+
+The distilled, ranked program for closing the remaining runtime *feature* gaps
+against the peer runtimes, from the 2026-07-11 capability audit plus the
+2026-07-18 robustness survey below (most of that survey's ranked items are now
+closed). The architecture is at/above parity already — scheduling, isolation,
+per-process GC, distribution, hot reload; live continuation migration,
+encrypted-by-default dist, and OSR exceed BEAM — and cached-boot startup
+(~6.5 ms, ADR-138) beats Node (~17 ms). What remains, by leverage:
+
+**Tier 1 — scheduled, in order:**
+
+1. 🟡 **Binary pattern matching / bit syntax** — BEAM's flagship remaining
+   capability. ✅ **The pattern shipped 2026-07-22 (ADR-140), pure Brood:**
+   the existing byte-granular `(bytes seg…)` pattern gained typed integer
+   segments — `(x :u16)`/`(x :i32-le)`/`(_ :u32)`, u/i × 8/16/32/64 × be/le,
+   big-endian default — lowered onto new prelude reads
+   `bytes-uint`/`-le`/`bytes-int`/`-le` + encoders `int->bytes`/`-le`; `:u64`
+   past `i64` auto-widens to a big integer (exact Erlang semantics). Sub-byte
+   widths / float / UTF-8 segments deferred (ADR-140). ⬜ Remaining: port the
+   `std/net` HTTP/WS parsers onto `bytes` + these patterns (the
+   "`bytes`-native parsing" item in the hatch findings below — retires the
+   carrier-string bridge). **[Brood]**
+2. ⬜ **Growable read buffer** — the input-side twin of iolists (tracked in the
+   hatch findings below): an internal builder that freezes to an immutable
+   `bytes`; pairs with (1) to make head/chunk/frame readers trivially O(n).
+   **[kernel]**
+3. ⬜ **`mio` reactor + inbound TLS** — Node's core competency (multiplexed
+   sockets at scale) and the last M4 gap; the server-mode forward path
+   (tracked under "Server / daemon (M4)" below). **[kernel]**
+4. ⬜ **Dirty-CPU offload pool** — BEAM dirty-scheduler / .NET blocking-pool
+   parity: the one remaining un-preemptible-native hole (the `BROOD_STALL_MS`
+   diagnostic tier already ships — survey below) and the explicit gate on the
+   WASM native-interop story (ADR-071). **[kernel]**
+
+**Tier 2 — real gaps, each gated on a first consumer (ADR-011):** the cluster
+**registry** (`Registry`/via-tuples, `:global`, `pg` — "OTP deferred" below);
+**mailbox bounds / backpressure** (survey item below); the **observability
+remainder** (`defevent` schemas, aggregators, node up/down, the remote tier,
+`nest observe`/`nest mcp` consuming the stream — "Telemetry" below);
+**`gen_statem`** and an **`Application` behaviour**.
+
+**Tier 3 — cheap ergonomic parity:** a **grapheme-correct string API**
+(codepoint-vs-grapheme indexing is a real divergence vs Elixir's `String`;
+`unicode-segmentation` is already a dep, wired only to display-width);
+**protocols/multimethods** (replace hand-written `type-of` cascades);
+**string interpolation**; **`&key` args** (designed — ADR-011); the dist
+**`terminate/2` hook** + **FQDN long names** (dist refinements below); the
+parked-`receive` **mailbox-slot leak** (survey housekeeping).
+
+**Explicitly no work:** the JSON/base64 native-codec rows (by-design pure
+Brood vs C codecs); and the residual message-latency gap vs BEAM (~3–6×) is
+*performance*, not features — its deep lever (inline receive compilation) is
+tracked under the Elixir-parity gaps below.
 
 ### Robustness gaps vs BEAM / .NET (2026-07-18 runtime survey)
 
@@ -631,7 +686,8 @@ today's ad-hoc `gc-stats`/`vm-stats`/`process-info` instrumentation behind one s
 
 - `&key` named arguments (designed — ADR-011) and supplied-p flags
 - Hygienic macros / `macroexpand-all`
-- Bignums / rationals (i64 + f64 is enough for now)
+- Rationals (ints already auto-widen to big integers on overflow; f64 +
+  decimals cover the rest)
 - True per-file **namespaces** — flat Emacs-style `provide`/`require` is in scope
   (ADR-019); real namespace isolation stays a later, additive Brood macro layer
 - Characters as a distinct type (chars are 1-char strings)

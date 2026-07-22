@@ -242,6 +242,9 @@ x                bind x; a repeated x is an equality constraint (non-linear)
 (p1 & rest)      head(s) + tail
 [p1 p2 ...]      vector of exact length (the tuple / tagged-data idiom)
 {:keys [a b]}    map — bind a,b to (:a m),(:b m); {:keys [a] :or {a 0}} defaults absent keys
+(bytes seg ...)  bytes value, bit-syntax style: byte/#b"…" literals; x = one byte;
+                 (x n) = n bytes as sub-bytes (n may be an earlier binding);
+                 (x :u16) (x :i32-le) ... = typed int, big-endian default; & rest
 ```
 
 ```lisp
@@ -249,6 +252,10 @@ x                bind x; a repeated x is an equality constraint (non-linear)
   ([:circle r]    (* 3.14 r r))
   ([:rect w h]    (* w h))
   (_              0))
+
+(match frame                                       ; binary protocol parsing
+  ((bytes (len :u16) (payload len) & rest) [payload rest])
+  (_                                       :short))
 ```
 
 ## Looping is recursion

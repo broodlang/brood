@@ -452,10 +452,47 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `(p1 & rest)` | head(s) + the tail bound to `rest` |
 | `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom** |
 | `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the value isn't a map |
+| `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — Erlang/Elixir bit syntax (see below) |
 
 Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
 shadows) — it does **not** test against a same-named value. Match a known value
 with a keyword (`:ok`), a quoted symbol (`'none`), or a pin (`~x`).
+
+### Bytes patterns (bit syntax)
+
+A `(bytes seg…)` pattern destructures a `bytes` value left-to-right, Erlang
+bit-syntax style. Each segment consumes bytes:
+
+| Segment | Consumes / binds |
+|---|---|
+| `7`, `#b"GET "` | those exact byte(s), by content |
+| `x` | one byte, bound as an int 0–255 (`_` skips one) |
+| `(x n)` | `n` bytes as a sub-`bytes` value; `n` is an int **or an earlier binding** (dynamic size); `(_ n)` skips |
+| `(x :u16)` | a typed integer: `:u8`/`:u16`/`:u32`/`:u64` unsigned, `:i8`/`:i16`/`:i32`/`:i64` signed two's complement — **big-endian by default**, explicit `:u16-be`/`:u16-le` (etc.) variants; `(_ :u32)` skips the width |
+| `& rest` | the remaining bytes (must be last) |
+
+Without a trailing `& rest` the pattern requires the bytes be consumed
+*exactly*; a too-short or too-long value falls through to the next clause. A
+repeated binder is an equality constraint, as everywhere else. A full-range
+`:u64` read past `i64` widens to a big integer transparently.
+
+```clojure
+;; TLV: a u16 length prefix drives a dynamic-size payload
+(match frame
+  ((bytes (len :u16) (payload len) & rest) (handle payload rest))
+  (_                                       :short))
+
+;; a header: magic byte, kind, big-endian length, then exactly len bytes
+(match pkt
+  ((bytes 127 kind (len :u16) (body len)) [kind body])
+  (_                                      :bad-frame))
+```
+
+The same reads and writes are available as plain functions for offset-based
+parsing: `(bytes-uint bs off n)` / `bytes-uint-le` / `bytes-int` /
+`bytes-int-le` (n = 1–8 bytes), and the encoders `(int->bytes v n)` /
+`int->bytes-le` (truncating to `n` bytes, the bit-syntax convention — so
+`(int->bytes -1 2)` is `#b"\xff\xff"`).
 
 ### `match`
 

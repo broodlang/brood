@@ -70,6 +70,7 @@ One vocabulary, shared by every site:
 | `(p1 & rest)` | head(s) + tail bound — reuses the `&` rest marker |
 | `[p1 p2 …]` | a vector of exactly that length — the Erlang *tuple* |
 | `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the target isn't a map |
+| `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — bit syntax: byte/`#b"…"` literals, one-byte binders, sized `(x n)` sub-bytes (dynamic sizes), typed integers `(x :u16)`/`(x :i32-le)`/…, `& rest` — see `docs/language.md` §Bytes patterns |
 | nested | patterns compose to any depth |
 
 **It's additive.** Every binding form Brood has today is already the

@@ -1259,7 +1259,7 @@ can't see through macros.
 Brood is the wrong shape for that model. It is an **image-based, self-editing,
 hot-reloadable** Lisp (ADR-013): the running runtime already holds every loaded
 module's globals in one shared, mutable code region (`global-names` enumerates
-them today). The endgame (M2–M5) is *an editor that is a running Brood image
+them today). The endgame (M2–M4) is *an editor that is a running Brood image
 editing Brood source* — at which point the editor literally is the image and
 "xref" is self-reflection. The idiomatic answer is the **SLIME/CIDER/Emacs-xref
 model**: the image recorded *where each thing was defined as it loaded*, and
@@ -2456,11 +2456,11 @@ relaxation (runtime-substrate crates), ADR-011 (ship the simple form),
 **Status:** accepted (2026-05-29). The first M3 substrate — the seam between the
 runtime and any frontend (local terminal today, a socket peer later).
 
-**Context.** The editor must feel native locally *and* serve remote/web frontends,
+**Context.** The editor must feel native locally *and* serve remote frontends,
 from one codebase (architecture.md). The way to get that for free is to make the
 display layer a **protocol, not a library**: the runtime emits a serialisable
 stream of "render this" operations and consumes input events; the local frontend
-implements that protocol in-process (the fast path), and a remote/web frontend
+implements that protocol in-process (the fast path), and a remote frontend
 implements the *identical* protocol over a socket. The open question was how thin
 the Rust surface should be, and where the protocol's meaning should live.
 
@@ -2511,7 +2511,7 @@ lives behind the scheduler registry).
   map of fg/bg/bold/reverse). Faces beyond that, mouse/resize events, scroll, and
   attaching the observer to a *remote* live image are additive and deferred
   (ADR-011). The same `term-draw`/`term-poll` shape is what the M3 editor frontend
-  and the M4/M5 socket frontends will speak.
+  and the M4 socket frontends will speak.
 
 **References.** ADR-006 (mechanism/policy), ADR-045 (the rope, the other editor
 substrate), ADR-005 relaxation (runtime-substrate crates), ADR-011 (ship the
@@ -2913,7 +2913,7 @@ is ready, like `receive`) would make the block truly zero-cost — a nicety, not
 - The REPL is now a genuinely modern prompt, entirely in Brood — the editor for the
   coming text editor (M2+) starts here, on the same seam.
 - `term-emit`'s relative ops are the inline counterpart to `term-draw`'s absolute
-  frame; both share `apply_face`, so a future remote/web frontend interprets one more
+  frame; both share `apply_face`, so a future remote frontend interprets one more
   small op set.
 - Piped (non-TTY) input is untouched: the editor is gated on **stdin** being a TTY
   (`(and (stdin-tty?) (stdout-tty?))` — a new `stdin-tty?` primitive), so
@@ -8749,3 +8749,35 @@ proves too clunky. The checker signature is the shallow surface
 (`string|bytes|int|pair|vector|nil` — the lattice can't express recursion);
 the flattener enforces the leaves at runtime. The read-side twin (a growable
 read buffer that freezes to `bytes`) stays a separate roadmap item.
+
+## ADR-140 — Bit syntax: typed integer segments in the bytes pattern, pure Brood
+
+**Decision.** The `(bytes seg…)` match pattern (previously byte-granular:
+literals, one-byte binders, sized `(x n)` sub-bytes, `& rest`) gains **typed
+integer segments**: `(x :u16)`, `(x :i32-le)`, … — widths 1/2/4/8 bytes,
+unsigned `:uN` and signed two's-complement `:iN`, **big-endian by default**
+(network order) with explicit `-be`/`-le` spellings; `(_ :u32)` skips a width;
+repeated binders stay equality constraints. The whole feature is **Brood, not
+Rust**: the matcher (`match-bytes-typed-seg` in `std/prelude.blsp`) lowers a
+typed segment onto new prelude functions — `bytes-uint`/`bytes-uint-le`/
+`bytes-int`/`bytes-int-le` (offset-based reads over `byte-at`) and the
+encoders `int->bytes`/`int->bytes-le` (truncating to the width, the
+bit-syntax convention) — all public, usable outside patterns.
+
+**Why.** The flagship remaining BEAM capability gap (the 2026-07-22 parity
+program, ROADMAP): binary protocol parsers destructure frames declaratively
+instead of doing index arithmetic, which is what makes porting the HTTP/WS
+parsers off the carrier-string bridge tractable. Pure Brood is the
+dogfood-correct shape — the mechanism (`byte-at`, overflow-checked
+arithmetic) already existed, so no kernel surface grew; a full-range `:u64`
+read past `i64` *just works* because ints auto-widen to big integers, giving
+exact Erlang semantics for free.
+
+**Deliberately NOT included** (ADR-011): **bit-granular** (sub-byte) widths —
+byte-aligned segments cover TLV/length-prefixed protocols; a flag byte's bit
+fields are one `bit-and`/`bit-shift-right` away, and bit offsets would double
+the lowering's complexity for one consumer (WebSocket headers). **Float
+segments** (`:f32`/`:f64`) — no bits↔float primitive exists yet; add when a
+consumer appears. **UTF-8 string segments** — `(utf8-bytes->string sub)` after
+a sized segment is one call. Each is additive within the same spec-keyword
+namespace if a real need lands.

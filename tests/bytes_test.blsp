@@ -113,6 +113,81 @@
     (is (= (match (bytes 5 5) ((bytes a a) :equal) (_ :diff)) :equal))
     (is (= (match (bytes 5 6) ((bytes a a) :equal) (_ :diff)) :diff))))
 
+(describe "bytes: typed integer segments (bit syntax)"
+  (test "unsigned widths, big-endian by default"
+    (is (= (match (bytes 1 2) ((bytes (x :u16)) x) (_ :no)) 258))
+    (is (= (match (bytes 0 0 1 0) ((bytes (x :u32)) x) (_ :no)) 256))
+    (is (= (match (bytes 1 2 3) ((bytes (x :u8) (y :u16)) [x y]) (_ :no)) [1 515])))
+  (test "explicit -be spellings equal the default"
+    (is (= (match (bytes 1 2) ((bytes (x :u16-be)) x) (_ :no)) 258)))
+  (test "little-endian variants"
+    (is (= (match (bytes 2 1) ((bytes (x :u16-le)) x) (_ :no)) 258))
+    (is (= (match (bytes 0 1 0 0) ((bytes (x :u32-le)) x) (_ :no)) 256)))
+  (test "signed segments read two's complement"
+    (is (= (match (bytes 255) ((bytes (x :i8)) x) (_ :no)) -1))
+    (is (= (match (bytes 127) ((bytes (x :i8)) x) (_ :no)) 127))
+    (is (= (match (bytes 255 254) ((bytes (x :i16)) x) (_ :no)) -2))
+    (is (= (match (bytes 254 255) ((bytes (x :i16-le)) x) (_ :no)) -2)))
+  (test "64-bit segments round-trip through int->bytes"
+    (is (= (match (int->bytes 123456789012345 8) ((bytes (x :u64)) x) (_ :no))
+          123456789012345))
+    (is (= (match (int->bytes -5 8) ((bytes (x :i64)) x) (_ :no)) -5)))
+  (test "length is enforced — too-short or unconsumed bytes fall through"
+    (is (= (match (bytes 1) ((bytes (x :u16)) x) (_ :short)) :short))
+    (is (= (match (bytes 1 2 3) ((bytes (x :u16)) x) (_ :inexact)) :inexact)))
+  (test "(_ :u32) skips the segment's width"
+    (is (= (match (bytes 9 9 9 9 7) ((bytes (_ :u32) x) x) (_ :no)) 7)))
+  (test "a typed length prefix drives a sized segment (TLV with :u16 length)"
+    (is (= (match (bytes-concat [(int->bytes 3 2) #b"ABC" (bytes 9)])
+             ((bytes (len :u16) (body len) & rest)
+               [len (utf8-bytes->string body) rest])
+             (_ :no))
+          [3 "ABC" (bytes 9)])))
+  (test "non-linear: a repeated typed binder requires an equal value"
+    (is (= (match (bytes 0 5 0 5) ((bytes (a :u16) (a :u16)) :equal) (_ :diff)) :equal))
+    (is (= (match (bytes 0 5 0 6) ((bytes (a :u16) (a :u16)) :equal) (_ :diff)) :diff)))
+  (test "mixes with literals, one-byte binders, and & rest — a mini frame header"
+    (is (= (match (bytes-concat [(bytes 127 2) (int->bytes 5 2) #b"hello" #b"!"])
+             ((bytes 127 kind (len :u16) (payload len) & more)
+               [kind len (utf8-bytes->string payload) more])
+             (_ :no))
+          [2 5 "hello" (bytes 33)])))
+  (test "an unknown spec keyword is a clean expand-time error"
+    (is (= (try (eval '(match (bytes 1) ((bytes (x :u3)) x) (_ :no)))
+            (catch e :bad-spec))
+          :bad-spec))))
+
+(describe "bytes: integer decode/encode helpers"
+  (test "bytes-uint / bytes-int read at offsets, both endians"
+    (is (= (bytes-uint (bytes 1 2 3 4) 1 2) 515))
+    (is (= (bytes-uint-le (bytes 1 2 3 4) 1 2) 770))
+    (is (= (bytes-int (bytes 0 255) 1 1) -1))
+    (is (= (bytes-int-le (bytes 254 255) 0 2) -2)))
+  (test "int->bytes round-trips, both endians"
+    (is (= (int->bytes 258 2) (bytes 1 2)))
+    (is (= (int->bytes-le 258 2) (bytes 2 1)))
+    (is (= (int->bytes -1 2) (bytes 255 255)))
+    (is (= (bytes-int (int->bytes -123456 4) 0 4) -123456))
+    (is (= (bytes-uint-le (int->bytes-le 987654321 5) 0 5) 987654321)))
+  (test "encoding truncates to the width (the bit-syntax convention)"
+    (is (= (int->bytes 256 1) (bytes 0)))
+    (is (= (int->bytes 511 1) (bytes 255))))
+  (test "width outside 1–8 is a clean error"
+    (is (= (try (bytes-uint (bytes 1) 0 0) (catch e :bad-width)) :bad-width))
+    (is (= (try (int->bytes 1 9) (catch e :bad-width)) :bad-width)))
+  (test "a :u64 read past the i64 range widens to a big integer (Erlang parity)"
+    (is (= (bytes-uint (bytes 255 0 0 0 0 0 0 0) 0 8) 18374686479671623680))
+    (is (= (match (bytes 255 255 255 255 255 255 255 255) ((bytes (x :u64)) x) (_ :no))
+          18446744073709551615)))
+  (test "typed reads cross processes — parse in a worker, send the fields home"
+    (let (parent (self))
+      (spawn (fn ()
+        (send parent
+          (match (bytes-concat [(int->bytes 7 2) #b"payload"])
+            ((bytes (n :u16) & body) [n (utf8-bytes->string body)])
+            (_ :no)))))
+      (is (= (receive (m m)) [7 "payload"])))))
+
 ;; ---- iolists (ADR-139): nested trees flattened once at the write boundary ----
 (describe "iolists"
   (test "bytes-concat flattens nesting, strings (UTF-8), bytes, and byte ints"
@@ -139,12 +214,10 @@
       (append-bytes path [[68] "E"])
       (is (= (slurp-bytes path) #b"ABCDE"))
       (delete-file path)))
-  (test "deep nesting flattens iteratively"
-    ;; 2k-deep left-nested list — enough to prove the flattener's explicit
-    ;; worklist. NOT deeper: the value must also survive the kernel's heap
-    ;; walkers (GC tracing / promote), which recurse per pair natively — a 40k
-    ;; depth here blew the CI worker's stack in GC, not in the flattener
-    ;; (devlog 2026-07-19 iolists entry; deep-structure walker hardening is a
-    ;; separate roadmap item).
-    (let (deep (fold (fn (acc _) (list acc)) (list "x") (range 2000)))
+  (test "deep nesting flattens (and survives the heap walkers)"
+    ;; 40k-deep left-nested list. The flattener uses an explicit worklist, and
+    ;; since the 2026-07-20 walker hardening (stacker segmented growth) the
+    ;; kernel's promote/GC/equal/hash walkers survive this depth too — see
+    ;; tests/deep_values_test.blsp for the dedicated coverage.
+    (let (deep (fold (fn (acc _) (list acc)) (list "x") (range 40000)))
       (is (= (bytes-concat deep) #b"x")))))
