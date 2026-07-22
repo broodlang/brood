@@ -1795,27 +1795,6 @@ message already sent stays sent."
   (exit timer :kill)
   nil)
 
-;; ---- dirty-native offload (ADR-144) -----------------------------------------
-;; The BEAM dirty-scheduler shape: a long/blocking native runs on a small OS
-;; pool and only THIS process waits — its scheduler worker keeps running other
-;; processes. Mechanism is `%offload` (kernel: copy args out, run on the pool,
-;; deliver the result as a message); this wrapper is the policy — park in a
-;; selective receive on the job's token, rethrow errors as ordinary throws.
-;; NOTE deliberately defined BEFORE the `receive` macro, like every other
-;; receive-using prelude fn (sleep, send-after, send-interval): the body then
-;; expands lazily at first call instead of at boot — a receive matcher expanded
-;; at boot trips the prelude freeze's global-env assert (see devlog 2026-07-22).
-(defn offload (f & args)
-  "Run the blocking native `f` (e.g. `slurp-bytes`, `%git-clone`,
-`%pbkdf2-sha256-bytes`) with `args` on the dirty-offload OS pool and wait for
-the result — parking only this process, never a scheduler worker. An error in
-the native rethrows here, catchable as usual. Only long/blocking
-data-in/data-out natives are allowed (`%offload` refuses the rest); other
-mailbox messages stay queued while waiting (selective receive)."
-  (let (tok (%offload f (into [] args)))
-    (receive
-      ([:offload ~tok result] result)
-      ([:offload-error ~tok e] (throw e)))))
 
 ;; Node-link auto-reconnect moved to `std/net/reconnect` (2026-07-18):
 ;; `(require 'net/reconnect)` then `(net/reconnect/watch "name@host:port")` —
@@ -1886,6 +1865,29 @@ mailbox messages stay queued while waiting (selective receive)."
       ;; `%receive` returns the matched (or timeout) body *thunk*; applying it here —
       ;; in tail position — is what keeps a receive loop O(1) stack (eval TCO).
       `((%receive ~matcher ~ms ~on-time)))))
+
+;; ---- dirty-native offload (ADR-144) -----------------------------------------
+;; The BEAM dirty-scheduler shape: a long/blocking native runs on a small OS
+;; pool and only THIS process waits — its scheduler worker keeps running other
+;; processes. Mechanism is `%offload` (kernel: copy args out, run on the pool,
+;; deliver the result as a message); this wrapper is the policy — park in a
+;; selective receive on the job's token, rethrow errors as ordinary throws.
+;; Sits AFTER the `receive` macro on purpose: its body macroexpands at boot,
+;; which makes every boot a regression test for the freeze's
+;; reachability-aware dangling-env check (a boot-expanded receive matcher
+;; leaves a dead captured-frame closure in the builder heap — devlog
+;; 2026-07-22).
+(defn offload (f & args)
+  "Run the blocking native `f` (e.g. `slurp-bytes`, `%git-clone`,
+`%pbkdf2-sha256-bytes`) with `args` on the dirty-offload OS pool and wait for
+the result — parking only this process, never a scheduler worker. An error in
+the native rethrows here, catchable as usual. Only long/blocking
+data-in/data-out natives are allowed (`%offload` refuses the rest); other
+mailbox messages stay queued while waiting (selective receive)."
+  (let (tok (%offload f (into [] args)))
+    (receive
+      ([:offload ~tok result] result)
+      ([:offload-error ~tok e] (throw e)))))
 
 ;; ---- a general membership test ----------------------------------------------
 (defn member? (x xs)

@@ -433,13 +433,15 @@ corruption, allocation serialisation). One item stays deferred:
   overflow on deeply-nested types), no RAII guard on `check_file`'s panic path.
   (The worker `run_one` is covered — `catch_unwind` retires the process with
   `:killed`, `scheduler.rs`.)
-- ⬜ **Prelude freeze vs boot-expanded `receive` (found 2026-07-22, ADR-144
-  work):** a receive-using prelude `defn` defined *after* the `receive` macro
-  expands at boot and leaves a captured-local-frame closure in the boot slab,
-  tripping `freeze_as_shared_code`'s global-env assert. Placement (define
-  before the macro → lazy expansion) is the convention meanwhile; fix the
-  wart — GC the boot slab before freeze or make the assert
-  reachability-based — or at least name the offending form in the panic.
+- ✅ **Prelude freeze vs boot-expanded `receive`** (found + fixed 2026-07-22):
+  the freeze's dangling-env assert swept the whole closure slab, including
+  boot *garbage* (the builder heap never collects), so a dead
+  captured-frame closure from a boot-time receive-matcher expansion killed
+  boot. Fixed with a **reachability mark pass** at freeze: reachable closures
+  keep the hard assert (a live captured frame really would dangle);
+  unreachable ones get their env scrubbed (unobservable). The prelude
+  `offload` now deliberately sits *after* the `receive` macro, so every boot
+  regression-tests the fix; `BROOD_BOOT_TRACE=1` reports the scrub count.
 
 ---
 

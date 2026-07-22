@@ -2281,6 +2281,99 @@ impl Heap {
             .map(|&(s, v)| (s, to_prelude(v)))
             .collect();
 
+        // Mark which closures are REACHABLE from the global bindings. The
+        // builder heap never collects (gc disabled — dense, stable indices are
+        // what make the local→prelude re-tag a pure bit-flip), so the slabs
+        // also hold boot *garbage*: intermediates from macroexpansion and
+        // top-level eval. Expander code legitimately creates closures that
+        // capture a local frame while it runs (the receive matcher expansion
+        // was the first to do so in the prelude — devlog 2026-07-22); dead by
+        // freeze time, they must not trip the dangling-env assert below. The
+        // assert stays HARD for reachable closures — a live captured frame
+        // really would dangle once the env slab is wiped — and dead ones get
+        // their env scrubbed instead, which is unobservable (nothing can
+        // reach them) and keeps the wiped-env invariant exact.
+        let reachable_clo: Vec<bool> = {
+            let slabs = &self.local;
+            let mut seen_pair = vec![false; slabs.pairs.len()];
+            let mut seen_vec = vec![false; slabs.vectors.len()];
+            let mut seen_map = vec![false; slabs.maps.len()];
+            let mut seen_clo = vec![false; slabs.closures.len()];
+            let mut seen_env = vec![false; slabs.envs.len()];
+            enum W {
+                V(Value),
+                E(EnvId),
+                M(MapId),
+            }
+            let mut work: Vec<W> = slabs.envs[root.index()]
+                .vars
+                .iter()
+                .map(|&(_, v)| W::V(v))
+                .collect();
+            while let Some(w) = work.pop() {
+                match w {
+                    W::V(v) => match v.unpack() {
+                        ValueRef::Pair(id) if id.region() == LOCAL => {
+                            if !std::mem::replace(&mut seen_pair[id.index()], true) {
+                                let (a, b) = slabs.pairs[id.index()];
+                                work.push(W::V(a));
+                                work.push(W::V(b));
+                            }
+                        }
+                        ValueRef::Vector(id) if id.region() == LOCAL => {
+                            if !std::mem::replace(&mut seen_vec[id.index()], true) {
+                                for &x in slabs.vectors[id.index()].iter() {
+                                    work.push(W::V(x));
+                                }
+                            }
+                        }
+                        ValueRef::Map(id) if id.region() == LOCAL => work.push(W::M(id)),
+                        ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == LOCAL => {
+                            if !std::mem::replace(&mut seen_clo[id.index()], true) {
+                                let c = &slabs.closures[id.index()];
+                                for arm in c.arms.iter() {
+                                    for &f in &arm.body {
+                                        work.push(W::V(f));
+                                    }
+                                    for &(_, d) in &arm.optionals {
+                                        work.push(W::V(d));
+                                    }
+                                }
+                                if let Some(e) = c.env {
+                                    work.push(W::E(e));
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    W::M(id) => {
+                        if !std::mem::replace(&mut seen_map[id.index()], true) {
+                            let node = &slabs.maps[id.index()];
+                            for &(k, v) in node.data.iter() {
+                                work.push(W::V(k));
+                                work.push(W::V(v));
+                            }
+                            for &child in node.children.iter() {
+                                work.push(W::M(child));
+                            }
+                        }
+                    }
+                    W::E(e) => {
+                        if !std::mem::replace(&mut seen_env[e.index()], true) {
+                            let frame = &slabs.envs[e.index()];
+                            for &(_, v) in frame.vars.iter() {
+                                work.push(W::V(v));
+                            }
+                            if let Some(p) = frame.parent {
+                                work.push(W::E(p));
+                            }
+                        }
+                    }
+                }
+            }
+            seen_clo
+        };
+
         let mut slabs = self.local;
         debug_assert!(
             slabs.ropes.is_empty(),
@@ -2321,7 +2414,8 @@ impl Heap {
                 *child = MapId::prelude(child.index());
             }
         }
-        for c in &mut slabs.closures {
+        let mut scrubbed = 0usize;
+        for (i, c) in slabs.closures.iter_mut().enumerate() {
             // Prelude closures are built from LOCAL/PRELUDE `fn_rest` (never cached —
             // the template cache is RUNTIME-keyed), so their arms are unique here and
             // `make_mut` never clones; it's used for robustness, not sharing.
@@ -2333,22 +2427,34 @@ impl Heap {
                     *d = to_prelude(*d);
                 }
             }
+            // A dead boot intermediate (unreachable from the globals) may hold
+            // a captured local frame — expander code makes such closures while
+            // it runs. Scrub the env: unobservable (nothing reaches it), and
+            // the wiped-env invariant below stays exact.
+            if !reachable_clo[i] && c.env.is_some() {
+                c.env = None;
+                scrubbed += 1;
+            }
             // Hard assert (not debug_assert!) — `slabs.envs` is wiped below,
-            // so a closure capturing a non-None env would survive into the
-            // frozen prelude with a dangling env handle, and the first call
-            // would silently index past the empty slab. We want the same
-            // failure in release: a clear panic at freeze time, not corrupt
-            // state at runtime. The message names the closure so the prelude
-            // line that produced it is easy to find.
+            // so a REACHABLE closure capturing a non-None env would survive
+            // into the frozen prelude with a dangling env handle, and the
+            // first call would silently index past the empty slab. We want the
+            // same failure in release: a clear panic at freeze time, not
+            // corrupt state at runtime. The message names the closure so the
+            // prelude line that produced it is easy to find.
             assert!(
                 c.env.is_none(),
                 "shared closures must capture the global env (closure {:?} \
-                 has env={:?}); the prelude tried to freeze a closure with a \
-                 captured local frame — most likely a `defn`/`def` whose body \
-                 closes over a let-bound name instead of a global",
+                 has env={:?}); the prelude tried to freeze a REACHABLE \
+                 closure with a captured local frame — most likely a \
+                 `defn`/`def` whose body closes over a let-bound name instead \
+                 of a global",
                 c.name.map(crate::core::value::symbol_name),
                 c.env,
             );
+        }
+        if scrubbed > 0 && std::env::var_os("BROOD_BOOT_TRACE").is_some() {
+            eprintln!("[boot] freeze scrubbed {scrubbed} dead boot-intermediate closure env(s)");
         }
         slabs.envs = Vec::new(); // the prelude region has no env frames
 

@@ -5743,3 +5743,26 @@ why); the underlying wart — boot-expansion of a receive matcher creating a
 freeze-hostile intermediate — is filed in the stability backlog to be either
 fixed (GC the boot slab before freeze, or make the assert reachability-
 based) or given a boot-time diagnostic that names the offending form.
+
+## 2026-07-22 — The freeze wart fixed: reachability-aware dangling-env check
+
+The morning's filing closed the same day. Root cause confirmed: the builder
+heap never collects (dense, stable indices are what make the local→prelude
+re-tag a pure bit-flip), so the closure slab at freeze also holds boot
+*garbage* — and the dangling-env assert swept all of it. A boot-time
+`receive`-matcher expansion legitimately creates a closure capturing a local
+frame while the expander runs; dead by freeze, it still tripped the assert.
+Fix: a **mark pass** (iterative worklist from the global bindings over
+pairs/vectors/CHAMP nodes/closure arms/env chains) classifies each closure;
+**reachable** ones keep the hard assert — a live captured frame really would
+dangle once the env slab is wiped — and **unreachable** ones get `env`
+scrubbed to `None`, which nothing can observe. Measured: exactly **1**
+scrubbed closure with `offload` boot-expanded (`BROOD_BOOT_TRACE=1` prints
+the count), confirming the diagnosis. The prelude `offload` moved to its
+natural home *after* the `receive` macro — deliberately, so every boot now
+regression-tests the fix; the before-the-macro placement convention is dead.
+Gates: offload/bytes/tcp/http/tls files green, suite 792/792, GC_STRESS
+clean, `nest check` zero warnings. (Separate, noted not fixed: boot garbage
+is *frozen into* the shared prelude region — a size cost, not a correctness
+one; a compacting freeze would need handle rewriting and is not worth it
+until the prelude's frozen size matters.)
