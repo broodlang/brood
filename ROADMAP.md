@@ -64,10 +64,18 @@ encrypted-by-default dist, and OSR exceed BEAM — and cached-boot startup
    first in-tree e2e TLS tests, `tests/tls_test.blsp`); `http-get`/`post`
    accept `:ca` and are byte-faithful over https; `serve-loop` serves https
    unchanged when handed a `tls-listen` socket. **[kernel]**
-4. ⬜ **Dirty-CPU offload pool** — BEAM dirty-scheduler / .NET blocking-pool
-   parity: the one remaining un-preemptible-native hole (the `BROOD_STALL_MS`
-   diagnostic tier already ships — survey below) and the explicit gate on the
-   WASM native-interop story (ADR-071). **[kernel]**
+4. ✅ **Dirty-CPU offload pool — shipped 2026-07-22 (ADR-144).** `%offload`
+   runs an allow-listed blocking native (git/kdf/digest/file-IO/keygen) on a
+   small OS pool via the ADR-059 copy-out → message-back seam; the prelude
+   `offload` wrapper parks the caller in a selective receive — a process
+   waits, never a worker. The package manager's clones/ls-remotes ride it.
+   Opens the ADR-071 WASM-interop gate. Deferred: BEAM-style process
+   *migration* to dirty schedulers (for heap-sharing natives) until a real
+   consumer needs it. **[kernel mechanism, Brood policy]**
+
+**Tier 1 is complete** (2026-07-22): bit syntax + the parser port, the
+read-buffer non-build, the socket reactor with TLS everywhere, and the
+offload pool all landed the same day.
 
 **Tier 2 — real gaps, each gated on a first consumer (ADR-011):** the cluster
 **registry** (`Registry`/via-tuples, `:global`, `pg` — "OTP deferred" below);
@@ -425,6 +433,13 @@ corruption, allocation serialisation). One item stays deferred:
   overflow on deeply-nested types), no RAII guard on `check_file`'s panic path.
   (The worker `run_one` is covered — `catch_unwind` retires the process with
   `:killed`, `scheduler.rs`.)
+- ⬜ **Prelude freeze vs boot-expanded `receive` (found 2026-07-22, ADR-144
+  work):** a receive-using prelude `defn` defined *after* the `receive` macro
+  expands at boot and leaves a captured-local-frame closure in the boot slab,
+  tripping `freeze_as_shared_code`'s global-env assert. Placement (define
+  before the macro → lazy expansion) is the convention meanwhile; fix the
+  wart — GC the boot slab before freeze or make the assert
+  reachability-based — or at least name the offending form in the panic.
 
 ---
 

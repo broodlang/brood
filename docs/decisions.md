@@ -8898,3 +8898,39 @@ processes were always the right consumer model on top (mailbox delivery,
 `receive` backpressure), so only the transport needed replacing. `mio` is
 runtime substrate under the boxcar bar: the readiness layer, no
 Lisp-callable behaviour.
+
+## ADR-144 — The dirty-native offload pool: blocking natives park a process, not a worker
+
+**Decision.** BEAM dirty-scheduler parity via the ADR-059 seam, not scheduler
+surgery. A new kernel mechanism **`%offload`** runs an **allow-listed**
+blocking native on a small OS pool (≈`nproc/4`, min 2, lazily started): the
+caller's args are deep-copied out as `Message`s, the pool thread rebuilds them
+in a private scratch `Heap`, calls the native's fn pointer, and delivers
+`[:offload token result]` (or `[:offload-error token err]`, the ADR-135-style
+structured error) back to the caller's mailbox. Policy is the prelude
+**`offload`** wrapper: fire `%offload`, park in a **selective receive** on the
+job's token (other mail stays queued), rethrow errors as ordinary throws. The
+allow list is natives that are long/blocking and data-in/data-out — no
+globals, no env lookups, no process identity — today `%git-clone`,
+`%git-resolve-ref`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`, `slurp`,
+`slurp-bytes`, `spit`, `spit-bytes`, `spit-append`, `append-bytes`,
+`tls-self-signed`. Offloading anything else is refused at the call (a
+heap-sharing or env-reading native off-process would race the caller's
+world). The package manager's `%git-clone`/`%git-resolve-ref` call sites go
+through `offload` — a `nest fetch` no longer pins a scheduler worker for the
+duration of a clone.
+
+**Why this shape.** The runtime already has exactly one blessed pattern for
+"blocking work must not hold a worker": run it off-thread, deliver a message,
+`receive` (ADR-059 — sockets, subprocess pipes). Reusing it means zero new
+park/suspend machinery in the VM, errors ride the existing structured-error
+seam, and the policy layer is ~ten lines of Brood. The alternative — true
+BEAM-style process *migration* onto dirty schedulers — buys generality (any
+native, no copy) at the price of deep scheduler surgery; revisit only if a
+consumer needs to offload heap-sharing work. Reduction preemption already
+bounds *short* native hogging (~one quantum); the pool is for the genuinely
+long tail the `BROOD_STALL_MS` tracer was built to find.
+
+**Also unlocked.** The ADR-071 WASM interop story listed the offload pool as
+its gate (a sandboxed component call is a long native); that gate is now
+open.

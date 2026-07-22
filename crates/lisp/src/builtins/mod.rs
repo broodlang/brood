@@ -2255,6 +2255,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         ),
         receive_match,
     );
+    // The dirty-native offload pool (ADR-144): the `offload` wrapper in the
+    // prelude is the policy; this is the mechanism.
+    def(
+        heap,
+        "%offload",
+        Arity::exact(2),
+        Sig::new(vec![any, any], int),
+        offload_start,
+    );
     def(
         heap,
         "self",
@@ -2683,6 +2692,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("append-bytes", &["path", "bytes"], "Append any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139) to the file at path byte-faithfully, creating it if absent. Returns nil. The incremental counterpart to spit-bytes (which truncates) — lets a large payload be streamed to disk chunk-by-chunk (e.g. spooling a file upload) without ever holding it whole in memory."),
     ("random-token", &["n"], "n cryptographically-strong random bytes from the OS RNG, hex-encoded as a 2n-char string. Used to mint a node cookie."),
     ("%digest", &["algo", "bytes"], "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp."),
+    ("%offload", &["f", "args"], "Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. Only long/blocking data-in/data-out natives are allowed (%git-clone, %git-resolve-ref, %pbkdf2-sha256-bytes, %digest, %hmac, slurp, slurp-bytes, spit, spit-bytes, spit-append, append-bytes, tls-self-signed) — anything heap-sharing or env-reading is refused. Prefer the prelude `offload` wrapper, which parks in a selective receive and rethrows errors."),
     ("%hmac", &["algo", "key-bytes", "msg-bytes"], "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp."),
     ("%git-resolve-ref", &["url", "ref"], "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037)."),
     ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),

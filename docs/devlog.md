@@ -5714,3 +5714,32 @@ https-through-the-std-server cases in http_test; 56 net tests + suite
 792/792, VM/TW + GC_STRESS green, `nest check` zero warnings. `SubscriberHandle`
 and the per-source thread machinery for sockets are gone (`sink_pair` cells
 replace retargeting); `proc.rs` keeps `spawn_io_source` for subprocess pipes.
+
+## 2026-07-22 — Tier 1 item 4: the dirty-native offload pool (ADR-144) — Tier 1 complete
+
+BEAM dirty-scheduler parity via the ADR-059 seam, no scheduler surgery:
+`%offload` copies an allow-listed blocking native's args out as messages,
+runs it on a small OS pool (≈nproc/4, min 2) against a private scratch
+`Heap`, and delivers `[:offload token result]` / `[:offload-error token err]`
+back; the prelude `offload` wrapper parks in a selective receive on the token
+and rethrows errors. Allowed: long/blocking data-in/data-out natives only
+(git, kdf, digest/hmac, file IO, TLS keygen) — anything heap-sharing is
+refused at the call. `package.blsp`'s `%git-clone`/`%git-resolve-ref` ride it
+(a `nest fetch` no longer pins a worker); the ADR-071 WASM gate is open.
+Tests `tests/offload_test.blsp` (7: round trips incl. file IO, error
+rethrow, refusals, selectivity — a decoy message survives the wait — and an
+8-process concurrent fan-in), green on VM/TW/no-JIT/GC_STRESS; suite
+792/792; `nest check` zero warnings.
+
+**Found en route — a real freeze/expansion wart:** a prelude `defn` whose
+body uses the `receive` macro AND is defined *after* the macro expands at
+boot, and that boot-time expansion leaves a closure with a captured local
+frame in the boot slab — `freeze_as_shared_code`'s global-env assert then
+kills boot. Every pre-existing receive-using prelude fn (sleep, send-after,
+send-interval) sits *before* the macro, so their bodies expand lazily at
+first call and the constraint was invisible until `offload` broke it. The
+fix here is placement (offload sits with its siblings, comment explains
+why); the underlying wart — boot-expansion of a receive matcher creating a
+freeze-hostile intermediate — is filed in the stability backlog to be either
+fixed (GC the boot slab before freeze, or make the assert reachability-
+based) or given a boot-time diagnostic that names the offending form.

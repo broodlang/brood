@@ -1118,6 +1118,27 @@ dies, so a forgotten interval can't tick forever.
 (cancel-timer t)
 ```
 
+### Blocking natives (`offload`)
+
+A long or blocking native — a git clone, a key derivation, big file IO — would
+pin its scheduler worker for the whole call. `(offload f & args)` runs it on
+the **dirty-offload OS pool** instead (the BEAM dirty-scheduler shape,
+ADR-144): only the calling *process* waits (a selective receive under the
+hood, so other mailbox messages stay queued), and errors rethrow at the call
+site, catchable as usual.
+
+```clojure
+(offload slurp-bytes "big-archive.tar")     ; the worker keeps running others
+(offload %pbkdf2-sha256-bytes pw salt 600000 32)
+```
+
+Only long/blocking **data-in/data-out** natives are allowed (`%git-clone`,
+`%git-resolve-ref`, `%pbkdf2-sha256-bytes`, `%digest`, `%hmac`, `slurp`,
+`slurp-bytes`, `spit`, `spit-bytes`, `spit-append`, `append-bytes`,
+`tls-self-signed`); anything heap-sharing or env-reading is refused with a
+clear error. Args and the result are deep-copied across (like `send`), so
+they must be sendable values. The package manager's clones already ride it.
+
 ### Per-process limits (`process-flag`)
 
 `(process-flag flag [value])` reads or sets a runtime flag on the **current**

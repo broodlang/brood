@@ -1,0 +1,54 @@
+;; The dirty-native offload pool (ADR-144): long/blocking natives run on a
+;; small OS pool via `(offload f & args)`, parking only the calling process —
+;; the BEAM dirty-scheduler shape. Mechanism `%offload` (kernel), policy the
+;; prelude wrapper (selective receive on the job token, errors rethrow).
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule offload-test (:use test))
+
+(describe "offload: results round-trip the pool"
+  (test "a pure native (%digest) gives the same answer offloaded and direct"
+    (let (data (string->utf8-bytes "the brood digs deep")
+          direct (%digest :sha256 data)
+          pooled (offload %digest :sha256 data))
+      (is (bytes? pooled))
+      (assert= pooled direct)))
+  (test "file IO through the pool: spit, slurp-bytes, cleanup"
+    (let (path (str "/tmp/brood-offload-" (now-ns) ".bin")
+          payload (bytes 0 255 128 65 7))
+      (offload spit-bytes path payload)
+      (let (back (offload slurp-bytes path))
+        (delete-file path)
+        (assert= back payload)))))
+
+(describe "offload: errors and refusals are clean"
+  (test "an error inside the offloaded native rethrows here, catchable"
+    (is (= (try (offload slurp "/definitely/not/a/file/brood-offload-test")
+            (catch e :caught))
+          :caught)))
+  (test "a native outside the allow list is refused"
+    (is (= (try (%offload bytes-concat [[]]) (catch e :refused)) :refused)))
+  (test "a Brood closure is not a native — wrong type"
+    (is (= (try (%offload member? [1 (list 1)]) (catch e :not-native)) :not-native))))
+
+(describe "offload: concurrency & selectivity"
+  (test "waiting for the pool is a selective receive — other mail stays queued"
+    (send (self) [:decoy :untouched])
+    (let (r (offload %digest :sha256 (string->utf8-bytes "x")))
+      (is (bytes? r))
+      ;; the decoy was not consumed by the offload wait
+      (assert= (receive ([:decoy v] v) (after 1000 :lost)) :untouched)))
+  (test "many processes offload at once; every result is correct"
+    (let (parent (self)
+          n 8)
+      (dotimes (i n)
+        (spawn (do
+                 (let (data (string->utf8-bytes (str "worker-" i))
+                       direct (%digest :sha256 data)
+                       pooled (offload %digest :sha256 data))
+                   (send parent [:done i (= pooled direct)])))))
+      (dotimes (_ n)
+        (receive
+          ([:done i ok] (is ok))
+          (after 10000 (is false)))))))

@@ -2627,3 +2627,146 @@ pub(super) fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     }
     result
 }
+
+// ---------- the dirty-native offload pool (ADR-144) ----------
+
+/// Natives a green process may run on the offload pool (`%offload`):
+/// long/blocking, data-in/data-out — each touches only the scratch heap it is
+/// handed (no globals, no env lookups, no process identity), so running it
+/// off-process is sound. Everything else is refused: offloading a
+/// heap-sharing or env-reading native would race the caller's world.
+const OFFLOAD_ALLOWED: &[&str] = &[
+    "%git-clone",
+    "%git-resolve-ref",
+    "%pbkdf2-sha256-bytes",
+    "%digest",
+    "%hmac",
+    "slurp",
+    "slurp-bytes",
+    "spit",
+    "spit-bytes",
+    "spit-append",
+    "append-bytes",
+    "tls-self-signed",
+];
+
+struct OffloadJob {
+    func: value::NativeFnPtr,
+    args: Vec<crate::process::Message>,
+    sink: crate::process::MailboxSink,
+    token: i64,
+}
+
+static OFFLOAD_TOKEN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+
+/// The pool: a few OS threads sharing one job queue (dirty work is the
+/// exception, not the load — BEAM's dirty schedulers are similarly few).
+/// Workers block on the shared receiver; the mutex is held only across the
+/// dequeue, so jobs run concurrently.
+fn offload_pool() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<OffloadJob>> {
+    use std::sync::{mpsc, Arc, Mutex, OnceLock};
+    static POOL: OnceLock<Mutex<mpsc::Sender<OffloadJob>>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<OffloadJob>();
+        let rx = Arc::new(Mutex::new(rx));
+        let n = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4);
+        let workers = (n / 4).max(2);
+        for i in 0..workers {
+            let rx = Arc::clone(&rx);
+            std::thread::Builder::new()
+                .name(format!("brood-offload-{i}"))
+                .spawn(move || loop {
+                    let job = rx.lock().expect("offload queue").recv();
+                    match job {
+                        Ok(j) => run_offload_job(j),
+                        Err(_) => break,
+                    }
+                })
+                .expect("spawn offload worker");
+        }
+        Mutex::new(tx)
+    })
+}
+
+/// Run one job on a pool thread: rebuild the args in a private scratch heap,
+/// call the native, ship the result (or the structured error) back as a
+/// mailbox message. The scratch heap dies with the job — nothing is shared.
+fn run_offload_job(job: OffloadJob) {
+    let mut heap = Heap::new();
+    let env = heap.new_env(None);
+    let mut vals = Vec::with_capacity(job.args.len());
+    for m in &job.args {
+        vals.push(crate::process::from_message(&mut heap, m));
+    }
+    let msg = match (job.func)(&vals, env, &mut heap) {
+        Ok(v) => match crate::process::to_message(&heap, v) {
+            Ok(m) => offload_msg("offload", job.token, m),
+            Err(e) => offload_msg("offload-error", job.token, crate::process::error_reason(&e)),
+        },
+        Err(e) => offload_msg("offload-error", job.token, crate::process::error_reason(&e)),
+    };
+    job.sink.emit(msg);
+}
+
+fn offload_msg(tag: &str, token: i64, payload: crate::process::Message) -> crate::process::Message {
+    use crate::process::Message;
+    Message::Vector(vec![
+        Message::Keyword(value::intern(tag)),
+        Message::Int(token),
+        payload,
+    ])
+}
+
+/// `(%offload f args)` — run the allowed blocking native `f` with `args` (a
+/// vector) on the offload pool. Returns a token int at once; the pool later
+/// delivers `[:offload token result]` or `[:offload-error token err]` to the
+/// calling process's mailbox. Policy lives in the prelude `offload` wrapper.
+pub(super) fn offload_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let (func, name) = match arg(args, 0) {
+        Value::Native(id) => {
+            let n = heap.native(id);
+            (n.func, n.name.clone())
+        }
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%offload",
+                "native function",
+                other,
+            ))
+        }
+    };
+    if !OFFLOAD_ALLOWED.contains(&name.as_str()) {
+        return Err(LispError::runtime(format!(
+            "%offload: `{name}` is not offload-safe — only long/blocking data-in/data-out natives run on the pool (see (doc '%offload))"
+        )));
+    }
+    let call_args: Vec<Value> = match arg(args, 1) {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        Value::Nil => Vec::new(),
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%offload",
+                "vector of arguments",
+                other,
+            ))
+        }
+    };
+    let mut msgs = Vec::with_capacity(call_args.len());
+    for v in call_args {
+        msgs.push(crate::process::to_message(heap, v)?);
+    }
+    let token = OFFLOAD_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (sink, _cell) = crate::process::sink_pair(crate::process::self_pid());
+    let job = OffloadJob {
+        func,
+        args: msgs,
+        sink,
+        token,
+    };
+    let _ = offload_pool().lock().expect("offload queue").send(job);
+    Ok(Value::Int(token))
+}

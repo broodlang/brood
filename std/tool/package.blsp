@@ -164,7 +164,9 @@ land in a later slice."
         (= (plist-get locked :ref) (get dep :ref))
         (plist-get locked :commit))
     (plist-get locked :commit)
-    (or (%git-resolve-ref (get dep :url) (get dep :ref))
+    ;; Network-bound (git ls-remote) → the offload pool, so a fetch doesn't
+    ;; pin a scheduler worker (ADR-144).
+    (or (offload %git-resolve-ref (get dep :url) (get dep :ref))
       (error "package: cannot resolve git ref \""
         (get dep :ref)
         "\" for "
@@ -213,7 +215,9 @@ land in a later slice."
       ;; Cache miss: (re)clone the pinned commit, hash the tree, record the meta.
       (do
         (when (dir? target) (%rm-rf target))
-        (%git-clone url target ref commit)
+        ;; The clone (network, possibly minutes) runs on the offload pool —
+        ;; parks only this process, never a scheduler worker (ADR-144).
+        (offload %git-clone url target ref commit)
         (let (sha (package-tree-hash target))
           (package--write-pkg-meta target url ref commit sha)
           {:name nm
