@@ -12,6 +12,15 @@ libfuzzer-sys = "0.4"
 
 [dependencies.brood]
 path = ".."
+# Lean tree for the sanitizer/sancov builds: the fuzz surfaces (reader, eval,
+# json, wire, bundle) touch neither the JIT nor the wasm host, and dropping
+# them keeps the instrumented rebuild minutes-and-gigabytes smaller.
+default-features = false
+# ASAN (cargo-fuzz's default sanitizer) must own allocation: brood's global
+# mimalloc allocator under ASAN interception ran the fuzz loop at ~4 exec/min.
+# `system-alloc` routes through the system allocator — same reason the
+# Makefile's `asan`/`tsan` targets set it.
+features = ["system-alloc"]
 
 # Keep the fuzz crate out of the parent workspace (cargo-fuzz builds it standalone
 # with nightly + ASAN + a sancov-instrumented dep tree).
@@ -26,5 +35,23 @@ doc = false
 [[bin]]
 name = "eval"
 path = "fuzz_targets/eval.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
 test = false
 doc = false

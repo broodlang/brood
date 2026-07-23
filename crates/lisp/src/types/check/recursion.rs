@@ -31,6 +31,14 @@ use super::walk::list_items;
 /// Entry: find every `(def NAME (fn …))` anywhere in `form` and check each for
 /// self-calls to `NAME` in non-tail position.
 pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+    // Deep-form stack safety — the same stacker remedy as walk.rs's
+    // check_into/collect_def_names (host-panic hardening, 2026-07-23).
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        check_recursion_inner(heap, form, out)
+    })
+}
+
+fn check_recursion_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
     let Some(items) = list_items(heap, form) else {
         return;
     };

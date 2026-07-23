@@ -5807,3 +5807,48 @@ scalars, a memory+realloc guest proving strings (incl. UTF-8) and
 error paths, `use-native`, 8-process concurrent calls, an offloaded call —
 11/11. Deferred slices per the ADR: package-manager `:native` integration,
 WASI grants, guest resources, epoch preemption, blob zero-copy.
+
+## 2026-07-23 — Finish-the-partials batch 1: embedded teardown, checker hardening, fuzz targets, and a repo-wide build bug
+
+The "finish everything not 100% done" sweep, first batch — three long-open
+items closed and one surprise:
+
+**Embedded-host teardown (the parked-waiter leak).** `Interp::drop` now runs
+`shutdown_runtime_parked`: every permanently-parked `receive` waiter of the
+dropped runtime is taken from its mailbox slot (under the state lock — racing
+sends are safe) and routed through the normal `deregister` death path
+(monitors fire, links propagate, names/sockets clean). Runtime-scoped by
+`Arc::ptr_eq` on the heap's `RuntimeCode`, so co-hosted runtimes are
+untouched. Pinned by `crates/lisp/tests/interp_teardown.rs` (reap on drop;
+another runtime's parked process survives and stays wakeable).
+
+**Checker host-panic hardening.** `check_file` runs its whole analysis under
+`catch_unwind` with compile-ns/known-names/imports/GC-roots restored on both
+paths — a checker panic degrades to one "checker internal error" diagnostic
+instead of killing brood-lsp / `nest check`. And deep-but-legal CODE no
+longer blows the native stack: the recursive walkers (`check_into`,
+`collect_def_names`, `check_recursion`, `check_macro_hygiene`,
+`collect_syms_into`, and the expander's `macroexpand_all_depth` +
+`resolve_walk`) grow the stack in heap-backed segments — the code-side
+sibling of the 2026-07-20 deep-value fix, driven by gdb backtraces of a
+30k-deep-form test that aborted the host walker by walker until it passed.
+
+**The three missing fuzz targets** (JSON via a persistent `Interp`; the dist
+wire decoder — the unauthenticated surface; the bundle footer/archive) ship
+with two workflow fixes that made them *usable*: the fuzz dep is lean
+(`default-features = false`, no wasmtime/cranelift in the sancov tree) with
+`system-alloc` (ASAN must own allocation — mimalloc under interception ran 4
+execs/min), and `make fuzz T=<target>` sets `ASAN_OPTIONS=symbolize=0`
+because the system llvm-symbolizer stalls ~90 s at EVERY exit against the
+65 MB instrumented binary (diagnosed via /proc wchan: main thread parked on
+`anon_pipe_read`). First smoke: wire 7.9M execs/min, bundle 54M, json 134k —
+zero findings across ~62 M executions.
+
+**The surprise: every build of every profile was recompiling `brood`.** The
+build script declared `rerun-if-changed=.git/HEAD` as a *relative* path —
+which resolves against `crates/lisp/`, where `.git` doesn't exist, and cargo
+re-runs a build script every time a watched path is missing. Nearly invisible
+under incremental dev builds; ~2 minutes per `cargo fuzz` invocation is what
+exposed it. Now absolute + emitted only when the paths exist: a repeat fuzz
+invocation went 2 min → 0.29 s, and every workspace rebuild stops paying the
+tax.

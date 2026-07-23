@@ -347,6 +347,18 @@ pub struct Interp {
     pub root: EnvId,
 }
 
+impl Drop for Interp {
+    /// The embedded-host teardown: reap every permanently-parked green process
+    /// of THIS runtime (a `(receive)` nothing will ever send to holds its
+    /// whole process + heap in the mailbox waiter slot — the long-flagged
+    /// leak; see `shutdown_runtime_parked`). The standalone binaries exit the
+    /// OS process right after, so this is effectively free there; a long-lived
+    /// host that creates and drops `Interp`s no longer accumulates them.
+    fn drop(&mut self) {
+        process::shutdown_runtime_parked(&self.heap.runtime_arc());
+    }
+}
+
 impl Interp {
     pub fn new() -> Self {
         // Share the immutable prelude; build this runtime a fresh, mutable code

@@ -162,6 +162,13 @@ suite: ## Run the in-language suite via the project runner (discovers tests/**/*
 stress: build ## The occasional BIG stress run (property/differential/race tests, 3 engines) — not part of CI
 	./stress/run.sh
 
+# ASAN_OPTIONS=symbolize=0 because the system llvm-symbolizer stalls ~90 s at
+# EVERY exit against the 65 MB sancov binary (found 2026-07-23 — it made the
+# loop look like 4 execs/min). A crash artifact can be re-run symbolized:
+#   cd crates/lisp && cargo +nightly fuzz run <T> fuzz/artifacts/<T>/<file>
+fuzz: ## Run one libFuzzer target briefly: make fuzz T=wire SECS=60 (targets: reader eval json wire bundle)
+	cd crates/lisp && ASAN_OPTIONS=symbolize=0 cargo +nightly fuzz run $(or $(T),reader) -- -max_total_time=$(or $(SECS),60) -rss_limit_mb=4096
+
 tsan: ## ThreadSanitizer over the concurrency-sensitive Rust tests (needs nightly + rust-src; system-alloc feature so mimalloc's un-instrumented internals don't report phantom races)
 	RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --test table_tsan --test concurrency_race --test preemption --test live_migration --test gc
 

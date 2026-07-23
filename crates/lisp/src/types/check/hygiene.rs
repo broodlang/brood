@@ -52,6 +52,14 @@ use crate::error::Pos;
 /// warning per capturing template binder. Reads only — no allocation, so it
 /// needs no GC rooting beyond what the caller already holds.
 pub fn check_macro_hygiene(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
+    // Deep-form stack safety — the same stacker remedy as walk.rs's walkers
+    // (host-panic hardening, 2026-07-23).
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        check_macro_hygiene_inner(heap, form, out)
+    })
+}
+
+fn check_macro_hygiene_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
     let items = match proper_list(heap, form) {
         Some(items) => items,
         None => return,

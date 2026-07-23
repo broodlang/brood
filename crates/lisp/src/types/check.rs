@@ -491,223 +491,244 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // `panic = abort` wouldn't need this, but today's `unwind` would
     // leak roots otherwise).
     let roots_base = heap.roots_len();
-    for &f in forms {
-        heap.push_root(f);
-    }
-    let n = forms.len();
-    let mut expanded: Vec<Value> = Vec::with_capacity(n);
-    for j in 0..n {
-        // Re-read the (relocated) form from the root stack, NOT the `forms` slice:
-        // an earlier iteration's `(require …)` `eval` can collect at any depth
-        // (ADR-061) and relocate it, so the slice's copy is stale by now.
-        let f = heap.root_at(roots_base + j);
-        // Compile pass: macroexpand then namespace-resolve, so the analysed tree
-        // matches what `eval` will see (qualified defs + references).
-        let exp = crate::eval::macros::compile(heap, f, root).unwrap_or(f);
-        // Root the just-built expansion *before* possibly triggering a
-        // collect via `eval`; otherwise this LOCAL handle dies between
-        // here and the next iteration's macroexpand.
-        heap.push_root(exp);
-        expanded.push(exp);
-        // Make the file's imports + required modules resolvable for the rest of the walk.
-        // For a `(defmodule … (:use …))` header, populate the import table DIRECTLY from its
-        // clauses (`setup_check_imports`) instead of evaling the expanded header — the eval
-        // re-macroexpands + re-compiles it and runs per-file O(globals) `provide`/`require`/
-        // `%refer` scans, which made a whole-project check O(files²). A standalone
-        // `(require …)` form (not a header) is still evaluated so its macros/globals resolve.
-        if is_ns_header(heap, f) {
-            setup_check_imports(heap, f);
-        } else if is_require_form(heap, exp) {
-            let _ = crate::eval::eval(heap, exp, root);
+    // Panic containment (host-panic hardening, 2026-07-23): the checker is
+    // advisory and runs inside long-lived hosts (brood-lsp, `nest check`, the
+    // REPL's background check) — an internal panic must not tear the host
+    // down, and must not leave the compile-ns / known-names / imports / GC
+    // roots captured above poisoned for the next check. The whole analysis
+    // runs under `catch_unwind`; the restores below run on BOTH paths, and a
+    // panic degrades to one "checker internal error" diagnostic.
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for &f in forms {
+            heap.push_root(f);
         }
-    }
-    // A pass-1 `(require …)` `eval` can collect at ANY depth (ADR-061), which
-    // relocates the rooted forms/expansions — so the `expanded` Vec and the
-    // `forms` slice now hold **stale** handles, even though the data survives on
-    // the root stack. Re-read the live, relocated handles from the root stack for
-    // the analysis passes below. Layout: `forms` at `roots_base..+n`, their
-    // expansions at `roots_base+n..+2n` (pushed in pass 1, in order).
-    let n = forms.len();
-    let forms: Vec<Value> = (0..n).map(|j| heap.root_at(roots_base + j)).collect();
-    let expanded: Vec<Value> = (0..n).map(|j| heap.root_at(roots_base + n + j)).collect();
-    // Pass 2: collect every `(def name …)` in the expanded tree (top level
-    // *or* nested — `defn` inside `test`/`describe`/`when`/… still defines a
-    // global once it runs, so the checker honours that). `defmacro` stays a
-    // special form (it doesn't expand to `def`), so we match it too.
-    let mut ctx = Ctx::default();
-    // Whole-file mode: enable operand / value-slot unbound checking (every
-    // top-level def is accumulated below, and the project image is loaded, so an
-    // unresolved operand is genuinely unbound — not the ambiguous free variable a
-    // bare fragment might carry).
-    ctx.enable_operand_checks();
-    // The set of namespace prefixes the loaded image knows — every `mod/` for which
-    // some `mod/<name>` global exists (the requires above are already evaluated). A
-    // qualified reference whose module isn't here can't be proven unbound (it may be
-    // defined dynamically or in an unloaded file), so the unbound check stays silent
-    // on it; a typo in a *known* module is still flagged. See `Ctx::known_ns`.
-    // Cached + shared (`Heap::known_ns_prefixes`): rebuilding this by scanning all globals
-    // per file was the residual O(files²) after the header-eval redesign — an O(1) `Arc`
-    // clone on all but the first file of a whole-project check.
-    ctx.set_known_ns_arc(heap.known_ns_prefixes());
-    for &form in &expanded {
-        collect_def_names(heap, form, &mut ctx);
-    }
-    // Pass 2.5: collect `(sig name (… -> …))` declarations — the authoritative
-    // signatures the call-check consults first. Two sources, both fed through the
-    // same parsers + namespace-qualification (`register_declared_sig`):
-    //
-    //  (a) the *un-expanded* top-level `(sig …)` forms — a hand-written declaration
-    //      (the `sig` macro's own output is dropped from the analysed tree, so the
-    //      un-expanded form is where a plain top-level sig is legible); and
-    //  (b) every `(%register-sig 'name 'type)` in the *expanded* tree — which is
-    //      what BOTH a `(sig …)` and a *macro-emitted* sig lower to. `defrecord`
-    //      expands to `(sig …)` forms nested in its `(do …)`, invisible to (a) (which
-    //      only sees the `(defrecord …)` head); (b) recovers them. Idempotent overlap
-    //      with (a) for a hand-written sig — the second register is a no-op.
-    //
-    // The declared name is qualified to the file's namespace exactly as the resolve
-    // pass qualifies a def head and the call site — `(sig g …)` inside `(defmodule
-    // ns …)` keys the sig under `ns/g`, matching the `ns/g` the walk resolves the
-    // call head to. Without this a module-local sig was silently dropped (keyed bare
-    // `g` while the call resolved to `ns/g`), so no user `(sig …)` in a module ever
-    // reached the call-argument check.
-    let file_ns_name: Option<String> = file_ns.map(value::symbol_name);
-    for &form in &forms {
-        register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
-    }
-    // Reconstruct a `(sig name type)` form from each `%register-sig` in the expanded
-    // tree (building forms needs `&mut heap`, so collect first, register after — GC
-    // is blocked for the whole check, so the handles stay live).
-    let mut macro_sig_forms: Vec<Value> = Vec::new();
-    for &form in &expanded {
-        collect_register_sig_forms(heap, form, &mut macro_sig_forms);
-    }
-    for &form in &macro_sig_forms {
-        register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
-    }
-    // Pass 2.7: infer a current value type for an *undeclared* global defined
-    // exactly once by `(def g <non-fn-expr>)` (Gap A — docs/type-gating.md). The
-    // RHS's `expr_ty` becomes `g`'s current-image type, consulted by `expr_ty` /
-    // `gradual_of` as `dynamic_within` (the `∩` relation — reload-safe, warns only
-    // on provable disjointness). Skipped for: a declared global (authoritative,
-    // handled by `add_inferred_value_ty`); a global defined more than once
-    // (ambiguous type → stays `dynamic()`); a macro; and a function/native value
-    // (its arrow is inferred separately, and gating a bare function name used as a
-    // value is a different concern).
-    {
-        let mut def_count: HashMap<Symbol, usize> = HashMap::new();
+        let n = forms.len();
+        let mut expanded: Vec<Value> = Vec::with_capacity(n);
+        for j in 0..n {
+            // Re-read the (relocated) form from the root stack, NOT the `forms` slice:
+            // an earlier iteration's `(require …)` `eval` can collect at any depth
+            // (ADR-061) and relocate it, so the slice's copy is stale by now.
+            let f = heap.root_at(roots_base + j);
+            // Compile pass: macroexpand then namespace-resolve, so the analysed tree
+            // matches what `eval` will see (qualified defs + references).
+            let exp = crate::eval::macros::compile(heap, f, root).unwrap_or(f);
+            // Root the just-built expansion *before* possibly triggering a
+            // collect via `eval`; otherwise this LOCAL handle dies between
+            // here and the next iteration's macroexpand.
+            heap.push_root(exp);
+            expanded.push(exp);
+            // Make the file's imports + required modules resolvable for the rest of the walk.
+            // For a `(defmodule … (:use …))` header, populate the import table DIRECTLY from its
+            // clauses (`setup_check_imports`) instead of evaling the expanded header — the eval
+            // re-macroexpands + re-compiles it and runs per-file O(globals) `provide`/`require`/
+            // `%refer` scans, which made a whole-project check O(files²). A standalone
+            // `(require …)` form (not a header) is still evaluated so its macros/globals resolve.
+            if is_ns_header(heap, f) {
+                setup_check_imports(heap, f);
+            } else if is_require_form(heap, exp) {
+                let _ = crate::eval::eval(heap, exp, root);
+            }
+        }
+        // A pass-1 `(require …)` `eval` can collect at ANY depth (ADR-061), which
+        // relocates the rooted forms/expansions — so the `expanded` Vec and the
+        // `forms` slice now hold **stale** handles, even though the data survives on
+        // the root stack. Re-read the live, relocated handles from the root stack for
+        // the analysis passes below. Layout: `forms` at `roots_base..+n`, their
+        // expansions at `roots_base+n..+2n` (pushed in pass 1, in order).
+        let n = forms.len();
+        let forms: Vec<Value> = (0..n).map(|j| heap.root_at(roots_base + j)).collect();
+        let expanded: Vec<Value> = (0..n).map(|j| heap.root_at(roots_base + n + j)).collect();
+        // Pass 2: collect every `(def name …)` in the expanded tree (top level
+        // *or* nested — `defn` inside `test`/`describe`/`when`/… still defines a
+        // global once it runs, so the checker honours that). `defmacro` stays a
+        // special form (it doesn't expand to `def`), so we match it too.
+        let mut ctx = Ctx::default();
+        // Whole-file mode: enable operand / value-slot unbound checking (every
+        // top-level def is accumulated below, and the project image is loaded, so an
+        // unresolved operand is genuinely unbound — not the ambiguous free variable a
+        // bare fragment might carry).
+        ctx.enable_operand_checks();
+        // The set of namespace prefixes the loaded image knows — every `mod/` for which
+        // some `mod/<name>` global exists (the requires above are already evaluated). A
+        // qualified reference whose module isn't here can't be proven unbound (it may be
+        // defined dynamically or in an unloaded file), so the unbound check stays silent
+        // on it; a typo in a *known* module is still flagged. See `Ctx::known_ns`.
+        // Cached + shared (`Heap::known_ns_prefixes`): rebuilding this by scanning all globals
+        // per file was the residual O(files²) after the header-eval redesign — an O(1) `Arc`
+        // clone on all but the first file of a whole-project check.
+        ctx.set_known_ns_arc(heap.known_ns_prefixes());
         for &form in &expanded {
-            if let Some((name, _)) = def_name_and_value(heap, form) {
-                *def_count.entry(name).or_insert(0) += 1;
-            }
+            collect_def_names(heap, form, &mut ctx);
         }
+        // Pass 2.5: collect `(sig name (… -> …))` declarations — the authoritative
+        // signatures the call-check consults first. Two sources, both fed through the
+        // same parsers + namespace-qualification (`register_declared_sig`):
+        //
+        //  (a) the *un-expanded* top-level `(sig …)` forms — a hand-written declaration
+        //      (the `sig` macro's own output is dropped from the analysed tree, so the
+        //      un-expanded form is where a plain top-level sig is legible); and
+        //  (b) every `(%register-sig 'name 'type)` in the *expanded* tree — which is
+        //      what BOTH a `(sig …)` and a *macro-emitted* sig lower to. `defrecord`
+        //      expands to `(sig …)` forms nested in its `(do …)`, invisible to (a) (which
+        //      only sees the `(defrecord …)` head); (b) recovers them. Idempotent overlap
+        //      with (a) for a hand-written sig — the second register is a no-op.
+        //
+        // The declared name is qualified to the file's namespace exactly as the resolve
+        // pass qualifies a def head and the call site — `(sig g …)` inside `(defmodule
+        // ns …)` keys the sig under `ns/g`, matching the `ns/g` the walk resolves the
+        // call head to. Without this a module-local sig was silently dropped (keyed bare
+        // `g` while the call resolved to `ns/g`), so no user `(sig …)` in a module ever
+        // reached the call-argument check.
+        let file_ns_name: Option<String> = file_ns.map(value::symbol_name);
+        for &form in &forms {
+            register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
+        }
+        // Reconstruct a `(sig name type)` form from each `%register-sig` in the expanded
+        // tree (building forms needs `&mut heap`, so collect first, register after — GC
+        // is blocked for the whole check, so the handles stay live).
+        let mut macro_sig_forms: Vec<Value> = Vec::new();
         for &form in &expanded {
-            let Some((name, rhs)) = def_name_and_value(heap, form) else {
-                continue;
-            };
-            // Skip a global defined more than once (ambiguous), a macro, and a
-            // **dynamic variable** (`defdyn`): a dynvar's `def` sets only the
-            // default, but `binding` rebinds it to any type in a dynamic extent, so
-            // its value type isn't fixed — it must stay `dynamic()`.
-            if def_count.get(&name) != Some(&1)
-                || ctx.is_file_macro(name)
-                || value::is_dynamic(name)
-            {
-                continue;
-            }
-            if let Some(ty) = guards::expr_ty(heap, rhs, &ctx) {
-                if !ty.contains_tag(value::Tag::Fn) && !ty.contains_tag(value::Tag::Native) {
-                    ctx.add_inferred_value_ty(name, ty);
-                }
-            }
+            collect_register_sig_forms(heap, form, &mut macro_sig_forms);
         }
-    }
-    // Pass 2.6: protocol/behaviour conformance. Model `(defprotocol …)` /
-    // `(defbehaviour …)` (from the un-expanded forms + the runtime registry of
-    // imported ones), then check that every `(defimpl …)` provides each declared op
-    // at the right arity, and every `(:implements …)` module *defines* them (read
-    // from the expanded tree, so macro-generated defns count).
-    let protocols = protocol::collect(heap, &forms);
-    protocol::check_impls(heap, &forms, &protocols, &mut out);
-    protocol::check_behaviours(heap, &forms, &expanded, &protocols, &mut out);
-    // Pass 3: check each expanded form with the accumulated file-globals.
-    for &form in &expanded {
-        check_into(heap, form, &ctx, &mut out);
-    }
-    // Pass 3.5: flag non-tail self-recursion (overflow footgun — Brood loops
-    // must be tail-recursive). Walks the same expanded tree.
-    for &form in &expanded {
-        recursion::check_recursion(heap, form, &mut out);
-    }
-    // Pass 4: macro-hygiene lint over the *un-expanded* forms — `defmacro`
-    // templates and their `~unquote` structure only survive pre-expansion
-    // (`macroexpand_all` leaves quasiquote opaque, and the template is gone once
-    // a macro is applied). Reads only.
-    for &form in &forms {
-        hygiene::check_macro_hygiene(heap, form, &mut out);
-    }
-    // Pass 4.5: unused `(:use …)` imports — a `:use` clause that contributes no
-    // symbol ever referenced in the file's expanded forms. Read the `:use` module
-    // names from the *unexpanded* header (the clause is gone after expansion), then
-    // group the imported qualified names by source module and scan the expanded tree
-    // for references. Warn only when the module contributed ≥1 public name and none
-    // appear.
-    {
-        let use_modules = extract_use_module_names(heap, &forms);
-        if !use_modules.is_empty() {
-            let all_refs = collect_all_syms(heap, &expanded);
-            let imported = heap.imported_pairs();
-            // Group each module's contributed names by source module. We record BOTH
-            // the qualified name AND the local (unqualified) alias the file actually
-            // calls — a `(:use …)` import is normally referenced *unqualified*
-            // (`*green*`, not `theme/*green*`), so matching only the qualified form
-            // (the old bug) reported every unqualified-used import as unused.
-            let mut module_names: std::collections::HashMap<String, Vec<Symbol>> =
-                std::collections::HashMap::new();
-            for (local, qual) in &imported {
-                let qname = value::symbol_name(*qual);
-                if let Some(slash) = qname.rfind('/') {
-                    let e = module_names.entry(qname[..slash].to_string()).or_default();
-                    e.push(*local);
-                    e.push(*qual);
+        for &form in &macro_sig_forms {
+            register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
+        }
+        // Pass 2.7: infer a current value type for an *undeclared* global defined
+        // exactly once by `(def g <non-fn-expr>)` (Gap A — docs/type-gating.md). The
+        // RHS's `expr_ty` becomes `g`'s current-image type, consulted by `expr_ty` /
+        // `gradual_of` as `dynamic_within` (the `∩` relation — reload-safe, warns only
+        // on provable disjointness). Skipped for: a declared global (authoritative,
+        // handled by `add_inferred_value_ty`); a global defined more than once
+        // (ambiguous type → stays `dynamic()`); a macro; and a function/native value
+        // (its arrow is inferred separately, and gating a bare function name used as a
+        // value is a different concern).
+        {
+            let mut def_count: HashMap<Symbol, usize> = HashMap::new();
+            for &form in &expanded {
+                if let Some((name, _)) = def_name_and_value(heap, form) {
+                    *def_count.entry(name).or_insert(0) += 1;
                 }
             }
-            // Module prefixes referenced via a *qualified* `mod/name` symbol anywhere
-            // in the file — so a file that reaches a module only by qualified reference
-            // (including to its private `--` names, which aren't imported at all) still
-            // counts the `:use` as load-bearing.
-            let mut qualified_mods: HashSet<String> = HashSet::new();
-            for &s in &all_refs {
-                let n = value::symbol_name(s);
-                if let Some(slash) = n.rfind('/') {
-                    qualified_mods.insert(n[..slash].to_string());
+            for &form in &expanded {
+                let Some((name, rhs)) = def_name_and_value(heap, form) else {
+                    continue;
+                };
+                // Skip a global defined more than once (ambiguous), a macro, and a
+                // **dynamic variable** (`defdyn`): a dynvar's `def` sets only the
+                // default, but `binding` rebinds it to any type in a dynamic extent, so
+                // its value type isn't fixed — it must stay `dynamic()`.
+                if def_count.get(&name) != Some(&1)
+                    || ctx.is_file_macro(name)
+                    || value::is_dynamic(name)
+                {
+                    continue;
                 }
-            }
-            for mod_name in &use_modules {
-                // Only actionable when the module contributed importable names (it's in
-                // the table) — a failed require / macro-only / empty module is silent.
-                if let Some(names) = module_names.get(mod_name) {
-                    let used = names.iter().any(|s| all_refs.contains(s))
-                        || qualified_mods.contains(mod_name);
-                    if !used {
-                        out.push((None, format!("unused :use import: {mod_name}")));
+                if let Some(ty) = guards::expr_ty(heap, rhs, &ctx) {
+                    if !ty.contains_tag(value::Tag::Fn) && !ty.contains_tag(value::Tag::Native) {
+                        ctx.add_inferred_value_ty(name, ty);
                     }
                 }
             }
         }
-    }
-    // (Unused module-private `defn`s are checked at the *whole-project* layer
-    // — `std/tool/project.blsp` `project--unused-private-warnings` — not here: a
-    // `--` name is a convention, not enforced privacy, so the editor legitimately
-    // references it from other modules and tests by its qualified name, which a
-    // single-file pass can't see. A per-file check produced false positives.)
-    // Balance the GC roots we pushed for pass 1 (input forms + their
-    // expansions). Safe to drop now: nothing after this consults `expanded`
-    // or `forms` against the heap.
+        // Pass 2.6: protocol/behaviour conformance. Model `(defprotocol …)` /
+        // `(defbehaviour …)` (from the un-expanded forms + the runtime registry of
+        // imported ones), then check that every `(defimpl …)` provides each declared op
+        // at the right arity, and every `(:implements …)` module *defines* them (read
+        // from the expanded tree, so macro-generated defns count).
+        let protocols = protocol::collect(heap, &forms);
+        protocol::check_impls(heap, &forms, &protocols, &mut out);
+        protocol::check_behaviours(heap, &forms, &expanded, &protocols, &mut out);
+        // Pass 3: check each expanded form with the accumulated file-globals.
+        for &form in &expanded {
+            check_into(heap, form, &ctx, &mut out);
+        }
+        // Pass 3.5: flag non-tail self-recursion (overflow footgun — Brood loops
+        // must be tail-recursive). Walks the same expanded tree.
+        for &form in &expanded {
+            recursion::check_recursion(heap, form, &mut out);
+        }
+        // Pass 4: macro-hygiene lint over the *un-expanded* forms — `defmacro`
+        // templates and their `~unquote` structure only survive pre-expansion
+        // (`macroexpand_all` leaves quasiquote opaque, and the template is gone once
+        // a macro is applied). Reads only.
+        for &form in &forms {
+            hygiene::check_macro_hygiene(heap, form, &mut out);
+        }
+        // Pass 4.5: unused `(:use …)` imports — a `:use` clause that contributes no
+        // symbol ever referenced in the file's expanded forms. Read the `:use` module
+        // names from the *unexpanded* header (the clause is gone after expansion), then
+        // group the imported qualified names by source module and scan the expanded tree
+        // for references. Warn only when the module contributed ≥1 public name and none
+        // appear.
+        {
+            let use_modules = extract_use_module_names(heap, &forms);
+            if !use_modules.is_empty() {
+                let all_refs = collect_all_syms(heap, &expanded);
+                let imported = heap.imported_pairs();
+                // Group each module's contributed names by source module. We record BOTH
+                // the qualified name AND the local (unqualified) alias the file actually
+                // calls — a `(:use …)` import is normally referenced *unqualified*
+                // (`*green*`, not `theme/*green*`), so matching only the qualified form
+                // (the old bug) reported every unqualified-used import as unused.
+                let mut module_names: std::collections::HashMap<String, Vec<Symbol>> =
+                    std::collections::HashMap::new();
+                for (local, qual) in &imported {
+                    let qname = value::symbol_name(*qual);
+                    if let Some(slash) = qname.rfind('/') {
+                        let e = module_names.entry(qname[..slash].to_string()).or_default();
+                        e.push(*local);
+                        e.push(*qual);
+                    }
+                }
+                // Module prefixes referenced via a *qualified* `mod/name` symbol anywhere
+                // in the file — so a file that reaches a module only by qualified reference
+                // (including to its private `--` names, which aren't imported at all) still
+                // counts the `:use` as load-bearing.
+                let mut qualified_mods: HashSet<String> = HashSet::new();
+                for &s in &all_refs {
+                    let n = value::symbol_name(s);
+                    if let Some(slash) = n.rfind('/') {
+                        qualified_mods.insert(n[..slash].to_string());
+                    }
+                }
+                for mod_name in &use_modules {
+                    // Only actionable when the module contributed importable names (it's in
+                    // the table) — a failed require / macro-only / empty module is silent.
+                    if let Some(names) = module_names.get(mod_name) {
+                        let used = names.iter().any(|s| all_refs.contains(s))
+                            || qualified_mods.contains(mod_name);
+                        if !used {
+                            out.push((None, format!("unused :use import: {mod_name}")));
+                        }
+                    }
+                }
+            }
+        }
+        // (Unused module-private `defn`s are checked at the *whole-project* layer
+        // — `std/tool/project.blsp` `project--unused-private-warnings` — not here: a
+        // `--` name is a convention, not enforced privacy, so the editor legitimately
+        // references it from other modules and tests by its qualified name, which a
+        // single-file pass can't see. A per-file check produced false positives.)
+    }));
+    // Balance the GC roots pushed for pass 1 (input forms + their expansions) and
+    // restore the compile-namespace state — on the clean AND the panic path.
     heap.truncate_roots(roots_base);
     heap.set_compile_ns(prev_ns);
     heap.set_ns_known_names(prev_known);
     heap.set_imports(prev_imports);
+    if let Err(p) = panicked {
+        let msg = if let Some(s) = p.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = p.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+        out.push((
+            None,
+            format!("checker internal error (advisory pass aborted; please report): {msg}"),
+        ));
+    }
     out
 }
 
@@ -772,6 +793,24 @@ mod tests {
         let mut interp = crate::Interp::new();
         let form = reader::read_one(&mut interp.heap, src).expect("parse");
         check_form(&interp.heap, form)
+    }
+
+    #[test]
+    fn checker_survives_pathologically_deep_forms() {
+        // Host-panic hardening (2026-07-23): a deeply-nested-but-legal form —
+        // the same class as the kernel's 60k-deep-value tests — must be
+        // *checked*, not blow the checker's native stack. check_into grows the
+        // stack in heap-backed segments (stacker), so this returns normally.
+        let mut interp = crate::Interp::new();
+        let identity = crate::core::value::intern("identity");
+        let mut form = Value::Int(1);
+        for _ in 0..30_000 {
+            let tail = interp.heap.alloc_pair(form, Value::Nil);
+            form = interp.heap.alloc_pair(Value::Sym(identity), tail);
+        }
+        // No assertion on the warning list's content — the property under test
+        // is "returns instead of crashing the host".
+        let _ = check_file(&mut interp.heap, &[form]);
     }
 
     /// `warnings` but with macroexpansion — what `(check 'form)` and

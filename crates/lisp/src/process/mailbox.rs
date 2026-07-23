@@ -160,17 +160,13 @@ pub(super) struct MailboxState {
     /// and re-queues it. (A short-lived `Process → Arc<Mailbox> → Process` cycle
     /// while parked; broken the moment it's re-queued or the process ends.)
     ///
-    /// **Known limitation — permanently-parked waiters leak in an embedded host.**
-    /// The cycle above is only "short-lived" for a process that *will* be woken. A
-    /// process parked on a `(receive)` that nothing ever sends to (and no deadline)
-    /// holds its `Box<Process>` here for the life of the `REGISTRY` entry, and the
-    /// `Process → Mailbox → Process` cycle keeps the heap alive. The standalone
-    /// binaries exit the OS process, so this is harmless there. But an embedded,
-    /// long-lived `Interp` that spawns such processes and is then dropped has **no
-    /// teardown path that drains permanently-parked waiters** — they (and their
-    /// heaps) leak until the host process exits. Implementing a registry-wide drain
-    /// on `Interp` drop is out of scope here; flagged so it isn't mistaken for a
-    /// transient cycle.
+    /// A process parked on a `(receive)` nothing will ever send to (no deadline)
+    /// holds its `Box<Process>` here for the life of the `REGISTRY` entry — which
+    /// is fine in the standalone binaries (the OS process exits) and no longer
+    /// leaks in an embedded host: `Interp::drop` runs
+    /// [`super::scheduler::shutdown_runtime_parked`], which takes each such
+    /// waiter belonging to the dropped runtime and routes it through the normal
+    /// death path (fixed 2026-07-23; it was a flagged leak).
     pub(super) waiter: Option<Box<Process>>,
     /// How many leading messages the parked waiter already scanned and rejected
     /// (selective receive). The worker re-runs it only when a message arrives

@@ -89,8 +89,9 @@ remainder** (`defevent` schemas, aggregators, node up/down, the remote tier,
 `unicode-segmentation` is already a dep, wired only to display-width);
 **protocols/multimethods** (replace hand-written `type-of` cascades);
 **string interpolation**; **`&key` args** (designed — ADR-011); the dist
-**`terminate/2` hook** + **FQDN long names** (dist refinements below); the
-parked-`receive` **mailbox-slot leak** (survey housekeeping).
+**`terminate/2` hook** + **FQDN long names** (dist refinements below). (The
+parked-`receive` mailbox-slot leak that used to sit here was fixed
+2026-07-23 — survey housekeeping above.)
 
 **Explicitly no work:** the JSON/base64 native-codec rows (by-design pure
 Brood vs C codecs); and the residual message-latency gap vs BEAM (~3–6×) is
@@ -193,7 +194,7 @@ mechanism/policy split: kernel primitive, Brood policy.
   `reconnect_watcher_heals_a_fallen_link` (down → raise → heal → message
   flows). The cluster **global registry / `pg`** stays in "OTP deferred"
   below (gated on a real consumer). **[Brood + kernel seam]**
-- 🟡 **Dirty-CPU accounting for long native builtins.** Shipped 2026-07-18 as
+- ✅ **Dirty-CPU accounting for long native builtins.** Shipped 2026-07-18 as
   a **`BROOD_STALL_MS`-armed diagnostic** (revised same day by measurement):
   when the stall tracer is armed, `call_native` times each builtin in a green
   process, `scheduler::charge_native` charges the elapsed time against the
@@ -204,18 +205,18 @@ mechanism/policy split: kernel primitive, Brood policy.
   (pingpong/ring/json — two `Instant::now` per native call) while buying
   almost nothing, because reduction preemption already bounds post-native
   hogging to ~one quantum (~1 ms); the un-preemptible time *inside* a long
-  native is only fixed by the offload pool. ⬜ Remaining: the M4 dirty-CPU
-  offload pool. **[kernel]**
-- 🟡 **Housekeeping found by the survey:** ⬜ permanently-parked `receive`
-  waiters (nothing will ever send) leak their mailbox slot in a long-lived
-  embedded host (`mailbox.rs`). ⬜ **Deep-structure hardening of the recursive
-  heap walkers** (found 2026-07-19 by the iolist deep-nesting test): a ~40k-deep
-  nested list is perfectly legal immutable data, but GC tracing / `promote`
-  recurse per pair natively, so deep values can blow a worker's native stack
-  (`fatal runtime error: stack overflow` in CI's suite wrapper — nondeterministic,
-  fires only if a collection lands while the value is live). Either make the
-  tracers iterative (explicit worklist, like `flatten_iolist`) or document a
-  depth bound; the test caps at 2k depth meanwhile. **[kernel]** ✅ Exit-signal propagation fixed (2026-07-18):
+  native is only fixed by the offload pool — ✅ **shipped 2026-07-22 (ADR-144,
+  the parity program's item 4)**. This item is complete. **[kernel]**
+- ✅ **Housekeeping found by the survey — all closed:** permanently-parked
+  `receive` waiters no longer leak in an embedded host (fixed 2026-07-23:
+  `Interp::drop` runs `shutdown_runtime_parked`, which routes each of the
+  dropped runtime's parked waiters through the normal death path — pinned by
+  `crates/lisp/tests/interp_teardown.rs`, including the
+  other-runtimes-untouched case). **Deep-structure hardening of the recursive
+  heap walkers** fixed 2026-07-20 (`stacker::maybe_grow` segmented growth in
+  promote/GC-flush/equal/hash; `tests/deep_values_test.blsp` pins 20k–60k
+  depth), and extended to the CODE walkers (expander/resolver/checker) on
+  2026-07-23. **[kernel]** ✅ Exit-signal propagation fixed (2026-07-18):
   kill **hardness** is now a request property separate from the reason
   (`MailboxState.kill_hard`), so link propagation stays hard (dies at the next
   reduction tick) but carries the **originating reason** — a cascading death
@@ -421,18 +422,30 @@ corruption, allocation serialisation). One item stays deferred:
 
 ### Stability backlog (2026-07-10)
 
-- 🟡 **Continuous fuzzing (`cargo-fuzz`)** — libFuzzer targets ship for the
-  **reader/scanner** and the **evaluator** (`crates/lisp/fuzz/fuzz_targets/`),
-  alongside the July stress kit (`make stress`: the 3-oracle differential
-  program fuzzer with coverage-guided expansion + auto-shrink, the
-  reader-robustness fuzzer, chaos preemption, TSAN/loom/ASAN passes). ⬜ Still
-  missing targets: **JSON**, the **dist wire framing** (`dist/wire.rs`), and the
-  **bundle footer/archive** (`bundle.rs`).
-- ⬜ **Host-panic hardening (audit residue)** — adversarial input can still panic
-  the Rust host: no recursion-depth counter on `expr_ty`/`check_into` (checker stack
-  overflow on deeply-nested types), no RAII guard on `check_file`'s panic path.
-  (The worker `run_one` is covered — `catch_unwind` retires the process with
-  `:killed`, `scheduler.rs`.)
+- ✅ **Continuous fuzzing (`cargo-fuzz`)** — all five libFuzzer targets ship
+  (`crates/lisp/fuzz/fuzz_targets/`): **reader**, **evaluator**, and (added
+  2026-07-23) **JSON** (through a persistent `Interp`), the **dist wire
+  framing** (the unauthenticated surface, via `dist::fuzz_decode_frame`), and
+  the **bundle footer/archive** (`bundle::fuzz_parse`) — alongside the July
+  stress kit (`make stress`). `make fuzz T=<target>` runs one; the fuzz dep is
+  lean (`default-features = false` + `system-alloc` — ASAN must own
+  allocation) and `ASAN_OPTIONS=symbolize=0` avoids a 90 s system-symbolizer
+  stall per exit. First smoke: ~62 M total execs across the three new
+  targets, zero findings. En route, a repo-wide build bug fell out: the build
+  script's relative `rerun-if-changed=.git/HEAD` never existed, so **every
+  build of every profile recompiled `brood`** — fixed (absolute + existing
+  paths only).
+- ✅ **Host-panic hardening (audit residue)** — closed 2026-07-23. The checker
+  now runs its whole analysis under `catch_unwind` with the compile-ns /
+  known-names / imports / GC-roots state restored on both paths (a panic
+  degrades to one "checker internal error" diagnostic — brood-lsp and `nest
+  check` survive); `expr_ty` already had its depth cap, and the remaining
+  recursive walkers (`check_into`, `collect_def_names`, `check_recursion`,
+  `check_macro_hygiene`, `collect_syms_into`, plus the expander's
+  `macroexpand_all_depth`/`resolve_walk` — deep CODE, the sibling of the
+  2026-07-20 deep-VALUE fix) grow the native stack in heap-backed segments
+  (`stacker`). Pinned by a 30k-deep-form test that previously aborted the
+  host.
 - ✅ **Prelude freeze vs boot-expanded `receive`** (found + fixed 2026-07-22):
   the freeze's dangling-env assert swept the whole closure slab, including
   boot *garbage* (the builder heap never collects), so a dead

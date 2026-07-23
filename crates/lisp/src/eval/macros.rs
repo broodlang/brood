@@ -468,6 +468,18 @@ fn resolve_sym(
 }
 
 fn resolve_walk(heap: &mut Heap, form: Value, ns_name: &str, locals: &[value::Symbol]) -> Value {
+    // Same deep-form stack safety as macroexpand_all_depth above.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        resolve_walk_inner(heap, form, ns_name, locals)
+    })
+}
+
+fn resolve_walk_inner(
+    heap: &mut Heap,
+    form: Value,
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> Value {
     match form.unpack() {
         ValueRef::Sym(s) => Value::symbol(resolve_sym(heap, s, ns_name, locals)),
         ValueRef::Pair(_) => resolve_list(heap, form, ns_name, locals),
@@ -918,6 +930,17 @@ pub fn macroexpand_all(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
 }
 
 fn macroexpand_all_depth(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {
+    // Expansion recurses per nesting level of the form; a deeply-nested-but-
+    // legal form (30k+ levels) would blow the native stack. Grow it in
+    // heap-backed segments instead (the stacker remedy the deep-VALUE walkers
+    // got on 2026-07-20, extended to the code walkers) — the fast path is a
+    // couple of compares, and depth stays structurally bounded by the form.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        macroexpand_all_depth_inner(heap, form, env, depth)
+    })
+}
+
+fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: u32) -> LispResult {
     // Block GC during the expansion: this walk holds partially-built LOCAL forms
     // in Rust locals and recurses into macro applications via `eval`, whose
     // safepoint would otherwise sweep them. The runtime evaluator roots its

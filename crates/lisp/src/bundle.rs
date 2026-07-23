@@ -287,3 +287,17 @@ mod tests {
         assert_eq!(strip_existing(base), base);
     }
 }
+
+/// Robustness/fuzz surface: treat `bytes` as an untrusted candidate bundle —
+/// footer detection + archive parse must return cleanly (Some/None), never
+/// panic or over-allocate, on ANY input. Exercised by the `bundle` fuzz
+/// target (`crates/lisp/fuzz/fuzz_targets/bundle.rs`).
+#[doc(hidden)]
+pub fn fuzz_parse(bytes: &[u8]) {
+    let _ = strip_existing(bytes);
+    if let Some((start, len)) = footer(bytes) {
+        if let Some(archive) = bytes.get(start..start + len) {
+            let _ = parse_archive(archive);
+        }
+    }
+}

@@ -411,6 +411,13 @@ fn sym_appears_in(heap: &Heap, form: Value, sym: Symbol) -> bool {
 /// including binder positions. Used by the unused-`:use` and unused-private-`defn`
 /// lints to build the full reference set of a file in one pass.
 fn collect_syms_into(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
+    // Deep-form stack safety — same stacker remedy as the walkers above.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        collect_syms_into_inner(heap, form, out)
+    })
+}
+
+fn collect_syms_into_inner(heap: &Heap, form: Value, out: &mut HashSet<Symbol>) {
     match form {
         Value::Sym(s) => {
             out.insert(s);
@@ -506,6 +513,13 @@ static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
 /// want the name in scope. So we *do* recurse there. The only thing we skip
 /// is `quote`/`quasiquote`.
 pub(super) fn collect_def_names(heap: &Heap, form: Value, ctx: &mut Ctx) {
+    // Deep-form stack safety — same stacker remedy as check_into above.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        collect_def_names_inner(heap, form, ctx)
+    })
+}
+
+fn collect_def_names_inner(heap: &Heap, form: Value, ctx: &mut Ctx) {
     let Some(items) = list_items(heap, form) else {
         return;
     };
@@ -632,6 +646,19 @@ pub(super) fn check_into(
     ctx: &Ctx,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
+    // The walk recurses per nesting level of the checked form, and a
+    // deeply-nested-but-legal form (the kernel's deep-value tests build
+    // 60k-deep lists) would blow the native stack. Grow it in heap-backed
+    // segments instead (host-panic hardening — the same stacker remedy as
+    // the kernel's deep-value walkers); unlike a depth cap this still CHECKS
+    // the deep form, and termination is structural (immutable data has no
+    // cycles).
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        check_into_inner(heap, form, ctx, out)
+    })
+}
+
+fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
     let Value::Pair(_) = form else { return };
     let Some(items) = list_items(heap, form) else {
         return;

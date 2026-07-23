@@ -1470,3 +1470,13 @@ mod tests {
         );
     }
 }
+
+/// Robustness/fuzz surface: decode one length-prefixed wire frame from raw,
+/// untrusted bytes under the pre-auth cap — must return Ok/Err, never panic
+/// or over-allocate, on ANY input. Exercised by the `wire` fuzz target
+/// (`crates/lisp/fuzz/fuzz_targets/wire.rs`).
+#[doc(hidden)]
+pub fn fuzz_decode_frame(bytes: &[u8]) {
+    let mut r = std::io::Cursor::new(bytes);
+    let _ = wire::read_frame_capped(&mut r, 1024 * 1024);
+}

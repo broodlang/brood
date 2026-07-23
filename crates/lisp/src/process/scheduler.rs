@@ -1798,6 +1798,52 @@ pub fn live_pids() -> Vec<u64> {
     crate::core::sync::lock(&REGISTRY).keys().copied().collect()
 }
 
+/// Tear down every **permanently-parked** green process belonging to
+/// `runtime` — the embedded-host teardown the mailbox waiter-slot comment
+/// long flagged as missing. A process parked on a `(receive)` nothing will
+/// ever send to (no deadline) holds its `Box<Process>` (and its whole heap)
+/// in its mailbox's waiter slot for the life of the `REGISTRY` entry; the
+/// standalone binaries exit the OS process so it never mattered there, but a
+/// long-lived embedded host dropping an `Interp` leaked them until host
+/// exit. Called from `Interp::drop`.
+///
+/// Each reaped process goes through the **normal death path** (`deregister`
+/// with reason `:killed`): monitors fire `[:down …]`, links propagate, names
+/// unregister, sockets close. Only *parked* waiters of *this* runtime are
+/// touched — a runnable/running process is left to finish or park (a host
+/// should quiesce before dropping; a later drop of another `Interp` sharing
+/// the scheduler reaps nothing of ours since our entries are gone). Racing
+/// `send`s are safe: the waiter is taken under the state lock, so a
+/// concurrent deliver either woke it first (we skip) or queues into a
+/// mailbox that is removed right after (a send to a dead pid — a no-op).
+/// Returns how many processes were reaped.
+pub fn shutdown_runtime_parked(runtime: &Arc<crate::core::heap::RuntimeCode>) -> usize {
+    let pids: Vec<u64> = crate::core::sync::lock(&REGISTRY).keys().copied().collect();
+    let mut reaped = 0;
+    for pid in pids {
+        let mailbox = match crate::core::sync::lock(&REGISTRY).get(&pid) {
+            Some(mb) => Arc::clone(mb),
+            None => continue,
+        };
+        let taken: Option<Box<Process>> = {
+            let mut st = crate::core::sync::lock(&mailbox.state);
+            match &st.waiter {
+                Some(p) if Arc::ptr_eq(&p.heap.runtime_arc(), runtime) => st.waiter.take(),
+                _ => None,
+            }
+        };
+        if let Some(p) = taken {
+            deregister(
+                pid,
+                Message::Keyword(crate::core::value::intern(pk::KILLED)),
+                &p.heap,
+            );
+            reaped += 1;
+        }
+    }
+    reaped
+}
+
 /// The eval / VM safepoint's cooperative RUNTIME-drain report (ADR-091 Stage 3c):
 /// this process reports whether it still references the draining generation. Called
 /// only when [`Heap::drain_active`](crate::core::heap::Heap::drain_active) already
