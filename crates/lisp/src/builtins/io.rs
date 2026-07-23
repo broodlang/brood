@@ -33,6 +33,63 @@ pub fn take_captured_stdout() -> Option<String> {
     crate::process::take_capture()
 }
 
+// ---- MCP progress notifications (the streaming/progress tier) -------------
+//
+// A long `nest mcp` tool (run-tests, check) can report incremental progress:
+// the MCP dispatcher **arms** a sink around a `tools/call` that carried a
+// `_meta.progressToken`, and the Brood handler calls `(mcp-progress progress
+// total message)` — which lands as a `notifications/progress` JSON-RPC message
+// on the (real) stdout stream the client is already reading, *during* the
+// call. Off (a no-op) when no token was supplied or when not running under the
+// MCP server, so the same handler is safe to call anywhere. The sink writes
+// raw JSON-RPC, bypassing the Brood output-capture above (which is a
+// port-level redirect, not the OS stdout).
+
+type ProgressSink = Box<dyn Fn(i64, Option<i64>, Option<String>)>;
+
+thread_local! {
+    static MCP_PROGRESS: std::cell::RefCell<Option<ProgressSink>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Arm the MCP progress sink for the duration of one `tools/call`. `f` receives
+/// `(progress, total, message)` and emits the `notifications/progress` message
+/// (the dispatcher owns the token + the write). Pair with [`disarm_mcp_progress`].
+pub fn arm_mcp_progress(f: ProgressSink) {
+    MCP_PROGRESS.with(|c| *c.borrow_mut() = Some(f));
+}
+
+/// Disarm the MCP progress sink — after this, `(mcp-progress …)` is a no-op again.
+pub fn disarm_mcp_progress() {
+    MCP_PROGRESS.with(|c| *c.borrow_mut() = None);
+}
+
+/// `(%mcp-progress progress total message)` — report progress from a `nest mcp`
+/// tool handler. `progress` is an int (units completed); `total` is an int or
+/// nil (the denominator, if known); `message` is a string or nil (a human
+/// label). Returns `true` if a progress notification was actually sent (a token
+/// was in scope), `false` if it was a no-op (not under an MCP progress request).
+pub(super) fn mcp_progress(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let progress = expect_int(heap, "%mcp-progress", arg(args, 0))?;
+    let total = match arg(args, 1) {
+        Value::Nil => None,
+        v => Some(expect_int(heap, "%mcp-progress", v)?),
+    };
+    let message = match arg(args, 2) {
+        Value::Nil => None,
+        v => Some(expect_string(heap, "%mcp-progress", v)?.to_string()),
+    };
+    let sent = MCP_PROGRESS.with(|c| {
+        if let Some(f) = c.borrow().as_ref() {
+            f(progress, total, message);
+            true
+        } else {
+            false
+        }
+    });
+    Ok(Value::boolean(sent))
+}
+
 /// If a capture is active on the current process, append `s` to it and return
 /// `true`; otherwise `false`. The single divert point shared by `print` and
 /// `write_term_bytes`.

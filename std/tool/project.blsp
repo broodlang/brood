@@ -639,9 +639,21 @@ resolve in the advisory checker. Returns the project root."
       nil
       ;; `append-two` (copy the small per-file diagnostic list, share `acc`) not
       ;; `(append acc …)` (recopies the growing accumulator each file → O(files²)).
-      (fold (fn (acc f) (append-two (check-file-structured f) acc))
-        nil
-        (project--all-files root)))))
+      ;; `%mcp-progress` streams per-file progress under `nest mcp` (a no-op — a
+      ;; cheap thread-local check — otherwise), so a large project's `check`
+      ;; reports live instead of one silent wait.
+      (let (files (project--all-files root)
+            total (length files))
+        (project--check-fold files total 0 nil)))))
+
+(defn project--check-fold (files total done acc)
+  (if (nil? files)
+    acc
+    (let (f (first files)
+          diags (check-file-structured f)
+          done2 (inc done))
+      (%mcp-progress done2 total (str "checked " (path-basename f)))
+      (project--check-fold (rest files) total done2 (append-two diags acc)))))
 
 ;; --- duplicate-global detection (flat namespace, ADR-019) --------------------
 ;; The project shares one flat global table: exactly one binding per name across

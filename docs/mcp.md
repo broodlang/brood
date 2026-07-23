@@ -320,7 +320,16 @@ scaffolding work already done.
 |---|---|---|---|
 | **0** | lifecycle, `tools/{list,call}`, `resources/{list,read}`, the eight core tools, the doc resources | `brood::introspect` extracted from LSP | proposed |
 | **1** | project-defined tools (a project's `mcp.blsp` extends the registry), `prompts/get` for `brood-task` | tool-extension API in `std/tool/mcp.blsp`     | next     |
-| **2** | structured progress notifications (long `run-tests`), per-tool sandboxing (`:safe` allowlist)        | progress event channel                   | later    |
+| **2** | structured progress notifications (long `run-tests`), per-tool sandboxing (`:safe` allowlist)        | progress event channel                   | progress ✅ (2026-07-23); sandboxing later |
+
+**Progress notifications (Tier 2, shipped 2026-07-23).** A `tools/call` that
+carries an MCP `_meta.progressToken` gets live `notifications/progress`
+streamed on the stdout channel during the (synchronous) call: a Brood handler
+calls `(mcp-progress progress total message)` — a no-op without a token, so
+any handler can use it. The `check` tool reports per file
+(`checked foo.blsp`, 3/12). Mechanism: `%mcp-progress` (a dispatcher-armed
+sink) + the reentrant stdout lock, so the server streams from inside a
+blocking handler.
 
 Tier 0 is reachable now because the prerequisites — the introspection
 primitives (ADR-025), project bootstrap (ADR-020/028), hot reload (ADR-013) —

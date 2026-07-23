@@ -29,7 +29,7 @@ use sequences::*;
 use system::*;
 use terminal::*;
 
-pub use io::{begin_stdout_capture, take_captured_stdout};
+pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_captured_stdout};
 pub use system::SPECIAL_FORMS;
 pub use terminal::{restore_raw, restore_terminal, restore_terminal_on_exit};
 
@@ -2288,6 +2288,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![any, any], int),
         offload_start,
+    );
+    // MCP progress notifications: a `nest mcp` tool handler reports incremental
+    // progress; the dispatcher arms the sink around a progress-token call. A
+    // no-op (false) when not under such a call. `mcp-progress` in std/tool/mcp
+    // is the friendly wrapper.
+    def(
+        heap,
+        "%mcp-progress",
+        Arity::exact(3),
+        Sig::new(vec![int, int.union(nil_ty), string.union(nil_ty)], bool_ty),
+        mcp_progress,
     );
     // WASM component interop (ADR-071/145, feature `wasm`): the sandboxed
     // native-extension host. Policy — file loading, `use-native` binding —

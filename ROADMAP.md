@@ -646,9 +646,14 @@ Runtime housekeeping (both items landed):
   + `.`/`..`, works for not-yet-existing targets) backs a second sandbox gate
   in `mcp--project-path`, so a project-relative `..`-free path that resolves out
   of the tree through a symlinked directory is now rejected, not just the
-  lexical cases (`crates/lisp/tests/mcp_sandbox.rs`). ⬜ Still: a
-  streaming/progress-notification tier for long-running tool output; exposing
-  GC/process *traces* (not just snapshots).
+  lexical cases (`crates/lisp/tests/mcp_sandbox.rs`). ✅ **the streaming /
+  progress-notification tier** shipped 2026-07-23: a `tools/call` carrying an
+  MCP `_meta.progressToken` arms a sink so a handler's `(mcp-progress progress
+  total message)` streams `notifications/progress` to the client *during* the
+  synchronous call (via the reentrant stdout lock); the core `check` tool
+  reports per-file, and `%mcp-progress` is a no-op elsewhere so any handler
+  can call it safely (tests in `mcp.rs`). ⬜ Still: exposing GC/process
+  *traces* (not just snapshots).
 
 ### Editor (M2) & display (M3)
 

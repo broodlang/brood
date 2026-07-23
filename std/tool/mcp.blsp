@@ -372,6 +372,15 @@ exist?\" without guessing names one at a time."
       (throw "doc-search: :query must be a string"))
     {:results (map (fn (pair) {:name (name (first pair)) :doc (second pair)}) (doc-search query))}))
 
+(defn mcp-progress (progress &optional (total nil) (message nil))
+  "Report incremental progress from a `nest mcp` tool handler (the streaming
+tier): `progress` units done, optional `total` (denominator) and `message`
+(label). Streams a `notifications/progress` to the client when the current
+`tools/call` carried a `_meta.progressToken`; a no-op otherwise, so it is safe
+to call from any handler. Returns true if a notification was sent. (The core
+`check` tool already reports per-file via the underlying `%mcp-progress`.)"
+  (%mcp-progress progress total message))
+
 (defn mcp-explain-error-tool (args)
   "`explain-error` — explain a Brood error code (or a caught error's `:code`).
 Returns `{:code :summary :causes :fix :example}` from the curated catalogue

@@ -5868,6 +5868,24 @@ all-elements-are-`(name value)`-pairs shape (a genuinely-flat odd `(let (a)
 catchable in-language via `read-string`); the "Coming from Clojure" table in
 language.md gains rows.
 
+## 2026-07-23 — MCP streaming/progress tier
+
+A long `nest mcp` tool (a `check` over a big project) used to be one silent
+wait. Now a `tools/call` carrying the MCP `_meta.progressToken` arms a
+progress sink: the Brood handler calls `(mcp-progress progress total
+message)`, which lands as a `notifications/progress` JSON-RPC message on the
+same stdout stream the client reads — *during* the synchronous call. The
+server is synchronous over stdio, so live streaming from inside a blocking
+handler works via the **reentrant stdout lock** (writing from the handler is
+safe even though `main_loop` holds the lock). `%mcp-progress` (kernel: a
+thread-local sink armed by the dispatcher; a no-op returning false when no
+token is in scope, so the same handler is safe anywhere) + a `mcp-progress`
+wrapper; the core `check` tool (`check-project-structured`) reports per-file
+(`checked foo.blsp`, 3/12). Tests: `progress_notification` shape (unit), a
+`tools/call` with a token streams a notification, and without a token none
+is sent (a test-only stdout redirect makes the reentrant-lock path
+observable). Suite 803/803.
+
 ## 2026-07-23 — LLM-native MCP tools: explain-error + find-pattern
 
 Two of the "errors that teach" tools shipped, as a new baked-in `explain`

@@ -459,6 +459,29 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
+    // MCP progress (the streaming tier): if the request carried a
+    // `_meta.progressToken`, arm a sink so the handler's `(mcp-progress …)`
+    // calls stream `notifications/progress` messages to the client on the same
+    // stdout channel — *during* this synchronous call. The stdout lock is
+    // reentrant, so writing from here is safe even though `main_loop` holds it.
+    let progress_token = params
+        .get("_meta")
+        .and_then(|m| m.get("progressToken"))
+        .cloned();
+    let progress_armed = if let Some(token) = progress_token {
+        brood::builtins::arm_mcp_progress(Box::new(move |progress, total, message| {
+            emit_progress(&progress_notification(
+                &token,
+                progress,
+                total,
+                message.as_deref(),
+            ));
+        }));
+        true
+    } else {
+        false
+    };
+
     let cp = interp.heap.checkpoint();
     let roots_base = interp.heap.roots_len();
 
@@ -532,6 +555,9 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
         Err(payload) => Err(RpcError::from_panic(payload)),
     };
     brood::process::set_deadline(None);
+    if progress_armed {
+        brood::builtins::disarm_mcp_progress();
+    }
 
     // Always drain the capture buffer (even on error / panic) so it never leaks
     // into the next call; attach it to a successful reply's content envelope.
@@ -546,6 +572,51 @@ fn call_tool(interp: &mut Interp, params: &Json) -> Result<Json, RpcError> {
     interp.heap.truncate_roots(roots_base);
     interp.heap.reset_local_to(cp);
     outcome
+}
+
+thread_local! {
+    /// A test-only redirect for progress notifications. When set, `emit_progress`
+    /// writes there instead of the process stdout — so an end-to-end `main_loop`
+    /// test can observe the `notifications/progress` stream (the real path uses
+    /// the reentrant stdout lock, which a `Vec` test writer can't see).
+    static PROGRESS_TEST_OUT: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<u8>>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Write one progress notification to the client — the process stdout (a
+/// reentrant lock, safe while `main_loop` holds it), or a test redirect.
+fn emit_progress(note: &Json) {
+    PROGRESS_TEST_OUT.with(|c| {
+        if let Some(buf) = c.borrow().as_ref() {
+            let mut b = buf.borrow_mut();
+            let _ = write_message(&mut *b, note);
+        } else {
+            let mut out = std::io::stdout().lock();
+            if write_message(&mut out, note).is_ok() {
+                let _ = out.flush();
+            }
+        }
+    });
+}
+
+/// Build an MCP `notifications/progress` message for `token`: `progress` is the
+/// value so far, `total` the denominator (if known), `message` a human label.
+/// Per the MCP spec, `progress` MUST increase; the token echoes the request's
+/// `_meta.progressToken` (a string or a number — passed through as-is).
+fn progress_notification(
+    token: &Json,
+    progress: i64,
+    total: Option<i64>,
+    message: Option<&str>,
+) -> Json {
+    let mut params = json!({ "progressToken": token, "progress": progress });
+    if let Some(t) = total {
+        params["total"] = json!(t);
+    }
+    if let Some(m) = message {
+        params["message"] = json!(m);
+    }
+    json!({ "jsonrpc": "2.0", "method": "notifications/progress", "params": params })
 }
 
 /// Walk the tool list looking for the entry whose `:name` matches; return its
@@ -2215,5 +2286,93 @@ mod tests {
         let content = &resp[1]["result"]["content"][0];
         assert_eq!(content["type"], "text");
         assert_eq!(content["text"], "7");
+    }
+
+    // ---- MCP progress notifications (the streaming tier) ---------------------
+
+    #[test]
+    fn progress_notification_builds_the_right_shape() {
+        let n = progress_notification(&json!("tok-1"), 3, Some(10), Some("halfway"));
+        assert_eq!(n["jsonrpc"], "2.0");
+        assert_eq!(n["method"], "notifications/progress");
+        assert_eq!(n["params"]["progressToken"], "tok-1");
+        assert_eq!(n["params"]["progress"], 3);
+        assert_eq!(n["params"]["total"], 10);
+        assert_eq!(n["params"]["message"], "halfway");
+        // A numeric token passes through; total/message are optional.
+        let n2 = progress_notification(&json!(42), 1, None, None);
+        assert_eq!(n2["params"]["progressToken"], 42);
+        assert!(n2["params"].get("total").is_none());
+        assert!(n2["params"].get("message").is_none());
+    }
+
+    /// Capture the progress stream emitted while `f` runs (the real path writes
+    /// to the reentrant stdout lock, which a `Vec` test writer can't see).
+    fn with_progress_capture(f: impl FnOnce()) -> Vec<Json> {
+        let buf = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        super::PROGRESS_TEST_OUT.with(|c| *c.borrow_mut() = Some(buf.clone()));
+        f();
+        super::PROGRESS_TEST_OUT.with(|c| *c.borrow_mut() = None);
+        let bytes = buf.borrow().clone();
+        unframe(&bytes)
+    }
+
+    #[test]
+    fn a_tools_call_with_a_progress_token_streams_notifications() {
+        let mut interp = Interp::new();
+        let notes = with_progress_capture(|| {
+            round_trip(
+                &mut interp,
+                &[
+                    req(
+                        1,
+                        "tools/call",
+                        json!({
+                            "name": "eval",
+                            "arguments": { "source": "(mcp/mcp-progress 1 3 \"step-one\")" },
+                            "_meta": { "progressToken": "tok-42" }
+                        }),
+                    ),
+                    notif("exit", json!(null)),
+                ],
+            );
+        });
+        assert_eq!(notes.len(), 1, "expected one progress notification");
+        assert_eq!(notes[0]["method"], "notifications/progress");
+        assert_eq!(notes[0]["params"]["progressToken"], "tok-42");
+        assert_eq!(notes[0]["params"]["progress"], 1);
+        assert_eq!(notes[0]["params"]["total"], 3);
+        assert_eq!(notes[0]["params"]["message"], "step-one");
+    }
+
+    #[test]
+    fn without_a_progress_token_no_notifications_are_sent() {
+        let mut interp = Interp::new();
+        let notes = with_progress_capture(|| {
+            let resp = round_trip(
+                &mut interp,
+                &[
+                    req(
+                        1,
+                        "tools/call",
+                        // Same call, no _meta.progressToken.
+                        json!({
+                            "name": "eval",
+                            "arguments": { "source": "(mcp/mcp-progress 1 3 \"step-one\")" }
+                        }),
+                    ),
+                    notif("exit", json!(null)),
+                ],
+            );
+            // The handler still succeeds — mcp-progress is a no-op returning
+            // false (the eval tool wraps it as {:value "false"}).
+            let text = resp[0]["result"]["content"][0]["text"].as_str().unwrap();
+            let body: Json = serde_json::from_str(text).unwrap();
+            assert_eq!(body["value"], "false");
+        });
+        assert!(
+            notes.is_empty(),
+            "no token → no progress notifications: {notes:?}"
+        );
     }
 }
