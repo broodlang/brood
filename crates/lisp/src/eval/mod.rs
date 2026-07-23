@@ -538,7 +538,7 @@ fn eval_tail_loop(
                     }
                     let binds = as_binding_vec(heap, binds_form)?;
                     if binds.len() % 2 != 0 {
-                        return Err(LispError::runtime("let: bindings must be name/value pairs"));
+                        return Err(scheme_binding_error(heap, "let", &binds));
                     }
                     // Fallback: a pattern (non-symbol) binding target reached eval
                     // unlowered — same paths as `fn` above. Lower via the compile
@@ -582,9 +582,7 @@ fn eval_tail_loop(
                     }
                     let binds = as_binding_vec(heap, binds_form)?;
                     if binds.len() % 2 != 0 {
-                        return Err(LispError::runtime(
-                            "letrec: bindings must be name/value pairs",
-                        ));
+                        return Err(scheme_binding_error(heap, "letrec", &binds));
                     }
                     // Plain-symbol targets only — letrec exists for mutual
                     // recursion of *named* values; pattern binding would muddy
@@ -1738,6 +1736,32 @@ fn as_binding_vec(heap: &Heap, v: Value) -> Result<Vec<Value>, LispError> {
     heap.seq_items(v).map_err(|_| {
         LispError::type_err("let bindings must be a list (a 1 b 2) or vector [a 1 b 2]")
     })
+}
+
+/// The odd-length `let`/`letrec` bindings error, with a teaching hint when the
+/// bindings look like Scheme/Clojure's **nested-pair** form — `(let ((a 1) (b
+/// 2)) …)` instead of Brood's flat `(let (a 1 b 2) …)`. Detected when every
+/// binding element is itself a `(name value)` 2-list (LLM-native errors,
+/// `docs/llm-native.md`).
+fn scheme_binding_error(heap: &Heap, who: &str, binds: &[Value]) -> LispError {
+    let looks_nested = !binds.is_empty()
+        && binds.iter().all(|&b| {
+            matches!(b.unpack(), ValueRef::Pair(_))
+                && heap.seq_items(b).map(|it| it.len() == 2).unwrap_or(false)
+                && matches!(
+                    heap.seq_items(b).ok().and_then(|it| it.first().copied()),
+                    Some(v) if matches!(v.unpack(), ValueRef::Sym(_))
+                )
+        });
+    let e = LispError::runtime(format!("{who}: bindings must be name/value pairs"));
+    if looks_nested {
+        e.with_hint(format!(
+            "Brood `{who}` bindings are FLAT, not nested like Scheme/Clojure: \
+             write `({who} (a 1 b 2) …)`, not `({who} ((a 1) (b 2)) …)`."
+        ))
+    } else {
+        e
+    }
 }
 
 /// Split a list cell into `(head, tail)`; `(nil, nil)` if it isn't a pair. For

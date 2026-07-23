@@ -24,7 +24,8 @@
 //!   nest add <name> …      add a dependency (`:path PATH` or `:git URL :ref REF`) and re-lock
 //!   nest remove <name>     remove a dependency and re-lock
 //!   nest repl              project-aware REPL (sources preloaded)
-//!   nest format            in-place reformat (`--check` for CI dry-run)
+//!   nest format            in-place reformat (`--check` for CI dry-run,
+//!                          `--changed` for only git-changed files)
 //!   nest doc [module]      Markdown docs (whole project or one module);
 //!                          `--all` is the complete builtin + prelude reference
 //!   nest mcp               Model Context Protocol server over stdio
@@ -209,6 +210,11 @@ enum Cmd {
         /// Don't write; exit non-zero if any file would change (CI mode).
         #[arg(long, short = 'c')]
         check: bool,
+        /// Only format `.blsp` files git reports as changed (modified, staged,
+        /// or untracked) — a fast, git-aware narrower scope. Falls back to the
+        /// whole project when not in a git repository. Ignored with `--check`.
+        #[arg(long)]
+        changed: bool,
     },
 
     /// Emit Markdown documentation — the whole project, or one named module.
@@ -346,7 +352,7 @@ fn run_main(cli: Cli) {
         Cmd::Test { files } => cmd_test(&mut interp, &files),
         Cmd::Check { files } => cmd_check(&mut interp, &files),
         Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
-        Cmd::Format { check } => cmd_format(&mut interp, check),
+        Cmd::Format { check, changed } => cmd_format(&mut interp, check, changed),
         Cmd::Run {
             file,
             watch,
@@ -480,9 +486,13 @@ fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
 }
 
 /// `nest format [--check]` — reformat in place, or dry-run on `--check`.
-fn cmd_format(interp: &mut Interp, check: bool) {
+fn cmd_format(interp: &mut Interp, check: bool, changed: bool) {
     let entry = if check {
+        // --check is CI's clean-tree gate: it must see the whole project, so
+        // --changed doesn't narrow it (a stale committed file would slip by).
         "(format/format-project-check)"
+    } else if changed {
+        "(format/format-project-changed)"
     } else {
         "(format/format-project)"
     };

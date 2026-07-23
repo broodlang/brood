@@ -793,6 +793,42 @@ per rewritten file and a summary; returns the number of files rewritten."
       (when (= r :rewrote) (println (str "  rewrote " path)))
       (format--apply (rest files) (if (= r :rewrote) (inc rewrote) rewrote)))))
 
+;; A tiny local set (a map to true) — avoids requiring `set` just for membership.
+(defn format--set-of (coll)
+  (fold (fn (m x) (assoc m x true)) {} coll))
+
+;; The .blsp files under the project that git reports as not-committed-clean
+;; (modified/staged/untracked), intersected with the project's own file set so
+;; a stray .blsp elsewhere in the repo is ignored. Returns `:not-a-repo` (from
+;; the primitive) when there is no git work tree; otherwise a list (possibly
+;; empty — a clean tree) of the changed .blsp paths.
+(defn format--changed-blsp (root)
+  (let (changed (%git-changed-files root))
+    (if (= changed :not-a-repo)
+      :not-a-repo
+      (let (project (format--set-of (format--every-blsp root)))
+        (filter (fn (p) (contains? project p))
+          (filter (fn (p) (ends-with? p ".blsp")) changed))))))
+
+(defn format-project-changed ()
+  "Format only the .blsp files git reports as changed (modified/staged/untracked)
+under the current project — the git-aware narrower scope of `nest format`
+(`--changed`). Falls back to the whole project if not in a git repo. Returns the
+number of files rewritten."
+  (let (root (format--require-root) changed (format--changed-blsp root))
+    (if (= changed :not-a-repo)
+      (do (println "format: not a git repository — formatting the whole project.")
+        (format-project))
+      (let (rewrote (format--apply changed 0))
+        (println (str "format: "
+                   (length changed)
+                   " changed file"
+                   (if (= (length changed) 1) "" "s")
+                   " considered, "
+                   rewrote
+                   " rewritten."))
+        rewrote))))
+
 (defn format-project-check ()
   "Check (don't write): print each file whose contents differ from
 `(format-source …)` and raise if any do. Used by `nest format --check`."

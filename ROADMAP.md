@@ -607,17 +607,25 @@ Runtime housekeeping (both items landed):
 
 ### Tooling & errors
 
-- ⬜ **`nest format --changed`** — whole-tree `nest format` reformats untouched
-  files; add a git-aware narrower scope.
+- ✅ **`nest format --changed`** — shipped 2026-07-23. A git-aware narrower
+  scope: formats only the `.blsp` files git reports not-committed-clean
+  (modified/staged/untracked), via a new `%git-changed-files` primitive
+  (returns the paths, or `:not-a-repo`); falls back to the whole project
+  outside a git repo, and `--check` still scans everything (CI's clean-tree
+  gate). `crates/nest/tests/format_changed.rs`.
 - 🟡 **LSP** — tiers 0–2 ship; still next: incremental sync; range/delta semantic
   tokens; **finer finding spans** (arity/type findings anchor to the call head, not
   the offending argument — wants `Pos` threaded through `types/check.rs`'s walk); and
   a **create-missing-`defn`** code action.
 - 🟡 **Errors that teach (LLM-native)** ([`docs/llm-native.md`](docs/llm-native.md))
-  — first instances landed; more to do: reader-level hints for Clojure/Scheme syntax
-  the lexer mis-parses (`(let ((a 1)) …)`, `#{…}`/`#(…)`), the
-  `brood.explain-error`/`brood.find-pattern` MCP tools, an intent→idiom cookbook, and
-  folding each new repeat mistake into the rule-of-three.
+  — first instances landed. ✅ **reader-level hints** for the Clojure/Scheme
+  syntax the reader mis-parses shipped 2026-07-23: `#{…}` (set literal),
+  `#(…)` (anonymous-fn reader macro), and `#'` (var-quote) now raise a clean
+  parse error with a `:hint` naming the Brood idiom (was "odd map" / "unbound
+  #"); Scheme/Clojure **nested `let`/`letrec` bindings** `((a 1) (b 2))` raise
+  a hint to flatten (`tests/reader_hints_test.blsp`). ⬜ Still to do: the
+  `brood.explain-error`/`brood.find-pattern` MCP tools, an intent→idiom
+  cookbook, and folding each new repeat mistake into the rule-of-three.
 - ⬜ **MCP tooling** — a streaming/progress-notification tier for long-running tool
   output; exposing GC/process *traces* (not just snapshots); tightening the write
   sandbox against symlink escapes (a `canonicalize` primitive).

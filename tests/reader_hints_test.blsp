@@ -1,0 +1,46 @@
+;; Teaching hints for Clojure/Scheme syntax Brood does not have (LLM-native
+;; errors, docs/llm-native.md): a mis-typed `#{…}` / `#(…)` / `#'` reader
+;; macro, or Scheme/Clojure's nested `let` bindings, should produce a clear
+;; error WITH a `:hint` pointing at the Brood idiom — not a confusing
+;; downstream "odd map" / "unbound #" surprise.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule reader-hints-test (:use test))
+
+(defn hint-of (src)
+  "The :hint of the error raised reading+evaluating `src`, or nil."
+  (try (eval (read-string src)) (catch e (get e :hint))))
+
+(describe "reader: Clojure/Scheme syntax gets a teaching hint"
+  (test "#{…} set literal → parse error naming the set library"
+    (let (e (try (read-string "#{1 2 3}") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (string-contains? (get e :message) "set-literal"))
+      (is (string-contains? (get e :hint) "(require 'set)"))))
+  (test "#(…) anonymous-fn reader macro → parse error naming (fn …)"
+    (let (e (try (read-string "#(+ 1 %)") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (string-contains? (get e :hint) "(fn (x)"))))
+  (test "#' var-quote → parse error naming plain quote"
+    (let (e (try (read-string "#'foo") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (string-contains? (get e :hint) "'foo"))))
+  (test "the legitimate # forms still read (no false positive)"
+    (is (bytes? (read-string "#b\"hi\"")))       ; bytes literal
+    (is (= (read-string "#foo") '#foo))))         ; a bare #-atom is a symbol
+
+(describe "let/letrec: Scheme/Clojure nested bindings get a hint"
+  (test "(let ((a 1)) …) → hint to flatten the bindings"
+    (let (h (hint-of "(let ((a 1)) a)"))
+      (is (string-contains? h "FLAT"))
+      (is (string-contains? h "(let (a 1 b 2)"))))
+  (test "(letrec ((f ...)) …) → the letrec-flavoured hint"
+    (let (h (hint-of "(letrec ((f (fn () 1))) (f))"))
+      (is (string-contains? h "(letrec (a 1 b 2)"))))
+  (test "a genuinely-flat let with an odd count has no false Scheme hint"
+    ;; (let (a) …) is odd but NOT the nested-pair shape, so no misleading hint.
+    (is (nil? (hint-of "(let (a) a)"))))
+  (test "flat bindings — list and vector — still work"
+    (is (= (eval (read-string "(let (a 1 b 2) (+ a b))")) 3))
+    (is (= (eval (read-string "(let [a 1 b 2] (+ a b))")) 3))))

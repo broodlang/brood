@@ -5853,7 +5853,34 @@ exposed it. Now absolute + emitted only when the paths exist: a repeat fuzz
 invocation went 2 min → 0.29 s, and every workspace rebuild stops paying the
 tax.
 
-## 2026-07-23 — "Private should be private": module privacy enforced (ADR-146)
+## 2026-07-23 — Tooling & errors batch: Clojure/Scheme teaching hints + `nest format --changed`
+
+Two finish-the-partials items from the tooling/errors cluster.
+
+**LLM-native reader hints.** The reader used to mis-parse three common
+Clojure/Scheme reader macros into confusing downstream errors: `#{1 2 3}` →
+"map literal has an odd number of forms", `#(+ 1 %)` → "unbound symbol: #",
+`#'foo` → same. Now `read_hash` catches `#{` / `#(` / `#'` and raises a clean
+parse error carrying a `:hint` that names the Brood idiom (the set library,
+`(fn …)`, plain `'foo`) — while `#b"…"` and bare `#foo` symbols still read.
+And Scheme/Clojure's nested `let`/`letrec` bindings `((a 1) (b 2))` (odd
+count) now raise a hint to flatten to `(a 1 b 2)`, detected by the
+all-elements-are-`(name value)`-pairs shape (a genuinely-flat odd `(let (a)
+…)` gets no false hint). `tests/reader_hints_test.blsp` (8 cases, hints are
+catchable in-language via `read-string`); the "Coming from Clojure" table in
+language.md gains rows.
+
+**`nest format --changed`.** Whole-tree `nest format` reformatted every
+`.blsp`; `--changed` narrows to only the files git reports not-committed-clean
+(modified/staged/untracked). New kernel mechanism `%git-changed-files dir`
+(runs `git status --porcelain -z` from the repo top, returns absolute paths —
+or the keyword `:not-a-repo`, distinct from a clean tree's empty list, since
+an empty Brood list is nil); Brood policy in `std/format.blsp`
+(`format-project-changed`) intersects with the project's own file set and
+falls back to the whole project outside a git repo. `--check` deliberately
+still scans everything (CI's clean-tree gate can't narrow). Integration test
+`crates/nest/tests/format_changed.rs` (clean tree considers 0; one dirty file
+is the only one formatted; non-git fallback).
 
 The `--` convention becomes real semantics. From inside a module, a
 hand-written qualified reference to another module's `--` name (plain or

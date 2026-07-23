@@ -1335,6 +1335,50 @@ pub(super) fn git_resolve_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     }
 }
 
+/// `(%git-changed-files dir)` — absolute paths of files that are NOT
+/// committed-clean under `dir`: modified, staged, or untracked (`git status
+/// --porcelain`, which unions all three). Returns a **list of strings** (which
+/// is `nil` when the tree is clean — an empty Brood list is nil), or the
+/// keyword **`:not-a-repo`** when `dir` is not inside a git work tree (distinct
+/// from a clean repo's empty list). The mechanism behind `nest format
+/// --changed`; the `.blsp` filter + formatting are Brood policy
+/// (std/format.blsp).
+pub(super) fn git_changed_files(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let dir = expect_string(heap, "%git-changed-files", arg(args, 0))?;
+    let not_a_repo = || Ok(Value::keyword(value::intern("not-a-repo")));
+    // `--porcelain -z` gives stable, NUL-terminated `XY <path>` records (a rename
+    // adds a second NUL-separated path; we take the destination). Run from the
+    // repo TOP so paths are root-relative and match what the caller walks.
+    let top = run_git(&["-C", &dir, "rev-parse", "--show-toplevel"], None)?;
+    if !top.status.success() {
+        return not_a_repo(); // not a git work tree
+    }
+    let root = String::from_utf8_lossy(&top.stdout).trim().to_string();
+    let out = run_git(&["-C", &root, "status", "--porcelain", "-z"], None)?;
+    if !out.status.success() {
+        return not_a_repo();
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut paths: Vec<Value> = Vec::new();
+    // Records are NUL-separated; each is `XY <path>` (3+ chars). A rename/copy
+    // record (`R`/`C` in X) is followed by an extra NUL-separated origin path,
+    // which we skip — the record's own path is the current (destination) name.
+    let mut it = stdout.split('\0');
+    while let Some(rec) = it.next() {
+        if rec.len() < 3 {
+            continue;
+        }
+        let (status, path) = rec.split_at(3);
+        let x = status.chars().next().unwrap_or(' ');
+        if x == 'R' || x == 'C' {
+            it.next(); // consume the origin path of a rename/copy
+        }
+        let abs = std::path::Path::new(&root).join(path);
+        paths.push(heap.alloc_string(&abs.to_string_lossy()));
+    }
+    Ok(heap.list(paths))
+}
+
 /// `(%git-clone url dest ref commit)` — populate `dest` with a shallow clone of
 /// `url` checked out at the exact `commit` (detached HEAD). Tries to fetch the
 /// commit directly (servers that allow SHA-in-want, e.g. GitHub); falls back to

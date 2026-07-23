@@ -238,14 +238,45 @@ impl<'a> Parser<'a> {
 
     /// Dispatch a leading `#`. Only `#b"…"` is special (a bytes literal); `#` is
     /// otherwise an ordinary atom character, so anything else (`#q`, `#foo`) reads
-    /// as a symbol.
+    /// as a symbol. Three common Clojure/Scheme `#`-reader-macros are caught with a
+    /// teaching hint (LLM-native errors, `docs/llm-native.md`) rather than
+    /// mis-parsed into a confusing downstream error (`#{…}` → "odd map", `#(…)` →
+    /// "unbound #").
     fn read_hash(&mut self) -> Result<Value, LispError> {
         if self.s.starts_with("#b\"") {
             self.s.bump(); // '#'
             self.s.bump(); // 'b'
-            self.read_bytes()
-        } else {
-            self.read_atom()
+            return self.read_bytes();
+        }
+        let pos = self.s.pos_at(self.s.pos());
+        match self.s.peek_after() {
+            // `#{…}` — Clojure set literal. Brood has no set reader literal yet;
+            // the `set` library is the idiom.
+            Some('{') => Err(LispError::parse(
+                "`#{…}` is Clojure set-literal syntax, which Brood does not have",
+            )
+            .with_pos(pos)
+            .with_hint(
+                "Brood has no `#{…}` reader literal. Use the set library: \
+                 `(require 'set)` then `(set/set [1 2 3])` (or `(:use set)` then \
+                 `(set [1 2 3])`).",
+            )),
+            // `#(…)` — Clojure anonymous-function reader macro.
+            Some('(') => Err(LispError::parse(
+                "`#(…)` is Clojure's anonymous-function reader macro, which Brood does not have",
+            )
+            .with_pos(pos)
+            .with_hint(
+                "Write the lambda out: Brood uses `(fn (x) …)` — e.g. `#(+ 1 %)` \
+                 becomes `(fn (x) (+ 1 x))`.",
+            )),
+            // `#'foo` — Clojure var-quote.
+            Some('\'') => Err(LispError::parse(
+                "`#'` is Clojure's var-quote, which Brood does not have",
+            )
+            .with_pos(pos)
+            .with_hint("Brood symbols are ordinary values — use a plain quote: `'foo`.")),
+            _ => self.read_atom(),
         }
     }
 
