@@ -82,11 +82,17 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
       (after *http-read-timeout-ms* (apply bytes-concat (reverse chunks))))))
 
 (defn http--read-raw (sock)
-  (let (head (http--read-until sock #b"" 0 #b"\r\n\r\n"))
-    (if (nil? head)
+  ;; `http--read-until` returns whatever it accumulated on EOF/timeout even
+  ;; without the terminator (a peer that half-sends a head then drops), so the
+  ;; marker can be absent (-1) here. Treat a missing terminator as a malformed /
+  ;; incomplete request → nil, so the caller closes the socket cleanly — NOT
+  ;; `(subbytes head 0 -1)`, which threw and killed the connection's worker
+  ;; process (leaking the fd) on a truncated head. A remotely-triggerable crash.
+  (let (head (http--read-until sock #b"" 0 #b"\r\n\r\n")
+        marker (if (nil? head) -1 (bytes-index-of head #b"\r\n\r\n")))
+    (if (< marker 0)
       nil
-      (let (marker (bytes-index-of head #b"\r\n\r\n")
-            clen (http--declared-length (utf8-bytes->string (subbytes head 0 marker))))
+      (let (clen (http--declared-length (utf8-bytes->string (subbytes head 0 marker))))
         (if (= clen 0)
           head
           ;; `head` already holds everything read so far (incl. any body bytes in
@@ -139,8 +145,12 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   bytes first), so `(parse-request \"GET /…\")` still works."
   (let (raw (if (string? raw) (string->utf8-bytes raw) raw)
         marker (bytes-index-of raw #b"\r\n\r\n")
-        head (utf8-bytes->string (subbytes raw 0 marker))
-        body (subbytes raw (+ marker 4) (byte-length raw))
+        ;; No blank-line terminator (a bare request line, or truncated): the
+        ;; whole thing is the head and the body is empty — never `(subbytes raw
+        ;; 0 -1)`, which throws. Mirrors `parse-response`'s guard.
+        head-end (if (< marker 0) (byte-length raw) marker)
+        head (utf8-bytes->string (subbytes raw 0 head-end))
+        body (if (< marker 0) #b"" (subbytes raw (+ marker 4) (byte-length raw)))
         lines (string-split head "\r\n")
         req (string-split (first lines) " "))
     {:method (nth req 0 "GET")
@@ -440,7 +450,8 @@ a transport failure). Must run in a process."
   (http-request "GET" url opts))
 
 (defn http-post (url body &optional (opts {}))
-  "POST `body` (a string, `bytes` value, or iolist; https: string only) to `url` —
+  "POST `body` (a string, `bytes` value, or iolist — over https too, since
+`tls-request` takes an iolist) to `url` —
 `http-request` with method \"POST\". Set the content type yourself via `opts`
 `:headers`, e.g. `{:headers {\"Content-Type\" \"application/json\"}}`. Returns the
 response map (`:body` is `bytes`; see `body-text`)."

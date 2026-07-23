@@ -15,7 +15,14 @@
   (test "a body after the blank line is captured"
     (let (r (parse-request "POST /x HTTP/1.0\r\nContent-Length: 5\r\n\r\nhello"))
       ;; :body is a bytes value (raw); decode it for a text body
-      (assert= (utf8-bytes->string (get r :body)) "hello"))))
+      (assert= (utf8-bytes->string (get r :body)) "hello")))
+  (test "a headerless request (no blank-line terminator) parses, not throws"
+    ;; the whole thing is the head, body empty — regression: this used to do
+    ;; (subbytes raw 0 -1) and throw.
+    (let (r (parse-request "GET / HTTP/1.0"))
+      (assert= (get r :method) "GET")
+      (assert= (get r :path) "/")
+      (assert= (byte-length (get r :body)) 0))))
 
 (describe "http: response rendering"
   (test "status line, Content-Length, and body (render-response is an iolist — ADR-139)"
@@ -118,7 +125,29 @@
           (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
             (is (string-contains? resp "200 OK"))
-            (is (string-contains? resp "<h1>brood</h1>"))))))))
+            (is (string-contains? resp "<h1>brood</h1>")))))))
+  (test "a truncated request head (no blank line, peer drops) doesn't kill the server"
+    ;; Regression: http--read-raw did (subbytes head 0 -1) on a head with no
+    ;; terminator, which threw and killed the connection's worker process
+    ;; (leaking the fd) — a remotely-triggerable crash. Now the malformed
+    ;; request is closed cleanly and the server keeps serving.
+    (let (me (self))
+      (spawn (do
+               (let (ls (http-listen 0))
+                 (send me [:port (tcp-local-port ls)])
+                 (serve-loop ls (fn (req) (ok "ok"))))))
+      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+        ;; a partial head, then close — the worker must not crash
+        (let (bad (tcp-connect "127.0.0.1" port))
+          (tcp-send bad "GET / HTTP/1.0\r\nHost: x")
+          (tcp-close bad))
+        (sleep 200)
+        ;; the server is still alive and serves a normal request
+        (let (c (tcp-connect "127.0.0.1" port))
+          (tcp-send c "GET / HTTP/1.0\r\n\r\n")
+          (let (resp (utf8-bytes->string (tcp-drain c)))
+            (tcp-close c)
+            (is (string-contains? resp "200 OK"))))))))
 
 (describe "http: a binary request body survives byte-faithfully"
   ;; http-read-request reads in binary mode, so a POST body containing bytes that

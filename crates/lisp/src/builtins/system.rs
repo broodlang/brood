@@ -2734,20 +2734,47 @@ fn offload_pool() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<OffloadJo
 /// call the native, ship the result (or the structured error) back as a
 /// mailbox message. The scratch heap dies with the job — nothing is shared.
 fn run_offload_job(job: OffloadJob) {
-    let mut heap = Heap::new();
-    let env = heap.new_env(None);
-    let mut vals = Vec::with_capacity(job.args.len());
-    for m in &job.args {
-        vals.push(crate::process::from_message(&mut heap, m));
-    }
-    let msg = match (job.func)(&vals, env, &mut heap) {
-        Ok(v) => match crate::process::to_message(&heap, v) {
-            Ok(m) => offload_msg("offload", job.token, m),
-            Err(e) => offload_msg("offload-error", job.token, crate::process::error_reason(&e)),
-        },
-        Err(e) => offload_msg("offload-error", job.token, crate::process::error_reason(&e)),
-    };
-    job.sink.emit(msg);
+    let OffloadJob {
+        func,
+        args,
+        sink,
+        token,
+    } = job;
+    // Contain a *panic* in the native (an interpreter bug, not a Brood `Err`)
+    // like the scheduler contains a panicking green process: without this, a
+    // panic unwinds and kills the worker thread permanently, and — with only
+    // ~nproc/4 workers — a couple of them drain the pool so every future
+    // `offload` (incl. `nest fetch`'s `%git-clone`) hangs forever on its
+    // `receive`. The per-job scratch heap is local to the closure, so a torn
+    // heap is discarded either way. On a caught panic the caller gets a
+    // structured `[:offload-error …]`, not silence.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut heap = Heap::new();
+        let env = heap.new_env(None);
+        let mut vals = Vec::with_capacity(args.len());
+        for m in &args {
+            vals.push(crate::process::from_message(&mut heap, m));
+        }
+        match func(&vals, env, &mut heap) {
+            Ok(v) => match crate::process::to_message(&heap, v) {
+                Ok(m) => offload_msg("offload", token, m),
+                Err(e) => offload_msg("offload-error", token, crate::process::error_reason(&e)),
+            },
+            Err(e) => offload_msg("offload-error", token, crate::process::error_reason(&e)),
+        }
+    }));
+    let msg = outcome.unwrap_or_else(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        let e = LispError::runtime(format!(
+            "offload: the native panicked (interpreter bug): {detail}"
+        ));
+        offload_msg("offload-error", token, crate::process::error_reason(&e))
+    });
+    sink.emit(msg);
 }
 
 fn offload_msg(tag: &str, token: i64, payload: crate::process::Message) -> crate::process::Message {

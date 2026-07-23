@@ -36,4 +36,27 @@
             (catch e :refused))
           :refused)))
   (test "top-level (no module) code may reach privates — the live-hacking hatch"
-    (assert= (eval (read-string "(priv-vault/vault--secret)")) 41)))
+    (assert= (eval (read-string "(priv-vault/vault--secret)")) 41))
+  (test "an unquoted private ref inside a quasiquote is still an evaluated ref — blocked"
+    ;; `(x ~(other/priv)) — the ~ brings the ref back to the evaluated context,
+    ;; so wrapping it in a quasiquote is not a bypass (ADR-146 level-aware walk).
+    (is (= (try (%load-string
+                  "(defmodule priv-qq) (defn f () `(x ~(priv-vault/vault--secret)))")
+            (catch e :blocked))
+          :blocked)))
+  (test "a quasiquote TEMPLATE (data, not unquoted) may name another module — data, not a ref"
+    ;; `(priv-vault/vault--secret) with NO unquote is just a quoted symbol list.
+    (%load-string "(defmodule priv-tmpl) (defn f () `(priv-vault/vault--secret))")
+    (is (= (first (priv-tmpl/f)) 'priv-vault/vault--secret)))
+  (test "an unquote nested inside a (quote ...) template is still an evaluated ref — blocked"
+    ;; `(quote ~(other/priv)) — Brood's quasiquote splices the unquote even inside
+    ;; a quoted subform, so `(quote ~(m/priv--x)) evaluates the private. The
+    ;; level-aware walk must not treat `quote` as terminal data inside a quasiquote.
+    (is (= (try (%load-string
+                  "(defmodule priv-qq2) (defn f () `(quote ~(priv-vault/vault--secret)))")
+            (catch e :blocked))
+          :blocked)))
+  (test "a macro template referencing its OWN module's private still works"
+    (%load-string
+      "(defmodule priv-mac) (defn mac--h (x) (* x 2)) (defmacro dbl (x) `(mac--h ~x)) (defn use () (dbl 21))")
+    (assert= (priv-mac/use) 42)))

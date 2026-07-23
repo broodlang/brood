@@ -239,7 +239,7 @@ pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // (no namespace) stays unrestricted — the live-hacking hatch hot reload
     // depends on.
     if let Some(ns) = heap.compile_ns() {
-        enforce_private_refs(heap, form, &value::symbol_name(ns), None)?;
+        enforce_private_refs(heap, form, &value::symbol_name(ns), None, 0)?;
     }
     let expanded = macroexpand_all(heap, form, env)?;
     let resolved = resolve(heap, expanded);
@@ -263,21 +263,32 @@ pub(crate) fn internals_grant_key(mod_name: &str) -> value::Symbol {
 }
 
 /// Enforce module privacy (ADR-146) over a resolved form: an error for any
-/// symbol reference `m/…--…` where `m` is neither the current namespace nor a
-/// module granted via `(:use-internals m)`. Skips `quote`/`quasiquote`
-/// subtrees (symbols there are data). `pos` tracks the nearest enclosing
-/// form's source position for the error.
+/// **evaluated** symbol reference `m/…--…` where `m` is neither the current
+/// namespace nor a module granted via `(:use-internals m)`. `pos` tracks the
+/// nearest enclosing form's position; `level` is the quasiquote nesting depth
+/// (0 = an evaluated context). A symbol is a reference only at level 0 — inside
+/// a `` `quasiquote `` template it is data, UNLESS an `~unquote` brings it back
+/// to level 0 (that IS an evaluated reference, so `` `(~other/priv--x) `` is
+/// still caught). `quote` is always data. A macro template referencing its OWN
+/// module's private is fine (`m == cur_ns`), so this doesn't false-flag them.
 fn enforce_private_refs(
     heap: &Heap,
     form: Value,
     cur_ns: &str,
     pos: Option<crate::error::Pos>,
+    level: u32,
 ) -> Result<(), LispError> {
     match form.unpack() {
-        ValueRef::Sym(s) => {
+        ValueRef::Sym(s) if level == 0 => {
             let name = value::symbol_name_ref(s);
             if let Some(slash) = name.rfind('/') {
                 let (m, bare) = (&name[..slash], &name[slash + 1..]);
+                // Only `--` names can ever be private, so short-circuit the common
+                // public qualified reference (`http/get`) BEFORE the alias-lookup
+                // allocation — this walk runs on every compiled form in a module.
+                if !bare.contains("--") {
+                    return Ok(());
+                }
                 // Resolve a module alias (`(:alias mod :as short)`) so the
                 // rule keys on the REAL module, matching how the reference
                 // will resolve.
@@ -287,10 +298,7 @@ fn enforce_private_refs(
                     .map(value::symbol_name)
                     .unwrap_or_else(|| m.to_string());
                 let m = real_m.as_str();
-                if bare.contains("--")
-                    && !m.is_empty()
-                    && m != cur_ns
-                    && heap.import_of(internals_grant_key(m)).is_none()
+                if !m.is_empty() && m != cur_ns && heap.import_of(internals_grant_key(m)).is_none()
                 {
                     let mut e = LispError::runtime(format!(
                         "`{name}` is module-private to `{m}` (a `--` name; ADR-146). \
@@ -306,23 +314,46 @@ fn enforce_private_refs(
             }
             Ok(())
         }
+        ValueRef::Sym(_) => Ok(()), // level > 0: template data, not a reference
         ValueRef::Pair(p) => {
             let (car, cdr) = heap.pair(p);
-            // Quoted subtrees are data, not references.
+            // Quote/quasiquote/unquote adjust the evaluated-vs-data context.
             if let ValueRef::Sym(h) = car.unpack() {
-                let n = value::symbol_name_ref(h);
-                if n == "quote" || n == "quasiquote" {
-                    return Ok(());
+                match value::symbol_name_ref(h) {
+                    // `(quote X)` at the evaluated level — X is inert data, never
+                    // a reference. But INSIDE a `` `quasiquote `` (level > 0) a
+                    // `(quote …)` is just a 2-element list template: the reader's
+                    // quasiquote still splices any `~unquote` nested within it
+                    // (`` `(quote ~(m/priv--x)) `` evaluates the unquote), so it
+                    // must NOT short-circuit there — fall through and keep walking
+                    // at the same level so the nested unquote is still checked.
+                    "quote" if level == 0 => return Ok(()),
+                    // `` `(quasiquote X) `` — X is one level deeper (more data).
+                    "quasiquote" => {
+                        return enforce_private_refs(heap, cdr, cur_ns, pos, level + 1);
+                    }
+                    // `~X` / `~@X` — one level shallower; at level 1 this returns
+                    // to the evaluated context, so X's refs ARE checked.
+                    "unquote" | "unquote-splicing" => {
+                        return enforce_private_refs(
+                            heap,
+                            cdr,
+                            cur_ns,
+                            pos,
+                            level.saturating_sub(1),
+                        );
+                    }
+                    _ => {}
                 }
             }
             let here = heap.form_pos_only(form).or(pos);
-            enforce_private_refs(heap, car, cur_ns, here)?;
-            enforce_private_refs(heap, cdr, cur_ns, here)
+            enforce_private_refs(heap, car, cur_ns, here, level)?;
+            enforce_private_refs(heap, cdr, cur_ns, here, level)
         }
         ValueRef::Vector(id) => {
             let here = heap.form_pos_only(form).or(pos);
             for &item in heap.vector(id).to_vec().iter() {
-                enforce_private_refs(heap, item, cur_ns, here)?;
+                enforce_private_refs(heap, item, cur_ns, here, level)?;
             }
             Ok(())
         }

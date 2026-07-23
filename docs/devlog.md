@@ -5868,6 +5868,43 @@ all-elements-are-`(name value)`-pairs shape (a genuinely-flat odd `(let (a)
 catchable in-language via `read-string`); the "Coming from Clojure" table in
 language.md gains rows.
 
+## 2026-07-23 — Validation pass, round 2: a remotely-triggerable server crash + 3 more
+
+A second wave of adversarial reviews (bit syntax, the bytes-native parser port,
+the offload pool + module privacy) plus probing. Bit syntax came back
+**clean** (signed/endian/i64-min/round-trips/widths all correct). Four real
+fixes:
+
+- **HIGH — a truncated HTTP request head crashed the server worker and leaked
+  its fd** (ADR-141 port regression). A client sending a partial head with no
+  `\r\n\r\n` then closing made `http--read-until` return the partial accumulator
+  *without* the terminator, so `http--read-raw` did `(subbytes head 0 -1)` →
+  threw → the per-connection process died before its `tcp-close` → leaked fd.
+  Remotely triggerable, a mild fd-exhaustion DoS. The old string path used
+  `http--split-first` (no-separator-safe); the bytes rewrite missed the
+  `marker < 0` guard that `parse-response` already had. Fixed in
+  `http--read-raw` (missing terminator → nil → clean close) and the sibling
+  `parse-request` (headerless input parses instead of throwing — its docstring
+  promised it worked). `http_test.blsp` gains a truncated-head e2e + a
+  headerless `parse-request` case.
+- **Privacy bypass via `(quote ~(private))` inside a quasiquote.** The
+  level-aware walk (added this session) treated `quote` as terminal at *any*
+  level, but Brood splices an `~unquote` nested inside a quoted subform of a
+  quasiquote (`` `(quote ~(m/priv--x)) `` evaluates the unquote). Now `quote`
+  short-circuits only at level 0; inside a quasiquote it keeps walking so the
+  nested unquote is still checked. `private_test.blsp` pins it (10 cases,
+  incl. nested/double-unquote levels and same-module macro templates).
+- **A panicking offload-pool worker permanently drained the pool** — no
+  `catch_unwind`, no respawn, so a native that panics (vs returns `Err`) killed
+  its worker; with ~nproc/4 workers a couple of panics would hang every future
+  `offload` (incl. `nest fetch`) forever. Now wrapped like the scheduler's
+  green-process containment: a caught panic delivers `[:offload-error …]` and
+  the worker survives. (No allowlisted native panics today — defensive.)
+- **Privacy walk allocated per qualified symbol** — it built `format!("{m}/")`
+  + interned + cloned to resolve aliases before testing `bare.contains("--")`,
+  so every public `mod/name` ref paid it. Reordered to short-circuit non-`--`
+  names first.
+
 ## 2026-07-23 — Adversarial validation pass over the day's work: 7 real fixes
 
 Three parallel adversarial reviews (the net reactor, the wasm host, the
