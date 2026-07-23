@@ -6,7 +6,7 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule package-test (:use test) (:use package) (:use project))
+(defmodule package-test (:use-internals package) (:use test) (:use package) (:use project))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-pkg-")
@@ -320,7 +320,7 @@
                 (package/package--dep->entry-node {:name 'greeter :kind :path :path "../greeter"})))
       (is (string-contains? out "a keeper comment"))
       (let (form (read-string out))
-        (assert= (project/project--parse-deps (plist-get (rest form) :dependencies))
+        (assert= (project/project-parse-deps (plist-get (rest form) :dependencies))
           (list {:name 'greeter :kind :path :path "../greeter"})))))
   (test "add appends to an existing :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
@@ -328,7 +328,7 @@
                 (package/package--dep->entry-node {:name 'b :kind :path :path "../b"})))
       (let (form (read-string out))
         (assert= (map (fn (d) (get d :name))
-                   (project/project--parse-deps (plist-get (rest form) :dependencies)))
+                   (project/project-parse-deps (plist-get (rest form) :dependencies)))
           (list 'a 'b)))))
   (test "remove drops the named dep, keeps the rest and comments"
     (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
@@ -336,12 +336,12 @@
       (is (string-contains? out "keep me"))
       (let (form (read-string out))
         (assert= (map (fn (d) (get d :name))
-                   (project/project--parse-deps (plist-get (rest form) :dependencies)))
+                   (project/project-parse-deps (plist-get (rest form) :dependencies)))
           (list 'b)))))
   (test "remove of the only dep leaves an empty :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
           out (package/package--manifest-remove src 'a))
-      (assert= (project/project--parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
+      (assert= (project/project-parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
 
 ;; The `fetch`/`tree` verbs themselves are cwd-driven (they walk from `(cwd)` to a
 ;; project root), so — like `run-project` — they can't be isolated from the brood

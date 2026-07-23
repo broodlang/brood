@@ -215,7 +215,7 @@ on screen (roughly centred), clamped so the window never runs past the end."
 
 ;; ---- the eval minibuffer's rendering (colour shared with the REPL) -----------
 ;;
-;; The minibuffer reuses the REPL line editor's *pure* analysis: `lineedit/lineedit--handle`
+;; The minibuffer reuses the REPL line editor's *pure* analysis: `lineedit/lineedit-handle`
 ;; for editing (incl. Tab completion via its keymap) and `std/highlight.blsp` for
 ;; colour. The only observer-specific bit is laying the highlight chunks out as
 ;; absolute `text` ops (the observer paints a full frame), where lineedit emits
@@ -238,10 +238,10 @@ right from column `col`. Tail-recursive."
 (defn observe--minibuffer (edit row cols)
   "Render the eval minibuffer at frame `row` (width `cols`): the prompt, then the
 input text with the **same** live syntax highlighting + bracket matching the REPL
-line editor uses (`highlight-chunks` / `lineedit/lineedit--overrides` over
+line editor uses (`highlight-chunks` / `lineedit/lineedit-overrides` over
 `std/highlight.blsp`), then the cursor at point. Returns a list of render ops —
 pure, so it shares the REPL's colouring rather than re-implementing it. (Tab
-completion already works via `lineedit/lineedit--handle`'s keymap in `observe--command-key`.)"
+completion already works via `lineedit/lineedit-handle`'s keymap in `observe--command-key`.)"
   (let (prompt (observe--fit (get edit :prompt) cols)
         promptw (string-length prompt)
         input (get edit :text)
@@ -250,7 +250,7 @@ completion already works via `lineedit/lineedit--handle`'s keymap in `observe--c
         len (string-length input)
         vis (substring input hs (min len (+ hs avail)))
         point (get edit :point)
-        overrides (editor/lineedit/lineedit--overrides input point)
+        overrides (editor/lineedit/lineedit-overrides input point)
         chunks (highlight-chunks input hs vis overrides)
         cursor-col (min (max 0 (dec cols)) (+ promptw (- point hs))))
     (append [(text row 0 prompt (face :observer/minibuffer-prompt))]
@@ -493,7 +493,7 @@ Clamped to a valid row."
   "Open the eval minibuffer (a Brood prompt). Enter evaluates in the observed
 runtime (locally inline, or on the peer when remote-attached); Ctrl-C cancels.
 Seeds the line editor with the session's command history (↑/↓ recall, C-r search)."
-  (assoc state :mode :command :edit (editor/lineedit/lineedit--init "λ " "" (get state :history)) :msg nil))
+  (assoc state :mode :command :edit (editor/lineedit/lineedit-init "λ " "" (get state :history)) :msg nil))
 
 (defn observe-cmd-tree (state _)
   "Toggle the tree view — the parent→child process forest (children indented under
@@ -604,7 +604,7 @@ string for the minibuffer. The local backend, and what the remote agent runs."
   "Feed `key` to the minibuffer's line editor (reusing lineedit's pure core). On
 submit, evaluate the text via `backend`'s `:eval` and show the result; on cancel /
 EOF, return to navigation; otherwise keep editing."
-  (let (edit (editor/lineedit/lineedit--handle (get state :edit) key)
+  (let (edit (editor/lineedit/lineedit-handle (get state :edit) key)
         done (get edit :done))
     (cond
       (= done :submit) (assoc state
@@ -613,7 +613,7 @@ EOF, return to navigation; otherwise keep editing."
                          :edit
                          nil
                          :history
-                         (editor/lineedit/lineedit--remember (get state :history) (get edit :text))
+                         (editor/lineedit/lineedit-remember (get state :history) (get edit :text))
                          :msg
                          ((get backend :eval) (get edit :text)))
       (nil? done) (assoc state :edit edit)

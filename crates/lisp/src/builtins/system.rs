@@ -2557,12 +2557,38 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             // an unbound `mod/name` surfaces as a normal unbound-reference error).
             for item in heap.seq_items(subset)? {
                 let bare = expect_symbol(heap, "%refer", item)?;
-                let qualified =
-                    value::intern(&format!("{}/{}", mod_name, value::symbol_name(bare)));
+                let bare_name = value::symbol_name(bare);
+                // A `--` name in an explicit :only list is a privacy breach
+                // unless this file holds an internals grant for the module
+                // (ADR-146) — same rule the resolver enforces for qualified
+                // references.
+                if bare_name.contains("--")
+                    && heap
+                        .import_of(crate::eval::macros::internals_grant_key(&mod_name))
+                        .is_none()
+                {
+                    return Err(LispError::runtime(format!(
+                        "(:use {mod_name} :only [... {bare_name} ...]): `{bare_name}` is module-private (ADR-146); grant access with (:use-internals {mod_name}) or use the public API"
+                    )));
+                }
+                let qualified = value::intern(&format!("{}/{}", mod_name, bare_name));
                 heap.add_import(bare, qualified);
             }
         }
     }
+    Ok(Value::nil())
+}
+
+/// `(%grant-internals 'mod)` — the `(:use-internals mod)` header clause's
+/// mechanism (ADR-146): record that the CURRENT file may reference `mod`'s
+/// module-private `--` names (qualified access), which is otherwise a compile
+/// error. Stored in the per-file import table under the impossible key
+/// `/internals/<mod>` (the `%alias` trick), so it rides the same save/restore
+/// lifecycle as every other import.
+pub(super) fn grant_internals(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let m = expect_symbol(heap, "%grant-internals", arg(args, 0))?;
+    let key = crate::eval::macros::internals_grant_key(&value::symbol_name(m));
+    heap.add_import(key, m);
     Ok(Value::nil())
 }
 

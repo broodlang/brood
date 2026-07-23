@@ -294,6 +294,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
     enum Clause {
         Use(Symbol, Option<Vec<Symbol>>), // (module, Some(only-subset) | None = all public)
         Alias(Symbol, Symbol),            // (short-prefix-name, module)
+        UseInternals(Symbol),             // (:use-internals mod) — ADR-146 grant
     }
     let mut clauses: Vec<Clause> = Vec::new();
     {
@@ -338,6 +339,14 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                     _ => None,
                 };
                 clauses.push(Clause::Use(mod_sym, subset));
+            } else if value::symbol_is(*kw_sym, "use-internals") {
+                let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
+                    continue;
+                };
+                // A grant is also a use (publics refer bare), plus the ADR-146
+                // internals key the privacy walk consults.
+                clauses.push(Clause::Use(mod_sym, None));
+                clauses.push(Clause::UseInternals(mod_sym));
             } else if value::symbol_is(*kw_sym, "alias") {
                 let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
                     continue;
@@ -394,6 +403,10 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                         }
                     }
                 }
+            }
+            Clause::UseInternals(mod_sym) => {
+                let key = crate::eval::macros::internals_grant_key(&value::symbol_name(mod_sym));
+                heap.add_import(key, mod_sym);
             }
             Clause::Alias(short, mod_sym) => {
                 let key = value::intern(&format!("{}/", value::symbol_name(short)));
@@ -510,8 +523,18 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
             // (ADR-061) and relocate it, so the slice's copy is stale by now.
             let f = heap.root_at(roots_base + j);
             // Compile pass: macroexpand then namespace-resolve, so the analysed tree
-            // matches what `eval` will see (qualified defs + references).
-            let exp = crate::eval::macros::compile(heap, f, root).unwrap_or(f);
+            // matches what `eval` will see (qualified defs + references). A compile
+            // ERROR is a real diagnostic now (ADR-146 module-privacy violations
+            // surface here — the file would fail to load), not silently swallowed;
+            // the un-expanded form still feeds the rest of the walk so the other
+            // lints run.
+            let exp = match crate::eval::macros::compile(heap, f, root) {
+                Ok(e) => e,
+                Err(err) => {
+                    out.push((err.pos, format!("does not compile: {}", err.message)));
+                    f
+                }
+            };
             // Root the just-built expansion *before* possibly triggering a
             // collect via `eval`; otherwise this LOCAL handle dies between
             // here and the next iteration's macroexpand.

@@ -5852,3 +5852,35 @@ under incremental dev builds; ~2 minutes per `cargo fuzz` invocation is what
 exposed it. Now absolute + emitted only when the paths exist: a repeat fuzz
 invocation went 2 min → 0.29 s, and every workspace rebuild stops paying the
 tax.
+
+## 2026-07-23 — "Private should be private": module privacy enforced (ADR-146)
+
+The `--` convention becomes real semantics. From inside a module, a
+hand-written qualified reference to another module's `--` name (plain or
+aliased) is a **compile error at load**; `(:use mod :only […])` refuses
+privates. Three doors stay open by design: **`(:use-internals mod)`** — the
+`@testable import`-style explicit grant for tests/tooling (rides the import
+table under the impossible key `/internals/<mod>`, the `%alias` trick);
+**top-level/REPL code** (no namespace) — the live-hacking hatch;
+and **a module's own macros** may expand to its privates anywhere, because
+enforcement reads the *pre-expansion* source and skips `quote`/`quasiquote`
+(the test framework's `describe`/`test` → `test/test--run` expansion made
+that the only coherent rule — post-expansion enforcement flagged every test
+file in the tree). Reflection still sees the flat table: a source-level
+contract, not value-level sealing.
+
+Enforcement immediately triaged the whole tree: **14 genuinely-shared
+helpers got promoted to public API** (net/http `parse-url`/`request-headers`/
+`render-headers` — sse's handshake stops reaching into http; lineedit's
+embedding quartet `lineedit-init`/`-handle`/`-overrides`/`-remember` — the
+observer and REPL are real embedders; project's model six
+`project-find-root`/`-abs-paths`/`-collect-sources`/`-apply`/`-parse-dep`/
+`-parse-deps` — the whole tool family consumes them; format's
+`format-cst-root`), and eleven test files now declare `(:use-internals …)`
+for the internals they pin. The checker learned the clause
+(`setup_check_imports`) and — generally useful beyond privacy — **now
+surfaces compile errors as diagnostics** instead of silently swallowing
+them. `tests/private_test.blsp` pins the whole contract (block, grant,
+alias-resolved block, :only refusal, same-module, top-level hatch);
+`namespace_test`'s old "soft privacy" case now pins the hard behavior.
+Suite 795/795; `nest check` zero warnings.

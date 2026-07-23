@@ -4,7 +4,7 @@
 ;; a check that the [value next-seed] discipline composes. Register-only —
 ;; discovered and run by `nest test` (and cargo test via suite.rs).
 
-(defmodule prng-test (:use test))
+(defmodule prng-test (:use-internals test) (:use test))
 
 ;; A tail-recursive helper: n successive draws from `seed`, oldest first.
 (defn prng-draws (seed n acc)

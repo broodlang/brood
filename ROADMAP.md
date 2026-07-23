@@ -256,13 +256,15 @@ would retire the bug class at the language level. See hatch's
   request head reader, chunked drain, and WS frame gather trivially O(n) — no manual
   list+`join`, no length-drain gymnastics. **[kernel]** a transient/builder value +
   freeze.
-- 🟡 Smaller ergonomic wins (all cheap): ✅ **`mapv`/`filterv`** shipped
-  2026-07-18 (prelude one-liners over `into`; `tests/sequence_test.blsp`).
-  ✅ **`let` vector-destructure of a list value** — verified 2026-07-18 to
-  already raise a clean `[:match-error :let …]` (the "or erroring" arm of the
-  ask; the silent-misbind era is gone). Still ⬜: making the **`foo--private`
-  convention link-checked** rather than a runtime unbound-symbol surprise (it
-  bit a cross-module call during the hatch work).
+- ✅ Smaller ergonomic wins — all closed: **`mapv`/`filterv`** shipped
+  2026-07-18 (prelude one-liners over `into`; `tests/sequence_test.blsp`);
+  **`let` vector-destructure of a list value** verified 2026-07-18 to raise a
+  clean `[:match-error :let …]`; and the **`foo--private` convention** went
+  past "link-checked" to **enforced module privacy** (2026-07-23, ADR-146):
+  a cross-module qualified private reference is a compile error at load,
+  `(:use-internals mod)` is the explicit test/tooling grant, top-level/REPL
+  stays unrestricted, and a module's macros may expand to its own privates.
+  14 genuinely-shared helpers were promoted to public API en route.
 
 ### Elixir-parity performance gaps (2026-07-12, refreshed 2026-07-18)
 

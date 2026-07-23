@@ -63,7 +63,7 @@ error inside the user expression surfaces here as the `:error` branch."
 ;; Best-effort — never raises.
 (defn mcp--shadows-for (file)
   (try
-    (let (root (project/project--find-root (cwd)))
+    (let (root (project/project-find-root (cwd)))
       (if (nil? root)
         nil
         (let (defined (project--file-def-names file)
@@ -522,7 +522,7 @@ the raw filesystem."
 ;; are no-ops). Failures in the project mcp.blsp surface as load errors during
 ;; `nest mcp` startup, which is exactly when the agent's `.mcp.json` would
 ;; have wired it up — the right time for a hard error.
-(let (root (project/project--find-root (cwd)))
+(let (root (project/project-find-root (cwd)))
   (when root
     (let (project-mcp (path-join root "mcp.blsp"))
       (when (file-exists? project-mcp)

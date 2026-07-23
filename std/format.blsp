@@ -671,41 +671,41 @@ form (not the comment) is emitted last and the close must NOT break. Only an
 ;; line preserved between any pair the author separated with one.
 (defn format-source (src)
   "Format `src` as a Brood source string. Idempotent."
-  (let (root (parse-source src)) (format-source--root (node-children root))))
+  (let (root (parse-source src)) (format-cst-root (node-children root))))
 
-(defn format-source--root (kids)
-  (let (out (format-source--root--walk kids 0 (vector-length kids) 0 ""))
+(defn format-cst-root (kids)
+  (let (out (format-cst-root--walk kids 0 (vector-length kids) 0 ""))
     (cond (= out "") "" (ends-with? out "\n") out else (str out "\n"))))
 
 ;; The walker threads `nl-since-last`: the newline count between the last
 ;; emitted block and the cursor. Whitespace adds its newline count; a comment
 ;; resets to 1 (its own trailing `\n` is the start of the gap to the next
 ;; block); a form resets to 0. Two-or-more newlines between blocks → blank line.
-(defn format-source--root--walk (kids i n nl acc)
+(defn format-cst-root--walk (kids i n nl acc)
   (if (= i n)
     acc
     (let (c (vector-ref kids i))
       (cond
-        (whitespace? c) (format-source--root--walk kids
+        (whitespace? c) (format-cst-root--walk kids
                           (inc i)
                           n
                           (+ nl (count-newlines (node-text c)))
                           acc)
-        (comment? c) (format-source--root--walk kids
+        (comment? c) (format-cst-root--walk kids
                        (inc i)
                        n
                        1
                        (format-source--glue acc nl (comment--strip-trailing-nl (node-text c))))
         else (let (form-block (render c 0) tc-idx (trailing-comment-at kids (inc i) n))
                (if (nil? tc-idx)
-                 (format-source--root--walk kids
+                 (format-cst-root--walk kids
                    (inc i)
                    n
                    0
                    (format-source--glue acc nl form-block))
                  ;; Hoist a same-line trailing comment onto its own line ABOVE the
                  ;; form; the form is then the last emitted block (nl 0).
-                 (format-source--root--walk kids
+                 (format-cst-root--walk kids
                    (inc tc-idx)
                    n
                    0
@@ -761,7 +761,7 @@ form (not the comment) is emitted last and the close must NOT break. Only an
 
 (defn format--require-root ()
   (require 'project)
-  (let (root (project/project--find-root (cwd)))
+  (let (root (project/project-find-root (cwd)))
     (when (nil? root)
       (error "format: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project/project-setup root)

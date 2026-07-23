@@ -298,7 +298,7 @@ and keep editing). So `(defn foo` opens a continuation line; a balanced form sub
 else eval + print it. Remembers it for ↑/↓ (persisted only for interactive sessions).
 Returns `{:eof false :history h}`."
   (let (remember (fn ()
-                   (let (h2 (editor/lineedit/lineedit--remember history form))
+                   (let (h2 (editor/lineedit/lineedit-remember history form))
                      (when interactive (repl--save-history h2))
                      {:eof false :history h2})))
     (cond

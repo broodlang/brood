@@ -8977,3 +8977,45 @@ package-manager `:native` manifest/lock/build-on-fetch integration
 guest `resource` handles (opaque stateful guest objects), epoch-based
 preemption of in-flight calls, and `Value::Bytes` zero-copy into linear
 memory.
+
+## ADR-146 — Module privacy is enforced; `(:use-internals mod)` is the grant
+
+**Decision.** The `--` module-private convention becomes **real semantics**
+("private should be private"). From inside a module, a hand-written qualified
+reference to another module's `--` name — plain or through an `(:alias …)` —
+is a **compile error at load**; `(:use mod :only […])` refuses to import one.
+The enforcement walk runs in `eval::macros::compile` over the
+**pre-expansion source** and skips `quote`/`quasiquote`, which yields the
+three deliberate doors:
+
+1. **`(:use-internals mod)`** — the explicit grant (Swift's `@testable
+   import` shape): a test or tightly-coupled tool module declares its
+   privileged access in its header, loudly and greppably. Implies `(:use
+   mod)` for publics; the grant rides the per-file import table under an
+   impossible key (`/internals/<mod>`, the `%alias` trick), so every
+   save/restore site works unchanged.
+2. **Top-level / REPL code (no namespace) is unrestricted** — the
+   live-hacking hatch hot reload depends on: redefining or advising a
+   private from the REPL keeps working.
+3. **A module's macros may expand to its own privates anywhere** — privacy
+   governs what an author can *type*, and macro templates live behind
+   `quasiquote` (the test framework's `describe`/`test` → `test/test--run`
+   pattern made this non-negotiable).
+
+Reflection (`eval`/`global-names`) still sees the flat global table —
+enforcement is a source-level contract, not value-level sealing (Java
+reflection, not a capability system). The checker surfaces violations too:
+`check_file` now reports **compile errors as diagnostics** (previously
+swallowed), and its header scan understands `:use-internals`.
+
+**What enforcement flushed out.** Every cross-module private reference
+in-tree was triaged: 14 functions that siblings genuinely needed were
+**promoted to public API** (net/http's `parse-url`/`request-headers`/
+`render-headers`; lineedit's embedding quartet `lineedit-init`/`-handle`/
+`-overrides`/`-remember`; project's model six `project-find-root`/
+`-abs-paths`/`-collect-sources`/`-apply`/`-parse-dep`/`-parse-deps`;
+format's `format-cst-root`), and eleven test files declare
+`(:use-internals …)` for the genuinely-internal helpers they pin.
+
+**Supersedes** the "privacy is soft" clause of ADR-019/065 and the
+"link-checked `--private`" hatch-findings item (this is the stronger form).

@@ -2962,6 +2962,22 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
     (map defmodule--use-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
 
+;; The forms for one `(:use-internals mod)` clause — module privacy's @testable
+;; seam (ADR-146): like `(:use mod)` (load + refer publics), PLUS a grant that
+;; lets this file reference `mod`'s module-private `--` names by qualified
+;; name, which is otherwise a compile error. For tests and tightly-coupled
+;; tooling; loud and greppable by design.
+(defn defmodule--internals-clause (clause)
+  (let (mod (second clause))
+    (list (list 'require (list 'quote mod))
+      (list '%refer (list 'quote mod) nil)
+      (list '%grant-internals (list 'quote mod)))))
+
+(defn defmodule--internals-forms (clauses)
+  (apply concat
+    (map defmodule--internals-clause
+      (filter (fn (c) (and (pair? c) (= (first c) :use-internals))) clauses))))
+
 ;; web/views/counter → counter  (a module name's last `/`-segment, as a symbol).
 (defn defmodule--last-segment (mod)
   (symbol (last (string-split (name mod) "/"))))
@@ -3010,6 +3026,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
        (defmodule--provide ~key)
        (%in-ns '~mod)
        ~@(defmodule--use-forms clauses)
+       ~@(defmodule--internals-forms clauses)
        ~@(defmodule--alias-forms clauses))))
 
 (defn module-doc (mod)

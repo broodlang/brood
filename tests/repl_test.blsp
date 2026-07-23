@@ -10,7 +10,7 @@
 ;; boundary (a deep copy across per-process heaps) before formatting it, proving
 ;; the structured-error path round-trips under the scheduler.
 
-(defmodule repl-test (:use test) (:use repl))
+(defmodule repl-test (:use-internals repl) (:use test) (:use repl))
 
 (describe "repl/repl--content? — ignore blank / comment-only input"
   (test "whitespace-only input has no datum"

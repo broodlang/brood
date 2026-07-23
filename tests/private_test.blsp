@@ -1,0 +1,39 @@
+;; Module privacy is ENFORCED (ADR-146): from inside a module, a hand-written
+;; qualified reference to another module's `--` name is a compile error at
+;; load; `(:use-internals mod)` is the explicit grant (the @testable seam for
+;; tests and tightly-coupled tooling); top-level code (no module) stays
+;; unrestricted — the live-hacking hatch hot reload depends on. A module's
+;; macros may expand to its own privates anywhere (enforcement reads the
+;; hand-written source, pre-expansion).
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule private-test (:use test))
+
+(describe "module privacy (ADR-146)"
+  (test "a cross-module private reference fails the module's load, catchably"
+    (%load-string "(defmodule priv-vault) (defn vault--secret () 41)")
+    (is (= (try (%load-string "(defmodule priv-thief) (defn steal () (priv-vault/vault--secret))")
+            (catch e (if (string-contains? (str (get e :message)) "module-private")
+                       :blocked
+                       [:other e])))
+          :blocked)))
+  (test "(:use-internals mod) grants access — loud, explicit, greppable"
+    (%load-string "(defmodule priv-vault2) (defn vault2--secret () 42)")
+    (%load-string
+      "(defmodule priv-friend (:use-internals priv-vault2)) (defn borrow () (priv-vault2/vault2--secret))")
+    (assert= (priv-friend/borrow) 42))
+  (test "same-module private access is untouched"
+    (%load-string "(defmodule priv-pub) (defn pub--inner () 7) (defn outer () (pub--inner))")
+    (assert= (priv-pub/outer) 7))
+  (test "an aliased qualified private is still blocked (the alias resolves first)"
+    (is (= (try (%load-string
+                  "(defmodule priv-al (:alias priv-vault :as pv)) (defn s () (pv/vault--secret))")
+            (catch e :blocked))
+          :blocked)))
+  (test "(:use mod :only [...]) refuses a private name without a grant"
+    (is (= (try (%load-string "(defmodule priv-only (:use priv-vault :only [vault--secret]))")
+            (catch e :refused))
+          :refused)))
+  (test "top-level (no module) code may reach privates — the live-hacking hatch"
+    (assert= (eval (read-string "(priv-vault/vault--secret)")) 41)))

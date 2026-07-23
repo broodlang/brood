@@ -2,7 +2,7 @@
 ;; load+introspect renderer behind `nest doc`. Register-only — discovered and run
 ;; by `nest test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(defmodule docs-test (:use test) (:use docs))
+(defmodule docs-test (:use-internals docs) (:use test) (:use docs))
 
 (describe "docs: leading module docstring"
   (test "a file's leading string form is its module doc"

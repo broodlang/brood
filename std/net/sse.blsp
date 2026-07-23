@@ -46,7 +46,7 @@ frames: return `(http/stream-response 200 (sse-headers) (fn (sock) … (sse-send
 data) …))` from an `http` handler to push events to a browser `EventSource`."
   (:use net/http))
 
-(require 'net/http)  ; reuse http/http--parse-url + http/http--request-headers for the handshake
+(require 'net/http)  ; reuse http/parse-url + http/request-headers for the handshake
 
 ;; ---- pure frame parsing -----------------------------------------------------
 
@@ -163,11 +163,11 @@ as `[:sse {:event :data :id}]` messages — `[:sse-open status]` once connected,
 `receive`, holding no worker) and returns that process's pid; `(exit pid :kill)` to
 disconnect. The socket is owned by the reader process, so call this for the process
 that should receive the events (typically the UI process — see `with-events`)."
-  (let (u (net/http/http--parse-url url)
+  (let (u (net/http/parse-url url)
         req (str "GET "
               (get u :path)
               " HTTP/1.1\r\n"
-              (net/http/http--render-headers (net/http/http--request-headers u
+              (net/http/render-headers (net/http/request-headers u
                                            ""
                                            {"Accept" "text/event-stream" "Connection" "keep-alive"}))
               "\r\n"))

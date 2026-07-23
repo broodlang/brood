@@ -1,4 +1,4 @@
-(defmodule uuid-test (:use test))
+(defmodule uuid-test (:use-internals uuid) (:use test))
 (require 'uuid)
 
 (describe "uuid-v4"

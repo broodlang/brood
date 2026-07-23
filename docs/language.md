@@ -1641,11 +1641,28 @@ refer them bare. `:use` is the **only** import clause: `(:require …)` is not a
 in any module defines root `*width*`, reachable bare everywhere (and so must be
 project-unique). Every non-earmuff name is namespaced.
 
-Privacy is **soft** (Clojure/CL-style, not Racket sealing): a `foo--internal`
-name marked private by convention is skipped by `(:use)` refer-all but *still
-reachable* by its qualified spelling, so live redefinition and advice keep working.
-The advisory checker warns on private names (names whose bare segment contains `--`)
-that are defined but never called within the file — see [Advisory lints](#advisory-lints-non-type-warnings).
+**Privacy is enforced** (ADR-146): a `foo--internal` name (any bare segment
+containing `--`) is module-private. From inside *another* module, a
+hand-written qualified reference to it — plain or via an `(:alias …)` — is a
+**compile error at load**, and `(:use mod :only […])` refuses to import one.
+Three deliberate doors stay open:
+
+- **`(:use-internals mod)`** in a module header is the explicit grant (the
+  `@testable import` seam) — tests and tightly-coupled tooling declare their
+  privileged access loudly; it also refers `mod`'s public names like `(:use)`.
+- **Top-level / REPL code** (no `defmodule`) is unrestricted — the
+  live-hacking hatch: hot-reloading or advising a private from the REPL keeps
+  working (`def` of a qualified private still rebinds it).
+- **A module's own macros** may expand to its privates anywhere: enforcement
+  reads the *hand-written* source, pre-expansion (macro templates live behind
+  `quasiquote`, which the privacy walk skips) — the pattern the test
+  framework's `describe`/`test` macros rely on.
+
+Reflection (`eval`, `global-names`, `bound?`) still sees the flat table —
+privacy governs what a module's source may reference, not what the live image
+contains. The advisory checker additionally warns on private names that are
+defined but never called within the file — see
+[Advisory lints](#advisory-lints-non-type-warnings).
 At the REPL the namespace tracks the last `defmodule`; `(current-ns)` reports it.
 
 > Status: landed (ADR-065/066, 2026-05-30). `defmodule` is the single namespace

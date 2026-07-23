@@ -178,7 +178,7 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
   "A 404 text/plain response."
   (response 404 {"Content-Type" "text/plain; charset=utf-8"} "Not Found"))
 
-(defn http--render-headers (headers)
+(defn render-headers (headers)
   ;; Render each header line, then one `(apply str …)` — the old `(str acc …)`
   ;; fold rebuilt the whole accumulator per header (O(headers²) in total bytes).
   (apply str (map (fn (kv) (str (first kv) ": " (second kv) "\r\n")) (map-pairs headers))))
@@ -204,7 +204,7 @@ bytes can never disagree."
      " "
      (get *http-status-text* status "OK")
      "\r\n"
-     (http--render-headers headers)
+     (render-headers headers)
      "\r\n"
      body-bytes]))
 
@@ -224,7 +224,7 @@ whose body is written incrementally over the socket afterwards (see
    " "
    (get *http-status-text* status "OK")
    "\r\n"
-   (http--render-headers headers)
+   (render-headers headers)
    "\r\n"])
 
 (defn stream-response (status headers stream-fn)
@@ -329,7 +329,7 @@ socket is registered *passive* (no reader until the worker calls
 ;; archive) round-trips exactly over http:// and https:// alike (`tls-request`
 ;; takes an iolist and honors `tcp-set-binary` since ADR-143).
 
-(defn http--parse-url (url)
+(defn parse-url (url)
   "Parse `url` into {:scheme :host :port :path}. Defaults: scheme http, port 80/443, path \"/\"."
   (let (rest (cond
                (starts-with? url "https://") (substring url 8 (string-length url))
@@ -383,7 +383,7 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
     ([:tcp-error ~sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
 
-(defn http--request-headers (u body-bytes extra)
+(defn request-headers (u body-bytes extra)
   "The request header map: Host / User-Agent / Connection: close, plus
 Content-Length (the body's **byte** count) when `body-bytes` is non-empty, with
 the caller's `extra` headers merged on top (so any of those can be overridden).
@@ -405,15 +405,15 @@ each overridable via `:headers`. Over `https://`, `opts` may also carry `:ca` �
 a PEM certificate replacing the Mozilla roots as the trust anchor (private CAs,
 `tls-self-signed` dev servers). Must run in a process (it `receive`s the
 response); the root process counts."
-  (let (u (http--parse-url url)
+  (let (u (parse-url url)
         body (or (get opts :body) "")
         body-bytes (bytes-concat body)
-        headers (http--request-headers u body-bytes (get opts :headers))
+        headers (request-headers u body-bytes (get opts :headers))
         head (str method
                " "
                (get u :path)
                " HTTP/1.0\r\n"
-               (http--render-headers headers)
+               (render-headers headers)
                "\r\n")
         ;; Binary mode before the request goes out (both transports): the peer
         ;; cannot respond before it has our request, so every response chunk

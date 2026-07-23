@@ -2193,6 +2193,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym, sym], nil_ty),
         alias,
     );
+    // `(:use-internals mod)` lowers to this — module privacy's @testable seam
+    // (ADR-146): grant this file access to `mod`'s `--` names.
+    def(
+        heap,
+        "%grant-internals",
+        Arity::exact(1),
+        Sig::new(vec![sym], nil_ty),
+        grant_internals,
+    );
     // `%binding`'s first arg is the *list/vector of names*, second is the
     // *list/vector of values*, third is the thunk — the macro `binding` emits
     // these as `(quote (*a* *b* …))` + `[v1 v2 …]` + `(fn () …)`.

@@ -5,7 +5,7 @@
 ;; serve → frame → key → frame → quit protocol is exercised without a node or a TTY.
 ;; The cross-node, real-TCP variant is `crates/cli/tests/serve_attach.rs`.
 
-(defmodule serve-test (:use test) (:use editor/serve) (:use editor/display) (:use editor/ui))
+(defmodule serve-test (:use-internals editor/serve) (:use test) (:use editor/serve) (:use editor/display) (:use editor/ui))
 
 ;; A tiny served app: a counter. `"+"` increments, `"q"` quits; the view paints the
 ;; count. An async `[:note n]` event (a non-key mailbox message — the event-bus shape)

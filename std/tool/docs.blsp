@@ -119,12 +119,12 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 (defn document-project ()
   "The Markdown documentation for the whole project (every source file under it), found from the cwd. Errors if not in a project."
   (require 'project)
-  ; project/project--find-root / --collect-sources / project-setup
-  (let (root (project/project--find-root (cwd)))
+  ; project/project-find-root / --collect-sources / project-setup
+  (let (root (project/project-find-root (cwd)))
     (when (nil? root) (error "doc: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)
-    (let (dirs (project/project--abs-paths root *project-source-paths*)
-          files (fold (fn (acc d) (append acc (project/project--collect-sources d))) nil dirs))
+    (let (dirs (project/project-abs-paths root *project-source-paths*)
+          files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
       (fold (fn (acc f) (str acc (document-file f) "\n")) "" files))))
 
 ;; --- the complete builtin/prelude reference (`nest doc --all`) ---------------

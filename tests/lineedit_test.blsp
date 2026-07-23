@@ -1,104 +1,104 @@
 ;; tests/lineedit_test.blsp — the raw-mode line editor's pure core (std/lineedit.blsp).
 ;;
-;; The editor splits into a pure keymap — `lineedit/lineedit--handle (state, key) -> state`
+;; The editor splits into a pure keymap — `lineedit/lineedit-handle (state, key) -> state`
 ;; — and a thin IO loop over the `term-*` seam. These tests drive the keymap
 ;; directly (no terminal needed, mirroring observe-frame / repl helper tests);
 ;; the live rendering is exercised manually via the REPL. The closing :isolated
 ;; block sends an editor-state map through a process boundary and edits it on the
 ;; far side, proving the immutable state round-trips the copy-on-send heap copy.
 
-(defmodule lineedit-test (:use test) (:use editor/lineedit) (:use editor/highlight))
+(defmodule lineedit-test (:use-internals editor/lineedit) (:use test) (:use editor/lineedit) (:use editor/highlight))
 
 ;; Apply a sequence of keys to a state (fold the pure handler).
-(defn le--keys (state keys) (fold editor/lineedit/lineedit--handle state keys))
-(defn le--fresh () (editor/lineedit/lineedit--init "brood> " "" '()))
+(defn le--keys (state keys) (fold editor/lineedit/lineedit-handle state keys))
+(defn le--fresh () (editor/lineedit/lineedit-init "brood> " "" '()))
 
-(describe "lineedit/lineedit--handle — typing and motion"
+(describe "lineedit/lineedit-handle — typing and motion"
   (test "printable chars insert at point and advance it"
     (let (s (le--keys (le--fresh) (list "(" "+" " " "1" ")")))
       (assert= (get s :text) "(+ 1)")
       (assert= (get s :point) 5)))
   (test "C-a / C-e and arrows move point, clamped"
     (let (s (le--keys (le--fresh) (list "a" "b" "c")))
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-a) :point) 0)
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-e) :point) 3)
-      (assert= (get (editor/lineedit/lineedit--handle (editor/lineedit/lineedit--handle s :ctrl-a) :left) :point)
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-a) :point) 0)
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-e) :point) 3)
+      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a) :left) :point)
         0)
-      (assert= (get (editor/lineedit/lineedit--handle s :right) :point) 3)))
+      (assert= (get (editor/lineedit/lineedit-handle s :right) :point) 3)))
   (test "M-f / M-b move by words"
     (let (s (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r")))
-      (assert= (get (editor/lineedit/lineedit--handle (editor/lineedit/lineedit--handle s :ctrl-a) :alt-f) :point)
+      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a) :alt-f) :point)
         3)
-      (assert= (get (editor/lineedit/lineedit--handle s :alt-b) :point) 4))))
+      (assert= (get (editor/lineedit/lineedit-handle s :alt-b) :point) 4))))
 
-(describe "lineedit/lineedit--handle — deletion and the kill ring"
+(describe "lineedit/lineedit-handle — deletion and the kill ring"
   (test "backspace and delete remove a char"
     (let (s (le--keys (le--fresh) (list "a" "b" "c")))
-      (assert= (get (editor/lineedit/lineedit--handle s :backspace) :text) "ab")
-      (assert= (get (editor/lineedit/lineedit--handle (editor/lineedit/lineedit--handle s :ctrl-a) :delete) :text)
+      (assert= (get (editor/lineedit/lineedit-handle s :backspace) :text) "ab")
+      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a) :delete) :text)
         "bc")))
   (test "C-k kills to end, C-u to start, into :kill"
     (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "a" "b" "c" "d")) 2))
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-k) :text) "ab")
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-k) :kill) "cd")
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-u) :text) "cd")
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-u) :kill) "ab")))
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-k) :text) "ab")
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-k) :kill) "cd")
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-u) :text) "cd")
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-u) :kill) "ab")))
   (test "C-w kills the previous word; C-y yanks it back"
     (let (s (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r"))
-          w (editor/lineedit/lineedit--handle s :ctrl-w))
+          w (editor/lineedit/lineedit-handle s :ctrl-w))
       (assert= (get w :text) "foo ")
       (assert= (get w :kill) "bar")
-      (assert= (get (editor/lineedit/lineedit--handle w :ctrl-y) :text) "foo bar"))))
+      (assert= (get (editor/lineedit/lineedit-handle w :ctrl-y) :text) "foo bar"))))
 
-(describe "lineedit/lineedit--handle — history recall"
+(describe "lineedit/lineedit-handle — history recall"
   (test "up walks older, down walks newer, restoring the in-progress line"
-    (let (h (editor/lineedit/lineedit--init "x> " "" (list "(newer)" "(older)"))
+    (let (h (editor/lineedit/lineedit-init "x> " "" (list "(newer)" "(older)"))
            d
            (le--keys h (list "w" "i" "p"))  ; in-progress text
            u1
-           (editor/lineedit/lineedit--handle d :up))
+           (editor/lineedit/lineedit-handle d :up))
       (assert= (get u1 :text) "(newer)")
-      (assert= (get (editor/lineedit/lineedit--handle u1 :up) :text) "(older)")
+      (assert= (get (editor/lineedit/lineedit-handle u1 :up) :text) "(older)")
       ;; back down past the newest restores the saved in-progress text
-      (assert= (get (editor/lineedit/lineedit--handle u1 :down) :text) "wip"))))
+      (assert= (get (editor/lineedit/lineedit-handle u1 :down) :text) "wip"))))
 
-(describe "lineedit/lineedit--remember — pushing onto history (shared by REPL + observer)"
+(describe "lineedit/lineedit-remember — pushing onto history (shared by REPL + observer)"
   (test "pushes a trimmed entry newest-first"
-    (assert= (editor/lineedit/lineedit--remember '("(a)") "  (b)  ") '("(b)" "(a)")))
+    (assert= (editor/lineedit/lineedit-remember '("(a)") "  (b)  ") '("(b)" "(a)")))
   (test "turns internal newlines into spaces so a multi-line form recalls as one line"
-    (assert= (editor/lineedit/lineedit--remember '() "(do\n1\n2)") '("(do 1 2)")))
+    (assert= (editor/lineedit/lineedit-remember '() "(do\n1\n2)") '("(do 1 2)")))
   (test "drops blanks and whitespace-only submissions"
-    (assert= (editor/lineedit/lineedit--remember '("(a)") "   ") '("(a)"))
-    (assert= (editor/lineedit/lineedit--remember '() "") '()))
+    (assert= (editor/lineedit/lineedit-remember '("(a)") "   ") '("(a)"))
+    (assert= (editor/lineedit/lineedit-remember '() "") '()))
   (test "drops a consecutive duplicate of the newest entry"
-    (assert= (editor/lineedit/lineedit--remember '("(a)" "(b)") "(a)") '("(a)" "(b)"))
+    (assert= (editor/lineedit/lineedit-remember '("(a)" "(b)") "(a)") '("(a)" "(b)"))
     ;; …but a non-consecutive repeat is kept (it becomes the newest)
-    (assert= (editor/lineedit/lineedit--remember '("(b)" "(a)") "(a)") '("(a)" "(b)" "(a)"))))
+    (assert= (editor/lineedit/lineedit-remember '("(b)" "(a)") "(a)") '("(a)" "(b)" "(a)"))))
 
-(describe "lineedit/lineedit--handle — extra emacs/readline keys"
+(describe "lineedit/lineedit-handle — extra emacs/readline keys"
   (test "C-p / C-n walk history like ↑ / ↓"
-    (let (h (editor/lineedit/lineedit--init "x> " "" (list "(b)" "(a)")))
-      (assert= (get (editor/lineedit/lineedit--handle h :ctrl-p) :text) "(b)")
-      (assert= (get (editor/lineedit/lineedit--handle (editor/lineedit/lineedit--handle h :ctrl-p) :ctrl-n) :text)
+    (let (h (editor/lineedit/lineedit-init "x> " "" (list "(b)" "(a)")))
+      (assert= (get (editor/lineedit/lineedit-handle h :ctrl-p) :text) "(b)")
+      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle h :ctrl-p) :ctrl-n) :text)
         "")))
   (test "C-h is backspace"
     (let (s (le--keys (le--fresh) (list "a" "b" "c")))
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-h) :text) "ab")))
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-h) :text) "ab")))
   (test "M-d kills the word after point, leaving point put"
     (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r")) 4)
-          d (editor/lineedit/lineedit--handle s :alt-d))
+          d (editor/lineedit/lineedit-handle s :alt-d))
       (assert= (get d :text) "foo ")
       (assert= (get d :kill) "bar")
       (assert= (get d :point) 4)))
   (test "C-t transposes the chars around point"
     (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "a" "b" "c")) 1))
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-t) :text) "bac")
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-t) :point) 2))
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-t) :text) "bac")
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-t) :point) 2))
     ;; at end of line, transpose the last two
     (let (s (le--keys (le--fresh) (list "a" "b" "c")))
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-t) :text) "acb")))
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-t) :text) "acb")))
   (test "C-l requests a screen clear (handled by the loop)"
-    (is (get (editor/lineedit/lineedit--handle (le--fresh) :ctrl-l) :clear))))
+    (is (get (editor/lineedit/lineedit-handle (le--fresh) :ctrl-l) :clear))))
 
 ;; The keymap is data (key → command symbol) and commands are real functions, so
 ;; the REPL/editor can rebind a key or redefine a command at runtime. (We assert the
@@ -111,9 +111,9 @@
     (assert= (get *lineedit-keymap* :alt-d) 'editor/lineedit/lineedit-kill-word-forward))
   (test "a command is a callable fn equivalent to pressing its key"
     (let (s (le--keys (le--fresh) (list "a" "b" "c")))
-      (assert= (lineedit-beginning-of-line s :ctrl-a) (editor/lineedit/lineedit--handle s :ctrl-a))
+      (assert= (lineedit-beginning-of-line s :ctrl-a) (editor/lineedit/lineedit-handle s :ctrl-a))
       (assert= (lineedit-kill-line (editor/lineedit/lineedit--move s 1) :ctrl-k)
-        (editor/lineedit/lineedit--handle (editor/lineedit/lineedit--move s 1) :ctrl-k))))
+        (editor/lineedit/lineedit-handle (editor/lineedit/lineedit--move s 1) :ctrl-k))))
   (test "dispatch resolves the command late (by symbol), so redefining hot-swaps"
     ;; the bound symbol is resolved via the global, not captured — proven by the
     ;; structure above + that handle and the command agree.
@@ -125,44 +125,44 @@
     (assert= (get *lineedit-keymap* :ctrl-j) 'editor/lineedit/lineedit-submit)
     (assert= (get *lineedit-keymap* :enter) 'editor/lineedit/lineedit-submit)
     (let (s (le--keys (le--fresh) (list "(" "+" " " "1" " " "1" ")")))
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-j) :done) :submit)
-      (assert= (get (editor/lineedit/lineedit--handle s :enter) :done) :submit))))
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-j) :done) :submit)
+      (assert= (get (editor/lineedit/lineedit-handle s :enter) :done) :submit))))
 
 (defn rs--init ()
-  (editor/lineedit/lineedit--init "x> " "" (list "(map f xs)" "(reduce + 0 ys)" "(filter p zs)")))
+  (editor/lineedit/lineedit-init "x> " "" (list "(map f xs)" "(reduce + 0 ys)" "(filter p zs)")))
 
 (describe "reverse incremental search (C-r)"
   (test "C-r enters search and selects the newest entry (empty query)"
     (assert= (get (lineedit-reverse-search (rs--init) :ctrl-r) :text) "(map f xs)"))
   (test "typing narrows to the newest matching entry"
     (let (e (lineedit-reverse-search (rs--init) :ctrl-r)
-          r (fold editor/lineedit/lineedit--handle e (list "r" "e" "d")))
+          r (fold editor/lineedit/lineedit-handle e (list "r" "e" "d")))
       (assert= (get r :text) "(reduce + 0 ys)")
       (assert= (get (get r :search) :query) "red")))
   (test "C-r steps to the next older match for the query"
     (let (e (lineedit-reverse-search (rs--init) :ctrl-r)
-          f (editor/lineedit/lineedit--handle e "f"))
+          f (editor/lineedit/lineedit-handle e "f"))
       ; newest with 'f' = (map f xs)
       (assert= (get f :text) "(map f xs)")
-      (assert= (get (editor/lineedit/lineedit--handle f :ctrl-r) :text) "(filter p zs)")))
+      (assert= (get (editor/lineedit/lineedit-handle f :ctrl-r) :text) "(filter p zs)")))
   (test "C-g cancels and restores the pre-search line"
     (let (s (le--keys (le--fresh) (list "w" "i" "p"))
           e (lineedit-reverse-search s :ctrl-r)
-          c (editor/lineedit/lineedit--handle e :ctrl-g))
+          c (editor/lineedit/lineedit-handle e :ctrl-g))
       (assert= (get c :text) "wip")
       (assert= (get c :search) nil)))
   (test "Enter accepts the match (keeps it, leaves search)"
-    (let (e (fold editor/lineedit/lineedit--handle
+    (let (e (fold editor/lineedit/lineedit-handle
               (lineedit-reverse-search (rs--init) :ctrl-r)
               (list "r" "e" "d"))
-          a (editor/lineedit/lineedit--handle e :enter))
+          a (editor/lineedit/lineedit-handle e :enter))
       (assert= (get a :text) "(reduce + 0 ys)")
       (assert= (get a :search) nil)))
   (test "any other key accepts then replays through the keymap"
-    (let (e (fold editor/lineedit/lineedit--handle
+    (let (e (fold editor/lineedit/lineedit-handle
               (lineedit-reverse-search (rs--init) :ctrl-r)
               (list "r" "e" "d"))
-          a (editor/lineedit/lineedit--handle e :ctrl-a))
+          a (editor/lineedit/lineedit-handle e :ctrl-a))
       ; accept + beginning-of-line
       (assert= (get a :search) nil)
       (assert= (get a :point) 0))))
@@ -178,17 +178,17 @@
                  :text)
         "ma"))))
 
-(describe "lineedit/lineedit--handle — end-of-read signals"
+(describe "lineedit/lineedit-handle — end-of-read signals"
   (test "C-d on an empty line signals EOF"
-    (assert= (get (editor/lineedit/lineedit--handle (le--fresh) :ctrl-d) :done) :eof))
+    (assert= (get (editor/lineedit/lineedit-handle (le--fresh) :ctrl-d) :done) :eof))
   (test "C-d mid-line deletes forward instead"
     (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "a" "b")) 0))
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-d) :text) "b")
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-d) :done) nil)))
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-d) :text) "b")
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-d) :done) nil)))
   (test "Enter submits, C-c cancels"
     (let (s (le--keys (le--fresh) (list "x")))
-      (assert= (get (editor/lineedit/lineedit--handle s :enter) :done) :submit)
-      (assert= (get (editor/lineedit/lineedit--handle s :ctrl-c) :done) :cancel))))
+      (assert= (get (editor/lineedit/lineedit-handle s :enter) :done) :submit)
+      (assert= (get (editor/lineedit/lineedit-handle s :ctrl-c) :done) :cancel))))
 
 (describe "lineedit/lineedit--hint-pieces / overrides — analysis -> render data"
   (test "a call in progress yields signature pieces headed by its name"
@@ -197,9 +197,9 @@
       (assert= (first pieces) ["(" lineedit-face-hint])
       (assert= (second pieces) ["map" lineedit-face-hint])))
   (test "bracket overrides: matched pair reversed, lone bracket in error face"
-    (assert= (editor/lineedit/lineedit--overrides "(+ 1)" 1)
+    (assert= (editor/lineedit/lineedit-overrides "(+ 1)" 1)
       (list [0 hl-face-match] [4 hl-face-match]))
-    (assert= (editor/lineedit/lineedit--overrides "(+ 1" 1) (list [0 hl-face-error])))
+    (assert= (editor/lineedit/lineedit-overrides "(+ 1" 1) (list [0 hl-face-error])))
   (test "a hint wider than the room is truncated (so it never wraps)"
     (assert= (editor/lineedit/lineedit--fit (list ["abcd" nil] ["efgh" {:bold true}]) 6 '())
       (list ["abcd" nil] ["ef" {:bold true}]))
@@ -217,7 +217,7 @@
   (test "Enter inserts a newline while the form is incomplete, submits when complete"
     (let (incomplete? (fn (s) (= s "(defn f"))   ; complete unless exactly this
           complete? (fn (s) (not (incomplete? s)))
-          mk (fn (text) (assoc (editor/lineedit/lineedit--init "x> " "" '() {:complete? complete?})
+          mk (fn (text) (assoc (editor/lineedit/lineedit-init "x> " "" '() {:complete? complete?})
                           :text text :point (string-length text))))
       ;; incomplete form: Enter adds "\n", does NOT submit
       (let (st (editor/lineedit/lineedit-submit (mk "(defn f") nil))
@@ -227,7 +227,7 @@
       (let (st (editor/lineedit/lineedit-submit (mk "(+ 1 2)") nil))
         (assert= (get st :done) :submit))))
   (test "multi-line render lights the matching bracket pair in place across lines"
-    (let (st (assoc (editor/lineedit/lineedit--init "p> " "" '() {:cont-prompt "c> "})
+    (let (st (assoc (editor/lineedit/lineedit-init "p> " "" '() {:cont-prompt "c> "})
                :text "(a\n b)" :point 6)   ; cursor after the final ) which closes (a
           ops (editor/lineedit/lineedit--multi-ops st))
       ;; the opener "(" (line 0) and the closer ")" (line 1) both render reversed
@@ -244,7 +244,7 @@
   :isolated
 
   (test "a state map sent to a worker edits identically"
-    (let (st (editor/lineedit/lineedit--init "x> " "" '())
+    (let (st (editor/lineedit/lineedit-init "x> " "" '())
           w (spawn (receive ([:edit s from] (send from (get (le--keys s (list "a" "b" "c")) :text))))))
       (send w [:edit st (self)])
       (assert= (receive (r r)) "abc"))))
@@ -253,11 +253,11 @@
   ;; "/home/wilhelm/src" — 17 chars; "/" is a word boundary only in :path mode.
   (def path "/home/wilhelm/src")
   (test "M-b moves back one path component"
-    (let (st (assoc (editor/lineedit/lineedit--init "" "" '()) :word-mode :path :text path :point 17))
+    (let (st (assoc (editor/lineedit/lineedit-init "" "" '()) :word-mode :path :text path :point 17))
       (assert= (get (lineedit-backward-word st nil) :point) 14)))   ; start of "src"
   (test "M-f moves forward one path component"
-    (let (st (assoc (editor/lineedit/lineedit--init "" "" '()) :word-mode :path :text path :point 0))
+    (let (st (assoc (editor/lineedit/lineedit-init "" "" '()) :word-mode :path :text path :point 0))
       (assert= (get (lineedit-forward-word st nil) :point) 5)))      ; end of "/home"
   (test "default mode treats the whole path as one word"
-    (let (st (assoc (editor/lineedit/lineedit--init "" "" '()) :text path :point 17))
+    (let (st (assoc (editor/lineedit/lineedit-init "" "" '()) :text path :point 17))
       (assert= (get (lineedit-backward-word st nil) :point) 0))))    ; jumps the whole path

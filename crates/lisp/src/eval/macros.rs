@@ -228,6 +228,19 @@ fn tagged(heap: &Heap, v: Value, name: &str) -> Option<Value> {
 /// runtime evaluator never sees an unexpanded macro or an unqualified namespaced
 /// reference. At root (`compile_ns == None`) the resolve step is a no-op.
 pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
+    // Module privacy is REAL (ADR-146): from inside a module, a hand-written
+    // qualified reference to another module's `--` name is a compile error,
+    // unless that module was granted with `(:use-internals mod)` (the
+    // @testable seam). Enforced on the PRE-expansion source deliberately: a
+    // module's macros may expand to its own private helpers inside any file
+    // (the test framework's `describe`/`test` → `test/test--run` pattern) —
+    // privacy governs what an author can *type*, and macro templates already
+    // live behind `quasiquote`, which the walk skips. Top-level / REPL code
+    // (no namespace) stays unrestricted — the live-hacking hatch hot reload
+    // depends on.
+    if let Some(ns) = heap.compile_ns() {
+        enforce_private_refs(heap, form, &value::symbol_name(ns), None)?;
+    }
     let expanded = macroexpand_all(heap, form, env)?;
     let resolved = resolve(heap, expanded);
     // Final step: expand auto-gensym-FREE `quasiquote`s into builder code so the VM
@@ -240,6 +253,81 @@ pub fn compile(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
     // deterministic. A `#`-autogensym template is LEFT for the runtime path (its
     // gensyms must be fresh per invocation, which a once-at-compile expansion freezes).
     Ok(expand_static_quasiquotes(heap, resolved))
+}
+
+/// The import-table key under which `(:use-internals mod)` records its grant —
+/// the `%alias` trick: a leading `/` cannot arise from any real qualified
+/// reference, so the key can never collide with a genuine import.
+pub(crate) fn internals_grant_key(mod_name: &str) -> value::Symbol {
+    value::intern(&format!("/internals/{mod_name}"))
+}
+
+/// Enforce module privacy (ADR-146) over a resolved form: an error for any
+/// symbol reference `m/…--…` where `m` is neither the current namespace nor a
+/// module granted via `(:use-internals m)`. Skips `quote`/`quasiquote`
+/// subtrees (symbols there are data). `pos` tracks the nearest enclosing
+/// form's source position for the error.
+fn enforce_private_refs(
+    heap: &Heap,
+    form: Value,
+    cur_ns: &str,
+    pos: Option<crate::error::Pos>,
+) -> Result<(), LispError> {
+    match form.unpack() {
+        ValueRef::Sym(s) => {
+            let name = value::symbol_name_ref(s);
+            if let Some(slash) = name.rfind('/') {
+                let (m, bare) = (&name[..slash], &name[slash + 1..]);
+                // Resolve a module alias (`(:alias mod :as short)`) so the
+                // rule keys on the REAL module, matching how the reference
+                // will resolve.
+                let alias_key = value::intern(&format!("{m}/"));
+                let real_m: String = heap
+                    .import_of(alias_key)
+                    .map(value::symbol_name)
+                    .unwrap_or_else(|| m.to_string());
+                let m = real_m.as_str();
+                if bare.contains("--")
+                    && !m.is_empty()
+                    && m != cur_ns
+                    && heap.import_of(internals_grant_key(m)).is_none()
+                {
+                    let mut e = LispError::runtime(format!(
+                        "`{name}` is module-private to `{m}` (a `--` name; ADR-146). \
+                         Call it from `{m}`, promote it to a public name, or — for a \
+                         test/tool module that genuinely needs the internals — grant \
+                         access with (:use-internals {m}) in this module's header."
+                    ));
+                    if let Some(p) = pos {
+                        e = e.with_pos(p);
+                    }
+                    return Err(e);
+                }
+            }
+            Ok(())
+        }
+        ValueRef::Pair(p) => {
+            let (car, cdr) = heap.pair(p);
+            // Quoted subtrees are data, not references.
+            if let ValueRef::Sym(h) = car.unpack() {
+                let n = value::symbol_name_ref(h);
+                if n == "quote" || n == "quasiquote" {
+                    return Ok(());
+                }
+            }
+            let here = heap.form_pos_only(form).or(pos);
+            enforce_private_refs(heap, car, cur_ns, here)?;
+            enforce_private_refs(heap, cdr, cur_ns, here)
+        }
+        ValueRef::Vector(id) => {
+            let here = heap.form_pos_only(form).or(pos);
+            for &item in heap.vector(id).to_vec().iter() {
+                enforce_private_refs(heap, item, cur_ns, here)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Does `form` contain a `#`-suffixed (auto-gensym) symbol anywhere?

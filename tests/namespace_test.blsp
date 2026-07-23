@@ -103,12 +103,20 @@
     ;; not to ilibB/skip-me — confirm only the qualified one exists.
     (is (bound? 'ilibB/skip-me)))
 
-  (test "a `--` private name is not referred by (:use)"
+  (test "a `--` private name is not referred by (:use), and privacy is ENFORCED (ADR-146)"
     (%load-string "(defmodule ilibC) (defn shown () :shown) (defn hidden--impl () :hidden)")
     (%load-string "(defmodule iappC (:use ilibC)) (defn run () (shown))")
     (is (= (iappC/run) :shown))
-    ;; the private name is still reachable by its qualified spelling (soft privacy)
-    (is (= (ilibC/hidden--impl) :hidden)))
+    ;; hard privacy: a module hand-writing another module's qualified private
+    ;; fails to COMPILE at load (it used to be reachable — "soft privacy")
+    (is (= (try (%load-string
+                  "(defmodule iappC2 (:use ilibC)) (defn peek () (ilibC/hidden--impl))")
+            (catch e :blocked))
+          :blocked))
+    ;; …unless it declares the grant — the explicit @testable seam
+    (%load-string
+      "(defmodule iappC3 (:use-internals ilibC)) (defn peek () (ilibC/hidden--impl))")
+    (is (= (iappC3/peek) :hidden)))
 
   (test "an own-namespace definition shadows an imported name"
     (%load-string "(defmodule ilibD) (defn val () :theirs)")

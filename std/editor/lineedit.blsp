@@ -6,7 +6,7 @@
 ;;    `term-poll`/`term-size`) plus the pure `std/highlight.blsp`. The Rust side
 ;;    only toggles raw mode and paints relative ops; everything an editor *does*
 ;;    — keymap, kill-ring, history, completion, layout — lives here, redefinable.
-;;  - Pure core + thin IO (the `observe-frame` discipline): `lineedit--handle`
+;;  - Pure core + thin IO (the `observe-frame` discipline): `lineedit-handle`
 ;;    maps `(state, key) -> state` with no IO, so the whole keymap is unit-tested
 ;;    without a terminal (tests/lineedit_test.blsp). `lineedit--loop` is the only
 ;;    part that polls keys and paints — exercised manually, like `repl`/`observe`.
@@ -42,7 +42,7 @@ Built on `std/highlight.blsp` (pure analysis) and the inline `term-*` seam.
 
 ;; ---- editor state -----------------------------------------------------------
 
-(defn lineedit--init (prompt prefix history &optional opts)
+(defn lineedit-init (prompt prefix history &optional opts)
   "The fresh editor state for one read: empty line, point at 0, the read-only `prefix`
 (legacy single-line form context) and `history` (newest-first submitted lines).
 `opts` (a map) enables multi-line editing: `:cont-prompt` (the prompt for lines after
@@ -267,11 +267,11 @@ first time, so ↓ can restore it."
             entry (nth hist ni))
         (assoc state :hist-idx ni :saved saved :text entry :point (string-length entry))))))
 
-(defn lineedit--remember (history src)
+(defn lineedit-remember (history src)
   "Push submitted source `src` onto `history` (newest first) for ↑/↓ recall —
 internal newlines collapsed to spaces (so a multi-line form recalls as one line),
 trimmed, dropping blanks and consecutive duplicates. Shared by the REPL and the
-observer's eval minibuffer (the `:hist` list `lineedit--init` is seeded with)."
+observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
   (let (entry (trim (replace src "\n" " ")))
     (if (or (= entry "")
           (and (not (empty? history)) (= (first history) entry)))
@@ -290,7 +290,7 @@ observer's eval minibuffer (the `:hist` list `lineedit--init` is seeded with)."
 
 ;; ---- reverse incremental history search (C-r) -------------------------------
 ;; A modal sub-state on `:search` = `{:query :idx :orig-text :orig-point}`. While
-;; set, `lineedit--handle` routes keys here instead of the keymap: printable chars
+;; set, `lineedit-handle` routes keys here instead of the keymap: printable chars
 ;; extend the query, C-r steps to the next older match, Enter accepts (keeps the
 ;; matched line for editing), C-g/Esc cancels (restoring the pre-search line), and
 ;; any other key accepts then replays through the normal keymap.
@@ -343,7 +343,7 @@ as a substring, or -1. An empty query matches the newest entry."
                                                 0)
       (and (string? key) (= (string-length key) 1)) (lineedit--search-step state (str q key) idx)
       ; extend; keep current match if it still matches
-      :else (lineedit--handle (lineedit--search-accept state) key))))
+      :else (lineedit-handle (lineedit--search-accept state) key))))
 
 (defn lineedit-reverse-search (state _)
   "Enter reverse incremental history search (C-r), saving the current line so C-g
@@ -538,7 +538,7 @@ a no-op. Passed to `keymap-dispatch` as the keymap's default."
     (lineedit-self-insert state key)
     state))
 
-(defn lineedit--handle (state key)
+(defn lineedit-handle (state key)
   "Dispatch key event `key` through `*lineedit-keymap*` to its command (via the
 shared `keymap-dispatch`): a global `(fn (state key) -> state)` resolved by symbol,
 so redefining the command or rebinding the key hot-swaps behaviour. An unbound key
@@ -595,7 +595,7 @@ never wraps (which would desync the `[:up 1]` cursor restore)."
         (lineedit--fit (rest pieces) (- room w) (cons [s f] acc))
         (reverse (cons [(substring s 0 room) f] acc))))))
 
-(defn lineedit--overrides (full pos)
+(defn lineedit-overrides (full pos)
   "Bracket-match colour overrides (`[pos face]` list) for the cursor at `pos`: the
 matched pair reversed, or a lone unmatched bracket in the error face."
   (let (m (bracket-match full pos))
@@ -656,7 +656,7 @@ highlighted (horizontally-scrolled) window, draw the signature hint on the line 
          len (string-length text)
          vis (substring text hs (min len (+ hs avail)))
          cursorpos (+ base point)
-         overrides (lineedit--overrides full cursorpos)
+         overrides (lineedit-overrides full cursorpos)
          chunks (highlight-chunks full (+ base hs) vis overrides)
          raw-hint (if (get st :search) nil (lineedit--hint-pieces full cursorpos))
          hint (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
@@ -702,7 +702,7 @@ tested in isolation."
         base (string-length prefix)
         full (str prefix text)
         cursorpos (+ base point)
-        overrides (lineedit--overrides full cursorpos)
+        overrides (lineedit-overrides full cursorpos)
         lines (string-split text "\n")
         nlines (count lines)
         [cur-row cur-col] (lineedit--cursor-rc text point)
@@ -760,7 +760,7 @@ once. Stops as soon as the read is `:done`."
   (if (get state :done)
     state
     (let (k (term-poll 0))
-      (if (nil? k) state (lineedit--drain (lineedit--handle state k))))))
+      (if (nil? k) state (lineedit--drain (lineedit-handle state k))))))
 
 (defn lineedit--finish (state)
   "End the read: repaint the final line, drop to a new line, and return the result
@@ -779,7 +779,7 @@ drain it and either finish or loop with the new state."
   (let (k (term-poll 250))
     (if (nil? k)
       (lineedit--await state)
-      (let (next (lineedit--drain (lineedit--handle state k)))
+      (let (next (lineedit--drain (lineedit-handle state k)))
         (if (get next :done)
           (lineedit--finish next)
           (lineedit--loop next))))))
@@ -808,7 +808,7 @@ The terminal is restored even if rendering raises (the caller must be on a TTY).
   (do
     (term-raw-enter)
     (let (result (try
-                   (lineedit--loop (lineedit--init prompt prefix history opts))
+                   (lineedit--loop (lineedit-init prompt prefix history opts))
                    (catch e (do (term-raw-leave) (throw e)))))
       (term-raw-leave)
       result)))
