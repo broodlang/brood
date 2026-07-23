@@ -619,8 +619,11 @@ Runtime housekeeping (both items landed):
   `(string-length (+ 1 2))` points at `(+ 1 2)`), falling back to the call
   head only for a bare literal/symbol (which the pair-keyed position table
   doesn't record). No `Pos`-threading rewrite needed — the argument value
-  already carries its position. ⬜ Still next: incremental sync; range/delta
-  semantic tokens; a **create-missing-`defn`** code action.
+  already carries its position. ✅ The **create-missing-`defn`** code action
+  already ships (verified 2026-07-23 — `create_defn_action` in
+  `crates/lsp/src/code_actions.rs`, a stub `(defn foo (a b …) nil)` with arity
+  matched to the call site, tested; the roadmap line was stale). ⬜ Still
+  next: incremental sync; range/delta semantic tokens.
 - 🟡 **Errors that teach (LLM-native)** ([`docs/llm-native.md`](docs/llm-native.md))
   — first instances landed. ✅ **reader-level hints** for the Clojure/Scheme
   syntax the reader mis-parses shipped 2026-07-23: `#{…}` (set literal),
