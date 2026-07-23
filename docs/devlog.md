@@ -5853,9 +5853,7 @@ exposed it. Now absolute + emitted only when the paths exist: a repeat fuzz
 invocation went 2 min → 0.29 s, and every workspace rebuild stops paying the
 tax.
 
-## 2026-07-23 — Tooling & errors batch: Clojure/Scheme teaching hints + `nest format --changed`
-
-Two finish-the-partials items from the tooling/errors cluster.
+## 2026-07-23 — Clojure/Scheme teaching hints (reader-level)
 
 **LLM-native reader hints.** The reader used to mis-parse three common
 Clojure/Scheme reader macros into confusing downstream errors: `#{1 2 3}` →
@@ -5870,7 +5868,32 @@ all-elements-are-`(name value)`-pairs shape (a genuinely-flat odd `(let (a)
 catchable in-language via `read-string`); the "Coming from Clojure" table in
 language.md gains rows.
 
-**Finer type/arity finding spans (LSP/`nest check`).** A type-mismatch or
+## 2026-07-23 — LLM-native MCP tools: explain-error + find-pattern
+
+Two of the "errors that teach" tools shipped, as a new baked-in `explain`
+module (`std/tool/explain.blsp`) — curated Brood data, policy-in-Brood:
+
+- **`explain-error`** maps a stable error code (`E0044`), a caught error map
+  (via its `:code`/`:kind`), or a kind keyword (`:type`) to
+  `{:code :summary :causes :fix :example}` — the material was in the Rust
+  error-code doc comments; this surfaces it to an agent as the actual *fix*
+  (E0044 → "rewrite as a tail-recursive loop with an accumulator"), not just
+  the message. Every one of the ~16 shipped E-codes has an entry.
+- **`find-pattern`** keyword-searches an intent→idiom cookbook (loop / mutable
+  state / build-a-string / set / map-update / error / spawn / receive /
+  destructure / parse-binary / offload / private) — the "how do I X in Brood"
+  an LLM reaches for, answered with the idiom + a runnable example + a doc
+  pointer, so the reflex is the Brood way, not a Clojure/Scheme one.
+
+Both are wired as `nest mcp` tools (the surface is now 20). Pure Brood over
+string ops; `tests/explain_test.blsp` (9) pins the catalogues incl. a
+completeness check (every entry has a summary + fix), `mcp_test` (5) pins the
+tool wrappers + catalogue membership. Suite green; docs/mcp.md tool table
+updated.
+
+## 2026-07-23 — Finer type/arity finding spans (LSP/`nest check`)
+
+A type-mismatch or
 callback-arity finding anchored at the call head — so `(string-length (+ 1
 2))` underlined `string-length`, not the actually-wrong `(+ 1 2)`. It now
 anchors at the offending **argument** when the argument is a positioned
@@ -5882,7 +5905,9 @@ the argument `Value` already carries its position. `type_check_catalog.rs`
 pins the column (`(+ 10 20)` at col 16, the lambda callback at col 6, a bare
 literal falling back to col 1).
 
-**Symlink-escape-proof MCP write sandbox.** The `nest mcp` write/edit tools
+## 2026-07-23 — Symlink-escape-proof MCP write sandbox (`canonicalize`)
+
+The `nest mcp` write/edit tools
 gated paths purely lexically (reject absolute/`~`/`..`) — which the code
 itself flagged as missing symlink resolution: a project-relative, `..`-free
 path could still resolve *out* of the tree through a symlinked directory
@@ -5895,7 +5920,9 @@ that compares the canonicalized target against the canonicalized project root.
 canonicalize resolution (unix-only; the private is reached from top-level
 eval, the ADR-146 live-hacking hatch).
 
-**`nest format --changed`.** Whole-tree `nest format` reformatted every
+## 2026-07-23 — `nest format --changed`
+
+Whole-tree `nest format` reformatted every
 `.blsp`; `--changed` narrows to only the files git reports not-committed-clean
 (modified/staged/untracked). New kernel mechanism `%git-changed-files dir`
 (runs `git status --porcelain -z` from the repo top, returns absolute paths —
@@ -5906,6 +5933,8 @@ falls back to the whole project outside a git repo. `--check` deliberately
 still scans everything (CI's clean-tree gate can't narrow). Integration test
 `crates/nest/tests/format_changed.rs` (clean tree considers 0; one dirty file
 is the only one formatted; non-git fallback).
+
+## 2026-07-23 — "Private should be private": module privacy enforced (ADR-146)
 
 The `--` convention becomes real semantics. From inside a module, a
 hand-written qualified reference to another module's `--` name (plain or

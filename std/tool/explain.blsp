@@ -1,0 +1,192 @@
+;; std/tool/explain.blsp — teach-the-error + intent→idiom lookup (LLM-native
+;; errors, docs/llm-native.md). (require 'explain).
+;;
+;; Two curated Brood-data catalogues an agent (or a human at the REPL) reads:
+;;   - `*error-explanations*` — stable error code → {:summary :causes :fix
+;;     :example}. `explain-error` takes a code, a caught error map, or a kind
+;;     keyword and returns the entry.
+;;   - `*idiom-cookbook*` — intent → the Brood-idiomatic pattern, with a runnable
+;;     example. `find-pattern` keyword-searches it ("how do I loop / mutate /
+;;     build a string / make a set …").
+;;
+;; The `nest mcp` tools `explain-error` and `find-pattern` are thin wrappers over
+;; these (std/tool/mcp.blsp). Policy (the content) is Brood; nothing here needs
+;; the kernel beyond string ops.
+
+(defmodule explain
+  "Teach-the-error and intent→idiom lookup for agents and the REPL:
+`(explain-error \"E0030\")` explains an error code (or a caught error map);
+`(find-pattern \"loop\")` returns the idiomatic Brood pattern for a task. Backs
+the `nest mcp` tools of the same names.")
+
+;; ---- error explanations (keyed by the stable E-codes in crates/lisp/error.rs)
+
+(def *error-explanations*
+  {"E0001" {:summary "A parse/reader error — the source isn't well-formed Brood."
+            :causes "Unbalanced delimiters; a stray Clojure/Scheme reader macro (`#{…}` set, `#(…)` fn, `#'` var-quote); a malformed number or string."
+            :fix "Read the caret position; balance `()`/`[]`/`{}`. Brood has no `#{…}`/`#(…)`/`#'` — use `(set/set …)`, `(fn (x) …)`, `'foo`."
+            :example "(fn (x) (+ 1 x))    ; not #(+ 1 %)"}
+   "E0002" {:summary "Input ended in the middle of a form or string (EOF mid-parse)."
+            :causes "An unclosed `(`, `[`, `{`, or `\"` — often the last line of a REPL paste."
+            :fix "This is 'needs more input', not a hard error — finish the form. A REPL keeps reading; a file is genuinely truncated."
+            :example "(defn f (x)\n  (+ x 1))   ; close every opener"}
+   "E0010" {:summary "Unbound symbol — a name that resolves to nothing."
+            :causes "A typo; a missing `(require 'mod)` for a `mod/name`; a module-private `--` name referenced from another module (ADR-146); using a `let`-bound name out of scope."
+            :fix "Check the spelling with `(apropos \"part\")`. For `mod/x`, add `(require 'mod)`. For a `--` private, call it from its own module or add `(:use-internals mod)`."
+            :example "(require 'json) (json/json-parse \"{}\")"}
+   "E0020" {:summary "Arity mismatch — a function called with the wrong number of arguments."
+            :causes "Too many or too few args; forgetting a required parameter; a variadic vs fixed confusion."
+            :fix "Check the arglist with `(arglist 'the-fn)` (or the `lookup` MCP tool). `&optional` params may be omitted; `& rest` takes any number."
+            :example "(defn greet (name &optional (greeting \"hi\")) …)  ; greet takes 1 or 2"}
+   "E0030" {:summary "Type mismatch — a value of the wrong type reached an operation."
+            :causes "Passing a string where a number is wanted (`=` does NOT coerce: `(= 1 1.0)` is false); a nil from a failed `get`; mixing int/float in strict `=`."
+            :fix "Convert explicitly (`string->number`, `str`); for numeric compares across int/float use `<`/`<=`, not `=`. The finding names the argument position and expected type."
+            :example "(+ 1 (string->number \"2\"))   ; not (+ 1 \"2\")"}
+   "E0040" {:summary "Division (or remainder) by zero."
+            :causes "`(/ x 0)` or `(rem x 0)` where the divisor turned out to be 0 (often a nil defaulted to 0, or an empty-collection count)."
+            :fix "Guard the divisor: `(if (zero? d) fallback (/ n d))`."
+            :example "(if (zero? n) 0 (/ total n))"}
+   "E0041" {:summary "Integer overflow (legacy) — arithmetic past the i64 range."
+            :causes "Historically raised on overflow; ints now auto-widen to big integers, so this is rare. Seen only on ops that predate widening."
+            :fix "Usually nothing — the result widens automatically. If you need a fixed width, mask with `bit-and`."
+            :example "(* 9223372036854775807 2)   ; => a big integer, no error"}
+   "E0042" {:summary "Index out of range — a sequence access past its bounds."
+            :causes "`(vector-ref v i)` / `(nth …)` / `(substring …)` / `(byte-at …)` with `i` ≥ length or negative."
+            :fix "Bounds-check first, or use the total form: `(nth v i default)` returns the default instead of raising."
+            :example "(nth v i nil)   ; nil instead of an error past the end"}
+   "E0043" {:summary "Soft memory limit crossed (ADR-043) — allocation exceeded the configured cap."
+            :causes "A runaway build (an unbounded loop accumulating data); a genuinely large workload under a low `BROOD_MEM_LIMIT`."
+            :fix "Bound the work (stream/chunk instead of materialising everything); raise `BROOD_MEM_LIMIT` if the size is legitimate. Catchable — recover and shed load."
+            :example "(reduce + 0 (range 1 1000000))   ; folds without building a list"}
+   "E0044" {:summary "Stack depth exceeded — runaway NON-tail recursion."
+            :causes "A recursive call that isn't in tail position (work happens after the call), so each call grows the stack: `(defn sum (n) (+ n (sum (- n 1))))`."
+            :fix "Rewrite as a tail-recursive loop with an accumulator (proper tail calls are O(1) stack), or use `reduce`/`fold`."
+            :example "(defn sum (n acc) (if (= n 0) acc (sum (- n 1) (+ acc n))))"}
+   "E0045" {:summary "Per-process heap limit — this process stayed over its `(process-flag :max-heap n)` after GC."
+            :causes "One process accumulating too much live data under its own declared cap (the BEAM `max_heap_size` analogue)."
+            :fix "Reduce the process's live set, or raise/clear its `:max-heap` flag. Uncaught, it kills only the offending process — others are untouched."
+            :example "(process-flag :max-heap 10000000)   ; per-process, in bytes"}
+   "E0050" {:summary "File I/O failed — a path couldn't be read or written."
+            :causes "A missing file, a permissions problem, a wrong path (relative to the cwd, not the project)."
+            :fix "Check the path exists (`(file-exists? p)`); use `(cwd)` to see the working directory. For binary data use `slurp-bytes`/`spit-bytes`."
+            :example "(when (file-exists? p) (slurp p))"}
+   "E0051" {:summary "Subprocess failed to start — the program couldn't be spawned."
+            :causes "The program isn't on PATH; a wrong executable name."
+            :fix "Confirm the binary is installed and on PATH; pass an absolute path if needed."
+            :example "(proc-spawn \"git\" [\"status\"])"}
+   "E0060" {:summary "Distribution-layer failure — a node/connect/send operation failed."
+            :causes "A wrong `name@host`; the peer not listening; a cookie mismatch; a dropped link (E0060 noconnection when `:send-errors` is on)."
+            :fix "Confirm both nodes ran `node-start` with the SAME cookie and reachable addresses; `std/net/reconnect` auto-heals a dropped link."
+            :example "(node-start :app (node-cookie))"}
+   "E0070" {:summary "Message too deeply nested to send — the deep-copy would overflow."
+            :causes "A value nested past `MAX_MESSAGE_DEPTH` (a ~256-deep structure) handed to `send`."
+            :fix "Flatten or restructure the value before sending; deeply-nested data is usually a design smell across a process boundary."
+            :example "; send a {:items [...]} map, not a 300-deep nested list"}
+   "E0099" {:summary "A generic runtime error (`throw`/`error`) with no more specific code."
+            :causes "An explicit `(error …)`/`(throw …)`, or a kernel error without a dedicated code."
+            :fix "Read the message and `:trace` (the caught map carries an innermost-first frame list). Branch on `:kind`/`:code`, not the message text."
+            :example "(try (risky) (catch e (get e :trace)))"}})
+
+;; A kind keyword → representative code, so `explain-error` accepts a `:kind`
+;; from a caught error map, not only a code.
+(def *kind->code*
+  {:parse "E0001" :unbound "E0010" :arity "E0020" :type "E0030" :runtime "E0099"})
+
+(defn explain-error (what)
+  "Explain an error: `what` may be a code string (\"E0030\"), a caught error map
+(from `(try … (catch e e))` — its `:code` or `:kind` is used), or a kind keyword
+(`:type`). Returns `{:code :summary :causes :fix :example}`, or
+`{:code :unknown :summary …}` if there's no entry. Pure — reads the curated
+`*error-explanations*` table."
+  (let (code (cond
+               (string? what) what
+               (keyword? what) (get *kind->code* what)
+               (map? what) (or (get what :code) (get *kind->code* (get what :kind)))
+               else nil)
+        entry (and code (get *error-explanations* code)))
+    (if entry
+      (assoc entry :code code)
+      {:code (or code :unknown)
+       :summary "No explanation on file for that error. Read the message + :hint; catch it and inspect :kind/:code/:trace."})))
+
+;; ---- intent → idiom cookbook -----------------------------------------------
+;; Each entry: {:intent "…" :keywords [..] :idiom "…" :example "…" :see "…"}.
+;; `find-pattern` matches a query against :intent + :keywords (substring, case-
+;; insensitive), ranking exact-keyword hits first.
+
+(def *idiom-cookbook*
+  (list
+    {:intent "loop / iterate / repeat"
+     :keywords ["loop" "for" "while" "iterate" "repeat" "recur"]
+     :idiom "There is no `while`/`for`/`loop`. Iterate with tail recursion (O(1) stack) or a higher-order fn (`map`/`filter`/`reduce`/`dotimes`/`dolist`)."
+     :example "(defn count-up (i n acc) (if (= i n) acc (count-up (+ i 1) n (+ acc i))))"
+     :see "docs/language.md §Recursion is the loop"}
+    {:intent "mutable state / a variable I can change"
+     :keywords ["mutable" "mutate" "set!" "var" "state" "counter" "assign" "change" "update variable"]
+     :idiom "No `set!`/mutable variables. Carry state in a recursive function's argument, in a process loop's state, or (when genuinely shared+mutable) a `Table` (Brood's ETS)."
+     :example "(defn account (bal) (receive ([:dep amt] (account (+ bal amt))) ([:bal from] (send from bal) (account bal))))"
+     :see "docs/language.md §Immutability"}
+    {:intent "build a string / concatenate in a loop"
+     :keywords ["string" "concat" "concatenate" "build string" "join" "stringbuilder" "accumulate string"]
+     :idiom "Don't `(str acc x)` in a loop (O(n²)). Cons parts onto a list and `(join \"\" (reverse parts))` once — or hand an iolist (nested list of strings/bytes) to the write boundary (ADR-139)."
+     :example "(join \"\" (map str (range 0 5)))"
+     :see "docs/decisions.md ADR-139 (iolists)"}
+    {:intent "a set / distinct elements / membership"
+     :keywords ["set" "distinct" "unique" "member" "contains" "#{}"]
+     :idiom "No `#{…}` literal. `(require 'set)` then `(set/set [1 2 3])`; membership is `(contains? s x)`; sets are maps-to-true."
+     :example "(require 'set) (contains? (set/set [1 2 3]) 2)"
+     :see "std/set.blsp"}
+    {:intent "update a value in a map"
+     :keywords ["map" "assoc" "update" "modify map" "put" "get"]
+     :idiom "Maps are immutable — `assoc`/`dissoc`/`update` return a FRESH map. `(update m :k f)` applies `f` to the current value."
+     :example "(update {:n 1} :n inc)   ; => {:n 2}"
+     :see "docs/language.md §Maps"}
+    {:intent "handle an error / try/catch"
+     :keywords ["error" "exception" "try" "catch" "throw" "rescue" "handle"]
+     :idiom "`catch` takes a BARE binding (no exception class): `(try expr (catch e body))`. A caught kernel error is a map — branch on `:kind`/`:code`, not the message."
+     :example "(try (/ 1 0) (catch e (get e :code)))   ; => \"E0040\""
+     :see "docs/language.md §Errors"}
+    {:intent "spawn a worker / concurrency / background task"
+     :keywords ["spawn" "thread" "worker" "concurrent" "parallel" "async" "process" "goroutine"]
+     :idiom "Cheap green processes: `(spawn (do …))` returns a pid; `(send pid msg)` and `(receive …)` pass messages. Share nothing — messages are deep-copied."
+     :example "(let (me (self) w (spawn (send me (* 6 7)))) (receive))"
+     :see "docs/concurrency.md"}
+    {:intent "receive / select a message by shape"
+     :keywords ["receive" "mailbox" "message" "selective" "pattern message"]
+     :idiom "`receive` matches messages by pattern; non-matching stay queued (selective receive). `(after ms body)` is a timeout."
+     :example "(receive ([:ok v] v) ([:err m] (throw m)) (after 1000 :timeout))"
+     :see "docs/concurrency.md §Selective receive"}
+    {:intent "destructure / bind parts of a value"
+     :keywords ["destructure" "pattern" "match" "unpack" "bind"]
+     :idiom "Patterns work in `let`/`fn`/`match`: vectors `[a b]`, maps `{:keys [x y]}`, list heads `(h & t)`, and `(bytes …)` bit syntax."
+     :example "(let ([a b] [1 2]) (+ a b))"
+     :see "docs/pattern-matching.md"}
+    {:intent "parse binary / bytes / a wire protocol"
+     :keywords ["bytes" "binary" "parse" "protocol" "bit syntax" "u16" "decode"]
+     :idiom "Destructure bytes with the `(bytes …)` pattern: typed integer segments `(x :u16)`/`(x :i32-le)`, sized `(x n)`, `& rest`. Sockets in binary mode deliver `bytes`."
+     :example "(match frame ((bytes (len :u16) (body len) & rest) body) (_ :short))"
+     :see "docs/language.md §Bytes patterns"}
+    {:intent "run a slow / blocking native call without stalling"
+     :keywords ["blocking" "slow" "offload" "git" "long" "io" "dirty"]
+     :idiom "Run an allow-listed blocking native on the offload pool: `(offload f & args)` parks only this process, never a scheduler worker."
+     :example "(offload slurp-bytes \"big.tar\")"
+     :see "docs/language.md §Blocking natives (offload)"}
+    {:intent "define a private helper / hide an implementation detail"
+     :keywords ["private" "hidden" "internal" "encapsulate" "defp"]
+     :idiom "A `--` in a name makes it module-private (ADR-146): `(defn foo--helper …)`. Another module can't reference it (compile error) without `(:use-internals foo)`."
+     :example "(defn parse--token (s) …)   ; private to this module"
+     :see "docs/language.md §Modules / privacy"}))
+
+(defn explain--matches? (q entry)
+  (let (ql (lower q))
+    (or (includes? (lower (get entry :intent)) ql)
+      (some? (fn (k) (includes? (lower k) ql)) (get entry :keywords)))))
+
+(defn find-pattern (query)
+  "Find the idiomatic Brood pattern(s) for a task. `query` is matched (case-
+insensitive substring) against each cookbook entry's intent + keywords. Returns
+`{:matches [{:intent :idiom :example :see} …]}` (the `:keywords` are dropped from
+the result — they're the search index, not content). Empty matches suggests
+`apropos`/`doc-search` for a name-based search instead."
+  {:matches (map (fn (e) (dissoc e :keywords))
+              (filter (fn (e) (explain--matches? query e)) *idiom-cookbook*))})

@@ -17,3 +17,23 @@
     (assert-error (mcp/mcp-eval-tool {:source 42})))
   (test "a parse error surfaces as :error, not a drop"
     (is (contains? (mcp/mcp-eval-tool {:source "(+ 1"}) :error))))
+
+;; The LLM-native tools explain-error and find-pattern (thin wrappers over
+;; std/tool/explain.blsp — 2026-07-23).
+(describe "mcp explain-error / find-pattern tools"
+  (test "explain-error returns the structured explanation for a code"
+    (let (r (mcp/mcp-explain-error-tool {:code "E0044"}))
+      (assert= (get r :code) "E0044")
+      (is (string-contains? (get r :fix) "tail-recursive"))))
+  (test "explain-error rejects a non-string :code"
+    (assert-error (mcp/mcp-explain-error-tool {:code 44})))
+  (test "find-pattern returns idiom matches for an intent"
+    (let (r (mcp/mcp-find-pattern-tool {:query "build a string"}))
+      (is (> (count (get r :matches)) 0))
+      (is (some? (fn (e) (string-contains? (get e :idiom) "iolist")) (get r :matches)))))
+  (test "find-pattern rejects a non-string :query"
+    (assert-error (mcp/mcp-find-pattern-tool {:query 1})))
+  (test "both tools are in the catalogue"
+    (let (names (map (fn (t) (get t :name)) (mcp/mcp-tools)))
+      (is (includes? names "explain-error"))
+      (is (includes? names "find-pattern")))))

@@ -730,6 +730,11 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // the `%wasm-*` primitives (feature `wasm`; without it the primitives are
     // unbound and requiring this module errors clearly). Opt-in.
     ("wasm", include_str!("../../../../std/wasm.blsp")),
+    // Teach-the-error + intent→idiom lookup (LLM-native errors): explain-error
+    // (a stable E-code → summary/causes/fix/example) and find-pattern (an
+    // intent → the idiomatic Brood pattern). Curated Brood data; backs the
+    // `nest mcp` tools of the same names. Opt-in.
+    ("explain", include_str!("../../../../std/tool/explain.blsp")),
     // Supervised node auto-reconnect (dist self-healing): `watch` keeps a peer
     // link alive with exponential-backoff `(connect …)` retries; subscribers get
     // [:nodeup]/[:nodedown]. Pure Brood over connect/monitor-node/nodes. Opt-in.

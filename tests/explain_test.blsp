@@ -1,0 +1,48 @@
+;; The teach-the-error + intent→idiom catalogues (std/tool/explain.blsp,
+;; LLM-native errors). explain-error maps a code / caught error / kind keyword
+;; to a structured explanation; find-pattern keyword-searches the idiom cookbook.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test).
+
+(defmodule explain-test (:use test) (:use explain))
+
+(describe "explain-error"
+  (test "a known code returns summary/causes/fix/example + the code"
+    (let (e (explain-error "E0040"))
+      (assert= (get e :code) "E0040")
+      (is (string-contains? (get e :summary) "ision"))   ; div/Division
+      (is (string-contains? (get e :fix) "zero?"))
+      (is (string? (get e :example)))))
+  (test "a caught error MAP is explained via its :code"
+    (let (e (explain-error (try (/ 1 0) (catch err err))))
+      (assert= (get e :code) "E0040")
+      (is (string-contains? (get e :fix) "divisor"))))
+  (test "a kind keyword resolves to its representative code"
+    (assert= (get (explain-error :type) :code) "E0030")
+    (assert= (get (explain-error :unbound) :code) "E0010"))
+  (test "an unknown code is reported cleanly, not thrown"
+    (let (e (explain-error "E9999"))
+      (assert= (get e :code) "E9999")
+      (is (string-contains? (get e :summary) "No explanation"))))
+  (test "every catalogue entry is complete (summary + fix present)"
+    (doseq (code (keys *error-explanations*))
+      (let (e (explain-error code))
+        (is (> (string-length (get e :summary)) 0))
+        (is (> (string-length (get e :fix)) 0))))))
+
+(describe "find-pattern"
+  (test "an intent word finds the idiom (case-insensitive)"
+    (let (m (get (find-pattern "LOOP") :matches))
+      (is (> (count m) 0))
+      (is (some? (fn (e) (string-contains? (get e :idiom) "tail recursion")) m))))
+  (test "a keyword hit matches even when the intent text doesn't"
+    ;; 'mutate' is a keyword of the mutable-state entry, not in its intent text.
+    (let (m (get (find-pattern "mutate") :matches))
+      (is (some? (fn (e) (string-contains? (get e :idiom) "set!")) m))))
+  (test "results drop the :keywords search index, keep the content"
+    (let (e (first (get (find-pattern "spawn") :matches)))
+      (is (contains? e :idiom))
+      (is (contains? e :example))
+      (refute (contains? e :keywords))))
+  (test "no match returns an empty (nil) matches list, not an error"
+    (is (nil? (get (find-pattern "zzz-no-such-intent") :matches)))))

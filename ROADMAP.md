@@ -630,9 +630,17 @@ Runtime housekeeping (both items landed):
   `#(…)` (anonymous-fn reader macro), and `#'` (var-quote) now raise a clean
   parse error with a `:hint` naming the Brood idiom (was "odd map" / "unbound
   #"); Scheme/Clojure **nested `let`/`letrec` bindings** `((a 1) (b 2))` raise
-  a hint to flatten (`tests/reader_hints_test.blsp`). ⬜ Still to do: the
-  `brood.explain-error`/`brood.find-pattern` MCP tools, an intent→idiom
-  cookbook, and folding each new repeat mistake into the rule-of-three.
+  a hint to flatten (`tests/reader_hints_test.blsp`). ✅ **The
+  `explain-error` / `find-pattern` MCP tools + the intent→idiom cookbook**
+  shipped 2026-07-23 (`std/tool/explain.blsp`, a new baked-in `explain`
+  module): `explain-error` maps a stable E-code (or a caught error's `:code`,
+  or a kind keyword) to `{:summary :causes :fix :example}` — the
+  Brood-idiomatic fix, not just the message; `find-pattern` keyword-searches a
+  curated intent→idiom cookbook ("loop / mutate / build a string / spawn /
+  parse binary …"). Both are pure Brood data + wrappers, wired as `nest mcp`
+  tools (now 20). `tests/explain_test.blsp` + `mcp_test`. ⬜ Still to do:
+  reader hints for the remaining Clojure/Scheme forms, and folding each new
+  repeat mistake into the rule-of-three.
 - 🟡 **MCP tooling** — ✅ the write sandbox is **symlink-escape-proof** (shipped
   2026-07-23): a new `canonicalize` primitive (real-path resolution — symlinks
   + `.`/`..`, works for not-yet-existing targets) backs a second sandbox gate

@@ -171,6 +171,8 @@ Claude Code already has those:
 | `all-globals` | `{}`                        | `{globals: [name]}`                    | The full name list of the live image (prelude + project) |
 | `doc-search`  | `{query}`                   | `{results: [{name, doc}]}`             | Find a capability by *behaviour* — searches docstrings, not names |
 | `bench`       | `{source, iterations?}`     | `{ms, iterations, per-iter-ms, value}` | Time an expression in the live image |
+| `explain-error` | `{code}`                  | `{code, summary, causes, fix, example}` | Teach-the-error — a stable error code (`E0044`) → its Brood-idiomatic **fix**, not just the message (`std/tool/explain.blsp`) |
+| `find-pattern`  | `{query}`                 | `{matches: [{intent, idiom, example, see}]}` | Intent → idiom — "how do I loop / mutate / build a string / spawn"? The Brood way, not a Clojure/Scheme reflex |
 
 Each tool is a `defn` in `std/tool/mcp.blsp`; `(mcp-tools)` returns the catalogue
 the dispatcher reads at startup. **A project can extend the surface** by
