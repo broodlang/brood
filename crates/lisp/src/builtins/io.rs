@@ -831,6 +831,66 @@ pub(super) fn file_exists(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
     Ok(Value::boolean(std::path::Path::new(&path).exists()))
 }
 
+/// `(canonicalize path)` — the real absolute path of `path` with **symlinks and
+/// `.`/`..` resolved**. Works for a not-yet-existing target: the longest
+/// existing ancestor is `fs::canonicalize`d (which resolves every symlink in
+/// it), then the remaining components are appended lexically. Relative paths are
+/// taken against the cwd. Returns nil if not even the cwd/root resolves. The
+/// primitive behind symlink-escape-proof path sandboxing (`std/tool/mcp.blsp`).
+pub(super) fn path_canonicalize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use std::path::{Component, Path, PathBuf};
+    let path = expect_string(heap, "canonicalize", arg(args, 0))?;
+    // Make absolute against the cwd first, then normalize `.`/`..`/`//`
+    // lexically so the ancestor walk below sees clean components.
+    let raw = Path::new(&path);
+    let abs = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(raw),
+            Err(_) => return Ok(Value::nil()),
+        }
+    };
+    // Try to canonicalize progressively-shorter prefixes; append the popped
+    // tail. `fs::canonicalize` resolves every symlink in the prefix, so a
+    // symlinked directory anywhere in the existing part is followed to its
+    // real location — which is exactly what a sandbox check must see.
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur: PathBuf = abs.clone();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&cur) {
+            let mut out = real;
+            for seg in tail.iter().rev() {
+                out.push(seg);
+            }
+            return Ok(heap.alloc_string(&out.to_string_lossy()));
+        }
+        match cur.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                if !cur.pop() {
+                    break;
+                }
+            }
+            None => break, // reached the root and it still didn't canonicalize
+        }
+    }
+    // Fallback: nothing canonicalized (e.g. a path with no existing ancestor on
+    // a broken mount). Return the lexically-normalized absolute path so callers
+    // still get a stable answer rather than nil.
+    let mut normalized = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(heap.alloc_string(&normalized.to_string_lossy()))
+}
+
 /// `(dir? path)` — true if `path` exists and is a directory.
 pub(super) fn is_dir(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "dir?", arg(args, 0))?;

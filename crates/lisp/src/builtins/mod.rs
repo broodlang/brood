@@ -1710,6 +1710,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "canonicalize",
+        Arity::exact(1),
+        Sig::new(vec![string], string.union(nil_ty)),
+        path_canonicalize,
+    );
+    def(
+        heap,
         "dir?",
         Arity::exact(1),
         Sig::new(vec![string], bool_ty),
@@ -2732,6 +2739,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("keyword", &["x"], "Coerce a string, symbol, or keyword to the matching keyword (interning if needed)."),
     ("cwd", &[], "The current working directory."),
     ("file-exists?", &["path"], "Whether path exists."),
+    ("canonicalize", &["path"], "The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. Use it to make path sandboxing symlink-escape-proof."),
     ("dir?", &["path"], "Whether path is a directory."),
     ("list-dir", &["path"], "The entry names directly under directory path, sorted."),
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),

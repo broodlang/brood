@@ -5870,6 +5870,19 @@ all-elements-are-`(name value)`-pairs shape (a genuinely-flat odd `(let (a)
 catchable in-language via `read-string`); the "Coming from Clojure" table in
 language.md gains rows.
 
+**Symlink-escape-proof MCP write sandbox.** The `nest mcp` write/edit tools
+gated paths purely lexically (reject absolute/`~`/`..`) — which the code
+itself flagged as missing symlink resolution: a project-relative, `..`-free
+path could still resolve *out* of the tree through a symlinked directory
+inside it (`proj/link -> /etc`, then write `link/passwd`). Fixed with a new
+`canonicalize` primitive (real absolute path — symlinks and `.`/`..`
+resolved; works for a not-yet-existing target by resolving the longest
+existing ancestor and appending the tail) and a second gate `mcp--under-root?`
+that compares the canonicalized target against the canonicalized project root.
+`crates/lisp/tests/mcp_sandbox.rs` pins the escape rejection and the
+canonicalize resolution (unix-only; the private is reached from top-level
+eval, the ADR-146 live-hacking hatch).
+
 **`nest format --changed`.** Whole-tree `nest format` reformatted every
 `.blsp`; `--changed` narrows to only the files git reports not-committed-clean
 (modified/staged/untracked). New kernel mechanism `%git-changed-files dir`

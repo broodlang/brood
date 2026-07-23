@@ -109,25 +109,41 @@ defines (the silent flat-namespace collision). On a load error:
 ;; touch files **inside the project it serves**, never the wider filesystem.
 
 (defn mcp--safe-rel? (rel)
-  "Whether `rel` is a safe project-relative path: a non-empty string, not
-absolute (`/…`) or home-anchored (`~…`), with no `..` segment that could climb
-out of the project. Purely lexical — symlinks inside the tree aren't chased (an
-acceptable bar for a project-scoped tool)."
+  "Whether `rel` passes the LEXICAL bar for a project-relative path: a non-empty
+string, not absolute (`/…`) or home-anchored (`~…`), with no `..` segment. The
+first (cheap) of two gates; the second is the symlink-resolving check in
+`mcp--project-path`."
   (and (string? rel)
     (> (string-length rel) 0)
     (not (starts-with? rel "/"))
     (not (starts-with? rel "~"))
     (not (includes? (string-split rel "/") ".."))))
 
+(defn mcp--under-root? (abs)
+  "Whether real path `abs` is the project root itself or lies strictly under it —
+compared after `canonicalize` on both sides, so a **symlinked directory inside
+the project that points outside** cannot be used to escape (the lexical check
+alone misses this — a purely-relative, `..`-free path can still resolve out of
+the tree through a symlink)."
+  (let (real (canonicalize abs)
+        root (canonicalize *project-root*))
+    (and (string? real) (string? root)
+      (or (= real root) (starts-with? real (str root "/"))))))
+
 (defn mcp--project-path (rel)
   "Resolve project-relative `rel` to an absolute path under `*project-root*`, or
-`throw` if it would escape the project (an absolute/`~`/`..` path, or no project
-root at all). The sandbox boundary the `write`/`edit` tools share."
+`throw` if it would escape the project — a lexical violation (absolute/`~`/`..`,
+or no project root), OR a **symlink** whose real target is outside the tree. The
+sandbox boundary the `write`/`edit` tools share."
   (when (nil? *project-root*)
     (throw "no project root — nest mcp must run inside a Brood project"))
   (when (not (mcp--safe-rel? rel))
     (throw (str "path must be project-relative — no leading '/' or '~', no '..': " (pr-str rel))))
-  (path-join *project-root* rel))
+  (let (abs (path-join *project-root* rel))
+    (when (not (mcp--under-root? abs))
+      (throw (str "path escapes the project sandbox — its real target (following symlinks) "
+               "is outside the project root: " (pr-str rel))))
+    abs))
 
 (defn mcp--write-result (rel abs)
   "The shared tail of `write`/`edit`: a `.blsp` file at absolute `abs` is loaded

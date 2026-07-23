@@ -626,9 +626,14 @@ Runtime housekeeping (both items landed):
   a hint to flatten (`tests/reader_hints_test.blsp`). ⬜ Still to do: the
   `brood.explain-error`/`brood.find-pattern` MCP tools, an intent→idiom
   cookbook, and folding each new repeat mistake into the rule-of-three.
-- ⬜ **MCP tooling** — a streaming/progress-notification tier for long-running tool
-  output; exposing GC/process *traces* (not just snapshots); tightening the write
-  sandbox against symlink escapes (a `canonicalize` primitive).
+- 🟡 **MCP tooling** — ✅ the write sandbox is **symlink-escape-proof** (shipped
+  2026-07-23): a new `canonicalize` primitive (real-path resolution — symlinks
+  + `.`/`..`, works for not-yet-existing targets) backs a second sandbox gate
+  in `mcp--project-path`, so a project-relative `..`-free path that resolves out
+  of the tree through a symlinked directory is now rejected, not just the
+  lexical cases (`crates/lisp/tests/mcp_sandbox.rs`). ⬜ Still: a
+  streaming/progress-notification tier for long-running tool output; exposing
+  GC/process *traces* (not just snapshots).
 
 ### Editor (M2) & display (M3)
 
