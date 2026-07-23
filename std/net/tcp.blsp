@@ -9,7 +9,16 @@
 ;;   [:tcp sock data]            inbound data on a connected socket — a `bytes`
 ;;                               value in binary mode (`tcp-set-binary`), a UTF-8
 ;;                               string in text mode (the default)
-;;   [:tcp-closed sock]          that socket reached EOF / errored
+;;   [:tcp-closed sock]          that socket reached EOF / errored. NOTE the peer
+;;                               closing its SEND side is a half-close — the write
+;;                               side stays usable (a server can still reply). So
+;;                               `[:tcp-closed]` does not free the socket; call
+;;                               `(tcp-close sock)` when you're done with it. A
+;;                               per-connection handler process that exits frees
+;;                               its sockets automatically (owner-death reclaim),
+;;                               so the serve-loop pattern needs no explicit close;
+;;                               a long-lived process handling sockets directly
+;;                               should close them to avoid holding fds.
 ;;   [:tcp-accept lsock client]  a new connection on a listener (client is wired
 ;;                               to the same owner, so its [:tcp …] arrive here too)
 ;;

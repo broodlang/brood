@@ -5868,6 +5868,59 @@ all-elements-are-`(name value)`-pairs shape (a genuinely-flat odd `(let (a)
 catchable in-language via `read-string`); the "Coming from Clojure" table in
 language.md gains rows.
 
+## 2026-07-23 — Adversarial validation pass over the day's work: 7 real fixes
+
+Three parallel adversarial reviews (the net reactor, the wasm host, the
+finish-the-partials Rust) plus hands-on probing turned up seven genuine
+issues; all fixed, none left open above LOW.
+
+**Sandbox / DoS (the important ones):**
+- **`canonicalize` didn't resolve a `..` in the non-existent tail** — it broke
+  out of the ancestor loop on the first `..` (`Path::file_name()` is None for
+  `..`) and fell to a lexical-only fallback that *skipped symlink resolution*.
+  So `canonicalize("/link/x/../../../etc")` returned the deceptive
+  `/real/x/../../../etc` (which `starts_with("/real")` accepts) instead of the
+  true `/etc`. A real bare-`starts_with` sandbox-escape hole in the primitive
+  (the MCP caller was safe only because `mcp--safe-rel?` rejects `..` first).
+  Rewritten to canonicalize the longest existing prefix, then resolve the
+  symlink-free tail's `..`/`.` against it — the result is now `..`-free and
+  safe. `mcp_sandbox.rs` gains the escape regression.
+- **WASM had no memory limit** — fuel meters instructions, not space, so a
+  component declaring a huge `memory` (or one `memory.grow`) could OOM the
+  host for ~1 fuel unit. Added a per-store `ResourceLimiter` (256 MiB cap) and
+  a 64 MiB load-input cap. `wasm_test.blsp` pins that a 327 MiB-memory
+  component is denied at load.
+- **TLS outbound had no `OUT_CAP`** — the plaintext path capped queued bytes at
+  16 MiB but the TLS path fed rustls's writer unboundedly, so a stuck HTTPS
+  reader grew `sendable_tls` without limit (the ADR's slow-reader bound was
+  silently false for TLS). Added `pending_out` accounting that drops the
+  connection past `OUT_CAP` while backed up.
+
+**Correctness:**
+- **`nest format --changed` silently skipped new files in a new directory** —
+  plain `git status --porcelain` collapses a wholly-untracked dir to `?? dir/`;
+  a `.blsp` filter then dropped it. Added `-uall`. Regression in
+  `format_changed.rs`.
+- **Host-panic hardening missed `collect_register_sig_forms`** — a deep
+  `(do (do …))` chain could still SIGSEGV it (a stack overflow `catch_unwind`
+  can't catch), defeating the pass. Wrapped in `stacker::maybe_grow`;
+  `checker_survives_pathologically_deep_forms` gains a deep-`do` case.
+- **`%git-changed-files` threw when git couldn't spawn** — a box without `git`
+  errored `nest format --changed` instead of falling back to whole-project.
+  Now maps a spawn error to `:not-a-repo`.
+- **Poison-tolerant wasm locks + a nested-`option` rejection** — the wasm
+  registry/instance mutexes now recover from a poisoned guard (a one-off panic
+  can't turn every future call into a hard panic), and an ambiguous
+  `option<option<T>>` marshal is rejected rather than silently collapsing `nil`.
+
+**Documented, not code-changed (LOW / by-design):** a peer half-close leaves a
+plaintext socket's fd until an explicit `tcp-close` (documented in
+`std/net/tcp.blsp` — the serve-loop's per-connection process reclaims it on
+exit); a WASM instance is a manual resource with no GC finalizer yet
+(documented in `std/wasm.blsp`); `mcp-progress` only fires on the dispatcher
+thread. Deferred as tracked follow-ups: a WASM instance finalizer (process/GC
+reap), TLS half-close symmetry + lossy close_notify under backpressure.
+
 ## 2026-07-23 — MCP streaming/progress tier
 
 A long `nest mcp` tool (a `check` over a big project) used to be one silent

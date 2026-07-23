@@ -8899,6 +8899,17 @@ processes were always the right consumer model on top (mailbox delivery,
 runtime substrate under the boxcar bar: the readiness layer, no
 Lisp-callable behaviour.
 
+**Hardened 2026-07-23** (the validation pass): TLS outbound gained the same
+`OUT_CAP` accounting the plaintext path had (a stuck HTTPS reader could grow
+rustls's writer buffer unboundedly), and a plaintext `OUT_CAP` breach now
+notifies the current subscriber even on an unclaimed socket. **Documented
+by-design:** a peer half-close leaves a plaintext fd until an explicit
+`tcp-close` (`std/net/tcp.blsp`; the serve-loop's per-connection process
+reclaims it on exit). **Deferred (LOW):** TLS half-close symmetry with
+plaintext (a TLS server can't reply to a client that close_notify'd before
+reading), and a lossy `close_notify` if the socket is write-backed-up at
+teardown.
+
 ## ADR-144 — The dirty-native offload pool: blocking natives park a process, not a worker
 
 **Decision.** BEAM dirty-scheduler parity via the ADR-059 seam, not scheduler
@@ -8976,7 +8987,14 @@ package-manager `:native` manifest/lock/build-on-fetch integration
 (`%wasm-build`), WASI capability grants (deny-by-default stays until then),
 guest `resource` handles (opaque stateful guest objects), epoch-based
 preemption of in-flight calls, and `Value::Bytes` zero-copy into linear
-memory.
+memory. **Hardened 2026-07-23** (the validation pass): a per-store
+`ResourceLimiter` (256 MiB) + a 64 MiB load-input cap close the fuel-doesn't-
+bound-memory OOM hole; the registry/instance locks are poison-tolerant; a
+`option<option<T>>` marshal is rejected (nil can't distinguish the two levels).
+**Still deferred:** an instance **finalizer** — today a `%wasm-load`ed
+instance is a manual resource freed only by `%wasm-close` (no process/GC reap;
+auto-reap-on-owner-death was rejected as a footgun given no ownership-transfer
+op), so a load-without-close leaks.
 
 ## ADR-146 — Module privacy is enforced; `(:use-internals mod)` is the grant
 

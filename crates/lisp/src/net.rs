@@ -303,6 +303,14 @@ struct TlsConn {
     read_done: bool,
     closing: Option<Instant>,
     registered: bool,
+    /// Plaintext bytes handed to the rustls writer since it was last fully
+    /// flushed to the socket — the TLS counterpart of the plaintext `OutQ.total`.
+    /// rustls's writer buffers without bound, so a stuck TLS reader would grow
+    /// its `sendable_tls` unboundedly; when this exceeds [`OUT_CAP`] while the
+    /// socket is backed up, the connection is dropped (the same slow-reader
+    /// bound the plaintext path enforces). Reset to 0 once `wants_write()` is
+    /// false (everything drained).
+    pending_out: usize,
     /// `tls-request` semantics: errors emit `[:tcp-error]` instead of
     /// `[:tcp-closed]`, and a missing close_notify at EOF is tolerated.
     one_shot: bool,
@@ -678,6 +686,11 @@ fn drive_tls(
                 Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
             }
         }
+        // Fully drained to the socket → the OUT_CAP accounting resets (rustls's
+        // buffer is empty again).
+        if !c.conn.wants_write() {
+            c.pending_out = 0;
+        }
         if c.closing.is_some() && !c.conn.wants_write() {
             return tls_finish(id, c, None);
         }
@@ -815,6 +828,7 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                         read_done: false,
                         closing: None,
                         registered: false,
+                        pending_out: 0,
                         one_shot: true,
                     };
                     sync_tls_registration(id, &mut c, registry);
@@ -845,6 +859,7 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                             read_done: false,
                             closing: None,
                             registered: false,
+                            pending_out: 0,
                             one_shot: false,
                         };
                         sync_tls_registration(id, &mut c, registry);
@@ -866,8 +881,11 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                 Some(Rx::Plain(c)) => {
                     if c.out.total + bytes.len() > OUT_CAP {
                         // A stuck reader: drop the connection rather than
-                        // buffer without bound.
-                        if c.reading && !c.read_done {
+                        // buffer without bound. Notify the current subscriber
+                        // regardless of whether reads were started (an unclaimed
+                        // accepted socket write-bombed here would otherwise drop
+                        // silently — Finding 5).
+                        if !c.read_done {
                             c.sink.emit(tcp_closed_msg(id));
                             c.read_done = true;
                         }
@@ -880,8 +898,25 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                     }
                 }
                 Some(Rx::Tls(c)) => {
-                    let _ = c.conn.writer().write_all(&bytes);
-                    drive_tls(id, c, false, true, registry)
+                    // Bound the plaintext handed to rustls (whose writer buffers
+                    // without limit): once we're backed up (`wants_write`) and
+                    // past OUT_CAP, drop rather than grow `sendable_tls` forever.
+                    if c.conn.wants_write() && c.pending_out + bytes.len() > OUT_CAP {
+                        if !c.read_done {
+                            if c.one_shot {
+                                c.sink
+                                    .emit(tcp_error_msg(id, "tls: outbound buffer overflow"));
+                            } else {
+                                c.sink.emit(tcp_closed_msg(id));
+                            }
+                            c.read_done = true;
+                        }
+                        true
+                    } else {
+                        c.pending_out += bytes.len();
+                        let _ = c.conn.writer().write_all(&bytes);
+                        drive_tls(id, c, false, true, registry)
+                    }
                 }
                 _ => false,
             };

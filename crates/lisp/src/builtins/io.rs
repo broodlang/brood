@@ -889,16 +889,18 @@ pub(super) fn file_exists(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 }
 
 /// `(canonicalize path)` — the real absolute path of `path` with **symlinks and
-/// `.`/`..` resolved**. Works for a not-yet-existing target: the longest
-/// existing ancestor is `fs::canonicalize`d (which resolves every symlink in
-/// it), then the remaining components are appended lexically. Relative paths are
-/// taken against the cwd. Returns nil if not even the cwd/root resolves. The
-/// primitive behind symlink-escape-proof path sandboxing (`std/tool/mcp.blsp`).
+/// `.`/`..` fully resolved**. Works for a not-yet-existing target: the longest
+/// existing prefix is `fs::canonicalize`d (which resolves every symlink in it,
+/// the POSIX-correct way — a `..` after a symlink resolves against the symlink's
+/// target, not lexically), then the non-existent tail (which has no symlinks) is
+/// resolved lexically against that canonical prefix (`..` pops, `.` drops). So
+/// the result never contains a `..`/`.` and is safe for a plain `starts_with`
+/// sandbox check. Relative paths are taken against the cwd. Returns nil only if
+/// the cwd can't be read. Backs symlink-escape-proof path sandboxing
+/// (`std/tool/mcp.blsp`).
 pub(super) fn path_canonicalize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use std::path::{Component, Path, PathBuf};
     let path = expect_string(heap, "canonicalize", arg(args, 0))?;
-    // Make absolute against the cwd first, then normalize `.`/`..`/`//`
-    // lexically so the ancestor walk below sees clean components.
     let raw = Path::new(&path);
     let abs = if raw.is_absolute() {
         raw.to_path_buf()
@@ -908,44 +910,40 @@ pub(super) fn path_canonicalize(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
             Err(_) => return Ok(Value::nil()),
         }
     };
-    // Try to canonicalize progressively-shorter prefixes; append the popped
-    // tail. `fs::canonicalize` resolves every symlink in the prefix, so a
-    // symlinked directory anywhere in the existing part is followed to its
-    // real location — which is exactly what a sandbox check must see.
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut cur: PathBuf = abs.clone();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(&cur) {
-            let mut out = real;
-            for seg in tail.iter().rev() {
-                out.push(seg);
+    // Apply the (symlink-free) non-existent tail components to `base` with real
+    // `..`/`.` semantics — the tail can't contain symlinks (it doesn't exist),
+    // so lexical resolution against the canonical `base` is correct.
+    let apply_tail = |mut base: PathBuf, tail: &[Component]| -> PathBuf {
+        for c in tail {
+            match c {
+                Component::ParentDir => {
+                    base.pop();
+                }
+                Component::CurDir => {}
+                other => base.push(other.as_os_str()),
             }
+        }
+        base
+    };
+    // Find the longest existing PREFIX (by component count) and canonicalize it;
+    // fs::canonicalize needs the whole path to exist, so shrink until it does.
+    // For an absolute path this always succeeds by k=1 (the root). Rebuilding the
+    // prefix each step is O(n²) in components, but paths are short.
+    let comps: Vec<Component> = abs.components().collect();
+    for k in (1..=comps.len()).rev() {
+        let mut prefix = PathBuf::new();
+        for c in &comps[..k] {
+            prefix.push(c.as_os_str());
+        }
+        if let Ok(real) = std::fs::canonicalize(&prefix) {
+            let out = apply_tail(real, &comps[k..]);
             return Ok(heap.alloc_string(&out.to_string_lossy()));
         }
-        match cur.file_name() {
-            Some(name) => {
-                tail.push(name.to_os_string());
-                if !cur.pop() {
-                    break;
-                }
-            }
-            None => break, // reached the root and it still didn't canonicalize
-        }
     }
-    // Fallback: nothing canonicalized (e.g. a path with no existing ancestor on
-    // a broken mount). Return the lexically-normalized absolute path so callers
-    // still get a stable answer rather than nil.
-    let mut normalized = PathBuf::new();
-    for comp in abs.components() {
-        match comp {
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::CurDir => {}
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    Ok(heap.alloc_string(&normalized.to_string_lossy()))
+    // Nothing (not even the root) canonicalized — a broken mount. Fall back to a
+    // purely lexical normalization so callers still get a stable, `..`-free path.
+    let out = apply_tail(PathBuf::new(), &comps);
+    Ok(heap.alloc_string(&out.to_string_lossy()))
 }
 
 /// `(dir? path)` — true if `path` exists and is a directory.
@@ -1466,15 +1464,22 @@ pub(super) fn git_changed_files(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     // `--porcelain -z` gives stable, NUL-terminated `XY <path>` records (a rename
     // adds a second NUL-separated path; we take the destination). Run from the
     // repo TOP so paths are root-relative and match what the caller walks.
-    let top = run_git(&["-C", &dir, "rev-parse", "--show-toplevel"], None)?;
-    if !top.status.success() {
-        return not_a_repo(); // not a git work tree
-    }
+    // `-uall` lists each untracked FILE individually — without it git collapses a
+    // wholly-untracked directory to `?? dir/`, so brand-new files in a new
+    // directory would be reported as the directory and dropped by a `.blsp`
+    // filter (a `nest format --changed` would silently skip them).
+    // A missing/un-spawnable `git` is treated as "not a repo" too (so a box
+    // without git falls back to whole-project formatting, not a hard error) —
+    // only a non-zero *exit* on a real git means a genuine "not a work tree".
+    let top = match run_git(&["-C", &dir, "rev-parse", "--show-toplevel"], None) {
+        Ok(o) if o.status.success() => o,
+        _ => return not_a_repo(),
+    };
     let root = String::from_utf8_lossy(&top.stdout).trim().to_string();
-    let out = run_git(&["-C", &root, "status", "--porcelain", "-z"], None)?;
-    if !out.status.success() {
-        return not_a_repo();
-    }
+    let out = match run_git(&["-C", &root, "status", "--porcelain", "-z", "-uall"], None) {
+        Ok(o) if o.status.success() => o,
+        _ => return not_a_repo(),
+    };
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut paths: Vec<Value> = Vec::new();
     // Records are NUL-separated; each is `XY <path>` (3+ chars). A rename/copy

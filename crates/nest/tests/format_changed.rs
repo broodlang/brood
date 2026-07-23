@@ -94,6 +94,22 @@ fn format_changed_only_touches_git_changed_files() {
         std::fs::read_to_string(root.join("src/b.blsp")).unwrap(),
         "(defn b () 2)\n"
     );
+
+    // Regression: a brand-new file in a brand-new (wholly-untracked) directory
+    // must be seen. Plain `git status --porcelain` collapses that to `?? dir/`;
+    // `-uall` lists the file, so `--changed` catches it.
+    std::fs::create_dir_all(root.join("src/fresh")).unwrap();
+    write(&root.join("src/fresh/c.blsp"), "(defn   c   () 3)\n");
+    let fresh = nest_format_changed(root);
+    assert!(
+        fresh.contains("1 changed file considered"),
+        "a new file in a new untracked dir must be considered, got:\n{fresh}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/fresh/c.blsp")).unwrap(),
+        "(defn c () 3)\n",
+        "the new-dir file should have been reformatted"
+    );
 }
 
 #[test]

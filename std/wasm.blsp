@@ -30,7 +30,10 @@ calls go through the dirty-offload pool (`wasm-call-blocking`)."
 
 (defn wasm-load (path)
   "Instantiate the compiled WASM component at `path` (a `.wasm` file). Returns
-an instance handle for `wasm-call`/`use-native`; `wasm-close` frees it."
+an instance handle for `wasm-call`/`use-native`. An instance is a **manual
+resource** — its store, code, and linear memory live until you `wasm-close` it
+(there is no GC finalizer yet), so `wasm-load` in a loop without closing leaks.
+Load once and reuse for a long-lived codec; close a short-lived one."
   (%wasm-load (slurp-bytes path)))
 
 (defn wasm-instantiate (source)

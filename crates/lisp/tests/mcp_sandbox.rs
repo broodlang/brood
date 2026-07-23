@@ -118,6 +118,21 @@ fn canonicalize_resolves_symlinks_and_nonexistent_tails() {
         format!("\"{}/d/f.txt\"", real_base.to_string_lossy())
     );
 
+    // `..` in the NON-EXISTENT tail, behind a symlink, must resolve too — else a
+    // bare `starts_with` sandbox check is escapable. `link/x/../../../out` climbs
+    // out of the symlink target entirely; the result must NOT be under `base`.
+    let escape = interp
+        .eval_str(&format!(
+            "(canonicalize (str {} \"/link/x/../../../../escaped\"))",
+            lit(&base)
+        ))
+        .unwrap();
+    let escaped = interp.print(escape);
+    assert!(
+        !escaped.contains("/link/") && !escaped.contains(".."),
+        "canonicalize must fully resolve `..` in the tail (no literal `..`, no symlink name): {escaped}"
+    );
+
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&outside);
 }

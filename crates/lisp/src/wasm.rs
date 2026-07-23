@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use wasmtime::component::{Component, Func, Linker, Type, Val};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, Value};
@@ -35,15 +35,52 @@ use crate::error::{LispError, LispResult};
 /// abstract ops) while still bounding a runaway guest to well under a second.
 const FUEL_PER_CALL: u64 = 2_000_000_000;
 
+/// Per-instance linear-memory + table cap. Fuel meters *instructions*, not
+/// space — without this a component that declares a huge `memory` or runs one
+/// `memory.grow` could OOM the host for ~1 fuel unit. 256 MiB is generous for a
+/// codec/parser (the intended use) while keeping one guest from exhausting host
+/// RAM; a real consumer that needs more sets it deliberately later.
+const MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+/// Cap the source handed to `Component::new` — compiling/validating an
+/// arbitrarily large blob is unmetered CPU + memory at load time.
+const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
+
+/// The store's host data: the resource limiter fuel can't provide.
+struct HostState {
+    limits: StoreLimits,
+}
+
 struct WasmInst {
-    store: Store<()>,
+    store: Store<HostState>,
     /// name → (callable, param types, result types), resolved at load.
     exports: HashMap<String, (Func, Box<[Type]>, Box<[Type]>)>,
+}
+
+/// A fresh store with the memory/table limiter armed.
+fn new_store(engine: &Engine) -> Store<HostState> {
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(MAX_MEMORY_BYTES)
+        .build();
+    let mut store = Store::new(engine, HostState { limits });
+    store.limiter(|s| &mut s.limits);
+    store
 }
 
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<Mutex<WasmInst>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The registry lock, poison-tolerant: a panic while another thread held it
+/// must not turn every future wasm op into a hard panic (the "must Err, never
+/// panic" bar). The map is plain data, so a poisoned guard is still usable.
+fn reg() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<Mutex<WasmInst>>>> {
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Lock one instance, poison-tolerant (see [`reg`]).
+fn lock_inst(inst: &Arc<Mutex<WasmInst>>) -> std::sync::MutexGuard<'_, WasmInst> {
+    inst.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The shared engine: fuel metering on, Cranelift, built once.
 fn engine() -> &'static Engine {
@@ -62,14 +99,23 @@ fn wasm_err(who: &str, e: impl std::fmt::Display) -> LispError {
 /// Instantiate a component from source bytes (a compiled `.wasm` component or
 /// WAT text — `wasmtime` accepts both). Returns the registry token.
 pub fn load(src: &[u8]) -> Result<u64, LispError> {
+    if src.len() > MAX_COMPONENT_BYTES {
+        return Err(wasm_err(
+            "%wasm-load",
+            format!(
+                "component is {} bytes, over the {MAX_COMPONENT_BYTES}-byte load cap",
+                src.len()
+            ),
+        ));
+    }
     let engine = engine();
     let component = Component::new(engine, src).map_err(|e| wasm_err("%wasm-load", e))?;
-    let mut store = Store::new(engine, ());
+    let mut store = new_store(engine);
     // Instantiation may run start functions — meter it like a call.
     store
         .set_fuel(FUEL_PER_CALL)
         .map_err(|e| wasm_err("%wasm-load", e))?;
-    let linker: Linker<()> = Linker::new(engine);
+    let linker: Linker<HostState> = Linker::new(engine);
     let instance = linker
         .instantiate(&mut store, &component)
         .map_err(|e| wasm_err("%wasm-load", e))?;
@@ -94,17 +140,14 @@ pub fn load(src: &[u8]) -> Result<u64, LispError> {
         }
     }
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    REGISTRY
-        .lock()
-        .expect("wasm registry")
-        .insert(id, Arc::new(Mutex::new(WasmInst { store, exports })));
+    reg().insert(id, Arc::new(Mutex::new(WasmInst { store, exports })));
     Ok(id)
 }
 
 /// The exported functions of instance `id`: `(name, arity)` pairs.
 pub fn exports(id: u64) -> Result<Vec<(String, usize)>, LispError> {
     let inst = instance(id)?;
-    let inst = inst.lock().expect("wasm instance");
+    let inst = lock_inst(&inst);
     let mut out: Vec<(String, usize)> = inst
         .exports
         .iter()
@@ -117,13 +160,11 @@ pub fn exports(id: u64) -> Result<Vec<(String, usize)>, LispError> {
 /// Drop instance `id` (idempotent). The store — and everything the guest
 /// owns — is freed when the last in-flight call releases it.
 pub fn close(id: u64) {
-    REGISTRY.lock().expect("wasm registry").remove(&id);
+    reg().remove(&id);
 }
 
 fn instance(id: u64) -> Result<Arc<Mutex<WasmInst>>, LispError> {
-    REGISTRY
-        .lock()
-        .expect("wasm registry")
+    reg()
         .get(&id)
         .cloned()
         .ok_or_else(|| LispError::runtime("%wasm-call: no such wasm instance (already closed?)"))
@@ -135,7 +176,7 @@ fn instance(id: u64) -> Result<Arc<Mutex<WasmInst>>, LispError> {
 /// is a catchable error.
 pub fn call(heap: &mut Heap, id: u64, name: &str, args: &[Value]) -> LispResult {
     let inst = instance(id)?;
-    let mut inst = inst.lock().expect("wasm instance");
+    let mut inst = lock_inst(&inst);
     let (func, param_tys, result_tys) = match inst.exports.get(name) {
         Some(entry) => (entry.0, entry.1.clone(), entry.2.clone()),
         None => {
@@ -265,10 +306,22 @@ fn lower(heap: &mut Heap, who: &str, v: Value, ty: &Type) -> Result<Val, LispErr
             }
             Val::Tuple(out)
         }
-        Type::Option(o) => match v {
-            Value::Nil => Val::Option(None),
-            some => Val::Option(Some(Box::new(lower(heap, who, some, &o.ty())?))),
-        },
+        Type::Option(o) => {
+            // `option<option<T>>` is ambiguous through Brood: `nil` is the only
+            // "none", so an outer None and an inner None collapse. Reject it
+            // rather than silently mis-marshal (a `some(none)` would be
+            // unreachable). A caller that needs it should use a `result`/variant.
+            if matches!(o.ty(), Type::Option(_)) {
+                return Err(LispError::runtime(format!(
+                    "{who}: nested `option<option<…>>` is not representable (nil is the only \
+                     none, so the two levels collapse) — use a result/variant"
+                )));
+            }
+            match v {
+                Value::Nil => Val::Option(None),
+                some => Val::Option(Some(Box::new(lower(heap, who, some, &o.ty())?))),
+            }
+        }
         other => {
             return Err(LispError::runtime(format!(
                 "{who}: unsupported WIT parameter type {other:?} (this slice marshals \

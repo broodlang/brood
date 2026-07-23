@@ -195,6 +195,16 @@ fn register_declared_sig(heap: &Heap, ctx: &mut Ctx, file_ns: Option<&str>, form
 /// form needs `&mut Heap`; GC is blocked for the whole check, so the pushed handles
 /// stay live.
 fn collect_register_sig_forms(heap: &mut Heap, form: Value, out: &mut Vec<Value>) {
+    // Recurses through nested `(do (do …))`; a deep-but-legal chain would blow
+    // the native stack (a SIGSEGV `catch_unwind` can't catch — the sibling of
+    // the walk.rs/recursion.rs hardening). Grow the stack in heap-backed
+    // segments like the rest.
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        collect_register_sig_forms_inner(heap, form, out)
+    })
+}
+
+fn collect_register_sig_forms_inner(heap: &mut Heap, form: Value, out: &mut Vec<Value>) {
     let Ok(items) = heap.list_to_vec(form) else {
         return;
     };
@@ -834,6 +844,19 @@ mod tests {
         // No assertion on the warning list's content — the property under test
         // is "returns instead of crashing the host".
         let _ = check_file(&mut interp.heap, &[form]);
+
+        // A deep `(do (do … (%register-sig …)))` chain exercises the OTHER
+        // recursive walker, `collect_register_sig_forms` (the one the initial
+        // hardening pass missed): it must grow the stack too, not SIGSEGV.
+        let do_sym = crate::core::value::intern("do");
+        let mut deep_do = Value::Nil; // an empty innermost `(do)`
+        for _ in 0..30_000 {
+            let inner = interp.heap.alloc_pair(Value::Sym(do_sym), deep_do);
+            let tail = interp.heap.alloc_pair(inner, Value::Nil);
+            deep_do = tail;
+        }
+        let top = interp.heap.alloc_pair(Value::Sym(do_sym), deep_do);
+        let _ = check_file(&mut interp.heap, &[top]);
     }
 
     /// `warnings` but with macroexpansion — what `(check 'form)` and

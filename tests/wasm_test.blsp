@@ -119,7 +119,15 @@
       (wasm-close inst)   ; idempotent
       (is (= (try (wasm-call inst "add" 1 2) (catch e :closed)) :closed))))
   (test "garbage source is a clean load error"
-    (is (= (try (wasm-instantiate "(component (bogus") (catch e :bad)) :bad))))
+    (is (= (try (wasm-instantiate "(component (bogus") (catch e :bad)) :bad)))
+  (test "a component demanding memory past the 256 MiB cap fails to load (not OOM)"
+    ;; 5000 pages * 64 KiB = ~327 MiB initial memory > the per-instance limiter
+    ;; cap — instantiation must be denied cleanly (fuel bounds instructions, the
+    ;; ResourceLimiter bounds space). Without the limiter this reserved 327 MiB.
+    (let (huge "(component
+                  (core module $m (memory (export \"m\") 5000))
+                  (core instance $i (instantiate $m)))")
+      (is (= (try (do (wasm-instantiate huge) :loaded) (catch e :denied)) :denied)))))
 
 (describe "wasm: use-native binds exports as Brood functions"
   (test "bound names call straight through"
