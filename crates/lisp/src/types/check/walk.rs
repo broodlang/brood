@@ -49,6 +49,16 @@ fn is_gensym_sym(s: Symbol) -> bool {
         .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// The finding position for a call **argument**: the argument's own source
+/// position when it has one (a nested call / vector — the reader positions
+/// pairs, so `(string-length (+ 1 2))` anchors the type finding at `(+ 1 2)`,
+/// not the call head), falling back to the whole call form for a bare literal
+/// or symbol (which the pair-keyed position table doesn't record). Finer LSP /
+/// `nest check` spans without threading `Pos` through the whole walk.
+fn arg_pos(heap: &Heap, arg: Value, form: Value) -> Option<crate::error::Pos> {
+    heap.form_pos_only(arg).or_else(|| heap.form_pos_only(form))
+}
+
 /// The arity of a callback argument, when it can be determined *unambiguously* —
 /// the input to the callback-arity check (ADR-078). A named **global** function
 /// (its arity lives in the heap) or a simple single-clause lambda literal yields
@@ -893,8 +903,9 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                         g.bound,
                         crate::syntax::printer::print(heap, arg),
                     );
-                    // Locate to the call form (a Pair the reader positioned).
-                    out.push((heap.form_pos_only(form), msg));
+                    // Anchor at the offending ARGUMENT when it's a positioned
+                    // sub-form (a nested call), else the call form.
+                    out.push((arg_pos(heap, arg, form), msg));
                 }
 
                 // Callback-arity check (ADR-078 arrows): when the parameter is a
@@ -920,7 +931,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                                     callback_desc(arg),
                                     arity_str(cb),
                                 );
-                                out.push((heap.form_pos_only(form), msg));
+                                out.push((arg_pos(heap, arg, form), msg));
                             }
                         }
                     }

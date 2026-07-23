@@ -165,3 +165,49 @@ fn checker_is_silent_on_every_should_not_warn_case() {
         );
     }
 }
+
+/// The (line, col) of the first warning for `src` whose message contains
+/// `needle`, or None. Uses the positioned `check_file` output directly.
+fn warning_pos(src: &str, needle: &str) -> Option<(u32, u32)> {
+    let mut interp = Interp::new();
+    let forms = brood::syntax::reader::read_all(&mut interp.heap, src).expect("parse");
+    check_file(&mut interp.heap, &forms)
+        .into_iter()
+        .find(|(_, m)| m.contains(needle))
+        .and_then(|(p, _)| p.map(|p| (p.line, p.col)))
+}
+
+/// Finer finding spans (2026-07-23): a type/callback-arity finding anchors at
+/// the offending ARGUMENT when it is a positioned sub-form (a nested call),
+/// not the call head.
+#[test]
+fn type_findings_anchor_at_the_offending_argument() {
+    // `(+ 10 20)` starts at column 16; the call head `string-length` at 1.
+    // Before the fix this pointed at column 1.
+    let src = "(string-length (+ 10 20))";
+    let (line, col) = warning_pos(src, "string-length").expect("a warning");
+    assert_eq!(line, 1);
+    assert_eq!(
+        col, 16,
+        "the type finding should anchor at the argument `(+ 10 20)` (col 16), not the call head"
+    );
+
+    // A callback-arity finding likewise points at the callback argument.
+    // `(fn (a b) a)` is the second token after `(map ` → column 6.
+    let cb = "(map (fn (a b) a) (list 1 2 3))";
+    let (l2, c2) = warning_pos(cb, "callback").expect("a callback warning");
+    assert_eq!(l2, 1);
+    assert_eq!(
+        c2, 6,
+        "the callback finding should anchor at the lambda argument"
+    );
+
+    // A bare (unpositioned) literal argument falls back to the call form.
+    let lit = "(string-length 42)";
+    let (l3, c3) = warning_pos(lit, "string-length").expect("a warning");
+    assert_eq!(
+        (l3, c3),
+        (1, 1),
+        "a bare-literal arg falls back to the call head"
+    );
+}

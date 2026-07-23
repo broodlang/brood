@@ -613,10 +613,14 @@ Runtime housekeeping (both items landed):
   (returns the paths, or `:not-a-repo`); falls back to the whole project
   outside a git repo, and `--check` still scans everything (CI's clean-tree
   gate). `crates/nest/tests/format_changed.rs`.
-- 🟡 **LSP** — tiers 0–2 ship; still next: incremental sync; range/delta semantic
-  tokens; **finer finding spans** (arity/type findings anchor to the call head, not
-  the offending argument — wants `Pos` threaded through `types/check.rs`'s walk); and
-  a **create-missing-`defn`** code action.
+- 🟡 **LSP** — tiers 0–2 ship. ✅ **finer finding spans** shipped 2026-07-23:
+  a type-mismatch / callback-arity finding now anchors at the offending
+  **argument** when it is a positioned sub-form (a nested call —
+  `(string-length (+ 1 2))` points at `(+ 1 2)`), falling back to the call
+  head only for a bare literal/symbol (which the pair-keyed position table
+  doesn't record). No `Pos`-threading rewrite needed — the argument value
+  already carries its position. ⬜ Still next: incremental sync; range/delta
+  semantic tokens; a **create-missing-`defn`** code action.
 - 🟡 **Errors that teach (LLM-native)** ([`docs/llm-native.md`](docs/llm-native.md))
   — first instances landed. ✅ **reader-level hints** for the Clojure/Scheme
   syntax the reader mis-parses shipped 2026-07-23: `#{…}` (set literal),

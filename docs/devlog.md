@@ -5870,6 +5870,18 @@ all-elements-are-`(name value)`-pairs shape (a genuinely-flat odd `(let (a)
 catchable in-language via `read-string`); the "Coming from Clojure" table in
 language.md gains rows.
 
+**Finer type/arity finding spans (LSP/`nest check`).** A type-mismatch or
+callback-arity finding anchored at the call head — so `(string-length (+ 1
+2))` underlined `string-length`, not the actually-wrong `(+ 1 2)`. It now
+anchors at the offending **argument** when the argument is a positioned
+sub-form (the reader positions pairs, so a nested call gets a precise span),
+falling back to the call form only for a bare literal/symbol (the pair-keyed
+position table records no position for those, and the call head is the
+closest anchor anyway). One `arg_pos` helper, no `Pos`-threading rewrite —
+the argument `Value` already carries its position. `type_check_catalog.rs`
+pins the column (`(+ 10 20)` at col 16, the lambda callback at col 6, a bare
+literal falling back to col 1).
+
 **Symlink-escape-proof MCP write sandbox.** The `nest mcp` write/edit tools
 gated paths purely lexically (reject absolute/`~`/`..`) — which the code
 itself flagged as missing symlink resolution: a project-relative, `..`-free
