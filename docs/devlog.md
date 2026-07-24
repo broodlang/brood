@@ -6896,3 +6896,57 @@ JIT-differential + `BROOD_JIT_DUMP_IR` + benchmark verification.
 
 Verified (prepass): compiles default + no-default-features; differential 2/2,
 jit 34/34 (under JIT_VERIFY); full suite 3071/3071.
+
+## 2026-07-24 — adversarial pass over `nest`: five real bugs, two of them serious
+
+Wrote a fuzz harness (~50 nasty argument values × every flag and positional, plus
+malformed manifests and malformed sources) and looked for hard failures: panics,
+hangs, string-interpolation escapes, and internal traces surfaced for user errors.
+No panics and no hangs anywhere. **No injection anywhere** either — verified with a
+computing oracle (a payload that prints `24690` if evaluated, so an error message
+merely *echoing* the payload can't be mistaken for evaluation);
+`escape_brood_string` / `blsp_string` hold across every command.
+
+Five genuine bugs, found in roughly increasing order of seriousness:
+
+1. **`nest format` silently RESTRUCTURED code that didn't parse.** The worst of the
+   set. The CST the formatter walks is lossless and error-*tolerant*, so it happily
+   represents an unclosed list — and its recovery rewrote the file. Given a
+   `(defn f …` whose paren was never closed followed by a top-level `(defn g …)`,
+   formatting moved `g` **inside** `f` and appended the missing paren at the end.
+   Being mid-edit with an unclosed paren is completely routine, and format-on-save
+   makes it automatic. `format-file` now gates on the STRICT reader
+   (`format--parses?` — the tolerant CST cannot answer this) and returns
+   `:unparseable`, leaving the file byte-identical; `format-project` reports
+   `skipped (does not parse)`, and `--check` says `does not parse` rather than
+   mislabelling it "needs formatting" (which promised a fix that would never come).
+2. **`nest add` could brick a project two different ways.** A name that isn't a
+   plain symbol was written verbatim into the manifest: `nest add "" :path ../x`
+   produced `:dependencies [[ :path "../x"]]`, which no longer parses, so *every*
+   later `nest` command failed until the file was hand-repaired. Any name with a
+   space, quote, bracket or paren did the same. Now validated by ROUND-TRIP — a name
+   is usable iff `read-first` returns the identical symbol, which also rejects a
+   numeric name without a hand-maintained character list. Separately, `add` wrote
+   the manifest *before* resolving, so `nest add foo :path ../nonexistent` left an
+   unresolvable dep behind and broke every later command; the edit is now rolled
+   back on failure, making a failed `add` a no-op.
+3. **A misspelled manifest head was silently ignored.** `(porject :name …)` — or any
+   first form that isn't `(project …)` — was skipped, so every setting in the
+   manifest was quietly dropped and the project ran on defaults. It looks like it
+   worked, which is the worst failure mode. Now an error naming the file and the
+   offending head.
+4. **`:source-paths "src"`** (a bare string instead of a vector — easy, since one
+   path is the common case) surfaced as `type error: first: expected list or vector`
+   raised from inside `map`, with nothing pointing at the manifest. Now names the
+   key and shows the fix, with the example matched to the key (suggesting `["src"]`
+   for `:test-paths` would be misleading).
+5. **An unparseable manifest didn't name the file**, and printed the raw error map.
+   Now `project: cannot parse <path> at line L, column C: <message>`.
+
+Also guarded `nest search` outside a project (the last command still leaking
+`package--in-project`'s trace).
+
+Manifest and source fuzzing produced **78 and 55 "leak" hits but zero crashes**, so
+the data handling was already robust; what the leaks were telling us was a
+diagnostics problem, which is what got fixed. 38 new regression tests
+(`package_test` 39→55, `project_test` 47→58, `format_test` 56→66).

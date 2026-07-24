@@ -16,6 +16,7 @@
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-dup-")
 (purge-stale-temp "brood-fmt-plugin-")
+(purge-stale-temp "brood-manifest-")
 
 (describe "project: :main parsing"
   (test "a bare symbol defaults the fn name to `main`"
@@ -366,3 +367,72 @@
         ; later walk: reloads edits → 2
         (project/project-load-sources root)
         (assert= *skip-load-count* 2)))))
+
+;; A malformed manifest used to be either cryptic or SILENT. `:source-paths "src"`
+;; (an easy mistake, since one path is the common case) surfaced as
+;; `type error: first: expected list or vector` raised from inside `map`, with
+;; nothing pointing at the manifest; and a first form that wasn't `(project …)` —
+;; a typo like `(porject …)` — was skipped entirely, so every setting in it was
+;; quietly ignored and the project silently ran on defaults.
+(describe "project: manifest validation"
+  (test "a vector of path strings is accepted"
+    (assert= (project/project--check-paths :source-paths ["src" "lib"]) ["src" "lib"]))
+  (test "a list of path strings is accepted"
+    (assert= (project/project--check-paths :source-paths (list "src")) (list "src")))
+  (test "a bare string is rejected, naming the key and the fix"
+    (let (msg (try (project/project--check-paths :source-paths "src") (catch e e)))
+      (and (is (string-contains? msg ":source-paths"))
+        (is (string-contains? msg "not a bare string"))
+        (is (string-contains? msg "[\"src\"]")))))
+  (test "a vector of non-strings is rejected"
+    (is (string-contains? (try (project/project--check-paths :source-paths [5]) (catch e e))
+          "must contain only strings")))
+  (test "a number is rejected"
+    (is (string-contains? (try (project/project--check-paths :test-paths 5) (catch e e))
+          "must be a vector of path strings")))
+  (test "the fix-it example matches the key it is about"
+    ;; suggesting ["src"] for :test-paths would be actively misleading
+    (is (string-contains? (try (project/project--check-paths :test-paths 5) (catch e e))
+          "[\"tests\"]"))))
+
+(describe "project: manifest loading errors point at the file"
+  :isolated
+  (test "an unparseable manifest names the file, line, and column"
+    (let (dir (temp-dir "brood-manifest-")
+          manifest (path-join dir "project.blsp"))
+      (make-dir dir)
+      (spit manifest "(project :name \"x\"\n")
+      (let (msg (try (project/project--apply-manifest manifest) (catch e e)))
+        (and (is (string-contains? msg "cannot parse"))
+          (is (string-contains? msg manifest))
+          (is (string-contains? msg "line"))))))
+  (test "an empty manifest says so rather than failing obscurely"
+    (let (dir (temp-dir "brood-manifest-")
+          manifest (path-join dir "project.blsp"))
+      (make-dir dir)
+      (spit manifest "")
+      (is (string-contains? (try (project/project--apply-manifest manifest) (catch e e))
+            "cannot parse"))))
+  (test "a first form that is not (project …) is REJECTED, not silently ignored"
+    (let (dir (temp-dir "brood-manifest-")
+          manifest (path-join dir "project.blsp"))
+      (make-dir dir)
+      (spit manifest "(porject :name \"x\")\n")
+      (let (msg (try (project/project--apply-manifest manifest) (catch e e)))
+        (and (is (string-contains? msg "must begin with a (project"))
+          (is (string-contains? msg "porject"))
+          (is (string-contains? msg "being ignored"))))))
+  (test "a non-list manifest is rejected"
+    (let (dir (temp-dir "brood-manifest-")
+          manifest (path-join dir "project.blsp"))
+      (make-dir dir)
+      (spit manifest "42\n")
+      (is (string-contains? (try (project/project--apply-manifest manifest) (catch e e))
+            "must begin with a (project"))))
+  (test "a well-formed manifest still applies"
+    (let (dir (temp-dir "brood-manifest-")
+          manifest (path-join dir "project.blsp"))
+      (make-dir dir)
+      (spit manifest "(project :name \"applied\" :version \"9.9.9\")\n")
+      (project/project--apply-manifest manifest)
+      (assert= *project-name* "applied"))))

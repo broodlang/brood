@@ -565,3 +565,32 @@
           ;; and the clone + lock landed under the app
           (is (dir? (path-join (path-join app-dir "_deps") "salutation")))
           (is (file-exists? (path-join app-dir "project.lock.blsp"))))))))
+
+;; A dependency NAME is written verbatim (unquoted) into project.blsp, so it must
+;; be a symbol that reads back as itself. Regression: `nest add "" :path ../x`
+;; wrote `:dependencies [[ :path "../x"]]` — a manifest that no longer parsed —
+;; and every later `nest` command in that project failed until it was hand-fixed.
+;; Any name with a space, quote, bracket or paren did the same.
+(describe "package: dependency-name validation (manifest safety)"
+  (test "a plain symbol name is accepted"
+    (is (package/package--valid-dep-name? "parser")))
+  (test "kebab-case is accepted" (is (package/package--valid-dep-name? "my-dep")))
+  (test "a namespaced name is accepted" (is (package/package--valid-dep-name? "net/http")))
+  (test "a non-ASCII identifier is accepted" (is (package/package--valid-dep-name? "日本語")))
+  (test "the empty string is rejected" (refute (package/package--valid-dep-name? "")))
+  (test "a space-only name is rejected" (refute (package/package--valid-dep-name? " ")))
+  (test "a name with an inner space is rejected"
+    (refute (package/package--valid-dep-name? "a b")))
+  (test "an open paren is rejected" (refute (package/package--valid-dep-name? "(")))
+  (test "a close paren is rejected" (refute (package/package--valid-dep-name? ")")))
+  (test "a quote character is rejected" (refute (package/package--valid-dep-name? "\"")))
+  (test "a bracket is rejected" (refute (package/package--valid-dep-name? "[x]")))
+  (test "a number is rejected (it reads as an int, not a symbol)"
+    (refute (package/package--valid-dep-name? "5")))
+  (test "a keyword is rejected" (refute (package/package--valid-dep-name? ":kw")))
+  (test "a non-string is rejected" (refute (package/package--valid-dep-name? 5)))
+  (test "a trailing-newline name is rejected"
+    (refute (package/package--valid-dep-name? "a\n")))
+  (test "add refuses a corrupting name before touching the manifest"
+    (is (string-contains? (try (package/add "" ":path" "../x") (catch e e))
+          "not a usable dependency name"))))

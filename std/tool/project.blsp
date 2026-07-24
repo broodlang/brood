@@ -199,6 +199,43 @@ the `nest new` scaffolder."
   ;; to `project/project-apply` at this macro's definition (ADR-065 §7).
   `(project-apply (quote ~opts)))
 
+;; `:source-paths` / `:test-paths` must be a vector (or list) of strings — they are
+;; handed straight to `map`/`path-join`. A bare string (`:source-paths "src"`, an
+;; easy mistake since one path is the common case) used to surface as
+;; `type error: first: expected list or vector, got string ("src")` raised from
+;; inside `map`, with nothing pointing at the manifest. Name the key and show what
+;; was written instead.
+(defn project--check-paths (key value)
+  ;; `example` keeps the fix-it accurate per key — suggesting ["src"] for
+  ;; :test-paths would be actively misleading.
+  (let (example (if (= key :test-paths) "[\"tests\"]" "[\"src\"]"))
+    (cond
+      (or (vector? value) (pair? value)) (if (fold (fn (ok p) (and ok (string? p))) true value)
+                                           value
+                                           (error "project: "
+                                             key
+                                             " must contain only strings, got "
+                                             (pr-str value)
+                                             " — write it as "
+                                             key
+                                             " "
+                                             example))
+      (string? value) (error "project: "
+                        key
+                        " must be a VECTOR of paths, not a bare string — write it as "
+                        key
+                        " [\""
+                        value
+                        "\"]")
+      else (error "project: "
+             key
+             " must be a vector of path strings, got "
+             (pr-str value)
+             " — write it as "
+             key
+             " "
+             example))))
+
 (defn project-apply (opts)
   (def *project-name* (plist-get opts :name))
   (def *project-version* (plist-get opts :version))
@@ -209,8 +246,8 @@ the `nest new` scaffolder."
   (let (src (plist-get opts :source-paths)
         tst (plist-get opts :test-paths)
         m (plist-get opts :main))
-    (when src (def *project-source-paths* src))
-    (when tst (def *project-test-paths* tst))
+    (when src (def *project-source-paths* (project--check-paths :source-paths src)))
+    (when tst (def *project-test-paths* (project--check-paths :test-paths tst)))
     (when m (def *project-main* (project--parse-main m))))
   (def *project-dependencies* (project-parse-deps (plist-get opts :dependencies)))
   (def *project-format-headers* (plist-get opts :format-headers))
@@ -374,16 +411,49 @@ rules merged in declaration order, then this project's own `:format-headers` on 
         own (or *project-format-headers* {}))
     (merge from-plugins own)))
 
+;; Read + apply one manifest file, with errors that point AT THE MANIFEST.
+;;
+;; Two failure modes used to be silent or cryptic:
+;;   - An unparseable manifest raised the bare reader error ("2:1: parse error:
+;;     unexpected end of input") with no indication of which file, so a stray
+;;     paren in project.blsp looked like a bug in the user's own source.
+;;   - A first form that ISN'T `(project …)` — a typo like `(porject …)`, or a
+;;     manifest someone wrapped in something — was silently skipped, so every
+;;     setting in it was quietly ignored and the project ran on defaults. That is
+;;     the worst kind of failure: it looks like it worked.
+(defn project--apply-manifest (manifest-path)
+  (let (form (try
+               (read-first (slurp manifest-path))
+               ;; A parse error arrives as a structured map; unwrap it to a
+               ;; readable `file: line L, column C: message` rather than printing
+               ;; the raw `{:message … :code … :kind :parse}` at the user.
+               (catch e
+                 (error "project: cannot parse "
+                   manifest-path
+                   (if (map? e)
+                     (str " at line "
+                       (get e :line)
+                       ", column "
+                       (get e :col)
+                       ": "
+                       (get e :message))
+                     (str ": " e))))))
+    (cond
+      (and (pair? form) (= (first form) 'project)) (project-apply (rest form))
+      (nil? form) (error "project: " manifest-path " is empty — it must hold one (project …) form")
+      else (error "project: "
+             manifest-path
+             " must begin with a (project …) form, got "
+             (pr-str (if (pair? form) (first form) form))
+             " — every setting in it is being ignored"))))
+
 (defn project-setup (root)
   (def *project-root* root)
   ;; Read the manifest as *data* and apply it — rather than `load`ing it, which
   ;; would need the `(project …)` macro bound bare in the (root) manifest file
   ;; (it now lives in this namespace). Manifests stay written `(project …)`.
   (let (mf (path-join root "project.blsp"))
-    (when (file-exists? mf)
-      (let (form (read-first (slurp mf)))
-        (when (and (pair? form) (= (first form) 'project))
-          (project-apply (rest form))))))
+    (when (file-exists? mf) (project--apply-manifest mf)))
   (def *load-path* (append (project-abs-paths root *project-source-paths*) *load-path*))
   (project--ensure-deps-on-path root)
   ;; Hand the formatter this project's (+ its plugins') macro-shape rules, so

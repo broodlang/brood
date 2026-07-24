@@ -563,7 +563,13 @@ fn run_main(cli: Cli) {
             require_project("publish", None);
             cmd_publish(&mut interp, index.as_deref())
         }
-        Cmd::Search { query, index } => cmd_search(&mut interp, &query, index.as_deref()),
+        Cmd::Search { query, index } => {
+            // `package/search` resolves the registry through the project's config,
+            // so it needs a project today. Guard it for a clean message rather than
+            // the internal `package--in-project` trace.
+            require_project("search", None);
+            cmd_search(&mut interp, &query, index.as_deref())
+        }
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => {
             require_project("mcp", None);
