@@ -1,0 +1,196 @@
+;; std/tool/coverage.blsp — FUNCTION-level test coverage, written in Brood.
+;;
+;; Answers "which of my functions did the test suite never call?" — the question
+;; that actually changes what you write next. It is NOT line coverage: a function
+;; counts as covered the moment it is entered once, however little of its body ran.
+;; See docs/coverage.md for why that tier, and what line coverage would need.
+;;
+;; ─────────────────────────────────────────────────────────────────────────────
+;; HOW IT WORKS — hot reload as the instrumentation seam
+;; ─────────────────────────────────────────────────────────────────────────────
+;; No kernel support, no compiler flag, no special build. Before the suite runs,
+;; every project function is REBOUND to a variadic shim that records a hit and
+;; forwards to the original (ADR-013 late binding makes the rebind visible to
+;; every already-loaded caller, including ones in other processes). Afterwards the
+;; hit table is compared against the set of functions the project defines.
+;;
+;; Three consequences worth knowing:
+;;
+;;   1. The shim is **variadic** (`(fn (& args) …)`), not arity-preserving. It has
+;;      to be: `arglist` reports only ONE arm of a multi-arm function, so building
+;;      a shim from it would silently break the arities it didn't see. Variadic
+;;      forwarding is correct for every shape — fixed, `&optional`, `& rest`, and
+;;      multi-arm alike. The cost is that arity errors now surface from inside the
+;;      shim rather than at the call, and that every rebind trips the hot-reload
+;;      arity diagnostic (`nest test --cover` sets `BROOD_NO_RELOAD_DIAG=1`).
+;;   2. A **self-recursive tail call is counted once**, not per iteration. The VM
+;;      compiles it to `SelfCall`, which deliberately bypasses the global lookup
+;;      (and so the shim). Fine here — coverage asks "was it entered", not "how
+;;      often" — but it means the hit COUNTS are a lower bound, not a profile.
+;;   3. Instrumentation is **observable**: it defeats JIT inlining of the wrapped
+;;      call and adds a frame. A coverage run is not a timing run.
+;;
+;; Hits live in a `Value::Table` (ADR-107) — the one sanctioned mutable structure,
+;; and exactly the right one here: tests run across many green processes with
+;; separate heaps, and a table is shared by identity with atomic `table-incr`, so
+;; concurrent hits from parallel tests can't lose an update.
+
+(defmodule coverage
+  "Function-level test coverage for a Brood project. Rebinds every project
+function to a counting shim (hot reload as the instrumentation seam), runs the
+suite, then reports which functions were never entered. Backs `nest test --cover`.")
+
+;; The live hit table for the current run, or nil when not instrumenting. A table
+;; handle is shared by identity, so every process that inherits this global writes
+;; to the same store.
+(def *coverage-hits* nil)
+
+;; The functions instrumented for this run, as a list of
+;; `{:name symbol :file string :line int}` — the DENOMINATOR. Captured before the
+;; suite runs, because instrumentation itself must not change what we count.
+(def *coverage-targets* nil)
+
+;; --- discovering what to count -----------------------------------------------
+
+;; Is `path` inside one of `dirs`? Compared by prefix on a path-component
+;; boundary, so a `src` source path doesn't also claim a sibling `src-extra/`.
+(defn coverage--under? (path dirs)
+  (fold (fn (found dir)
+          (or found
+            (and (not (nil? path))
+              (starts-with? path dir)
+              (or (= (string-length path) (string-length dir))
+                (= (substring path (string-length dir) (+ (string-length dir) 1)) "/")))))
+    false
+    (or dirs (list))))
+
+;; Every global that is a plain function DEFINED IN this project's source dirs.
+;; Excludes macros (they are expanded, never called — a shim would break them),
+;; native primitives, and non-callable data. `source-location` is what ties a
+;; global back to a file, so anything the kernel didn't record a location for is
+;; skipped rather than guessed at.
+(defn coverage--targets (source-dirs)
+  (fold (fn (acc sym)
+          (let (location (source-location sym))
+            (if (and (not (nil? location))
+                  (coverage--under? (vector-ref location 0) source-dirs)
+                  (= (type-of (eval sym)) :fn))
+              (cons {:name sym :file (vector-ref location 0) :line (vector-ref location 1)} acc)
+              acc)))
+    nil
+    (global-names)))
+
+;; --- instrumenting ------------------------------------------------------------
+
+;; Rebind one global to a shim that records a hit then forwards. Built with `eval`
+;; because the name is computed: `def` takes a literal symbol, so the rebinding
+;; form is constructed and evaluated. The shim closes over the ORIGINAL value, so
+;; forwarding can't recurse into itself.
+(defn coverage--instrument! (sym hits)
+  (let (original (eval sym))
+    (eval (list 'def
+            sym
+            (list 'quote
+              (fn (& args)
+                (table-incr hits (name sym) 1)
+                (apply original args)))))))
+
+(defn coverage-begin! (source-dirs)
+  "Instrument every function this project defines under `source-dirs` and return the hit table. Call once, AFTER the project's sources are loaded and before the suite runs. Sets `*coverage-hits*` / `*coverage-targets*` for the reporter."
+  (let (targets (coverage--targets source-dirs)
+        hits (table))
+    (def *coverage-hits* hits)
+    (def *coverage-targets* targets)
+    (fold (fn (_ target) (coverage--instrument! (get target :name) hits)) nil targets)
+    hits))
+
+;; --- reporting ----------------------------------------------------------------
+
+;; One record per instrumented function: its name, file, line, and hit count.
+;; Reads the table ONCE via `table-snapshot` (atomic, O(n)) rather than probing
+;; per function, so the report can't tear across a still-running process.
+(defn coverage-results ()
+  "The current run's coverage as a list of `{:name :file :line :hits}`, hits being the number of times the function was entered (0 = never). nil when no run was instrumented."
+  (if (nil? *coverage-hits*)
+    nil
+    (let (snapshot (table-snapshot *coverage-hits*))
+      (map (fn (target)
+             (assoc target :hits (or (get snapshot (name (get target :name))) 0)))
+        *coverage-targets*))))
+
+(defn coverage--covered (results) (filter (fn (r) (> (get r :hits) 0)) results))
+
+;; Uncovered functions in SOURCE order. The underlying target list comes from
+;; `global-names` (sorted by spelling), so without this the report reads 7, 15, 9 —
+;; sorting by line is what makes it walk the file top-to-bottom.
+(defn coverage--uncovered (results)
+  (sort-by (fn (r) (get r :line)) (filter (fn (r) (= (get r :hits) 0)) results)))
+
+;; Percentage as a whole number, rounded to nearest. An empty denominator is 100%
+;; (nothing to cover is not a failure), which keeps a source-less project from
+;; reporting 0% and failing a `--cover-min` gate.
+(defn coverage--percent (covered total)
+  (if (= total 0) 100 (quot (+ (* covered 200) total) (* total 2))))
+
+;; Group results by file, as a list of `[file file-results]`, in stable
+;; (alphabetical) file order so the report is diffable between runs.
+(defn coverage--by-file (results)
+  (let (files (sort (fold (fn (acc r) (if (member? (get r :file) acc) acc (cons (get r :file) acc)))
+                      nil
+                      results)))
+    (map (fn (f) [f (filter (fn (r) (= (get r :file) f)) results)]) files)))
+
+;; Shorten an absolute path to a project-relative one for display.
+(defn coverage--relative (path root)
+  (if (and (not (nil? root)) (starts-with? path root))
+    (let (cut (+ (string-length root) 1))
+      (if (> (string-length path) cut) (substring path cut (string-length path)) path))
+    path))
+
+(defn coverage-report (root)
+  "Print the coverage report: a per-file table, then the uncovered function names, then a total line. Returns the total percentage (an int 0–100)."
+  (let (results (coverage-results))
+    (if (nil? results)
+      (do
+        (println "")
+        (println "coverage: no functions were instrumented")
+        100)
+      (let (total (count results)
+            covered (count (coverage--covered results))
+            percent (coverage--percent covered total))
+        (println "")
+        (println "Coverage (functions entered at least once):")
+        (fold (fn (_ entry)
+                (let (file-results (second entry)
+                      file-total (count file-results)
+                      file-covered (count (coverage--covered file-results)))
+                  (println (str "  "
+                             (pad-right (coverage--relative (first entry) root) 44)
+                             (pad-left (str (coverage--percent file-covered file-total)) 4)
+                             "%  ("
+                             file-covered
+                             "/"
+                             file-total
+                             ")"))))
+          nil
+          (coverage--by-file results))
+        (let (missed (coverage--uncovered results))
+          (unless (empty? missed)
+            (println "")
+            (println (str "Never called (" (count missed) "):"))
+            (fold (fn (_ r)
+                    (println (str "  "
+                               (coverage--relative (get r :file) root)
+                               ":"
+                               (get r :line)
+                               ": "
+                               (name (get r :name)))))
+              nil
+              ;; Report in source order within a file, files alphabetical — the
+              ;; same order as the table above, so the two read together.
+              (fold (fn (acc entry) (append acc (coverage--uncovered (second entry))))
+                nil
+                (coverage--by-file results)))))
+        (println "")
+        (println (str "coverage: " percent "% of " total " functions (" covered " covered)"))
+        percent))))

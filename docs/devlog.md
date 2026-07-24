@@ -6668,3 +6668,55 @@ Two sharp edges noted and deliberately left:
   it stays a latent note rather than a fix in search of a caller.
 - Group→test tag merging can duplicate a tag present at both levels. Matching is
   by presence, so it is harmless.
+
+## 2026-07-24 — `nest test --cover`: function coverage with zero kernel support (ADR-148)
+
+The last `mix test` flag worth having. Line coverage is the obvious reading, and it
+needs a VM seam — so this ships the **function-level** tier instead, and it turns
+out to need **no kernel support at all**.
+
+`nest test --cover` reports which project functions the suite never entered;
+`--cover-min PCT` fails the run under a floor (implies `--cover`). Coverage prints
+even when the suite is red — that's when you most want it — and the floor is gated
+*after* the suite result so a failing test reports itself rather than being masked.
+
+**`std/tool/coverage.blsp` is pure Brood policy** over three things the language
+already had:
+
+- `global-names` + `source-location` → the denominator (functions defined under the
+  project's `:source-paths`; macros/natives/data excluded, so std can't inflate it).
+- `def` rebinding + late binding (ADR-013) → the instrumentation. Each target is
+  rebound to a shim that records a hit and forwards; late binding means every
+  already-loaded caller, in any process, picks it up with no reload.
+- `Value::Table` (ADR-107) → hit collection. Tests run across processes with
+  separate heaps; a table is shared by identity and `table-incr` is atomic, so
+  parallel tests can't lose an update. The sanctioned mutable structure doing
+  exactly its job.
+
+Adding a VM coverage mode would have been building machinery to avoid using the
+language — the ADR-006 principle read honestly.
+
+**The one real design constraint: the shim must be variadic.** `arglist` reports
+only ONE arm of a multi-arm function, so an arity-preserving shim built from it
+would silently break the arities it never saw — `(defn f ((x) …) ((x y) …))` reports
+`(x y)`, and `(f 1)` would then fail. `(fn (& args) … (apply original args))` is
+correct for fixed, `&optional`, `& rest`, and multi-arm alike;
+`tests/coverage_test.blsp` pins each shape. The cost is that every rebind
+legitimately changes arity, which tripped the hot-reload diagnostic once per
+function — hence one new off-switch, `BROOD_NO_RELOAD_DIAG=1` (default stays on, so
+an *accidental* mismatch is still surfaced), which `--cover` sets for its own
+process.
+
+Two limits documented rather than papered over: a self-recursive tail call is
+counted **once** (the VM's `SelfCall` bypasses global lookup, and so the shim), so
+hit counts are a lower bound and not a profile; and instrumentation defeats JIT
+inlining of the wrapped call, so `--cover` is never a benchmark.
+
+Verified: 57% on a 7-function fixture with the 3 uncovered ones named in source
+order (an earlier version listed them alphabetically — 7, 15, 9); exactly 50% of a
+generated 400-function project where every even-indexed function is called, in
+1.4 s; and a clean "no functions were instrumented" (returning 100%, so no spurious
+gate failure) in this repo, which declares no `:source-paths`.
+
+Line coverage stays deferred with its shape settled — see ADR-148 and
+`docs/coverage.md`.

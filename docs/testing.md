@@ -237,6 +237,14 @@ never overlap or drop a test regardless of machine or run order. `--shard` is
 shard index ≥ the partition count, exits 2 rather than silently running zero
 tests (which a CI job would read as green).
 
+## Coverage
+
+`nest test --cover` reports **function-level** coverage — which of the project's
+functions the suite never called — and `--cover-min PCT` fails the run below a
+floor. It is not line coverage, and a `--cover` run is not a timing run. See
+[`coverage.md`](coverage.md) for what it measures, how hot reload is used as the
+instrumentation seam, and why the shim is variadic.
+
 ## Running
 
 In a project, run the whole suite with **`nest test`** (or `make suite`, or

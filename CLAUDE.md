@@ -149,7 +149,8 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          framework `std/proc/*` (`gen`, `supervisor`); the net *library*
                          `std/net/*` (`http`, `sse`, `tcp`); the toolchain `std/tool/*`
                          — grouped on disk but BARE module names (test, project, package,
-                         docs, grammar, mcp, observer, proctree, repl, sexp, reload). The
+                         coverage, docs, grammar, mcp, observer, proctree, repl, sexp,
+                         reload). The
                          net library and `proc/supervisor` were briefly externalized (Move 2)
                          then re-bundled in-tree (ADR-097, batteries-included default);
                          the Rust socket *mechanism* stays in-tree too

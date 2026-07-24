@@ -499,7 +499,9 @@ fn eval_tail_loop(
                         if let (Some(old_a), Some(new_a)) =
                             (value_arity(heap, old), value_arity(heap, val))
                         {
-                            if old_a.min != new_a.min || old_a.max != new_a.max {
+                            if (old_a.min != new_a.min || old_a.max != new_a.max)
+                                && reload_diagnostics_enabled()
+                            {
                                 eprintln!(
                                     "[reload] arity changed for {}: {} -> {}",
                                     value::symbol_name(name),
@@ -516,6 +518,7 @@ fn eval_tail_loop(
                         // `defmacro` special form.
                         if matches!(old.unpack(), ValueRef::Macro(_))
                             && matches!(val.unpack(), ValueRef::Macro(_))
+                            && reload_diagnostics_enabled()
                         {
                             eprintln!(
                                 "[reload] macro {} redefined; callers expanded before now keep the old expansion — re-eval them",
@@ -1960,6 +1963,19 @@ fn value_arity(heap: &Heap, v: Value) -> Option<value::Arity> {
         ValueRef::Native(id) => Some(heap.native(id).arity),
         _ => None,
     }
+}
+
+/// Whether `def` should report a hot-reload arity/macro change on stderr.
+/// `BROOD_NO_RELOAD_DIAG=1` silences it, for a tool that rebinds globals
+/// *deliberately* and en masse — `nest test --cover` wraps every project function
+/// in a variadic counting shim, which legitimately changes every arity, so the
+/// diagnostic would be hundreds of lines of expected noise. Off-switch only: the
+/// default stays on, so an accidental reload mismatch is still surfaced.
+fn reload_diagnostics_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("BROOD_NO_RELOAD_DIAG").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
 }
 
 /// Render an `Arity` as a compact "N", "N-M", or "N+" string for the

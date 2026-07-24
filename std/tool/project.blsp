@@ -1250,15 +1250,44 @@ resolve in the advisory checker. Returns the project root."
       ;; its units) inside the `%isolate` that `run-tests-scoped` wraps it in.
       ;; `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all-then-run-all path (the
       ;; escape hatch, e.g. for a suite that relies on cross-file top-level defs).
+      ;; Instrument for coverage BEFORE the suite and AFTER the sources are loaded
+      ;; (and after `check-project`, whose `%isolate` would roll the rebindings
+      ;; back). Opt-in: `:cover` in the option plist, from `nest test --cover`.
+      (when (test/opt? :cover opts) (project--coverage-begin! root))
       ;; Persist the `--failed` set whichever way the run goes: the interesting
       ;; case is precisely the failing one, and `run-tests-scoped` RAISES on
       ;; failure, so catch, record, then re-raise to keep the non-zero exit.
       (let (resolved (project--resolve-test-opts root opts)
             outcome (try (project--run-suite files resolved) (catch e (list :%suite-raised e))))
         (project--write-failed! root *test-last-ran* *test-last-failed*)
-        (if (and (pair? outcome) (= (first outcome) :%suite-raised))
-          (throw (second outcome))
-          outcome)))))
+        ;; Report coverage before propagating a suite failure — a red run is
+        ;; exactly when you still want to see what went unexercised.
+        (let (percent (if (test/opt? :cover opts) (project--coverage-finish! root opts) nil))
+          (if (and (pair? outcome) (= (first outcome) :%suite-raised))
+            (throw (second outcome))
+            (project--coverage-gate percent opts)))))))
+
+;; --- coverage wiring (nest test --cover) --------------------------------------
+;; `coverage` is required lazily, like `package`: a run without `--cover` never
+;; loads it, and the module is pure policy over `source-location`/`table` (see
+;; std/tool/coverage.blsp).
+(defn project--coverage-begin! (root)
+  (require 'coverage)
+  (coverage/coverage-begin! (project-abs-paths root *project-source-paths*)))
+
+(defn project--coverage-finish! (root opts)
+  (require 'coverage)
+  (coverage/coverage-report root))
+
+;; Enforce `--cover-min N`: a coverage floor is only useful if it can fail the
+;; build, so falling short raises (non-zero exit) exactly like a failing test.
+;; Runs AFTER the suite-failure re-raise, so a red suite reports its own failure
+;; first rather than being masked by a coverage complaint.
+(defn project--coverage-gate (percent opts)
+  (let (minimum (test/opt-val :cover-min opts nil))
+    (if (and (not (nil? percent)) (not (nil? minimum)) (< percent minimum))
+      (error "coverage " percent "% is below the required minimum " minimum "%")
+      :ok)))
 
 ;; Expand `:failed` in a `nest test` option plist into the `:filter` spec's
 ;; `:names`. The resolved `:filter` is CONSed on the front: `opt-val` returns the
@@ -1271,16 +1300,21 @@ resolve in the advisory checker. Returns the project root."
       (cons (project--failed-filter root (test/opt-val :filter opts nil)) opts))))
 
 (defn run-loaded-tests (& opts)
-  "Run the ALREADY-REGISTERED suite — the `nest test FILE…` path, where the CLI has loaded the named files itself. Inside a project this resolves `:failed` against the project's record and updates that record afterwards, so `--failed` works the same as on a whole-project run; outside one it is just `run-tests`."
+  "Run the ALREADY-REGISTERED suite — the `nest test FILE…` path, where the CLI has loaded the named files itself. Inside a project this resolves `:failed` against the project's record, updates that record afterwards, and honours `:cover`, so the flags mean the same thing as on a whole-project run; outside a project it is just `run-tests` (with a warning if coverage was asked for, since there are no project sources to instrument)."
   (let (root (project-find-root (cwd)))
     (if (nil? root)
-      (apply test/run-tests opts)
-      (let (resolved (project--resolve-test-opts root opts)
+      (do
+        (when (test/opt? :cover opts)
+          (eprintln "warning: --cover needs a project (no project.blsp found) — running without coverage"))
+        (apply test/run-tests opts))
+      (let (_ (when (test/opt? :cover opts) (project--coverage-begin! root))
+            resolved (project--resolve-test-opts root opts)
             outcome (try (apply test/run-tests resolved) (catch e (list :%suite-raised e))))
         (project--write-failed! root *test-last-ran* *test-last-failed*)
-        (if (and (pair? outcome) (= (first outcome) :%suite-raised))
-          (throw (second outcome))
-          outcome)))))
+        (let (percent (if (test/opt? :cover opts) (project--coverage-finish! root opts) nil))
+          (if (and (pair? outcome) (= (first outcome) :%suite-raised))
+            (throw (second outcome))
+            (project--coverage-gate percent opts)))))))
 
 ;; Run the discovered suite — scoped file-by-file (the default) or the legacy
 ;; load-all-then-run-all path under `BROOD_TEST_NO_SCOPE`.

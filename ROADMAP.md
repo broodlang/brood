@@ -787,17 +787,22 @@ Runtime housekeeping (both items landed):
   ⬜ Still unmapped from `mix test`: `--cover` (needs a coverage mechanism — see
   "Test coverage" below), `--stale` (needs a per-test dependency graph),
   `--formatter`, `--breakpoints`.
-- ⬜ **Test coverage (`nest test --cover`)** — no coverage mechanism exists today.
-  The raw material does: compiled IR nodes already carry `pos: Option<Pos>` and
-  `CompiledArm` records its source file (`eval/compile/ir.rs`), and `Value::Table`
-  (ADR-107) is a shared identity-mutable store that can aggregate hits across the
-  many green processes a suite runs in. Shape: a Rust **mechanism** recording
-  `(file, line)` hits into a shared table under an off-by-default flag (the JIT must
-  be disabled in that mode — native code bypasses the hook), and Brood **policy**
-  (`std/tool/coverage.blsp`) turning hits into per-file/per-function percentages +
-  the report. Wants an ADR: it's a new observability seam, and the cheap
-  function-level variant (which globals were called) is a genuinely different
-  product from line coverage.
+- 🟡 **Test coverage** — ✅ **function-level `nest test --cover` shipped 2026-07-24**
+  (ADR-148, [`docs/coverage.md`](docs/coverage.md)): which project functions the
+  suite never entered, plus `--cover-min PCT` to fail the run under a floor.
+  Implemented as **pure Brood policy with zero kernel support** — `global-names` +
+  `source-location` for the denominator, `def` rebinding + late binding (ADR-013)
+  as the instrumentation seam, and `Value::Table` (ADR-107) for cross-process hit
+  aggregation. The shim is variadic *because* `arglist` reports only one arm of a
+  multi-arm function; one new off-switch (`BROOD_NO_RELOAD_DIAG=1`) silences the
+  arity diagnostic the rebinding legitimately trips.
+  ⬜ Still: **line/branch coverage**, a separate tier. The raw material exists —
+  IR nodes carry `pos: Option<Pos>` and `CompiledArm` records its file
+  (`eval/compile/ir.rs`) — and the shape is settled (compile-time instrumentation
+  rather than a per-instruction runtime check, so an ordinary run stays unchanged;
+  JIT off in that mode; reporting extends `std/tool/coverage.blsp`). Deferred until
+  something concrete needs per-line detail: function coverage answers "what does my
+  suite never touch", which is the question that changes what you write next.
 - ✅ **`nest format --changed`** — shipped 2026-07-23. A git-aware narrower
   scope: formats only the `.blsp` files git reports not-committed-clean
   (modified/staged/untracked), via a new `%git-changed-files` primitive
