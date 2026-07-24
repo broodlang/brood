@@ -166,6 +166,7 @@ Claude Code already has those:
 | `processes`   | `{}`                        | `{processes: [{id, status, mailbox, memory, reductions, ...}]}` | After `spawn`, snapshot every live green process with its full `process-info` stats — the observer's per-process view (mailbox backlog, reductions/work counter, heap, monitors) |
 | `process-info`| `{id}`                      | `{id, status, mailbox, reductions, ...}` or `{error}` | Drill into one process by the numeric id from `processes` |
 | `node`        | `{}`                        | `{node, workers, peak-threads, spawned, process-count, mem-bytes, mem-peak, peers}` | Runtime-wide stats — the observer's header; "is the runtime healthy/busy?" |
+| `watch-runtime`| `{ms?, filter?}`           | `{events: [{kind, pid, detail}], count, ms}` | Watch the kernel runtime-event **stream** for `ms` (default 500, capped 5000) — GC pauses (`:gc`), spawn/exit churn (`:spawn`/`:exit`), JIT deopts (`:deopt`) — a *trace*, not a snapshot. `filter` selects kinds (e.g. `{gc: true, exit: true}`). |
 | `callers`     | `{name}`                    | `{references: [{file, line, col}]}`    | Cross-file find-references — the *use* sites of a global (complements `lookup`'s def site) |
 | `apropos`     | `{pattern}`                 | `{matches: [name]}`                    | Discover globals by name substring — answer "does X exist?" without guessing names |
 | `all-globals` | `{}`                        | `{globals: [name]}`                    | The full name list of the live image (prelude + project) |

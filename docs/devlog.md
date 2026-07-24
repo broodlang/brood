@@ -6284,3 +6284,31 @@ a concurrent-emitter fan-in (4 workers × 25 ticks → one counter reads 100, pr
 serial-listener aggregation). 9/9 + telemetry 19/19 + sysmon 8/8 green; `nest check` zero
 warnings. Deferred: a distribution/histogram aggregator (percentiles need bucketing or
 sample retention — a follow-up over the bounded summary).
+
+## 2026-07-24 — LLM-native / MCP polish: watch-runtime trace tool + cookbook entries
+
+Two ROADMAP sub-items, both pure Brood.
+
+**MCP `watch-runtime` tool** (closes item B, "expose GC/process *traces*, not just
+snapshots"). `std/tool/mcp.blsp` gains `mcp-watch-runtime-tool`: it arms the kernel
+`system-monitor` on the handler process for a bounded window (`:ms`, capped 5 s,
+optional `:filter` kind selector), sleeps, disarms, and drains the collected
+`[:system kind pid detail]` events into `{:events [{:kind :pid :detail}] :count :ms}`.
+That's the runtime-event STREAM — GC pauses, spawn/exit churn, JIT deopts — that a
+point-in-time `processes`/`node` snapshot can't show. Self-contained: the global
+single-subscriber monitor is armed-and-disarmed within the one call, and self-events
+are never emitted so the watcher only sees other processes' activity. 21 tools now.
+`tests/mcp_test.blsp` +3 (`:isolated`, since it arms the global monitor): spawn/exit
+collection over a window, the `:filter` selecting only `:exit`, and the catalogue
+entry.
+
+**Cookbook entries** (item A — the intent→idiom `find-pattern` catalogue in
+`std/tool/explain.blsp`). The E-code table has zero gaps (all 16 codes covered), so
+the open surface was cookbook entries: added five confirmed Clojure/Scheme reflexes —
+keyword-as-fn `(:k m)` → `(get m :k)`, char literal `\c` → 1-char string / `int->char`,
+discard `#_` → `;`, regex `#"…"` → `(require 'regex)` + `regex/match?` — and updated
+the `#{…}` set entry (was "no set literal") to the now-first-class kernel set. Reader
+hints for the three that still silently mis-parse (`#_`, `#"…"`, `\char`) are a Rust
+`read_hash` change, deferred.
+
+explain 9/9, mcp 13/13, `nest check` zero warnings.

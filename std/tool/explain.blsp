@@ -133,9 +133,9 @@ the `nest mcp` tools of the same names.")
      :see "docs/decisions.md ADR-139 (iolists)"}
     {:intent "a set / distinct elements / membership"
      :keywords ["set" "distinct" "unique" "member" "contains" "#{}"]
-     :idiom "No `#{…}` literal. `(require 'set)` then `(set/set [1 2 3])`; membership is `(contains? s x)`; sets are maps-to-true."
-     :example "(require 'set) (contains? (set/set [1 2 3]) 2)"
-     :see "std/set.blsp"}
+     :idiom "`#{1 2 3}` is a first-class immutable set (ADR-060): `set?` true, prints `#{…}`, never `=` to a map. Membership is `(contains? s x)`; it's seqable (`map`/`fold`/`count`). `(require 'set)` adds `union`/`intersection`/`difference`/`subset?` and `(set/set coll)`."
+     :example "(contains? #{1 2 3} 2)   ; => true"
+     :see "docs/language.md §Sets"}
     {:intent "update a value in a map"
      :keywords ["map" "assoc" "update" "modify map" "put" "get"]
      :idiom "Maps are immutable — `assoc`/`dissoc`/`update` return a FRESH map. `(update m :k f)` applies `f` to the current value."
@@ -175,7 +175,27 @@ the `nest mcp` tools of the same names.")
      :keywords ["private" "hidden" "internal" "encapsulate" "defp"]
      :idiom "A `--` in a name makes it module-private (ADR-146): `(defn foo--helper …)`. Another module can't reference it (compile error) without `(:use-internals foo)`."
      :example "(defn parse--token (s) …)   ; private to this module"
-     :see "docs/language.md §Modules / privacy"}))
+     :see "docs/language.md §Modules / privacy"}
+    {:intent "use a keyword as a function to look up a map"
+     :keywords ["keyword" "keyword function" "lookup" ":key" "get value" "(:k m)"]
+     :idiom "A keyword is NOT callable — `(:k m)` errors (E0030). Look up with `(get m :k)` (or `(get m :k default)`). Nested access is `(get-in m [:a :b])`."
+     :example "(get {:name \"ana\"} :name)   ; NOT (:name m)"
+     :see "docs/language.md §Maps"}
+    {:intent "a character / single-char literal"
+     :keywords ["char" "character" "backslash" "\\newline" "\\space" "codepoint" "letter"]
+     :idiom "There is no `\\c` char literal (`\\newline`/`\\a` read as a symbol, silently). A character is a 1-char string `\"a\"`, or `(int->char 97)` from a codepoint; iterate a string's codepoints with `string->codepoints`."
+     :example "(int->char 10)   ; a newline string; NOT \\newline"
+     :see "docs/language.md §Strings"}
+    {:intent "comment out / discard a form"
+     :keywords ["comment" "discard" "#_" "ignore form" "disable code"]
+     :idiom "There is no `#_` discard reader macro (it reads as a symbol, silently). Comment a line with `;`, a region by deleting it, or gate code with `(when false …)`."
+     :example ";; (old-thing)   — NOT #_(old-thing)"
+     :see "docs/language.md §Syntax"}
+    {:intent "a regular expression / match a pattern in a string"
+     :keywords ["regex" "regexp" "pattern" "match string" "#\"\"" "re-find" "re-matches"]
+     :idiom "There is no `#\"…\"` regex literal — pass the pattern as a plain string. `(require 'regex)`: `(regex/match? pat s)` searches anywhere, `(regex/matches? pat s)` anchors both ends. (`^`/`$` anchor within a search.)"
+     :example "(require 'regex) (regex/match? \"[0-9]+\" \"abc123\")   ; => true"
+     :see "std/regex.blsp"}))
 
 (defn explain--matches? (q entry)
   (let (ql (lower q))

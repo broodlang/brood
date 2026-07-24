@@ -37,3 +37,31 @@
     (let (names (map (fn (t) (get t :name)) (mcp/mcp-tools)))
       (is (includes? names "explain-error"))
       (is (includes? names "find-pattern")))))
+
+;; watch-runtime — the runtime-event STREAM tool (a trace, not a snapshot;
+;; 2026-07-24). It arms the GLOBAL single-subscriber system-monitor, so :isolated
+;; (runs alone — no cross-talk with other tests' spawns/GCs).
+(defn mcpt-burst (n) (when (> n 0) (spawn (+ 1 1)) (mcpt-burst (- n 1))))
+
+(describe "mcp watch-runtime tool"
+  :isolated
+  (test "collects spawn/exit runtime events over a window"
+    ;; a burst of trivial short-lived processes, from a helper process (so the
+    ;; watcher — this test process — sees their :spawn/:exit, not its own)
+    (spawn (do (sleep 20) (mcpt-burst 12)))
+    (let (r (mcp/mcp-watch-runtime-tool {:ms 300})
+          evs (get r :events)
+          kinds (map (fn (e) (get e :kind)) evs))
+      (is (> (get r :count) 0))
+      (is (includes? kinds :spawn))
+      (is (includes? kinds :exit))
+      ;; every event carries the documented shape
+      (is (every? (fn (e) (and (contains? e :kind) (contains? e :pid) (contains? e :detail))) evs))))
+  (test "the :filter selects only the requested kinds"
+    (spawn (do (sleep 20) (mcpt-burst 10)))
+    (let (r (mcp/mcp-watch-runtime-tool {:ms 300 :filter {:exit true}})
+          evs (get r :events))
+      (is (> (count evs) 0))
+      (is (every? (fn (e) (= (get e :kind) :exit)) evs))))
+  (test "the tool is in the catalogue"
+    (is (includes? (map (fn (t) (get t :name)) (mcp/mcp-tools)) "watch-runtime"))))

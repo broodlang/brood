@@ -713,9 +713,14 @@ Runtime housekeeping (both items landed):
   Brood-idiomatic fix, not just the message; `find-pattern` keyword-searches a
   curated intent→idiom cookbook ("loop / mutate / build a string / spawn /
   parse binary …"). Both are pure Brood data + wrappers, wired as `nest mcp`
-  tools (now 20). `tests/explain_test.blsp` + `mcp_test`. ⬜ Still to do:
-  reader hints for the remaining Clojure/Scheme forms, and folding each new
-  repeat mistake into the rule-of-three.
+  tools (now 21). `tests/explain_test.blsp` + `mcp_test`. ✅ **cookbook expanded
+  2026-07-24** — five confirmed Clojure/Scheme reflexes folded in: keyword-as-fn
+  `(:k m)` → `(get m :k)`, char literal `\c` → 1-char string / `int->char`,
+  discard `#_` → `;`, regex `#"…"` → `(require 'regex)` + `regex/match?`, and the
+  `#{…}` set entry updated to the now-first-class kernel literal. ⬜ Still to do:
+  reader hints for the remaining Clojure/Scheme *reader* forms (`#_`, `#"…"`,
+  `\char` currently silently mis-parse — a Rust `read_hash`/atom change), and
+  folding each new repeat mistake into the rule-of-three.
 - 🟡 **MCP tooling** — ✅ the write sandbox is **symlink-escape-proof** (shipped
   2026-07-23): a new `canonicalize` primitive (real-path resolution — symlinks
   + `.`/`..`, works for not-yet-existing targets) backs a second sandbox gate
@@ -727,8 +732,15 @@ Runtime housekeeping (both items landed):
   total message)` streams `notifications/progress` to the client *during* the
   synchronous call (via the reentrant stdout lock); the core `check` tool
   reports per-file, and `%mcp-progress` is a no-op elsewhere so any handler
-  can call it safely (tests in `mcp.rs`). ⬜ Still: exposing GC/process
-  *traces* (not just snapshots).
+  can call it safely (tests in `mcp.rs`). ✅ **GC/process *traces* exposed**
+  (shipped 2026-07-24): a new `watch-runtime` MCP tool arms the kernel
+  `system-monitor` on the handler process for a bounded window (`:ms`, capped
+  5 s, with an optional `:filter` kind selector), then returns the collected
+  `[:runtime kind pid detail]` stream — GC pauses, spawn/exit churn, JIT deopts —
+  a *trace*, not a snapshot, complementing `processes`/`node`. Pure Brood over the
+  telemetry/`system-monitor` seam (`std/tool/mcp.blsp`); tests in
+  `tests/mcp_test.blsp`. ⬜ Still: none named — the snapshot-vs-stream gap is now
+  closed.
 
 ### Editor (M2) & display (M3)
 
