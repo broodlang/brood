@@ -6458,3 +6458,35 @@ the registration in `system.rs`, the benches, and `tests/agent_test.blsp`.
 
 Verified: `cargo build -p cli` with gui+treesit-grammars+jit clean; full Brood
 suite 2979/2979 green.
+
+## 2026-07-24 — `:format-plugins` now resolves any dep kind, not just `:path`
+
+**Bug:** `:format-plugins [dep]` was a silent no-op for every dep kind except
+`:path`. `project--plugin-format-headers` went through `project--path-dep-dir`,
+which matched `(= (get d :kind) :path)` and returned `nil` for anything else — so a
+project that consumed a framework as a `:git` dep lost the framework's declared
+`:format-headers`, and `nest format` reflowed the framework's macros against its
+declared shape (a `hatch` consumer's `(on "increment" (params model) …)` clause
+signature dropped onto its own line). Nothing warned; formatting just regressed the
+moment a dep was switched from `:path` to `:git`.
+
+**Fix:** replaced `project--path-dep-dir` with `project--dep-manifest-path
+(dep-name root)`, which resolves the dep's own `project.blsp` for *every* kind — a
+`:path` dep in place at its `:path`, a fetched dep (`:git`/`:tarball`/`:registry`)
+from its `_deps/<name>/` checkout (`package--git-target`'s layout; a `:registry`
+dep resolves through the same git path). Ordering already works out:
+`project-setup` runs `project--ensure-deps-on-path` (which fetches into `_deps/`)
+before it computes `*format-headers-extra*`, and
+`project--manifest-format-headers` returns `{}` for a missing file, so an
+unfetched/offline dep degrades to no extra rules instead of erroring.
+
+Tests in `tests/project_test.blsp` ("project: :format-plugins manifest
+resolution"): path/git/tarball/absent resolution, a `:git` plugin's headers
+reaching `project--effective-format-headers` with the project's own
+`:format-headers` winning a clash, and the unfetched-plugin degradation.
+
+**Note for a future session:** the tree is *not* in the current formatter's
+canonical form — a whole-tree `nest format` rewrites ~202 of 262 files (trailing
+comments migrate off their form, continuation lines re-indent). Don't run it
+casually as part of an unrelated change; a deliberate one-shot reflow commit is the
+way to close that gap.
