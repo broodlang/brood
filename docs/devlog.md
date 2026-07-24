@@ -6490,3 +6490,56 @@ canonical form — a whole-tree `nest format` rewrites ~202 of 262 files (traili
 comments migrate off their form, continuation lines re-indent). Don't run it
 casually as part of an unrelated change; a deliberate one-shot reflow commit is the
 way to close that gap.
+
+## 2026-07-24 — Structural cleanup Tier 2 (dedup)
+
+The dedup items from the structural review (ROADMAP "Structural /
+code-organization cleanup", Tier 2). 5/6/9 + the parse-url half of 7 landed; 8
+and the path half of 7 deferred with rationale.
+
+**Item 9 — `eval/compile/inline.rs`.** Collapsed the near-identical
+`node_has_selfcall` (non-gated) / `node_has_self_call` (jit) /
+`node_has_make_closure` (jit) into one generic `node_any(node, &pred)`
+"does the tree contain a node matching pred?" combinator.
+
+**Item 6 — `lib.rs` `eval_str`/`eval_source`.** Factored the shared top-level
+driver into a private `eval_forms(Vec<(Value, Option<Pos>)>)` that carries the
+delicate GC-rooting (root the unevaluated forms, re-fetch via `root_at` across a
+collection), namespace pre-scan, and per-form reset logic exactly once; the two
+public fns are 3-line adapters (no positions → `None`; positioned → `Some`, which
+gates `note_definition` + `or_pos`). Restore now runs once on all paths.
+
+**Item 5 — `types/mod.rs` literal refinement.** Four generic helpers
+(`merge_union_lit_set`/`intersect_lit_set`/`lit_is_subtype`/`lit_disjoint`, over
+`T: Ord + Clone`) replace the per-kind (`Symbol`/`i64`/`bool`/`String`) blocks in
+`union`/`intersect`/`is_subtype`/`is_disjoint`/`negate`; all ten `Ty`
+constructors now use struct-update over `Ty::flat(tags)`. ~250 lines out,
+behaviour identical (238 lattice/checker Rust tests + `nest check` green).
+
+**Item 7 (url half) — `std/net/http.blsp`.** `parse-url` was a lossy reimpl of
+`url/parse-url`; it now `(require 'url)`s and wraps the one RFC-3986 parser,
+applying HTTP defaults (scheme http, port 80/443, path "/") and prepending
+`http://` to a scheme-less input so a bare `host[:port]/path` still parses as an
+authority. `:use url` would clash on the `parse-url` name, so it's a qualified
+call.
+
+**Deferred:** item 8 (`gui_gpu.rs` is a prototype — the missing ops are
+unimplemented GPU features, not diverged geometry; needs a live display to
+verify) and the path half of item 7 (`path.blsp` vs the prelude `path-*` subset
+have different contracts — a deliberate API call, not a mechanical dedupe).
+
+En route: fixed the `heap::stall_guard` re-export I added on 2026-07-24 — the
+*function* is used by the GC (always compiled), only the `heap::` re-export is
+gui-only, so the re-export (not the fn) is now `#[cfg(feature = "gui")]`.
+
+Verified: suite 2985/2985; `nest check` zero warnings; types/compile/interp Rust
+tests green; jit + non-jit + gui feature configs all compile.
+
+**make install warning-free (same session).** The `make install` build
+(`release-fast`, gui+treesit-grammars+jit) emitted 5 `private_interfaces`
+warnings: `pub(crate)` VM functions (`exec_call`/`dispatch`/`exec_chunk`/
+`attach_vm_trace`/`jit_dispatch_tail`) exposed `pub(super)`/private types
+(`Step`, `ChunkExit`, `BcFrame`) in their signatures. Since `eval::compile`
+re-exports its children crate-wide (`pub(crate) use child::*`), the consistent fix
+is to widen those three types to `pub(crate)`. `make release` (cli + nest +
+brood-lsp) now builds with zero warnings.

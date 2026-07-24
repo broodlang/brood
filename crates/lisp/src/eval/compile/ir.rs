@@ -720,7 +720,7 @@ impl CompiledClosure {
 /// VM arm un-run, so a tail call reuses a frame (in [`vm_run_bc`]) or is forced (in
 /// value position, via [`force`]). (`exec_value`/`exec_call` survive for `push_frame`'s
 /// `&optional` defaults and top-level `run`; the bytecode driver uses [`ChunkExit`].)
-pub(super) enum Step {
+pub(crate) enum Step {
     Done(Value),
     Tail {
         compiled: Arc<CompiledArm>,
@@ -739,7 +739,7 @@ pub(super) enum Step {
 /// reuse the current frame (TCO); `Done` pops it. A non-tail call to a native or a
 /// tree-walked arm is already executed inside `exec_chunk` (via `dispatch`) and
 /// surfaces as an ordinary pushed value, never as `Call`.
-pub(super) enum ChunkExit {
+pub(crate) enum ChunkExit {
     Done(Value),
     Tail {
         arm: Arc<CompiledArm>,

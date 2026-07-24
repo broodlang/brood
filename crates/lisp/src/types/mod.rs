@@ -260,17 +260,8 @@ impl Ty {
     /// closures and builtins).
     pub fn arrow(sig: Sig) -> Ty {
         Ty {
-            tags: FN_BITS,
             arrow: Some(Arc::new(sig)),
-            elem: None,
-            map_kv: None,
-            overload: None,
-            fields: None,
-            tuple: None,
-            lit: None,
-            lit_int: None,
-            lit_bool: None,
-            lit_str: None,
+            ..Ty::flat(FN_BITS)
         }
     }
 
@@ -289,17 +280,8 @@ impl Ty {
     /// constructor is for tests/direct construction only.
     pub fn overload_of(sigs: Vec<Sig>) -> Ty {
         Ty {
-            tags: FN_BITS,
-            arrow: None,
             overload: Some(Arc::new(sigs)),
-            elem: None,
-            map_kv: None,
-            fields: None,
-            tuple: None,
-            lit: None,
-            lit_int: None,
-            lit_bool: None,
-            lit_str: None,
+            ..Ty::flat(FN_BITS)
         }
     }
 
@@ -314,34 +296,16 @@ impl Ty {
     /// have type `elem` — the general element-refinement constructor.
     pub fn seq_of(tags: u32, elem: Ty) -> Ty {
         Ty {
-            tags: tags & SEQ_BITS,
-            arrow: None,
             elem: Some(Arc::new(elem)),
-            map_kv: None,
-            overload: None,
-            fields: None,
-            tuple: None,
-            lit: None,
-            lit_int: None,
-            lit_bool: None,
-            lit_str: None,
+            ..Ty::flat(tags & SEQ_BITS)
         }
     }
 
     /// `map<K, V>` — a map whose keys have type `K` and values have type `V`.
     pub fn map_of(key: Ty, val: Ty) -> Ty {
         Ty {
-            tags: MAP_BIT,
-            arrow: None,
-            elem: None,
             map_kv: Some(Arc::new((key, val))),
-            overload: None,
-            fields: None,
-            tuple: None,
-            lit: None,
-            lit_int: None,
-            lit_bool: None,
-            lit_str: None,
+            ..Ty::flat(MAP_BIT)
         }
     }
 
@@ -351,17 +315,8 @@ impl Ty {
     /// onto the `Keyword` tag). See `docs/type-records.md`.
     pub fn record_of(fields: BTreeMap<Symbol, (Ty, bool)>) -> Ty {
         Ty {
-            tags: MAP_BIT,
-            arrow: None,
-            elem: None,
-            map_kv: None,
-            overload: None,
             fields: Some(Arc::new(fields)),
-            tuple: None,
-            lit: None,
-            lit_int: None,
-            lit_bool: None,
-            lit_str: None,
+            ..Ty::flat(MAP_BIT)
         }
     }
 
@@ -377,17 +332,8 @@ impl Ty {
     /// `docs/type-tuples.md` (ADR-128).
     pub fn tuple_of(elems: Vec<Ty>) -> Ty {
         Ty {
-            tags: VECTOR_BIT,
-            arrow: None,
-            elem: None,
-            map_kv: None,
-            overload: None,
-            fields: None,
             tuple: Some(Arc::new(elems)),
-            lit: None,
-            lit_int: None,
-            lit_bool: None,
-            lit_str: None,
+            ..Ty::flat(VECTOR_BIT)
         }
     }
 
@@ -404,17 +350,8 @@ impl Ty {
         let mut set = BTreeSet::new();
         set.insert(sym);
         Ty {
-            tags: KEYWORD_BIT,
-            arrow: None,
-            elem: None,
-            map_kv: None,
-            overload: None,
-            fields: None,
-            tuple: None,
             lit: Some(Arc::new(set)),
-            lit_int: None,
-            lit_bool: None,
-            lit_str: None,
+            ..Ty::flat(KEYWORD_BIT)
         }
     }
 
@@ -432,17 +369,8 @@ impl Ty {
         let mut set = BTreeSet::new();
         set.insert(n);
         Ty {
-            tags: INT_BIT,
-            arrow: None,
-            elem: None,
-            map_kv: None,
-            overload: None,
-            fields: None,
-            tuple: None,
-            lit: None,
             lit_int: Some(Arc::new(set)),
-            lit_bool: None,
-            lit_str: None,
+            ..Ty::flat(INT_BIT)
         }
     }
 
@@ -461,17 +389,8 @@ impl Ty {
         let mut set = BTreeSet::new();
         set.insert(b);
         Ty {
-            tags: BOOL_BIT,
-            arrow: None,
-            elem: None,
-            map_kv: None,
-            overload: None,
-            fields: None,
-            tuple: None,
-            lit: None,
-            lit_int: None,
             lit_bool: Some(Arc::new(set)),
-            lit_str: None,
+            ..Ty::flat(BOOL_BIT)
         }
     }
 
@@ -489,17 +408,8 @@ impl Ty {
         let mut set = BTreeSet::new();
         set.insert(s.to_string());
         Ty {
-            tags: STR_BIT,
-            arrow: None,
-            elem: None,
-            map_kv: None,
-            overload: None,
-            fields: None,
-            tuple: None,
-            lit: None,
-            lit_int: None,
-            lit_bool: None,
             lit_str: Some(Arc::new(set)),
+            ..Ty::flat(STR_BIT)
         }
     }
 
@@ -655,17 +565,33 @@ impl Ty {
             other.tags & VECTOR_BIT != 0,
             &other.tuple,
         );
-        // Literal sets union *exactly* (not widen) — `:a ∪ :b = {a,b}`. But a side
-        // whose keyword member is *open* (keyword tag, no literal set) contributes
-        // every keyword, so the result keyword member is open too (`:a ∪ keyword =
-        // keyword`).
-        let lit = merge_union_lit(&self, &other);
-        // Same exact-union rule for int literals — an independent tag/field, so
-        // this composes with `lit` (a keyword-literal side and an int-literal
-        // side) with no special-casing at all.
-        let lit_int = merge_union_lit_int(&self, &other);
-        let lit_bool = merge_union_lit_bool(&self, &other);
-        let lit_str = merge_union_lit_str(&self, &other);
+        // Literal sets union *exactly* (not widen) — `:a ∪ :b = {a,b}` — unless a
+        // side has that member *open* (tag present, no set), which contributes
+        // every value of the tag (`:a ∪ keyword = keyword`). Each tag is
+        // independent, so `(or :ok 5)` carries both a keyword- and an int-literal
+        // set with no special-casing.
+        let lit = merge_union_lit_set(KEYWORD_BIT, self.tags, &self.lit, other.tags, &other.lit);
+        let lit_int = merge_union_lit_set(
+            INT_BIT,
+            self.tags,
+            &self.lit_int,
+            other.tags,
+            &other.lit_int,
+        );
+        let lit_bool = merge_union_lit_set(
+            BOOL_BIT,
+            self.tags,
+            &self.lit_bool,
+            other.tags,
+            &other.lit_bool,
+        );
+        let lit_str = merge_union_lit_set(
+            STR_BIT,
+            self.tags,
+            &self.lit_str,
+            other.tags,
+            &other.lit_str,
+        );
         Ty {
             tags,
             arrow,
@@ -713,81 +639,42 @@ impl Ty {
         } else {
             None
         };
-        // Literal sets intersect; if the result is empty no keyword qualifies, so
-        // clear the keyword bit too. An *open* side (keyword, no set) intersects to
-        // the other side's set (the narrower).
+        // Literal sets intersect; an empty result means no value of the tag
+        // qualifies, so clear that tag bit. An *open* side (tag, no set) intersects
+        // to the other side's set (the narrower). Each tag is independent.
         let lit = if tags & KEYWORD_BIT != 0 {
-            match (&self.lit, &other.lit) {
-                (Some(a), Some(b)) => {
-                    let s: BTreeSet<Symbol> = a.intersection(b).copied().collect();
-                    if s.is_empty() {
-                        tags &= !KEYWORD_BIT;
-                        None
-                    } else {
-                        Some(Arc::new(s))
-                    }
-                }
-                (Some(a), None) => Some(a.clone()),
-                (None, Some(b)) => Some(b.clone()),
-                (None, None) => None,
+            let (s, keep) = intersect_lit_set(&self.lit, &other.lit);
+            if !keep {
+                tags &= !KEYWORD_BIT;
             }
+            s
         } else {
             None
         };
-        // Same intersection logic, independent tag — an int-literal set
-        // narrows exactly like a keyword-literal one.
         let lit_int = if tags & INT_BIT != 0 {
-            match (&self.lit_int, &other.lit_int) {
-                (Some(a), Some(b)) => {
-                    let s: BTreeSet<i64> = a.intersection(b).copied().collect();
-                    if s.is_empty() {
-                        tags &= !INT_BIT;
-                        None
-                    } else {
-                        Some(Arc::new(s))
-                    }
-                }
-                (Some(a), None) => Some(a.clone()),
-                (None, Some(b)) => Some(b.clone()),
-                (None, None) => None,
+            let (s, keep) = intersect_lit_set(&self.lit_int, &other.lit_int);
+            if !keep {
+                tags &= !INT_BIT;
             }
+            s
         } else {
             None
         };
-        // Same intersection logic again, independent tags.
         let lit_bool = if tags & BOOL_BIT != 0 {
-            match (&self.lit_bool, &other.lit_bool) {
-                (Some(a), Some(b)) => {
-                    let s: BTreeSet<bool> = a.intersection(b).copied().collect();
-                    if s.is_empty() {
-                        tags &= !BOOL_BIT;
-                        None
-                    } else {
-                        Some(Arc::new(s))
-                    }
-                }
-                (Some(a), None) => Some(a.clone()),
-                (None, Some(b)) => Some(b.clone()),
-                (None, None) => None,
+            let (s, keep) = intersect_lit_set(&self.lit_bool, &other.lit_bool);
+            if !keep {
+                tags &= !BOOL_BIT;
             }
+            s
         } else {
             None
         };
         let lit_str = if tags & STR_BIT != 0 {
-            match (&self.lit_str, &other.lit_str) {
-                (Some(a), Some(b)) => {
-                    let s: BTreeSet<String> = a.intersection(b).cloned().collect();
-                    if s.is_empty() {
-                        tags &= !STR_BIT;
-                        None
-                    } else {
-                        Some(Arc::new(s))
-                    }
-                }
-                (Some(a), None) => Some(a.clone()),
-                (None, Some(b)) => Some(b.clone()),
-                (None, None) => None,
+            let (s, keep) = intersect_lit_set(&self.lit_str, &other.lit_str);
+            if !keep {
+                tags &= !STR_BIT;
             }
+            s
         } else {
             None
         };
@@ -836,21 +723,18 @@ impl Ty {
         if self.tuple.is_some() {
             tags |= self.tags & VECTOR_BIT;
         }
-        // A literal set omits the *other* keywords, which are in the complement —
-        // so the keyword tag survives (widened to "any keyword").
-        if self.lit.is_some() {
-            tags |= KEYWORD_BIT;
-        }
-        // Same reasoning, independent tag — an int-literal set omits the
-        // other ints, so the int tag survives (widened to "any int").
-        if self.lit_int.is_some() {
-            tags |= INT_BIT;
-        }
-        if self.lit_bool.is_some() {
-            tags |= BOOL_BIT;
-        }
-        if self.lit_str.is_some() {
-            tags |= STR_BIT;
+        // A literal set omits the *other* values of its tag, which are in the
+        // complement — so the tag survives (widened to "any" of that tag). Each
+        // literal kind is an independent tag/field.
+        for (present, bit) in [
+            (self.lit.is_some(), KEYWORD_BIT),
+            (self.lit_int.is_some(), INT_BIT),
+            (self.lit_bool.is_some(), BOOL_BIT),
+            (self.lit_str.is_some(), STR_BIT),
+        ] {
+            if present {
+                tags |= bit;
+            }
         }
         Ty::flat(tags)
     }
@@ -968,55 +852,15 @@ impl Ty {
                 }
             }
         }
-        if self.tags & KEYWORD_BIT != 0 {
-            if let Some(b) = &other.lit {
-                match &self.lit {
-                    // every keyword self admits must be one `other` admits
-                    Some(a) => {
-                        if !a.is_subset(b) {
-                            return false;
-                        }
-                    }
-                    None => return false, // self = "any keyword" ⊄ a literal set
-                }
-            }
-        }
-        if self.tags & INT_BIT != 0 {
-            if let Some(b) = &other.lit_int {
-                match &self.lit_int {
-                    // every int self admits must be one `other` admits
-                    Some(a) => {
-                        if !a.is_subset(b) {
-                            return false;
-                        }
-                    }
-                    None => return false, // self = "any int" ⊄ a literal set
-                }
-            }
-        }
-        if self.tags & BOOL_BIT != 0 {
-            if let Some(b) = &other.lit_bool {
-                match &self.lit_bool {
-                    Some(a) => {
-                        if !a.is_subset(b) {
-                            return false;
-                        }
-                    }
-                    None => return false,
-                }
-            }
-        }
-        if self.tags & STR_BIT != 0 {
-            if let Some(b) = &other.lit_str {
-                match &self.lit_str {
-                    Some(a) => {
-                        if !a.is_subset(b) {
-                            return false;
-                        }
-                    }
-                    None => return false,
-                }
-            }
+        // Each literal member: every value `self` admits for the tag must be one
+        // `other` admits (an unrefined `other` admits all; an open `self` is not a
+        // subset of a specific literal set). One rule per independent tag/field.
+        if !lit_is_subtype(self.tags & KEYWORD_BIT != 0, &self.lit, &other.lit)
+            || !lit_is_subtype(self.tags & INT_BIT != 0, &self.lit_int, &other.lit_int)
+            || !lit_is_subtype(self.tags & BOOL_BIT != 0, &self.lit_bool, &other.lit_bool)
+            || !lit_is_subtype(self.tags & STR_BIT != 0, &self.lit_str, &other.lit_str)
+        {
+            return false;
         }
         true
     }
@@ -1033,25 +877,19 @@ impl Ty {
         if shared == 0 {
             return true;
         }
-        if shared == KEYWORD_BIT {
-            if let (Some(a), Some(b)) = (&self.lit, &other.lit) {
-                return a.is_disjoint(b);
-            }
+        // When the sole shared tag is a literal kind and both sides pin disjoint
+        // sets, no value of that tag satisfies both. One rule per independent tag.
+        if let Some(d) = lit_disjoint(shared == KEYWORD_BIT, &self.lit, &other.lit) {
+            return d;
         }
-        if shared == INT_BIT {
-            if let (Some(a), Some(b)) = (&self.lit_int, &other.lit_int) {
-                return a.is_disjoint(b);
-            }
+        if let Some(d) = lit_disjoint(shared == INT_BIT, &self.lit_int, &other.lit_int) {
+            return d;
         }
-        if shared == BOOL_BIT {
-            if let (Some(a), Some(b)) = (&self.lit_bool, &other.lit_bool) {
-                return a.is_disjoint(b);
-            }
+        if let Some(d) = lit_disjoint(shared == BOOL_BIT, &self.lit_bool, &other.lit_bool) {
+            return d;
         }
-        if shared == STR_BIT {
-            if let (Some(a), Some(b)) = (&self.lit_str, &other.lit_str) {
-                return a.is_disjoint(b);
-            }
+        if let Some(d) = lit_disjoint(shared == STR_BIT, &self.lit_str, &other.lit_str) {
+            return d;
         }
         // Two tuple shapes are provably disjoint if their arities differ (a
         // vector value has exactly one length, so it can't be both a 2-tuple
@@ -1230,113 +1068,102 @@ fn merge_intersect<T: PartialEq>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> Opti
     }
 }
 
-/// The surviving keyword-literal set for a **union**. Unlike the generic
-/// [`merge_union`], two literal sets combine *exactly* (set-union), since the union
-/// of `{:a}` and `{:b}` is precisely `{:a, :b}`. But if either side has its keyword
-/// member *open* (the keyword tag present with no literal set — i.e. "any keyword"),
-/// the union admits every keyword, so the result is open too (`None`).
-fn merge_union_lit(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<Symbol>>> {
-    let open = |t: &Ty| t.tags & KEYWORD_BIT != 0 && t.lit.is_none();
-    if open(a) || open(b) {
+/// The surviving literal set for a **union** of one tag's literal member. Unlike
+/// the generic [`merge_union`], two literal sets combine *exactly* (set-union) —
+/// `{:a} ∪ {:b} = {:a, :b}`. But if either side has that member *open* (the tag
+/// present with no literal set — i.e. "any keyword"/"any int"/…), the union
+/// admits every value of the tag, so the result is open too (`None`). One
+/// function over every literal kind (`Symbol`/`i64`/`bool`/`String`), each an
+/// independent tag/field: pass the tag bit and both sides' `tags` + literal field.
+fn merge_union_lit_set<T: Ord + Clone>(
+    tag: u32,
+    a_tags: u32,
+    a: &Option<Arc<BTreeSet<T>>>,
+    b_tags: u32,
+    b: &Option<Arc<BTreeSet<T>>>,
+) -> Option<Arc<BTreeSet<T>>> {
+    let open = |tags: u32, set: &Option<Arc<BTreeSet<T>>>| tags & tag != 0 && set.is_none();
+    if open(a_tags, a) || open(b_tags, b) {
         return None;
     }
-    match (&a.lit, &b.lit) {
-        (None, None) => None,
-        (x, y) => {
-            let mut set = BTreeSet::new();
-            if let Some(x) = x {
-                set.extend(x.iter().copied());
-            }
-            if let Some(y) = y {
-                set.extend(y.iter().copied());
-            }
-            if set.is_empty() {
-                None
-            } else {
-                Some(Arc::new(set))
-            }
-        }
+    if a.is_none() && b.is_none() {
+        return None;
+    }
+    let mut set = BTreeSet::new();
+    if let Some(a) = a {
+        set.extend(a.iter().cloned());
+    }
+    if let Some(b) = b {
+        set.extend(b.iter().cloned());
+    }
+    if set.is_empty() {
+        None
+    } else {
+        Some(Arc::new(set))
     }
 }
 
-/// The int-literal counterpart of [`merge_union_lit`] — same exact-union,
-/// open-widens rule, independent tag (`INT_BIT`, not `KEYWORD_BIT`).
-fn merge_union_lit_int(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<i64>>> {
-    let open = |t: &Ty| t.tags & INT_BIT != 0 && t.lit_int.is_none();
-    if open(a) || open(b) {
-        return None;
-    }
-    match (&a.lit_int, &b.lit_int) {
-        (None, None) => None,
-        (x, y) => {
-            let mut set = BTreeSet::new();
-            if let Some(x) = x {
-                set.extend(x.iter().copied());
-            }
-            if let Some(y) = y {
-                set.extend(y.iter().copied());
-            }
-            if set.is_empty() {
-                None
+/// The surviving literal set for an **intersection** of one tag's literal member
+/// (the tag bit already known to survive): the narrower of the two — two sets
+/// intersect exactly; an *open* side (no set) intersects to the other side's set.
+/// The returned `bool` is `false` when the intersection is empty, so no value of
+/// the tag qualifies and the caller clears the tag bit.
+fn intersect_lit_set<T: Ord + Clone>(
+    a: &Option<Arc<BTreeSet<T>>>,
+    b: &Option<Arc<BTreeSet<T>>>,
+) -> (Option<Arc<BTreeSet<T>>>, bool) {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let s: BTreeSet<T> = a.intersection(b).cloned().collect();
+            if s.is_empty() {
+                (None, false)
             } else {
-                Some(Arc::new(set))
+                (Some(Arc::new(s)), true)
             }
         }
+        (Some(a), None) => (Some(a.clone()), true),
+        (None, Some(b)) => (Some(b.clone()), true),
+        (None, None) => (None, true),
     }
 }
 
-/// The bool-literal counterpart of [`merge_union_lit`] (ADR-120) — same
-/// exact-union, open-widens rule, independent tag (`BOOL_BIT`).
-fn merge_union_lit_bool(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<bool>>> {
-    let open = |t: &Ty| t.tags & BOOL_BIT != 0 && t.lit_bool.is_none();
-    if open(a) || open(b) {
-        return None;
+/// Is `self`'s literal member for one tag a subtype of `other`'s? `self_has_tag`
+/// is whether `self` carries the tag at all (only then is there anything to
+/// check). An unrefined `other` admits everything; a refined `other` requires a
+/// refined `self` subset — an open `self` ("any") is *not* a subset of a literal
+/// set.
+fn lit_is_subtype<T: Ord>(
+    self_has_tag: bool,
+    a: &Option<Arc<BTreeSet<T>>>,
+    b: &Option<Arc<BTreeSet<T>>>,
+) -> bool {
+    if !self_has_tag {
+        return true;
     }
-    match (&a.lit_bool, &b.lit_bool) {
-        (None, None) => None,
-        (x, y) => {
-            let mut set = BTreeSet::new();
-            if let Some(x) = x {
-                set.extend(x.iter().copied());
-            }
-            if let Some(y) = y {
-                set.extend(y.iter().copied());
-            }
-            if set.is_empty() {
-                None
-            } else {
-                Some(Arc::new(set))
-            }
-        }
+    match b {
+        None => true,
+        Some(b) => match a {
+            Some(a) => a.is_subset(b),
+            None => false,
+        },
     }
 }
 
-/// The string-literal counterpart of [`merge_union_lit`] (ADR-120) — same
-/// exact-union, open-widens rule, independent tag (`STR_BIT`). Stores owned
-/// `String` content (not a heap `StrId`) so identical literals compare equal
-/// regardless of heap allocation identity.
-fn merge_union_lit_str(a: &Ty, b: &Ty) -> Option<Arc<BTreeSet<String>>> {
-    let open = |t: &Ty| t.tags & STR_BIT != 0 && t.lit_str.is_none();
-    if open(a) || open(b) {
-        return None;
-    }
-    match (&a.lit_str, &b.lit_str) {
-        (None, None) => None,
-        (x, y) => {
-            let mut set = BTreeSet::new();
-            if let Some(x) = x {
-                set.extend(x.iter().cloned());
-            }
-            if let Some(y) = y {
-                set.extend(y.iter().cloned());
-            }
-            if set.is_empty() {
-                None
-            } else {
-                Some(Arc::new(set))
-            }
+/// Whether two literal sets decide **disjointness** for a tag that is the sole
+/// shared tag: `Some(_)` when both sides pin a set (an exact enumeration), else
+/// `None` (the caller falls through to its default). Only ever adds a
+/// genuinely-disjoint verdict — advisory-soundness holds.
+fn lit_disjoint<T: Ord>(
+    shared_is_tag: bool,
+    a: &Option<Arc<BTreeSet<T>>>,
+    b: &Option<Arc<BTreeSet<T>>>,
+) -> Option<bool> {
+    if shared_is_tag {
+        if let (Some(a), Some(b)) = (a, b) {
+            return Some(a.is_disjoint(b));
         }
     }
+    None
 }
 
 mod display;

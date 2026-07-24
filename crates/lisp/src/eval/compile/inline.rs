@@ -120,13 +120,15 @@ pub(crate) fn linmap_has_update(node: &Node, s: usize) -> bool {
     found
 }
 
-pub(crate) fn node_has_selfcall(node: &Node) -> bool {
-    if matches!(node, Node::SelfCall { .. }) {
-        return true;
+/// True if `node`, or any descendant, satisfies `pred`. The one recursive
+/// "does the tree contain a …?" walker — every `node_has_*` probe is a `pred`
+/// over this (self-calls, `MakeClosure`, …), so the recursion lives in one place.
+pub(crate) fn node_any<F: Fn(&Node) -> bool>(node: &Node, pred: &F) -> bool {
+    pred(node) || {
+        let mut found = false;
+        walk_children(node, |c| found = found || node_any(c, pred));
+        found
     }
-    let mut found = false;
-    walk_children(node, |c| found = found || node_has_selfcall(c));
-    found
 }
 
 /// Probe whether `(fn (params…) body…)` folds a **linear** immutable-map
@@ -150,7 +152,7 @@ pub(crate) fn linmap_probe(
         scope.bind(p);
     }
     let node = compile_body(heap, body, &mut scope, true)?;
-    if !node_has_selfcall(&node) {
+    if !node_any(&node, &|n| matches!(n, Node::SelfCall { .. })) {
         return None;
     }
     (0..params.len())
@@ -183,26 +185,6 @@ pub(crate) fn node_count(node: &Node) -> usize {
     let mut n = 1;
     walk_children(node, |child| n += node_count(child));
     n
-}
-
-/// True if `node` (or any descendant) is a `Node::SelfCall`.
-#[cfg(feature = "jit")]
-pub(crate) fn node_has_self_call(node: &Node) -> bool {
-    matches!(node, Node::SelfCall { .. }) || {
-        let mut found = false;
-        walk_children(node, |c| found = found || node_has_self_call(c));
-        found
-    }
-}
-
-/// True if `node` (or any descendant) is a `Node::MakeClosure`.
-#[cfg(feature = "jit")]
-pub(crate) fn node_has_make_closure(node: &Node) -> bool {
-    matches!(node, Node::MakeClosure { .. }) || {
-        let mut found = false;
-        walk_children(node, |c| found = found || node_has_make_closure(c));
-        found
-    }
 }
 
 /// Is `node` a non-tail self-recursive call to `defn_name` with exactly `nrequired`
@@ -761,8 +743,8 @@ pub(crate) fn self_inline_probe(
     }
     // Frame-reuse self-calls and nested closures are incompatible with naive slot
     // shifting; skip an oversized body to avoid blow-up.
-    if node_has_self_call(body)
-        || node_has_make_closure(body)
+    if node_any(body, &|n| matches!(n, Node::SelfCall { .. }))
+        || node_any(body, &|n| matches!(n, Node::MakeClosure { .. }))
         || node_count(body) > SELF_INLINE_MAX_BODY
     {
         return None;

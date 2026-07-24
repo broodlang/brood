@@ -24,7 +24,8 @@
 
 (require 'net/tcp)
 (require 'file)
-
+; the single RFC-3986 parser — `parse-url` wraps it with HTTP defaults
+(require 'url)
 (defmodule net/http
   "A minimal HTTP/1.0 server over the TCP + file libraries (ADR-062). `(serve port
 handler)` listens and runs one handler process per connection; a handler maps a
@@ -352,22 +353,16 @@ socket is registered *passive* (no reader until the worker calls
 ;; takes an iolist and honors `tcp-set-binary` since ADR-143).
 
 (defn parse-url (url)
-  "Parse `url` into {:scheme :host :port :path}. Defaults: scheme http, port 80/443, path \"/\"."
-  (let (rest (cond
-               (starts-with? url "https://") (substring url 8 (string-length url))
-               (starts-with? url "http://") (substring url 7 (string-length url))
-               else url)
-        scheme (if (starts-with? url "https://") "https" "http")
-        slash (index-of rest "/")
-        hostport (if (< slash 0) rest (substring rest 0 slash))
-        path (if (< slash 0) "/" (substring rest slash (string-length rest)))
-        colon (index-of hostport ":")
-        host (if (< colon 0) hostport (substring hostport 0 colon))
-        port (if (< colon 0)
-               (if (= scheme "https") 443 80)
-               (let (n (string->number (substring hostport (+ colon 1) (string-length hostport))))
-                 (if (nil? n) 80 n))))
-    {:scheme scheme :host host :port port :path path}))
+  "Parse `url` into {:scheme :host :port :path} with HTTP defaults applied: scheme
+http, port 80/443 by scheme, path \"/\". The RFC-3986 parsing itself lives in one
+place — `url/parse-url` (the full parser); a scheme-less input is treated as an
+`http://` authority so a bare `host[:port]/path` still parses as a host."
+  (let (with-scheme (if (>= (index-of url "://") 0) url (str "http://" url))
+        u (url/parse-url with-scheme)
+        scheme (or (get u :scheme) "http")
+        path (let (p (get u :path)) (if (or (nil? p) (= p "")) "/" p))
+        port (or (get u :port) (if (= scheme "https") 443 80)))
+    {:scheme scheme :host (get u :host) :port port :path path}))
 
 (defn parse-response (raw)
   "Parse a raw HTTP response (`bytes`, from the transport; a string is accepted

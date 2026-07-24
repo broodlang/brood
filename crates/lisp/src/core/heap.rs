@@ -1946,7 +1946,9 @@ mod equality;
 mod gc;
 mod map_ops;
 mod vm_cache;
-pub(crate) use self::gc::{stall_guard, stall_guard_pid, stall_threshold_ms};
+#[cfg(feature = "gui")]
+pub(crate) use self::gc::stall_guard;
+pub(crate) use self::gc::{stall_guard_pid, stall_threshold_ms};
 pub(crate) use self::vm_cache::{CallIcEntry, FastLink, GlobalIcEntry, VmCacheKey};
 
 impl Heap {

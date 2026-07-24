@@ -49,27 +49,35 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    **no test asserting agreement** (verified). Add a coverage test; better,
    co-locate each doc with its `def`. **[kernel]**
 
-**Tier 2 — real duplication to dedupe:**
+**Tier 2 — real duplication to dedupe: 5/6/9 + the parse-url half of 7 done
+2026-07-24 (suite 2985/2985, `nest check` zero-warning, 238 type-lattice Rust
+tests green). 8 and the path half of 7 deferred with rationale (below).**
 
-5. ⬜ **`types/mod.rs` 4-way literal-refinement copy-paste** — `lit`/`lit_int`/
-   `lit_bool`/`lit_str` get 4 near-identical blocks in `intersect`/`is_subtype`/
-   `is_disjoint`/`negate` (~200 lines; `intersect` already drifted from `union`'s
-   factored `merge_union_lit_*`). Plus every `Ty` constructor re-spells all 11
-   fields — struct-update syntax cuts ~100 lines.
-6. ⬜ **`lib.rs` `eval_str`/`eval_source` ~70-line near-dups** — carry delicate
-   load-bearing GC-rooting logic mirrored by hand; factor a private `eval_forms`
-   core. Highest-risk dup.
-7. ⬜ **`std/` path + url duplication** **[Brood]** — `std/path.blsp` (full API)
-   is required by *nothing* (verified: no `(:use path)`), while tooling uses the
-   prelude's bootstrap `path-*` subset; consolidate. `parse-url` duplicated —
-   `url.blsp` full parser vs a lossy reimpl in `net/http.blsp:357`; have net/http
-   `:use url`.
-8. ⬜ **`gui.rs` ↔ `gui_gpu.rs` render-op expansion copy-pasted and already
-   diverged** — GPU path silently skips `Cursor`/`ScrollRegion`/underline. Compute
-   op-geometry once, consume from either backend.
-9. ⬜ **`eval/compile/inline.rs` `node_*` predicate family** — `node_has_selfcall`
-   and `node_has_self_call` are functionally identical (one underscore apart,
-   verified); collapse the family to a `node_any` combinator.
+5. ✅ **`types/mod.rs` 4-way literal-refinement copy-paste** — the per-kind blocks
+   in `union`/`intersect`/`is_subtype`/`is_disjoint`/`negate` now go through four
+   generic helpers (`merge_union_lit_set`/`intersect_lit_set`/`lit_is_subtype`/
+   `lit_disjoint`, `T: Ord + Clone`), and all ten `Ty` constructors use
+   struct-update over `Ty::flat(tags)`. ~250 lines removed; behaviour identical.
+6. ✅ **`lib.rs` `eval_str`/`eval_source` near-dups** — factored the private
+   `eval_forms(Vec<(Value, Option<Pos>)>)` core carrying the load-bearing
+   GC-rooting/namespace/reset logic once; the two public fns are now 3-line
+   adapters. The restore now runs exactly once on every path (was mirrored).
+7. 🟡 **`std/` path + url duplication** **[Brood]** — ✅ **url:** `net/http`'s
+   `parse-url` now wraps `url/parse-url` (the one RFC-3986 parser) + HTTP defaults,
+   instead of a lossy reimpl. ⬜ **path deferred:** `path.blsp` and the prelude
+   `path-*` subset look like dups but have *different contracts* (`path/basename`
+   strips a trailing slash, `path-basename` doesn't; `path/join` is variadic with
+   absolute-reset, `path-join` is 2-arg) — merging them would change tested
+   behaviour, so it needs a deliberate API decision, not a mechanical dedupe.
+8. ⬜ **`gui.rs` ↔ `gui_gpu.rs`** — **deferred:** `gui_gpu.rs` is a declared
+   *prototype* (solid quads; "Cursor / zones: not drawn in the GPU prototype"), so
+   the missing `Cursor`/`ScrollRegion`/underline are *unimplemented GPU features*,
+   not diverged geometry. Making the GPU path draw them (ScrollRegion op-reprocess,
+   GPU text underline) is feature work needing a live display to verify — out of
+   scope for a mechanical cleanup pass.
+9. ✅ **`eval/compile/inline.rs` `node_*` predicate family** — collapsed
+   `node_has_selfcall`/`node_has_self_call`/`node_has_make_closure` into one
+   generic `node_any(node, &pred)` combinator.
 
 **Tier 3 — quick wins (verified, safe/mechanical): ✅ all done 2026-07-24.**
 (Suite 2979/2979 green; built with gui+treesit-grammars+jit.)

@@ -1946,7 +1946,7 @@ const MAX_BC_FRAMES: usize = 1 << 20;
 /// `live_vm_arms`, which stay valid across a suspend because the driver does **not**
 /// unwind them when it captures (a collection while parked relocates the *values* at
 /// those positions in place, keeping the indices good — ADR-100 §8).
-struct BcFrame {
+pub(crate) struct BcFrame {
     arm: Arc<CompiledArm>,
     ip: usize,
     base: usize,

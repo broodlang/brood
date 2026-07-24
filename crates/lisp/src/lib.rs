@@ -392,73 +392,7 @@ impl Interp {
     /// and return the value of the last.
     pub fn eval_str(&mut self, src: &str) -> Result<Value, LispError> {
         let forms = syntax::reader::read_all(&mut self.heap, src)?;
-        // A top-level run starts at the root namespace; the source's own `(ns …)`
-        // sets it, with a forward-reference pre-scan (ADR-065). Restored after.
-        let prev_ns = self.heap.set_compile_ns(None);
-        let known = if eval::macros::file_opens_ns(&self.heap, &forms) {
-            eval::macros::scan_def_names(&self.heap, &forms)
-        } else {
-            std::collections::HashSet::new()
-        };
-        let prev_known = self.heap.set_ns_known_names(known);
-        let prev_imports = self.heap.set_imports(std::collections::HashMap::new());
-        // The parsed forms sit in LOCAL below this checkpoint; each form's eval
-        // allocates above it. Between top-level forms the eval stack is empty and
-        // nothing in LOCAL is live but the (discarded) intermediate result —
-        // globals live in PRELUDE/RUNTIME — so we reclaim that form's garbage
-        // before the next. The final form's result is kept for the caller.
-        let cp = self.heap.checkpoint();
-        let gc = self.heap.gc_enabled();
-        let mut result = Value::nil();
-        let n = forms.len();
-        // GC-root the unevaluated forms across the per-form eval: at the
-        // outermost-eval safepoint (`GC_BLOCK == 1`) the copying collector
-        // relocates forms[i+1..] (LOCAL pairs the loop still needs). We re-fetch
-        // each form from the (relocated) root stack via `root_at` — the `forms`
-        // `Vec`'s own handles go stale across a collection. The
-        // `roots_len`/`truncate_roots` pairing stays balanced on the error path.
-        let roots_base = self.heap.roots_len();
-        for &form in &forms {
-            self.heap.push_root(form);
-        }
-        for i in 0..n {
-            // The form's current handle (relocated if an earlier form's eval
-            // triggered a collection); the `forms` Vec copy may be stale.
-            let form = self.heap.root_at(roots_base + i);
-            // Compile pass: expand macros once before evaluating (form-by-form,
-            // so a macro a form defines is in scope for the forms after it).
-            let outcome = eval::macros::compile(&mut self.heap, form, self.root).and_then(|f| {
-                // BROOD_VM → the compiling engine (ADR-076); off → tree-walker.
-                // Stage 0 defers, so this is at parity. Mirrors `eval_source`.
-                if eval::compile::vm_enabled() {
-                    eval::compile::run(&mut self.heap, f, self.root)
-                } else {
-                    eval::eval(&mut self.heap, f, self.root)
-                }
-            });
-            match outcome {
-                Ok(v) => result = v,
-                Err(e) => {
-                    self.heap.truncate_roots(roots_base);
-                    self.heap.set_compile_ns(prev_ns);
-                    self.heap.set_ns_known_names(prev_known);
-                    self.heap.set_imports(prev_imports);
-                    return Err(e);
-                }
-            }
-            // Per-form arena reset is the *no-GC* reclamation path (ADR-016). With
-            // the safepoint collector on, GC reclaims instead — and a copy moves
-            // the slabs, so the pre-loop checkpoint is stale and a reset would
-            // corrupt. Skip it when GC is enabled.
-            if !gc && i + 1 < n {
-                self.heap.reset_local_to(cp);
-            }
-        }
-        self.heap.truncate_roots(roots_base);
-        self.heap.set_compile_ns(prev_ns);
-        self.heap.set_ns_known_names(prev_known);
-        self.heap.set_imports(prev_imports);
-        Ok(result)
+        self.eval_forms(forms.into_iter().map(|f| (f, None)).collect())
     }
 
     /// Like [`eval_str`](Self::eval_str), but for source loaded from a named
@@ -468,10 +402,36 @@ impl Interp {
     /// `docs/tooling.md`); parse errors keep the reader's precise position.
     pub fn eval_source(&mut self, src: &str) -> Result<Value, LispError> {
         let forms = syntax::reader::read_all_positioned(&mut self.heap, src)?;
-        // Root namespace + forward-ref pre-scan for a file run (ADR-065), restored
-        // after. The file's own `(ns …)` form sets the namespace.
-        let prev_ns = self.heap.set_compile_ns(None);
+        self.eval_forms(forms.into_iter().map(|(f, p)| (f, Some(p))).collect())
+    }
+
+    /// Shared top-level driver behind [`eval_str`](Self::eval_str) (no positions)
+    /// and [`eval_source`](Self::eval_source) (each form tagged with its
+    /// `line:col`, so an otherwise-unpositioned error gets `PATH:LINE:COL` and
+    /// def sites are recorded for `M-.`). Evaluates each form against the global
+    /// environment and returns the last value.
+    ///
+    /// Namespace + forward-reference pre-scan (ADR-065): a top-level run starts at
+    /// the root namespace; the source's own `(ns …)` sets it, restored after.
+    ///
+    /// GC-rooting (load-bearing): the parsed forms sit in LOCAL and each form's
+    /// eval allocates above a checkpoint. At the outermost-eval safepoint
+    /// (`GC_BLOCK == 1`) the copying collector relocates the still-unevaluated
+    /// forms, so we root them and re-fetch each via `root_at` — the `forms` Vec's
+    /// own handles go stale across a collection; positions are plain data and
+    /// don't move. Between forms the eval stack is empty and only the discarded
+    /// intermediate result is live (globals live in PRELUDE/RUNTIME), so that
+    /// garbage is reclaimed before the next form: by GC when the collector is on,
+    /// else by the ADR-016 per-form arena reset (a move would invalidate the
+    /// checkpoint, so the reset is skipped whenever GC is enabled). The
+    /// `roots_len`/`truncate_roots` pairing and the namespace restore both run
+    /// exactly once, on every path.
+    fn eval_forms(
+        &mut self,
+        forms: Vec<(Value, Option<crate::error::Pos>)>,
+    ) -> Result<Value, LispError> {
         let form_vals: Vec<Value> = forms.iter().map(|&(f, _)| f).collect();
+        let prev_ns = self.heap.set_compile_ns(None);
         let known = if eval::macros::file_opens_ns(&self.heap, &form_vals) {
             eval::macros::scan_def_names(&self.heap, &form_vals)
         } else {
@@ -483,48 +443,52 @@ impl Interp {
         let gc = self.heap.gc_enabled();
         let mut result = Value::nil();
         let n = forms.len();
-        // GC-root the unevaluated forms across the loop (see `eval_str`); re-fetch
-        // each form's relocated handle via `root_at` (positions are plain data in
-        // `forms`, so they don't move).
         let roots_base = self.heap.roots_len();
         for &(form, _) in &forms {
             self.heap.push_root(form);
         }
+        let mut ret: Result<(), LispError> = Ok(());
         for i in 0..n {
+            // The form's current handle (relocated if an earlier form's eval
+            // triggered a collection); the `forms` Vec copy may be stale.
             let form = self.heap.root_at(roots_base + i);
             let pos = forms[i].1;
-            // Record def sites — try the raw form first (preserves pre-expansion
-            // spans for `defn`/`defmacro`), then also the expanded form so
-            // user-defined def-like macros whose raw head isn't recognised
-            // (e.g. `defseq`) still get their call-site position recorded.
-            // Both calls no-op when not a definition or no file is set.
-            self.heap.note_definition(form, pos);
+            // Record def sites (file runs only): the raw form first (preserves
+            // pre-expansion spans for `defn`/`defmacro`), then the expanded form
+            // so def-like macros whose raw head isn't recognised (e.g. `defseq`)
+            // still get their call-site position. Both no-op off a definition or
+            // with no file set.
+            if let Some(pos) = pos {
+                self.heap.note_definition(form, pos);
+            }
+            // Compile pass: expand macros once before evaluating (form-by-form, so
+            // a macro a form defines is in scope for the forms after it), then
+            // route through the compiling VM (ADR-076) or, under BROOD_VM=0, the
+            // tree-walker (Stage 0 defers, so the two are at parity).
             let outcome = eval::macros::compile(&mut self.heap, form, self.root)
                 .and_then(|f| {
-                    self.heap.note_definition(f, pos);
-                    // BROOD_VM routes the resolved form through the compiling
-                    // engine (ADR-076); off by default → the tree-walker. Stage 0:
-                    // the VM path defers every form back to `eval`, so this is at
-                    // exact parity until lexical addressing lands (Stage 1).
+                    if let Some(pos) = pos {
+                        self.heap.note_definition(f, pos);
+                    }
                     if eval::compile::vm_enabled() {
                         eval::compile::run(&mut self.heap, f, self.root)
                     } else {
                         eval::eval(&mut self.heap, f, self.root)
                     }
                 })
-                .map_err(|e| e.or_pos(pos));
+                .map_err(|e| match pos {
+                    Some(p) => e.or_pos(p),
+                    None => e,
+                });
             match outcome {
                 Ok(v) => result = v,
                 Err(e) => {
-                    self.heap.truncate_roots(roots_base);
-                    self.heap.set_compile_ns(prev_ns);
-                    self.heap.set_ns_known_names(prev_known);
-                    self.heap.set_imports(prev_imports);
-                    return Err(e);
+                    ret = Err(e);
+                    break;
                 }
             }
-            // See `eval_str`: per-form reset is the no-GC path; with the collector
-            // on, GC reclaims and a move would invalidate the checkpoint.
+            // Per-form arena reset is the no-GC reclamation path (ADR-016); with
+            // the collector on, GC reclaims and a move would invalidate `cp`.
             if !gc && i + 1 < n {
                 self.heap.reset_local_to(cp);
             }
@@ -533,7 +497,7 @@ impl Interp {
         self.heap.set_compile_ns(prev_ns);
         self.heap.set_ns_known_names(prev_known);
         self.heap.set_imports(prev_imports);
-        Ok(result)
+        ret.map(|()| result)
     }
 
     /// Render a value to its readable text form.

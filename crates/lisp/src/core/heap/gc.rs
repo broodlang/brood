@@ -2676,6 +2676,9 @@ impl Drop for StallGuard {
         }
     }
 }
+/// A pid-less stall guard for a non-process work span (GC compaction/minor
+/// collection, and the GUI paint path). The `heap::stall_guard` re-export is
+/// gated on the `gui` feature since only `gui.rs` reaches it that way.
 pub(crate) fn stall_guard(label: &'static str) -> Option<StallGuard> {
     stall_threshold_ms().map(|ms| StallGuard {
         label,
