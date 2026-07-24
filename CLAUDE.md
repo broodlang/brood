@@ -149,8 +149,8 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          framework `std/proc/*` (`gen`, `supervisor`); the net *library*
                          `std/net/*` (`http`, `sse`, `tcp`); the toolchain `std/tool/*`
                          — grouped on disk but BARE module names (test, project, package,
-                         coverage, docs, grammar, mcp, observer, proctree, repl, sexp,
-                         reload). The
+                         complete, coverage, docs, grammar, mcp, observer, proctree,
+                         repl, sexp, reload). The
                          net library and `proc/supervisor` were briefly externalized (Move 2)
                          then re-bundled in-tree (ADR-097, batteries-included default);
                          the Rust socket *mechanism* stays in-tree too
@@ -166,7 +166,8 @@ subprocess); `nest` is a thin shell over `std/tool/project.blsp`. `nest` subcomm
 today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
 `mcp` (an MCP server over the project), `observe` (the M3 process viewer),
 `attach` (the `emacsclient`-style thin frontend for a daemon serving a `ui-run`
-app — ADR-090), `grammar` (emit an editor syntax grammar — VS Code TextMate or
+app — ADR-090), `completions` (emit a shell TAB-completion script; `complete` is the hidden
+candidate engine behind it), `grammar` (emit an editor syntax grammar — VS Code TextMate or
 Emacs — generated from `(special-forms)`, ADR-092), the package-manager commands
 `fetch`/`update`/`tree`/`add`/`remove` (ADR-037), and `release` (single-binary
 bundling, ADR-038).

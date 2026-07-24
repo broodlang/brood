@@ -1,0 +1,211 @@
+;; std/tool/complete.blsp — project-aware candidates for `nest` shell completion.
+;;
+;; Only the VALUE half of completion lives here. Subcommand names and flag names
+;; are derived in `nest` from clap's own argument model, because that is already
+;; their single source of truth: re-listing them in Brood would guarantee drift the
+;; first time a flag is added. What Brood owns is the part that depends on the
+;; project — which tags exist, which deps are declared, which test files there are.
+;;
+;; ─────────────────────────────────────────────────────────────────────────────
+;; TWO HARD RULES, because this runs on every TAB press
+;; ─────────────────────────────────────────────────────────────────────────────
+;; 1. NEVER raise. A completion that errors would splatter a stack trace into the
+;;    user's command line mid-typing. Every entry point here returns a list —
+;;    empty when it cannot tell — and swallows failures. A broken project must
+;;    still complete flags and filenames.
+;; 2. NEVER load the project image. Booting + loading sources costs far more than
+;;    a keypress budget allows, and a project whose sources don't compile would
+;;    complete nothing. Everything here is filesystem reads and textual scanning.
+;;
+;; Consequence of rule 2: tags are found by scanning test source TEXT for
+;; `:tags [...]`, not by registering the suite. That can't see a tag computed at
+;; runtime — an acceptable trade, since a completion list is a hint, not a
+;; specification, and a wrong hint costs nothing but a wrong pause costs every
+;; keystroke.
+
+(defmodule complete
+  "Project-aware candidate lists for `nest` shell completion — tags, dependency
+names, module names, test files. Every function returns a (possibly empty) list
+and never raises: it runs on each TAB press, so a failure must degrade to \"no
+suggestions\", never to an error on the user's command line."
+  ;; `project--collect-tests` is module-private (ADR-146). Completion is tooling
+  ;; over the project, which is exactly what the internals grant is for — and note
+  ;; the privacy error fires at REQUIRE time, so without this the whole module
+  ;; fails to load and every `complete--safely` net below is bypassed.
+  (:use-internals project))
+
+(require 'project)
+
+;; --- safety net ---------------------------------------------------------------
+;; Run `thunk`, yielding nil on any failure. Wrapped around every filesystem or
+;; parse operation below so a half-written manifest or an unreadable directory
+;; costs a suggestion, not an error.
+(defn complete--safely (thunk) (try (thunk) (catch _ nil)))
+
+(defn complete--root () (complete--safely (fn () (project/project-find-root (cwd)))))
+
+;; Strip `root/` from an absolute path so completions read as the relative paths a
+;; user actually types.
+(defn complete--relative (path root)
+  (if (and (not (nil? root))
+        (starts-with? path root)
+        (> (string-length path)
+          (+ (string-length root) 1)))
+    (substring path (+ (string-length root) 1) (string-length path))
+    path))
+
+;; --- files --------------------------------------------------------------------
+(defn complete-test-files ()
+  "Project-relative paths of every `*_test.blsp` under the project's test paths. Empty outside a project."
+  (let (root (complete--root))
+    (if (nil? root)
+      nil
+      (or (complete--safely (fn ()
+                              (map (fn (p) (complete--relative p root))
+                                (fold (fn (acc dir)
+                                        (append acc (project/project--collect-tests dir)))
+                                  nil
+                                  (project/project-abs-paths root
+                                    (or *project-test-paths* ["tests"]))))))
+        nil))))
+
+(defn complete-blsp-files ()
+  "Project-relative paths of every `.blsp` under the project's source AND test paths — the candidates for `nest check` / `nest run` / `nest format`."
+  (let (root (complete--root))
+    (if (nil? root)
+      nil
+      (or (complete--safely (fn ()
+                              (map (fn (p) (complete--relative p root))
+                                (append (fold (fn (acc dir)
+                                                (append acc (project/project-collect-sources dir)))
+                                          nil
+                                          (project/project-abs-paths root
+                                            (or *project-source-paths* ["src"])))
+                                  (fold (fn (acc dir)
+                                          (append acc (project/project--collect-tests dir)))
+                                    nil
+                                    (project/project-abs-paths root
+                                      (or *project-test-paths* ["tests"])))))))
+        nil))))
+
+;; --- tags ---------------------------------------------------------------------
+;; Pull `:tags [...]` out of source TEXT. Deliberately textual (rule 2): the
+;; alternative is registering the suite, which means loading the project.
+;;
+;; Scans for the literal `:tags` then takes what is between the following `[` and
+;; `]`. A `:tags` inside a string or comment would be picked up — harmless, since
+;; the worst case is one spurious suggestion.
+(defn complete--tags-in (text acc from)
+  (let (i (index-of--from text ":tags" from))
+    (if (< i 0)
+      acc
+      (let (open (index-of--from text "[" i)
+            close (if (< open 0) -1 (index-of--from text "]" open)))
+        (if (or (< open 0) (< close 0))
+          acc
+          (complete--tags-in text
+            (append acc (complete--keywords (substring text (+ open 1) close)))
+            (+ close 1)))))))
+
+;; `index-of` has no start offset, so scan a suffix and re-base the result.
+(defn index-of--from (text needle from)
+  (if (>= from (string-length text))
+    -1
+    (let (i (index-of (substring text from (string-length text)) needle))
+      (if (< i 0) -1 (+ from i)))))
+
+;; The bare names of the `:keyword`s in a whitespace-separated fragment.
+(defn complete--keywords (fragment)
+  (fold (fn (acc token)
+          (if (and (starts-with? token ":") (> (string-length token) 1))
+            (append acc (list (substring token 1 (string-length token))))
+            acc))
+    nil
+    (filter (fn (s) (not (= s ""))) (string-split (trim fragment) " "))))
+
+(defn complete-tags ()
+  "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why."
+  (let (files (complete-test-files)
+        root (complete--root))
+    (if (or (nil? files) (nil? root))
+      nil
+      (sort (keys (fold (fn (seen name) (assoc seen name true))
+                    {}
+                    (fold (fn (acc rel)
+                            (append acc
+                              (or (complete--safely (fn ()
+                                                      (complete--tags-in (slurp (path-join root
+                                                                                  rel))
+                                                        nil
+                                                        0)))
+                                nil)))
+                      nil
+                      files)))))))
+
+;; --- selectors ----------------------------------------------------------------
+(defn complete-selectors ()
+  "Candidates for `--only` / `--exclude` / `--include`: every declared tag, plus the `test:` and `describe:` pseudo-selector prefixes."
+  (append (complete-tags) (list "test:" "describe:")))
+
+;; --- dependencies -------------------------------------------------------------
+(defn complete-dep-names ()
+  "The names of the dependencies this project declares — the candidates for `nest remove` and `nest update`. Read straight from the manifest as data, so it works even when the deps are not fetched."
+  (let (root (complete--root))
+    (if (nil? root)
+      nil
+      (or (complete--safely (fn ()
+                              (let (form (read-first (slurp (path-join root "project.blsp"))))
+                                (if (and (pair? form) (= (first form) 'project))
+                                  (map (fn (d) (name (get d :name)))
+                                    (project/project-parse-deps (plist-get (rest form)
+                                                                  :dependencies)))
+                                  nil))))
+        nil))))
+
+;; --- modules ------------------------------------------------------------------
+(defn complete-modules ()
+  "Candidates for `nest doc MODULE`: every baked-in std module plus this project's own source modules (by file basename, which is how `require` names them)."
+  (let (root (complete--root))
+    (sort (keys (fold (fn (seen m) (assoc seen m true))
+                  {}
+                  (append (or (complete--safely (fn () (builtin-modules)))
+                            nil)
+                    (if (nil? root)
+                      nil
+                      (or (complete--safely (fn ()
+                                              (map (fn (p)
+                                                     (complete--strip-extension (path-basename p)))
+                                                (fold (fn (acc dir)
+                                                        (append acc
+                                                          (project/project-collect-sources dir)))
+                                                  nil
+                                                  (project/project-abs-paths root
+                                                    (or *project-source-paths* ["src"]))))))
+                        nil))))))))
+
+(defn complete--strip-extension (filename)
+  (if (ends-with? filename ".blsp")
+    (substring filename 0 (- (string-length filename) 5))
+    filename))
+
+;; --- dispatch -----------------------------------------------------------------
+;; One entry point so `nest` needs only a single eval per completion request, and
+;; an unknown kind is "no suggestions" rather than an error.
+(defn complete-for (kind)
+  "Candidates for a completion `kind` (a string, from `nest complete`): \"selector\", \"tag\", \"test-file\", \"blsp-file\", \"dep\", or \"module\". Any other kind yields nil, so a new flag that forgets to add a kind degrades to filename completion instead of failing."
+  (cond
+    (= kind "selector") (complete-selectors)
+    (= kind "tag") (complete-tags)
+    (= kind "test-file") (complete-test-files)
+    (= kind "blsp-file") (complete-blsp-files)
+    (= kind "dep") (complete-dep-names)
+    (= kind "module") (complete-modules)
+    else nil))
+
+(defn complete-print (kind prefix)
+  "Print one candidate per line for `kind`, keeping only those starting with `prefix` — the form `nest complete` consumes. Prints nothing (and never raises) when there is nothing to suggest, so the shell falls back to filename completion."
+  (fold (fn (_ c) (println c))
+    nil
+    (filter (fn (c) (or (= prefix "") (starts-with? c prefix)))
+      (or (complete--safely (fn () (complete-for kind))) nil)))
+  :ok)

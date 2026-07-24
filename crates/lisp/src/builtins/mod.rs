@@ -1690,6 +1690,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)),
         builtin_doc,
     );
+    def(
+        heap,
+        "builtin-modules",
+        Arity::exact(0),
+        Sig::new(vec![], list_ty),
+        builtin_modules,
+    );
     // Release-bundle mechanism (ADR-038): an app produced by `nest release`
     // carries its source appended to the binary. These let `std/project.blsp`
     // boot it; `%builtin-module` (above) already consults the bundle, so
@@ -2871,6 +2878,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("doc", &["f"], "The docstring of a function, macro, or primitive, or nil."),
     ("arglist", &["f"], "The parameter list of a function, macro, or primitive, or nil."),
     ("global-names", &[], "Every globally bound symbol, sorted by spelling."),
+    ("builtin-modules", &[], "The names of every module baked into this binary, as a sorted list of strings — what `(require 'name)` resolves without a load-path. Backs `nest` shell completion and lets a name be validated before requiring it."),
     ("special-forms", &[], "The special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter and the LSP."),
     ("bound?", &["sym"], "Whether sym is bound in scope. Quote it: (bound? 'foo)."),
     ("dynamic?", &["x"], "Whether x is a symbol declared dynamic with defdyn. Quote it: (dynamic? '*foo*)."),

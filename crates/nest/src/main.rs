@@ -35,7 +35,7 @@
 
 use brood::cli_support::{report_error, run_on_main_stack, FullTermGuard, RawTermGuard};
 use brood::Interp;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 mod mcp;
 mod release;
@@ -65,6 +65,17 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// Which shell `nest completions` emits an integration script for. A `ValueEnum`,
+/// so the choices are listed in `--help`, an unknown one is rejected with a
+/// formatted error, and `nest completions <TAB>` completes them from this
+/// definition rather than a restated list.
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
 /// Which editor grammar `nest grammar` emits (ADR-092). A `ValueEnum` so clap
 /// lists the choices in `--help`, rejects an unknown one with a formatted error,
 /// and offers shell completion — instead of a hand-rolled match + `exit(2)`.
@@ -82,6 +93,33 @@ enum GrammarTarget {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Print a shell integration script enabling TAB completion for `nest`.
+    ///
+    /// Completes subcommands, flags, and project-aware values — test files, tags
+    /// for `--only`/`--exclude`/`--include`, dependency names, module names.
+    ///
+    /// Install by sourcing it from your shell's startup file:
+    ///   bash:  eval "$(nest completions bash)"
+    ///   zsh:   eval "$(nest completions zsh)"
+    ///   fish:  nest completions fish | source
+    Completions {
+        /// Which shell to emit for.
+        #[arg(value_name = "SHELL")]
+        shell: CompletionShell,
+    },
+
+    /// Print completion candidates for a partial command line (used by the shell
+    /// scripts from `nest completions`; not usually run by hand).
+    ///
+    /// Takes the words after `nest`, the word being typed last, and prints one
+    /// candidate per line. Always exits 0 — a completion must never fail.
+    #[command(hide = true)]
+    Complete {
+        /// The words after `nest`, with the partial word last.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+
     /// Scaffold a new project (project.blsp + src/ + tests/ + starter files).
     New {
         /// The project's name. Becomes the directory + `:name` in project.blsp.
@@ -500,6 +538,8 @@ fn run_main(cli: Cli) {
             }
             cmd_check(&mut interp, &files)
         }
+        Cmd::Completions { shell } => cmd_completions(shell),
+        Cmd::Complete { words } => cmd_complete(&words),
         Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
         Cmd::Format { check, changed } => {
             require_project("format", None);
@@ -1491,6 +1531,246 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 /// Walk up from cwd looking for a `project.blsp` marker. Used by the
 /// single-file `nest run/test/check` paths to decide whether to bootstrap
 /// the project image.
+// ── shell completion ────────────────────────────────────────────────────────
+//
+// Two halves, split by what owns the truth:
+//
+//   * Subcommand and flag names are read out of clap's OWN model
+//     (`Cli::command()`), never a hand-kept list. That is the whole point: a flag
+//     added to the `Cmd` enum is completable the same day, and a flag renamed
+//     can't leave a stale completion behind.
+//   * Project-dependent VALUES (tags, dep names, modules, test files) come from
+//     `std/tool/complete.blsp`, and only when the cursor is actually at a value
+//     position — so completing a subcommand or a flag never pays interpreter boot.
+//
+// Everything here must be silent and total: completion runs on a keypress, so it
+// prints candidates or nothing, exits 0, and never reports an error.
+
+/// What kind of value an argument takes, i.e. what to suggest after it. `None`
+/// means "no idea" — the shell falls back to filename completion, which is a
+/// better answer than a wrong list.
+fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
+    match (subcommand, arg_name) {
+        (_, "only" | "exclude" | "include") => Some("selector"),
+        ("test", "files") => Some("test-file"),
+        ("check" | "run" | "format", _) => Some("blsp-file"),
+        ("doc", "module") => Some("module"),
+        ("remove" | "update", _) => Some("dep"),
+        _ => None,
+    }
+}
+
+/// Ask `std/tool/complete.blsp` to PRINT the candidates for `kind` that start with
+/// `prefix`. Brood prints straight to stdout (which is where the shell reads them
+/// from) and does the prefix filtering, so no list has to be marshalled back
+/// across the boundary.
+///
+/// Failures are swallowed deliberately: a broken manifest or an unreadable
+/// directory must cost a suggestion, not spray an error across a half-typed
+/// prompt. This is also the only path that pays interpreter boot, and it is
+/// reached only when the cursor is genuinely at a project-dependent value.
+fn print_dynamic_values(kind: &str, prefix: &str) {
+    let mut interp = Interp::new();
+    let code = format!(
+        "(require 'complete) {}",
+        brood::introspect::call_form("complete/complete-print", &[kind, prefix])
+    );
+    let _ = interp.eval_str(&code);
+}
+
+/// Every subcommand name clap knows about, hidden ones excluded.
+fn subcommand_names() -> Vec<String> {
+    Cli::command()
+        .get_subcommands()
+        .filter(|s| !s.is_hide_set())
+        .map(|s| s.get_name().to_string())
+        .collect()
+}
+
+/// The `--long` flags of one subcommand, plus the global ones.
+fn flag_names(subcommand: &str) -> Vec<String> {
+    let root = Cli::command();
+    let Some(sub) = root.get_subcommands().find(|s| s.get_name() == subcommand) else {
+        return Vec::new();
+    };
+    sub.get_arguments()
+        .chain(root.get_arguments())
+        .filter(|a| !a.is_hide_set())
+        .filter_map(|a| a.get_long().map(|l| format!("--{l}")))
+        .collect()
+}
+
+/// Does this argument take a value (so the word after it is a value, not a flag)?
+fn takes_value(subcommand: &str, long: &str) -> bool {
+    let root = Cli::command();
+    let sub_takes = root
+        .get_subcommands()
+        .find(|s| s.get_name() == subcommand)
+        .and_then(|sub| {
+            sub.get_arguments()
+                .find(|a| a.get_long() == Some(long))
+                .map(|a| a.get_num_args().is_none_or(|n| n.takes_values()))
+        });
+    sub_takes.unwrap_or_else(|| {
+        root.get_arguments()
+            .find(|a| a.get_long() == Some(long))
+            .is_some_and(|a| a.get_num_args().is_none_or(|n| n.takes_values()))
+    })
+}
+
+/// The `--long` value-taking arg immediately before the cursor, if any.
+fn pending_value_flag(subcommand: &str, words: &[String]) -> Option<String> {
+    let previous = words.last()?;
+    let long = previous.strip_prefix("--")?;
+    // `--flag=value` is already complete; only a bare `--flag` leaves a value pending.
+    if long.contains('=') {
+        return None;
+    }
+    takes_value(subcommand, long).then(|| long.to_string())
+}
+
+/// The positional argument's clap id for a subcommand, if it has one.
+fn positional_name(subcommand: &str) -> Option<String> {
+    Cli::command()
+        .get_subcommands()
+        .find(|s| s.get_name() == subcommand)?
+        .get_positionals()
+        .next()
+        .map(|a| a.get_id().to_string())
+}
+
+/// `nest completions <shell>` — emit a shell integration script.
+///
+/// The scripts are deliberately thin: each one forwards the current words to
+/// `nest complete` and offers whatever comes back, so there is exactly ONE
+/// implementation of completion logic and the shells can't disagree with it (or go
+/// stale when a flag is added). Each also falls back to the shell's own filename
+/// completion when `nest complete` returns nothing, so a path is always typeable.
+fn cmd_completions(shell: CompletionShell) {
+    match shell {
+        // `-o default` is the fallback: with no candidates, bash resumes normal
+        // filename completion instead of offering nothing.
+        CompletionShell::Bash => print!(
+            r#"# nest completion for bash — eval "$(nest completions bash)"
+_nest_complete() {{
+    local IFS=$'\n'
+    local words=("${{COMP_WORDS[@]:1:COMP_CWORD}}")
+    # An empty trailing word means "completing a fresh word": keep it, so
+    # `nest test <TAB>` differs from `nest tes<TAB>`.
+    [[ ${{#words[@]}} -eq 0 ]] && words=("")
+    COMPREPLY=($(nest complete -- "${{words[@]}}" 2>/dev/null))
+    return 0
+}}
+complete -o default -o bashdefault -F _nest_complete nest
+"#
+        ),
+        // NB the locals are `parts`/`candidates`, NOT `words`: zsh's completion
+        // context provides `$words`, so declaring `local -a words` would blank it
+        // before it could be read and every completion would see an empty command
+        // line.
+        CompletionShell::Zsh => print!(
+            r#"# nest completion for zsh — eval "$(nest completions zsh)"
+_nest_complete() {{
+    local -a candidates parts
+    parts=("${{(@)words[2,$CURRENT]}}")
+    (( ${{#parts}} == 0 )) && parts=("")
+    candidates=("${{(@f)$(nest complete -- "${{parts[@]}}" 2>/dev/null)}}")
+    # `_files` is the fallback when nest has no opinion, so paths stay completable.
+    if (( ${{#candidates}} == 0 )) || [[ -z "${{candidates[1]}}" ]]; then
+        _files
+    else
+        compadd -- "${{candidates[@]}}"
+    fi
+}}
+compdef _nest_complete nest
+"#
+        ),
+        // fish has no "fall back to files" switch, so ask for both: nest's
+        // candidates plus the usual file list.
+        CompletionShell::Fish => print!(
+            r#"# nest completion for fish — nest completions fish | source
+function __nest_complete
+    set -l tokens (commandline -opc) (commandline -ct)
+    nest complete -- $tokens[2..-1] 2>/dev/null
+end
+complete -c nest -f -a '(__nest_complete)'
+complete -c nest -a '(__fish_complete_path)'
+"#
+        ),
+    }
+}
+
+/// `nest complete -- <words…>` — print one candidate per line for the word being
+/// typed. `words` is everything after `nest`, with the (possibly empty) partial
+/// word last. Always exits 0.
+fn cmd_complete(words: &[String]) {
+    // The word under the cursor, and the settled words before it.
+    let (current, prior) = match words.split_last() {
+        Some((last, rest)) => (last.clone(), rest.to_vec()),
+        None => (String::new(), Vec::new()),
+    };
+    let subcommand = prior
+        .iter()
+        .find(|w| !w.starts_with('-'))
+        .cloned()
+        .filter(|w| subcommand_names().contains(w));
+
+    // Static candidates are filtered and printed here; dynamic ones are printed by
+    // Brood (which also filters), so `kind` is resolved and then handed over.
+    let statics: Vec<String> = match &subcommand {
+        // Still choosing a subcommand.
+        None => subcommand_names(),
+        Some(sub) => {
+            if current.starts_with('-') {
+                flag_names(sub)
+            } else if let Some(flag) = pending_value_flag(sub, &prior) {
+                match value_kind(sub, &flag) {
+                    Some(kind) => {
+                        print_dynamic_values(kind, &current);
+                        return;
+                    }
+                    // No known value kind: print nothing so the shell falls back
+                    // to filenames, which beats a confidently wrong list.
+                    None => return,
+                }
+            } else if let Some(values) = positional_possible_values(sub) {
+                // A `ValueEnum` positional (`nest grammar <TARGET>`) — choices
+                // come from the enum definition, not a restated list.
+                values
+            } else {
+                match positional_name(sub).and_then(|name| value_kind(sub, &name)) {
+                    Some(kind) => {
+                        print_dynamic_values(kind, &current);
+                        return;
+                    }
+                    None => return,
+                }
+            }
+        }
+    };
+
+    for c in statics {
+        if !c.is_empty() && c.starts_with(&current) {
+            println!("{c}");
+        }
+    }
+}
+
+/// A positional's `ValueEnum` choices (e.g. `nest grammar <TARGET>`), so those
+/// come from the enum definition rather than being restated.
+fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
+    let values: Vec<String> = Cli::command()
+        .get_subcommands()
+        .find(|s| s.get_name() == subcommand)?
+        .get_positionals()
+        .next()?
+        .get_possible_values()
+        .iter()
+        .map(|v| v.get_name().to_string())
+        .collect();
+    (!values.is_empty()).then_some(values)
+}
+
 /// Guard a project-scoped subcommand at the `nest` boundary.
 ///
 /// Without this, running one outside a project surfaced a raw Brood `error`: a

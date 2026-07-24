@@ -710,6 +710,7 @@ const CORE_MODULES: &[(&str, &str)] = &[
     ("text", include_str!("../../../../std/text.blsp")),
     ("project", include_str!("../../../../std/tool/project.blsp")),
     ("coverage", include_str!("../../../../std/tool/coverage.blsp")),
+    ("complete", include_str!("../../../../std/tool/complete.blsp")),
     // `nest new` scaffolding (templates + new-project), split out of `project` so
     // the analysis half stays lean. `(:use project)` for *config-git-init*. Opt-in.
     (
@@ -1123,6 +1124,26 @@ pub(super) fn bundle_module_names(_: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 /// guide into each new project.
 pub(super) fn builtin_doc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     lookup_embedded(args, heap, EMBEDDED_DOCS, "%builtin-doc", "doc name")
+}
+
+/// `(builtin-modules)` — the names of every module baked into this binary, as a
+/// sorted list of strings. The module table is a Rust static, so the language has
+/// no other way to see it; `std/tool/complete.blsp` uses it to offer `nest doc`
+/// candidates, and it is generally useful for validating a module name before
+/// `require`ing it.
+pub(super) fn builtin_modules(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let mut names: Vec<&str> = CORE_MODULES
+        .iter()
+        .chain(DEV_MODULES.iter())
+        .map(|(name, _)| *name)
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut items = Vec::with_capacity(names.len());
+    for n in &names {
+        items.push(heap.alloc_string(n));
+    }
+    Ok(heap.list(items))
 }
 
 pub(super) fn apply_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {

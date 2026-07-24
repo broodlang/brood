@@ -7015,3 +7015,61 @@ jit 34/34 + jit_runtime_compaction 3/3 all green under
 Rust test suite (every lib + integration target — `suite.rs`, `runtime_collector`
 20/20, preemption/work-stealing/reductions/…) green. Combined with the earlier
 `nest test` 3108/3108, the decomposition-so-far is behaviour-identical under stress.
+
+## 2026-07-24 — `nest completions`: project-aware TAB completion
+
+`nest completions <bash|zsh|fish>` emits a shell integration script; TAB then
+completes subcommands, flags, **and project-dependent values** — test files, the
+`:tags` declared anywhere in the suite (for `--only`/`--exclude`/`--include`),
+declared dependency names, module names, and `ValueEnum` choices.
+
+**Split by which side owns the truth.** Subcommands and flag names are read out of
+**clap's own argument model** (`Cli::command()`), never a hand-kept list — a flag
+added to the `Cmd` enum is completable the same day, and a renamed flag cannot
+leave a stale completion behind. Staleness is the failure mode that kills
+completions over time, so this was the design driver. Project-dependent values come
+from `std/tool/complete.blsp`, and only when the cursor is genuinely at a value
+position, so completing a subcommand or a flag never pays interpreter startup
+(~60ms static vs ~185ms dynamic in a debug build).
+
+The three emitted scripts are deliberately thin — each forwards the current words
+to a hidden `nest complete` and offers what comes back — so there is exactly one
+implementation of the logic and the shells cannot disagree with it.
+
+**Two invariants, both tested:**
+
+1. **Completion never fails.** It runs on a keypress, so `nest complete` exits 0
+   and writes nothing to stderr whatever it is handed. Verified by a harness over
+   ~1300 invocations (every subcommand × ~50 hostile values × three contexts:
+   healthy project, unparseable manifest, bare directory): zero non-zero exits,
+   zero stderr bytes, zero crash dumps. Also re-ran the computing injection oracle
+   (a payload printing `24690` only if evaluated) — never evaluated.
+2. **Silence means fall back.** With no useful candidate (`--seed` takes a number),
+   nothing is printed and each script defers to the shell's own filename
+   completion. A confidently wrong list is worse than none.
+
+Tags are found by scanning test source **text** for `:tags [...]`, not by
+registering the suite: loading a project image costs far more than a keypress
+allows, and a project whose sources don't compile would complete nothing. A
+runtime-computed tag is therefore invisible — fine, since a completion list is a
+hint, not a specification.
+
+One new primitive, `(builtin-modules)`, exposes the Rust-side baked-in module table
+(a static the language otherwise cannot see); it also lets a module name be checked
+before `require`ing it.
+
+**Two bugs caught before shipping**, both by testing rather than reading:
+- `std/tool/complete.blsp` failed to load at all, because `project--collect-tests`
+  is module-private (ADR-146) and the privacy error fires at **require** time —
+  which meant every `complete--safely` net inside was bypassed and completion
+  silently produced nothing. Fixed with `(:use-internals project)`.
+- The zsh script declared `local -a words`, **shadowing zsh's own
+  completion-context `$words`** before it could be read, so every completion would
+  have seen an empty command line. Renamed to `parts`. Found by hand-review since
+  zsh isn't installed here — bash is verified end-to-end by driving
+  `_nest_complete` with real `COMP_WORDS`/`COMP_CWORD`; zsh and fish are
+  syntax-reviewed only, which is worth knowing.
+
+`crates/nest/tests/complete.rs` (18 cases, incl. the never-fail matrix and the
+zsh-shadowing regression) + `tests/complete_test.blsp` (38 cases over the pure
+scanning/keyword/safety-net logic).

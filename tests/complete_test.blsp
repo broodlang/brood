@@ -1,0 +1,107 @@
+;; Shell-completion candidate logic (std/tool/complete.blsp).
+;;
+;; The pure string machinery — tag extraction, the offset-scanning helper, prefix
+;; filtering — is tested directly. The project-dependent lookups are covered
+;; end-to-end from the CLI in `crates/nest/tests/complete.rs`, which is where the
+;; real contract lives (exit 0, empty stderr, sensible candidates).
+;;
+;; The one thing to keep in mind: every function here runs on a TAB press, so
+;; "returns nothing" is a valid, tested answer and raising never is.
+
+(defmodule complete-test (:use-internals complete) (:use test) (:use complete))
+
+(describe "complete: scanning with an offset"
+  (test "finds a needle at the start"
+    (assert= (complete/index-of--from "abcabc" "abc" 0) 0))
+  (test "finds a LATER occurrence when started past the first"
+    (assert= (complete/index-of--from "abcabc" "abc" 1) 3))
+  (test "returns -1 when the needle is absent"
+    (assert= (complete/index-of--from "abc" "zzz" 0) -1))
+  (test "returns -1 when the needle only appears before the offset"
+    (assert= (complete/index-of--from "abcxxx" "abc" 1) -1))
+  (test "an offset at the end of the string terminates rather than erroring"
+    (assert= (complete/index-of--from "abc" "a" 3) -1))
+  (test "an offset past the end terminates too"
+    (assert= (complete/index-of--from "abc" "a" 99) -1))
+  (test "an empty haystack is handled"
+    (assert= (complete/index-of--from "" "a" 0) -1)))
+
+(describe "complete: keyword extraction from a bracket fragment"
+  (test "one keyword" (assert= (complete/complete--keywords ":fast") (list "fast")))
+  (test "several keywords"
+    (assert= (complete/complete--keywords ":fast :slow :db") (list "fast" "slow" "db")))
+  (test "extra whitespace is tolerated"
+    (assert= (complete/complete--keywords "  :fast   :slow  ") (list "fast" "slow")))
+  (test "non-keyword tokens are skipped"
+    (assert= (complete/complete--keywords ":fast oops :slow") (list "fast" "slow")))
+  (test "a bare colon is not a tag"
+    ;; ":" has nothing after the colon, so there is no name to offer.
+    (assert= (complete/complete--keywords ":") nil))
+  (test "an empty fragment yields nothing" (assert= (complete/complete--keywords "") nil)))
+
+(describe "complete: finding :tags in source text"
+  (test "a describe-level tag list is found"
+    (assert= (complete/complete--tags-in "(describe \"g\" :tags [:fast :unit] ...)" nil 0)
+      (list "fast" "unit")))
+  (test "tags from SEVERAL forms in one file are all found"
+    (assert= (complete/complete--tags-in "(describe \"g\" :tags [:a]\n  (test \"t\" :tags [:b] ...))"
+               nil
+               0)
+      (list "a" "b")))
+  (test "source with no tags yields nothing"
+    (assert= (complete/complete--tags-in "(describe \"g\" (test \"t\" ...))" nil 0) nil))
+  (test "an empty tag list yields nothing"
+    (assert= (complete/complete--tags-in "(describe \"g\" :tags [] ...)" nil 0) nil))
+  ;; Malformed input must terminate, not loop or raise — this scanner runs over
+  ;; whatever half-typed file happens to be on disk.
+  (test ":tags with no bracket at all terminates"
+    (assert= (complete/complete--tags-in "(describe \"g\" :tags" nil 0) nil))
+  (test ":tags with an unclosed bracket terminates"
+    (assert= (complete/complete--tags-in "(describe \"g\" :tags [:fast" nil 0) nil))
+  (test "a trailing :tags after a valid one terminates"
+    (assert= (complete/complete--tags-in "(a :tags [:x]) (b :tags" nil 0) (list "x")))
+  (test "an empty file terminates" (assert= (complete/complete--tags-in "" nil 0) nil)))
+
+(describe "complete: path relativisation"
+  (test "a path under the root is made relative"
+    (assert= (complete/complete--relative "/p/tests/a_test.blsp" "/p") "tests/a_test.blsp"))
+  (test "a path outside the root is left alone"
+    (assert= (complete/complete--relative "/other/a.blsp" "/p") "/other/a.blsp"))
+  (test "a nil root leaves the path alone"
+    (assert= (complete/complete--relative "/p/a.blsp" nil) "/p/a.blsp")))
+
+(describe "complete: the safety net"
+  ;; Rule 1 of this module: never raise. A thunk that throws must yield nil so the
+  ;; caller degrades to "no suggestions" instead of erroring onto the command line.
+  (test "a successful thunk passes its value through"
+    (assert= (complete/complete--safely (fn () 42)) 42))
+  (test "a throwing thunk yields nil"
+    (assert= (complete/complete--safely (fn () (error "boom"))) nil))
+  (test "a thunk that throws a value yields nil"
+    (assert= (complete/complete--safely (fn () (throw :nope))) nil))
+  (test "a nil-returning thunk is indistinguishable, which is fine"
+    (assert= (complete/complete--safely (fn () nil)) nil)))
+
+(describe "complete: baked-in module list"
+  (test "the module list is non-empty" (is (> (count (builtin-modules)) 0)))
+  (test "it contains a known opt-in module" (is (includes? (builtin-modules) "json")))
+  (test "it contains the completion module itself"
+    (is (includes? (builtin-modules) "complete")))
+  (test "entries are strings"
+    (is (fold (fn (ok m) (and ok (string? m))) true (builtin-modules))))
+  (test "the list is sorted"
+    (assert= (builtin-modules) (sort (builtin-modules))))
+  (test "modules include the baked-in set"
+    (is (fold (fn (found m) (or found (= m "json"))) false (complete/complete-modules)))))
+
+(describe "complete: dispatch by kind"
+  (test "an unknown kind yields nothing rather than raising"
+    (assert= (complete/complete-for "no-such-kind") nil))
+  (test "a nil kind yields nothing" (assert= (complete/complete-for nil) nil))
+  (test "the module kind resolves"
+    (is (> (count (complete/complete-for "module")) 0)))
+  (test "selectors always include the pseudo-prefixes even with no tags"
+    ;; `complete-selectors` appends them unconditionally, so a project with no
+    ;; tagged tests still gets the useful `test:` / `describe:` hints.
+    (let (selectors (complete/complete-selectors))
+      (and (is (includes? selectors "test:")) (is (includes? selectors "describe:"))))))

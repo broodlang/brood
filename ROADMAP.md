@@ -872,6 +872,20 @@ Runtime housekeeping (both items landed):
   JIT off in that mode; reporting extends `std/tool/coverage.blsp`). Deferred until
   something concrete needs per-line detail: function coverage answers "what does my
   suite never touch", which is the question that changes what you write next.
+- ✅ **Shell completion (`nest completions`)** — shipped 2026-07-24
+  ([`docs/tooling.md`](docs/tooling.md) §Shell completion). TAB completion for
+  bash/zsh/fish covering subcommands, flags, **and project-aware values**: test
+  files, `:tags` for `--only`/`--exclude`/`--include`, declared dependency names,
+  module names, and `ValueEnum` choices. Split by which side owns the truth —
+  subcommands + flags are derived from **clap's own argument model** (so a new flag
+  is completable immediately and a renamed one can't leave a stale completion), while
+  project-dependent values come from `std/tool/complete.blsp` and only when the
+  cursor is at a value position, so the common case never pays interpreter startup.
+  Two tested invariants: completion **never fails** (exit 0, empty stderr, whatever
+  it's handed — no project, unparseable manifest, hostile text) and **silence means
+  fall back** to the shell's filename completion. One new primitive,
+  `(builtin-modules)`, exposes the Rust-side baked-in module table.
+  `crates/nest/tests/complete.rs` (18) + `tests/complete_test.blsp` (38).
 - ✅ **`nest format --changed`** — shipped 2026-07-23. A git-aware narrower
   scope: formats only the `.blsp` files git reports not-committed-clean
   (modified/staged/untracked), via a new `%git-changed-files` primitive

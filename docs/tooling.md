@@ -260,6 +260,64 @@ like a top-level block: it gets its own line, and blank lines around it survive.
   re-emits as a nested staircase. If you wrote it as `cond` it would stay flat;
   the formatter is not in the business of rewriting forms.
 
+## Shell completion: `nest completions`
+
+TAB completion for `nest`, covering subcommands, flags, **and project-aware
+values**. Install by sourcing the emitted script from your shell startup file:
+
+```bash
+eval "$(nest completions bash)"      # ~/.bashrc
+eval "$(nest completions zsh)"       # ~/.zshrc  (after compinit)
+nest completions fish | source       # ~/.config/fish/config.fish
+```
+
+What completes:
+
+| position | candidates |
+| --- | --- |
+| `nest <TAB>` | every subcommand |
+| `nest test --<TAB>` | that subcommand's flags |
+| `nest test <TAB>` | the project's `*_test.blsp` files |
+| `nest check\|run\|format <TAB>` | every `.blsp` under the source + test paths |
+| `nest test --only\|--exclude\|--include <TAB>` | every tag declared with `:tags [...]`, plus the `test:` / `describe:` prefixes |
+| `nest remove\|update <TAB>` | the dependencies the manifest declares |
+| `nest doc <TAB>` | baked-in std modules plus the project's own |
+| `nest grammar <TAB>`, `nest completions <TAB>` | the enum's own values |
+
+### How it is put together
+
+Two halves, split by which side owns the truth:
+
+- **Subcommands and flag names come from clap's own argument model** in `nest`
+  (`Cli::command()`), never a hand-kept list. That is the point: a flag added to
+  the `Cmd` enum is completable immediately, and a renamed flag cannot leave a
+  stale completion behind. `ValueEnum` positionals likewise take their choices from
+  the enum definition.
+- **Project-dependent values come from `std/tool/complete.blsp`** (Brood), and only
+  when the cursor is actually at a value position — so completing a subcommand or a
+  flag never pays interpreter startup.
+
+The emitted shell scripts are deliberately thin: each forwards the current words to
+`nest complete` and offers what comes back, so there is one implementation and the
+shells cannot disagree with it.
+
+### Two invariants worth knowing
+
+1. **Completion never fails.** It runs on a keypress, so `nest complete` exits 0
+   and writes nothing to stderr no matter what it is handed — no project, an
+   unparseable manifest, hostile argument text. A stack trace pasted into a
+   half-typed command line would be far worse than a missing suggestion. This is
+   pinned by tests in `crates/nest/tests/complete.rs`.
+2. **Silence means "fall back".** When there is no useful candidate — `--seed`
+   takes a number, say — nothing is printed, and each script then defers to the
+   shell's own filename completion. A confidently wrong list is worse than none.
+
+Tags are found by scanning test source **text** for `:tags [...]` rather than by
+registering the suite, because loading a project image costs far more than a
+keypress budget allows (and a project whose sources don't compile would complete
+nothing). The trade-off is that a tag computed at runtime is invisible — acceptable,
+since a completion list is a hint, not a specification.
+
 ## Documentation output: Markdown from `nest doc`
 
 `nest doc [module]` emits Markdown documentation to stdout: with no operand it
