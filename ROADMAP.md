@@ -736,14 +736,22 @@ Runtime housekeeping (both items landed):
 - ⬜ **Mouse / resize input events** — deferred until a feature needs them.
 - ⬜ **GPU-window frontend** — a later additive path speaking the same display
   protocol; arbitrary per-px buffer sizing rides with it.
-- 🟡 **Telemetry** (ADR-106) — core landed, and the kernel event *sources* shipped
+- 🟡 **Telemetry** (ADR-106) — core landed; the kernel event *sources* shipped
   2026-07-19 (ADR-137: `system-monitor` → `telemetry/watch-runtime`, GC/spawn/exit/
-  deopt as `[:runtime kind]` events). Still to fold in: node up/down through the same
-  stream (today `monitor-node`); unifying `gc-stats`/`vm-stats`/`process-info`
-  snapshots behind it so `nest observe` + `nest mcp` consume the stream; `defevent` +
-  checker-validated event schemas; built-in aggregators
-  (counter/gauge/summary/histogram) + sampling; and the location-transparent remote
-  tier over the dist link.
+  deopt as `[:runtime kind]` events). ✅ **Metric aggregators + sampling** shipped
+  2026-07-24: `counter`/`sum`/`last-value` (gauge)/`summary` (running
+  count/mean/stddev/min/max) + `sample-every` (1-in-N), the Elixir
+  `Telemetry.Metrics` set folded entirely in Brood over the `attach` seam — zero
+  new kernel surface. State is a shared `table` (ADR-107); folds run serially in the
+  one listener so a read-modify-write is race-free and stays bounded (no sample
+  retention). `metric`/`metrics-snapshot` readers poll it atomically.
+  `tests/telemetry_metrics_test.blsp` (9, incl. concurrent-emitter fan-in +
+  sampling). Still to fold in: node up/down through the same stream (today
+  `monitor-node`); unifying `gc-stats`/`vm-stats`/`process-info` snapshots behind it
+  so `nest observe` + `nest mcp` consume the stream; a **distribution/histogram**
+  aggregator (percentiles — needs bucketing or sample retention, deferred over the
+  bounded summary); `defevent` + checker-validated event schemas; and the
+  location-transparent remote tier over the dist link.
 
 ### Server / daemon (M4)
 

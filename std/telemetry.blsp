@@ -221,3 +221,107 @@ metadata on a throw (then re-raises). `metadata` is a map shared by all three ev
 The events are emitted async (fire-and-forget); the timing measures `body` running in
 the caller. Returns `body`'s value."
   `(telemetry--span ~event ~metadata (fn () ~@body)))
+
+;; ---- metric aggregators (Elixir Telemetry.Metrics, folded in Brood) ----------
+;; An aggregator is just an `attach` of a folding handler — ADR-106 anticipated
+;; exactly this ("a handler that folds events into running stats"). Because every
+;; handler runs SERIALLY in the one listener process, a plain read-modify-write on
+;; a shared `table` (ADR-107) is race-free here, so we keep float-safe RUNNING
+;; aggregates (count/sum/sum-of-squares/min/max) rather than storing samples — the
+;; metric state is bounded no matter how many events fire. Readers
+;; (`metric`/`metrics-snapshot`) run in another process but read the table
+;; atomically. State survives a listener restart (it lives in the table + the
+;; `def`-global handle, not listener memory), matching ADR-106's stateless-listener
+;; design.
+
+(def *telemetry-metrics* nil)
+
+(defn telemetry--metrics ()
+  "The shared metrics table, created on first use (configuration-time, so the lazy
+init is single-threaded)."
+  (when (nil? *telemetry-metrics*) (def *telemetry-metrics* (table)))
+  *telemetry-metrics*)
+
+(defn reset-metrics ()
+  "Drop every aggregated metric (fresh table). Does NOT detach the handlers — call
+`detach`/`detach-all` for that. Returns nil."
+  (def *telemetry-metrics* (table))
+  nil)
+
+(defn counter (id event)
+  "Count each emit of `event` under metric `id`. `(metric id)` → `{:kind :counter
+:count n}`. Returns `id`."
+  (let (t (telemetry--metrics))
+    (attach id event
+      (fn (e m md)
+        (let (cur (table-get t id {:kind :counter :count 0}))
+          (table-put t id (assoc cur :count (+ (get cur :count) 1))))))))
+
+(defn sum (id event key)
+  "Sum measurement `key` across each emit of `event` under metric `id`. Float-safe.
+`(metric id)` → `{:kind :sum :sum s}`. Returns `id`."
+  (let (t (telemetry--metrics))
+    (attach id event
+      (fn (e m md)
+        (let (v (get m key 0) cur (table-get t id {:kind :sum :sum 0}))
+          (table-put t id (assoc cur :sum (+ (get cur :sum) v))))))))
+
+(defn last-value (id event key)
+  "Track the latest value of measurement `key` (a gauge) under metric `id`.
+`(metric id)` → `{:kind :gauge :value v}`. Returns `id`."
+  (let (t (telemetry--metrics))
+    (attach id event
+      (fn (e m md)
+        (table-put t id {:kind :gauge :value (get m key)})))))
+
+(defn summary (id event key)
+  "Accumulate running statistics of measurement `key` under metric `id` — a bounded
+5-number fold (count/sum/sum-of-squares/min/max), no samples retained. `(metric id)`
+→ `{:kind :summary :count :sum :min :max :mean :stddev}` (mean/stddev derived on
+read). Returns `id`."
+  (let (t (telemetry--metrics))
+    (attach id event
+      (fn (e m md)
+        (let (v   (get m key)
+              cur (table-get t id nil))
+          (if (nil? cur)
+            (table-put t id {:kind :summary :count 1 :sum v :sumsq (* v v) :min v :max v})
+            (table-put t id (assoc cur
+              :count (+ (get cur :count) 1)
+              :sum   (+ (get cur :sum) v)
+              :sumsq (+ (get cur :sumsq) (* v v))
+              :min   (min (get cur :min) v)
+              :max   (max (get cur :max) v)))))))))
+
+(defn telemetry--present (state)
+  "Turn a raw metric accumulator into its reader shape: a `:summary` gets `:mean`
+and `:stddev` derived and its internal `:sumsq` dropped; others pass through."
+  (if (= (get state :kind) :summary)
+    (let (n    (get state :count)
+          s    (get state :sum)
+          mean (/ s n)
+          var  (- (/ (get state :sumsq) n) (* mean mean)))
+      {:kind :summary :count n :sum s :min (get state :min) :max (get state :max)
+       :mean mean :stddev (sqrt (if (< var 0) 0 var))})
+    state))
+
+(defn metric (id)
+  "The current value of metric `id` as a map (with `:summary`'s `:mean`/`:stddev`
+derived), or nil if no such metric has recorded anything yet."
+  (let (state (table-get (telemetry--metrics) id nil))
+    (when state (telemetry--present state))))
+
+(defn metrics-snapshot ()
+  "A point-in-time map of every metric `id` → its reader value (see `metric`).
+Atomic; safe to poll from any process (this is the stream-folded replacement for
+scraping N snapshot builtins). Empty map if no metrics recorded."
+  (let (snap (table-snapshot (telemetry--metrics)))
+    (reduce-kv (fn (acc id state) (assoc acc id (telemetry--present state))) {} snap)))
+
+(defn sample-every (id n handler)
+  "Wrap `handler` so it runs on every `n`th matching event (1-in-`n` sampling) —
+folds only a fraction of a hot event. Deterministic (an atomic counter under `id`,
+not a PRNG), so it never loses count. Compose with an aggregator's handler, or any
+attach handler. Returns the wrapped handler."
+  (let (t (telemetry--metrics) k [id :sample-seen])
+    (fn (e m md) (when (= 0 (rem (table-incr t k 1) n)) (handler e m md)))))

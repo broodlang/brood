@@ -6750,6 +6750,18 @@ runs and returns its body). Telemetry is the seam `nest observe` / `nest mcp` sh
 eventually consume, and where kernel events (GC, scheduler) get published once a Rust
 emit seam is added.
 
+**Follow-up (2026-07-24) — metric aggregators landed.** The deferred "metric
+aggregators" are now shipped in `std/telemetry.blsp`, still zero-kernel: `counter`,
+`sum`, `last-value` (gauge), `summary` (running count/mean/stddev/min/max), and
+`sample-every` (1-in-N), the Elixir `Telemetry.Metrics` set as `attach` handlers.
+Two properties make it clean: state is a shared `table` (ADR-107), and because every
+handler runs *serially in the one listener* (the isolation guarantee above), a
+read-modify-write on that table is race-free — so `summary` keeps float-safe RUNNING
+aggregates and never retains samples (bounded state). Readers (`metric`,
+`metrics-snapshot`) poll the table atomically from any process. Still deferred: a
+distribution/histogram (percentiles need bucketing or sample retention), `defevent`
+schemas, and the remote tier.
+
 ## ADR-107 — `table`: an in-memory shared store (Brood's ETS) as a Rust-backed handle of deep clones
 
 **Status:** accepted (2026-06-14). Implemented: `Value::Table(u64)` + `Tag::Table`

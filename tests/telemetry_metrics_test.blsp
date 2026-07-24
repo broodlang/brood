@@ -1,0 +1,124 @@
+;; std/telemetry.blsp metric aggregators — the Elixir Telemetry.Metrics folded in
+;; Brood over the ADR-106 attach seam: counter / sum / last-value (gauge) / summary
+;; (running count/mean/stddev/min/max) + every-Nth sampling. State lives in a shared
+;; `table` (ADR-107); folds run serially in the one listener process.
+;;
+;; :isolated — each block starts/stops its own listener, resets the metrics table,
+;; and detach-all's, so the shared handler + metrics globals don't race. Bodies stay
+;; tail-recursive (small green-process stack). Register-only — `nest test` finds it.
+
+(defmodule telemetry-metrics-test (:use test) (:use telemetry))
+
+(defn tmm-emit-n (event m n)
+  "Emit `event` with measurements `m`, `n` times (tail-recursive)."
+  (when (> n 0) (emit event m) (tmm-emit-n event m (- n 1))))
+
+(describe "telemetry metrics: counter / sum / gauge"
+  :isolated
+  (test "counter tallies each emit of its event"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (counter :c [:http :req])
+    (tmm-emit-n [:http :req] {} 5)
+    (emit [:other] {})            ; a different event is not counted
+    (telemetry-sync)
+    (let (got (metric :c)) (stop-telemetry)
+      (assert= (get got :count) 5)
+      (assert= (get got :kind) :counter)))
+
+  (test "sum adds a measurement across emits (float-safe)"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (sum :s [:pay] :amount)
+    (emit [:pay] {:amount 1.5}) (emit [:pay] {:amount 2.25}) (emit [:pay] {:amount 0.25})
+    (telemetry-sync)
+    (let (got (metric :s)) (stop-telemetry)
+      (assert= (get got :sum) 4.0)))
+
+  (test "last-value keeps the latest measurement (a gauge)"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (last-value :g [:pool] :inflight)
+    (emit [:pool] {:inflight 3}) (emit [:pool] {:inflight 7}) (emit [:pool] {:inflight 2})
+    (telemetry-sync)
+    (let (got (metric :g)) (stop-telemetry)
+      (assert= (get got :value) 2)
+      (assert= (get got :kind) :gauge)))
+
+  (test "metric is nil before its event has fired"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (counter :never [:nope])
+    (telemetry-sync)
+    (let (got (metric :never)) (stop-telemetry)
+      (is (nil? got)))))
+
+(describe "telemetry metrics: summary (running statistics)"
+  :isolated
+  (test "count / sum / min / max / mean / stddev over a fold"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (summary :lat [:http :req] :duration)
+    (emit [:http :req] {:duration 10})
+    (emit [:http :req] {:duration 20})
+    (emit [:http :req] {:duration 30})
+    (telemetry-sync)
+    (let (got (metric :lat)) (stop-telemetry)
+      (assert= (get got :count) 3)
+      (assert= (get got :sum) 60)
+      (assert= (get got :min) 10)
+      (assert= (get got :max) 30)
+      (assert= (get got :mean) 20)
+      ;; variance = (100+400+900)/3 - 20^2 = 66.666…, stddev ≈ 8.165
+      (is (< (abs (- (get got :stddev) 8.16496580927726)) 0.0001))))
+
+  (test "a single sample has stddev 0"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (summary :one [:e] :v)
+    (emit [:e] {:v 42})
+    (telemetry-sync)
+    (let (got (metric :one)) (stop-telemetry)
+      (assert= (get got :count) 1)
+      (assert= (get got :mean) 42)
+      (assert= (get got :stddev) 0.0))))
+
+(describe "telemetry metrics: snapshot & sampling"
+  :isolated
+  (test "metrics-snapshot returns every metric's reader value"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (counter :a [:e]) (summary :b [:e] :v)
+    (emit [:e] {:v 5}) (emit [:e] {:v 15})
+    (telemetry-sync)
+    (let (snap (metrics-snapshot)) (stop-telemetry)
+      (assert= (into [] (sort (keys snap))) [:a :b])
+      (assert= (get (get snap :a) :count) 2)
+      (assert= (get (get snap :b) :mean) 10)))
+
+  (test "sample-every folds only every nth event"
+    (let (me (self))
+      (start-telemetry) (detach-all) (reset-metrics)
+      ;; the wrapped handler forwards `:fired` only on every 3rd emit
+      (attach :s [:hot] (sample-every :s 3 (fn (e m md) (send me :fired))))
+      (tmm-emit-n [:hot] {} 10)   ; 10 emits → the 3rd/6th/9th fire = 3
+      (telemetry-sync)
+      (let (n (tmm-drain 0)) (stop-telemetry)
+        (assert= n 3)))))
+
+;; Count `:fired` messages already in the mailbox (telemetry-sync has flushed the
+;; listener, so every fire's send has landed) until a short quiet gap.
+(defn tmm-drain (n) (receive (:fired (tmm-drain (+ n 1))) (after 150 n)))
+
+(describe "telemetry metrics: across processes"
+  :isolated
+  (test "concurrent emitters aggregate into one counter (serial listener)"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (counter :total [:tick])
+    (let (me (self))
+      ;; four workers each emit 25 ticks; the listener folds all 100 serially.
+      (tmm-spawn-emitters me 4 25)
+      (tmm-await 4))
+    (telemetry-sync)
+    (let (got (metric :total)) (stop-telemetry)
+      (assert= (get got :count) 100))))
+
+(defn tmm-spawn-emitters (parent workers per)
+  (when (> workers 0)
+    (spawn (do (tmm-emit-n [:tick] {} per) (send parent :done)))
+    (tmm-spawn-emitters parent (- workers 1) per)))
+(defn tmm-await (n)
+  (if (= n 0) :ok (receive (:done (tmm-await (- n 1))) (after 5000 :timeout))))

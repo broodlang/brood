@@ -6255,3 +6255,32 @@ Deferred (noted): range / delta semantic-token requests. Delta needs new statefu
 machinery (resultId issuance + a previous-`data` cache on `Document` + a diff), and
 the token walk already runs off a cached CST — so the payoff is marginal until
 profiling shows token recompute/bandwidth actually hurts (ADR-011).
+
+## 2026-07-24 — Telemetry metric aggregators + sampling (Elixir Telemetry.Metrics, in Brood)
+
+The next telemetry sub-item after the ADR-137 kernel event sources — and the one
+ADR-106 explicitly anticipated ("a handler that folds events into running stats").
+All in `std/telemetry.blsp`, **zero new kernel surface**: `counter`, `sum`,
+`last-value` (gauge), `summary` (running count/sum/sum-of-squares/min/max), and
+`sample-every` (deterministic 1-in-N), plus `metric`/`metrics-snapshot`/`reset-metrics`
+readers. Maps 1:1 to Elixir's `Telemetry.Metrics`.
+
+The design leans on two existing pieces: metric state is a shared `table` (ADR-107),
+and — the load-bearing observation — every telemetry handler runs SERIALLY in the one
+listener process (ADR-106), so a plain `table-get`+`table-put` read-modify-write is
+race-free inside an aggregator. That lets `summary` keep float-safe RUNNING aggregates
+(count/sum/sumsq/min/max, mean+stddev derived on read) instead of retaining samples —
+so a metric is bounded no matter how many events fire. Readers run in another process
+but read the table atomically (`table-get`/`table-snapshot`). State survives a listener
+restart (it lives in the table + the `def`-global handle, not listener memory) — matching
+ADR-106's stateless-restartable-listener contract.
+
+`sample-every` counts with an atomic `table-incr` (no PRNG, never loses count) and fires
+the wrapped handler on every Nth event — composes with any aggregator or attach handler.
+
+`tests/telemetry_metrics_test.blsp` (9, `:isolated`): counter/sum/gauge, summary stats
+(stddev checked against 8.165 for 10/20/30), snapshot, sampling (10 emits → 3 fires), and
+a concurrent-emitter fan-in (4 workers × 25 ticks → one counter reads 100, proving the
+serial-listener aggregation). 9/9 + telemetry 19/19 + sysmon 8/8 green; `nest check` zero
+warnings. Deferred: a distribution/histogram aggregator (percentiles need bucketing or
+sample retention — a follow-up over the bounded summary).
