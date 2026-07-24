@@ -37,10 +37,18 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    function (file is 5,431); individual match arms ~300 lines. The extracted
    `jit_lower_i64_arm` is the model — pull `Call`/`Prim`/`SelfCall` families into
    their own `fn`s, possibly `jit_lower/{prepass,call,prim,control}.rs`.
-2. ⬜ **Split `process/scheduler.rs` (2080)** — fuses ~7 concerns; carve
-   `preempt.rs` (budget/guards), `pool.rs` (queue/stealing/workers), `lifecycle.rs`
-   (spawn/exit/deregister), leaving capture-driver glue in the root. Mirror the
-   `dist.rs`→`dist/` pattern.
+2. 🟡 **Split `process/scheduler.rs` (2080 → 1824)** — partial, done 2026-07-24.
+   Investigation found the roadmap's clean preempt/pool/lifecycle carve isn't
+   achievable cheaply: the **reduction budget** (`REDUCTIONS`/`reduction_budget`)
+   is shared across the preemption core, the capture-driver glue, *and* the worker
+   loop, so a full carve needs accessor-fn refactors through the KI-1 concurrency
+   code. Took the low-risk win instead: extracted the self-contained execution
+   guards — GC-block/macro-block depth + RAII guards and the stack-overflow byte
+   guard — into `process/scheduler/guards.rs` (their thread-locals are touched only
+   by their own accessors; `install_ctx` resets via those), re-exported so
+   `scheduler::…`/`process::…` paths are unchanged. ⬜ The reduction/worker/lifecycle
+   engine stays one unit in the root; a further pool/lifecycle carve would need the
+   accessor layer and is deferred (not worth the concurrency risk yet).
 3. ⬜ **Split `core/heap/gc.rs` (4518)** — extract the RUNTIME shared-region
    compaction + node-liveness drain (~1300 lines, ADR-091) to `heap/gc_runtime.rs`;
    independent of per-process nursery GC, roughly halves the file.

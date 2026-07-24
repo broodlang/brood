@@ -6668,3 +6668,27 @@ Two sharp edges noted and deliberately left:
   it stays a latent note rather than a fix in search of a caller.
 - Group→test tag merging can duplicate a tag present at both levels. Matching is
   by presence, so it is harmless.
+
+## 2026-07-24 — Structural cleanup Tier 1 item 2 (partial): scheduler guards split
+
+Mapping `scheduler.rs` for the roadmap's preempt/pool/lifecycle carve showed the
+**reduction budget** (`REDUCTIONS`/`reduction_budget`) is the shared heart of the
+engine — touched by the preemption core, the capture-driver glue (`tick_capture`/
+`yield_now`), and the worker loop (`finish_quantum`). A clean 3-way carve would
+need accessor functions threaded through that shared state, in the KI-1
+concurrency code. Not worth the risk for a file-organization pass.
+
+Took the low-risk win: extracted the genuinely self-contained execution guards —
+`GC_BLOCK`/`MACRO_BLOCK`/`STACK_BASE` thread-locals + `gc_block_*`/`macro_block_*`
+accessors + `GcBlockGuard`/`MacroBlockGuard` + the stack-overflow byte guard
+(`WORKER_STACK_BYTES`/`stack_budget`/`stack_overflow_check`) — into
+`process/scheduler/guards.rs` (2080 → 1824 in the root; guards.rs 269). The
+thread-locals are touched only by their own accessors, and `install_ctx` resets
+them through those accessors, so the move is closed and behaviour-identical. The
+public items are re-exported from `scheduler.rs`, so every `crate::process::…`
+call site (eval, macros, cli_support, tests) is unchanged.
+
+The reduction/worker/lifecycle engine stays one unit in the root; a further
+pool/lifecycle carve (which needs the accessor layer) is deferred.
+
+Verified: compiles default + no-default-features; full suite 3024/3024.
