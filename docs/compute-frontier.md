@@ -1,5 +1,59 @@
 # Plan — the post-JIT single-threaded compute frontier
 
+> ## ⏯ RESUME HERE (2026-07-24) — allocation frontier re-profiled; premise corrected
+>
+> Picking up the "allocation / GC frontier" item (`bintree` + `nqueens`, the two worst compute
+> rows). **The stale framing was wrong and is now fixed:** the ROADMAP said these "run
+> interpreted (~39×/187× behind Elixir)". They do **not** — both are cleanly JIT'd (`jit_deopt=0`),
+> and the real gap is ~9.5×. `Cons` and small `MakeVector` are admitted to the JIT subset
+> (`chunk_in_jit_subset`, `jit_lower.rs`), so structure-building arms lower and win.
+>
+> **Verified current numbers** (fresh `--bin brood` build; `make`-installed harness N):
+>
+> | bench | tree-walker | VM (no JIT) | VM+JIT | vs fastest (last archived run) |
+> |---|---|---|---|---|
+> | `bintree` N=200 | 8508 ms | 422 ms | **~119 ms** | 9.8× behind Elixir (10.4 ms), 6/7 |
+> | `nqueens` N=10 | 3866 ms | 286 ms | **~100 ms** | 9.5× behind Node/Elixir (8.7/9.0 ms), 5/7 |
+>
+> JIT gives ~3.5× / ~2.9× over the plain VM. **`BROOD_GC_FLOOR` sweep: raising the nursery floor
+> makes both *slightly slower* (bintree 118→138 ms), never faster** — so this is NOT
+> GC-frequency-bound; it's allocation *volume* + dispatch. Nursery tuning is a dead end here.
+>
+> **Measured hotspots (`--features perf-stats`, `BROOD_PERF_STATS=1`). The spike's verdict is a
+> NEGATIVE result — both rows already run at/near their JIT ceiling; there is no sound quick win:**
+> - **`bintree` — 100% native, pure escaping allocation.** `vm_apply=48` (≈zero VM),
+>   `jit_link_done=3.24M`, `jit_deopt=0`. `alloc=876,789` — ≈819K are the `[left right]`
+>   `MakeVector(2)` per internal node (2^12−1 × 200; ~39 MB churned/run). The nodes are **returned
+>   from `make` and walked later by `check`** → they **escape** → JIT escape analysis / scalar
+>   replacement is **inapplicable**. Floored by the boxed 24-byte `Value` (48 B/node). The only
+>   lever is a **narrower cell representation** — invariant-risky (a new `Value` kind, brushes the
+>   NaN-boxing line §2 explicitly rejects) — or accepting the cap.
+> - **`nqueens` — the step lambda already runs NATIVE; no stuck slow path.** The `reduce` step
+>   lambda (`arm 12 <closure>`, confirmed in the `BROOD_JIT_DUMP_IR` dump at N=10) DOES JIT-compile
+>   and runs native via the HOF fast-frame. Proof: `BROOD_NO_HOF=1` (force it off the HOF path) makes
+>   `jit_apply_fast` jump **62 → 341,801** (it just moves to the dispatch fast-frame) and is *slower*
+>   (119 vs 102 ms) — the fast paths are engaged and helping. The `vm_apply=42,617` is a **minority**
+>   (native completions are in the hundreds of thousands: `jit_link_done=681,893`), `jit_deopt=0`.
+>   Residual gap is allocation + inherent per-element overhead, not a dispatch bug.
+>   **(Correction: an earlier draft of this block claimed nqueens was "capturing-closure dispatch
+>   bound, stuck on the slow trampoline" and proposed a `!capture_names` fast-link fix. That was
+>   wrong — the lambda is not stuck; it runs native. Disregard that lever for nqueens.)**
+>
+> **Conclusion for this push — do NOT sink effort here as a quick win.** Both rows are already
+> JIT-native on their hot paths (bintree entirely; nqueens' lambda + safe?/solve). The ~9.5× gap is
+> the boxed-24-byte-`Value` allocation floor + GC churn — the "foundational, multi-session bet with
+> capped payoff, will not reach .NET/Node on raw numeric throughput" §4 always described. The only
+> real lever is:
+> 1. **`bintree` narrower-repr** — spends a core invariant (new `Value` kind / representation), for a
+>    capped payoff. **Defer** — needs an explicit decision to spend an invariant; not a quick win.
+> 2. **Escape analysis** — deprioritized: bintree's cells escape; nqueens has no stuck allocation.
+>
+> Better ROI lives elsewhere (JIT Stage-4 RUNTIME-compaction survival; closure-arm inlining) — see
+> `ROADMAP.md` VM & JIT. Reprioritize unless the narrower-repr invariant spend is explicitly wanted.
+>
+> `perf record` is unavailable here (`perf_event_paranoid=4`, no sudo assumed; flamegraph/valgrind/
+> heaptrack not installed), so the `BROOD_PERF_STATS` counters above are the profiling substrate.
+
 > ## ⏯ RESUME HERE (2026-07-02) — unboxed-register JIT + HOF fast path shipped
 >
 > The big lever since 2026-06-20 (full play-by-play in `docs/devlog.md`, 2026-07-02): an

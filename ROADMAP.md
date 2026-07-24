@@ -558,6 +558,15 @@ Runtime housekeeping (both items landed):
 
 ### VM & JIT
 
+> **Status (2026-07-24): this track is at rest — its frontier is effectively mined
+> out.** A full sweep found the remaining items are either already shipped or
+> not worth doing: native-HOF-callback routing (already done via `apply_engine`);
+> the allocation frontier `bintree`/`nqueens` (representation-capped by the boxed
+> 24-byte `Value` — no sound quick win, `compute-frontier.md` 2026-07-24 block);
+> and JIT Stage 4 (no-go — gated off in production, below). The VM+JIT is in good
+> shape; further compute-perf work is high-effort/capped-payoff. Reopen only for a
+> concrete need (e.g. closure-arm inlining if a real workload demands it).
+
 - ✅ **The `let`-self-ref `send` divergence no longer reproduces** (verified
   2026-07-19): a `let`-bound self-recursive closure sent to a pid is rejected with
   the same "cannot send a self-referential local closure" error by BOTH engines in
@@ -577,9 +586,28 @@ Runtime housekeeping (both items landed):
   deliberately absent here: it amortizes cost across a tight loop and buys nothing
   for a thunk invoked once. The divergence above (since verified fixed) confirms
   the VM-routed path is behaviour-identical to the tree-walker.
-- ⬜ **JIT Stage 4 — RUNTIME compaction survival** (ADR-091) — a constant-pool
-  indirection table (ADR-096 §4.C) lets `runtime_collect` rewrite handles without
-  invalidating machine code.
+- 🛑 **JIT Stage 4 — RUNTIME compaction survival** (ADR-091) — **investigated
+  2026-07-24; NO-GO, near-zero real payoff.** The idea was a constant-pool
+  indirection table (ADR-096 §4.C) so `runtime_collect` could rewrite handles
+  without invalidating native code. Findings (verified in-code + measured):
+  (1) RUNTIME **data-handle** relocation ALREADY survives in native code — the JIT
+  bakes a pointer to the `ConstVal` and reads live bits via `brood_rt_const_load`;
+  compaction rewrites those in place (`rewrite_arm_handles` over `live_vm_arms`),
+  and runtime-service *function* addresses already sit in a per-arm indirection
+  table. (2) The only native-invalidating step is the **epoch bump** in
+  `runtime_collect_with` (`heap.rs` bumps `runtime.version` = `global_epoch()`,
+  which nulls every arm's `jit_code` on next tier). (3) BUT that single-process
+  compaction path is gated on `Arc::get_mut` (unique runtime ownership), which
+  **never holds during real execution** — `spawn_root_program` keeps the runtime
+  `Arc` shared for the whole run, so `(runtime-collect)` returns `:ran false` and
+  the auto-safepoint compaction is skipped too. Production reclamation goes through
+  the 2-generation path, which frees whole generations **without** rewriting handles
+  or bumping the epoch → it does not invalidate native code at all. So the
+  invalidating path is off precisely when it would matter; building the
+  epoch-decouple/IC-remap machinery buys ~nothing. Left behind: the missing
+  end-to-end coverage was added — `crates/lisp/tests/jit_runtime_compaction.rs`
+  (a JIT'd RUNTIME-handle arm stays correct across a real relocation; green under
+  `GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY`).
 - ✅ **Leaf-callee inlining** (the real call-heavy lever) — **implemented 2026-07-19;
   DEFAULT ON since the same evening (`BROOD_NO_LEAF_INLINE=1` opts out)** after the
   gating measurements came back flat everywhere they had to (boot / 100×-hello
@@ -609,10 +637,22 @@ Runtime housekeeping (both items landed):
   name) — the expansion/`require` measurement + default-flip are done.
 - ⬜ **Layer-2 computed-goto dispatch** (`std::arch::asm!`, x86-64, `#[cfg]`-gated,
   pure-Rust fallback) — only if profiling still shows dispatch overhead. Additive.
-- ⬜ **Heap-walking benchmark gap** — `bintree`/`nqueens` run interpreted (~39×/187×
-  behind Elixir); structure-walking bodies bail the JIT subset. Gated on the
-  allocation-elimination work ([`docs/compute-frontier.md`](docs/compute-frontier.md));
-  higher ceiling than the call-dispatch levers — profile before the next JIT push.
+- ⬜ **Allocation / GC frontier — `bintree` + `nqueens`** (the two worst compute
+  rows). **Profiled 2026-07-24 — no sound quick win; representation-capped.** Both
+  are heavily JIT'd, NOT interpreted (JIT ~3.5×/~2.9× over the plain VM: bintree
+  ~422→~119 ms, nqueens ~286→~100 ms local); bintree runs 100% native, nqueens' hot
+  paths (the `reduce` step lambda + `safe?`/`solve`) run native too. The ~9.5× gap
+  (bintree 102 vs Elixir 10.4 ms N=200; nqueens 83 vs Node/Elixir 8.7/9.0 ms N=10)
+  is the **boxed 24-byte `Value` allocation floor + GC churn**, not dispatch:
+  bintree churns ~819K escaping 48-byte tree-node vectors/run. Measured dead ends:
+  `BROOD_GC_FLOOR` sweep *regresses* (not GC-frequency-bound); the cells **escape**
+  so JIT escape analysis is inapplicable; nqueens' lambda already runs native
+  (`BROOD_NO_HOF=1` A/B confirms — no stuck slow path). The only remaining lever is
+  a **narrower cell representation**, which spends a core invariant (new `Value`
+  kind / brushes the NaN-boxing line `types.md`/compute-frontier §2 reject) for a
+  capped payoff. **Defer** unless that invariant spend is explicitly wanted — better
+  ROI in JIT Stage-4 / closure-arm inlining. Full analysis:
+  [`docs/compute-frontier.md`](docs/compute-frontier.md) (2026-07-24 RESUME block).
 
 ### Tooling & errors
 
