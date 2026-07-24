@@ -7,7 +7,7 @@
 ;; isolate it from here without changing the working directory. The hand-run
 ;; equivalent — `nest new foo && cd foo && nest run` — is the integration check.
 
-(defmodule project-test (:use-internals project) (:use test) (:use project))
+(defmodule project-test (:use-internals project) (:use-internals scaffold) (:use test) (:use project))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-dup-")
@@ -102,14 +102,14 @@
 
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"
-    (is (string-contains? (project/project--gitignore-template) "_deps/")))
+    (is (string-contains? (scaffold/project--gitignore-template) "_deps/")))
   (test "the .gitattributes template maps .blsp to Clojure but keeps it out of the language stats"
-    (let (a (project/project--gitattributes-template))
+    (let (a (scaffold/project--gitattributes-template))
       (is (string-contains? a "*.blsp"))
       (is (string-contains? a "linguist-language=Clojure"))
       (is (string-contains? a "linguist-detectable=false"))))
   (test "the manifest template documents how to add :dependencies"
-    (let (m (project/project--manifest-template "demo"))
+    (let (m (scaffold/project--manifest-template "demo"))
       (is (string-contains? m ":dependencies"))
       ;; still a valid manifest: the first form is the (project …) call
       (let (form (read-string m))

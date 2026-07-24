@@ -88,23 +88,30 @@ paths — but until then, prefer learning over shortcuts.
 ```
 crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
   core/        substrate: value.rs (Value, Tag, symbol interner, Closure/Arity),
-               heap.rs (per-process heap + shared regions + env chain; major sections:
-               construction/construction, source-positions, definition-sites, alloc,
-               accessors, equality/hashing, env-chain, globals, gc-roots, gc-stats,
-               vm-cache, collection/compaction), alloc.rs,
+               heap.rs (per-process heap + shared regions + env chain: construction,
+               source-positions, definition-sites, alloc, accessors, env-chain, globals)
+               with child modules heap/{gc.rs (roots/collection/RUNTIME-compaction/stats),
+               map_ops.rs (CHAMP ops), equality.rs (equality/compare/hash),
+               vm_cache.rs (VM body cache + inline caches)} — children of `heap`, so they
+               reach Heap's private items via `use super::*`, alloc.rs,
                blob.rs (cross-process zero-copy blob heap), map_champ.rs (CHAMP
-               map trie), sync.rs
+               map trie), table.rs (shared mutable table — Brood's ETS, ADR-107), sync.rs
   syntax/      reader.rs (text -> Value), scanner.rs, printer.rs, and the tooling
                CST (atom.rs / cst.rs / scope.rs)
   eval/        mod.rs (evaluator — a `'tail: loop` for tail calls + special forms),
                compile/ (the closure-compiling VM — the default engine, ADR-076),
-               split into three files:
+               split into files (all child modules of compile/mod.rs — `use super::*` +
+               `pub(crate) use child::*`):
                  - ir.rs — IR types: PrimOp/PrimOp1, ConstVal, Node, CompiledArm/Closure, Chunk/Inst
-                 - mod.rs — the compiler front-end (compile_arm, compile_node, emit_node:
-                   AST → IR → bytecode), exec_chunk (the bytecode interpreter inner loop,
-                   Stage 1 call-free arms), dispatch (the VM arm dispatcher: Call/SelfCall,
-                   IC, JIT fast path), and vm_run_bc (the outer VM trampoline: tail-call
-                   loop, frame save/restore)
+                 - mod.rs — the compiler front-end (compile_arm, compile_node) + shared
+                   IR walkers + run/apply entry points + BcFrame/Suspended
+                 - emit.rs — emit_node/compile_chunk (Node → bytecode)
+                 - exec_value.rs — exec_value + prim exec helpers (Node tree-walk)
+                 - dispatch.rs — the VM arm dispatcher (Call/SelfCall, IC, JIT fast path)
+                 - exec_chunk.rs — the bytecode interpreter inner loop
+                 - vm_run_bc.rs — the outer VM trampoline (tail-call loop, frame save/restore)
+                 - inline.rs — Node→Node optimizer passes (linmap rewrite, self/leaf inlining)
+                 - jit_runtime.rs — JIT tiering glue (feature = "jit")
                  - jit_lower.rs — jit_lower_arm / jit_lower_arm_inner: Cranelift JIT lowering
                    (feature = "jit")
                macros.rs (quasiquote, macroexpand, the compile pass + pattern lowering)
@@ -114,12 +121,17 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                mod.rs (Reg struct, pub fn register, PRIMITIVE_DOCS, shared helpers),
                numeric.rs (numeric/bitwise/bitset/math), sequences.rs (pair/list/range/
                seqview/vector/map/string/rope), io.rs (TCP/table/print/time/fs/hashing/
-               git/crypto), terminal.rs (terminal + GUI, feature-gated), system.rs
-               (eval/load/macros/introspection/errors/processes/dist/dynamic/namespaces)
+               git/crypto), os.rs (env/hostname/os-cmd/run-process/halt), terminal.rs
+               (terminal + GUI, feature-gated), system.rs (eval/load/processes/dist/
+               dynamic/namespaces) + selfhost_macros.rs (macroexpand/check) + tooling.rs
+               (source-positions + introspection, editor/LSP) + errors.rs (throw/try).
+               All submodules use glob re-export (`use X::*`) so register() is untouched
   introspect.rs  doc/arglist/global-names/bound? and friends (ADR-025)
   cli_support.rs file-runner / --test plumbing shared by the binaries
   process.rs + process/   green-process scheduler (mailbox, message, monitor,
                scheduler, timer): spawn/send/receive/monitor
+  subprocess.rs   persistent child-OS-process mechanism (ADR-104) — distinct from
+               process.rs (green processes); renamed from proc.rs to end the name clash
   dist.rs + dist/   distributed nodes (handshake, heartbeat, wire) — ADR-033/034
   net.rs       thin non-blocking TCP socket mechanism (ADR-062); Brood policy is
                the in-tree `std/net/*` library

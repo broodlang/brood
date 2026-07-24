@@ -429,7 +429,7 @@ pub(super) fn expect_socket(heap: &Heap, who: &str, v: Value) -> Result<u64, Lis
 }
 
 // ---------- in-memory shared table (Brood's ETS, ADR-107) ----------
-// A `Value::Table(id)` handle; the store lives in `crate::table`. These builtins are
+// A `Value::Table(id)` handle; the store lives in `crate::core::table`. These builtins are
 // thin wrappers — all the storage / locking / clone-in-clone-out lives there.
 
 pub(super) fn expect_table(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
@@ -439,56 +439,56 @@ pub(super) fn expect_table(heap: &Heap, who: &str, v: Value) -> Result<u64, Lisp
 }
 
 pub(super) fn table_new(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::table(crate::table::create()))
+    Ok(Value::table(crate::core::table::create()))
 }
 
 pub(super) fn table_put(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-put", arg(args, 0))?;
-    crate::table::check_key("table-put", arg(args, 1))?;
-    crate::table::put(heap, id, arg(args, 1), arg(args, 2))
+    crate::core::table::check_key("table-put", arg(args, 1))?;
+    crate::core::table::put(heap, id, arg(args, 1), arg(args, 2))
 }
 
 pub(super) fn table_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-get", arg(args, 0))?;
-    crate::table::check_key("table-get", arg(args, 1))?;
-    crate::table::get(heap, id, arg(args, 1), arg(args, 2))
+    crate::core::table::check_key("table-get", arg(args, 1))?;
+    crate::core::table::get(heap, id, arg(args, 1), arg(args, 2))
 }
 
 pub(super) fn table_has(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-has?", arg(args, 0))?;
-    crate::table::check_key("table-has?", arg(args, 1))?;
-    Ok(Value::boolean(crate::table::has(heap, id, arg(args, 1))?))
+    crate::core::table::check_key("table-has?", arg(args, 1))?;
+    Ok(Value::boolean(crate::core::table::has(heap, id, arg(args, 1))?))
 }
 
 pub(super) fn table_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-delete", arg(args, 0))?;
-    crate::table::check_key("table-delete", arg(args, 1))?;
-    crate::table::delete(heap, id, arg(args, 1))
+    crate::core::table::check_key("table-delete", arg(args, 1))?;
+    crate::core::table::delete(heap, id, arg(args, 1))
 }
 
 pub(super) fn table_incr(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-incr", arg(args, 0))?;
-    crate::table::check_key("table-incr", arg(args, 1))?;
+    crate::core::table::check_key("table-incr", arg(args, 1))?;
     let delta = match arg(args, 2) {
         Value::Nil => 1, // (table-incr t k) defaults the delta to 1
         v => expect_int(heap, "table-incr", v)?,
     };
-    crate::table::incr(heap, id, arg(args, 1), delta)
+    crate::core::table::incr(heap, id, arg(args, 1), delta)
 }
 
 pub(super) fn table_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-count", arg(args, 0))?;
-    Ok(Value::int(crate::table::count(id)?))
+    Ok(Value::int(crate::core::table::count(id)?))
 }
 
 pub(super) fn table_snapshot(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-snapshot", arg(args, 0))?;
-    crate::table::snapshot(heap, id)
+    crate::core::table::snapshot(heap, id)
 }
 
 pub(super) fn table_drop(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-drop", arg(args, 0))?;
-    Ok(Value::boolean(crate::table::drop_table(id)))
+    Ok(Value::boolean(crate::core::table::drop_table(id)))
 }
 
 pub(super) fn socket_port(who: &str, p: i64) -> Result<u16, LispError> {
@@ -703,7 +703,7 @@ pub(super) fn tcp_local_port(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 
 // ----- persistent child processes (ADR-104) ----------------------------------
 //
-// Thin mechanism over `crate::proc`: spawn a long-lived child with piped stdio,
+// Thin mechanism over `crate::subprocess`: spawn a long-lived child with piped stdio,
 // write its stdin, and receive its output as `[:proc …]` mailbox messages. The
 // framing/protocol policy (e.g. JSON-RPC for an LSP client) is Brood. A child is
 // `Value::Subprocess(id)`. Contrast `%os-cmd`/`run-process`, which run to exit.
@@ -739,7 +739,7 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
         }
     }
     let owner = crate::process::self_pid();
-    match crate::proc::spawn(&prog, &argv, cwd.as_deref(), &env, owner) {
+    match crate::subprocess::spawn(&prog, &argv, cwd.as_deref(), &env, owner) {
         Ok(id) => Ok(Value::subprocess(id)),
         Err(e) => Err(LispError::runtime(format!("proc-spawn {}: {}", prog, e))
             .with_code(crate::error::error_codes::SUBPROCESS_FAILED)),
@@ -749,21 +749,21 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-send", arg(args, 0))?;
     let out = send_payload(heap, "proc-send", arg(args, 1))?;
-    crate::proc::send(id, &out).map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
+    crate::subprocess::send(id, &out).map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
     Ok(Value::nil())
 }
 
 pub(super) fn proc_set_binary(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-set-binary", arg(args, 0))?;
     let on = crate::eval::truthy(arg(args, 1));
-    crate::proc::set_binary(id, on)
+    crate::subprocess::set_binary(id, on)
         .map_err(|e| LispError::runtime(format!("proc-set-binary: {}", e)))?;
     Ok(Value::nil())
 }
 
 pub(super) fn proc_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-close", arg(args, 0))?;
-    crate::proc::close(id);
+    crate::subprocess::close(id);
     Ok(Value::nil())
 }
 
@@ -1926,168 +1926,4 @@ pub(super) fn uid_name(_uid: u32) -> Option<String> {
 #[cfg(not(unix))]
 pub(super) fn gid_name(_gid: u32) -> Option<String> {
     None
-}
-
-/// `(getenv name)` — the value of environment variable `name` as a string, or nil
-/// if it is unset. Lets Brood locate things like the user config directory.
-pub(super) fn getenv(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let name = expect_string(heap, "getenv", arg(args, 0))?;
-    match std::env::var(&name) {
-        Ok(val) => Ok(heap.alloc_string(&val)),
-        Err(_) => Ok(Value::nil()),
-    }
-}
-
-/// `(hostname)` — this machine's short hostname (no domain), used to qualify a
-/// node name as `name@host` (ADR-073). Reads `/proc/sys/kernel/hostname`,
-/// falling back to `$HOSTNAME` then `"localhost"` — never errors, since a node
-/// must always get *some* identity. Long/FQDN names are had by passing an
-/// already-qualified name to `node-start` (`:foo@my.fqdn`), so we don't resolve
-/// the FQDN here.
-pub(super) fn hostname(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let h = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "localhost".to_string());
-    Ok(heap.alloc_string(&h))
-}
-
-/// `(%env-all)` — all environment variables as a `{string → string}` map.
-pub(super) fn env_all(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let env: Vec<(String, String)> = std::env::vars().collect();
-    let pairs: Vec<(Value, Value)> = env
-        .iter()
-        .map(|(k, v)| (heap.alloc_string(k), heap.alloc_string(v)))
-        .collect();
-    Ok(heap.map_from_pairs(pairs))
-}
-
-/// `(%argv)` — command-line arguments as a vector of strings, including argv[0].
-pub(super) fn argv_builtin(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let args: Vec<String> = std::env::args().collect();
-    let vals: Vec<Value> = args.iter().map(|a| heap.alloc_string(a)).collect();
-    Ok(heap.alloc_vector(vals))
-}
-
-/// `(%os-type)` — the current OS as a keyword: `:linux`, `:macos`, or `:windows`.
-pub(super) fn os_type_builtin(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
-    #[cfg(target_os = "linux")]
-    return Ok(Value::keyword(value::intern("linux")));
-    #[cfg(target_os = "macos")]
-    return Ok(Value::keyword(value::intern("macos")));
-    #[cfg(target_os = "windows")]
-    return Ok(Value::keyword(value::intern("windows")));
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    return Ok(Value::keyword(value::intern("unknown")));
-}
-
-/// `(%os-cmd prog args)` — run `prog` with `args` (list or vector of strings),
-/// capturing stdout and stderr. Returns `{:stdout s :stderr s :exit n}`.
-pub(super) fn os_cmd(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let prog = expect_string(heap, "%os-cmd", arg(args, 0))?;
-    let mut cmd = std::process::Command::new(&prog);
-    if args.len() > 1 {
-        let raw = heap.seq_items(arg(args, 1))?;
-        for a in &raw {
-            cmd.arg(expect_string(heap, "%os-cmd", *a)?);
-        }
-    }
-    let output = cmd.output().map_err(|e| {
-        LispError::runtime(format!("%os-cmd: {prog}: {e}"))
-            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
-    })?;
-    let stdout = heap.alloc_string(&String::from_utf8_lossy(&output.stdout));
-    let stderr = heap.alloc_string(&String::from_utf8_lossy(&output.stderr));
-    let exit_code = output.status.code().unwrap_or(-1) as i64;
-    let kw = |k: &'static str| Value::keyword(value::intern(k));
-    Ok(heap.map_from_pairs(vec![
-        (kw("stdout"), stdout),
-        (kw("stderr"), stderr),
-        (kw("exit"), Value::int(exit_code)),
-    ]))
-}
-
-/// `(%os-cmd-stdin prog args stdin-str)` — like `%os-cmd` but writes `stdin-str` to the
-/// child's stdin (pipe closed after writing → EOF). Safe for inputs well under 64 KiB
-/// (the OS pipe buffer); used by the git porcelain to pipe patch text to `git apply -`
-/// instead of writing a temp file.
-pub(super) fn os_cmd_stdin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    use std::io::Write;
-    let prog = expect_string(heap, "%os-cmd-stdin", arg(args, 0))?;
-    let mut cmd = std::process::Command::new(&prog);
-    if args.len() > 1 {
-        let raw = heap.seq_items(arg(args, 1))?;
-        for a in &raw {
-            cmd.arg(expect_string(heap, "%os-cmd-stdin", *a)?);
-        }
-    }
-    let stdin_str = expect_string(heap, "%os-cmd-stdin", arg(args, 2))?.to_string();
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| {
-        LispError::runtime(format!("%os-cmd-stdin: {prog}: {e}"))
-            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
-    })?;
-    if let Some(mut stdin_pipe) = child.stdin.take() {
-        let _ = stdin_pipe.write_all(stdin_str.as_bytes());
-        // stdin_pipe dropped here → EOF sent to child
-    }
-    let output = child.wait_with_output().map_err(|e| {
-        LispError::runtime(format!("%os-cmd-stdin: {prog}: {e}"))
-            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
-    })?;
-    let stdout = heap.alloc_string(&String::from_utf8_lossy(&output.stdout));
-    let stderr = heap.alloc_string(&String::from_utf8_lossy(&output.stderr));
-    let exit_code = output.status.code().unwrap_or(-1) as i64;
-    let kw = |k: &'static str| Value::keyword(value::intern(k));
-    Ok(heap.map_from_pairs(vec![
-        (kw("stdout"), stdout),
-        (kw("stderr"), stderr),
-        (kw("exit"), Value::int(exit_code)),
-    ]))
-}
-
-/// `(%halt code)` — terminate the process immediately with `code`.
-pub(super) fn halt_builtin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let code = expect_int(heap, "%halt", arg(args, 0))?;
-    std::process::exit(code as i32);
-}
-
-/// `(run-process prog args)` — run external program `prog` with `args` (a list or
-/// vector of strings), inheriting stdio, and return its exit code as an integer
-/// (-1 if killed by a signal). The Emacs `call-process` analogue: the general
-/// subprocess mechanism (used by the project scaffolder's `git init`).
-pub(super) fn run_process(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let pv = arg(args, 0);
-    let prog = match pv {
-        Value::Str(id) => heap.string(id).to_string(),
-        _ => {
-            return Err(LispError::wrong_type(
-                heap,
-                "run-process",
-                "string program",
-                pv,
-            ))
-        }
-    };
-    let mut argv = Vec::new();
-    for a in heap.seq_items(arg(args, 1))? {
-        match a {
-            Value::Str(id) => argv.push(heap.string(id).to_string()),
-            _ => {
-                return Err(LispError::type_err(
-                    "run-process: arguments must be strings",
-                ))
-            }
-        }
-    }
-    match std::process::Command::new(&prog).args(&argv).status() {
-        Ok(status) => Ok(Value::int(status.code().unwrap_or(-1) as i64)),
-        Err(e) => Err(LispError::runtime(format!("run-process: {}: {}", prog, e))
-            .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
-            .with_hint("check that the program is on PATH and the args are well-formed")),
-    }
 }

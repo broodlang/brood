@@ -6386,3 +6386,42 @@ lock-vec shape, parse) — all offline via `file://` + local git repos; 39/39 gr
 cwd-driven verbs (`publish`/`search`) are hand-verified via the binary (per the repo
 convention that cwd verbs aren't Rust-E2E'd; their arg-driven cores ARE unit-tested).
 `nest check` zero warnings.
+
+## 2026-07-24 — File-organization pass: split the giants, no behavior change
+
+A pure code-organization sweep (no logic changes) breaking up the largest,
+multi-concern files and fixing two placement/naming issues. Every step verified
+green (build + suite; the two hot-path splits additionally via `make test-both`).
+
+**Test extractions** (inline `#[cfg(test)] mod tests` → sibling files; the dominant
+line reductions): `types/check.rs` 4539→830 (`check/tests.rs`+`soundness_oracle.rs`),
+`types/mod.rs` 2768→1435 (`tests.rs`; also peeled `sig.rs`/`display.rs`),
+`dist/wire.rs` 1245→902 (`wire_tests.rs`), `nest/mcp.rs` 2386→1058 (`mcp_tests.rs`),
+`lsp/main.rs` 1587→970 (test files + a new `uri.rs`).
+
+**Hot-file splits** (child-module layout — `use super::*` + `pub(crate)` sweep +
+`pub(crate) use child::*` re-exports; behavior-identical relocations):
+- `core/heap.rs` 10760→3912, adding `heap/{gc,map_ops,equality,vm_cache}.rs`. Children
+  of `heap` (not siblings) so they reach `Heap`'s private fields/methods/structs with no
+  visibility churn; a few private methods called cross-sibling widened to `pub(crate)`;
+  `stall_threshold_ms`/`stall_guard_pid` re-exported. GC-suite verified.
+- `eval/compile/mod.rs` 9569→2157, adding `emit/exec_value/dispatch/exec_chunk/vm_run_bc/
+  inline/jit_runtime/tests.rs`. `jit_runtime.rs` is `#![cfg(feature="jit")]`; jit +
+  non-jit builds both clean; differential (both-engine) gate green.
+
+**Builtins coarse splits** (glob-import architecture keeps `register()` untouched):
+`system.rs` 2909→2411 (`selfhost_macros.rs`/`tooling.rs`/`errors.rs`), `io.rs` 2093→1929
+(`os.rs`). The remaining internal giants (system's self-hosting + processes blocks; io's
+git/crypto/fs braid) left as follow-ups — unmarked internal boundaries / heavy interleave.
+
+**Brood std:** `std/tool/project.blsp` 2436→1358, scaffolding (templates + `new-project`)
+split to `std/tool/scaffold.blsp` — a new bundled module `(:use project)` for
+`*config-git-init*`; `nest new` re-pointed to `scaffold/new-project`; smoke-tested.
+
+**Placement/naming:** `proc.rs`→`subprocess.rs` (naming hazard vs `process.rs` — the two
+were unrelated subsystems); `table.rs`→`core/table.rs` (peer of `core/blob.rs`/`map_champ.rs`).
+
+Skipped/deferred with rationale: externalizing `random` from the prelude (user-facing
+break for ~64 lines); `net.rs`/`gui.rs`/`jit_lower.rs` deep splits (tightly-coupled
+delicate code, marginal-vs-risk); std crypto/data grouping (bundled names are
+path-independent, so purely cosmetic — ADR-011 flat-is-fine).

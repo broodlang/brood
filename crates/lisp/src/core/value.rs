@@ -507,14 +507,14 @@ pub enum Value {
     /// sent across processes. The TLS counterpart reuses this same handle.
     Socket(u64),
     /// A child process — an id into the global subprocess registry
-    /// (`crate::proc`). Like a `Socket` it is a scalar handle, not a heap object:
+    /// (`crate::subprocess`). Like a `Socket` it is a scalar handle, not a heap object:
     /// the GC never traces or moves it, and it carries a live OS resource (a spawned
     /// process plus its stdin pipe and stdout/stderr reader threads). Process-local
     /// mechanism (the owning process drives it via the `proc-*` primitives and
     /// receives its output as mailbox messages); **never** sent across processes.
     Subprocess(u64),
     /// An **in-memory table** (Brood's ETS, ADR-107) — an id into the global table
-    /// registry (`crate::table`). Like a `Socket`/`Subprocess` it is a scalar handle,
+    /// registry (`crate::core::table`). Like a `Socket`/`Subprocess` it is a scalar handle,
     /// not a heap object: the GC never traces or moves it. **Unlike** them it is
     /// *shared, not process-local* — the handle is sent by value across processes and
     /// every copy indexes the same shared store (the way a `Pid` names one shared

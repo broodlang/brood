@@ -4483,7 +4483,7 @@ fn jit_lower_arm_inner(
                             let oob = b.ins().icmp_imm(
                                 IntCC::UnsignedGreaterThanOrEqual,
                                 kw[1],
-                                crate::table::DENSE_KEY_MAX,
+                                crate::core::table::DENSE_KEY_MAX,
                             );
                             b.ins().brif(oob, absent, &[], g_load, &[]);
                             b.switch_to_block(absent);
@@ -4497,7 +4497,7 @@ fn jit_lower_arm_inner(
                                 .atomic_load(types::I64, MemFlagsData::trusted(), addr);
                             let moved =
                                 b.ins()
-                                    .icmp_imm(IntCC::Equal, sv, crate::table::SLOT_MOVED as i64);
+                                    .icmp_imm(IntCC::Equal, sv, crate::core::table::SLOT_MOVED as i64);
                             b.ins().brif(moved, ffi, &[], g_flag, &[]);
                             b.switch_to_block(g_flag);
                             let f = b
@@ -4509,7 +4509,7 @@ fn jit_lower_arm_inner(
                             let present = b.ins().icmp_imm(
                                 IntCC::NotEqual,
                                 sv,
-                                crate::table::SLOT_EMPTY as i64,
+                                crate::core::table::SLOT_EMPTY as i64,
                             );
                             b.ins().jump(merge, &[BlockArg::Value(present)]);
                             // FFI fallback: the exact `table-has?`; its `Value::Bool`
@@ -4656,7 +4656,7 @@ fn jit_lower_arm_inner(
                         let oob = b.ins().icmp_imm(
                             IntCC::UnsignedGreaterThanOrEqual,
                             kw[1],
-                            crate::table::DENSE_KEY_MAX,
+                            crate::core::table::DENSE_KEY_MAX,
                         );
                         b.ins().brif(oob, ffi, &[], g_enc, &[]);
                         // Encode the value into a tagged slot word (mirrors
@@ -4674,7 +4674,7 @@ fn jit_lower_arm_inner(
                         let enc_int_ok = b.create_block();
                         b.ins().brif(fits, enc_int_ok, &[], ffi, &[]);
                         b.switch_to_block(enc_int_ok);
-                        let wi = b.ins().bor_imm(sh, crate::table::INT_TAG as i64);
+                        let wi = b.ins().bor_imm(sh, crate::core::table::INT_TAG as i64);
                         b.ins().jump(enc_done, &[BlockArg::Value(wi)]);
                         b.switch_to_block(t_bool);
                         let v_bool = b.ins().icmp_imm(IntCC::Equal, vtag, TAG_BOOL as i64);
@@ -4694,7 +4694,7 @@ fn jit_lower_arm_inner(
                         let enc_nil = b.create_block();
                         b.ins().brif(v_nil, enc_nil, &[], ffi, &[]);
                         b.switch_to_block(enc_nil);
-                        let wn = b.ins().iconst(types::I64, crate::table::SLOT_NIL as i64);
+                        let wn = b.ins().iconst(types::I64, crate::core::table::SLOT_NIL as i64);
                         b.ins().jump(enc_done, &[BlockArg::Value(wn)]);
                         b.switch_to_block(enc_done);
                         let word = b.block_params(enc_done)[0];
@@ -4709,7 +4709,7 @@ fn jit_lower_arm_inner(
                         );
                         let moved =
                             b.ins()
-                                .icmp_imm(IntCC::Equal, old, crate::table::SLOT_MOVED as i64);
+                                .icmp_imm(IntCC::Equal, old, crate::core::table::SLOT_MOVED as i64);
                         let g_flag = b.create_block();
                         b.ins().brif(moved, ffi, &[], g_flag, &[]);
                         // Post-op dense-flag re-check (the migration protocol on

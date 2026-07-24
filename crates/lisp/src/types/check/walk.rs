@@ -20,9 +20,10 @@ use crate::types::{GradualTy, Ty};
 
 use super::ctx::{Ctx, PathKey};
 use super::guards::{
-    expr_ty, find_redundant_clause, global_value_ty, guard_assertion, is_syntactic_keyword,
+    find_redundant_clause, guard_assertion, is_syntactic_keyword,
     literal_eq_test_raw, match_exhaustiveness_gap, path_guard_assertion, render_literal_pattern,
 };
+use super::infer::{expr_ty, global_value_ty};
 use super::sigs::{
     arity_of, arity_str, curated_sig, declared_heap_overload, declared_heap_sig,
     declared_heap_value_ty, is_globally_bound, sig_of,

@@ -11,7 +11,7 @@
 
 use brood::core::heap::Heap;
 use brood::core::value::Value;
-use brood::table;
+use brood::core::table;
 
 fn heap() -> Heap {
     // A standalone heap per thread — table values are scalars here, so no GC

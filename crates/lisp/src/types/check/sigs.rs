@@ -31,7 +31,7 @@ use crate::types::{Sig, Ty};
 
 use super::annot;
 use super::ctx::Ctx;
-use super::guards::expr_ty;
+use super::infer::expr_ty;
 use super::walk::list_items;
 
 /// Curated stdlib sigs, keyed by interned `Symbol`. Built once at first

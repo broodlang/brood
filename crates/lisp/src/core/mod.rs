@@ -8,4 +8,5 @@ pub mod heap;
 pub mod keywords;
 pub mod map_champ;
 pub mod sync;
+pub mod table; // in-memory shared table — Brood's ETS (ADR-107): a sendable handle into a global store of deep clones
 pub mod value;

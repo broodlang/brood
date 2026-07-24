@@ -563,11 +563,11 @@ pub unsafe extern "C" fn brood_rt_table_has(
         return 1;
     };
     let key = words_to_val(k0, k1, k2);
-    if let Err(e) = crate::table::check_key("table-has?", key) {
+    if let Err(e) = crate::core::table::check_key("table-has?", key) {
         h.jit_pending_error = Some(e);
         return 2;
     }
-    match crate::table::has(h, id, key) {
+    match crate::core::table::has(h, id, key) {
         Ok(b) => {
             *out = Value::Bool(b);
             0
@@ -605,11 +605,11 @@ pub unsafe extern "C" fn brood_rt_table_get2(
         return 1;
     };
     let key = words_to_val(k0, k1, k2);
-    if let Err(e) = crate::table::check_key("table-get", key) {
+    if let Err(e) = crate::core::table::check_key("table-get", key) {
         h.jit_pending_error = Some(e);
         return 2;
     }
-    match crate::table::get(h, id, key, Value::Nil) {
+    match crate::core::table::get(h, id, key, Value::Nil) {
         Ok(v) => {
             *out = v;
             0
@@ -649,12 +649,12 @@ pub unsafe extern "C" fn brood_rt_table_put(
         return 1;
     };
     let key = words_to_val(k0, k1, k2);
-    if let Err(e) = crate::table::check_key("table-put", key) {
+    if let Err(e) = crate::core::table::check_key("table-put", key) {
         h.jit_pending_error = Some(e);
         return 2;
     }
     let val = words_to_val(v0, v1, v2);
-    match crate::table::put(h, id, key, val) {
+    match crate::core::table::put(h, id, key, val) {
         Ok(v) => {
             *out = v;
             0
@@ -727,7 +727,7 @@ pub unsafe extern "C" fn brood_rt_table_dense_base(
 ) -> *const u8 {
     use crate::core::value::Value;
     if let Value::Table(id) = words_to_val(w0, w1, w2) {
-        if let Some((slots, flag)) = crate::table::jit_dense_base(id) {
+        if let Some((slots, flag)) = crate::core::table::jit_dense_base(id) {
             *out_flag = flag as i64;
             return slots as *const u8;
         }

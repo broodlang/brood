@@ -495,15 +495,15 @@ fn cmd_check(interp: &mut Interp, files: &[String]) {
     }
 }
 
-/// `nest new <name> [--template NAME]` — delegates to `(project/new-project name
-/// template)` in std/project.blsp.
+/// `nest new <name> [--template NAME]` — delegates to `(scaffold/new-project name
+/// template)` in std/tool/scaffold.blsp (config still comes from `project`).
 fn cmd_new(interp: &mut Interp, name: &str, template: Option<&str>) {
     let mut args: Vec<&str> = vec![name];
     args.extend(template);
-    let call = brood::introspect::call_form("project/new-project", &args);
+    let call = brood::introspect::call_form("scaffold/new-project", &args);
     run(
         interp,
-        &format!("(require 'project) (project/load-config) {call}"),
+        &format!("(require 'project) (project/load-config) (require 'scaffold) {call}"),
     );
 }
 
