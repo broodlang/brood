@@ -6767,3 +6767,59 @@ The `jit_lower_arm_inner` decomposition stays open for a dedicated session.
 Verified: compiles default + no-default-features; differential 2/2 (JIT≡VM
 bit-identical), jit 34/34, jit_runtime_compaction 3/3 — all with BROOD_JIT_VERIFY=1;
 full suite 3057/3057.
+
+## 2026-07-24 — hardening pass over the whole `nest` surface
+
+Asked to get the session's `nest` work to 100%, so: probe every input rather than
+re-read the code. Seven fixes, one of them a crash.
+
+**A panic on `--partitions 0`.** `validate_shard`'s range message computed
+`total - 1` on a `u64`, which underflows — so a bad *flag value* produced a Rust
+panic, a backtrace, and a `.brood_crash_dump`. The shallow fix is a `Some(0)` arm;
+the real fix is that CLI validation shouldn't be hand-rolled arithmetic at all.
+All numeric test flags now carry a declarative
+`value_parser!(u64).range(…)` — `--partitions`/`--max-failures`/
+`--repeat-until-failure`/`--timeout`/`--slowest` ≥ 1, `--cover-min` **0–100**
+(it previously accepted 150, which could never pass) — so an out-of-range value is
+rejected by the parser with a consistent message and never reaches arithmetic.
+`saturating_sub` remains as defence in depth. Negatives were already fine: clap
+rejects them at parse time.
+
+**Project-scoped commands leaked internals.** `nest test|check|format|doc|fetch|
+tree|update|publish|add|remove|run|mcp` outside a project each surfaced a raw Brood
+error — a bogus source position pointing into the bootstrap string (`1:58`), an
+internal function name (`project/run-project-tests`), an internal line number — for
+what is only a wrong-directory mistake. They now go through a `require_project`
+guard at the `nest` boundary: one line naming the cwd, one naming the fix, and for
+commands with a file-scoped form, a third naming that (`nest test <file>_test.blsp`).
+Exit 2. Modelled on `nest repl`'s existing good message and on cargo's "could not
+find `Cargo.toml`". The file-scoped forms (`nest test FILE`, `nest check FILE`,
+`nest run FILE`, `nest doc --all`, `nest doc <module>`) are all still allowed
+outside a project — verified, since guarding them would have been a regression.
+
+**A filter matching nothing passed for success.** Found by using the tool: a stale
+`--failed` record still named tests from a file I'd deleted, so `nest test --failed`
+selected zero tests and exited 0. Same class as the `FILE:LINE` bug fixed earlier
+in the day, so it got the same general treatment — `--only`/`FILE:LINE`/`--failed`
+now warn when they match nothing. Sharding is deliberately excluded: an empty shard
+is normal when a small suite fans across many machines.
+
+**`--seed` only shuffled within a file.** The scoped runner drains file-by-file, so
+files always ran in discovery order and a cross-file order dependency could never
+surface — most of the point of a seed. `drain-files-scoped` now shuffles the loader
+list too. Also corrected the summary line, which said "replay with --seed N": the
+seed fixes *scheduling* order (verified stable across 5 runs per seed), but parallel
+tests genuinely interleave, so promising exact replay was a lie. It now says "same
+order … parallel tests still interleave".
+
+**Three smaller ones.** `--slowest 0` printed a "Slowest 0 tests:" heading with
+nothing under it. `project--coverage-finish!` took an `opts` it never used.
+`coverage-begin!` leaked its hit table on a second call — a table lives in a
+runtime-wide registry, so dropping the handle doesn't free it, and a long-lived
+`nest mcp` image instrumenting twice would strand one store per run; it now
+`table-drop`s the previous one.
+
+14 new tests (`test_selection_test.blsp` 59 → 73). Investigated and left alone:
+negative CLI values (already clean), `--include` without `--exclude` (a documented
+no-op, not worth a warning), and the per-file `:lines` warning storm (still
+unreachable from the CLI).

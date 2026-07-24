@@ -222,8 +222,27 @@ joins it, and one that wasn't run keeps its previous state. So the loop "run
 after a fully green run) it warns and runs everything, rather than silently running
 nothing.
 
+**A narrowing selector that matches nothing warns.** `--only`, `FILE:LINE` and
+`--failed` all report `warning: no tests matched the given filters` when they
+select zero tests, because "0 tests, 0 passed" with a zero exit is
+indistinguishable from success in CI. The usual causes are a typo'd selector and a
+stale `--failed` record naming tests that have since been deleted. An **empty
+shard** deliberately does *not* warn — that's normal when a small suite fans across
+many machines.
+
 A `FILE:LINE` that addresses no test **runs zero tests and warns** — it does not
 fall back to the whole suite, which in CI would be indistinguishable from success.
+
+`--seed` fixes the order tests are **scheduled** in; it is reproducible run to run.
+Parallel tests still genuinely interleave, so a *concurrency*-dependent failure may
+not recur from the seed alone. In the scoped (whole-project) run the seed shuffles
+**file order as well as** the tests within each file, so cross-file order
+dependencies are shaken out too.
+
+Numeric flags are range-checked by the argument parser: `--partitions`,
+`--max-failures`, `--repeat-until-failure`, `--timeout` and `--slowest` must be
+≥ 1, and `--cover-min` must be 0–100. A bad value is rejected before the run
+starts.
 
 **Positive selectors union, they don't intersect.** `--only`, `FILE:LINE`,
 `--failed` and `--names` all *add* candidates, so `--failed --only slow` runs

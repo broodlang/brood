@@ -97,6 +97,11 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 
 (defn coverage-begin! (source-dirs)
   "Instrument every function this project defines under `source-dirs` and return the hit table. Call once, AFTER the project's sources are loaded and before the suite runs. Sets `*coverage-hits*` / `*coverage-targets*` for the reporter."
+  ;; Release a previous run's table before replacing the handle. A table lives in
+  ;; a runtime-wide registry, not the process heap, so dropping the reference is
+  ;; NOT enough to free it — a long-lived image (`nest mcp`) instrumenting more
+  ;; than once would otherwise strand one store per run.
+  (when (not (nil? *coverage-hits*)) (table-drop *coverage-hits*))
   (let (targets (coverage--targets source-dirs)
         hits (table))
     (def *coverage-hits* hits)

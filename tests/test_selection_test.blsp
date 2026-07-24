@@ -200,6 +200,53 @@
     (assert= (selection--select (test/test--make-filter (list "slow") nil nil nil nil nil nil nil))
       (list "math › multiplies"))))
 
+;; A narrowing selector that matches nothing must be reported, not pass silently:
+;; "0 tests, 0 passed" with a zero exit is indistinguishable from success in CI.
+;; The usual causes are a typo'd selector and a stale `--failed` record naming
+;; tests that have since been deleted (which is exactly how this was found).
+(describe "test selection: detecting a filter that matched nothing"
+  :isolated
+  (test "no filter at all does not count as narrowing"
+    (def *test-filter* nil)
+    (refute (test/test--filter-narrows?)))
+  (test "an empty spec does not count as narrowing"
+    (def *test-filter* {})
+    (refute (test/test--filter-narrows?)))
+  (test "--only counts as narrowing"
+    (def *test-filter* {:only (list ["slow" ""])})
+    (is (test/test--filter-narrows?)))
+  (test "FILE:LINE counts as narrowing"
+    (def *test-filter* {:lines (list ["a.blsp" 4])})
+    (is (test/test--filter-narrows?)))
+  (test "exact names (--failed) count as narrowing"
+    (def *test-filter* {:names (list "g › t")})
+    (is (test/test--filter-narrows?)))
+  ;; An empty shard is normal when a small suite fans across many CI machines,
+  ;; so sharding alone must NOT trip the warning.
+  (test "sharding alone does NOT count as narrowing"
+    (def *test-filter* {:shards 8 :shard 7})
+    (refute (test/test--filter-narrows?)))
+  (test "a seed alone does not count as narrowing"
+    (def *test-filter* {:seed 42})
+    (refute (test/test--filter-narrows?)))
+  (test "--exclude alone does not count as narrowing"
+    ;; Excluding everything is a deliberate act, not a probable typo.
+    (def *test-filter* {:exclude (list ["slow" ""])})
+    (refute (test/test--filter-narrows?)))
+  (test "the filter global is restored for the rest of the suite"
+    (def *test-filter* nil)
+    (assert= *test-filter* nil)))
+
+(describe "test selection: --slowest guard"
+  (test "a positive count is kept" (assert= (test/test--slowest-n (list :slowest 3)) 3))
+  ;; 0 used to print a "Slowest 0 tests:" heading with nothing under it.
+  (test "zero reports nothing rather than an empty heading"
+    (assert= (test/test--slowest-n (list :slowest 0)) nil))
+  (test "a negative count reports nothing"
+    (assert= (test/test--slowest-n (list :slowest -1)) nil))
+  (test "the legacy :slow flag still means 5" (assert= (test/test--slowest-n (list :slow)) 5))
+  (test "absent means nothing" (assert= (test/test--slowest-n nil) nil)))
+
 (describe "test selection: --max-failures budget"
   :isolated
   ;; A result is (group name fails ms); a non-empty `fails` marks a failed test.

@@ -168,12 +168,12 @@ enum Cmd {
         failed: bool,
 
         /// Stop the run once this many tests have failed.
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
         max_failures: Option<u64>,
 
         /// Run the suite up to N times, stopping at the first failure — for
         /// shaking out a flaky test.
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
         repeat_until_failure: Option<u64>,
 
         /// Randomise test order using this seed. Any value shuffles (including 0);
@@ -184,17 +184,17 @@ enum Cmd {
 
         /// Hard per-test timeout in milliseconds (default 120000). A test over it
         /// is killed and reported as a failure.
-        #[arg(long, value_name = "MS")]
+        #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
 
         /// List the N slowest tests after the summary.
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
         slowest: Option<u64>,
 
         /// Split the suite into N shards and run only one (see `--shard`) — for
         /// fanning a suite across CI machines. Assignment is a stable hash of each
         /// test's name, so shards never overlap or drop a test.
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
         partitions: Option<u64>,
 
         /// Which shard to run, 0-based. Requires `--partitions`.
@@ -214,7 +214,7 @@ enum Cmd {
 
         /// Fail the run (exit non-zero) if coverage is below this percentage.
         /// Implies `--cover`.
-        #[arg(long, value_name = "PCT")]
+        #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u64).range(0..=100))]
         cover_min: Option<u64>,
     },
 
@@ -454,6 +454,14 @@ fn run_main(cli: Cli) {
             cover,
             cover_min,
         } => {
+            // Named FILES run standalone outside a project; project-wide
+            // discovery needs a manifest to discover from.
+            if files.is_empty() {
+                require_project(
+                    "test",
+                    Some("To run one file outside a project: nest test <file>_test.blsp"),
+                );
+            }
             // A positional may be `FILE` or `FILE:LINE`; the line suffix becomes a
             // selector while the bare path is what actually gets loaded.
             let mut paths: Vec<String> = Vec::new();
@@ -486,9 +494,17 @@ fn run_main(cli: Cli) {
             };
             cmd_test(&mut interp, &paths, &opts);
         }
-        Cmd::Check { files } => cmd_check(&mut interp, &files),
+        Cmd::Check { files } => {
+            if files.is_empty() {
+                require_project("check", Some("To check one file outside a project: nest check <file>.blsp"));
+            }
+            cmd_check(&mut interp, &files)
+        }
         Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
-        Cmd::Format { check, changed } => cmd_format(&mut interp, check, changed),
+        Cmd::Format { check, changed } => {
+            require_project("format", None);
+            cmd_format(&mut interp, check, changed)
+        }
         Cmd::Run {
             file,
             watch,
@@ -496,29 +512,63 @@ fn run_main(cli: Cli) {
             main,
             name,
             args,
-        } => cmd_run(
-            &mut interp,
-            file.as_deref(),
-            &watch,
-            for_duration.as_deref(),
-            main.as_deref(),
-            name.as_deref(),
-            &args,
-        ),
-        Cmd::Doc { module, all } => cmd_doc(&mut interp, module.as_deref(), all),
+        } => {
+            // A FILE runs standalone outside a project (documented); the bare
+            // form needs `:main` from a manifest.
+            if file.is_none() {
+                require_project("run", Some("To run one file outside a project: nest run <file>.blsp"));
+            }
+            cmd_run(
+                &mut interp,
+                file.as_deref(),
+                &watch,
+                for_duration.as_deref(),
+                main.as_deref(),
+                name.as_deref(),
+                &args,
+            )
+        }
+        Cmd::Doc { module, all } => {
+            if module.is_none() && !all {
+                require_project(
+                    "doc",
+                    Some("For the builtin reference: nest doc --all; for one module: nest doc <module>"),
+                );
+            }
+            cmd_doc(&mut interp, module.as_deref(), all)
+        }
         Cmd::Grammar { target } => cmd_grammar(&mut interp, target),
-        Cmd::Fetch => run(&mut interp, "(require 'package) (package/fetch)"),
-        Cmd::Update { names } => cmd_update(&mut interp, &names),
-        Cmd::Tree => run(&mut interp, "(require 'package) (package/tree)"),
-        Cmd::Add { name, spec } => cmd_add(&mut interp, &name, &spec),
+        Cmd::Fetch => {
+            require_project("fetch", None);
+            run(&mut interp, "(require 'package) (package/fetch)")
+        }
+        Cmd::Update { names } => {
+            require_project("update", None);
+            cmd_update(&mut interp, &names)
+        }
+        Cmd::Tree => {
+            require_project("tree", None);
+            run(&mut interp, "(require 'package) (package/tree)")
+        }
+        Cmd::Add { name, spec } => {
+            require_project("add", None);
+            cmd_add(&mut interp, &name, &spec)
+        }
         Cmd::Remove { name } => {
+            require_project("remove", None);
             let call = brood::introspect::call_form("package/remove-dep", &[&name]);
             run(&mut interp, &format!("(require 'package) {call}"));
         }
-        Cmd::Publish { index } => cmd_publish(&mut interp, index.as_deref()),
+        Cmd::Publish { index } => {
+            require_project("publish", None);
+            cmd_publish(&mut interp, index.as_deref())
+        }
         Cmd::Search { query, index } => cmd_search(&mut interp, &query, index.as_deref()),
         Cmd::Repl => cmd_repl(&mut interp),
-        Cmd::Mcp => cmd_mcp(&mut interp),
+        Cmd::Mcp => {
+            require_project("mcp", None);
+            cmd_mcp(&mut interp)
+        }
         Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
         Cmd::Attach { spec, cookie } => cmd_attach(&mut interp, spec, cookie),
         Cmd::Release {
@@ -678,6 +728,13 @@ fn split_file_line(arg: &str) -> (String, Option<u64>) {
 /// --shard 5` matches no test, and `--shard` without `--partitions` is ignored
 /// outright — both exit 0 having run zero tests, which in CI is indistinguishable
 /// from a green build. Fail loudly instead.
+/// Cross-field check that clap can't express: `--shard` is only meaningful with
+/// `--partitions`, and must be in range. The single-field ranges (`--partitions`
+/// ≥ 1, `--cover-min` 0–100, …) are enforced declaratively by `value_parser`, so
+/// an out-of-range value never reaches this code — `saturating_sub` below is
+/// defence in depth, not the guard: `--partitions 0` once reached `total - 1`
+/// here and panicked on the u64 underflow, handing the user a Rust backtrace and
+/// a crash dump for what is only a bad flag.
 fn validate_shard(opts: &TestOpts) {
     match (opts.partitions, opts.shard) {
         (None, shard) if shard != 0 => {
@@ -688,7 +745,7 @@ fn validate_shard(opts: &TestOpts) {
             eprintln!(
                 "nest test: --shard {shard} is out of range for --partitions {total} \
                  (shards are 0-based, so use 0..{})",
-                total - 1
+                total.saturating_sub(1)
             );
             std::process::exit(2);
         }
@@ -1428,6 +1485,27 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 /// Walk up from cwd looking for a `project.blsp` marker. Used by the
 /// single-file `nest run/test/check` paths to decide whether to bootstrap
 /// the project image.
+/// Guard a project-scoped subcommand at the `nest` boundary.
+///
+/// Without this, running one outside a project surfaced a raw Brood `error`: a
+/// bogus source position pointing into the bootstrap string (`1:58`), an internal
+/// function name (`project/run-project-tests`), and an internal line number — for
+/// what is only a wrong-directory mistake. Compare `cargo`: "could not find
+/// `Cargo.toml` in /x or any parent directory". `hint` names the file-scoped
+/// alternative when the command has one, so the error also teaches the way out.
+fn require_project(command: &str, hint: Option<&str>) {
+    if in_project() {
+        return;
+    }
+    let cwd = std::env::current_dir().map_or_else(|_| ".".to_string(), |p| p.display().to_string());
+    eprintln!("nest {command}: no project.blsp in {cwd} or any parent directory.");
+    eprintln!("  Create one with `nest new <name>`, or cd into an existing project.");
+    if let Some(hint) = hint {
+        eprintln!("  {hint}");
+    }
+    std::process::exit(2);
+}
+
 fn in_project() -> bool {
     let mut here = std::env::current_dir().ok();
     while let Some(dir) = here {

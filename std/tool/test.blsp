@@ -585,6 +585,33 @@ docs/testing.md for the full guide.")
 (defn test--order-units (units seed)
   (if (nil? seed) units (first (shuffle seed units))))
 
+;; The seed for this run, or nil. Read straight off the active filter so the
+;; file-order shuffle below and the unit-order shuffle above can't disagree.
+(defn test--filter-seed () (if (nil? *test-filter*) nil (get *test-filter* :seed)))
+
+;; Did this run ask for a NARROWING selector — `--only`, `FILE:LINE`, or exact
+;; names (`--failed`)? Used to warn when such a selector matched nothing: "0
+;; tests, 0 passed" with a zero exit is indistinguishable from success in CI, and
+;; the usual causes are a typo'd selector or a stale `--failed` record naming
+;; tests that no longer exist.
+;;
+;; `:shards` is deliberately NOT counted: an empty shard is normal and expected
+;; when a small suite is fanned across many CI machines, so warning on it would be
+;; noise rather than signal.
+(defn test--filter-narrows? ()
+  (and (not (nil? *test-filter*))
+    (or (not (empty? (or (get *test-filter* :only) (list))))
+      (not (empty? (or (get *test-filter* :lines) (list))))
+      (not (empty? (or (get *test-filter* :names) (list)))))))
+
+;; Randomise FILE order as well, for the scoped (file-by-file) runner. Without
+;; this `--seed` shuffled only WITHIN each file — the scoped path drains one file
+;; at a time, so files always ran in discovery order and a cross-file order
+;; dependency would never be shaken out, which is most of the point of a seed.
+(defn test--order-files (loaders)
+  (let (seed (test--filter-seed))
+    (if (nil? seed) loaders (first (shuffle seed loaders)))))
+
 ;; The full selection pipeline: filter, shard, then order. One place, so
 ;; `run-tests` and `run-tests-scoped` can't drift on selection semantics.
 (defn test--select-units (units spec)
@@ -943,7 +970,11 @@ docs/testing.md for the full guide.")
                             (list (cons file-results chunks)
                               (+ failed (count-failed file-results)))))))
                 (list nil 0)
-                loaders)
+                ;; `--seed` randomises FILE order too, not just the units within a
+                ;; file — the scoped runner drains one file at a time, so without
+                ;; this files always ran in discovery order and a cross-file order
+                ;; dependency could never be shaken out.
+                (test--order-files loaders))
         chunks (first final))
     ;; `chunks` is reverse run order; fold back to run order with `append-two`, which copies
     ;; only its FIRST arg (the small per-file result list) and SHARES the accumulator tail —
@@ -1090,8 +1121,11 @@ docs/testing.md for the full guide.")
   (def *test-max-failures* (opt-val :max-failures opts 0)))
 
 ;; How many slowest tests to list: `:slowest N`, or 5 for the legacy `:slow`
-;; flag, else nil (list none).
-(defn test--slowest-n (opts) (opt-val :slowest opts (if (opt? :slow opts) 5 nil)))
+;; flag, else nil (list none). `:slowest 0` is nil too — otherwise the reporter
+;; printed a "Slowest 0 tests:" heading with nothing under it.
+(defn test--slowest-n (opts)
+  (let (n (opt-val :slowest opts (if (opt? :slow opts) 5 nil)))
+    (if (and (not (nil? n)) (> n 0)) n nil)))
 
 ;; Run one pass thunk up to `n` times, stopping at the first failing pass. A pass
 ;; RAISES when the suite fails, so the raise itself ends the loop — no result
@@ -1114,6 +1148,9 @@ docs/testing.md for the full guide.")
         seed (if (nil? *test-filter*) nil (get *test-filter* :seed)))
     (def *test-last-ran* (map full-name results))
     (def *test-last-failed* (map full-name (filter r-failed? results)))
+    ;; A narrowing selector that matched nothing must not pass for success.
+    (when (and (= total 0) (test--filter-narrows?))
+      (eprintln "warning: no tests matched the given filters — 0 tests ran (check the selector, or a stale --failed record naming tests that no longer exist)"))
     (report-failures results)
     (report-slow-over results *test-slow-ms*)
     (when slowest (report-slow results slowest))
@@ -1126,9 +1163,17 @@ docs/testing.md for the full guide.")
       "failed"
       (str "(" fails " failed assertions" extra ")"))
     (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
-    ;; Echo the seed whenever the order was randomised, so a failure found in a
-    ;; shuffled run can be replayed exactly (`--seed N`).
-    (when seed (println (str "  (random order, seed " seed " — replay with --seed " seed ")")))
+    ;; Echo the seed whenever the order was randomised, so the run can be
+    ;; reproduced. Deliberately says "same order", not "replay exactly": the seed
+    ;; fixes the order tests are SCHEDULED in, but parallel tests genuinely
+    ;; interleave, so a concurrency-dependent failure may not recur from the seed
+    ;; alone. Promising exact replay here would be a lie.
+    (when seed
+      (println (str "  (random order, seed "
+                 seed
+                 " — same order with --seed "
+                 seed
+                 "; parallel tests still interleave)")))
     (if (> failed 0) (error (str failed " test(s) failed")) :ok)))
 
 (defn run-tests (& opts)
