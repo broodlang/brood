@@ -48,7 +48,10 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    (so extracted helpers can name it) and pulled the arithmetic emitters
    (`emit_arith`/`emit_float_arith`) into `eval/compile/jit_lower/emit.rs` as free
    fns taking `(&mut FunctionBuilder, …, deopt)` — the proven pattern for the rest.
-   `jit_lower.rs` now 5437 → 4389 with `i64.rs`/`prepass.rs`/`emit.rs` split out.
+   Then extracted the scalar slot-access helpers (`box_scalar`/`load_slot_int`/
+   `store_int`/`copy_value`) into `emit.rs` too, threading a `Copy` `Frame`
+   context (`rb_var`/`base`/`nslots`/`deopt`/`carry_vars`).
+   `jit_lower.rs` now 5437 → 4325 with `i64.rs`/`prepass.rs`/`emit.rs` split out.
    🟡 The remaining **emit-loop decomposition** — the ~1,600-line
    `for ip in 0..len` CLIF loop (Call ~300, Prim1/2/3 + fused ~700, SelfCall ~200,
    control ~130) over the virtualized `Op` stack — is the high-risk remainder.

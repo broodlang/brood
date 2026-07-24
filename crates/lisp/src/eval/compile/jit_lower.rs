@@ -22,7 +22,7 @@ mod prepass;
 #[cfg(feature = "jit")]
 mod emit;
 #[cfg(feature = "jit")]
-use emit::{emit_arith, emit_float_arith};
+use emit::{box_scalar, copy_value, emit_arith, emit_float_arith, load_slot_int, store_int};
 
 /// The virtualized operand-stack element for `jit_lower_arm_inner`'s emit loop —
 /// module scope (not a fn-local enum) so the extracted emit helpers can name it. A
@@ -1362,6 +1362,15 @@ fn jit_lower_arm_inner(
     let rb_var = b.declare_var(ptr_ty);
     let call = b.ins().call(rb_ref, &[heap]);
     b.def_var(rb_var, b.inst_results(call)[0]);
+    // The frame-access context the extracted slot helpers (`emit::load_slot_int` etc.)
+    // read; all fields are `Copy`, so it threads by value.
+    let frame = emit::Frame {
+        rb_var,
+        base,
+        nslots,
+        deopt,
+        carry_vars: &carry_vars,
+    };
     // A scratch `Value`-sized stack slot the handle / call / global ops write their result
     // into (the out-pointer ABI). One per arm, reused: each result is read straight back
     // into registers before the next op.
@@ -1690,15 +1699,6 @@ fn jit_lower_arm_inner(
     // forms are `i64`, so a materialised operand (a return, a binder, a self-call/call arg)
     // stores / passes correctly. (Without this, returning `(< a b)` produced `Value::Int 1`
     // instead of `true`.)
-    let box_scalar = |b: &mut FunctionBuilder,
-                      v: cranelift_codegen::ir::Value|
-     -> (u8, cranelift_codegen::ir::Value) {
-        if b.func.dfg.value_type(v) == types::I64 {
-            (TAG_INT, v)
-        } else {
-            (TAG_BOOL, b.ins().uextend(types::I64, v))
-        }
-    };
     // Load frame slot `k` as an unboxed `i64`, tag-checking `Int` first: a non-`Int`
     // operand branches to `deopt` (the VM then runs the arm, where the inline path
     // handles the real shape). Leaves `b` switched to the post-check block. Used by
@@ -1707,26 +1707,6 @@ fn jit_lower_arm_inner(
     // the entry block already verified Int and `def_var`'d the raw i64; each SelfCall
     // re-`def_var`s on the back-edge. `use_var` gives the current iteration's value without
     // any memory access or branch.
-    let load_slot_int = |b: &mut FunctionBuilder, k: i64| -> cranelift_codegen::ir::Value {
-        if let Some((var, false)) = carry_vars.get(k as usize).copied().flatten() {
-            return b.use_var(var);
-        }
-        let roots_base = b.use_var(rb_var);
-        let idx = b.ins().iadd_imm(base, k);
-        let off = b.ins().imul_imm(idx, STRIDE);
-        let addr = b.ins().iadd(roots_base, off);
-        let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
-        let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
-        let cont = b.create_block();
-        b.ins().brif(is_int, cont, &[], deopt, &[]);
-        b.switch_to_block(cont);
-        b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            addr,
-            PAYLOAD_OFFSET as i32,
-        )
-    };
     // `map` reorders the two operands into the primitive's `(x, y)` argument order —
     // e.g. `>` is `%lt` with `map = [1, 0]` (operands swapped), so the JIT must apply
     // it or `(> a b)` would compute `a < b`. `m == 0` picks the first source, else the
@@ -1759,55 +1739,11 @@ fn jit_lower_arm_inner(
     let done_block = leader_block[len]?;
     // Store an unboxed scalar `Op::Int` value into frame slot `k`, boxing it as `Int` or
     // (for a comparison `i8`) `Bool` via `box_scalar`.
-    let store_int = |b: &mut FunctionBuilder, k: i64, v: cranelift_codegen::ir::Value| {
-        debug_assert!(
-            (k as usize) < nslots,
-            "[jit-slot] store_int slot {k} >= nslots {nslots}"
-        );
-        let (tag_byte, payload) = box_scalar(b, v);
-        let roots_base = b.use_var(rb_var);
-        let idx = b.ins().iadd_imm(base, k);
-        let off = b.ins().imul_imm(idx, STRIDE);
-        let addr = b.ins().iadd(roots_base, off);
-        let tag = b.ins().iconst(types::I8, tag_byte as i64);
-        b.ins().store(MemFlagsData::trusted(), tag, addr, 0);
-        b.ins().store(
-            MemFlagsData::trusted(),
-            payload,
-            addr,
-            PAYLOAD_OFFSET as i32,
-        );
-    };
     // Copy the whole `Value` from frame slot `src` to slot `dst` (handle-safe — moves the
     // bytes verbatim, no interpretation). A `Value` is `STRIDE` bytes (`#[repr(C, u8)]`):
     // it must copy **every** i64 word, not just tag+payload — `Value::Pid { node, id }`
     // (and any future 2-word-payload variant) carries `id` in the third word at offset 16,
     // which a tag+payload-only copy would drop and corrupt.
-    let copy_value = |b: &mut FunctionBuilder, src: i64, dst: i64| {
-        debug_assert!(
-            (src as usize) < nslots && (dst as usize) < nslots,
-            "[jit-slot] copy_value src {src} dst {dst} vs nslots {nslots}"
-        );
-        let roots_base = b.use_var(rb_var);
-        let saddr = {
-            let i = b.ins().iadd_imm(base, src);
-            let o = b.ins().imul_imm(i, STRIDE);
-            b.ins().iadd(roots_base, o)
-        };
-        let daddr = {
-            let i = b.ins().iadd_imm(base, dst);
-            let o = b.ins().imul_imm(i, STRIDE);
-            b.ins().iadd(roots_base, o)
-        };
-        let mut off = 0i32;
-        while (off as i64) < STRIDE {
-            let w = b
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), saddr, off);
-            b.ins().store(MemFlagsData::trusted(), w, daddr, off);
-            off += 8;
-        }
-    };
     // Read an operand as its three `Value` words `[w0, w1, w2]` — for a self-call arg, a
     // binder, a return, or a `cons`/`car`/`cdr` operand. An `Int` boxes to `[Int-tag, v, 0]`
     // (the third word is irrelevant to an Int); a `Slot` loads all three; a `Handle` is
@@ -1903,7 +1839,7 @@ fn jit_lower_arm_inner(
         match op {
             Op::Int(v) => v,
             Op::Bool(v) => v,
-            Op::Slot(k) => load_slot_int(b, k as i64),
+            Op::Slot(k) => load_slot_int(b, k as i64, frame),
             Op::Handle(w0, w1, _) => {
                 let tagb = b.ins().band_imm(w0, 0xff);
                 let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
@@ -2069,7 +2005,7 @@ fn jit_lower_arm_inner(
             // A comparison `i8` (`store_int`/`box_scalar` boxes it as `Value::Bool`) marks
             // the slot bool; a real `i64` int does not.
             let is_b = b.func.dfg.value_type(v) == types::I8;
-            store_int(b, dst, v);
+            store_int(b, dst, v, frame);
             set_slot_float(dst, false);
             set_slot_bool(dst, is_b);
             if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
@@ -2098,7 +2034,7 @@ fn jit_lower_arm_inner(
             }
         }
         Op::Slot(k) => {
-            copy_value(b, k as i64, dst);
+            copy_value(b, k as i64, dst, frame);
             // Read both source flags and f64 cache into locals *before* mutating (a held
             // `borrow()` would double-borrow with `set_slot_*`'s `borrow_mut()`).
             let f = slot_float.borrow().get(k).copied().unwrap_or(false);
@@ -3763,7 +3699,7 @@ fn jit_lower_arm_inner(
                             // (no per-element call / slab lookup). The index slot tag-checks
                             // to int (deopt otherwise); an out-of-range index deopts so the
                             // VM produces `nth`'s exact out-of-range result.
-                            let idx = load_slot_int(&mut b, *slot_b as i64);
+                            let idx = load_slot_int(&mut b, *slot_b as i64, frame);
                             let oob = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, idx, vlen);
                             let cont = b.create_block();
                             b.ins().brif(oob, deopt, &[], cont, &[]);
@@ -3811,8 +3747,8 @@ fn jit_lower_arm_inner(
                         stack.push(emit_float_arith(&mut b, *op, x, y, deopt)?);
                     } else {
                         // Source 0 = slot_a, source 1 = slot_b (the VM's `[sa, sb]` order).
-                        let sa = load_slot_int(&mut b, *slot_a as i64);
-                        let sb = load_slot_int(&mut b, *slot_b as i64);
+                        let sa = load_slot_int(&mut b, *slot_a as i64, frame);
+                        let sb = load_slot_int(&mut b, *slot_b as i64, frame);
                         let x = pick(sa, sb, map[0]);
                         let y = pick(sa, sb, map[1]);
                         stack.push(Op::Int(emit_arith(&mut b, *op, x, y, deopt)?));
@@ -3890,7 +3826,7 @@ fn jit_lower_arm_inner(
                     } else {
                         // Source 0 = slot_a, source 1 = the literal `int_b` (the fusion of
                         // `(Const, Local)` already inverted `map` so the slot is source 0).
-                        let sa = load_slot_int(&mut b, *slot_a as i64);
+                        let sa = load_slot_int(&mut b, *slot_a as i64, frame);
                         let sb = b.ins().iconst(types::I64, *int_b);
                         let x = pick(sa, sb, map[0]);
                         let y = pick(sa, sb, map[1]);
@@ -4091,7 +4027,7 @@ fn jit_lower_arm_inner(
                     // only this fresh iteration's (so-far-nonexistent) work.
                     if ckpt_active {
                         let zero = b.ins().iconst(types::I64, 0);
-                        store_int(&mut b, arm.ckpt_slot as i64, zero);
+                        store_int(&mut b, arm.ckpt_slot as i64, zero, frame);
                     }
                     // Back-edge bookkeeping, BATCHED (BEAM-style): decrement the
                     // in-register countdown; while nonzero the loop resumes with ONE
@@ -4234,7 +4170,7 @@ fn jit_lower_arm_inner(
                 }
                 let packed = (((j as i64) + 1) << 16) | stack.len() as i64;
                 let pv = b.ins().iconst(types::I64, packed);
-                store_int(&mut b, arm.ckpt_slot as i64, pv);
+                store_int(&mut b, arm.ckpt_slot as i64, pv, frame);
             }
             j += 1;
             if j == len {

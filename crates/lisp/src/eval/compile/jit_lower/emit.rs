@@ -4,8 +4,24 @@
 //! (module scope in `jit_lower.rs`).
 #![cfg(feature = "jit")]
 use super::*;
-use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
-use cranelift_frontend::FunctionBuilder;
+use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_BOOL, TAG_INT};
+use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder, MemFlagsData};
+use cranelift_frontend::{FunctionBuilder, Variable};
+
+/// The size of a `Value` in bytes — the frame-slot stride in `roots`.
+const STRIDE: i64 = std::mem::size_of::<crate::core::value::Value>() as i64;
+
+/// The frame-access context the slot helpers need: the `roots` base variable, the
+/// arm's frame base offset, the slot count, the shared `deopt` block, and the
+/// register-carried param-slot table. All `Copy`, so it threads freely.
+#[derive(Clone, Copy)]
+pub(super) struct Frame<'a> {
+    pub rb_var: Variable,
+    pub base: cranelift_codegen::ir::Value,
+    pub nslots: usize,
+    pub deopt: cranelift_codegen::ir::Block,
+    pub carry_vars: &'a [Option<(Variable, bool)>],
+}
 
 /// Integer arithmetic/comparison lowering (overflow-checked → deopt to BigInt).
 /// Returns the SSA result, or None if `op` is not lowered as unboxed integer arith.
@@ -129,4 +145,93 @@ pub(super) fn emit_float_arith(
             // coerces int↔float identically on both engines.)
             _ => return None,
         })
+}
+
+/// Box an unboxed scalar SSA value into a `(tag, payload)` pair: an `i64` is an
+/// `Int`; anything narrower (an `i8` comparison result) is a `Bool` (uext to i64).
+pub(super) fn box_scalar(
+    b: &mut FunctionBuilder,
+    v: cranelift_codegen::ir::Value,
+) -> (u8, cranelift_codegen::ir::Value) {
+        if b.func.dfg.value_type(v) == types::I64 {
+            (TAG_INT, v)
+        } else {
+            (TAG_BOOL, b.ins().uextend(types::I64, v))
+        }
+}
+
+/// Load frame slot `k` as an unboxed `i64`, tag-checking `Int` first (a non-Int
+/// operand branches to `deopt`). A register-carried param slot skips the check.
+pub(super) fn load_slot_int(b: &mut FunctionBuilder, k: i64, f: Frame) -> cranelift_codegen::ir::Value {
+        if let Some((var, false)) = f.carry_vars.get(k as usize).copied().flatten() {
+            return b.use_var(var);
+        }
+        let roots_base = b.use_var(f.rb_var);
+        let idx = b.ins().iadd_imm(f.base, k);
+        let off = b.ins().imul_imm(idx, STRIDE);
+        let addr = b.ins().iadd(roots_base, off);
+        let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
+        let is_int = b.ins().icmp_imm(IntCC::Equal, tag, TAG_INT as i64);
+        let cont = b.create_block();
+        b.ins().brif(is_int, cont, &[], f.deopt, &[]);
+        b.switch_to_block(cont);
+        b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            addr,
+            PAYLOAD_OFFSET as i32,
+        )
+}
+
+/// Store an unboxed scalar into frame slot `k`, boxing via [`box_scalar`].
+pub(super) fn store_int(b: &mut FunctionBuilder, k: i64, v: cranelift_codegen::ir::Value, f: Frame) {
+        debug_assert!(
+            (k as usize) < f.nslots,
+            "[jit-slot] store_int slot {} >= nslots {}",
+            k,
+            f.nslots
+        );
+        let (tag_byte, payload) = box_scalar(b, v);
+        let roots_base = b.use_var(f.rb_var);
+        let idx = b.ins().iadd_imm(f.base, k);
+        let off = b.ins().imul_imm(idx, STRIDE);
+        let addr = b.ins().iadd(roots_base, off);
+        let tag = b.ins().iconst(types::I8, tag_byte as i64);
+        b.ins().store(MemFlagsData::trusted(), tag, addr, 0);
+        b.ins().store(
+            MemFlagsData::trusted(),
+            payload,
+            addr,
+            PAYLOAD_OFFSET as i32,
+        );
+}
+
+/// Copy a whole `Value` (all words, handle-safe) from frame slot `src` to `dst`.
+pub(super) fn copy_value(b: &mut FunctionBuilder, src: i64, dst: i64, f: Frame) {
+        debug_assert!(
+            (src as usize) < f.nslots && (dst as usize) < f.nslots,
+            "[jit-slot] copy_value src {} dst {} vs nslots {}",
+            src,
+            dst,
+            f.nslots
+        );
+        let roots_base = b.use_var(f.rb_var);
+        let saddr = {
+            let i = b.ins().iadd_imm(f.base, src);
+            let o = b.ins().imul_imm(i, STRIDE);
+            b.ins().iadd(roots_base, o)
+        };
+        let daddr = {
+            let i = b.ins().iadd_imm(f.base, dst);
+            let o = b.ins().imul_imm(i, STRIDE);
+            b.ins().iadd(roots_base, o)
+        };
+        let mut off = 0i32;
+        while (off as i64) < STRIDE {
+            let w = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), saddr, off);
+            b.ins().store(MemFlagsData::trusted(), w, daddr, off);
+            off += 8;
+        }
 }

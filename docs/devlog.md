@@ -6974,3 +6974,21 @@ incremental grind with per-step JIT-differential verification.
 
 Verified: compiles default + no-default-features; differential 2/2, jit 34/34
 (under JIT_VERIFY); full suite 3108/3108.
+
+## 2026-07-24 — Tier 1 item 1 cont.: extract scalar slot helpers (Frame context)
+
+Continued the emit-loop decomposition. Extracted the scalar slot-access helpers —
+`box_scalar` (scalar → (tag,payload)), `load_slot_int` (tag-checked Int load, deopt
+otherwise), `store_int` (box + store), `copy_value` (handle-safe whole-Value copy) —
+from their closures into `jit_lower/emit.rs`. Their shared captured state (the
+`roots` base var `rb_var`, the frame `base`, `nslots`, the `deopt` block, and the
+register-carried `carry_vars` table) is bundled into a `#[derive(Clone, Copy)]
+Frame<'a>` struct built once after `rb_var` and threaded by value. A `STRIDE`
+module const replaces the fn-local one.
+
+One transform gotcha fixed: the `frameize` pass rewrote `{nslots}` inside a
+`debug_assert!` format string to `{f.nslots}` (invalid inline-arg syntax) — switched
+those to positional `{}` + args.
+
+`jit_lower.rs` 4389 → 4325; `emit.rs` 132 → 237. Verified: compiles default +
+no-default-features; differential 2/2, jit 34/34 (JIT_VERIFY); full suite 3108/3108.
