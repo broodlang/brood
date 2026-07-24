@@ -126,6 +126,8 @@ land in a later slice."
   (cond
     (= (get dep :kind) :path) (package--resolve-path root dep)
     (= (get dep :kind) :git) (package--resolve-git root dep (get lock-index (get dep :name)))
+    (= (get dep :kind) :tarball) (package--resolve-tarball root dep)
+    (= (get dep :kind) :registry) (package--resolve-registry root dep (get lock-index (get dep :name)) nil)
     else (error "package: unknown dependency kind " (get dep :kind))))
 
 ;; Index a lock's :dependencies vector by dep name → its plist (the :git/:ref/
@@ -235,6 +237,144 @@ land in a later slice."
     (plist-get locked :sha256)
     (package-tree-hash target)))
 
+;; --- tarball deps (ADR-037 v2) ----------------------------------------------
+;; A :tarball dep names a URL and a MANDATORY :sha256 of the archive bytes — the
+;; integrity pin standing in for git's commit (there is no reviewed ref to trust).
+;; The archive is downloaded, its bytes verified against the declared sha256, then
+;; extracted into _deps/<name>/, stripping the single wrapper directory (the standard
+;; `tar czf pkg-x.y.z/` / GitHub-archive layout). A `file://` URL is read directly —
+;; offline tests and local artifacts; http(s) follows a bounded number of redirects
+;; (release assets 302 to a CDN). Like git, the cache's .brood-pkg.blsp stamp lets a
+;; plain `nest run` skip a re-download when the locked sha still matches.
+
+(def *package--max-redirects* 5)
+
+(defn package--http-fetch (url redirects-left)
+  (require 'net/http)
+  (let (resp   (net/http/http-get url)
+        status (get resp :status))
+    (cond
+      (and (>= status 200) (< status 300)) (get resp :body)
+      (and (>= status 300) (< status 400) (> redirects-left 0))
+        (let (loc (get (get resp :headers) "location"))
+          (if (nil? loc)
+            (error "package: " url " returned HTTP " status " with no Location header")
+            (package--http-fetch loc (dec redirects-left))))
+      (= status 0) (error "package: cannot fetch " url ": " (get resp :error))
+      else (error "package: fetching " url " returned HTTP " status))))
+
+(defn package--fetch-bytes (url)
+  "The bytes at `url`: a `file://` path is read directly (offline / local artifact);
+an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and its
+2xx body returned. Throws on a non-2xx status or a transport error."
+  (if (starts-with? url "file://")
+    (slurp-bytes (substring url 7))
+    (package--http-fetch url *package--max-redirects*)))
+
+(defn package--tarball-cache-current? (target sha)
+  (let (meta (package--pkg-meta-path target))
+    (and (dir? target)
+      (file-exists? meta)
+      (let (form (read-first (slurp meta)))
+        (and (pair? form)
+          (= (first form) 'brood-pkg)
+          (= sha (plist-get (rest form) :sha256)))))))
+
+(defn package--write-tarball-meta (target url sha)
+  (spit (package--pkg-meta-path target)
+    (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
+      (pr-str (list 'brood-pkg :tarball url :sha256 sha :fetched-at (now)))
+      "\n")))
+
+(defn package--resolve-tarball (root dep)
+  (let (nm     (get dep :name)
+        url    (get dep :url)
+        sha    (get dep :sha256)
+        target (package--git-target root nm))
+    (if (package--tarball-cache-current? target sha)
+      {:name nm :kind :tarball :url url :sha256 sha
+       :resolved-path target
+       :deps (package--manifest-deps (path-join target "project.blsp"))}
+      (do
+        (when (dir? target) (%rm-rf target))
+        (let (bytes (package--fetch-bytes url)
+              got   (hash/sha256-bytes bytes))
+          (when (not (= got sha))
+            (error "package: :tarball " nm " sha256 mismatch — the manifest pins " sha
+              " but the download hashed to " got
+              " (tampered, wrong URL, or a moved artifact — verify and re-pin)"))
+          (let (archive (path-join (package--deps-dir root) (str (name nm) ".tar.gz")))
+            (make-dir (package--deps-dir root))
+            (spit-bytes archive bytes)
+            ;; Extraction (large archives) runs on the offload pool, like the clone.
+            (offload %untar-gz archive target 1)
+            (delete-file archive)
+            (package--write-tarball-meta target url sha)
+            {:name nm :kind :tarball :url url :sha256 sha
+             :resolved-path target
+             :deps (package--manifest-deps (path-join target "project.blsp"))}))))))
+
+;; --- package registry (ADR-147): a git-backed metadata index ----------------
+;; The registry is just a git repo of package metadata — no hosted server, no
+;; account (ADR-037's "no central infrastructure" property, kept). Layout: one file
+;; per package, `packages/<name>.blsp`, holding a vector of published version entries
+;; `{:version :git :ref :description}` (newest last). `nest search` greps it; `nest
+;; publish` appends the current project's entry; a `[name :version "x"]` dep resolves
+;; the named version to its git source and pins it — EXACT version match, no semver
+;; solver (ADR-037's direct-refs-only invariant). A URL index is cloned into a
+;; project-local `_deps/.registry-<hash>/` cache; a local-path index is read in place
+;; (dev, self-hosted, and the offline test path).
+
+(defn package--registry-index (index) (or index *config-registry*))
+(defn registry--url? (loc) (string-contains? loc "://"))
+
+(defn registry--clone-index (root url)
+  (let (target (path-join (package--deps-dir root) (str ".registry-" (hash/sha256 url)))
+        commit (or (offload %git-resolve-ref url "main")
+                 (error "package: cannot reach the registry index at " url)))
+    (unless (package--cache-current? target commit)
+      (when (dir? target) (%rm-rf target))
+      (offload %git-clone url target "main" commit)
+      (package--write-pkg-meta target url "main" commit ""))
+    target))
+
+(defn registry--read-dir (root index)
+  "A local directory to read the index from: a local path is used in place; a URL is
+cloned/updated into `_deps/.registry-<hash>/`."
+  (let (loc (package--registry-index index))
+    (if (registry--url? loc) (registry--clone-index root loc) loc)))
+
+(defn registry--package-file (index-dir nm)
+  (path-join (path-join index-dir "packages") (str (name nm) ".blsp")))
+
+(defn registry--versions (index-dir nm)
+  "The published version entries for `nm` (a list of maps, newest last); nil if the
+package is unknown to this index."
+  (let (f (registry--package-file index-dir nm))
+    (if (file-exists? f)
+      (let (form (read-first (slurp f))) (if (vector? form) (vec->list form) nil))
+      nil)))
+
+(defn registry--find-version (index-dir nm version)
+  (find (fn (e) (= (get e :version) version)) (registry--versions index-dir nm)))
+
+;; A registry dep names a package + an EXACT version; we look the version up in the
+;; index, then delegate to git resolution (clone + pin) and re-tag the resolved entry
+;; as `:registry` so the lock records the version alongside the resolved commit/sha.
+(defn package--resolve-registry (root dep locked index)
+  (let (nm      (get dep :name)
+        version (get dep :version)
+        idx     (registry--read-dir root index)
+        entry   (registry--find-version idx nm version))
+    (when (nil? entry)
+      (error "package: no registry entry for " nm " " version
+        " (run `nest search " (name nm) "` to see what's published)"))
+    (when (nil? (get entry :git))
+      (error "package: registry entry " nm " " version " has no :git source"))
+    (let (git-dep  {:name nm :kind :git :url (get entry :git) :ref (get entry :ref)}
+          resolved (package--resolve-git root git-dep locked))
+      (assoc (assoc resolved :kind :registry) :version version))))
+
 ;; Two resolutions of the same name must agree on their source (kind + location).
 (defn package--check-compatible (existing dep)
   (cond
@@ -258,6 +398,23 @@ land in a later slice."
                                  " @ "
                                  (get dep :ref)
                                  " — pin it explicitly in your root manifest"))
+    (= (get dep :kind) :tarball) (when (not (and (= (get existing :url) (get dep :url))
+                                              (= (get existing :sha256) (get dep :sha256))))
+                                   (error "package: conflicting dependency "
+                                     (get dep :name)
+                                     " required as two different tarballs ("
+                                     (get existing :url)
+                                     " and "
+                                     (get dep :url)
+                                     ") — pin it explicitly in your root manifest"))
+    (= (get dep :kind) :registry) (when (not (= (get existing :version) (get dep :version)))
+                                    (error "package: conflicting dependency "
+                                      (get dep :name)
+                                      " required at two registry versions ("
+                                      (get existing :version)
+                                      " and "
+                                      (get dep :version)
+                                      ") — pin it explicitly in your root manifest"))
     else (when (not (= (get existing :path) (get dep :path)))
            (error "package: conflicting dependency "
              (get dep :name)
@@ -347,6 +504,24 @@ land in a later slice."
                                        :sha256
                                        (get e :sha256))
                                (list :deps (package--dep-names-vec (get e :deps))))
+      (= (get e :kind) :tarball) (append (list (get e :name)
+                                           :tarball
+                                           (get e :url)
+                                           :sha256
+                                           (get e :sha256))
+                                   (list :deps (package--dep-names-vec (get e :deps))))
+      (= (get e :kind) :registry) (append (list (get e :name)
+                                            :registry
+                                            (get e :version)
+                                            :git
+                                            (get e :url)
+                                            :ref
+                                            (get e :ref)
+                                            :commit
+                                            (get e :commit)
+                                            :sha256
+                                            (get e :sha256))
+                                    (list :deps (package--dep-names-vec (get e :deps))))
       else (append (list (get e :name) :path (get e :path) :sha256 (get e :sha256))
              (list :deps (package--dep-names-vec (get e :deps)))))))
 
@@ -465,6 +640,8 @@ land in a later slice."
   (cond
     (= (get dep :kind) :path) (str (get dep :name) "  (path \"" (get dep :path) "\")")
     (= (get dep :kind) :git) (str (get dep :name) "  (git " (get dep :url) " @ " (get dep :ref) ")")
+    (= (get dep :kind) :tarball) (str (get dep :name) "  (tarball " (get dep :url) ")")
+    (= (get dep :kind) :registry) (str (get dep :name) "  (registry v" (get dep :version) ")")
     else (str (get dep :name))))
 
 ;; Print `deps` (a list of dep maps) as an indented tree, recursing into each
@@ -516,6 +693,14 @@ land in a later slice."
                                         [:str (package--str-lit (get dep :url))]
                                         [:keyword ":ref"]
                                         [:str (package--str-lit (get dep :ref))])]
+    (= (get dep :kind) :tarball) [:vector (vector [:symbol (name (get dep :name))]
+                                            [:keyword ":tarball"]
+                                            [:str (package--str-lit (get dep :url))]
+                                            [:keyword ":sha256"]
+                                            [:str (package--str-lit (get dep :sha256))])]
+    (= (get dep :kind) :registry) [:vector (vector [:symbol (name (get dep :name))]
+                                             [:keyword ":version"]
+                                             [:str (package--str-lit (get dep :version))])]
     else (error "package: cannot build a manifest entry for kind " (get dep :kind))))
 
 ;; Is `n` the manifest's top-level (project …) list node?
@@ -613,7 +798,7 @@ land in a later slice."
 (defn package--has-dep? (deps nm) (some? (fn (d) (= (get d :name) nm)) deps))
 
 (defn add (nm & spec)
-  "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH` or `:git URL :ref REF` (strings). A :git dep is resolved and cloned into _deps/ as part of the re-lock. Backs `nest add`."
+  "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH`, `:git URL :ref REF`, or `:tarball URL :sha256 HEX` (strings). A :git/:tarball dep is fetched into _deps/ as part of the re-lock. Backs `nest add`."
   (package--in-project (fn (root)
                          (let (dep (project/project-parse-dep (apply vector
                                                                  (cons (symbol nm)
@@ -646,3 +831,86 @@ land in a later slice."
           (when (dir? target) (%rm-rf target))  ; drop its _deps/ cache, if any
           (write-lockfile root (resolve-deps root *project-dependencies* (read-lockfile root)))
           (println (str "package: removed " nm)))))))
+
+;; --- `nest search` / `nest publish` (ADR-147) -------------------------------
+
+(defn registry--list-packages (index-dir)
+  "The package names (symbols) published in `index-dir`."
+  (let (dir (path-join index-dir "packages"))
+    (if (dir? dir)
+      (map (fn (f) (symbol (substring f 0 (- (string-length f) 5)))) ; strip ".blsp"
+        (filter (fn (f) (ends-with? f ".blsp")) (list-dir dir)))
+      nil)))
+
+(defn registry--matches? (index-dir nm term)
+  (let (latest (last (registry--versions index-dir nm)))
+    (or (string-contains? (name nm) term)
+      (and latest
+        (get latest :description)
+        (string-contains? (get latest :description) term)))))
+
+(defn registry--search-line (index-dir nm)
+  (let (latest (last (registry--versions index-dir nm)))
+    (str (name nm) "  " (if latest (get latest :version) "?")
+      (if (and latest (get latest :description)) (str "  — " (get latest :description)) ""))))
+
+(defn search (term & rest)
+  "Search the package registry index for `term` (matched against each package's name
+and latest description), printing name / latest version / description per hit. An
+optional index location overrides the configured `:registry`. Backs `nest search`."
+  (package--in-project
+    (fn (root)
+      (let (index (if (empty? rest) nil (first rest))
+            dir   (registry--read-dir root index)
+            hits  (filter (fn (nm) (registry--matches? dir nm term))
+                    (registry--list-packages dir)))
+        (if (empty? hits)
+          (println (str "No packages matching \"" term "\"."))
+          (dolist (nm hits) (println (registry--search-line dir nm))))
+        nil))))
+
+;; Append a version entry for package `nm-str` to the index, refusing a duplicate
+;; version. Arg-driven (no project globals) so it's testable without mutating shared
+;; state. Returns the package file path.
+(defn registry--append-entry (index-dir nm-str version desc repo)
+  (when (nil? version) (error "package: nothing to publish — the project has no :version"))
+  (when (nil? repo)
+    (error "package: publishing needs a :repository \"<git-url>\" in project.blsp"))
+  (when (nil? desc)
+    (error "package: publishing needs a :description in project.blsp"))
+  (let (sym      (symbol nm-str)
+        existing (registry--versions index-dir sym))
+    (when (find (fn (e) (= (get e :version) version)) existing)
+      (error "package: " nm-str " " version
+        " is already published — bump :version in project.blsp"))
+    (let (entry   {:version version :git repo :ref (str "v" version) :description desc}
+          updated (apply vector (append existing (list entry)))
+          file    (registry--package-file index-dir sym))
+      (make-dir (path-join index-dir "packages"))
+      (spit file (str ";; " nm-str
+                   " — registry entries (managed by `nest publish`, ADR-147).\n"
+                   (pr-str updated) "\n"))
+      file)))
+
+(defn registry--publish-into (index-dir)
+  (when (nil? *project-name*) (error "package: project has no :name"))
+  ;; Deliberately no auto-commit: the user owns the index repo (its commit policy,
+  ;; signing, review). We write the entry; they commit + push.
+  (let (file (registry--append-entry index-dir *project-name* *project-version*
+               *project-description* *project-repository*))
+    (println (str "package: wrote " *project-name* " " *project-version* " to " file))
+    (println (str "  review it, then commit and `git push` the index to share it."))
+    file))
+
+(defn publish (& rest)
+  "Publish the current project's :version to the registry index — appends an entry
+built from project.blsp's :name/:version/:description/:repository to the index's
+`packages/<name>.blsp` and commits it (you then `git push`). The index must be a
+LOCAL checkout you can push (an optional argument, else `:registry`); a URL, or a
+version already published, is refused. Backs `nest publish`."
+  (package--in-project
+    (fn (root)
+      (let (loc (package--registry-index (if (empty? rest) nil (first rest))))
+        (when (registry--url? loc)
+          (error "package: `nest publish` needs a local index checkout to write + push — clone the registry and pass its path (or set :registry to it), not a URL"))
+        (registry--publish-into loc)))))

@@ -1927,6 +1927,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], pair.union(nil_ty).union(kw)),
         git_changed_files,
     );
+    // Extract a gzip'd tar archive into a dir, stripping N leading path components.
+    // The tarball source-delivery mechanism (ADR-037 tarball deps); shells to `tar`.
+    def(
+        heap,
+        "%untar-gz",
+        Arity::exact(3),
+        Sig::new(vec![string, string, int], kw),
+        untar_gz,
+    );
     // Delete a cached dependency tree. Bounded to paths under `_deps/` — refuses
     // anything else, so a mis-pathed `nest update` can't rm the wrong directory.
     def(
@@ -2820,6 +2829,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),
     ("%git-changed-files", &["dir"], "Absolute paths of files NOT committed-clean under `dir` (modified, staged, or untracked — the union `git status --porcelain` reports). Returns a list of strings (nil when the tree is clean — an empty list is nil), or the keyword :not-a-repo when `dir` is not inside a git work tree. Backs `nest format --changed`."),
     ("%rm-rf", &["path"], "Recursively delete `path`. Bounded to paths under `_deps/` (refuses anything else). Idempotent. The package manager's cache-eviction mechanism (ADR-037)."),
+    ("%untar-gz", &["archive", "dest", "strip"], "Extract a gzip'd tar `archive` into `dest`, stripping `strip` leading path components (package convention: 1). Shells to `tar`. Returns :ok or throws. The tarball-dep delivery mechanism (ADR-037)."),
     ("read-line", &[], "Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input."),
     ("file-mtime", &["path"], "Last-modified time of path as epoch-milliseconds, or nil if the file is missing. Cheap (stat) — pair with `load` to drive a hot-reloader."),
     ("file-size", &["path"], "Size of the file at path in bytes, or nil if it is missing."),

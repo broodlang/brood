@@ -201,6 +201,26 @@ enum Cmd {
         name: String,
     },
 
+    /// Publish this project's version to the package registry index (ADR-147).
+    ///
+    /// Appends an entry built from project.blsp's :name/:version/:description/
+    /// :repository to the index's packages/<name>.blsp and commits it (you then
+    /// `git push`). The index must be a LOCAL checkout you can push.
+    Publish {
+        /// The registry index — a local checkout you can push. Omit to use the
+        /// configured `:registry`.
+        index: Option<String>,
+    },
+
+    /// Search the package registry index for a term (name or description) (ADR-147).
+    Search {
+        /// The term to match against each package's name and latest description.
+        query: String,
+
+        /// The registry index to search. Omit to use the configured `:registry`.
+        index: Option<String>,
+    },
+
     /// Start a REPL. Inside a project, every source file is pre-loaded so the
     /// project's modules are immediately callable.
     Repl,
@@ -379,6 +399,8 @@ fn run_main(cli: Cli) {
             let call = brood::introspect::call_form("package/remove-dep", &[&name]);
             run(&mut interp, &format!("(require 'package) {call}"));
         }
+        Cmd::Publish { index } => cmd_publish(&mut interp, index.as_deref()),
+        Cmd::Search { query, index } => cmd_search(&mut interp, &query, index.as_deref()),
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => cmd_mcp(&mut interp),
         Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
@@ -765,6 +787,32 @@ fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
         brood::introspect::call_form("package/add", &args)
     );
     run(interp, &call);
+}
+
+/// `nest publish [INDEX]` — publish this project's version to the registry index
+/// (ADR-147). Loads the user config first so a `:registry` override applies.
+fn cmd_publish(interp: &mut Interp, index: Option<&str>) {
+    let call = match index {
+        Some(i) => brood::introspect::call_form("package/publish", &[i]),
+        None => "(package/publish)".to_string(),
+    };
+    run(
+        interp,
+        &format!("(require 'project) (project/load-config) (require 'package) {call}"),
+    );
+}
+
+/// `nest search QUERY [INDEX]` — search the registry index (ADR-147).
+fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>) {
+    let args: Vec<&str> = match index {
+        Some(i) => vec![query, i],
+        None => vec![query],
+    };
+    let call = brood::introspect::call_form("package/search", &args);
+    run(
+        interp,
+        &format!("(require 'project) (project/load-config) (require 'package) {call}"),
+    );
 }
 
 /// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents

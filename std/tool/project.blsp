@@ -137,6 +137,28 @@ the `nest new` scaffolder."
     (project--reject-reserved-opts name opts)
     {:name name :kind :path :path path}))
 
+(defn project--parse-registry-dep (name entry)
+  (let (version (vector-ref entry 2)
+        opts    (project--vec-drop entry 3))
+    (when (not (string? version))
+      (error "project: registry dependency " name " version must be a string, got " version))
+    (project--reject-reserved-opts name opts)
+    {:name name :kind :registry :version version}))
+
+(defn project--parse-tarball-dep (name entry)
+  (let (url (vector-ref entry 2)
+        opts (project--vec-drop entry 3)
+        sha (plist-get opts :sha256))
+    (when (not (string? url))
+      (error "project: :tarball dependency " name " URL must be a string, got " url))
+    ;; A tarball has no commit to trust, so a :sha256 is MANDATORY — it's the only
+    ;; thing pinning the fetched bytes to reviewed content (ADR-037 supply-chain).
+    (when (not (string? sha))
+      (error "project: :tarball dependency " name
+        " needs a :sha256 \"<hex>\" (the archive's SHA-256 — the only integrity pin)"))
+    (project--reject-reserved-opts name opts)
+    {:name name :kind :tarball :url url :sha256 sha}))
+
 ;; Normalise one `[name kind spec & opts]` entry into a dep map.
 (defn project-parse-dep (entry)
   (when (not (vector? entry))
@@ -148,7 +170,10 @@ the `nest new` scaffolder."
     (cond
       (= kind :git) (project--parse-git-dep name entry)
       (= kind :path) (project--parse-path-dep name entry)
-      else (error "project: dependency " name " must be :git or :path, got " kind))))
+      (= kind :tarball) (project--parse-tarball-dep name entry)
+      (= kind :version) (project--parse-registry-dep name entry)
+      else (error "project: dependency " name
+             " must be :git, :path, :tarball, or :version, got " kind))))
 
 ;; Parse the manifest's :dependencies value into a list of normalised dep maps.
 ;; Omitted/nil => empty list.
@@ -167,7 +192,7 @@ the `nest new` scaffolder."
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:source-paths` `:test-paths` `:main` and `:dependencies`. Arguments are literal data — write dep names and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:main` and `:dependencies`. Arguments are literal data — write dep names and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'project-apply …)`) so α qualifies `project-apply`
   ;; to `project/project-apply` at this macro's definition (ADR-065 §7).
   `(project-apply (quote ~opts)))
@@ -175,6 +200,10 @@ the `nest new` scaffolder."
 (defn project-apply (opts)
   (def *project-name* (plist-get opts :name))
   (def *project-version* (plist-get opts :version))
+  ;; Package-registry metadata (ADR-147): human summary + the git URL this package
+  ;; is published from. Optional in general; `nest publish` requires both.
+  (def *project-description* (plist-get opts :description))
+  (def *project-repository* (plist-get opts :repository))
   (let (src (plist-get opts :source-paths)
         tst (plist-get opts :test-paths)
         m (plist-get opts :main))
@@ -1281,9 +1310,15 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (def *config-git-init* false)
 ; nest new: run `git init` in the new project?
 
+;; The default package-registry index — a git repo of package metadata (ADR-147).
+;; `nest search`/`publish` and `:version` deps read it; override via `:registry` in
+;; the user config, or pass an explicit index to the registry functions (tests do).
+(def *config-registry* "https://github.com/broodlang/registry")
+
 (defn config (& opts)
-  "Set user-level tooling preferences — the form the user config file (`~/.config/brood/config.blsp`) contains. Recognized keys: `:git-init` (whether `nest new` runs `git init`). Sets only the keys given; returns nil."
+  "Set user-level tooling preferences — the form the user config file (`~/.config/brood/config.blsp`) contains. Recognized keys: `:git-init` (whether `nest new` runs `git init`) and `:registry` (the package-registry index git URL). Sets only the keys given; returns nil."
   (let (gi (plist-get opts :git-init)) (unless (nil? gi) (def *config-git-init* gi)))
+  (let (rg (plist-get opts :registry)) (unless (nil? rg) (def *config-registry* rg)))
   nil)
 
 (defn config--base-dir ()

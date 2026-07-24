@@ -6355,3 +6355,34 @@ on a two-bucket fold), and node liveness — the peer-set diff (via `(:use-inter
 telemetry)`, the ADR-146 @testable seam), the up/down emit seam, and `watch-nodes`
 lifecycle with no spurious events on a single node. A live two-node cluster rides the
 dist suite. `nest check` zero warnings.
+
+## 2026-07-24 — Package manager v2: tarball deps + a git-backed registry (ADR-147)
+
+Finished the two ADR-037-deferred package-manager pieces (the concrete pull: a request
+to complete both). One new Rust primitive; everything else Brood policy.
+
+**`:tarball` deps** (`[name :tarball URL :sha256 HEX]`). Download via `std/net`'s
+byte-faithful `http-get` (no new Rust HTTP client — `std/net` post-dates ADR-037's
+planned `%http-get`), or read a `file://` path directly (offline artifacts + the
+offline test path); http(s) follows bounded redirects. `:sha256` is **mandatory** and
+verified before extraction (ADR-037's supply-chain property kept) — a mismatch is a
+loud error. The one new primitive is **`%untar-gz`** (`crates/lisp/src/builtins/io.rs`),
+a thin shell to `tar` like `%git-clone` shells `git`, on the ADR-144 offload allow-list,
+stripping the single wrapper dir. Wired through resolve/lock/conflict/tree/CST/`add`.
+
+**Git-backed registry.** The index is just a git repo of `packages/<name>.blsp`
+metadata — no hosted server (ADR-037's "no central infrastructure" kept). `nest publish`
+appends the project's `{:version :git :ref :description}` entry to a local index
+checkout and stops (no auto-commit — the user owns the index repo: review, commit,
+push). `nest search` greps it. A `[name :version "X.Y.Z"]` dep resolves the **exact**
+version to its git source and pins it, reusing the whole `:git` cache/lock path. Two
+new optional manifest fields feed publish: `:description`, `:repository`. A `:registry`
+config key (default `github.com/broodlang/registry`) sets the index. No semver solver
+(ADR-037 invariant). New `nest publish`/`nest search` subcommands (`crates/nest/src/main.rs`).
+
+`tests/package_test.blsp` +9 (4 tarball: strip-extract, sha-mismatch guard, cache hit,
+parse; 5 registry: append/duplicate, required fields, search/find, `:version` resolve +
+lock-vec shape, parse) — all offline via `file://` + local git repos; 39/39 green. The
+cwd-driven verbs (`publish`/`search`) are hand-verified via the binary (per the repo
+convention that cwd verbs aren't Rust-E2E'd; their arg-driven cores ARE unit-tested).
+`nest check` zero warnings.

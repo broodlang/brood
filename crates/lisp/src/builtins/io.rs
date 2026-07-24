@@ -1573,6 +1573,49 @@ pub(super) fn git_clone(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     Ok(crate::core::value::kw("ok"))
 }
 
+/// `(%untar-gz archive dest strip)` — extract a gzip'd tar archive `archive` into
+/// directory `dest`, stripping `strip` leading path components (the package-manager
+/// convention is `strip = 1`, dropping the tarball's single wrapper directory so the
+/// package root lands directly in `dest`). Shells out to the system `tar` (the same
+/// dependency tradeoff as `%git-clone`'s `git`); on the offload allow-list so a large
+/// extract runs on the dirty-native pool. Returns `:ok`. The tarball source-delivery
+/// mechanism (ADR-037 tarball deps); policy — download, sha256-verify, `_deps/`
+/// bounding — lives in `std/tool/package.blsp`.
+pub(super) fn untar_gz(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let archive = expect_string(heap, "%untar-gz", arg(args, 0))?;
+    let dest = expect_string(heap, "%untar-gz", arg(args, 1))?;
+    let strip = expect_int(heap, "%untar-gz", arg(args, 2))?;
+    if strip < 0 {
+        return Err(
+            LispError::runtime("%untar-gz: strip-components must be >= 0".to_string())
+                .with_code(crate::error::error_codes::FILE_IO),
+        );
+    }
+    std::fs::create_dir_all(&dest).map_err(|e| {
+        LispError::runtime(format!("%untar-gz: cannot create {}: {}", dest, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    let strip_arg = format!("--strip-components={}", strip);
+    let out = std::process::Command::new("tar")
+        .args(["-xzf", &archive, "-C", &dest, &strip_arg])
+        .output()
+        .map_err(|e| {
+            LispError::runtime(format!("%untar-gz: tar: {}", e))
+                .with_code(crate::error::error_codes::SUBPROCESS_FAILED)
+                .with_hint("is `tar` installed and on PATH?")
+        })?;
+    if out.status.success() {
+        Ok(crate::core::value::kw("ok"))
+    } else {
+        Err(LispError::runtime(format!(
+            "%untar-gz: extracting {} failed: {}",
+            archive,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .with_code(crate::error::error_codes::SUBPROCESS_FAILED))
+    }
+}
+
 /// `(%rm-rf path)` — recursively delete `path`. **Bounded to `_deps/`**: refuses
 /// any path without a `_deps` component, so a mis-computed cache path can't delete
 /// something outside the package cache. Idempotent (`:ok` if already absent). The

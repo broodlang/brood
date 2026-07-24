@@ -24,10 +24,19 @@
 >   `tree` subcommands, `add`/`remove` editing the manifest over the
 >   comment-preserving CST, and auto-fetch via `ensure-deps` on every
 >   project-aware subcommand.
+> - **v2 — done (2026-07-24, ADR-147):** **`:tarball` deps** — a `.tar.gz`
+>   artifact + a **mandatory `:sha256`**, downloaded (via `std/net`'s byte-faithful
+>   `http-get`, or read from a `file://` path), verified, and strip-extracted into
+>   `_deps/` by the new `%untar-gz` primitive; and a **git-backed registry** — the
+>   index is just a git repo of `packages/<name>.blsp` metadata (no hosted server,
+>   keeping ADR-037's "no central infrastructure"). `nest publish` appends the
+>   project's version entry; `nest search` greps the index; a `[name :version "x"]`
+>   dep resolves the named version (EXACT match, no semver solver) to its git source
+>   and pins it. See *The registry (v2)* below.
 >
-> Deferred to v2 by design (ADR-011): a registry, semver + a constraint solver,
-> tarball/HTTP source kinds (`%http-get` not yet added — it lands with the first
-> `:tarball` dep), and signed packages. See *Future work* below.
+> Still deferred by design (ADR-011): semver + a constraint solver, tarball sources
+> *in* registry entries (registry entries point to git today), and signed packages.
+> See *Future work* below.
 >
 > Four decisions refined the original sketch when implementation began — they
 > are folded into the relevant sections below and summarised in ADR-037's
@@ -102,12 +111,14 @@ The `(project …)` form (`std/tool/project.blsp`) gains an optional
 `:dependencies` slot. The value is a vector of **dep entries**. Each entry
 is a vector: `[name source-kind source-spec & opts]`.
 
-Two source kinds at v1:
+Four source kinds:
 
-| Kind     | Shape                                              | Notes |
-|----------|----------------------------------------------------|---|
-| `:git`   | `[name :git URL :ref REF]`                         | `REF` is a tag or commit. Branches are accepted but advisory — `:ref "main"` re-resolves on every `nest update`. |
-| `:path`  | `[name :path PATH]`                                | Filesystem path, relative to the manifest. Local dev/mirror; SHA-256'd at fetch time. |
+| Kind       | Shape                                    | Notes |
+|------------|------------------------------------------|---|
+| `:git`     | `[name :git URL :ref REF]`               | `REF` is a tag or commit. Branches are accepted but advisory — `:ref "main"` re-resolves on every `nest update`. |
+| `:path`    | `[name :path PATH]`                      | Filesystem path, relative to the manifest. Local dev/mirror; SHA-256'd at fetch time. |
+| `:tarball` | `[name :tarball URL :sha256 HEX]`        | A `.tar.gz` artifact (http/https, or `file://` for a local/offline one). `:sha256` is **mandatory** — the integrity pin standing in for git's commit; a mismatch is a loud error. Extracted into `_deps/<name>/`, stripping the single wrapper directory. (v2, ADR-147.) |
+| `:version` | `[name :version "X.Y.Z"]`                | A **registry** dep: `name` is looked up in the configured index and its **exact** version resolved to the underlying git source + pinned. No semver ranges. (v2, ADR-147.) |
 
 `name` is the **local symbol** the dep will be available as inside
 `(require …)`. It need not match the package's own `:name` — the manifest
@@ -336,11 +347,47 @@ Each is a one-liner from the Rust shell into Brood policy:
 | `nest update <name>`                     | Same, but only for one dep. |
 | `nest add <name> :git URL :ref REF`      | Append to `:dependencies` (preserving the manifest's formatting via the existing `parse-source` / formatter), then `fetch`. |
 | `nest add <name> :path PATH`             | Path-dep variant of `add`. |
+| `nest add <name> :tarball URL :sha256 HEX` | Tarball-dep variant of `add` (v2). |
 | `nest remove <name>`                     | Strip from `:dependencies`, drop `_deps/<name>/`, re-resolve the lock. |
 | `nest tree`                              | Print the resolved dep tree (root → direct → transitive). |
+| `nest publish [<index>]`                 | Append this project's version entry to the registry index (v2, ADR-147). |
+| `nest search <term> [<index>]`           | Search the registry index by name/description (v2, ADR-147). |
 | `nest test` / `run` / `check` / `format` / `mcp` | Auto-fetch missing deps on first run (a no-op on the second). |
 
 `nest fetch` is idempotent and side-effect-free when the cache is current.
+
+## The registry (v2, ADR-147)
+
+The registry is deliberately **not** a hosted service — it is **a git repository of
+metadata**, keeping ADR-037's "no central infrastructure to host or pay for" while
+adding discovery and named/versioned resolution (the crates.io-index / Go-proxy
+model). Layout: one file per package, `packages/<name>.blsp`, holding a vector of
+published version entries (newest last):
+
+```lisp
+[{:version "1.0.0" :git "https://github.com/you/foo" :ref "v1.0.0" :description "…"}
+ {:version "1.1.0" :git "https://github.com/you/foo" :ref "v1.1.0" :description "…"}]
+```
+
+The index location is the user config's `:registry`
+(`~/.config/brood/config.blsp`), default `https://github.com/broodlang/registry`,
+overridable per command by passing an index path/URL. A **URL** index is cloned into
+`_deps/.registry-<hash>/`; a **local path** index is read (and, for `publish`,
+written) in place — the dev / self-hosted / offline path.
+
+- **`nest publish`** reads `:name`/`:version`/`:description`/`:repository` from
+  `project.blsp`, appends the entry to `packages/<name>.blsp` in a **local** index
+  checkout, and stops there — it does **not** auto-commit (you own the index repo:
+  review, commit, `git push`). A version already published is refused; publishing to
+  a URL is refused (clone it first).
+- **`nest search <term>`** greps every package's name and latest description.
+- **A `[name :version "X.Y.Z"]` dep** looks the exact version up in the index,
+  resolves it to the entry's git source, and pins the commit — reusing the entire
+  `:git` cache/lock machinery. **No semver ranges** (ADR-037's direct-refs-only
+  invariant); a missing version is a loud error pointing at `nest search`.
+
+To publish, a package sets two manifest fields: `:repository` (its git URL) and
+`:description`. The published `:ref` is `v<version>` by convention.
 
 ## Cache layout & gitignore
 

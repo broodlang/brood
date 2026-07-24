@@ -813,11 +813,19 @@ Runtime housekeeping (both items landed):
 
 ### Packaging & ecosystem
 
-- ✅ **Package manager** (ADR-037, [`docs/packages.md`](docs/packages.md)) — `:path`
-  deps end-to-end, **`:git` deps** (slice 2), and **the verbs + auto-fetch**
+- ✅ **Package manager** (ADR-037/147, [`docs/packages.md`](docs/packages.md)) —
+  `:path` deps end-to-end, **`:git` deps** (slice 2), and **the verbs + auto-fetch**
   (slice 3: `nest fetch`/`update`/`tree`/`add`/`remove`) all shipped 2026-05-30
   (`%git-clone`/`%git-resolve-ref` in `builtins/io.rs`, policy in
-  `std/tool/package.blsp`). ⬜ Remaining: `:tarball` deps + `%http-get` (deferred).
+  `std/tool/package.blsp`). ✅ **v2 shipped 2026-07-24 (ADR-147):** **`:tarball`
+  deps** (`[name :tarball URL :sha256 HEX]` — download via `std/net` `http-get` or
+  `file://`, mandatory sha256 verify, strip-extract via the new `%untar-gz` shell to
+  `tar` on the offload pool) and a **git-backed registry** — the index is just a git
+  repo of `packages/<name>.blsp` metadata (no hosted server), with `nest publish`
+  (append the project's entry, no auto-commit), `nest search`, and `[name :version
+  "X"]` deps resolving an exact version to its git source. ⬜ Remaining (ADR-011):
+  semver ranges, tarball sources *inside* registry entries, signed packages, cloned-
+  index auto-refresh.
 - ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of
   project + `_deps/` to a pre-built `brood`; deferred until the editor needs end-user
   distribution.

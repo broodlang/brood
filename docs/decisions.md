@@ -9063,3 +9063,58 @@ format's `format-cst-root`), and eleven test files declare
 
 **Supersedes** the "privacy is soft" clause of ADR-019/065 and the
 "link-checked `--private`" hatch-findings item (this is the stronger form).
+
+## ADR-147 — Package manager v2: tarball deps + a git-backed registry
+
+**Status:** accepted / implemented (2026-07-24). Extends ADR-037. Design in
+[`packages.md`](packages.md) (*The registry (v2)* + the manifest/subcommand tables);
+tests in `tests/package_test.blsp` (tarball + registry blocks).
+
+**Context.** ADR-037 shipped a git-/path-deps package manager and *deferred* three
+things to v2 "until a concrete pain shows up" (ADR-011): tarball/HTTP source kinds, a
+registry, and discovery. The concrete pull arrived (a request to finish both). Two
+things also changed since ADR-037: a byte-faithful in-tree HTTP client now exists
+(`std/net`, ADR-141/143) — so the planned Rust `%http-get` is unnecessary — and
+first-class bytes + `%digest` make download+verify trivial.
+
+**Decision.** Add two source kinds and a registry, reusing the existing machinery and
+keeping every ADR-037 invariant.
+
+- **`:tarball` deps** — `[name :tarball URL :sha256 HEX]`. Downloaded via `std/net`'s
+  `http-get` (dogfooding the language over a new Rust HTTP client), or read from a
+  `file://` path (offline/local artifacts + the offline test path); http(s) follows a
+  bounded number of redirects (release assets 302 to a CDN). The **`:sha256` is
+  mandatory** — the integrity pin standing in for git's reviewed commit; the bytes
+  are verified before extraction, and a mismatch is a loud error. This preserves
+  ADR-037's "no unverified code" property (the npm supply-chain surface stays closed).
+  Extraction is the **one new Rust primitive, `%untar-gz`** — a thin shell to system
+  `tar` (the same dependency tradeoff as `%git-clone`'s `git`), on the ADR-144 offload
+  allow-list, stripping the single wrapper directory so the package root lands in
+  `_deps/<name>/`. Everything else (cache stamp, lock, load-path, conflict) is the
+  git path, generalized.
+
+- **A git-backed registry** — the index is **just a git repo** of metadata
+  (`packages/<name>.blsp` = a vector of `{:version :git :ref :description}` entries),
+  **not a hosted service**. This is the crux: it keeps ADR-037's decisive property —
+  *no central infrastructure to host or pay for* — while adding discovery and named
+  resolution (the crates.io-index / Go-proxy model). A URL index is cloned into
+  `_deps/.registry-<hash>/`; a local-path index is used in place. `nest publish`
+  appends the project's entry (from `:name`/`:version`/`:description`/`:repository`)
+  to a **local** index checkout and **does not auto-commit** — the user owns the index
+  repo (its commit policy, signing, review): we write, they `git push`. `nest search`
+  greps it. A **`[name :version "X.Y.Z"]`** dep resolves the **exact** version to its
+  git source and pins it, reusing the `:git` clone/cache/lock path.
+
+- **Invariants kept from ADR-037.** No semver / constraint solver — registry deps are
+  *exact* version pins, and two versions of one name is still a loud conflict. No
+  install scripts — a tarball/registry package is the same pure Brood source a git dep
+  is; nothing runs at fetch beyond `require`'s normal top-level evaluation. Two new
+  optional manifest fields, `:description` and `:repository`, feed `publish`.
+
+**Why.** The registry-shape choice ADR-037 called "baked in once and hard to walk
+back" is answered without reversing it: a git-backed index *is* decentralized. The
+one new Rust primitive (`%untar-gz`) is mechanism the language genuinely can't
+bootstrap (a gzip+tar decoder); download, verify, index format, resolution, publish,
+and search are all Brood policy (ADR-006). Deferred still (ADR-011): semver ranges,
+tarball sources inside registry entries (entries point to git today), signed
+packages, and auto-refresh/TTL for the cloned index.

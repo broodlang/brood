@@ -36,6 +36,15 @@
   (str "file://" dir))
 (defn pkg-git-tag (dir tag) (run-process "git" (list "-C" dir "tag" tag)))
 
+;; Build a .tar.gz of fixture dir `<parent>/<wrapper>` (so the archive has the
+;; single `<wrapper>/` prefix the resolver strips). Returns [file-url sha256] — a
+;; file:// URL keeps :tarball resolution offline, like pkg-git-init's for :git.
+(require 'hash)
+(defn pkg-tar-init (parent wrapper)
+  (let (archive (path-join parent (str wrapper ".tar.gz")))
+    (run-process "tar" (list "-czf" archive "-C" parent wrapper))
+    (list (str "file://" archive) (hash/sha256-bytes (slurp-bytes archive)))))
+
 (defn pkg-write-project (root nm src-module body deps-line)
   (make-dir (path-join root "src"))
   (spit (path-join root "project.blsp")
@@ -218,6 +227,139 @@
                                     nil)
                                   (catch e e))
                 "conflicting dependency")))))))
+
+;; --- :tarball deps (ADR-037 v2) ---------------------------------------------
+;; A .tar.gz artifact + mandatory :sha256, extracted (wrapper stripped) into
+;; _deps/. Exercised offline via a file:// URL to a locally-built archive.
+(describe "package: resolving :tarball deps"
+  (test "a :tarball dep downloads, sha-verifies, and strip-extracts into _deps/"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (ts  (pkg-tar-init parent "greeter")
+            url (first ts)
+            sha (second ts))
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (entries (resolve-deps app-dir
+                        (list {:name 'greeter :kind :tarball :url url :sha256 sha})
+                        nil))
+          (assert= (count entries) 1)
+          (let (e (first entries)
+                target (path-join (path-join app-dir "_deps") "greeter"))
+            (assert= (get e :kind) :tarball)
+            (assert= (get e :url) url)
+            (assert= (get e :sha256) sha)
+            (is (dir? target))
+            ;; strip-components=1 dropped the wrapper: the manifest is at the dep root
+            (is (file-exists? (path-join target "project.blsp")))
+            (is (file-exists? (path-join target "src/greeter.blsp")))
+            (is (file-exists? (path-join target ".brood-pkg.blsp"))))))))
+  (test "a wrong :sha256 errors loudly (the integrity pin)"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (ts (pkg-tar-init parent "greeter") url (first ts))
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (is (string-contains?
+              (try (resolve-deps app-dir
+                     (list {:name 'greeter :kind :tarball :url url :sha256 "deadbeef"})
+                     nil)
+                (catch e (error-message e)))
+              "sha256 mismatch")))))
+  (test "a second resolve is a cache hit (locked sha), no re-extract"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (ts (pkg-tar-init parent "greeter") url (first ts) sha (second ts))
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (dep (list {:name 'greeter :kind :tarball :url url :sha256 sha})
+              e1  (first (resolve-deps app-dir dep nil)))
+          (write-lockfile app-dir (list e1))
+          (let (e2 (first (resolve-deps app-dir dep (read-lockfile app-dir))))
+            (assert= (get e2 :kind) :tarball)
+            (assert= (get e2 :sha256) sha))))))
+  (test ":tarball deps parse; a missing :sha256 is rejected"
+    (assert= (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz" :sha256 "abc"]])
+      (list {:name 'foo :kind :tarball :url "https://x/foo.tar.gz" :sha256 "abc"}))
+    (is (string-contains?
+          (try (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
+            (catch e (error-message e)))
+          "sha256"))))
+
+;; --- the registry: publish / search / :version deps (ADR-147) ---------------
+;; A git-backed metadata index. The publish/resolve helpers are arg-driven (no
+;; project-global mutation), so these run concurrently with the rest of the suite.
+(describe "package: the registry index"
+  (test "append-entry writes a version entry; a duplicate version is refused"
+    (let (index (path-join (pkg-fixture-root) "index"))
+      (make-dir index)
+      (package/registry--append-entry index "greeter" "0.1.0" "friendly greetings" "https://x/greeter")
+      (is (file-exists? (path-join index "packages/greeter.blsp")))
+      (let (vs (package/registry--versions index 'greeter))
+        (assert= (count vs) 1)
+        (assert= (get (first vs) :version) "0.1.0")
+        (assert= (get (first vs) :git) "https://x/greeter")
+        (assert= (get (first vs) :ref) "v0.1.0"))
+      ;; a second version appends; the same version again is refused
+      (package/registry--append-entry index "greeter" "0.2.0" "friendly greetings" "https://x/greeter")
+      (assert= (count (package/registry--versions index 'greeter)) 2)
+      (is (string-contains?
+            (try (package/registry--append-entry index "greeter" "0.2.0" "d" "https://x/greeter")
+              (catch e (error-message e)))
+            "already published"))))
+  (test "publish requires :repository and :description"
+    (let (index (path-join (pkg-fixture-root) "index"))
+      (make-dir index)
+      (is (string-contains?
+            (try (package/registry--append-entry index "x" "1.0.0" "desc" nil) (catch e (error-message e)))
+            ":repository"))
+      (is (string-contains?
+            (try (package/registry--append-entry index "x" "1.0.0" nil "https://x") (catch e (error-message e)))
+            ":description"))))
+  (test "search matches on name and description; find-version is exact"
+    (let (index (path-join (pkg-fixture-root) "index"))
+      (make-dir index)
+      (package/registry--append-entry index "greeter" "0.1.0" "friendly greetings" "https://x/greeter")
+      (assert= (package/registry--list-packages index) (list 'greeter))
+      (is (package/registry--matches? index 'greeter "greet"))       ; by name
+      (is (package/registry--matches? index 'greeter "friendly"))    ; by description
+      (refute (package/registry--matches? index 'greeter "zzz"))
+      (assert= (get (package/registry--find-version index 'greeter "0.1.0") :version) "0.1.0")
+      (is (nil? (package/registry--find-version index 'greeter "9.9.9")))))
+  (test "a :version dep resolves the named version to its git source and pins it"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          index (path-join parent "index")
+          app-dir (path-join parent "app"))
+      (make-dir index)
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (url (pkg-git-init dep-dir))
+        (pkg-git-tag dep-dir "v1.0.0")
+        (package/registry--append-entry index "greeter" "1.0.0" "greetings" url)
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (dep {:name 'greeter :kind :registry :version "1.0.0"}
+              e (package/package--resolve-registry app-dir dep nil index))
+          (assert= (get e :kind) :registry)
+          (assert= (get e :version) "1.0.0")
+          (assert= (get e :url) url)
+          (is (string? (get e :commit)))
+          (is (dir? (path-join (path-join app-dir "_deps") "greeter")))
+          ;; the lock row carries :registry + the version + the resolved git pin
+          (let (row (package/package--entry->lock-vec e))
+            (assert= (vector-ref row 1) :registry)
+            (assert= (vector-ref row 2) "1.0.0"))
+          ;; an unknown version errors, pointing at `nest search`
+          (is (string-contains?
+                (try (package/package--resolve-registry app-dir
+                       {:name 'greeter :kind :registry :version "9.9.9"} nil index)
+                  (catch er (error-message er)))
+                "no registry entry"))))))
+  (test ":version deps parse into a registry dep map"
+    (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
+      (list {:name 'foo :kind :registry :version "1.2.0"}))))
 
 ;; Namespace-collision detection (ADR-070). We test the cwd-free helpers
 ;; (`package--provided-modules` / `package--check-namespace-collisions`) directly,

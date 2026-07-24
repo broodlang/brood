@@ -2674,6 +2674,7 @@ pub(super) fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
 const OFFLOAD_ALLOWED: &[&str] = &[
     "%git-clone",
     "%git-resolve-ref",
+    "%untar-gz",
     "%pbkdf2-sha256-bytes",
     "%digest",
     "%hmac",

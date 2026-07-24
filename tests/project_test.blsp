@@ -65,7 +65,7 @@
           "must be a symbol")))
   (test "an unknown source kind is rejected"
     (is (string-contains? (try (project/project-parse-dep '[parser :svn "../p"]) (catch e e))
-          "must be :git or :path")))
+          "must be :git, :path, :tarball, or :version")))
   (test "a :git dep without a :ref is rejected"
     (is (string-contains? (try
                             (project/project-parse-dep '[parser :git "https://x.git"])
