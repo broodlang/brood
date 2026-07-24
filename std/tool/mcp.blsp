@@ -358,7 +358,7 @@ complementing the point-in-time `processes`/`node` snapshots."
     (if opt (system-monitor (self) opt) (system-monitor (self)))
     (sleep ms)
     (system-monitor nil)                          ; disarm before draining
-    (let (events (mcp--collect-runtime '()))
+    (let (events (into [] (mcp--collect-runtime '())))   ; [] (not nil) when empty
       {:events events :count (count events) :ms ms})))
 
 (defn mcp-callers-tool (args)

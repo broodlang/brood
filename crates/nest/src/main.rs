@@ -420,7 +420,7 @@ fn cmd_test(interp: &mut Interp, files: &[String]) {
     // Single-file path: mirror brood --test, but pre-load project image when
     // we're inside a project so cross-module names resolve.
     let bootstrap = if in_project() {
-        "(require 'project) (project/load-config) (let (root (project/project--find-root (cwd))) \
+        "(require 'project) (project/load-config) (let (root (project/project-find-root (cwd))) \
             (when root (project/project-setup root) (project/project-load-sources root))) \
             (require 'test)"
     } else {
@@ -672,7 +672,7 @@ fn cmd_run(
         format!("(require 'project) (project/load-config) {}", main_override)
     } else if in_project() {
         "(require 'project) (project/load-config) \
-         (let (root (project/project--find-root (cwd))) \
+         (let (root (project/project-find-root (cwd))) \
            (when root (project/project-setup root))) "
             .to_string()
     } else {
@@ -811,7 +811,7 @@ fn cmd_repl(interp: &mut Interp) {
         run(
             interp,
             "(require 'project) (project/load-config) \
-             (let (root (project/project--find-root (cwd))) \
+             (let (root (project/project-find-root (cwd))) \
                (when root (project/project-setup root) (project/project-load-sources root)))",
         );
         eprintln!("nest repl — project sources loaded; Ctrl-D to exit");
@@ -841,7 +841,7 @@ fn cmd_mcp(interp: &mut Interp) {
     let bootstrap = r#"
         (require 'project)
         (project/load-config)
-        (let (root (project/project--find-root (cwd)))
+        (let (root (project/project-find-root (cwd)))
           (when (nil? root)
             (error "nest mcp: not in a Brood project (no project.blsp found from " (cwd) ")"))
           (project/setup-tooling-image root))
@@ -944,7 +944,7 @@ fn cmd_release(
     //    reported + exit by `run_for_value`.
     let collected = run_for_value(
         interp,
-        "(require 'project) (let (root (project/project--find-root (cwd))) \
+        "(require 'project) (let (root (project/project-find-root (cwd))) \
          (project/bundle-collect root))",
     );
     let items = match interp.heap.seq_items(collected) {
