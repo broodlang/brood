@@ -33,10 +33,19 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
 
 **Tier 1 — maintainability hazards (real payoff):**
 
-1. ⬜ **Split `eval/compile/jit_lower.rs::jit_lower_arm_inner`** — one ~3,900-line
-   function (file is 5,431); individual match arms ~300 lines. The extracted
-   `jit_lower_i64_arm` is the model — pull `Call`/`Prim`/`SelfCall` families into
-   their own `fn`s, possibly `jit_lower/{prepass,call,prim,control}.rs`.
+1. 🟡 **Split `eval/compile/jit_lower.rs` (5437 → 4576)** — partial, done
+   2026-07-24. Extracted the self-contained **unboxed i64/f64 scalar worker**
+   (`Scalar`/`I64Ctx`, the `i64_*`/`lower_i64_*` family, and `jit_lower_i64_arm`,
+   ~860 lines) — a cluster used only by the `jit_lower_arm` dispatcher, never by
+   `jit_lower_arm_inner` — into `eval/compile/jit_lower/i64.rs`, re-exported so the
+   tiering glue's `jit_lower::…` paths are unchanged. Behaviour-identical (a
+   relocation of independent fns). ⬜ The **`jit_lower_arm_inner` decomposition**
+   (the ~2,185-line function → `Call`/`Prim`/`SelfCall`/control helpers threading
+   the Cranelift lowering state) is the high-risk core and stays open — it needs a
+   dedicated pass with JIT-differential + `BROOD_JIT_DUMP_IR` + benchmark
+   verification, not a mechanical extraction. Verified: differential 2/2, jit
+   34/34, compaction 3/3 (all under `JIT_VERIFY`); suite 3057/3057; both feature
+   configs compile.
 2. 🟡 **Split `process/scheduler.rs` (2080 → 1824)** — partial, done 2026-07-24.
    Investigation found the roadmap's clean preempt/pool/lifecycle carve isn't
    achievable cheaply: the **reduction budget** (`REDUCTIONS`/`reduction_budget`)

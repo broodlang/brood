@@ -6744,3 +6744,26 @@ gate failure) in this repo, which declares no `:source-paths`.
 
 Line coverage stays deferred with its shape settled — see ADR-148 and
 `docs/coverage.md`.
+
+## 2026-07-24 — Structural cleanup Tier 1 item 1 (partial): extract jit_lower/i64.rs
+
+The roadmap's target is decomposing `jit_lower_arm_inner` (a ~2,185-line Cranelift
+lowering function) — the high-risk core, where a subtle miscompile passes tests
+but is wrong on an edge case. Deferred that; took the clean, low-risk win instead.
+
+Extracted the **unboxed i64/f64 scalar worker** — `Scalar`/`impl Scalar`,
+`arm_scalar_kind`, the `i64_*` eligibility/op helpers, `I64Ctx`, `i64_guard_overflow`,
+`lower_i64_arith`/`lower_i64_value`/`lower_i64_cond`, and `jit_lower_i64_arm`
+(~860 lines) — into `eval/compile/jit_lower/i64.rs`. Verified the cluster is used
+only by the `jit_lower_arm` dispatcher and the tiering glue (`jit_runtime`), never
+by `jit_lower_arm_inner`, so it's a self-contained relocation. `jit_lower.rs`
+5437 → 4576; i64.rs 869. `jit_lower_i64_arm` bumped to `pub(super)` (dispatcher
+calls it); `arm_i64_eligible`/`arm_i64_too_deep`/`i64_mark_too_deep` re-exported
+`pub(crate)` so `jit_lower::…` paths in `jit_runtime` are unchanged. The module +
+re-exports are `#[cfg(feature = "jit")]` (the whole cluster is jit-only).
+
+The `jit_lower_arm_inner` decomposition stays open for a dedicated session.
+
+Verified: compiles default + no-default-features; differential 2/2 (JIT≡VM
+bit-identical), jit 34/34, jit_runtime_compaction 3/3 — all with BROOD_JIT_VERIFY=1;
+full suite 3057/3057.
