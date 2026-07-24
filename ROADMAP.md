@@ -53,14 +53,22 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    loop, so a full carve needs accessor-fn refactors through the KI-1 concurrency
    code. Took the low-risk win instead: extracted the self-contained execution
    guards — GC-block/macro-block depth + RAII guards and the stack-overflow byte
-   guard — into `process/scheduler/guards.rs` (their thread-locals are touched only
-   by their own accessors; `install_ctx` resets via those), re-exported so
-   `scheduler::…`/`process::…` paths are unchanged. ⬜ The reduction/worker/lifecycle
-   engine stays one unit in the root; a further pool/lifecycle carve would need the
-   accessor layer and is deferred (not worth the concurrency risk yet).
-3. ⬜ **Split `core/heap/gc.rs` (4518)** — extract the RUNTIME shared-region
-   compaction + node-liveness drain (~1300 lines, ADR-091) to `heap/gc_runtime.rs`;
-   independent of per-process nursery GC, roughly halves the file.
+   guard — into `process/scheduler/guards.rs`, re-exported so `scheduler::…`/
+   `process::…` paths are unchanged. Then (2026-07-24) extended it: the shared
+   scheduling state (run queue, worker pool, pid/parent tables, counters) stays in
+   the root, but the **process lifecycle** — `spawn`/`spawn_linked`/`spawn_impl`/
+   `spawn_root_program`, `exit`/`exit_propagate`/`exit_with`, `deregister`,
+   `proc_descr` — moved to `process/scheduler/lifecycle.rs` (statics-in-root, so a
+   pure relocation reached via `use super::*`; public surface re-exported). Root
+   2080 → ~1400. ⬜ The remaining **worker-pool** machinery (queue/stealing/worker
+   loop) stays in the root; carving it would need the accessor layer for the shared
+   reduction budget and is deferred (not worth the concurrency risk yet).
+3. ✅ **Split `core/heap/gc.rs` (4520 → 2689)** — done 2026-07-24. Extracted the
+   RUNTIME shared-region collector (ADR-091 — two-generation aging, single-process
+   compaction, node-liveness drain, live-globals migration + the `RuntimeForward`/
+   `flush_rt_*` helpers, ~1830 lines) to `heap/gc_runtime.rs`. The two regions were
+   self-contained (no cross-calls into the LOCAL collector), so behaviour-identical.
+   Verified: 21 heap tests under `GC_STRESS`+`GC_VERIFY`; suite green.
 4. ✅ **`register()`/`PRIMITIVE_DOCS` drift guard** (`builtins/mod.rs`) — done
    2026-07-24. Added a unit test that registers every primitive into a fresh env,
    enumerates the natives, and asserts every **user-facing** (non-`%`) primitive

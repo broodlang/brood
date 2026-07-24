@@ -6823,3 +6823,26 @@ runtime-wide registry, so dropping the handle doesn't free it, and a long-lived
 negative CLI values (already clean), `--include` without `--exclude` (a documented
 no-op, not worth a warning), and the per-file `:lines` warning storm (still
 unreachable from the CLI).
+
+## 2026-07-24 — Tier 1 item 2 continued: extract scheduler/lifecycle.rs
+
+Extended the scheduler split (after guards.rs) with the low-risk statics-in-root
+approach: the shared scheduling state stays in the root, and only the **process
+lifecycle** functions move — `spawn`/`spawn_linked`/`spawn_impl`/
+`spawn_root_program`, `exit`/`exit_propagate`/`exit_with`, `deregister`,
+`proc_descr` — into `process/scheduler/lifecycle.rs`, reaching the root's statics
+and pool fns via `use super::*`. A pure relocation (statics don't move → behaviour
+identical). Root 1835 → 1545; lifecycle.rs 299.
+
+Two adjustments the move forced: `proc_descr`/`deregister` bumped to `pub(super)`
+(the root worker loop calls them); `exit_propagate` to `pub(crate)` (it was
+`pub(super)` = pub-in-`process`, which the re-export from the deeper module needed
+widened for `process::links`); and `super::sysmon::…` paths rewritten to
+`crate::process::sysmon::…` (in the child, `super` is now `scheduler`, not
+`process`). Public surface (`spawn`/`exit`/…) re-exported from `scheduler.rs` so
+every `crate::process::…` call site is unchanged.
+
+The worker-pool machinery (queue/stealing/worker loop) stays in the root — carving
+it needs the accessor layer for the shared reduction budget, deferred.
+
+Verified: compiles default + no-default-features; full suite 3071/3071.
