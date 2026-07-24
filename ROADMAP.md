@@ -713,7 +713,7 @@ Runtime housekeeping (both items landed):
   Brood-idiomatic fix, not just the message; `find-pattern` keyword-searches a
   curated intent→idiom cookbook ("loop / mutate / build a string / spawn /
   parse binary …"). Both are pure Brood data + wrappers, wired as `nest mcp`
-  tools (now 21). `tests/explain_test.blsp` + `mcp_test`. ✅ **cookbook expanded
+  tools (now 20 in a project context). `tests/explain_test.blsp` + `mcp_test`. ✅ **cookbook expanded
   2026-07-24** — five confirmed Clojure/Scheme reflexes folded in: keyword-as-fn
   `(:k m)` → `(get m :k)`, char literal `\c` → 1-char string / `int->char`,
   discard `#_` → `;`, regex `#"…"` → `(require 'regex)` + `regex/match?`, and the

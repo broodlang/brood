@@ -474,7 +474,8 @@ its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
 
-Twenty-one tools work today: the eight v0 tools, `callers` (cross-file
+Twenty tools work today (in a project context — `write`/`edit` need a root): the
+eight v0 tools, `callers` (cross-file
 find-references), the three discovery tools `apropos` / `all-globals` /
 `doc-search` (search the flat namespace by name or docstring rather than
 looking up a name you already know), `bench` (time an expression in the
