@@ -6312,3 +6312,46 @@ hints for the three that still silently mis-parse (`#_`, `#"…"`, `\char`) are 
 `read_hash` change, deferred.
 
 explain 9/9, mcp 13/13, `nest check` zero warnings.
+
+## 2026-07-24 — Finish-the-partials: reader hints (`#_`/`#"…"`/`\c`) + telemetry histogram + node-liveness stream
+
+Closing the completable polish on three 🟡 threads (the deferred sub-items behind
+each — mailbox bounds, the WASM `:native` pkg slice, dist `terminate`/FQDN/Windows —
+stay ADR-011 consumer-gated, not built).
+
+**Reader hints — the last three silently-mis-parsed Clojure/Scheme forms** (closes the
+LLM-native reader-hints thread; the cookbook already named these idioms 2026-07-24).
+`read_hash` (`crates/lisp/src/syntax/reader.rs`) gains `#_` → hint the `;` comment
+idiom (no form-level discard) and `#"…"` → hint `(require 'regex)` + `regex/match?`
+(the `#b"…"` bytes literal is matched *before* the dispatch, so a `#"` is unambiguously
+the regex form). And a new `'\\'` arm in `read_form` catches a leading `\c`/`\newline`
+character literal — which previously read as a stray symbol `\c` → "unbound symbol: \c"
+— with a hint naming the 1-char string / `int->char` idiom (Brood has no char type; a
+leading backslash is never a valid form start, and a repo-wide grep confirmed no
+existing source relies on one). `tests/reader_hints_test.blsp` +3 (14 total, all green),
+`docs/language.md` "Coming from Clojure" table +3 rows.
+
+**Telemetry distribution/histogram aggregator** (the one named follow-up over `summary`;
+`std/telemetry.blsp`, zero new kernel surface). `distribution` buckets a measurement
+into explicit ascending upper bounds (Prometheus / Elixir-`Telemetry.Metrics`-
+`distribution` shape) — per-bucket counts + count/sum/min/max, **bounded** (no samples
+retained), matching `summary`'s running-aggregate philosophy. `(metric id)` presents
+`:buckets [{:le b :count c}… {:le :inf :count c}]` + `:mean`; `metric-percentile` estimates
+a quantile by linear interpolation within the containing bucket (`histogram_quantile` —
+bounded memory for approximate quantiles). Unsorted bounds are normalized ascending.
+
+**Node up/down through the telemetry stream** (`watch-nodes`, `std/telemetry.blsp`).
+The kernel has no `[:nodeup]` event — `monitor-node` fires only `[:nodedown]` — so a
+general watcher can't be purely event-driven; `watch-nodes` polls `(nodes)` and diffs
+consecutive peer sets, re-emitting each change through the SAME `[:runtime kind]` seam
+as `watch-runtime`: `[:runtime :nodeup]`/`[:runtime :nodedown]` with `{:node name}`.
+Polling (second-scale, `:interval-ms`) suits node liveness — rare operational events —
+and catches BOTH inbound peers and outbound `connect`s, which a per-spec `monitor-node`
+alone would miss.
+
+`tests/telemetry_metrics_test.blsp` +2 describes (15 tests, 6 `:isolated`, all green):
+distribution bucketing/overflow/normalization + percentile interpolation (p50→10, p90→18
+on a two-bucket fold), and node liveness — the peer-set diff (via `(:use-internals
+telemetry)`, the ADR-146 @testable seam), the up/down emit seam, and `watch-nodes`
+lifecycle with no spurious events on a single node. A live two-node cluster rides the
+dist suite. `nest check` zero warnings.

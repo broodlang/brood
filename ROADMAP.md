@@ -80,8 +80,8 @@ offload pool all landed the same day.
 **Tier 2 — real gaps, each gated on a first consumer (ADR-011):** the cluster
 **registry** (`Registry`/via-tuples, `:global`, `pg` — "OTP deferred" below);
 **mailbox bounds / backpressure** (survey item below); the **observability
-remainder** (`defevent` schemas, aggregators, node up/down, the remote tier,
-`nest observe`/`nest mcp` consuming the stream — "Telemetry" below);
+remainder** (aggregators + node up/down done 2026-07-24; still `defevent` schemas,
+the remote tier, `nest observe`/`nest mcp` consuming the stream — "Telemetry" below);
 **`gen_statem`** and an **`Application` behaviour**.
 
 **Tier 3 — cheap ergonomic parity:** a **grapheme-correct string API**
@@ -178,10 +178,13 @@ mechanism/policy split: kernel primitive, Brood policy.
   `[:system kind subject-pid detail]` messages (BEAM `system_monitor` shape,
   `:gc-min-pause-us` = `long_gc`); `telemetry/watch-runtime` re-emits them as
   `[:runtime kind]` telemetry events, so runtime + app events share the
-  ADR-106 attach seam. `tests/sysmon_test.blsp`. ⬜ Remaining: node up/down
-  events (today via `monitor-node`), `defevent` schemas, aggregators, the
-  `nest observe`/`nest mcp` consumers, and the remote tier — see "Telemetry"
-  under M3 below. **[kernel sources, Brood aggregation]**
+  ADR-106 attach seam. `tests/sysmon_test.blsp`. Slice 3 (2026-07-24): the
+  **aggregators** landed — counter/sum/gauge/summary/`sample-every`, then the
+  **distribution/histogram** aggregator + `metric-percentile`, and **node up/down**
+  folded into the `[:runtime kind]` stream via `watch-nodes` (poll-and-diff `(nodes)`;
+  see "Telemetry" under M3). ⬜ Remaining: `defevent` schemas, the
+  `nest observe`/`nest mcp` consumers (unify the snapshot builtins behind the stream),
+  and the remote tier. **[kernel sources, Brood aggregation]**
 - ✅ **Distribution self-healing: auto-reconnect + backoff.** Shipped
   2026-07-18. Brood policy: **`std/net/reconnect`** — a named, idempotent
   watcher process per node spec that connects, arms `monitor-node`, and on
@@ -717,10 +720,13 @@ Runtime housekeeping (both items landed):
   2026-07-24** — five confirmed Clojure/Scheme reflexes folded in: keyword-as-fn
   `(:k m)` → `(get m :k)`, char literal `\c` → 1-char string / `int->char`,
   discard `#_` → `;`, regex `#"…"` → `(require 'regex)` + `regex/match?`, and the
-  `#{…}` set entry updated to the now-first-class kernel literal. ⬜ Still to do:
-  reader hints for the remaining Clojure/Scheme *reader* forms (`#_`, `#"…"`,
-  `\char` currently silently mis-parse — a Rust `read_hash`/atom change), and
-  folding each new repeat mistake into the rule-of-three.
+  `#{…}` set entry updated to the now-first-class kernel literal. ✅ **reader hints
+  for the last three silently-mis-parsed forms shipped 2026-07-24**: `#_` (discard →
+  `;` comment), `#"…"` (regex literal → `(require 'regex)` + `regex/match?`), and `\c`
+  (character literal → 1-char string / `int->char`), each a clean parse error with a
+  `:hint` naming the Brood idiom (`read_hash` + a new `'\\'` arm in `read_form`;
+  `tests/reader_hints_test.blsp`, language.md table). ⬜ Still: folding each new repeat
+  mistake into the rule-of-three (ongoing curation, no named gap).
 - 🟡 **MCP tooling** — ✅ the write sandbox is **symlink-escape-proof** (shipped
   2026-07-23): a new `canonicalize` primitive (real-path resolution — symlinks
   + `.`/`..`, works for not-yet-existing targets) backs a second sandbox gate
@@ -757,13 +763,19 @@ Runtime housekeeping (both items landed):
   new kernel surface. State is a shared `table` (ADR-107); folds run serially in the
   one listener so a read-modify-write is race-free and stays bounded (no sample
   retention). `metric`/`metrics-snapshot` readers poll it atomically.
-  `tests/telemetry_metrics_test.blsp` (9, incl. concurrent-emitter fan-in +
-  sampling). Still to fold in: node up/down through the same stream (today
-  `monitor-node`); unifying `gc-stats`/`vm-stats`/`process-info` snapshots behind it
-  so `nest observe` + `nest mcp` consume the stream; a **distribution/histogram**
-  aggregator (percentiles — needs bucketing or sample retention, deferred over the
-  bounded summary); `defevent` + checker-validated event schemas; and the
-  location-transparent remote tier over the dist link.
+  `tests/telemetry_metrics_test.blsp`. ✅ **Distribution/histogram aggregator +
+  node up/down shipped 2026-07-24** (both pure Brood, zero new kernel surface):
+  `distribution` buckets a measurement into explicit ascending upper bounds
+  (Prometheus / Elixir-`distribution` shape) with bounded per-bucket counts (no
+  samples retained, like `summary`), and `metric-percentile` estimates a quantile by
+  in-bucket linear interpolation (`histogram_quantile` — bounded memory for approximate
+  percentiles); `watch-nodes` polls `(nodes)`, diffs the peer set, and re-emits
+  `[:runtime :nodeup]`/`[:runtime :nodedown]` through the same `[:runtime kind]` seam as
+  `watch-runtime` (polling because the kernel has no `[:nodeup]` event — it catches both
+  inbound peers and outbound `connect`s). `tests/telemetry_metrics_test.blsp` now 15.
+  ⬜ Still to fold in: unifying `gc-stats`/`vm-stats`/`process-info` snapshots behind the
+  stream so `nest observe` + `nest mcp` consume it; `defevent` + checker-validated event
+  schemas; and the location-transparent remote tier over the dist link.
 
 ### Server / daemon (M4)
 

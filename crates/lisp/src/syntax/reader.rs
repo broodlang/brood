@@ -207,6 +207,16 @@ impl<'a> Parser<'a> {
             // number/keyword/`nil`). A bare `:` before `|` is the keyword marker.
             '|' => self.read_bar_symbol(false),
             ':' if self.s.peek_after() == Some('|') => self.read_bar_symbol(true),
+            // `\c` / `\newline` — Clojure/Scheme character literal. Brood has no
+            // char type (a `\` at form start otherwise reads as a stray symbol like
+            // `\c`), so catch it with a teaching hint (LLM-native errors,
+            // `docs/llm-native.md`) instead of a confusing "unbound symbol: \c".
+            '\\' => Err(self
+                .err("`\\c` is a Clojure/Scheme character literal, which Brood does not have")
+                .with_hint(
+                    "Brood has no character type — a character is just a 1-char string. \
+                 Write `\"c\"` (or `(int->char 99)` from a codepoint).",
+                )),
             _ => self.read_atom(),
         }
     }
@@ -238,10 +248,11 @@ impl<'a> Parser<'a> {
 
     /// Dispatch a leading `#`. Only `#b"…"` is special (a bytes literal); `#` is
     /// otherwise an ordinary atom character, so anything else (`#q`, `#foo`) reads
-    /// as a symbol. Three common Clojure/Scheme `#`-reader-macros are caught with a
-    /// teaching hint (LLM-native errors, `docs/llm-native.md`) rather than
+    /// as a symbol. Five common Clojure/Scheme/EDN `#`-reader-macros are caught with
+    /// a teaching hint (LLM-native errors, `docs/llm-native.md`) rather than
     /// mis-parsed into a confusing downstream error (`#{…}` → "odd map", `#(…)` →
-    /// "unbound #").
+    /// "unbound #", `#_` / `#"…"` → a stray symbol): `#{` reads as a set, and
+    /// `#(` / `#'` / `#_` / `#"` each raise a hint naming the Brood idiom.
     fn read_hash(&mut self) -> Result<Value, LispError> {
         if self.s.starts_with("#b\"") {
             self.s.bump(); // '#'
@@ -271,6 +282,25 @@ impl<'a> Parser<'a> {
             )
             .with_pos(pos)
             .with_hint("Brood symbols are ordinary values — use a plain quote: `'foo`.")),
+            // `#_` — Clojure/EDN discard reader macro (skip the next form).
+            Some('_') => Err(LispError::parse(
+                "`#_` is Clojure/EDN's discard reader macro, which Brood does not have",
+            )
+            .with_pos(pos)
+            .with_hint(
+                "Brood has no form-level discard — comment the form out with `;` \
+                 (a line comment runs to end of line).",
+            )),
+            // `#"…"` — Clojure regex literal. (`#b"…"` was handled above, so a `#"`
+            // here is unambiguously the regex form.)
+            Some('"') => Err(LispError::parse(
+                "`#\"…\"` is Clojure's regex literal, which Brood does not have",
+            )
+            .with_pos(pos)
+            .with_hint(
+                "Brood regexes are library values: `(require 'regex)`, then \
+                 `(regex/match? \"pat\" s)` (or `regex/find`, `regex/replace`).",
+            )),
             _ => self.read_atom(),
         }
     }

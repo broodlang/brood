@@ -192,6 +192,55 @@ stream. One system monitor exists at a time — a second call replaces the first
   (send watcher :stop)
   nil)
 
+;; ---- distribution liveness (node up/down) → the telemetry stream ------------
+;; The kernel has no `[:nodeup]` event — `monitor-node` fires only `[:nodedown]`,
+;; and reconnect synthesizes `[:nodeup]` per spec — so a general watcher can't be
+;; purely event-driven. `watch-nodes` polls `(nodes)` and diffs consecutive peer
+;; sets, re-emitting each change through the SAME `[:runtime kind]` seam as
+;; `watch-runtime`: `[:runtime :nodeup]` / `[:runtime :nodedown]` with `{:node name}`
+;; metadata. Polling (coarse, second-scale) suits node liveness — rare operational
+;; events — and catches BOTH inbound peers and outbound `connect`s, which a
+;; per-spec `monitor-node` alone would miss.
+
+(defn telemetry--member? (ys x)
+  "Whether list `ys` contains `x` (by `=`)."
+  (cond
+    (empty? ys)      false
+    (= (first ys) x) true
+    :else            (telemetry--member? (rest ys) x)))
+
+(defn telemetry--absent (xs ys)
+  "The elements of list `xs` not present in list `ys`."
+  (filter (fn (x) (not (telemetry--member? ys x))) xs))
+
+(defn telemetry--nodes-loop (known interval)
+  "Poll `(nodes)` every `interval` ms, emit a `[:runtime :nodeup]`/`[:runtime
+:nodedown]` telemetry event per added/removed peer, and recur; stop on `:stop`."
+  (receive
+    (:stop nil)
+    (after interval
+      (let (current (or (nodes) (list)))
+        (dolist (n (telemetry--absent current known))
+          (emit [:runtime :nodeup] {} {:node n}))
+        (dolist (n (telemetry--absent known current))
+          (emit [:runtime :nodedown] {} {:node n}))
+        (telemetry--nodes-loop current interval)))))
+
+(defn watch-nodes (&optional interval-ms)
+  "Watch cluster membership and re-emit changes as telemetry: a peer appearing in
+`(nodes)` emits `[:runtime :nodeup]` `{:node name}`, one disappearing emits
+`[:runtime :nodedown]` — folding distribution liveness into the same attach stream
+as `watch-runtime`. `interval-ms` is the poll period (default 1000). Returns the
+watcher pid; `stop-watch-nodes` (or killing it) ends it. The peers already connected
+at start are the baseline (no spurious `:nodeup` for them)."
+  (let (interval (or interval-ms 1000))
+    (spawn (telemetry--nodes-loop (or (nodes) (list)) interval))))
+
+(defn stop-watch-nodes (watcher)
+  "Stop a `watch-nodes` watcher. Returns nil."
+  (send watcher :stop)
+  nil)
+
 ;; ---- span -------------------------------------------------------------------
 
 (defn telemetry--sub (event seg)
@@ -293,17 +342,77 @@ read). Returns `id`."
               :min   (min (get cur :min) v)
               :max   (max (get cur :max) v)))))))))
 
+;; ---- distribution / histogram (bucketed, bounded) ---------------------------
+;; The percentile-capable aggregator ADR-106 anticipated. Like `summary` it keeps
+;; only running aggregates — here per-bucket counts against explicit upper bounds
+;; (Prometheus / Elixir-`Telemetry.Metrics`-`distribution` shape) — so state stays
+;; bounded no matter how many events fire (no samples retained). Percentiles are
+;; ESTIMATED from the buckets by linear interpolation (`metric-percentile`), the
+;; standard `histogram_quantile` trade: bounded memory for approximate quantiles.
+;; Assumes non-negative measurements (durations, sizes) — the histogram domain.
+
+(defn telemetry--bucket-index (bounds v i)
+  "Index of the first bound ≥ `v` (scanning from `i`), or `(count bounds)` — the
+overflow bucket — when `v` exceeds every bound. `bounds` is ascending."
+  (if (>= i (count bounds))
+    i
+    (if (<= v (nth bounds i)) i (telemetry--bucket-index bounds v (+ i 1)))))
+
+(defn distribution (id event key buckets)
+  "Bucket measurement `key` of `event` into a histogram under metric `id`. `buckets`
+is a vector of ascending upper bounds (e.g. `[10 50 100 500]`); a value goes into the
+first bound ≥ it, or an overflow bucket above the last. Bounded (per-bucket counts,
+no samples). `(metric id)` → `{:kind :distribution :count :sum :min :max :mean
+:buckets [{:le b :count c}… {:le :inf :count c}]}`; estimate quantiles with
+`metric-percentile`. Returns `id`."
+  (let (t      (telemetry--metrics)
+        bounds (into [] (sort buckets)))
+    (attach id event
+      (fn (e m md)
+        (let (v      (get m key)
+              cur    (table-get t id nil)
+              cur    (if (nil? cur)
+                       {:kind :distribution :bounds bounds :counts {}
+                        :count 0 :sum 0 :min v :max v}
+                       cur)
+              counts (get cur :counts)
+              idx    (telemetry--bucket-index (get cur :bounds) v 0))
+          (table-put t id (assoc cur
+            :counts (assoc counts idx (+ (get counts idx 0) 1))
+            :count  (+ (get cur :count) 1)
+            :sum    (+ (get cur :sum) v)
+            :min    (min (get cur :min) v)
+            :max    (max (get cur :max) v))))))))
+
+(defn telemetry--dist-buckets (bounds counts i acc)
+  "Build the presented `:buckets` vector: one `{:le bound :count n}` per bound, then
+a final `{:le :inf :count n}` for the overflow bucket."
+  (if (>= i (count bounds))
+    (into [] (reverse (cons {:le :inf :count (get counts i 0)} acc)))
+    (telemetry--dist-buckets bounds counts (+ i 1)
+      (cons {:le (nth bounds i) :count (get counts i 0)} acc))))
+
 (defn telemetry--present (state)
   "Turn a raw metric accumulator into its reader shape: a `:summary` gets `:mean`
-and `:stddev` derived and its internal `:sumsq` dropped; others pass through."
-  (if (= (get state :kind) :summary)
-    (let (n    (get state :count)
-          s    (get state :sum)
-          mean (/ s n)
-          var  (- (/ (get state :sumsq) n) (* mean mean)))
-      {:kind :summary :count n :sum s :min (get state :min) :max (get state :max)
-       :mean mean :stddev (sqrt (if (< var 0) 0 var))})
-    state))
+and `:stddev` derived and its internal `:sumsq` dropped; a `:distribution` gets its
+per-bucket `:buckets` and `:mean` presented (internal `:bounds`/`:counts` dropped);
+others pass through."
+  (let (kind (get state :kind))
+    (cond
+      (= kind :summary)
+        (let (n    (get state :count)
+              s    (get state :sum)
+              mean (/ s n)
+              var  (- (/ (get state :sumsq) n) (* mean mean)))
+          {:kind :summary :count n :sum s :min (get state :min) :max (get state :max)
+           :mean mean :stddev (sqrt (if (< var 0) 0 var))})
+      (= kind :distribution)
+        (let (n (get state :count))
+          {:kind :distribution :count n :sum (get state :sum)
+           :min (get state :min) :max (get state :max)
+           :mean (if (> n 0) (/ (get state :sum) n) 0)
+           :buckets (telemetry--dist-buckets (get state :bounds) (get state :counts) 0 nil)})
+      :else state)))
 
 (defn metric (id)
   "The current value of metric `id` as a map (with `:summary`'s `:mean`/`:stddev`
@@ -317,6 +426,35 @@ Atomic; safe to poll from any process (this is the stream-folded replacement for
 scraping N snapshot builtins). Empty map if no metrics recorded."
   (let (snap (table-snapshot (telemetry--metrics)))
     (reduce-kv (fn (acc id state) (assoc acc id (telemetry--present state))) {} snap)))
+
+(defn telemetry--quantile (bounds counts nb rank i prev-cum prev-bound maxv)
+  "Walk the cumulative bucket counts for the bucket the `rank`-th observation falls
+in, then linearly interpolate within `[prev-bound, upper]`. The overflow bucket
+(`i = nb`) can't interpolate above its (unbounded) top, so it reports `maxv`."
+  (let (c   (get counts i 0)
+        cum (+ prev-cum c))
+    (if (or (>= cum rank) (>= i nb))
+      (if (>= i nb)
+        maxv
+        (let (up (nth bounds i))
+          (if (<= c 0)
+            up
+            (+ prev-bound (* (- up prev-bound) (/ (- rank prev-cum) c))))))
+      (telemetry--quantile bounds counts nb rank (+ i 1) cum (nth bounds i) maxv))))
+
+(defn metric-percentile (id p)
+  "Estimate the `p`-th percentile (`p` in 0..1) of `distribution` metric `id` from its
+bucketed counts — linear interpolation within the containing bucket, the standard
+`histogram_quantile` estimate (approximate; precision is the bucket granularity).
+Returns nil unless `id` is a `distribution` with at least one observation."
+  (let (state (table-get (telemetry--metrics) id nil))
+    (when (and state
+               (= (get state :kind) :distribution)
+               (> (get state :count) 0))
+      (let (bounds (get state :bounds)
+            counts (get state :counts))
+        (telemetry--quantile bounds counts (count bounds)
+                             (* p (get state :count)) 0 0 0 (get state :max))))))
 
 (defn sample-every (id n handler)
   "Wrap `handler` so it runs on every `n`th matching event (1-in-`n` sampling) —

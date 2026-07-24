@@ -7,7 +7,9 @@
 ;; and detach-all's, so the shared handler + metrics globals don't race. Bodies stay
 ;; tail-recursive (small green-process stack). Register-only — `nest test` finds it.
 
-(defmodule telemetry-metrics-test (:use test) (:use telemetry))
+;; `:use-internals telemetry` grants the node-liveness tests access to the private
+;; diff helpers (`telemetry--absent`) — the ADR-146 @testable seam.
+(defmodule telemetry-metrics-test (:use test) (:use telemetry) (:use-internals telemetry))
 
 (defn tmm-emit-n (event m n)
   "Emit `event` with measurements `m`, `n` times (tail-recursive)."
@@ -77,6 +79,57 @@
       (assert= (get got :mean) 42)
       (assert= (get got :stddev) 0.0))))
 
+(describe "telemetry metrics: distribution (bucketed histogram)"
+  :isolated
+  (test "buckets by upper bound, with an overflow bucket"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (distribution :d [:http :req] :duration [10 50 100])
+    ;; 5→≤10, 10→≤10, 30→≤50, 75→≤100, 200→overflow
+    (emit [:http :req] {:duration 5})
+    (emit [:http :req] {:duration 10})
+    (emit [:http :req] {:duration 30})
+    (emit [:http :req] {:duration 75})
+    (emit [:http :req] {:duration 200})
+    (telemetry-sync)
+    (let (got (metric :d)) (stop-telemetry)
+      (assert= (get got :kind) :distribution)
+      (assert= (get got :count) 5)
+      (assert= (get got :sum) 320)
+      (assert= (get got :min) 5)
+      (assert= (get got :max) 200)
+      (assert= (get got :mean) 64)
+      (let (bs (get got :buckets))
+        (assert= (count bs) 4)
+        (assert= (get (nth bs 0) :le) 10)  (assert= (get (nth bs 0) :count) 2)
+        (assert= (get (nth bs 1) :le) 50)  (assert= (get (nth bs 1) :count) 1)
+        (assert= (get (nth bs 2) :le) 100) (assert= (get (nth bs 2) :count) 1)
+        (assert= (get (nth bs 3) :le) :inf) (assert= (get (nth bs 3) :count) 1))))
+
+  (test "unsorted buckets are normalized to ascending"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (distribution :d [:e] :v [100 10 50])
+    (emit [:e] {:v 5})
+    (telemetry-sync)
+    (let (bs (get (metric :d) :buckets)) (stop-telemetry)
+      (assert= (get (nth bs 0) :le) 10)
+      (assert= (get (nth bs 0) :count) 1)))
+
+  (test "metric-percentile estimates a quantile by bucket interpolation"
+    (start-telemetry) (detach-all) (reset-metrics)
+    (distribution :d [:e] :v [10 20 30])
+    ;; 5× at 5 (→≤10 bucket), 5× at 15 (→≤20 bucket): b0=5, b1=5
+    (tmm-emit-n [:e] {:v 5} 5)
+    (tmm-emit-n [:e] {:v 15} 5)
+    (telemetry-sync)
+    (let (p50 (metric-percentile :d 0.5)
+          p90 (metric-percentile :d 0.9)
+          none (metric-percentile :nope 0.5))
+      (stop-telemetry)
+      ;; rank 5 lands at b0's top edge → 10; rank 9 is 4/5 into b1 [10,20] → 18
+      (is (< (abs (- p50 10)) 0.0001))
+      (is (< (abs (- p90 18)) 0.0001))
+      (is (nil? none)))))          ; nil for an unknown / non-distribution metric
+
 (describe "telemetry metrics: snapshot & sampling"
   :isolated
   (test "metrics-snapshot returns every metric's reader value"
@@ -122,3 +175,45 @@
     (tmm-spawn-emitters parent (- workers 1) per)))
 (defn tmm-await (n)
   (if (= n 0) :ok (receive (:done (tmm-await (- n 1))) (after 5000 :timeout))))
+
+;; Node up/down through the telemetry stream (`watch-nodes`). A live two-node
+;; cluster is exercised by the dist suite; here we test the deterministic core —
+;; the peer-set diff and the `[:runtime :nodeup]`/`[:runtime :nodedown]` emit seam
+;; `watch-nodes` polls into — plus the watcher lifecycle on a single node.
+
+(defn tnode-drain (acc) (receive (m (tnode-drain (cons m acc))) (after 150 (reverse acc))))
+
+(describe "telemetry: node liveness (watch-nodes)"
+  :isolated
+  (test "absent computes the added / removed peers of two peer sets"
+    (assert= (into [] (telemetry/telemetry--absent '(:a :b :c) '(:a))) [:b :c])   ; added
+    (assert= (empty? (telemetry/telemetry--absent '(:a) '(:a :b))) true)           ; none removed
+    (assert= (into [] (telemetry/telemetry--absent '(:a :b) '(:a :c))) [:b]))      ; :b gone
+
+  (test "a membership change re-emits [:runtime :nodeup]/[:runtime :nodedown]"
+    (let (me (self))
+      (start-telemetry) (detach-all)
+      (attach :up   [:runtime :nodeup]   (fn (e m md) (send me [:up (get md :node)])))
+      (attach :down [:runtime :nodedown] (fn (e m md) (send me [:down (get md :node)])))
+      ;; poll 1 — known {:a}, current {:a :b}: :b appears (up = current∖known)
+      (dolist (n (telemetry/telemetry--absent '(:a :b) '(:a))) (emit [:runtime :nodeup] {} {:node n}))
+      (dolist (n (telemetry/telemetry--absent '(:a) '(:a :b))) (emit [:runtime :nodedown] {} {:node n}))
+      ;; poll 2 — known {:a :b}, current {:a}: :b vanishes (down = known∖current)
+      (dolist (n (telemetry/telemetry--absent '(:a) '(:a :b))) (emit [:runtime :nodeup] {} {:node n}))
+      (dolist (n (telemetry/telemetry--absent '(:a :b) '(:a))) (emit [:runtime :nodedown] {} {:node n}))
+      (telemetry-sync)
+      (let (got (into [] (tnode-drain '()))) (stop-telemetry)
+        (assert= got [[:up :b] [:down :b]]))))
+
+  (test "watch-nodes starts and stops cleanly with no spurious events (single node)"
+    (let (me (self))
+      (start-telemetry) (detach-all)
+      (attach :any [:runtime :nodeup] (fn (e m md) (send me :spurious)))
+      (let (w (watch-nodes 20))
+        (is (not (nil? w)))
+        (sleep 80)                 ; several poll cycles, no peers → no emits
+        (stop-watch-nodes w))
+      (telemetry-sync)
+      (let (spurious (receive (:spurious true) (after 100 false)))
+        (stop-telemetry)
+        (is (not spurious))))))

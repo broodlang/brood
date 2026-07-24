@@ -6684,8 +6684,12 @@ LSP-on-data concern.
 **Status:** accepted (2026-06-14). Implemented: `std/telemetry.blsp`
 (`require 'telemetry`), registered in `crates/lisp/src/builtins.rs`, tested by
 `tests/telemetry_test.blsp` (19 cases incl. the crash-isolation guarantee + a
-concurrent block). The kernel-event sources, metric aggregators, `defevent` schemas,
-and the remote tier are deferred follow-ons (ADR-011) — see the roadmap entry.
+concurrent block). The kernel-event sources (ADR-137), the metric aggregators
+(counter/sum/gauge/summary/`sample-every` + the bucketed `distribution`/histogram with
+`metric-percentile`, `tests/telemetry_metrics_test.blsp`), and node up/down through the
+`[:runtime kind]` stream (`watch-nodes`) all shipped 2026-07-24 — all pure Brood over
+this seam. `defevent` schemas and the remote tier remain deferred follow-ons (ADR-011)
+— see the roadmap entry.
 
 This decision **superseded two earlier cuts** in the same session (greenfield, ADR-000
 spirit): first an async single-registry process; then, after asking "why is Erlang

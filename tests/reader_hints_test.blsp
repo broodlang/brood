@@ -1,8 +1,9 @@
 ;; Teaching hints for Clojure/Scheme syntax Brood does not have (LLM-native
-;; errors, docs/llm-native.md): a mis-typed `#{…}` / `#(…)` / `#'` reader
-;; macro, or Scheme/Clojure's nested `let` bindings, should produce a clear
-;; error WITH a `:hint` pointing at the Brood idiom — not a confusing
-;; downstream "odd map" / "unbound #" surprise.
+;; errors, docs/llm-native.md): a mis-typed `#(…)` / `#'` / `#_` / `#"…"`
+;; reader macro, a `\c` character literal, or Scheme/Clojure's nested `let`
+;; bindings, should produce a clear error WITH a `:hint` pointing at the Brood
+;; idiom — not a confusing downstream "odd map" / "unbound #" / stray-symbol
+;; surprise. (`#{…}` is now a first-class set literal, not an error.)
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
@@ -25,6 +26,22 @@
     (let (e (try (read-string "#'foo") (catch e e)))
       (assert= (get e :kind) :parse)
       (is (string-contains? (get e :hint) "'foo"))))
+  (test "#_ discard reader macro → parse error naming the ; comment idiom"
+    (let (e (try (read-string "#_(skip me)") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (string-contains? (get e :hint) ";"))))
+  (test "#\"…\" regex literal → parse error naming (require 'regex)"
+    (let (e (try (read-string "#\"[0-9]+\"") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (string-contains? (get e :hint) "regex"))))
+  (test "\\c character literal → parse error naming the 1-char string idiom"
+    (let (e (try (read-string "\\c") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (string-contains? (get e :hint) "1-char string")))
+    ;; a named char (\newline) hints the same way
+    (let (e (try (read-string "\\newline") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (string-contains? (get e :hint) "int->char"))))
   (test "the legitimate # forms still read (no false positive)"
     (is (bytes? (read-string "#b\"hi\"")))       ; bytes literal
     (is (= (read-string "#foo") '#foo))))         ; a bare #-atom is a symbol
