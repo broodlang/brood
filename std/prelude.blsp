@@ -2854,6 +2854,11 @@ leaves `s` unchanged."
   (let (sl (string-length s) ql (string-length suffix))
     (and (>= sl ql) (= (substring s (- sl ql) sl) suffix))))
 
+;; The bootstrap `path-*` subset (path-join/path-basename/path-absolute/parent-dir):
+;; the minimal path ops tooling needs *before* any module can be required. The full
+;; path library is `std/path.blsp` (`path/dirname`/`normalize`/`relative-to`/…) — a
+;; deliberate layer on top, with its own (slightly different) contracts. Not a dup.
+;;
 ;; Index of the last `/` in `s`, scanning down from `i`, or -1 if none. (Brood has
 ;; no char accessor yet; paths are short, so a substring scan is fine.)
 (defn path--last-slash (s i)

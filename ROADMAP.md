@@ -49,9 +49,9 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    **no test asserting agreement** (verified). Add a coverage test; better,
    co-locate each doc with its `def`. **[kernel]**
 
-**Tier 2 — real duplication to dedupe: 5/6/9 + the parse-url half of 7 done
-2026-07-24 (suite 2985/2985, `nest check` zero-warning, 238 type-lattice Rust
-tests green). 8 and the path half of 7 deferred with rationale (below).**
+**Tier 2 — real duplication to dedupe: 5/6/7/9 done 2026-07-24 (suite 2985/2985,
+`nest check` zero-warning, 238 type-lattice Rust tests green). 8 deferred with
+rationale (below).**
 
 5. ✅ **`types/mod.rs` 4-way literal-refinement copy-paste** — the per-kind blocks
    in `union`/`intersect`/`is_subtype`/`is_disjoint`/`negate` now go through four
@@ -62,13 +62,14 @@ tests green). 8 and the path half of 7 deferred with rationale (below).**
    `eval_forms(Vec<(Value, Option<Pos>)>)` core carrying the load-bearing
    GC-rooting/namespace/reset logic once; the two public fns are now 3-line
    adapters. The restore now runs exactly once on every path (was mirrored).
-7. 🟡 **`std/` path + url duplication** **[Brood]** — ✅ **url:** `net/http`'s
+7. ✅ **`std/` path + url duplication** **[Brood]** — **url:** `net/http`'s
    `parse-url` now wraps `url/parse-url` (the one RFC-3986 parser) + HTTP defaults,
-   instead of a lossy reimpl. ⬜ **path deferred:** `path.blsp` and the prelude
-   `path-*` subset look like dups but have *different contracts* (`path/basename`
-   strips a trailing slash, `path-basename` doesn't; `path/join` is variadic with
-   absolute-reset, `path-join` is 2-arg) — merging them would change tested
-   behaviour, so it needs a deliberate API decision, not a mechanical dedupe.
+   instead of a lossy reimpl. **path:** resolved as *not* true duplication — a
+   deliberate keep-both. `path.blsp` is the full public path API; the prelude
+   `path-*` subset is the necessary bootstrap layer (modules aren't loadable at
+   boot, and the two have different contracts — `path/basename` strips a trailing
+   slash, `path-basename` doesn't; `path/join` is variadic with absolute-reset,
+   `path-join` is 2-arg). Documented as such in both files.
 8. ⬜ **`gui.rs` ↔ `gui_gpu.rs`** — **deferred:** `gui_gpu.rs` is a declared
    *prototype* (solid quads; "Cursor / zones: not drawn in the GPU prototype"), so
    the missing `Cursor`/`ScrollRegion`/underline are *unimplemented GPU features*,

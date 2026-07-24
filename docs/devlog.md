@@ -6533,10 +6533,16 @@ applying HTTP defaults (scheme http, port 80/443, path "/") and prepending
 authority. `:use url` would clash on the `parse-url` name, so it's a qualified
 call.
 
+**Item 7 (path) — resolved as keep-both.** `path.blsp` (the full path API) and the
+prelude `path-*` bootstrap subset aren't true duplication: the subset must exist
+before any module loads, and the two carry different contracts (`path/basename`
+strips a trailing slash, `path-basename` doesn't; `path/join` is variadic +
+absolute-reset, `path-join` is 2-arg). Documented the layering in both files so it
+isn't re-flagged; no code churn.
+
 **Deferred:** item 8 (`gui_gpu.rs` is a prototype — the missing ops are
 unimplemented GPU features, not diverged geometry; needs a live display to
-verify) and the path half of item 7 (`path.blsp` vs the prelude `path-*` subset
-have different contracts — a deliberate API call, not a mechanical dedupe).
+verify).
 
 En route: fixed the `heap::stall_guard` re-export I added on 2026-07-24 — the
 *function* is used by the GC (always compiled), only the `heap::` re-export is
