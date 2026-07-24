@@ -6,7 +6,10 @@
 ;; preserves comments, preserves blank-line intent between top-level forms,
 ;; collapses short forms onto a single line, and breaks long ones over multiple.
 
-(defmodule format-test (:use test) (:use format))
+(defmodule format-test (:use-internals format) (:use test) (:use format))
+
+;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
+(purge-stale-temp "brood-fmt-safe-")
 
 (describe "format: trivial inputs"
   (test "empty input yields empty output" (assert= (format-source "") ""))
@@ -302,3 +305,47 @@
           (assert= (starts-with? plain "(zzz-clause \"event\"\n") true)
           ;; rule = 2 → event name + (params model) ride the head line
           (assert= (starts-with? ruled "(zzz-clause \"event\" (params model)\n") true))))))
+
+;; DATA SAFETY. The CST the formatter walks is lossless and error-TOLERANT, so it
+;; happily represents an unclosed list — and its recovery used to RESTRUCTURE the
+;; source. Given a `(defn f …` whose paren was never closed followed by a
+;; top-level `(defn g …)`, `nest format` moved `g` *inside* `f` and appended the
+;; missing paren at the end. Being mid-edit with an unclosed paren is routine (and
+;; format-on-save makes it automatic), so that silently turned a half-typed file
+;; into different code. A formatter's contract is "same program, different
+;; layout" — with no parseable program there is nothing safe to do, so the file is
+;; left untouched.
+(describe "format: refuses to rewrite a file that does not parse"
+  (test "well-formed source parses"
+    (is (format/format--parses? "(defn f (x) x)\n")))
+  (test "several top-level forms parse"
+    (is (format/format--parses? "(def a 1)\n(def b 2)\n")))
+  (test "an empty file parses" (is (format/format--parses? "")))
+  (test "a comment-only file parses" (is (format/format--parses? ";; nothing\n")))
+  (test "an unclosed list does not parse" (refute (format/format--parses? "(defn f (x)\n")))
+  (test "an unterminated string does not parse"
+    (refute (format/format--parses? "(def a \"oops)\n")))
+  (test "a stray close paren does not parse" (refute (format/format--parses? "(def a 1))\n")))
+  (test "an unparseable file is reported as :unparseable and left BYTE-IDENTICAL"
+    (let (dir (temp-dir "brood-fmt-safe-")
+          path (path-join dir "broken.blsp")
+          ;; f's paren is never closed; g is a separate top-level defn
+          source "(defn f (x)\n  (+ x 1)\n\n(defn g (y)\n  (* y 2))\n")
+      (make-dir dir)
+      (spit path source)
+      (assert= (format/format-file path) :unparseable)
+      (assert= (slurp path) source)))
+  (test "a badly-laid-out but PARSEABLE file is still rewritten"
+    (let (dir (temp-dir "brood-fmt-safe-")
+          path (path-join dir "ugly.blsp"))
+      (make-dir dir)
+      (spit path "(defn f (x)\n        (+ x 1))\n")
+      (assert= (format/format-file path) :rewrote)
+      (is (format/format--parses? (slurp path)))))
+  (test "an already-formatted file is left unchanged"
+    (let (dir (temp-dir "brood-fmt-safe-")
+          path (path-join dir "clean.blsp"))
+      (make-dir dir)
+      (spit path "(defn f (x) (+ x 1))\n")
+      (format/format-file path)
+      (assert= (format/format-file path) :unchanged))))

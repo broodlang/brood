@@ -821,25 +821,62 @@ package is unknown to this index."
 
 (defn package--has-dep? (deps nm) (some? (fn (d) (= (get d :name) nm)) deps))
 
+;; A dependency name is written VERBATIM into project.blsp (unquoted, as a
+;; symbol), so it has to be one that reads back as itself. Without this check
+;; `nest add "" :path ../x` wrote `:dependencies [[ :path "../x"]]` — a manifest
+;; that no longer parses — and every later `nest` command in that project failed
+;; with an internal parse error until the file was repaired by hand. Any name
+;; containing a space, quote, bracket or paren did the same.
+;;
+;; The round-trip IS the property we need: whatever survives `read-first`
+;; unchanged is safe to write back out. That also correctly rejects a numeric name
+;; ("5" reads as an int, not a symbol) without a hand-maintained character list.
+(defn package--valid-dep-name? (nm)
+  (and (string? nm)
+    (not (= nm ""))
+    (= (try (read-first nm) (catch _ nil)) (symbol nm))))
+
 (defn add (nm & spec)
   "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH`, `:git URL :ref REF`, or `:tarball URL :sha256 HEX` (strings). A :git/:tarball dep is fetched into _deps/ as part of the re-lock. Backs `nest add`."
-  (package--in-project (fn (root)
-                         (let (dep (project/project-parse-dep (apply vector
-                                                                (cons (symbol nm)
-                                                                  (map package--spec-token spec)))))
-                           (when (package--has-dep? *project-dependencies* (get dep :name))
-                             (error "package: " nm " is already a dependency"))
-                           (let (manifest (path-join root "project.blsp"))
-                             (spit manifest
-                               (package--manifest-add (slurp manifest)
-                                 (package--dep->entry-node dep)))
-                             (package--load-manifest manifest)
-                             (let (entries (resolve-deps root
-                                             *project-dependencies*
-                                             (read-lockfile root)))
-                               (package--guard-collisions root entries)
-                               (write-lockfile root entries))
-                             (println (str "package: added " nm)))))))
+  ;; Checked BEFORE anything is written, so a bad name can't leave a half-edited
+  ;; manifest behind.
+  (when (not (package--valid-dep-name? nm))
+    (error "package: "
+      (pr-str nm)
+      " is not a usable dependency name — it must be a plain symbol written verbatim into project.blsp (no spaces, quotes, brackets, parens, and not a number)"))
+  (package--in-project
+    (fn (root)
+      (let (dep (project/project-parse-dep (apply vector
+                                             (cons (symbol nm)
+                                               (map package--spec-token spec)))))
+        (when (package--has-dep? *project-dependencies* (get dep :name))
+          (error "package: " nm " is already a dependency"))
+        ;; ATOMIC: the manifest edit has to happen before
+        ;; resolution (resolution reads the loaded manifest), so a
+        ;; failure afterwards is rolled back. Without this, `nest
+        ;; add foo :path ../nonexistent` left an unresolvable dep
+        ;; in project.blsp and EVERY later command failed on it —
+        ;; the project needed hand-repair after one typo.
+        (let (manifest (path-join root "project.blsp")
+              original (slurp manifest))
+          (spit manifest
+            (package--manifest-add original (package--dep->entry-node dep)))
+          (let (outcome (try
+                          (do
+                            (package--load-manifest manifest)
+                            (let (entries (resolve-deps root
+                                            *project-dependencies*
+                                            (read-lockfile root)))
+                              (package--guard-collisions root entries)
+                              (write-lockfile root entries))
+                            :%added)
+                          (catch e (list :%add-failed e))))
+            (if (and (pair? outcome) (= (first outcome) :%add-failed))
+              (do
+                (spit manifest original)
+                (package--load-manifest manifest)
+                (throw (second outcome)))
+              (println (str "package: added " nm)))))))))
 
 (defn remove-dep (nm)
   "Remove dependency `nm` from project.blsp and re-lock (an empty lock if no deps remain). Backs `nest remove`."

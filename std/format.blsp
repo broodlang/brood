@@ -782,31 +782,59 @@ form (not the comment) is emitted last and the close must NOT break. Only an
     (project/project-setup root)
     root))
 
+;; Does `src` parse as a complete program? The CST the formatter walks is
+;; deliberately LOSSLESS and error-TOLERANT — it happily represents an unclosed
+;; list — so it cannot answer this. The strict reader can.
+;;
+;; This gate is load-bearing, not belt-and-braces. A formatter's contract is "same
+;; program, different layout", and on a file with a missing `)` the CST's recovery
+;; silently RESTRUCTURED the source: given a `(defn f …` whose paren was never
+;; closed followed by a top-level `(defn g …)`, formatting moved `g` *inside* `f`
+;; and appended the missing paren at the end. Being mid-edit with an unclosed paren
+;; is completely routine (and format-on-save makes it automatic), so that turned a
+;; half-typed file into silently different code.
+(defn format--parses? (src) (try (do (read-all src) true) (catch _ false)))
+
 (defn format-file (path)
-  "Format the file at `path` in place. Returns :unchanged or :rewrote."
-  (let (src (slurp path) out (format-source src))
-    (if (= src out) :unchanged (do (spit path out) :rewrote))))
+  "Format the file at `path` in place. Returns `:unchanged`, `:rewrote`, or `:unparseable` — a file that does not parse is left untouched, since there is no program to re-lay-out and the tolerant CST would restructure it."
+  (let (src (slurp path))
+    (if (not (format--parses? src))
+      :unparseable
+      (let (out (format-source src))
+        (if (= src out) :unchanged (do (spit path out) :rewrote))))))
 
 (defn format-project ()
   "Format every .blsp under the current project (sources + tests). Prints one line
-per rewritten file and a summary; returns the number of files rewritten."
+per rewritten file and a summary; returns the number of files rewritten. A file
+that does not parse is reported and skipped, never rewritten."
   (let (root (format--require-root) files (format--every-blsp root))
-    (let (rewrote (format--apply files 0))
+    (let (counts (format--apply files 0 0)
+          rewrote (first counts)
+          skipped (second counts))
       (println (str "format: "
                  (length files)
                  " file"
                  (if (= (length files) 1) "" "s")
                  " considered, "
                  rewrote
-                 " rewritten."))
+                 " rewritten"
+                 (if (> skipped 0) (str ", " skipped " skipped (does not parse)") "")
+                 "."))
       rewrote)))
 
-(defn format--apply (files rewrote)
+;; Returns `(rewrote skipped)`. An unparseable file prints a `does not parse`
+;; line so it is never silently passed over — the whole point is that the user
+;; finds out their file was left alone, and why.
+(defn format--apply (files rewrote skipped)
   (if (nil? files)
-    rewrote
-    (let (path (first files) r (format-file path))
+    (list rewrote skipped)
+    (let (path (first files)
+          r (format-file path))
       (when (= r :rewrote) (println (str "  rewrote " path)))
-      (format--apply (rest files) (if (= r :rewrote) (inc rewrote) rewrote)))))
+      (when (= r :unparseable) (println (str "  skipped (does not parse): " path)))
+      (format--apply (rest files)
+        (if (= r :rewrote) (inc rewrote) rewrote)
+        (if (= r :unparseable) (inc skipped) skipped)))))
 
 ;; A tiny local set (a map to true) — avoids requiring `set` just for membership.
 (defn format--set-of (coll)
@@ -835,14 +863,18 @@ number of files rewritten."
       (do
         (println "format: not a git repository — formatting the whole project.")
         (format-project))
-      (let (rewrote (format--apply changed 0))
+      (let (counts (format--apply changed 0 0)
+            rewrote (first counts)
+            skipped (second counts))
         (println (str "format: "
                    (length changed)
                    " changed file"
                    (if (= (length changed) 1) "" "s")
                    " considered, "
                    rewrote
-                   " rewritten."))
+                   " rewritten"
+                   (if (> skipped 0) (str ", " skipped " skipped (does not parse)") "")
+                   "."))
         rewrote))))
 
 (defn format-project-check ()
@@ -859,14 +891,33 @@ number of files rewritten."
                                     " checked, all clean."))
                          0)
         else (do
-               (fold (fn (_ p) (println (str "  needs formatting: " p))) nil changed)
-               (error "format: "
-                 (length changed)
-                 (if (= (length changed) 1) " file needs" " files need")
-                 " formatting."))))))
+               (fold (fn (_ entry)
+                       (println (if (= (vector-ref entry 1) :unparseable)
+                                  (str "  does not parse: " (vector-ref entry 0))
+                                  (str "  needs formatting: " (vector-ref entry 0)))))
+                 nil
+                 changed)
+               (let (unparseable (length (filter (fn (e) (= (vector-ref e 1) :unparseable))
+                                           changed))
+                     dirty (- (length changed) unparseable))
+                 (error "format: "
+                   dirty
+                   (if (= dirty 1) " file needs" " files need")
+                   " formatting"
+                   (if (> unparseable 0) (str ", " unparseable " do(es) not parse") "")
+                   ".")))))))
 
+;; An unparseable file is reported as `[path :unparseable]` rather than as "needs
+;; formatting": `nest format` will NOT rewrite it (see `format-file`), so calling
+;; it unformatted would promise a fix that never comes. It still fails the check —
+;; a file that doesn't parse is not a clean tree.
 (defn format--check (files acc)
   (if (nil? files)
     (reverse acc)
-    (let (path (first files) src (slurp path))
-      (format--check (rest files) (if (= src (format-source src)) acc (cons path acc))))))
+    (let (path (first files)
+          src (slurp path))
+      (format--check (rest files)
+        (cond
+          (not (format--parses? src)) (cons [path :unparseable] acc)
+          (= src (format-source src)) acc
+          else (cons [path :needs-formatting] acc))))))
