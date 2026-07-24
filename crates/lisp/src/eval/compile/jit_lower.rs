@@ -16,6 +16,55 @@ use i64::jit_lower_i64_arm;
 #[cfg(feature = "jit")]
 mod prepass;
 
+// CLIF emit helpers extracted from `jit_lower_arm_inner`'s closures (the next step
+// of that function's decomposition). They take `b: &mut FunctionBuilder` + the
+// `deopt` block and produce SSA/`Op` results.
+#[cfg(feature = "jit")]
+mod emit;
+#[cfg(feature = "jit")]
+use emit::{emit_arith, emit_float_arith};
+
+/// The virtualized operand-stack element for `jit_lower_arm_inner`'s emit loop —
+/// module scope (not a fn-local enum) so the extracted emit helpers can name it. A
+/// logical operand is an unboxed `Int`/`Float`/`Bool` SSA value, a frame `Slot`, a
+/// `Handle` (three `Value` words), or a hoisted invariant global vector/table.
+#[cfg(feature = "jit")]
+#[derive(Clone, Copy)]
+pub(super) enum Op {
+    Int(cranelift_codegen::ir::Value),
+    /// An unboxed `f64` SSA value; boxed to `Value::Float` when stored/returned.
+    /// Float comparisons yield an `Op::Int` i8 (a Bool), so branch handling is shared.
+    Float(cranelift_codegen::ir::Value),
+    /// A boolean SSA value (`i64` 0/1) that has crossed a block boundary (a comparison
+    /// widened through a block param, which erases the `i8`-means-bool signal); tagged
+    /// so it still boxes as `Bool` and branches correctly in `JumpIfFalse`.
+    Bool(cranelift_codegen::ir::Value),
+    Slot(usize),
+    Handle(
+        cranelift_codegen::ir::Value,
+        cranelift_codegen::ir::Value,
+        cranelift_codegen::ir::Value,
+    ),
+    /// A hoisted invariant global vector (matmul LICM): its resolved `Value` words
+    /// (`w0..w2`) plus its element storage base (`ptr`, `len`), resolved once at entry.
+    HoistedVec {
+        ptr: cranelift_codegen::ir::Value,
+        len: cranelift_codegen::ir::Value,
+        w0: cranelift_codegen::ir::Value,
+        w1: cranelift_codegen::ir::Value,
+        w2: cranelift_codegen::ir::Value,
+    },
+    /// A hoisted invariant global dense table (the sieve lever): its resolved `Value`
+    /// words plus the dense slot region base and the store's `dense`-flag address.
+    HoistedTable {
+        slots: cranelift_codegen::ir::Value,
+        flag: cranelift_codegen::ir::Value,
+        w0: cranelift_codegen::ir::Value,
+        w1: cranelift_codegen::ir::Value,
+        w2: cranelift_codegen::ir::Value,
+    },
+}
+
 // ===================== JIT lowering (ADR-101 Stage 1) =====================
 //
 // Lower a chunked arm to native code via Cranelift, co-located here because it reads
@@ -1689,87 +1738,6 @@ fn jit_lower_arm_inner(
     // BigInt (ADR bignums), so deopting here keeps the JIT bit-identical to the VM
     // instead of silently wrapping. Comparisons yield an `I8` 0/1. Leaves `b` switched
     // to the post-check block for the arithmetic ops.
-    let emit_arith = |b: &mut FunctionBuilder,
-                      op: PrimOp,
-                      x: cranelift_codegen::ir::Value,
-                      y: cranelift_codegen::ir::Value|
-     -> Option<cranelift_codegen::ir::Value> {
-        let checked = |b: &mut FunctionBuilder, r: cranelift_codegen::ir::Value, ov| {
-            let cont = b.create_block();
-            b.ins().brif(ov, deopt, &[], cont, &[]);
-            b.switch_to_block(cont);
-            r
-        };
-        Some(match op {
-            PrimOp::Add => {
-                let (r, ov) = b.ins().sadd_overflow(x, y);
-                checked(b, r, ov)
-            }
-            PrimOp::Sub => {
-                let (r, ov) = b.ins().ssub_overflow(x, y);
-                checked(b, r, ov)
-            }
-            PrimOp::Mul => {
-                let (r, ov) = b.ins().smul_overflow(x, y);
-                checked(b, r, ov)
-            }
-            PrimOp::Lt => b.ins().icmp(IntCC::SignedLessThan, x, y),
-            PrimOp::Le => b.ins().icmp(IntCC::SignedLessThanOrEqual, x, y),
-            PrimOp::Eq => b.ins().icmp(IntCC::Equal, x, y),
-            // Integer division family (`rem`/`quot`/`%div`). Cranelift's `sdiv`/`srem`
-            // *trap* on a zero divisor and on the `i64::MIN / -1` overflow, so both must
-            // be guarded → deopt before the op (the VM's inline path defers exactly these
-            // edges to the native, matching). `%div` additionally yields an `Int` only on
-            // an exact quotient — a nonzero remainder means a `Float` the native builds,
-            // so deopt then too. Operand order is already `(x, y)` (map applied).
-            PrimOp::Rem | PrimOp::Quot | PrimOp::Div => {
-                let zero = b.ins().iconst(types::I64, 0);
-                let div0 = b.ins().icmp(IntCC::Equal, y, zero);
-                let c0 = b.create_block();
-                b.ins().brif(div0, deopt, &[], c0, &[]);
-                b.switch_to_block(c0);
-                // (x == i64::MIN) && (y == -1) — the one signed-division overflow.
-                let min = b.ins().iconst(types::I64, i64::MIN);
-                let neg1 = b.ins().iconst(types::I64, -1);
-                let x_min = b.ins().icmp(IntCC::Equal, x, min);
-                let y_m1 = b.ins().icmp(IntCC::Equal, y, neg1);
-                let ov = b.ins().band(x_min, y_m1);
-                let c1 = b.create_block();
-                b.ins().brif(ov, deopt, &[], c1, &[]);
-                b.switch_to_block(c1);
-                match op {
-                    PrimOp::Rem => b.ins().srem(x, y),
-                    PrimOp::Quot => b.ins().sdiv(x, y),
-                    PrimOp::Div => {
-                        // Exact only: a nonzero remainder → Float → deopt to the native.
-                        let r = b.ins().srem(x, y);
-                        let inexact = b.ins().icmp(IntCC::NotEqual, r, zero);
-                        let c2 = b.create_block();
-                        b.ins().brif(inexact, deopt, &[], c2, &[]);
-                        b.switch_to_block(c2);
-                        b.ins().sdiv(x, y)
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            PrimOp::Max => {
-                let cond = b.ins().icmp(IntCC::SignedGreaterThanOrEqual, x, y);
-                b.ins().select(cond, x, y)
-            }
-            PrimOp::Min => {
-                let cond = b.ins().icmp(IntCC::SignedLessThanOrEqual, x, y);
-                b.ins().select(cond, x, y)
-            }
-            PrimOp::BitAnd => b.ins().band(x, y),
-            PrimOp::BitOr => b.ins().bor(x, y),
-            PrimOp::BitXor => b.ins().bxor(x, y),
-            PrimOp::Cons => return None, // allocates — never in the JIT subset
-            PrimOp::VectorRef => return None, // heap slab read — not lowered; out of subset
-            // Table ops: not an int-arith op — lowered as a runtime callback in the
-            // Inst::Prim2 arm below (never through this integer emitter).
-            PrimOp::TableHas | PrimOp::TableGet => return None,
-        })
-    };
 
     // ---- The hybrid operand model. ----
     //
@@ -1788,57 +1756,6 @@ fn jit_lower_arm_inner(
     // produced and consumed within a block (stored to a slot by a self-call/binder, returned,
     // or tag-checked back to an int), never crossing the loop back-edge live, which is the
     // only safepoint — so the moving GC never sees a handle in a register.
-    #[derive(Clone, Copy)]
-    enum Op {
-        Int(cranelift_codegen::ir::Value),
-        // An unboxed `f64` SSA value (a `Const(Float)`, a float-slot read, or a float
-        // arith result). Boxed back to a `Value::Float` (TAG_FLOAT + the bits) when stored
-        // to a slot / self-call arg / returned. Float *comparisons* (`<`/`<=`/`=`) yield an
-        // `Op::Int` i8 (a Bool), like integer compares, so branch handling is shared.
-        Float(cranelift_codegen::ir::Value),
-        // A boolean SSA value (`i64` 0/1) that has crossed a block boundary. A comparison
-        // result is normally an `Op::Int` with `i8` type (and `box_scalar` boxes it as a
-        // `Value::Bool`); but when it flows through a block param (e.g. an `(and …)`
-        // short-circuit carrying its result to the merge) it is zero-extended to the `i64`
-        // block-param width, which erases the `i8`-means-bool signal. The lowering tags such
-        // params as `Op::Bool` (via `bool_param` recorded at the jump) so they still box as
-        // `Bool`, not `Int`, and branch correctly in `JumpIfFalse`.
-        Bool(cranelift_codegen::ir::Value),
-        Slot(usize),
-        Handle(
-            cranelift_codegen::ir::Value,
-            cranelift_codegen::ir::Value,
-            cranelift_codegen::ir::Value,
-        ),
-        // A hoisted invariant **global vector** (matmul LICM, the global lever): its
-        // resolved `Value` words (`w0..w2`, like a `Handle` — used for any non-`VectorRef`
-        // consumer) PLUS its element storage base (`ptr`, `len`), resolved **once** at the
-        // arm entry. A `(nth thisglobal idx)` reads `ptr + idx*STRIDE` inline instead of
-        // calling `brood_rt_vector_ref`; the back-edge epoch guard deopts if the global was
-        // rebound, keeping it bit-identical to the VM's per-iteration late binding.
-        HoistedVec {
-            ptr: cranelift_codegen::ir::Value,
-            len: cranelift_codegen::ir::Value,
-            w0: cranelift_codegen::ir::Value,
-            w1: cranelift_codegen::ir::Value,
-            w2: cranelift_codegen::ir::Value,
-        },
-        // A hoisted invariant **global dense table** (the sieve lever): its resolved
-        // `Value` words PLUS the dense slot region base and the store's `dense`-flag
-        // address, resolved once at entry (`brood_rt_table_dense_base`). A
-        // `table-put`/`table-has?` on this global with an int key becomes ONE inline
-        // atomic slot op + a flag re-check; any guard failure (MOVED sentinel, flag
-        // flipped by a migration/drop, out-of-range key, unencodable value) falls
-        // back to the per-op FFI callback, which handles the full semantics. The
-        // back-edge epoch guard covers a rebind of the global itself.
-        HoistedTable {
-            slots: cranelift_codegen::ir::Value,
-            flag: cranelift_codegen::ir::Value,
-            w0: cranelift_codegen::ir::Value,
-            w1: cranelift_codegen::ir::Value,
-            w2: cranelift_codegen::ir::Value,
-        },
-    }
     let done_block = leader_block[len]?;
     // Store an unboxed scalar `Op::Int` value into frame slot `k`, boxing it as `Int` or
     // (for a comparison `i8`) `Bool` via `box_scalar`.
@@ -2128,35 +2045,6 @@ fn jit_lower_arm_inner(
     // Float arith / comparison. Arith → `Op::Float`; a comparison → an `i8` boxed as a
     // Bool (`Op::Int`, exactly like the integer compares). The integer-only ops
     // (`rem`/`quot`) and `=` aren't lowered for floats → `None` bails the arm to the VM.
-    let emit_float_arith = |b: &mut FunctionBuilder, op: PrimOp, x, y| -> Option<Op> {
-        use cranelift_codegen::ir::condcodes::FloatCC;
-        Some(match op {
-            PrimOp::Add => Op::Float(b.ins().fadd(x, y)),
-            PrimOp::Sub => Op::Float(b.ins().fsub(x, y)),
-            PrimOp::Mul => Op::Float(b.ins().fmul(x, y)),
-            PrimOp::Div => {
-                // Brood float `/` raises on a zero divisor (matches the VM — `(/ x 0.0)`
-                // errors), so guard `y == 0.0` and deopt (the VM then raises); otherwise
-                // `fdiv`. `fcmp Equal 0.0` catches +0.0 and -0.0 alike.
-                let zero = b.ins().f64const(0.0);
-                let is_zero = b.ins().fcmp(FloatCC::Equal, y, zero);
-                let cont = b.create_block();
-                b.ins().brif(is_zero, deopt, &[], cont, &[]);
-                b.switch_to_block(cont);
-                Op::Float(b.ins().fdiv(x, y))
-            }
-            PrimOp::Lt => Op::Int(b.ins().fcmp(FloatCC::LessThan, x, y)),
-            PrimOp::Le => Op::Int(b.ins().fcmp(FloatCC::LessThanOrEqual, x, y)),
-            // `=` is NOT lowered for floats: Brood `=` is *structural*, so a Float
-            // is never equal to an Int (`(= 2.0 2)` is false), but IEEE `fcmp Equal`
-            // — after the int-literal-to-f64 coercion the `Prim2SlotInt` float path
-            // applies — would return true for `(= 2.0 2)`. Returning `None` bails the
-            // arm to the VM, whose `prim_apply_float` likewise returns `None` for `Eq`
-            // and defers to the structural native `prim_eq`. (Lt/Le are safe: ordering
-            // coerces int↔float identically on both engines.)
-            _ => return None,
-        })
-    };
     // Store an operand into frame slot `dst`: an `Int` is boxed; a `Slot` is copied
     // verbatim; a `Handle` stores its three words (so a handle binder / self-call arg /
     // return keeps its type).
@@ -3666,14 +3554,14 @@ fn jit_lower_arm_inner(
                         let bb = as_f64(&mut b, bb_op);
                         let x = pick(aa, bb, map[0]);
                         let y = pick(aa, bb, map[1]);
-                        stack.push(emit_float_arith(&mut b, *op, x, y)?);
+                        stack.push(emit_float_arith(&mut b, *op, x, y, deopt)?);
                     } else {
                         // Arithmetic/comparison: materialise to int, apply `map`.
                         let aa = as_int(&mut b, aa_op);
                         let bb = as_int(&mut b, bb_op);
                         let x = pick(aa, bb, map[0]);
                         let y = pick(aa, bb, map[1]);
-                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y, deopt)?));
                     }
                 }
                 Inst::Prim3 {
@@ -3920,14 +3808,14 @@ fn jit_lower_arm_inner(
                         let sb = as_f64(&mut b, Op::Slot(*slot_b));
                         let x = pick(sa, sb, map[0]);
                         let y = pick(sa, sb, map[1]);
-                        stack.push(emit_float_arith(&mut b, *op, x, y)?);
+                        stack.push(emit_float_arith(&mut b, *op, x, y, deopt)?);
                     } else {
                         // Source 0 = slot_a, source 1 = slot_b (the VM's `[sa, sb]` order).
                         let sa = load_slot_int(&mut b, *slot_a as i64);
                         let sb = load_slot_int(&mut b, *slot_b as i64);
                         let x = pick(sa, sb, map[0]);
                         let y = pick(sa, sb, map[1]);
-                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y, deopt)?));
                     }
                 }
                 Inst::Prim2SlotInt {
@@ -3998,7 +3886,7 @@ fn jit_lower_arm_inner(
                         let sb = b.ins().f64const(*int_b as f64);
                         let x = pick(sa, sb, map[0]);
                         let y = pick(sa, sb, map[1]);
-                        stack.push(emit_float_arith(&mut b, *op, x, y)?);
+                        stack.push(emit_float_arith(&mut b, *op, x, y, deopt)?);
                     } else {
                         // Source 0 = slot_a, source 1 = the literal `int_b` (the fusion of
                         // `(Const, Local)` already inverted `map` so the slot is source 0).
@@ -4006,7 +3894,7 @@ fn jit_lower_arm_inner(
                         let sb = b.ins().iconst(types::I64, *int_b);
                         let x = pick(sa, sb, map[0]);
                         let y = pick(sa, sb, map[1]);
-                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y)?));
+                        stack.push(Op::Int(emit_arith(&mut b, *op, x, y, deopt)?));
                     }
                 }
                 Inst::Jump(t) => {

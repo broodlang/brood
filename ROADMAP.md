@@ -43,8 +43,13 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    `jit_lower_arm_inner` decomposition itself: extracted the pure, Cranelift-free
    **pre-lowering analysis** (block-leader + operand-stack-depth abstract interp)
    into `eval/compile/jit_lower/prepass.rs::block_analysis` — data-in/data-out, no
-   CLIF emitted, verified behaviour-identical (differential 2/2, jit 34/34, suite
-   3071/3071). ⬜ The **emit-loop decomposition** — the ~1,730-line
+   CLIF emitted, verified behaviour-identical. Then did the key **enabling refactor**
+   for the emit loop: moved the fn-local `Op` operand-model enum to module scope
+   (so extracted helpers can name it) and pulled the arithmetic emitters
+   (`emit_arith`/`emit_float_arith`) into `eval/compile/jit_lower/emit.rs` as free
+   fns taking `(&mut FunctionBuilder, …, deopt)` — the proven pattern for the rest.
+   `jit_lower.rs` now 5437 → 4389 with `i64.rs`/`prepass.rs`/`emit.rs` split out.
+   🟡 The remaining **emit-loop decomposition** — the ~1,600-line
    `for ip in 0..len` CLIF loop (Call ~300, Prim1/2/3 + fused ~700, SelfCall ~200,
    control ~130) over the virtualized `Op` stack — is the high-risk remainder.
    Every arm shares `b` (the `FunctionBuilder`, which can't move into a struct — it

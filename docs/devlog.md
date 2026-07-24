@@ -6950,3 +6950,27 @@ Manifest and source fuzzing produced **78 and 55 "leak" hits but zero crashes**,
 the data handling was already robust; what the leaks were telling us was a
 diagnostics problem, which is what got fixed. 38 new regression tests
 (`package_test` 39→55, `project_test` 47→58, `format_test` 56→66).
+
+## 2026-07-24 — Tier 1 item 1 cont.: Op → module scope + extract jit_lower/emit.rs
+
+The enabling refactor for decomposing `jit_lower_arm_inner`'s emit loop. The
+blocker was that the `Op` operand-model enum was defined *inside* the function, so
+no emit helper could become a free fn. Moved `Op` to module scope in `jit_lower.rs`
+(`#[cfg(feature="jit")] pub(super) enum Op`), then extracted the two arithmetic
+emitters — `emit_arith` (overflow-checked int arith → deopt) and `emit_float_arith`
+(f64) — from their closures (which took `b` and captured the `deopt` block) into
+`eval/compile/jit_lower/emit.rs` as free fns `(&mut FunctionBuilder, op, x, y,
+deopt)`. Call sites pass `deopt` explicitly.
+
+This proves the pattern for the rest of the emit loop: fn-local types → module
+scope, helper closures → free fns in `emit.rs`/(future) `call.rs`/`prim.rs`/
+`control.rs` with their captured state (FuncRefs, the `RefCell` slot-tracking) as
+params. `jit_lower.rs` 5437 → 4389, now with `i64.rs` (869) + `prepass.rs` (108) +
+`emit.rs` (132) split out.
+
+Remaining: the larger helper closures (box_scalar/store_op/as_int/vector_ref/
+eq_dispatch/…) and the per-Inst arm bodies, extracted the same way — a continuing
+incremental grind with per-step JIT-differential verification.
+
+Verified: compiles default + no-default-features; differential 2/2, jit 34/34
+(under JIT_VERIFY); full suite 3108/3108.
