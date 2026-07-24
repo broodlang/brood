@@ -769,6 +769,31 @@ Runtime housekeeping (both items landed):
 
 ### Tooling & errors
 
+- ✅ **`nest test` selection — `mix test` parity** — shipped 2026-07-24. The suite
+  had **no way to run a subset by name**: 2965 tests, and the only narrowing was a
+  file path. Now `--only`/`--exclude`/`--include SELECTOR` (a tag, `test:substr`,
+  or `describe:substr`), `FILE:LINE` (the covering test), `--failed` (last run's
+  failures, kept as a set difference in the project cache dir), `--seed` (shuffle,
+  seed echoed for replay), `--partitions N --shard K` (stable-hash CI shards),
+  `--max-failures`, `--repeat-until-failure`, `--timeout`, `--slowest N`,
+  `--no-trace`. Tags come from `:tags [kw …]` on `describe`/`test`, merged
+  group→test. Selector parsing + all selection logic live in Brood
+  (`std/tool/test.blsp`, `test--make-filter`); `nest` only forwards argv.
+  `tests/test_selection_test.blsp` (54 cases, incl. cross-process spec round-trip).
+  ⬜ Still unmapped from `mix test`: `--cover` (needs a coverage mechanism — see
+  "Test coverage" below), `--stale` (needs a per-test dependency graph),
+  `--formatter`, `--breakpoints`.
+- ⬜ **Test coverage (`nest test --cover`)** — no coverage mechanism exists today.
+  The raw material does: compiled IR nodes already carry `pos: Option<Pos>` and
+  `CompiledArm` records its source file (`eval/compile/ir.rs`), and `Value::Table`
+  (ADR-107) is a shared identity-mutable store that can aggregate hits across the
+  many green processes a suite runs in. Shape: a Rust **mechanism** recording
+  `(file, line)` hits into a shared table under an off-by-default flag (the JIT must
+  be disabled in that mode — native code bypasses the hook), and Brood **policy**
+  (`std/tool/coverage.blsp`) turning hits into per-file/per-function percentages +
+  the report. Wants an ADR: it's a new observability seam, and the cheap
+  function-level variant (which globals were called) is a genuinely different
+  product from line coverage.
 - ✅ **`nest format --changed`** — shipped 2026-07-23. A git-aware narrower
   scope: formats only the `.blsp` files git reports not-committed-clean
   (modified/staged/untracked), via a new `%git-changed-files` primitive

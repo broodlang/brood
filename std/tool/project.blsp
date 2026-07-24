@@ -1177,6 +1177,51 @@ resolve in the advisory checker. Returns the project root."
 ;; A `(check-project)` advisory pre-flight runs after all loads but before
 ;; `(run-tests)`, so the checker sees every source + test file once
 ;; cross-module names are resolvable through the loaded heap.
+;; --- the `--failed` set (mix test --failed) -----------------------------------
+;; Which tests failed last time, as full `"group › name"` labels, persisted beside
+;; the check caches. Maintained as a SET-DIFFERENCE, not an overwrite: a test that
+;; just ran and passed leaves the set, a test that just failed joins it, and a test
+;; that wasn't run at all (because of a filter) keeps its previous state. That's
+;; what makes `nest test --failed` usable repeatedly — fix one test, re-run, and
+;; only the still-broken ones remain.
+(defn project--failed-file (root)
+  (let (dir (project--cache-dir root)) (if (nil? dir) nil (path-join dir "last-failed.blsp"))))
+
+;; Stored as a `{:failed (label …)}` record rather than a bare list, because an
+;; empty list IS nil in a Lisp — a bare list can't distinguish "never run" from
+;; "last run was green", and those two want different messages.
+(defn project--read-failed-record (root)
+  "The previous run's `{:failed (label …)}` record, or nil when there is none (no cache dir, never run here, or an unreadable/corrupt file)."
+  (let (f (project--failed-file root))
+    (if (or (nil? f) (not (file-exists? f)))
+      nil
+      (let (form (try (read-first (slurp f)) (catch _ nil)))
+        (if (map? form) form nil)))))
+
+(defn project--write-failed! (root ran failed)
+  "Update the on-disk `--failed` set: drop everything in `ran` that isn't in `failed`, then add `failed`. Best-effort — a project with no writable cache dir simply keeps no record."
+  (let (f (project--failed-file root))
+    (when (not (nil? f))
+      (let (previous (or (get (project--read-failed-record root) :failed) (list))
+            kept (filter (fn (l) (not (member? l (or ran (list))))) previous)
+            merged (append kept (or failed (list))))
+        (try (spit f (pr-str {:failed merged})) (catch _ nil))))))
+
+;; Build the `:filter` spec for `--failed`. With nothing to narrow to, run
+;; everything and say why — a command that silently runs zero tests reads as
+;; broken, and "re-run the failures" on a green suite most usefully means "run it".
+(defn project--failed-filter (root spec)
+  (let (record (project--read-failed-record root)
+        failed (get record :failed))
+    (cond
+      (nil? record) (do
+                      (eprintln "warning: --failed: no record of a previous run here — running every test")
+                      spec)
+      (empty? failed) (do
+                        (eprintln "warning: --failed: nothing failed on the last run — running every test")
+                        spec)
+      else (assoc (or spec {}) :names failed))))
+
 (defn run-project-tests (& opts)
   "Discover, load (register-only), and run the project's whole test suite once, from the cwd. `opts` pass through to `run-tests` (e.g. `:slow`). Runs an advisory `check-project` pre-flight. Errors if not in a project or if any test fails. Backs `nest test`."
   (let (root (project-find-root (cwd)))
@@ -1205,11 +1250,46 @@ resolve in the advisory checker. Returns the project root."
       ;; its units) inside the `%isolate` that `run-tests-scoped` wraps it in.
       ;; `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all-then-run-all path (the
       ;; escape hatch, e.g. for a suite that relies on cross-file top-level defs).
-      (if (getenv "BROOD_TEST_NO_SCOPE")
-        (do
-          (fold (fn (_ f) (load f)) nil files)
-          (apply test/run-tests opts))
-        (apply test/run-tests-scoped (map (fn (f) (fn () (load f))) files) opts)))))
+      ;; Persist the `--failed` set whichever way the run goes: the interesting
+      ;; case is precisely the failing one, and `run-tests-scoped` RAISES on
+      ;; failure, so catch, record, then re-raise to keep the non-zero exit.
+      (let (resolved (project--resolve-test-opts root opts)
+            outcome (try (project--run-suite files resolved) (catch e (list :%suite-raised e))))
+        (project--write-failed! root *test-last-ran* *test-last-failed*)
+        (if (and (pair? outcome) (= (first outcome) :%suite-raised))
+          (throw (second outcome))
+          outcome)))))
+
+;; Expand `:failed` in a `nest test` option plist into the `:filter` spec's
+;; `:names`. The resolved `:filter` is CONSed on the front: `opt-val` returns the
+;; first match, so a prepended entry shadows the original without rebuilding the
+;; plist.
+(defn project--resolve-test-opts (root opts)
+  (if (not (test/opt? :failed opts))
+    opts
+    (cons :filter
+      (cons (project--failed-filter root (test/opt-val :filter opts nil)) opts))))
+
+(defn run-loaded-tests (& opts)
+  "Run the ALREADY-REGISTERED suite — the `nest test FILE…` path, where the CLI has loaded the named files itself. Inside a project this resolves `:failed` against the project's record and updates that record afterwards, so `--failed` works the same as on a whole-project run; outside one it is just `run-tests`."
+  (let (root (project-find-root (cwd)))
+    (if (nil? root)
+      (apply test/run-tests opts)
+      (let (resolved (project--resolve-test-opts root opts)
+            outcome (try (apply test/run-tests resolved) (catch e (list :%suite-raised e))))
+        (project--write-failed! root *test-last-ran* *test-last-failed*)
+        (if (and (pair? outcome) (= (first outcome) :%suite-raised))
+          (throw (second outcome))
+          outcome)))))
+
+;; Run the discovered suite — scoped file-by-file (the default) or the legacy
+;; load-all-then-run-all path under `BROOD_TEST_NO_SCOPE`.
+(defn project--run-suite (files opts)
+  (if (getenv "BROOD_TEST_NO_SCOPE")
+    (do
+      (fold (fn (_ f) (load f)) nil files)
+      (apply test/run-tests opts))
+    (apply test/run-tests-scoped (map (fn (f) (fn () (load f))) files) opts)))
 
 ;; Structured analogue of `run-project-tests` — same bootstrap (discovery,
 ;; load, type-check pre-flight) but `(run-tests-structured)` at the end, so

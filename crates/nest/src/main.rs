@@ -145,9 +145,64 @@ enum Cmd {
     /// inside a project, project sources are pre-loaded so cross-module names
     /// resolve.
     Test {
-        /// Specific test files to run. Omit for project-wide discovery.
+        /// Specific test files to run, optionally `FILE:LINE` to run just the
+        /// test at that line. Omit for project-wide discovery.
         #[arg(value_name = "FILE")]
         files: Vec<String>,
+
+        /// Run only tests matching a selector, repeatable: a tag (`db`), a test
+        /// name substring (`test:adds`), or a group substring (`describe:math`).
+        #[arg(long, value_name = "SELECTOR")]
+        only: Vec<String>,
+
+        /// Skip tests matching a selector (same forms as `--only`), repeatable.
+        #[arg(long, value_name = "SELECTOR")]
+        exclude: Vec<String>,
+
+        /// Re-admit tests that `--exclude` dropped, repeatable. `--include` wins.
+        #[arg(long, value_name = "SELECTOR")]
+        include: Vec<String>,
+
+        /// Run only the tests that failed on the previous run in this project.
+        #[arg(long)]
+        failed: bool,
+
+        /// Stop the run once this many tests have failed.
+        #[arg(long, value_name = "N")]
+        max_failures: Option<u64>,
+
+        /// Run the suite up to N times, stopping at the first failure — for
+        /// shaking out a flaky test.
+        #[arg(long, value_name = "N")]
+        repeat_until_failure: Option<u64>,
+
+        /// Randomise test order using this seed (0 keeps declaration order). The
+        /// seed is echoed in the summary so a failure can be replayed.
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+
+        /// Hard per-test timeout in milliseconds (default 120000). A test over it
+        /// is killed and reported as a failure.
+        #[arg(long, value_name = "MS")]
+        timeout: Option<u64>,
+
+        /// List the N slowest tests after the summary.
+        #[arg(long, value_name = "N")]
+        slowest: Option<u64>,
+
+        /// Split the suite into N shards and run only one (see `--shard`) — for
+        /// fanning a suite across CI machines. Assignment is a stable hash of each
+        /// test's name, so shards never overlap or drop a test.
+        #[arg(long, value_name = "N")]
+        partitions: Option<u64>,
+
+        /// Which shard to run, 0-based. Requires `--partitions`.
+        #[arg(long, value_name = "K", default_value_t = 0)]
+        shard: u64,
+
+        /// Don't print each test as it starts (the default prints them).
+        #[arg(long)]
+        no_trace: bool,
     },
 
     /// Advisory type-check the project, or specific files.
@@ -369,7 +424,51 @@ fn run_main(cli: Cli) {
     let mut interp = Interp::new();
 
     match cli.cmd {
-        Cmd::Test { files } => cmd_test(&mut interp, &files),
+        Cmd::Test {
+            files,
+            only,
+            exclude,
+            include,
+            failed,
+            max_failures,
+            repeat_until_failure,
+            seed,
+            timeout,
+            slowest,
+            partitions,
+            shard,
+            no_trace,
+        } => {
+            // A positional may be `FILE` or `FILE:LINE`; the line suffix becomes a
+            // selector while the bare path is what actually gets loaded.
+            let mut paths: Vec<String> = Vec::new();
+            let mut lines: Vec<(String, u64)> = Vec::new();
+            for arg in &files {
+                let (path, line) = split_file_line(arg);
+                if let Some(n) = line {
+                    lines.push((path.clone(), n));
+                }
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            let opts = TestOpts {
+                only,
+                exclude,
+                include,
+                failed,
+                max_failures,
+                repeat_until_failure,
+                seed,
+                timeout,
+                slowest,
+                partitions,
+                shard,
+                no_trace,
+                lines,
+            };
+            cmd_test(&mut interp, &paths, &opts);
+        }
         Cmd::Check { files } => cmd_check(&mut interp, &files),
         Cmd::New { name, template } => cmd_new(&mut interp, &name, template.as_deref()),
         Cmd::Format { check, changed } => cmd_format(&mut interp, check, changed),
@@ -423,19 +522,151 @@ fn run_main(cli: Cli) {
 /// `nest test [FILES...]` — project-wide if no files, otherwise just those.
 /// Single-file mode mirrors the old `brood --test` shape but with project
 /// sources pre-loaded if we're inside a project, so cross-module names work.
-fn cmd_test(interp: &mut Interp, files: &[String]) {
+/// The `nest test` selection / execution flags, lowered to the Brood option
+/// plist that `run-tests` and friends already accept. Selector *parsing* stays in
+/// Brood (`test--make-filter`) so the grammar has one definition; this only
+/// forwards argv.
+#[derive(Default)]
+struct TestOpts {
+    only: Vec<String>,
+    exclude: Vec<String>,
+    include: Vec<String>,
+    failed: bool,
+    max_failures: Option<u64>,
+    repeat_until_failure: Option<u64>,
+    seed: Option<u64>,
+    timeout: Option<u64>,
+    slowest: Option<u64>,
+    partitions: Option<u64>,
+    shard: u64,
+    no_trace: bool,
+    /// `FILE:LINE` selectors peeled off the positional FILE list.
+    lines: Vec<(String, u64)>,
+}
+
+/// Quote a Rust string as a Brood string literal.
+fn blsp_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// `(list "a" "b")`, or `nil` when empty — the shape `test--make-filter` expects.
+fn blsp_string_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "nil".to_string()
+    } else {
+        let quoted: Vec<String> = items.iter().map(|s| blsp_string(s)).collect();
+        format!("(list {})", quoted.join(" "))
+    }
+}
+
+fn blsp_opt_int(value: Option<u64>) -> String {
+    value.map_or_else(|| "nil".to_string(), |n| n.to_string())
+}
+
+impl TestOpts {
+    /// True when nothing narrows or reorders the run — lets the common case pass
+    /// no filter at all, so `run-tests` takes its original fast path.
+    fn is_plain_selection(&self) -> bool {
+        self.only.is_empty()
+            && self.exclude.is_empty()
+            && self.include.is_empty()
+            && self.lines.is_empty()
+            && self.seed.is_none()
+            && self.partitions.is_none()
+    }
+
+    fn filter_expr(&self) -> String {
+        if self.is_plain_selection() {
+            return "nil".to_string();
+        }
+        let lines = if self.lines.is_empty() {
+            "nil".to_string()
+        } else {
+            let entries: Vec<String> = self
+                .lines
+                .iter()
+                .map(|(file, line)| format!("[{} {}]", blsp_string(file), line))
+                .collect();
+            format!("(list {})", entries.join(" "))
+        };
+        format!(
+            "(test/test--make-filter {} {} {} {} nil {} {} {})",
+            blsp_string_list(&self.only),
+            blsp_string_list(&self.exclude),
+            blsp_string_list(&self.include),
+            lines,
+            blsp_opt_int(self.seed),
+            blsp_opt_int(self.partitions),
+            self.shard,
+        )
+    }
+
+    /// The Brood option plist — spliced straight into the `run-*` call.
+    fn to_plist(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        // `:trace` (live per-test progress) is the interactive default; `--no-trace`
+        // is the opt-out. The `brood --test` path never sets it, keeping machine-
+        // parsed output clean.
+        if !self.no_trace {
+            parts.push(":trace".to_string());
+        }
+        if self.failed {
+            parts.push(":failed".to_string());
+        }
+        if let Some(n) = self.max_failures {
+            parts.push(format!(":max-failures {n}"));
+        }
+        if let Some(n) = self.repeat_until_failure {
+            parts.push(format!(":repeat {n}"));
+        }
+        if let Some(n) = self.timeout {
+            parts.push(format!(":timeout {n}"));
+        }
+        if let Some(n) = self.slowest {
+            parts.push(format!(":slowest {n}"));
+        }
+        let filter = self.filter_expr();
+        if filter != "nil" {
+            parts.push(format!(":filter {filter}"));
+        }
+        parts.join(" ")
+    }
+}
+
+/// Split a positional test argument into its path and optional `:LINE` suffix.
+/// A trailing `:N` is a line selector; anything else is a plain path (so a file
+/// whose name genuinely contains a colon still loads).
+fn split_file_line(arg: &str) -> (String, Option<u64>) {
+    if let Some((path, suffix)) = arg.rsplit_once(':') {
+        if let Ok(line) = suffix.parse::<u64>() {
+            if !path.is_empty() {
+                return (path.to_string(), Some(line));
+            }
+        }
+    }
+    (arg.to_string(), None)
+}
+
+fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     // Default a memory ceiling on for test runs (ADR-043); an explicit
     // BROOD_MEM_LIMIT still wins (init ran first in main()).
     brood::core::alloc::init_limits_with_default(
         brood::core::alloc::TEST_DEFAULT_HARD,
         brood::core::alloc::TEST_DEFAULT_SOFT,
     );
+    let plist = opts.to_plist();
     if files.is_empty() {
         // Whole-project discovery via std/project.blsp. Raises on failure,
         // so a non-zero exit falls out of the eval error.
+        // `test` is required up front, not left to `run-project-tests`: the option
+        // plist can contain a `(test/test--make-filter …)` call, and arguments are
+        // evaluated before the callee runs its own `require`.
         run(
             interp,
-            "(require 'project) (project/load-config) (project/run-project-tests)",
+            &format!(
+                "(require 'project) (require 'test) (project/load-config) \
+                 (project/run-project-tests {plist})"
+            ),
         );
         return;
     }
@@ -448,6 +679,7 @@ fn cmd_test(interp: &mut Interp, files: &[String]) {
     } else {
         "(require 'test)"
     };
+    let inside_project = in_project();
     run(interp, bootstrap);
     for path in files {
         let src = brood::cli_support::read_source_or_exit("nest test", std::path::Path::new(path));
@@ -456,10 +688,14 @@ fn cmd_test(interp: &mut Interp, files: &[String]) {
             std::process::exit(1);
         }
     }
-    // `:trace` prints each test's name as it starts (live progress) — wanted for the
-    // interactive `nest test`; the `brood --test` path stays quiet for clean,
-    // machine-parseable output.
-    run(interp, "(test/run-tests :trace)");
+    // Inside a project, go through `run-loaded-tests` so `--failed` resolves
+    // against (and updates) the project's record exactly as on a whole-project
+    // run; outside one there is no record to keep, so run the registry directly.
+    if inside_project {
+        run(interp, &format!("(project/run-loaded-tests {plist})"));
+    } else {
+        run(interp, &format!("(test/run-tests {plist})"));
+    }
 }
 
 /// `nest check [FILES...]` — project-wide if no files, otherwise file-by-file.

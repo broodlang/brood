@@ -43,6 +43,8 @@ and calls `(run-tests)` for you. The language binary `brood` only ever runs a
 - **`(describe "group" body…)`** — names a group of related cases.
 - **`(test "name" body…)`** — one case. The body is any Brood code plus
   assertions.
+- Both accept `:serial` / `:isolated` (execution mode) and `:tags [kw …]`
+  (selection) before the body, in any order — see [Tags](#tags).
 - **`(deftest name body…)`** — a single case named by a symbol, no group. Kept
   for convenience; expands to `test`.
 
@@ -168,6 +170,64 @@ process-local) mutable accumulator to race on:
 A corollary: assertions must be used **lexically inside a test body** (the throw
 must reach that body's `try`), not from unrelated top-level helper functions.
 
+## Tags
+
+A `describe` or `test` may carry `:tags [kw …]` before its body, alongside the
+`:serial` / `:isolated` mode keywords (in either order). Tags are what
+`nest test --only` / `--exclude` / `--include` select on — the ExUnit `@tag`
+analogue:
+
+```lisp
+(describe "db writes" :serial :tags [:db :slow]
+  (test "inserts" ...)                        ; inherits :db :slow
+  (test "reconnects" :tags [:flaky] ...))     ; :db :slow :flaky
+```
+
+Group-level tags are **merged into** each test's own, so `--only db` picks up a
+test tagged only at the group level. Tags are plain keywords; there is no
+tag-with-value form (`--only db:primary` treats `db` as the tag and ignores the
+value unless the key is the built-in `test`/`describe` pseudo-selector below).
+
+## Selecting which tests to run
+
+`nest test` narrows a run three ways, and they compose:
+
+| flag | selects |
+| --- | --- |
+| `--only SELECTOR` | run **only** matching tests. Repeatable; several `--only`s **union** |
+| `--exclude SELECTOR` | drop matching tests |
+| `--include SELECTOR` | re-admit what `--exclude` dropped (`--include` wins) |
+| `FILE:LINE` | the test covering that line — point anywhere inside its body |
+| `--failed` | only the tests that failed on the previous run here |
+| `--partitions N --shard K` | one stable shard of the suite, for CI fan-out |
+| `--seed N` | randomise order; the seed is echoed so a failure replays |
+
+A **selector** is a tag name (`db`), a test-name substring (`test:adds`), or a
+group-label substring (`describe:math`):
+
+```bash
+nest test --only db                  # every test tagged :db
+nest test --only test:adds           # tests whose NAME contains "adds"
+nest test --only describe:math       # tests in a group whose label contains "math"
+nest test --exclude slow             # everything except :slow
+nest test --exclude slow --include flaky   # ...but keep the :flaky ones
+nest test tests/math_test.blsp:42    # just the test covering line 42
+nest test --failed                   # re-run last run's failures
+```
+
+`--failed` keeps its record in the project's cache dir as a **set difference**, not
+a snapshot: a test that just ran and passed leaves the set, one that just failed
+joins it, and one that wasn't run keeps its previous state. So the loop "run
+`--failed`, fix one, run `--failed` again" narrows each time. With no record (or
+after a fully green run) it warns and runs everything, rather than silently running
+nothing.
+
+A `FILE:LINE` that addresses no test **runs zero tests and warns** — it does not
+fall back to the whole suite, which in CI would be indistinguishable from success.
+
+`--partitions` assigns each test by a stable hash of its full label, so shards
+never overlap or drop a test regardless of machine or run order.
+
 ## Running
 
 In a project, run the whole suite with **`nest test`** (or `make suite`, or
@@ -179,10 +239,24 @@ below — forwarded by the runner, and usable directly if you call it yourself:
 (run-tests)            ; run all, print failures + a summary
 (run-tests :trace)     ; print `▶ group › name` as each test STARTS — live progress
 (run-tests :slow)      ; after the summary, list the slowest 5 tests
-(run-tests :timeout 5000)   ; per-test HARD ceiling in ms — killed+failed (default 30000)
+(run-tests :slowest 10)     ; ...or the slowest N
+(run-tests :timeout 5000)   ; per-test HARD ceiling in ms — killed+failed (default 120000)
 (run-tests :slow-over 200)  ; list any test over this many ms (informational; default 1000)
+(run-tests :max-failures 1) ; abandon the run once this many tests have failed
+(run-tests :repeat 50)      ; run the suite up to 50 times, stop at the first failure
+(run-tests :filter SPEC)    ; a selection spec — see `test--make-filter`
 (run-tests :trace :slow)
 ```
+
+The `nest test` flags map onto these one-for-one: `--max-failures` → `:max-failures`,
+`--repeat-until-failure` → `:repeat`, `--slowest` → `:slowest`, `--timeout` →
+`:timeout`, `--no-trace` suppresses `:trace`, and the selection flags are lowered
+into one `:filter` spec built by `test--make-filter` (selector *parsing* lives in
+Brood, so the grammar has a single definition).
+
+**`--max-failures` granularity.** The budget is checked between scheduling steps
+and between files, not mid-test, so a run can overshoot the cap slightly — the
+batch already in flight still reports. It bounds the run; it isn't an exact stop.
 
 `nest test` passes `:trace`, so it shows each test's name as it starts (handy for
 spotting a slow or hung one) — the `brood --test` path and `run-tests-structured`
@@ -195,11 +269,11 @@ overridable as above):
 | knob | default | effect |
 | --- | --- | --- |
 | `*test-slow-ms*` | 1000 | a test over this is **listed** (name + duration) under the summary — still **passes**; informational only |
-| `*test-timeout-ms*` | 30000 | a test over this is **hard-killed** (`(exit worker :kill)`) and **fails** as `test timed out after Ns` |
+| `*test-timeout-ms*` | 120000 | a test over this is **hard-killed** (`(exit worker :kill)`) and **fails** as `test timed out after Ns` |
 
-So a test between the two (1s ≤ t < 30s) is listed but passes; at/over the timeout it's killed and fails. Keep slow < timeout.
+So a test between the two (1s ≤ t < 120s) is listed but passes; at/over the timeout it's killed and fails. Keep slow < timeout.
 
-**Per-test timeout.** Every test has a wall-clock budget — **30 s by default**. A
+**Per-test timeout.** Every test has a wall-clock budget — **120 s by default**. A
 test that exceeds it is **hard-killed** (`(exit worker :kill)`, ADR-063 — so even a
 tight infinite loop is stopped, not just a `receive`-blocked one) and reported as a
 `test timed out after Ns` failure, rather than dragging or wedging the whole suite.
