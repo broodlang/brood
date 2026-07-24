@@ -39,13 +39,22 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    ~860 lines) — a cluster used only by the `jit_lower_arm` dispatcher, never by
    `jit_lower_arm_inner` — into `eval/compile/jit_lower/i64.rs`, re-exported so the
    tiering glue's `jit_lower::…` paths are unchanged. Behaviour-identical (a
-   relocation of independent fns). ⬜ The **`jit_lower_arm_inner` decomposition**
-   (the ~2,185-line function → `Call`/`Prim`/`SelfCall`/control helpers threading
-   the Cranelift lowering state) is the high-risk core and stays open — it needs a
-   dedicated pass with JIT-differential + `BROOD_JIT_DUMP_IR` + benchmark
-   verification, not a mechanical extraction. Verified: differential 2/2, jit
-   34/34, compaction 3/3 (all under `JIT_VERIFY`); suite 3057/3057; both feature
-   configs compile.
+   relocation of independent fns). Then (2026-07-24) started the
+   `jit_lower_arm_inner` decomposition itself: extracted the pure, Cranelift-free
+   **pre-lowering analysis** (block-leader + operand-stack-depth abstract interp)
+   into `eval/compile/jit_lower/prepass.rs::block_analysis` — data-in/data-out, no
+   CLIF emitted, verified behaviour-identical (differential 2/2, jit 34/34, suite
+   3071/3071). ⬜ The **emit-loop decomposition** — the ~1,730-line
+   `for ip in 0..len` CLIF loop (Call ~300, Prim1/2/3 + fused ~700, SelfCall ~200,
+   control ~130) over the virtualized `Op` stack — is the high-risk remainder.
+   Every arm shares `b` (the `FunctionBuilder`, which can't move into a struct — it
+   borrows `ctx.func`), the `stack`, ~30 `FuncRef`s, and the hoist maps, so a family
+   extraction needs a pervasive `LowerCtx { stack, funcs, hoisted, … }` refactor
+   (helpers take `(&mut FunctionBuilder, &mut LowerCtx, …)`) applied across the
+   whole loop before the first helper can move — an all-or-nothing change to
+   JIT-critical code where a subtle miscompile passes the tests. Deferred to a
+   focused pass with per-family JIT-differential + `BROOD_JIT_DUMP_IR` + benchmark
+   verification.
 2. ✅ **Split `process/scheduler.rs` (2080 → 1088)** — done 2026-07-24. The key
    insight that unlocked it: **keep every shared static in the root** and relocate
    only *functions* — then each child reaches the state via `use super::*`, so no

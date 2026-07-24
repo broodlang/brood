@@ -6872,3 +6872,27 @@ Net: `scheduler.rs` 2080 → 1088, carved into `guards.rs` (269) + `lifecycle.rs
 glue, `Process`/`Ctx`, and the shared statics.
 
 Verified: compiles default + no-default-features; full suite 3071/3071.
+
+## 2026-07-24 — Tier 1 item 1 cont.: start jit_lower_arm_inner decomposition (prepass)
+
+Began decomposing `jit_lower_arm_inner` (the ~2,185-line Cranelift lowerer) by
+extracting its pure, Cranelift-free **pre-lowering analysis** — the block-leader
+detection + operand-stack-depth abstract interp — into
+`eval/compile/jit_lower/prepass.rs::block_analysis(code, len) -> (is_leader,
+depth)`. Data in, data out, emits no CLIF, so behaviour-identical by construction.
+The function drops ~90 lines and the analysis now has a name + a home (the
+roadmap's `jit_lower/prepass.rs`).
+
+The emit-loop remainder (the ~1,730-line `for ip in 0..len` CLIF loop) is the
+high-risk core and stays open. Assessed in detail: the 15 match arms (Call ~300,
+Prim1/2/3 + fused prims ~700, SelfCall ~200, control ~130) all share `b` (the
+`FunctionBuilder` — can't move into a struct, it borrows `ctx.func`), the
+virtualized `Op` stack, ~30 `FuncRef`s, and the hoist maps. Extracting any family
+needs a pervasive `LowerCtx { stack, funcs, hoisted, … }` refactor (helpers as
+`(&mut FunctionBuilder, &mut LowerCtx, …)`) applied across the whole loop before
+the first helper moves — an all-or-nothing change to JIT-critical code where a
+subtle miscompile passes the tests. Deferred to a focused pass with per-family
+JIT-differential + `BROOD_JIT_DUMP_IR` + benchmark verification.
+
+Verified (prepass): compiles default + no-default-features; differential 2/2,
+jit 34/34 (under JIT_VERIFY); full suite 3071/3071.
