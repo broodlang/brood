@@ -2,6 +2,9 @@
 ;; Templates + new-project, split out of tool/project.blsp (which keeps project
 ;; analysis: manifest parsing, test discovery, lints, release, config).
 (defmodule scaffold
+  "`nest new` project scaffolding — templates and new-project creation, split
+out of the `project` module (which keeps project analysis: manifest parsing,
+test discovery, lints, release, config)."
   (:use project))   ; for *config-git-init*
 
 ;; --- scaffolding a new project (`nest new <name>`) ---------------------------

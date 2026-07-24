@@ -19,7 +19,7 @@
 ;; grammar crate (Brood `Cargo.toml`) + a face table + a layer — no code here.
 ;; Framework tier, pure, zero kernel surface beyond the parse builtin (§C).
 
-(defmodule treesit
+(defmodule editor/treesit
   "Generic tree-sitter language services over `tree-sitter-parse`'s positioned
 CST (`{:kind :start :end :named :kids/:text}`): `(fontify text lang face-of)` →
 `[start end face]` spans, and pure structural motions `(text lang point) ->

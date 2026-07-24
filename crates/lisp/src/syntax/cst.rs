@@ -339,10 +339,6 @@ impl<'a> Cst<'a> {
         }
     }
 
-    /// A `"…"` string. An unterminated string (EOF before the close quote)
-    /// becomes an `Error` node spanning to EOF, since `Node` carries no
-    /// "recovered" sub-state — `Error` is how syntactic diagnostics find it.
-    ///
     /// A `#`-dispatched form. `#b"…"` is a bytes literal — scanned like a string
     /// so the leaf span covers the whole `#b"…"` (the formatter preserves it
     /// verbatim; it highlights as a string token). `#{ … }` is a set literal:
@@ -366,6 +362,10 @@ impl<'a> Cst<'a> {
         }
     }
 
+    /// A `"…"` string. An unterminated string (EOF before the close quote)
+    /// becomes an `Error` node spanning to EOF, since `Node` carries no
+    /// "recovered" sub-state — `Error` is how syntactic diagnostics find it.
+    ///
     /// Uses [`Scanner::scan_string_body`] with `out: None` — same body-walk
     /// the reader uses, just without decoding (the CST keeps content as the
     /// source span; readers slice it on demand).

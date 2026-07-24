@@ -6425,3 +6425,36 @@ Skipped/deferred with rationale: externalizing `random` from the prelude (user-f
 break for ~64 lines); `net.rs`/`gui.rs`/`jit_lower.rs` deep splits (tightly-coupled
 delicate code, marginal-vs-risk); std crypto/data grouping (bundled names are
 path-independent, so purely cosmetic — ADR-011 flat-is-fine).
+
+## 2026-07-24 — Structural cleanup Tier 3 (quick wins) + a broken-build fix
+
+The safe/mechanical items from the structural review (ROADMAP "Structural /
+code-organization cleanup"), plus a build breakage found on the way.
+
+**Build fix:** `gui.rs` referenced `crate::core::heap::stall_guard`, but after the
+`heap/gc.rs` split only `stall_guard_pid`/`stall_threshold_ms` were re-exported
+from `heap` — added `stall_guard` to `pub(crate) use self::gc::{…}` (a
+gui-feature-only build failed without it).
+
+**Dead code:** deleted `cli_support::parse_jobs_args` (clap replaced it) and
+`Scanner::set_pos` — both zero callers.
+
+**Doc-comment misattachments:** the crash-dump doc now sits on
+`install_crash_dump` (was stranded above `fmt_utc_ms`); the `syntax/cst.rs`
+string paragraph moved onto `fn string` (was above `fn hash`); removed the
+orphaned `mailbox-size` doc left in `terminal.rs` (the primitive is documented in
+`PRIMITIVE_DOCS` + `process/mailbox.rs`).
+
+**Stale headers:** `builtins/io.rs` "terminal frontend (ADR-046)" banner (over
+`mailbox-size`/`process-info`) → "process introspection (ADR-051)"; fixed the
+first-line path comments in `std/editor/ansi.blsp` and `std/net/http.blsp`.
+
+**std/ consistency:** added `scaffold`'s missing `defmodule` docstring; renamed
+the `treesit` module → `editor/treesit` to match its file/registration/require
+path (updated the `treesit/`→`editor/treesit/` call sites in
+`tests/treesit_module_test.blsp`); moved `std/agent.blsp` → `std/proc/agent.blsp`
+beside `gen`/`supervisor`, renamed the module `agent` → `proc/agent`, and updated
+the registration in `system.rs`, the benches, and `tests/agent_test.blsp`.
+
+Verified: `cargo build -p cli` with gui+treesit-grammars+jit clean; full Brood
+suite 2979/2979 green.

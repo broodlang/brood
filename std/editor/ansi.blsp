@@ -1,4 +1,4 @@
-;; std/ansi.blsp — bare ANSI escape strings for simple terminal scripts.
+;; std/editor/ansi.blsp — bare ANSI escape strings for simple terminal scripts.
 (defmodule editor/ansi
   "ANSI escape *strings* for simple terminal output — the lightweight path for a
 script that just `print`s control codes each frame (animations, cellular

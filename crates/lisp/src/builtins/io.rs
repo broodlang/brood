@@ -767,14 +767,12 @@ pub(super) fn proc_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
     Ok(Value::nil())
 }
 
-// ----- terminal frontend (ADR-046) -------------------------------------------
+// ----- process introspection (ADR-051) ---------------------------------------
 //
-// The thin crossterm seam: enter/leave the alternate screen, read keys, and
-// paint a *frame* — a Brood vector of render ops. The protocol's meaning is
-// data (the ops); these primitives are the in-process frontend that interprets
-// it, so a remote frontend can implement the identical op vocabulary later.
-// Errors surface as clean `LispError`s (never a crossterm panic), mirroring the
-// rope primitives' discipline.
+// Kernel-internal per-process state an observer needs but Brood can't reach:
+// `mailbox-size` and the `process-info` snapshot, assembled here from the
+// registry / scheduler / name / monitor tables. `std/observer.blsp` builds
+// everything else on top. (The terminal/GUI frontend lives in terminal.rs.)
 
 pub(super) fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {

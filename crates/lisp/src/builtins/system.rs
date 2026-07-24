@@ -761,6 +761,9 @@ const CORE_MODULES: &[(&str, &str)] = &[
         "proc/supervisor",
         include_str!("../../../../std/proc/supervisor.blsp"),
     ),
+    // Process-backed state cell: start/get/update/get-and-update/cast/stop.
+    // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
+    ("proc/agent", include_str!("../../../../std/proc/agent.blsp")),
     // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
     // the dev observer's tree sort *and* a shipped app's process list (myedit's
@@ -835,9 +838,6 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // Authenticated encryption (ChaCha20-Poly1305), PBKDF2 key derivation, secure
     // random bytes. Wraps the %chacha20-* and %pbkdf2-sha256-bytes primitives.
     ("crypto", include_str!("../../../../std/crypto.blsp")),
-    // Process-backed state cell: start/get/update/get-and-update/cast/stop.
-    // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
-    ("agent", include_str!("../../../../std/agent.blsp")),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
     (

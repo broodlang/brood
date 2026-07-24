@@ -109,15 +109,6 @@ impl<'a> Scanner<'a> {
         self.pos
     }
 
-    /// Move the cursor — used by both parsers when they consume a single
-    /// known-width delimiter (`(`, `[`, …). Asserted to land on a UTF-8
-    /// boundary because both delimiters and all moves happen at ASCII chars.
-    #[inline]
-    pub fn set_pos(&mut self, p: usize) {
-        debug_assert!(self.src.is_char_boundary(p));
-        self.pos = p;
-    }
-
     #[inline]
     pub fn at_end(&self) -> bool {
         self.pos >= self.src.len()

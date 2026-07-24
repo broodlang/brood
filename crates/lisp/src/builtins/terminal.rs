@@ -1325,11 +1325,6 @@ pub(super) fn gui_font_register(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     Ok(Value::keyword(name))
 }
 
-/// `(mailbox-size pid)` — the number of queued messages in a local process's
-/// mailbox, or `nil` for a remote/dead pid. The one process-introspection
-/// accessor Brood can't reach (the queue lives behind the scheduler registry);
-/// `std/observer.blsp` assembles everything else (id, liveness) from Brood.
-
 #[cfg(test)]
 mod gui_face_tests {
     use super::gui_face;

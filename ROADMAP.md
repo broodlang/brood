@@ -22,6 +22,87 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 ## Active work — dated findings & backlogs
 
+### Structural / code-organization cleanup (2026-07-24)
+
+Findings from a full-repo structural review (9 parallel reviewers over all of
+`crates/` + `std/`). **Verdict: the codebase is well-structured** — coherent
+module boundaries, disciplined naming (zero `do_`/`normalize_`), no dead-code
+piles / commented-out blocks / TODO rot, clean feature-gating, the two-parser and
+tiered-evaluator hazards both *managed*. These are "sharpen a good thing" items,
+none urgent. Ranked by payoff. All **[kernel]** unless marked.
+
+**Tier 1 — maintainability hazards (real payoff):**
+
+1. ⬜ **Split `eval/compile/jit_lower.rs::jit_lower_arm_inner`** — one ~3,900-line
+   function (file is 5,431); individual match arms ~300 lines. The extracted
+   `jit_lower_i64_arm` is the model — pull `Call`/`Prim`/`SelfCall` families into
+   their own `fn`s, possibly `jit_lower/{prepass,call,prim,control}.rs`.
+2. ⬜ **Split `process/scheduler.rs` (2080)** — fuses ~7 concerns; carve
+   `preempt.rs` (budget/guards), `pool.rs` (queue/stealing/workers), `lifecycle.rs`
+   (spawn/exit/deregister), leaving capture-driver glue in the root. Mirror the
+   `dist.rs`→`dist/` pattern.
+3. ⬜ **Split `core/heap/gc.rs` (4518)** — extract the RUNTIME shared-region
+   compaction + node-liveness drain (~1300 lines, ADR-091) to `heap/gc_runtime.rs`;
+   independent of per-process nursery GC, roughly halves the file.
+4. ⬜ **`register()`/`PRIMITIVE_DOCS` drift guard** (`builtins/mod.rs`) — ~170
+   primitives declared in one place, documented ~2000 lines away by string key,
+   **no test asserting agreement** (verified). Add a coverage test; better,
+   co-locate each doc with its `def`. **[kernel]**
+
+**Tier 2 — real duplication to dedupe:**
+
+5. ⬜ **`types/mod.rs` 4-way literal-refinement copy-paste** — `lit`/`lit_int`/
+   `lit_bool`/`lit_str` get 4 near-identical blocks in `intersect`/`is_subtype`/
+   `is_disjoint`/`negate` (~200 lines; `intersect` already drifted from `union`'s
+   factored `merge_union_lit_*`). Plus every `Ty` constructor re-spells all 11
+   fields — struct-update syntax cuts ~100 lines.
+6. ⬜ **`lib.rs` `eval_str`/`eval_source` ~70-line near-dups** — carry delicate
+   load-bearing GC-rooting logic mirrored by hand; factor a private `eval_forms`
+   core. Highest-risk dup.
+7. ⬜ **`std/` path + url duplication** **[Brood]** — `std/path.blsp` (full API)
+   is required by *nothing* (verified: no `(:use path)`), while tooling uses the
+   prelude's bootstrap `path-*` subset; consolidate. `parse-url` duplicated —
+   `url.blsp` full parser vs a lossy reimpl in `net/http.blsp:357`; have net/http
+   `:use url`.
+8. ⬜ **`gui.rs` ↔ `gui_gpu.rs` render-op expansion copy-pasted and already
+   diverged** — GPU path silently skips `Cursor`/`ScrollRegion`/underline. Compute
+   op-geometry once, consume from either backend.
+9. ⬜ **`eval/compile/inline.rs` `node_*` predicate family** — `node_has_selfcall`
+   and `node_has_self_call` are functionally identical (one underscore apart,
+   verified); collapse the family to a `node_any` combinator.
+
+**Tier 3 — quick wins (verified, safe/mechanical): ✅ all done 2026-07-24.**
+(Suite 2979/2979 green; built with gui+treesit-grammars+jit.)
+
+- ✅ Deleted dead `parse_jobs_args` (`cli_support.rs`) and `Scanner::set_pos`
+  (`syntax/scanner.rs`) — both had zero callers.
+- ✅ Fixed doc-comment misattachments: the crash-dump doc now sits on
+  `install_crash_dump` (was on `fmt_utc_ms`); `syntax/cst.rs` string paragraph
+  moved onto `fn string`; the orphaned `mailbox-size` doc removed from
+  `terminal.rs` (the primitive is documented in `PRIMITIVE_DOCS` + `mailbox.rs`).
+- ✅ Fixed stale/misleading headers: `builtins/io.rs` "terminal frontend" banner
+  → "process introspection"; corrected path comments in `std/editor/ansi.blsp`
+  and `std/net/http.blsp`. **[Brood]**
+- ✅ `std/` consistency **[Brood]**: added `scaffold`'s `defmodule` docstring;
+  renamed the `treesit` module to `editor/treesit` (+ its callers); moved
+  `agent.blsp` → `std/proc/agent.blsp` and renamed the module to `proc/agent`
+  (+ registration, benches, tests).
+
+Also en route: fixed a broken build — `heap::stall_guard` was referenced by
+`gui.rs` but not re-exported after the `heap/gc.rs` split (only `stall_guard_pid`
+was); added it to the `pub(crate) use self::gc::{…}` list.
+
+**Tier 4 — policy-in-Rust notes (judgment calls, "Rust=mechanism, Brood=policy"):**
+
+- ⬜ `gui.rs` hardcodes UI policy — Catppuccin colors duplicated with `theme.blsp`
+  (drift-prone), a named-color palette `face.blsp` could own, a kinetic-scroll
+  physics model.
+- ⬜ `builtins/io.rs` (1929) is a 13-concern grab-bag — split crypto+hashing and
+  the package-manager git/tar mechanism; transcendental math is misfiled in
+  `sequences.rs` (belongs in `numeric.rs`).
+- ⬜ `nest`'s `cmd_run` (217 lines) carries more policy in Rust than the other thin
+  subcommand handlers — candidate to push into a Brood `project/run` entry.
+
 ### Runtime-feature parity program — BEAM / .NET / Node (2026-07-22)
 
 The distilled, ranked program for closing the remaining runtime *feature* gaps
