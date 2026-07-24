@@ -224,6 +224,7 @@ pub fn write_release(base: &[u8], archive: &[u8], out: &Path) -> std::io::Result
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

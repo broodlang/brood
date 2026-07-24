@@ -50,14 +50,14 @@ fn a_woken_process_is_not_reaped_by_another_interps_drop() {
     let parked_before = brood::process::parked_process_count();
     a.eval_str("(def p (spawn (receive)))").unwrap();
     assert!(wait_until(|| {
-        brood::process::parked_process_count() >= parked_before + 1
+        brood::process::parked_process_count() > parked_before
     }));
     {
         let _b = Interp::new();
     } // B drops — must not touch A's waiter.
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(
-        brood::process::parked_process_count() >= parked_before + 1,
+        brood::process::parked_process_count() > parked_before,
         "another runtime's drop reaped our parked process"
     );
     // A's process is still alive and wakeable: send to it and let it finish.

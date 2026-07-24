@@ -354,6 +354,11 @@ struct TlsPending {
     accepted_at: Instant,
 }
 
+// The `Tls` variant (rustls state) is much larger than the others, but the
+// reactor holds exactly one `Rx` per live socket and a TLS connection genuinely
+// needs that state inline — boxing would just add an indirection on the hot
+// read/write path for no real saving.
+#[allow(clippy::large_enum_variant)]
 enum Rx {
     Plain(PlainConn),
     Tls(TlsConn),
