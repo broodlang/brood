@@ -161,6 +161,7 @@ pub enum HandleKind {
     Pair,
     Vector,
     Map,
+    Set,
     Rope,
     Fn,
     Macro,
@@ -211,6 +212,10 @@ impl ConstVal {
                 kind: HandleKind::Map,
                 bits: AtomicU64::new(id.0),
             },
+            ValueRef::Set(id) => ConstVal::Handle {
+                kind: HandleKind::Set,
+                bits: AtomicU64::new(id.0),
+            },
             ValueRef::Rope(id) => ConstVal::Handle {
                 kind: HandleKind::Rope,
                 bits: AtomicU64::new(id.0),
@@ -240,6 +245,7 @@ impl ConstVal {
                     HandleKind::Pair => Value::pair(PairId(b)),
                     HandleKind::Vector => Value::vector(VecId(b)),
                     HandleKind::Map => Value::map(MapId(b)),
+                    HandleKind::Set => Value::set(MapId(b)),
                     HandleKind::Rope => Value::rope(RopeId(b)),
                     HandleKind::Fn => Value::func(ClosureId(b)),
                     HandleKind::Macro => Value::macro_(ClosureId(b)),
@@ -260,7 +266,7 @@ impl ConstVal {
                 ValueRef::BigInt(id) => id.0,
                 ValueRef::Pair(id) => id.0,
                 ValueRef::Vector(id) => id.0,
-                ValueRef::Map(id) => id.0,
+                ValueRef::Map(id) | ValueRef::Set(id) => id.0,
                 ValueRef::Rope(id) => id.0,
                 ValueRef::Fn(id) | ValueRef::Macro(id) => id.0,
                 // `f` (flush_rt_value) never changes the handle *kind*, so this is

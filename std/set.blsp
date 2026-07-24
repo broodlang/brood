@@ -1,59 +1,47 @@
-;; std/set.blsp — sets as an opt-in library over maps.
+;; std/set.blsp — the set algebra over the kernel `#{…}` set type.
 ;; A namespace (ADR-065): its functions are `set/set`, `set/union`, … — consumers
-;; `(:use set)` to refer them bare, or call them qualified. (First migrated std
-;; module; the rest follow the same defmodule→ns pattern.)
+;; `(:use set)` to refer them bare, or call them qualified.
 (defmodule set
   "Sets — unordered collections of **unique** values with fast membership.
 
-A set is represented as a **map of `element → true`**, so it is not a new value
-kind: every map and sequence operation already works on it directly. That is the
-whole point of building it in Brood rather than the kernel —
+A set is a **first-class kernel value** (`#{…}`, ADR-060): `set?` is true, it
+prints `#{…}`, and it never compares equal to a map. It is backed by the same
+CHAMP trie as a map (`element → true`), so it shares the map's structural
+equality (vector/structural keys work — `#{[0 0] [1 2]}` Just Works) and O(log n)
+membership, and it is *seqable* (`map`/`fold`/`count`/`vec`/`into` treat it as its
+elements).
 
-- **membership** is `(contains? s x)` (the prelude's map-key test),
-- **elements** are `(keys s)`, **size** is `(count s)`, **empty?** is `(empty? s)`,
-- you can `fold` / `map` / `into` a set exactly like any map's keys.
-
-This module adds only what maps don't already give: a constructor that dedups
-(`set`), single-element add/remove (`conj` / `disj`), and the set algebra
-(`union` / `intersection` / `difference` / `subset?`). Structural equality and
-vector keys come for free from the map underneath, so a set of coordinates —
-`(set [[0 0] [1 2]])` — Just Works as the live-cell model a cellular automaton
-wants (replacing the `{[x y] true}` map-as-set tell).
-
-**Planned upgrade (deliberately deferred, ADR-011):** a first-class `#{…}` reader
-literal, `#{…}` printing, and a distinct `set?` / `Tag::Set` — which need kernel
-support (reader, printer, a `Value` variant). Until then a set *is* a map, so
-test it with `map?`, not `set?`. The library API below is forward-compatible:
-when the literal lands these functions keep the same names and meanings.")
+The kernel supplies the literal, `set?`, and the O(log n) element ops
+(`%set`/`%set-add`/`%set-remove`/`%set-has?`/`%set-count`); the prelude's
+`contains?`/`count`/`empty?` already dispatch to a set. This module adds the
+constructor from a collection (`set`), single-element `conj`/`disj`, and the set
+algebra (`union` / `intersection` / `difference` / `subset?`).")
 
 (defn set (coll)
-  "The set of the distinct elements of `coll` (a list or vector). Duplicates
-collapse: `(set [1 1 2]) ⇒ {1 true 2 true}`."
-  (fold (fn (s x) (assoc s x true)) {} coll))
+  "The set of the distinct elements of `coll` (any seqable — list, vector, another
+set). Duplicates collapse: `(set [1 1 2]) ⇒ #{1 2}`."
+  (fold (fn (s x) (%set-add s x)) #{} coll))
 
 (defn conj (s x)
   "`s` with `x` added (a no-op if `x` is already present). Returns a fresh set."
-  (assoc s x true))
+  (%set-add s x))
 
 (defn disj (s x)
   "`s` with `x` removed (a no-op if `x` is absent). Returns a fresh set."
-  (dissoc s x))
+  (%set-remove s x))
 
-;; The accumulator is always a set (a map), so the per-element folds use the
-;; 3-arg kernel `map-assoc`/`map-dissoc` directly — variadic `assoc`/`dissoc`
-;; would build a rest-list on every element.
 (defn union (a b)
   "Every element in either `a` or `b`."
-  (fold (fn (s x) (map-assoc s x true)) a (keys b)))
+  (fold (fn (s x) (%set-add s x)) a b))
 
 (defn intersection (a b)
   "Every element in both `a` and `b`."
-  (fold (fn (s x) (if (contains? b x) (map-assoc s x true) s)) {} (keys a)))
+  (fold (fn (s x) (if (contains? b x) (%set-add s x) s)) #{} a))
 
 (defn difference (a b)
   "Every element of `a` that is not in `b`."
-  (fold (fn (s x) (map-dissoc s x)) a (keys b)))
+  (fold (fn (s x) (%set-remove s x)) a b))
 
 (defn subset? (a b)
   "True when every element of `a` is also in `b`."
-  (fold (fn (ok x) (if ok (contains? b x) false)) true (keys a)))
+  (fold (fn (ok x) (if ok (contains? b x) false)) true a))

@@ -255,6 +255,27 @@ fn eval_tail_loop(
                     Ok(heap.map_from_pairs(pairs))
                 });
             }
+            ValueRef::Set(id) => {
+                // A set literal evaluates each element, then dedups by structural
+                // equality (`set_from_elems`). Like a vector literal, operand-stack-
+                // rooted so a deep collection during an element eval can't dangle the
+                // source forms or accumulated elements.
+                let items = heap.set_elems(id);
+                let n = items.len();
+                return heap.root_scope(|heap| {
+                    let env_r = heap.root_env(env);
+                    let src: SmallVec<[Root; 8]> = items.iter().map(|&it| heap.root(it)).collect();
+                    let mut out_r: SmallVec<[Root; 8]> = SmallVec::with_capacity(n);
+                    for &ir in &src {
+                        let env_now = heap.read_root_env(env_r);
+                        let item = heap.read_root(ir);
+                        let v = eval(heap, item, env_now)?;
+                        out_r.push(heap.root(v));
+                    }
+                    let out: Vec<Value> = out_r.iter().map(|&r| heap.read_root(r)).collect();
+                    Ok(heap.set_from_elems(out))
+                });
+            }
             ValueRef::Pair(_) => {} // combination, handled below
             _ => return Ok(expr),
         }

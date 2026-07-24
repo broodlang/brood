@@ -69,6 +69,10 @@ pub enum Message {
     List(Vec<Message>, Option<Pos>),
     Vector(Vec<Message>),
     Map(Vec<(Message, Message)>),
+    /// A set value — its elements (the backing values are all `true`, so only the
+    /// elements ship). Rebuilt as a `Value::Set` on the receiver, preserving the
+    /// distinct set type across a `send`/node boundary.
+    Set(Vec<Message>),
     Ref(u64),
     /// A process id carrying node identity. In-process this keeps the interned
     /// node `Symbol`; the node-link wire codec (`crate::dist`) re-encodes the
@@ -286,6 +290,14 @@ fn to_message_rec(
                 ));
             }
             Message::Map(out)
+        }
+        Value::Set(id) => {
+            let elems = heap.set_elems(id);
+            let mut out = Vec::with_capacity(elems.len());
+            for e in elems {
+                out.push(to_message_rec(heap, e, visited, depth + 1)?);
+            }
+            Message::Set(out)
         }
         Value::Ref(n) => Message::Ref(n),
         Value::Pid { node, id } => Message::Pid { node, id },
@@ -517,6 +529,13 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
                 pairs.push((k, v));
             }
             heap.map_from_pairs(pairs)
+        }
+        Message::Set(items) => {
+            let mut elems = Vec::with_capacity(items.len());
+            for item in items {
+                elems.push(from_message(heap, item));
+            }
+            heap.set_from_elems(elems)
         }
         Message::Ref(n) => Value::ref_(*n),
         Message::Pid { node, id } => Value::pid(*node, *id),

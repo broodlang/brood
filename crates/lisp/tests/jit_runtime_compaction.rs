@@ -42,11 +42,7 @@ fn run(src: &'static str) -> Result<String, String> {
 }
 
 fn is(src: &'static str, want: &str) {
-    assert_eq!(
-        run(src).as_deref(),
-        Ok(want),
-        "diverged on:\n  {src}"
-    );
+    assert_eq!(run(src).as_deref(), Ok(want), "diverged on:\n  {src}");
 }
 
 #[test]

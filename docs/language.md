@@ -35,7 +35,7 @@ these are the ones to unlearn:
 | `{:keys [a b]}` / `:or` map destructuring | **Supported** — a map literal in pattern position binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default): `(let ({:keys [a b] :or {b 0}} m) …)`, works in `let`/`fn`/`match`. General `{:key subpattern}` nesting and `:as` are deferred (ADR-011). | Works as in Clojure for the `:keys`/`:or` subset. |
 | `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. | Works (vectors are accepted in binding position), but it's non-idiomatic — prefer lists. |
 | `(let [[a 1] [b 2]] …)` / Scheme's `(let ((a 1)) …)` | Bindings are **flat**: `(let (a 1 b 2) …)`. | A clean error **with a hint** to flatten (was accepted-then-confusing). |
-| `#{1 2 3}` set literal | No set reader literal. Use the `set` library: `(require 'set)` then `(set/set [1 2 3])`. | A parse error **with a hint** naming the set library (was a misleading "odd map literal"). |
+| `#{1 2 3}` set literal | A first-class set (`Value::Set`, ADR-060): `set?` true, prints `#{…}`, never `=` to a map. Evaluates its elements and dedups. | Reads as a kernel set; the `set` library (`(require 'set)`) adds `union`/`intersection`/… |
 | `#(+ 1 %)` anonymous-fn reader macro | Write it out: `(fn (x) (+ 1 x))`. | A parse error **with a hint** naming `(fn …)` (was "unbound symbol: #"). |
 | `#'foo` var-quote | Symbols are values — plain `'foo`. | A parse error **with a hint** naming `'foo`. |
 | `(/ 7 2)` → ratio `7/2` | No ratios. Integer args give an integer **only when they divide evenly**; otherwise a float. `(/ 12 3)` → `4`, `(/ 7 2)` → `3.5`. | A float where you expected an exact ratio. |
@@ -235,17 +235,24 @@ type `(record :k T …)` this lowers to.
 
 ## Sets
 
-There is no kernel set kind yet. A **set** is an opt-in library (`(:use set)` to
-refer its names bare, `std/set.blsp`) built *on maps*: a set is a map of
-`element → true`, so every map
-operation already applies — membership is `(contains? s x)`, elements are
-`(keys s)`, size is `(count s)`, and you can `fold`/`map`/`into` it. The module
-adds only what maps lack: `(set coll)` (dedups), `conj`/`disj`, and the algebra
-`union`/`intersection`/`difference`/`subset?`. Structural equality and vector
-keys come from the map underneath, so `(set [[0 0] [1 2]])` is the natural
-live-cell model for a grid. A first-class `#{…}` literal and a distinct `set?` are
-deferred until they earn kernel support (reader/printer/`Value` variant) — see
-the roadmap.
+A **set** is a first-class kernel value written `#{1 2 3}` — an unordered
+collection of distinct elements (ADR-060). It is its own kind: `(set? s)` is true,
+`(map? s)` is false, `(type-of s)` is `:set`, it prints `#{…}`, and a set is
+**never** `=` to a map (even one with the same keys). Under the hood it shares the
+CHAMP trie with maps (`element → true`), so it inherits structural equality
+(including vector/structural elements — `#{[0 0] [1 2]}` is the natural live-cell
+model for a grid) and O(log n) membership, and it is **seqable**: `count`,
+`first`/`rest`, `map`, `fold`, `into`, and `vec` all treat it as its elements.
+Equality is order-independent (`(= #{1 2 3} #{3 2 1})`), and a `#{…}` literal
+evaluates its elements then dedups (`#{(+ 1 1) 2}` ⇒ `#{2}`).
+
+Membership is `(contains? s x)`; the kernel supplies the literal, `set?`, and the
+O(log n) element ops (`%set`/`%set-add`/`%set-remove`/`%set-has?`/`%set-count`).
+The **`set` library** (`(require 'set)` / `(:use set)`, `std/set.blsp`) adds the
+constructor from a collection (`(set coll)`, which dedups), single-element
+`conj`/`disj`, and the algebra `union`/`intersection`/`difference`/`subset?`.
+Sets deep-copy across processes like any value (`send`/`spawn` round-trip them as
+sets, not maps).
 
 ## Syntax
 

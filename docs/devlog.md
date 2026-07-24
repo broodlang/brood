@@ -6166,3 +6166,40 @@ a stalled or forgotten socket with a live owner is never reaped). Two additions 
 
 The app-side per-read timeout (`*http-read-timeout-ms*`) that already protects the
 HTTP server is unchanged. Suite 803/803; `nest check` zero warnings.
+
+## 2026-07-24 — First-class set kernel (`#{…}`, ADR-060)
+
+Promoted sets from the map-backed library to a first-class kernel type — the
+long-deferred ADR-060 item. A new `Value::Set(MapId)` shares the CHAMP trie with
+maps (`element → true`) so the storage is reused verbatim, but it is its OWN kind
+at the value/tag boundary: `set?` true, `map?` false, `type-of` `:set`, prints
+`#{…}`, and a set is **never** `=` to a map (even same-keyed).
+
+Paid the full `docs/types.md` compatibility contract for a new `Value` variant:
+`Tag::Set` + `ALL_TAGS` bit (the type lattice; without it `ANY` excluded sets and
+every `any` param wrongly rejected them — the "expects any, got «blank»" tell),
+`value::tag`, the reader (`#{…}` → `Value::Set`, evaluates + dedups its elements),
+printer, tree-walker + macroexpander + namespace-resolve arms, structural hash +
+`equal` (order-independent, reduces to `map_equal` on the backing trie), a
+`ConstVal::Handle` kind, `Message::Set` + the dist wire codec (cross-process
+round-trip as a set, not a map), and — the delicate part — the ~dozen
+wildcard-guarded GC paths a set shares with maps (copy collector, promote, RUNTIME
+compaction flush, `is_movable`/`needs_root_slot`, the `GC_VERIFY` walk, multigen
+liveness). The compiler's exhaustiveness caught the explicit matches;
+`GC_STRESS`+`GC_VERIFY` covered the wildcard ones.
+
+Sets are **seqable** (`first`/`rest`/`seq_items` yield elements, so
+`count`/`map`/`fold`/`into` Just Work; `rest` returns a list so a fold over a set
+materialises at most once). Kernel ops `%set`/`%set-add`/`%set-remove`/
+`%set-has?`/`%set-count`; `std/set.blsp` is now Brood sugar over them (constructor
++ `conj`/`disj` + `union`/`intersection`/`difference`/`subset?`). Deferred (noted):
+compiling a `#{…}` literal in a hot arm to a dedicated `Node::Set`/bytecode — today
+such an arm defers to the tree-walker (correct, `_ => None` in `compile_node`); the
+VM-eligibility optimization is a follow-up, and quasiquoting into a set literal
+(`` `#{~x} ``) doesn't unquote yet.
+
+`tests/set_test.blsp` rewritten for the kernel type (18 tests incl. literals,
+`set?`/`map?`, order-independent equality, set≠map, and the `:isolated`
+cross-process fan-in); `reader_hints_test` updated (`#{…}` now reads instead of
+raising the old teaching hint). Suite **2921/2921**, `nest check` zero warnings,
+differential + GC + runtime-collector/multigen green.

@@ -13,11 +13,10 @@
   (try (eval (read-string src)) (catch e (get e :hint))))
 
 (describe "reader: Clojure/Scheme syntax gets a teaching hint"
-  (test "#{…} set literal → parse error naming the set library"
-    (let (e (try (read-string "#{1 2 3}") (catch e e)))
-      (assert= (get e :kind) :parse)
-      (is (string-contains? (get e :message) "set-literal"))
-      (is (string-contains? (get e :hint) "(require 'set)"))))
+  (test "#{…} now reads as a first-class set literal (no longer an error)"
+    (let (s (eval (read-string "#{1 2 3}")))
+      (is (set? s))
+      (assert= s #{1 2 3})))
   (test "#(…) anonymous-fn reader macro → parse error naming (fn …)"
     (let (e (try (read-string "#(+ 1 %)") (catch e e)))
       (assert= (get e :kind) :parse)

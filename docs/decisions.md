@@ -3346,20 +3346,26 @@ features" (ADR-011):
   deduping constructor `set`, single-element `conj`/`disj`, and the algebra
   `union`/`intersection`/`difference`/`subset?`. Structural equality and vector
   keys come for free from the CHAMP map underneath (ADR-040).
-- **Deferred to the kernel, deliberately:** a `#{…}` reader literal, `#{…}`
-  printing, and a distinct `set?`/`Tag::Set`. Those need reader, printer, and a new
-  `Value` variant (and the type-system bit, GC trace, copy-on-send arms — the full
-  compatibility contract in `docs/types.md`). Until a concrete need pulls them in,
-  a set is a map, so test it with `map?`. The library API is forward-compatible:
-  the function names/meanings survive the eventual literal.
+- **Promoted to the kernel — shipped 2026-07-24 (supersedes the original
+  deferral).** A `#{…}` reader literal, `#{…}` printing, and a distinct
+  `Value::Set`/`Tag::Set` all landed: the full compatibility contract
+  (`docs/types.md`) was paid — a new `Value` variant + `Tag` + type-lattice bit
+  (`ALL_TAGS`), `value::tag`, GC trace/promote/copy-on-send (`Message::Set` + the
+  dist wire codec), structural hash + `equal`, a `ConstVal::Handle` kind, and the
+  reader/printer/evaluator/macroexpander arms. The set is still backed by the CHAMP
+  map (`element → true`) so it reuses the map storage verbatim; it is its OWN kind
+  only at the value/tag boundary (`set?` true, `map?` false, `type-of` `:set`, and
+  a set is **never** `=` to a map). The `set` library became Brood sugar over the
+  kernel ops (`%set`/`%set-add`/`%set-remove`/`%set-has?`/`%set-count`).
 
 **Consequences.**
-- Zero kernel surface, zero new `Value` match arms — the feature lands without
-  touching the exhaustive `Value` matches (notably not colliding with in-flight
-  kernel work).
-- A set and the equivalent `{… true}` map are *indistinguishable* (no `set?`).
-  That's the accepted cost of the deferral; it's revisited if/when the literal
-  lands.
+- A set and the equivalent `{… true}` map are now **distinguishable** (`set?` vs
+  `map?`, distinct print, never `=`) — the original deferral's accepted cost is
+  paid off. Existing `map?`-based set tests were updated to `set?`.
+- The new `Value` variant added ~30 `Set` match arms across the kernel (GC,
+  promote, region predicates, verifier, eval/compile/macroexpand); the compiler's
+  exhaustiveness enforced most, and `GC_STRESS`+`GC_VERIFY` covered the
+  wildcard-guarded GC paths a set shares with maps.
 
 **References.** ADR-006 (write the language in the language), ADR-011 (defer power
 features), ADR-040 (CHAMP map the set rides on), [`ROADMAP.md`](../ROADMAP.md)

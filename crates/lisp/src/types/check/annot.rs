@@ -37,6 +37,7 @@ fn base_ty(name: &str) -> Option<Ty> {
         "vector" => Ty::of(Tag::Vector),
         "list" => Ty::LIST,
         "map" => Ty::of(Tag::Map),
+        "set" => Ty::of(Tag::Set),
         "fn" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
         "rope" => Ty::of(Tag::Rope),
         "pid" => Ty::of(Tag::Pid),

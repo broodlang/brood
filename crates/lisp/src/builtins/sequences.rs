@@ -74,6 +74,9 @@ pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             Value::Pair(p) => Ok(heap.car(p)),
             _ => Ok(Value::nil()),
         },
+        // A set is a sequence of its elements (CHAMP order): its head, or nil if
+        // empty — so `first`/`map`/`fold`/… treat a set as a seq (Clojure-like).
+        Value::Set(id) => Ok(heap.set_elems(id).first().copied().unwrap_or(Value::nil())),
         Value::Nil => Ok(Value::nil()),
         _ => Err(LispError::wrong_type(heap, "first", "list or vector", v)),
     }
@@ -103,6 +106,13 @@ pub(super) fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             Value::Pair(p) => Ok(heap.cdr(p)),
             _ => Ok(Value::nil()),
         },
+        // The tail of a set is a plain list of its remaining elements (CHAMP order):
+        // a set seqs as its elements, and after the first `rest` the fold walks a
+        // list — so a `(fold f init a-set)` materialises the set at most once (O(n)).
+        Value::Set(id) => {
+            let items: Vec<Value> = heap.set_elems(id).into_iter().skip(1).collect();
+            Ok(heap.list(items))
+        }
         Value::Nil => Ok(Value::nil()),
         _ => Err(LispError::wrong_type(heap, "rest", "list or vector", v)),
     }
@@ -132,6 +142,7 @@ pub(super) fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResul
         Value::Vector(id) => Ok(Value::boolean(heap.vector(id).is_empty())),
         Value::Bytes(id) => Ok(Value::boolean(heap.bytes(id).as_bytes().is_empty())),
         Value::Map(id) => Ok(Value::boolean(heap.map_size(id) == 0)),
+        Value::Set(id) => Ok(Value::boolean(heap.map_size(id) == 0)),
         _ => Err(LispError::wrong_type(heap, "empty?", "collection", x)),
     }
 }
@@ -601,6 +612,52 @@ pub(super) fn map_pairs(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 /// `count`/`empty?` on a map use instead of materialising `map-pairs`.
 pub(super) fn map_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_map(heap, "map-count", arg(args, 0))?;
+    Ok(Value::int(heap.map_size(id) as i64))
+}
+
+pub(super) fn expect_set(heap: &Heap, who: &str, v: Value) -> Result<value::MapId, LispError> {
+    expect!(heap, who, v, "set",
+        Value::Set(id) => id,
+    )
+}
+
+/// Re-wrap the `MapId` a map op just produced as a **set** (both share the CHAMP
+/// store; the set-op natives keep the backing values all `true`).
+fn as_set(v: Value) -> Value {
+    match v {
+        Value::Map(id) => Value::set(id),
+        _ => unreachable!("map op returns Value::Map"),
+    }
+}
+
+/// `(%set a b c …)` — build a set from element args (the programmatic form of the
+/// `#{ }` literal). Dedups by structural equality; every op returns a fresh set.
+pub(super) fn set_construct(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.set_from_elems(args.to_vec()))
+}
+
+/// `(%set-add s x)` — a fresh set with `x` added (a set already holding `x` is
+/// returned structurally unchanged — the CHAMP `assoc` is a no-op).
+pub(super) fn set_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_set(heap, "%set-add", arg(args, 0))?;
+    Ok(as_set(heap.map_assoc(id, arg(args, 1), Value::Bool(true))))
+}
+
+/// `(%set-remove s x)` — a fresh set with `x` removed (absent → unchanged).
+pub(super) fn set_remove(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_set(heap, "%set-remove", arg(args, 0))?;
+    Ok(as_set(heap.map_dissoc(id, arg(args, 1))))
+}
+
+/// `(%set-has? s x)` — is `x` an element of set `s`? O(log n) trie lookup.
+pub(super) fn set_has(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_set(heap, "%set-has?", arg(args, 0))?;
+    Ok(Value::boolean(heap.map_get(id, arg(args, 1)).is_some()))
+}
+
+/// `(%set-count s)` — the number of elements, O(1) (the CHAMP root tracks size).
+pub(super) fn set_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = expect_set(heap, "%set-count", arg(args, 0))?;
     Ok(Value::int(heap.map_size(id) as i64))
 }
 

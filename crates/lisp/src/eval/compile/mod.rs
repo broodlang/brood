@@ -366,6 +366,9 @@ fn value_is_immovable(v: Value) -> bool {
         ValueRef::Pair(id) => id.region() != value::LOCAL,
         ValueRef::Vector(id) => id.region() != value::LOCAL,
         ValueRef::Map(id) => id.region() != value::LOCAL,
+        // A set is a `MapId` — movable when LOCAL, so it must be checked (else this
+        // tripwire would wrongly pass a movable LOCAL set baked into a Const).
+        ValueRef::Set(id) => id.region() != value::LOCAL,
         ValueRef::Rope(id) => id.region() != value::LOCAL,
         ValueRef::Fn(id) | ValueRef::Macro(id) => id.region() != value::LOCAL,
         // A `Range` is a `VecId` and a `Transient` a `TransientId` — both movable when
@@ -453,6 +456,7 @@ fn body_symbols(heap: &Heap, body: Value) -> std::collections::HashSet<Symbol> {
                 work.push(k);
                 work.push(val);
             }),
+            ValueRef::Set(sid) => heap.fold_entries(sid, &mut |k, _v| work.push(k)),
             _ => {}
         }
     }
@@ -1881,6 +1885,7 @@ fn jit_describe_value(v: Value) -> &'static str {
         Value::Vector(_) => "vector",
         Value::Range(_) => "range",
         Value::Map(_) => "map",
+        Value::Set(_) => "set",
         _ => "other",
     }
 }

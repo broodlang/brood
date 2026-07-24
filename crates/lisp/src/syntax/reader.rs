@@ -250,17 +250,12 @@ impl<'a> Parser<'a> {
         }
         let pos = self.s.pos_at(self.s.pos());
         match self.s.peek_after() {
-            // `#{…}` — Clojure set literal. Brood has no set reader literal yet;
-            // the `set` library is the idiom.
-            Some('{') => Err(LispError::parse(
-                "`#{…}` is Clojure set-literal syntax, which Brood does not have",
-            )
-            .with_pos(pos)
-            .with_hint(
-                "Brood has no `#{…}` reader literal. Use the set library: \
-                 `(require 'set)` then `(set/set [1 2 3])` (or `(:use set)` then \
-                 `(set [1 2 3])`).",
-            )),
+            // `#{…}` — a set literal (`Value::Set`). Consume the '#' and read the
+            // brace-delimited elements; the evaluator evaluates + dedups them.
+            Some('{') => {
+                self.s.bump(); // '#'
+                self.read_set()
+            }
             // `#(…)` — Clojure anonymous-function reader macro.
             Some('(') => Err(LispError::parse(
                 "`#(…)` is Clojure's anonymous-function reader macro, which Brood does not have",
@@ -426,6 +421,30 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(self.heap.map_from_pairs(pairs))
+    }
+
+    /// Read a set literal `#{ a b c … }`. Elements are read as (unevaluated) forms
+    /// in source order; the evaluator evaluates them and dedups by structural
+    /// equality (`set_from_elems`). Commas are whitespace, so `#{1, 2, 3}` reads
+    /// the same as `#{1 2 3}`. The `#` is consumed by `read_hash`; this consumes
+    /// the `{`.
+    fn read_set(&mut self) -> Result<Value, LispError> {
+        // No `set_form_pos` — see `read_vector`: the form-pos table is pair-keyed.
+        let start = self.s.pos_at(self.s.pos()); // position of the opening '{'
+        self.s.bump(); // '{'
+        let mut items = Vec::new();
+        loop {
+            self.s.skip_trivia();
+            match self.s.peek() {
+                None => return Err(self.err_at_incomplete(start, "unclosed set (opened here)")),
+                Some('}') => {
+                    self.s.bump();
+                    break;
+                }
+                Some(_) => items.push(self.read_form()?),
+            }
+        }
+        Ok(self.heap.set_from_elems(items))
     }
 
     fn read_string(&mut self) -> Result<Value, LispError> {

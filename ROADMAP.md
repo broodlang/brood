@@ -536,8 +536,19 @@ Runtime housekeeping (both items landed):
 - ⬜ **Parameter-type inference from arbitrary body usage** across branches — needs
   guard-aware dominance analysis; stays out until false-positive-clean (ADR-011).
   (The sound tiers of `infer_sig` already ship.)
-- ⬜ **First-class set kernel piece** — a `#{…}` reader literal + printing + a
-  distinct `set?`/`Tag::Set`; the `(require 'set)` library already shipped (ADR-060).
+- ✅ **First-class set kernel** — shipped 2026-07-24. A distinct `Value::Set`/
+  `Tag::Set` backed by the CHAMP trie (`element → true`): the `#{…}` reader literal
+  (evaluates + dedups its elements), `#{…}` printing, `set?`, `type-of` → `:set`,
+  order-independent equality with a set **never** `=` to a map, seqable
+  (`count`/`first`/`rest`/`map`/`fold`/`into`), cross-process round-trip
+  (`Message::Set` + wire codec), and full GC/promote/compaction survival (the
+  compatibility contract — GC trace, copy-on-send, hash, `ConstVal` handle, type
+  lattice). Kernel ops `%set`/`%set-add`/`%set-remove`/`%set-has?`/`%set-count`;
+  the `set` library (`std/set.blsp`) is now Brood sugar over the kernel type
+  (constructor + `conj`/`disj` + `union`/`intersection`/`difference`/`subset?`).
+  Tests: `tests/set_test.blsp` (18, incl. cross-process), `reader_hints_test`;
+  green under `GC_STRESS`+`GC_VERIFY`, differential, `nest check` zero-warnings,
+  suite 2921/2921 (ADR-060).
 - ⬜ **Unbounded stream generation** (`iterate` / infinite producers) — lazy
   seq-view fusion already shipped (ADR-111); picks up when an editor feature needs it.
 - 🟡 **`std/` curation + frameworks sequencing** (ADR-085/097) — `std/` curated and

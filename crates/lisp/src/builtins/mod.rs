@@ -83,6 +83,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const pair: Ty = Ty::of(Tag::Pair);
     const vec_ty: Ty = Ty::of(Tag::Vector);
     const map_ty: Ty = Ty::of(Tag::Map);
+    const set_ty: Ty = Ty::of(Tag::Set);
     const pid_ty: Ty = Ty::of(Tag::Pid);
     const ref_ty: Ty = Ty::of(Tag::Ref);
     const list_ty: Ty = Ty::LIST;
@@ -502,6 +503,43 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![map_ty, any], map_ty),
         map_into,
+    );
+
+    // set (the `#{…}` kernel type; the `set` library is Brood over these)
+    def(
+        heap,
+        "%set",
+        Arity::at_least(0),
+        Sig::variadic(any, set_ty),
+        set_construct,
+    );
+    def(
+        heap,
+        "%set-add",
+        Arity::exact(2),
+        Sig::new(vec![set_ty, any], set_ty),
+        set_add,
+    );
+    def(
+        heap,
+        "%set-remove",
+        Arity::exact(2),
+        Sig::new(vec![set_ty, any], set_ty),
+        set_remove,
+    );
+    def(
+        heap,
+        "%set-has?",
+        Arity::exact(2),
+        Sig::new(vec![set_ty, any], bool_ty),
+        set_has,
+    );
+    def(
+        heap,
+        "%set-count",
+        Arity::exact(1),
+        Sig::new(vec![set_ty], int),
+        set_count,
     );
 
     // string
@@ -2642,6 +2680,11 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("map-dissoc", &["m", "k"], "A fresh map like m with key k removed."),
     ("map-pairs", &["m"], "The entries of m as a list of [k v] vectors, in insertion order."),
     ("map-count", &["m"], "The number of entries in map m. O(1) — the CHAMP root tracks its size."),
+    ("%set", &["&", "xs"], "Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this."),
+    ("%set-add", &["s", "x"], "A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n)."),
+    ("%set-remove", &["s", "x"], "A fresh set like s with element x removed (absent → unchanged). O(log n)."),
+    ("%set-has?", &["s", "x"], "Is x an element of set s? O(log n)."),
+    ("%set-count", &["s"], "The number of elements in set s. O(1) — the CHAMP root tracks its size."),
     ("string-length", &["s"], "The number of characters in string s."),
     ("display-width", &["s"], "How many terminal/grid cells string s occupies (grapheme-cluster aware: an emoji / flag / CJK char counts as 2, a combining mark 0). The width-aware counterpart to string-length."),
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),

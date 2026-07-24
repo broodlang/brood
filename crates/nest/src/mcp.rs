@@ -857,6 +857,14 @@ pub fn value_to_json(heap: &Heap, v: Value) -> Result<Json, String> {
             }
             Ok(Json::Object(obj))
         }
+        // A set projects as a JSON array of its elements (JSON has no set type;
+        // same array shape as a vector/list — the distinct set-ness is a Brood
+        // concept the JSON boundary doesn't carry).
+        Value::Set(id) => heap
+            .set_elems(id)
+            .into_iter()
+            .map(|x| value_to_json(heap, x))
+            .collect(),
         // Pids and refs round-trip as tagged objects so a tool returning
         // `(list-processes)` (or any pid-bearing value) doesn't lose data.
         // `{"$type": "pid", "node": "name", "id": 42}` and `{"$type": "ref",

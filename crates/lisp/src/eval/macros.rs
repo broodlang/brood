@@ -620,6 +620,14 @@ fn resolve_walk_inner(
             }
             heap.map_from_pairs(pairs)
         }
+        ValueRef::Set(id) => {
+            let items = heap.set_elems(id);
+            let mut out = Vec::with_capacity(items.len());
+            for e in items {
+                out.push(resolve_walk(heap, e, ns_name, locals));
+            }
+            heap.set_from_elems(out)
+        }
         other => other,
     }
 }
@@ -927,6 +935,11 @@ fn collect_all_syms(heap: &Heap, v: Value, out: &mut Vec<value::Symbol>) {
                 collect_all_syms(heap, val, out);
             }
         }
+        ValueRef::Set(id) => {
+            for e in heap.set_elems(id) {
+                collect_all_syms(heap, e, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1178,6 +1191,16 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
                 pairs.push((k, v));
             }
             Ok(heap.map_from_pairs(pairs))
+        }
+        ValueRef::Set(id) => {
+            // Walk a set literal's elements so macros inside them expand once here.
+            // Keep it a literal set (the evaluator evaluates + dedups it).
+            let items = heap.set_elems(id);
+            let mut out = Vec::with_capacity(items.len());
+            for e in items {
+                out.push(macroexpand_all_depth(heap, e, env, depth + 1)?);
+            }
+            Ok(heap.set_from_elems(out))
         }
         other => Ok(other),
     }

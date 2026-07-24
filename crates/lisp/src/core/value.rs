@@ -539,6 +539,16 @@ pub enum Value {
     /// equal decimals (`1.5M` / `1.50M`) compare and hash equal (normalized).
     /// Added at the END of the enum to preserve the JIT's pinned discriminant order.
     Decimal(DecimalId),
+    /// An immutable **set** (`#{ }`): a collection of distinct elements, compared
+    /// by structural equality. Backed by the same CHAMP trie as [`Value::Map`] — a
+    /// set *is* a map whose values are all `true`, so element membership/insertion
+    /// reuse the map machinery verbatim — but it is its OWN kind: `set?` is true,
+    /// `map?` is false, `type-of` is `:set`, it prints `#{…}`, and a set never
+    /// compares equal to a map (ADR-060; the library `(require 'set)` predates this
+    /// and is now sugar over the kernel type). Every op returns a *fresh* set
+    /// (ADR-026 immutability). Added at the END, after `Decimal`, to preserve the
+    /// JIT's pinned discriminant order.
+    Set(MapId),
 }
 
 /// The **unpacked** view of a [`Value`] — the form you `match` against.
@@ -624,6 +634,13 @@ impl Value {
     #[inline]
     pub fn map(id: MapId) -> Value {
         Value::Map(id)
+    }
+    /// Wrap a CHAMP node id as a **set** (`#{…}`) — the same backing store as a
+    /// map, tagged as its own kind. The elements are the map's keys; the values are
+    /// all `true` by construction (see `Heap::set_from_elems`).
+    #[inline]
+    pub fn set(id: MapId) -> Value {
+        Value::Set(id)
     }
     #[inline]
     pub fn func(id: ClosureId) -> Value {
@@ -736,6 +753,7 @@ pub enum Tag {
     Table,
     Bytes,
     Decimal,
+    Set,
 }
 
 impl Tag {
@@ -764,6 +782,7 @@ impl Tag {
             Tag::Table => "table",
             Tag::Bytes => "bytes",
             Tag::Decimal => "decimal",
+            Tag::Set => "set",
         }
     }
 
@@ -773,8 +792,8 @@ impl Tag {
     /// code that was essentially the entire `intern` cost (~98% of all interns were
     /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
     pub fn keyword(self) -> Symbol {
-        static KW: LazyLock<[Symbol; 21]> = LazyLock::new(|| {
-            const TAGS: [Tag; 21] = [
+        static KW: LazyLock<[Symbol; 22]> = LazyLock::new(|| {
+            const TAGS: [Tag; 22] = [
                 Tag::Nil,
                 Tag::Bool,
                 Tag::Int,
@@ -796,8 +815,9 @@ impl Tag {
                 Tag::Table,
                 Tag::Bytes,
                 Tag::Decimal,
+                Tag::Set,
             ];
-            let mut out = [0u32; 21];
+            let mut out = [0u32; 22];
             for t in TAGS {
                 out[t as usize] = intern(t.name());
             }
@@ -844,6 +864,8 @@ pub fn tag(v: Value) -> Tag {
         Value::Bytes(_) => Tag::Bytes,
         // A decimal is its OWN type — distinct from int/float (unlike BigInt).
         Value::Decimal(_) => Tag::Decimal,
+        // A set is its OWN type — distinct from map (unlike a range/pair alias).
+        Value::Set(_) => Tag::Set,
     }
 }
 
@@ -1191,6 +1213,7 @@ pub(crate) mod jit_layout {
             Value::Table(0),
             Value::Bytes(BytesId::local(0)),
             Value::Decimal(DecimalId::local(0)),
+            Value::Set(MapId::local(0)),
         ];
         // Exhaustiveness guard: this match must name every variant. When a new
         // variant appears, add it here AND to `all` above.
@@ -1219,7 +1242,8 @@ pub(crate) mod jit_layout {
                 | Value::Subprocess(_)
                 | Value::Table(_)
                 | Value::Bytes(_)
-                | Value::Decimal(_) => {}
+                | Value::Decimal(_)
+                | Value::Set(_) => {}
             }
         }
         all

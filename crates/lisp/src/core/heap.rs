@@ -228,6 +228,9 @@ fn tag_rank(v: Value) -> u8 {
         ValueRef::SeqView(_) => 6,
         ValueRef::Vector(_) => 7,
         ValueRef::Map(_) => 8,
+        // A set sorts among collections, just past maps (its own rank so a
+        // heterogeneous set-vs-map fallback never needs a same-rank tiebreak).
+        ValueRef::Set(_) => 19,
         ValueRef::Fn(_) => 9,
         ValueRef::Native(_) => 10,
         ValueRef::Macro(_) => 11,
@@ -473,6 +476,7 @@ fn to_prelude(v: Value) -> Value {
         ValueRef::Range(id) => Value::range(VecId::prelude(id.index())),
         ValueRef::SeqView(id) => Value::seqview(VecId::prelude(id.index())),
         ValueRef::Map(id) => Value::map(MapId::prelude(id.index())),
+        ValueRef::Set(id) => Value::set(MapId::prelude(id.index())),
         ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
         ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
         ValueRef::Decimal(id) => Value::decimal(DecimalId::prelude(id.index())),
@@ -2010,6 +2014,7 @@ pub fn is_movable(v: Value) -> bool {
         ValueRef::Range(id) => id.region() == LOCAL,
         ValueRef::SeqView(id) => id.region() == LOCAL,
         ValueRef::Map(id) => id.region() == LOCAL,
+        ValueRef::Set(id) => id.region() == LOCAL,
         ValueRef::Str(id) => id.region() == LOCAL,
         ValueRef::BigInt(id) => id.region() == LOCAL,
         ValueRef::Decimal(id) => id.region() == LOCAL,
@@ -2041,6 +2046,7 @@ pub fn needs_root_slot(v: Value) -> bool {
         ValueRef::Range(id) => shared(id.region()),
         ValueRef::SeqView(id) => shared(id.region()),
         ValueRef::Map(id) => shared(id.region()),
+        ValueRef::Set(id) => shared(id.region()),
         ValueRef::Str(id) => shared(id.region()),
         ValueRef::BigInt(id) => shared(id.region()),
         ValueRef::Decimal(id) => shared(id.region()),
@@ -2327,7 +2333,9 @@ impl Heap {
                                 }
                             }
                         }
-                        ValueRef::Map(id) if id.region() == LOCAL => work.push(W::M(id)),
+                        ValueRef::Map(id) | ValueRef::Set(id) if id.region() == LOCAL => {
+                            work.push(W::M(id))
+                        }
                         ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == LOCAL => {
                             if !std::mem::replace(&mut seen_clo[id.index()], true) {
                                 let c = &slabs.closures[id.index()];
@@ -3472,6 +3480,32 @@ impl Heap {
         Value::map(current)
     }
 
+    /// Build a **set** (`Value::Set`) from `elems`: a CHAMP of `elem → true`,
+    /// deduped by structural equality (the trie collapses duplicate keys), wrapped
+    /// as a set. Same GC-quiet in-place build as `map_from_pairs`; the result is a
+    /// fresh immutable value. Backs the `#{…}` reader literal, `set` construction,
+    /// and `from_message` reconstruction.
+    pub fn set_from_elems(&mut self, elems: Vec<Value>) -> Value {
+        let watermark = Some(self.local.maps.len());
+        let mut current = match self.alloc_empty_map().unpack() {
+            ValueRef::Map(id) => id,
+            _ => unreachable!("alloc_empty_map returns Value::Map"),
+        };
+        for e in elems {
+            let hash = self.hash_value(e);
+            current = self.champ_assoc(current, e, Value::Bool(true), hash, 0, watermark);
+        }
+        Value::set(current)
+    }
+
+    /// The elements of a set, in the CHAMP's deterministic-per-shape order (the
+    /// keys of the backing trie — the values are all `true` and dropped).
+    pub fn set_elems(&self, id: MapId) -> Vec<Value> {
+        let mut out = Vec::with_capacity(self.map_size(id));
+        self.fold_entries(id, &mut |k, _v| out.push(k));
+        out
+    }
+
     /// All entries in the map, walked depth-first through the trie.
     /// Order is deterministic per shape (slot-index ascending at each
     /// level, then collision-leaf order) but is **not** insertion order
@@ -4045,6 +4079,9 @@ impl Heap {
                 // sub-node handles.
                 Value::map(self.promote_map_node(id, fwd))
             }
+            // A set shares the CHAMP storage — promote its trie exactly like a map
+            // and keep the `Set` wrapper (mirrors the `SeqView` case above).
+            ValueRef::Set(id) if id.region() == LOCAL => Value::set(self.promote_map_node(id, fwd)),
             ValueRef::Fn(id) if id.region() == LOCAL => Value::func(self.promote_closure(id, fwd)),
             ValueRef::Macro(id) if id.region() == LOCAL => {
                 Value::macro_(self.promote_closure(id, fwd))
@@ -4383,6 +4420,7 @@ impl Heap {
             Value::Pair(id) => ("pair", id.region(), id.is_old(), id.generation()),
             Value::Vector(id) => ("vector", id.region(), id.is_old(), id.generation()),
             Value::Map(id) => ("map", id.region(), id.is_old(), id.generation()),
+            Value::Set(id) => ("set", id.region(), id.is_old(), id.generation()),
             Value::Str(id) => ("string", id.region(), id.is_old(), id.generation()),
             Value::Rope(id) => ("rope", id.region(), id.is_old(), id.generation()),
             _ => return None,
@@ -4427,7 +4465,7 @@ impl Heap {
         match v {
             Value::Pair(id) => check!(id, "pair", pairs),
             Value::Vector(id) | Value::Range(id) => check!(id, "vector", vectors),
-            Value::Map(id) => check!(id, "map", maps),
+            Value::Map(id) | Value::Set(id) => check!(id, "map", maps),
             Value::Str(id) => check!(id, "string", strings),
             _ => {}
         }
@@ -4649,6 +4687,10 @@ impl Heap {
             ValueRef::Pair(_) => self.list_to_vec(v),
             ValueRef::Vector(id) => Ok(self.vector(id).to_vec()),
             ValueRef::Range(id) => Ok(self.range_to_vec(id)),
+            // A set is a sequence of its elements — so `map`/`reduce`/`count`/`vec`/…
+            // work on it (Clojure-like). Order is the CHAMP's deterministic-per-shape
+            // order, matching how `#{…}` prints.
+            ValueRef::Set(id) => Ok(self.set_elems(id)),
             _ => Err(LispError::type_err("expected a list or vector")),
         }
     }
@@ -4871,6 +4913,22 @@ impl Heap {
                 (size as u64).hash(h);
                 acc.hash(h);
             }
+            ValueRef::Set(id) => {
+                // Order-insensitive like Map (XOR the per-element hashes), but a
+                // distinct tag byte (23) and **keys only** (a set's backing values are
+                // all `true`) — so a set never hashes the same as the map with the same
+                // keys, matching that a set is never `equal` to a map (ADR-060).
+                23u8.hash(h);
+                let mut acc: u64 = 0;
+                let size = self.map_size(id);
+                self.fold_entries(id, &mut |k, _vv| {
+                    let mut sub = std::collections::hash_map::DefaultHasher::new();
+                    self.hash_value_into(k, &mut sub);
+                    acc ^= sub.finish();
+                });
+                (size as u64).hash(h);
+                acc.hash(h);
+            }
             ValueRef::Fn(id) => {
                 10u8.hash(h);
                 id.0.hash(h);
@@ -5050,6 +5108,11 @@ impl Heap {
             // structurally; collision leaves fall back to set-equality on
             // their entries (their internal order isn't canonical).
             (Map(x), Map(y)) => self.map_equal(x, y),
+            // Two sets are equal iff they hold the same elements. Backed by the same
+            // canonical CHAMP as maps (element→`true`), so this reduces to map
+            // equality on the underlying trie. A set is never equal to a map — that
+            // mixed pair falls through to `_ => false` (distinct kinds, ADR-060).
+            (Set(x), Set(y)) => self.map_equal(x, y),
             (Fn(x), Fn(y)) => x == y,
             (Macro(x), Macro(y)) => x == y,
             (Native(x), Native(y)) => x == y,
@@ -6100,9 +6163,10 @@ impl Heap {
                 ValueRef::Vector(id) if id.region() == RUNTIME => {
                     work.extend(self.vector(id).iter().copied());
                 }
-                ValueRef::Map(id) if id.region() == RUNTIME => {
+                ValueRef::Map(id) | ValueRef::Set(id) if id.region() == RUNTIME => {
                     // `fold_entries` walks the trie in place — no intermediate Vec
                     // (unlike `map_entries`), which matters on this diagnostics walk.
+                    // A set shares the trie (values all `true`), so the same walk covers it.
                     self.fold_entries(id, &mut |k, val| {
                         work.push(k);
                         work.push(val);
@@ -6703,7 +6767,7 @@ impl Heap {
                         work.extend(self.vector(id).iter().copied());
                     }
                 }
-                ValueRef::Map(id) if id.region() == RUNTIME => {
+                ValueRef::Map(id) | ValueRef::Set(id) if id.region() == RUNTIME => {
                     if id.code_gen() == gen {
                         return true;
                     }
@@ -8394,7 +8458,7 @@ impl Heap {
                             }
                         }
                     }
-                    ValueRef::Map(id) if id.region() == LOCAL => {
+                    ValueRef::Map(id) | ValueRef::Set(id) if id.region() == LOCAL => {
                         let slabs = if id.is_old() { &self.old } else { &self.local };
                         bad(
                             "map",
@@ -8788,6 +8852,11 @@ fn flush_value_grown(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Va
         }
         ValueRef::Map(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::map(flush_map(old, new, fwd, id))
+        }
+        // A set is backed by the same CHAMP storage as a map — forward it via
+        // `flush_map` and keep the `Set` wrapper (mirrors the `SeqView` case above).
+        ValueRef::Set(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::set(flush_map(old, new, fwd, id))
         }
         ValueRef::Str(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::str_(flush_string(old, new, fwd, id))
@@ -9258,7 +9327,7 @@ fn runtime_gen_of(v: Value) -> Option<usize> {
         ValueRef::Vector(id) | ValueRef::Range(id) | ValueRef::SeqView(id) => {
             in_rt(id.region(), id.code_gen())
         }
-        ValueRef::Map(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::Map(id) | ValueRef::Set(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::Str(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::BigInt(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::Decimal(id) => in_rt(id.region(), id.code_gen()),
@@ -9297,6 +9366,11 @@ fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v:
         }
         ValueRef::Map(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::map(flush_rt_map(old, new, fwd, id))
+        }
+        // A set shares the CHAMP storage — forward its trie like a map under a
+        // RUNTIME compaction and keep the `Set` wrapper (mirrors `SeqView` above).
+        ValueRef::Set(id) if id.region() == RUNTIME && id.code_gen() == g => {
+            Value::set(flush_rt_map(old, new, fwd, id))
         }
         ValueRef::Str(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::str_(flush_rt_string(old, new, fwd, id))
@@ -9622,7 +9696,7 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
             {
                 id.index() < nv
             }
-            ValueRef::Map(id) if id.region() == RUNTIME => id.index() < nm,
+            ValueRef::Map(id) | ValueRef::Set(id) if id.region() == RUNTIME => id.index() < nm,
             ValueRef::Str(id) if id.region() == RUNTIME => id.index() < ns,
             ValueRef::BigInt(id) if id.region() == RUNTIME => id.index() < nb,
             ValueRef::Decimal(id) if id.region() == RUNTIME => id.index() < nd,

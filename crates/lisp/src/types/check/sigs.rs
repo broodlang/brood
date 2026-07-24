@@ -60,7 +60,14 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // is likewise seqable — `count`/`first`/`rest`/`map`/`every?` all iterate its
     // octets at runtime — so it belongs in the domain too.
     #[allow(non_upper_case_globals)]
-    const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Map, Tag::Bytes]);
+    const seq: Ty = Ty::of_tags(&[
+        Tag::Nil,
+        Tag::Pair,
+        Tag::Vector,
+        Tag::Map,
+        Tag::Set,
+        Tag::Bytes,
+    ]);
     #[allow(non_upper_case_globals)]
     const bool_ty: Ty = Ty::of(Tag::Bool);
     // `count`/`length` accept a string, map, bytes, or sequence (the prelude
@@ -70,6 +77,7 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     const countable: Ty = Ty::of_tags(&[
         Tag::Str,
         Tag::Map,
+        Tag::Set,
         Tag::Nil,
         Tag::Pair,
         Tag::Vector,
@@ -142,7 +150,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     }
     //   contains? — map-key probe (map or a live transient); bool result.
     //   member?   — linear scan over a sequence; first arg is the needle.
-    put("contains?", Sig::new(vec![Ty::of(Tag::Map), any], bool_ty));
+    put(
+        "contains?",
+        Sig::new(vec![Ty::of_tags(&[Tag::Map, Tag::Set]), any], bool_ty),
+    );
     put("member?", Sig::new(vec![any, seq], bool_ty));
     // some?/every?: both take a 1-ary callback and a sequence, return bool.
     // Curated because the body is a cond-recursive closure; infer_sig bails.

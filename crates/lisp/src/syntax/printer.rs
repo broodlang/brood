@@ -146,6 +146,18 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             }
             out.push('}');
         }
+        ValueRef::Set(id) => {
+            // `#{a b c}` — elements only (the backing values are all `true`), in the
+            // CHAMP's insertion order. Reads back as a set literal.
+            out.push_str("#{");
+            for (i, (k, _v)) in heap.map_entries(id).iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                write_value(out, heap, *k, readable, depth + 1);
+            }
+            out.push('}');
+        }
         ValueRef::Fn(id) => {
             out.push_str("#<fn");
             if let Some(name) = heap.closure(id).name {

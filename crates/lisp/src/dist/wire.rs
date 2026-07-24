@@ -421,6 +421,9 @@ const M_BIGINT: u8 = 14;
 /// An arbitrary-precision base-10 decimal, sent as its canonical decimal string
 /// (mirrors [`M_BIGINT`] / [`Message::Decimal`]) — portable across nodes.
 const M_DECIMAL: u8 = 15;
+/// A set — its element count then each element (values are all `true`, dropped).
+/// Portable across nodes; the receiver rebuilds a `Value::Set`.
+const M_SET: u8 = 16;
 
 fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     match m {
@@ -495,6 +498,13 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
             for (k, v) in entries {
                 encode_msg(w, k)?;
                 encode_msg(w, v)?;
+            }
+        }
+        Message::Set(items) => {
+            w.push(M_SET);
+            put_u32(w, items.len() as u32);
+            for it in items {
+                encode_msg(w, it)?;
             }
         }
         Message::Ref(n) => {
@@ -640,6 +650,14 @@ fn decode_msg_at(r: &mut Cursor<Vec<u8>>, depth: u32) -> io::Result<Message> {
                 entries.push((k, v));
             }
             Message::Map(entries)
+        }
+        M_SET => {
+            let n = get_u32(r)? as usize;
+            let mut items = Vec::with_capacity(prealloc(r, n));
+            for _ in 0..n {
+                items.push(decode_msg_at(r, depth + 1)?);
+            }
+            Message::Set(items)
         }
         M_REF => Message::Ref(get_u64(r)?),
         M_PID => Message::Pid {
