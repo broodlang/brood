@@ -1944,11 +1944,12 @@ pub enum EnvRoot {
 
 mod equality;
 mod gc;
+mod gc_runtime;
 mod map_ops;
 mod vm_cache;
-#[cfg(feature = "gui")]
-pub(crate) use self::gc::stall_guard;
-pub(crate) use self::gc::{stall_guard_pid, stall_threshold_ms};
+// `stall_guard` is used by the RUNTIME compactor (`gc_runtime`) and the GUI paint
+// path, so it's re-exported unconditionally; `stall_guard_pid` by the scheduler.
+pub(crate) use self::gc::{stall_guard, stall_guard_pid, stall_threshold_ms};
 pub(crate) use self::vm_cache::{CallIcEntry, FastLink, GlobalIcEntry, VmCacheKey};
 
 impl Heap {

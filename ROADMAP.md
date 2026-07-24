@@ -44,10 +44,14 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
 3. ⬜ **Split `core/heap/gc.rs` (4518)** — extract the RUNTIME shared-region
    compaction + node-liveness drain (~1300 lines, ADR-091) to `heap/gc_runtime.rs`;
    independent of per-process nursery GC, roughly halves the file.
-4. ⬜ **`register()`/`PRIMITIVE_DOCS` drift guard** (`builtins/mod.rs`) — ~170
-   primitives declared in one place, documented ~2000 lines away by string key,
-   **no test asserting agreement** (verified). Add a coverage test; better,
-   co-locate each doc with its `def`. **[kernel]**
+4. ✅ **`register()`/`PRIMITIVE_DOCS` drift guard** (`builtins/mod.rs`) — done
+   2026-07-24. Added a unit test that registers every primitive into a fresh env,
+   enumerates the natives, and asserts every **user-facing** (non-`%`) primitive
+   has a `PRIMITIVE_DOCS` entry and no doc entry is an orphan. Surfaced 12
+   genuinely-undocumented user-facing primitives (`bytes`/`byte-at`/`byte-length`/
+   `bytes->list`/`bytes-concat`/`bytes-index-of`/`subbytes`, `max`/`min`,
+   `current-ns`/`seqview?`/`demonitor-node`) — docs added. `%`-prefixed internal
+   ops stay exempt (wrapped by prelude fns/macros). **[kernel]**
 
 **Tier 2 — real duplication to dedupe: 5/6/7/9 done 2026-07-24 (suite 2985/2985,
 `nest check` zero-warning, 238 type-lattice Rust tests green). 8 deferred with

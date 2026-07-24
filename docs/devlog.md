@@ -6559,3 +6559,18 @@ warnings: `pub(crate)` VM functions (`exec_call`/`dispatch`/`exec_chunk`/
 re-exports its children crate-wide (`pub(crate) use child::*`), the consistent fix
 is to widen those three types to `pub(crate)`. `make release` (cli + nest +
 brood-lsp) now builds with zero warnings.
+
+## 2026-07-24 — Structural cleanup Tier 1 item 4: PRIMITIVE_DOCS drift guard
+
+`register()` and `PRIMITIVE_DOCS` sit ~2000 lines apart in `builtins/mod.rs` and
+agree only by string key, with no test — a new primitive (or a rename) could
+silently lose its doc. Added a unit test (`builtins::primitive_docs_tests`) that
+registers every primitive into a fresh LOCAL env, enumerates the natives, and
+asserts: (1) every user-facing (non-`%`) primitive has a `PRIMITIVE_DOCS` entry;
+(2) no doc entry is an orphan (a name nothing registers). `%`-prefixed ops are
+internal (wrapped by a prelude fn/macro) and exempt.
+
+The guard immediately caught 12 undocumented user-facing primitives —
+`bytes`/`byte-at`/`byte-length`/`bytes->list`/`bytes-concat`/`bytes-index-of`/
+`subbytes`, `max`/`min`, `current-ns`/`seqview?`/`demonitor-node` — docs added
+(verified they now surface via `(doc …)`). 0 orphan docs.

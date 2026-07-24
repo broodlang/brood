@@ -2930,6 +2930,21 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("nodes", &[], "A list of currently connected peer node names."),
     ("monitor-node", &["name"], "Get [:nodedown name] when the link to node `name` goes down (heartbeat timeout or close)."),
     ("disconnect", &["name"], "Tear down the link to peer node `name` now, without exiting this process (Erlang's disconnect_node) — fires [:nodedown name] on both sides and prunes `name` from (nodes). Returns true if a link existed, false otherwise. Use it to leave a node/cluster cleanly while staying alive."),
+    // ---- raw bytes (builtins/bytes.rs) ----
+    ("bytes", &["&", "byte-ints"], "Build a bytes value from byte integers 0–255: (bytes 1 2 3), or (bytes [1 2 3]) / (bytes (list …)) taking a single vector/list as the sequence. An existing bytes value passes through unchanged."),
+    ("byte-length", &["b"], "The number of bytes in b. O(1)."),
+    ("byte-at", &["b", "i"], "The byte at index i of b as an int 0–255; errors if i is out of range."),
+    ("subbytes", &["b", "start", "&optional", "end"], "The byte slice [start, end) of b as a fresh bytes value (end defaults to the length). Errors if the range is out of bounds."),
+    ("bytes-concat", &["&", "iolists"], "One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model."),
+    ("bytes-index-of", &["haystack", "needle", "&optional", "from"], "The first index of the needle bytes within haystack at or after from (default 0), or -1 if absent. The byte-protocol workhorse (locate a \\r\\n\\r\\n, a frame delimiter, …)."),
+    ("bytes->list", &["b"], "The bytes b as a list of integers 0–255."),
+    // ---- numeric (builtins/numeric.rs) ----
+    ("max", &["x", "&", "more"], "The greatest of one or more numbers (int/float/decimal), compared numerically; the result keeps its own type."),
+    ("min", &["x", "&", "more"], "The least of one or more numbers (int/float/decimal), compared numerically; the result keeps its own type."),
+    // ---- namespace / sequence-view / distribution ----
+    ("current-ns", &[], "The current compilation namespace as a symbol, or nil at the root namespace (top level)."),
+    ("seqview?", &["x"], "True if x is a lazy sequence view — the reducible produced by range/map/filter/… before it is realized (into/count/…)."),
+    ("demonitor-node", &["name"], "Cancel this process's node monitor for node `name` (undo monitor-node); a no-op if none is registered. Returns nil."),
 ];
 
 /// The `(params, doc)` for a primitive `name`, or `(&[], "")` if undocumented.
@@ -2939,4 +2954,64 @@ fn primitive_doc(name: &str) -> (&'static [&'static str], &'static str) {
         .find(|(n, _, _)| *n == name)
         .map(|&(_, p, d)| (p, d))
         .unwrap_or((&[], ""))
+}
+
+#[cfg(test)]
+mod primitive_docs_tests {
+    use super::*;
+    use crate::core::heap::Heap;
+    use std::collections::HashSet;
+
+    // Register every primitive into a fresh LOCAL env (not the global one, so
+    // `env_chain_names` can enumerate it) and return the names bound to a native.
+    fn registered_primitive_names() -> Vec<String> {
+        let mut heap = Heap::new();
+        let root = heap.new_env(None);
+        register(&mut heap, root);
+        heap.env_chain_names(root)
+            .into_iter()
+            .filter(|&sym| matches!(heap.env_get(root, sym), Some(Value::Native(_))))
+            .map(value::symbol_name)
+            .collect()
+    }
+
+    // Drift guard: `register()` and `PRIMITIVE_DOCS` live ~2000 lines apart and
+    // agree only by string key, so a new primitive (or a rename/removal) can
+    // silently lose its doc. This pins the contract:
+    //   1. every USER-FACING primitive (a non-`%` native) has a PRIMITIVE_DOCS
+    //      entry — `%`-prefixed ops are internal kernel primitives (wrapped by a
+    //      prelude fn/macro; never called directly), so they're exempt;
+    //   2. no PRIMITIVE_DOCS entry is an orphan (names a primitive that no longer
+    //      registers).
+    // A new public primitive without a doc, or a doc left behind by a rename,
+    // fails here — the doc is what `(doc …)`, the LSP, and completion surface.
+    #[test]
+    fn every_user_facing_primitive_is_documented_and_no_orphan_docs() {
+        let registered: Vec<String> = registered_primitive_names();
+        let doc_names: HashSet<&str> = PRIMITIVE_DOCS.iter().map(|&(n, _, _)| n).collect();
+        let reg_names: HashSet<&str> = registered.iter().map(|s| s.as_str()).collect();
+
+        let mut undocumented: Vec<&str> = registered
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|n| !n.starts_with('%') && !doc_names.contains(n))
+            .collect();
+        undocumented.sort();
+
+        let mut orphan: Vec<&str> = PRIMITIVE_DOCS
+            .iter()
+            .map(|&(n, _, _)| n)
+            .filter(|n| !reg_names.contains(n))
+            .collect();
+        orphan.sort();
+
+        assert!(
+            undocumented.is_empty(),
+            "user-facing primitives missing a PRIMITIVE_DOCS entry (add one, or prefix with `%` if truly internal): {undocumented:?}"
+        );
+        assert!(
+            orphan.is_empty(),
+            "PRIMITIVE_DOCS entries with no registered primitive (stale after a rename/removal): {orphan:?}"
+        );
+    }
 }
