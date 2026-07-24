@@ -3326,9 +3326,13 @@ ADR-043 (root-vs-worker thread + finite-poll model), ADR-033/034 (the dist
 reader-thread → mailbox precedent),
 [`ROADMAP.md`](../ROADMAP.md) M3/M4.
 
-## ADR-060 — Sets are a library over maps; the `#{…}` literal is deferred
+## ADR-060 — Sets: a library over maps, then promoted to a first-class `#{…}` kernel type
 
-**Status:** accepted (2026-05-30). `std/set.blsp` implemented.
+**Status:** accepted as a library (2026-05-30, `std/set.blsp`); **the deferral was
+reversed and `#{…}` promoted to a first-class `Value::Set`/`Tag::Set` kernel type on
+2026-07-24** — see the "Promoted to the kernel" follow-up below. The original
+library-over-maps decision text is retained as historical record; the library now
+survives as sugar over the kernel type, so its function names/meanings are unchanged.
 
 **Context.** Building cellular automata / editor code surfaced the want for a set
 of values (a Game-of-Life live-cell set is the canonical case). The workaround —
