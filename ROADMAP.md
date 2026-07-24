@@ -22,6 +22,36 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 ## Active work — dated findings & backlogs
 
+### `jit_lower_arm_inner` emit-loop decomposition — remaining steps (2026-07-25)
+
+The dependency-ordered continuation of the Tier-1 item-1 split (see "Structural /
+code-organization cleanup" below for what's landed: `i64.rs`/`prepass.rs`/`emit.rs`,
+`Op` at module scope, the `Frame` context, and the arith/scalar/slot-kind helpers —
+`jit_lower.rs` 5437 → 4308). The pattern is proven; each step is a behaviour-identical
+closure→free-fn relocation into `jit_lower/emit.rs` (or a new sibling), verified with
+**differential 2/2 + jit 34/34 (JIT_VERIFY) + full suite** per step. Ordered by
+dependency:
+
+- ⬜ **Batch 5 — operand-materialization family:** `read_words` (**~35 call sites**),
+  `store_words`, `as_int`, `as_block_arg`, `exit_done` → `emit.rs` (extend `Frame`
+  as needed). High call-site churn but mechanical.
+- ⬜ **`Funcs` struct** — bundle the ~25 runtime-callback `FuncRef`s (cons/car/
+  make_vector/global/call_slow/vref/table/… ) into one `Copy` struct built after the
+  imports, threaded like `Frame`. The enabler for the big helpers + arm bodies.
+- ⬜ **Big helpers:** `store_op`, `call_handle`, `vector_ref` (~177 lines),
+  `table_prim`, `eq_dispatch` (~239) → `emit.rs`, gated on the `Funcs` struct + the
+  batch-5 deps.
+- ⬜ **Per-`Inst` arm bodies:** Call (~300) / Prim1/2/3 + fused (~700) / SelfCall
+  (~200) / control (~130) → `jit_lower/{call,prim,control}.rs` — the largest and
+  last, gated on everything above. Each arm becomes `emit_<inst>(&mut b, &mut stack,
+  frame, funcs, …)`.
+
+**Testing bar for this work (raise it):** beyond the per-step differential/jit/suite,
+run the split under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 BROOD_JIT_VERIFY=1` and the
+full `make test` (nextest) before calling the whole decomposition done; spot-check the
+numeric benchmark rows are bit-identical to `BROOD_VM=0` (extraction must not perturb
+codegen). **[kernel/JIT]**
+
 ### Structural / code-organization cleanup (2026-07-24)
 
 Findings from a full-repo structural review (9 parallel reviewers over all of

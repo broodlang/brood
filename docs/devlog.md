@@ -7001,3 +7001,17 @@ Continued the emit-loop decomposition: extracted the per-slot type-tracking help
 slot-flag tables (`slot_float`/`slot_bool`). `op_is_float`'s call sites had nested
 parens (`Op::Slot(*slot_a)`), rewritten precisely. jit_lower.rs 4325 → ~4300.
 Verified: differential 2/2, jit 34/34 (JIT_VERIFY); full suite 3108/3108.
+
+## 2026-07-25 — jit_lower decomposition: roadmap the remainder + a heavier test pass
+
+Recorded the remaining `jit_lower_arm_inner` emit-loop decomposition steps as a
+dependency-ordered checklist at the top of ROADMAP "Active work" (batch 5
+operand-materialization → `Funcs` struct → big helpers → per-`Inst` arm bodies),
+with a raised testing bar for the work.
+
+Ran that heavier pass against the 4 batches landed so far: differential 2/2 +
+jit 34/34 + jit_runtime_compaction 3/3 all green under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 BROOD_JIT_VERIFY=1`; and the full `brood`
+Rust test suite (every lib + integration target — `suite.rs`, `runtime_collector`
+20/20, preemption/work-stealing/reductions/…) green. Combined with the earlier
+`nest test` 3108/3108, the decomposition-so-far is behaviour-identical under stress.
