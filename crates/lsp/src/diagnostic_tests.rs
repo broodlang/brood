@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// The advisory type-check diagnostics the LSP would publish for `src` — the

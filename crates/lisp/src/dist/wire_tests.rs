@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// Encode a frame (with its length prefix) and decode it back.

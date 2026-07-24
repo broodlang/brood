@@ -1,4 +1,3 @@
-
 use super::*;
 use lsp_server::{Request, RequestId};
 use lsp_types::{
