@@ -42,7 +42,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 (defn comment? (n) (= (node-kind n) :comment))
 (defn trivia? (n) (or (whitespace? n) (comment? n)))
 
-(defn container? (n) (let (k (node-kind n)) (or (= k :list) (= k :vector) (= k :map) (= k :root))))
+(defn container? (n) (let (k (node-kind n)) (or (= k :list) (= k :vector) (= k :map) (= k :set) (= k :root))))
 
 (defn wrapper? (n)
   (let (k (node-kind n)) (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice))))
@@ -192,6 +192,8 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       (= k :list) (single-line--seq (node-children n) "(" ")")
       (= k :vector) (single-line--seq (node-children n) "[" "]")
       (= k :map) (single-line--seq (node-children n) "{" "}")
+      ; a set literal `#{ … }` — a flat sequence, like a vector, with the `#{` glued
+      (= k :set) (single-line--seq (node-children n) "#{" "}")
       else nil)))
 
 (defn single-line--str (text)
@@ -243,6 +245,8 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       (= k :list) (render--seq n indent "(" ")")
       (= k :vector) (render--seq n indent "[" "]")
       (= k :map) (render--seq n indent "{" "}")
+      ; a set literal `#{ … }` — flat like a vector (not pair-broken like a map)
+      (= k :set) (render--seq n indent "#{" "}")
       else (node-text n))))
 
 (defn render--wrap (prefix child indent)
@@ -292,7 +296,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 (defn had-author-newlines? (n)
   (let (k (node-kind n))
     (cond
-      (or (= k :list) (= k :vector) (= k :map))
+      (or (= k :list) (= k :vector) (= k :map) (= k :set))
         (had-author-newlines--scan (node-children n) 0 (vector-length (node-children n)))
       (wrapper? n) (had-author-newlines? (node-form n))
       else false)))

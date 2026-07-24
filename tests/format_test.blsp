@@ -208,10 +208,20 @@
   (test "vectors fit on one line when they fit" (assert= (format-source "[ 1  2  3 ]") "[1 2 3]\n"))
   (test "maps keep alternating key/value pairs"
     (assert= (format-source "{ :a 1   :b 2 }") "{:a 1 :b 2}\n"))
+  ;; A set literal `#{…}` keeps its `#{` glued and lays out flat like a vector.
+  ;; Regression: `#{}` was once re-emitted as `# {}` (a lone `#` symbol + an empty
+  ;; map), which no longer reads back as a set and crashes at runtime.
+  (test "an empty set keeps its #{ glued"
+    (assert= (format-source "#{}") "#{}\n"))
+  (test "a set stays flat and normalises inner spacing"
+    (assert= (format-source "#{ 1   2  3 }") "#{1 2 3}\n"))
+  (test "a set as a get default round-trips"
+    (assert= (format-source "(get m k #{})") "(get m k #{})\n"))
   (test "empty containers stay empty"
     (assert= (format-source "()") "()\n")
     (assert= (format-source "[]") "[]\n")
-    (assert= (format-source "{}") "{}\n")))
+    (assert= (format-source "{}") "{}\n")
+    (assert= (format-source "#{}") "#{}\n")))
 
 (describe "format: idempotency"
   (test "idempotent on a representative grab-bag"

@@ -233,12 +233,13 @@ pub(super) fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Valu
         }
         // Containers: [kind [child …]]. Children include trivia (whitespace +
         // comments) so the formatter can preserve blank-line + comment intent.
-        Root | List | Vector | Map => {
+        Root | List | Vector | Map | Set => {
             let k = match node.kind {
                 Root => "root",
                 List => "list",
                 Vector => "vector",
                 Map => "map",
+                Set => "set",
                 _ => unreachable!(),
             };
             let kids: Vec<Value> = node
@@ -313,6 +314,7 @@ pub(super) fn cst_node_kind_name(kind: cst::NodeKind) -> &'static str {
         List => "list",
         Vector => "vector",
         Map => "map",
+        Set => "set",
     }
 }
 
@@ -340,7 +342,7 @@ pub(super) fn cst_to_positioned(
         }
         // Containers + wrappers carry their (position-annotated) children — trivia
         // included, exactly as `parse-source`, so callers filter what they want.
-        Quote | Quasi | Unquote | Splice | Root | List | Vector | Map => {
+        Quote | Quasi | Unquote | Splice | Root | List | Vector | Map | Set => {
             let kids: Vec<Value> = node
                 .children
                 .iter()
