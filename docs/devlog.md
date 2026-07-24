@@ -6574,3 +6574,97 @@ The guard immediately caught 12 undocumented user-facing primitives —
 `bytes`/`byte-at`/`byte-length`/`bytes->list`/`bytes-concat`/`bytes-index-of`/
 `subbytes`, `max`/`min`, `current-ns`/`seqview?`/`demonitor-node` — docs added
 (verified they now surface via `(doc …)`). 0 orphan docs.
+
+## 2026-07-24 — `nest test` selection: `mix test` parity
+
+**The gap:** with 2965 tests the only way to narrow a run was a file path — no
+name filter existed anywhere, not on the CLI and not in `std/tool/test.blsp`
+(`run-project-tests` forwarded only `:slow`). Iterating on one `describe` meant
+running the whole suite or remembering its file.
+
+**Shipped**, as `mix test`'s surface mapped onto the runner:
+
+| flag | meaning |
+| --- | --- |
+| `--only` / `--exclude` / `--include SELECTOR` | repeatable; a tag, `test:substr`, or `describe:substr`. Several `--only`s union; `--include` beats `--exclude` |
+| `FILE:LINE` | the test covering that line (last test declared at/before it) |
+| `--failed` | last run's failures, from the project cache dir |
+| `--seed N` | shuffle order, seed echoed in the summary for replay |
+| `--partitions N --shard K` | stable-hash CI shards |
+| `--max-failures N` | abandon the run after N failures |
+| `--repeat-until-failure N` | up to N passes, stop at the first failure |
+| `--timeout MS`, `--slowest N`, `--no-trace` | expose knobs the runner already had internally |
+
+Tags are new: `:tags [kw …]` on `describe`/`test`, alongside `:serial`/`:isolated`
+in any order, merged group→test. The per-test tuple grew from `(name thunk)` to
+`(name thunk meta)` with `{:tags :file :line}`; the line comes from the first body
+form's read position (captured at expansion time like `fail-loc`), which is what
+makes `FILE:LINE` addressable.
+
+Division of labour follows ADR-006: **all** selection logic and selector *parsing*
+live in Brood (`test--make-filter`, `test--select-units`), so the grammar has one
+definition and `nest` only forwards argv.
+
+**Three things worth remembering:**
+
+1. **`--max-failures` had to be enforced twice.** Per-file scoping means every file
+   gets its own driver, so `run-driver`'s between-steps check only ever bounded one
+   file — a 4-failure file blew straight past `--max-failures 1`. `drain-files-scoped`
+   now carries a running failure count in its fold state and stops loading further
+   files. The budget is still checked at step/file boundaries, so it bounds a run
+   rather than stopping exactly.
+2. **The shard hash needs a finalizer.** A plain polynomial hash (`h*31 + c`) leaves
+   the low bits unmixed — its parity is just the character-sum parity — so
+   `(rem h 2)` sent an entire small suite to one shard and left the other empty.
+   Now FNV-1a masked to 32 bits with an xor-shift finalizer; the test asserts the
+   spread over 200 labels, not just that shards partition.
+3. **An unresolvable `FILE:LINE` must select nothing, not everything.** Deriving the
+   "is anything whitelisted?" test from the *resolved* line list meant a typo'd path
+   resolved to empty → no positive constraint → the whole suite ran. In CI that is
+   indistinguishable from success. It now uses the *requested* `:lines`, runs zero
+   tests, and warns. Caught by the new tests, not by hand.
+
+`tests/test_selection_test.blsp` — 54 cases over synthetic unit lists (registering
+real fixtures would pollute the suite being run), including an `:isolated`
+cross-process block proving a filter spec survives a `send` deep-copy.
+
+Also fixed stale docs: `docs/testing.md` claimed a 30 s default per-test timeout;
+it has been 120 s.
+
+**Not mapped from `mix test`** (recorded on the roadmap rather than silently
+dropped): `--cover` (no coverage mechanism exists — the IR already carries
+positions and `Value::Table` can aggregate across processes, but it wants a Rust
+recording seam + a Brood reporting module + an ADR), `--stale` (needs a per-test
+dependency graph), `--formatter`, `--breakpoints`.
+
+## 2026-07-24 — review pass on `nest test` selection: four defects fixed
+
+A deliberate review of the code from the previous entry, probing edge cases rather
+than re-reading. Four real defects, all now covered by tests:
+
+1. **Path matching crossed filename boundaries.** `test--same-file?` compared paths
+   with a bare `ends-with?` in both directions — and `"extra_test.blsp"` genuinely
+   *does* end with `"a_test.blsp"` (the last 11 characters are exactly that), so a
+   `FILE:LINE` selector could pick a test out of an unrelated file. Now the suffix
+   must land on a path-component boundary (`test--path-suffix?`: the character
+   before the match has to be `/`). Narrow in practice — it needs both files named
+   in one run with bare-filename paths — but silent and wrong when hit.
+2. **`--shard K` out of range silently ran nothing.** `--partitions 2 --shard 5`
+   matched no test and exited 0. A CI job reads that as green. Now exits 2 with the
+   valid range.
+3. **`--shard` without `--partitions` was silently ignored** — it ran the whole
+   suite while looking like a shard. Also exits 2 now.
+4. **`--seed 0` contradicted its own help**, which claimed 0 meant declaration
+   order; the runner only skips shuffling when the seed is *absent*. Help corrected
+   — any value shuffles, omitting the flag keeps declaration order.
+
+Also documented that positive selectors **union**: `--failed --only slow` is
+(failures ∪ slow), not the intersection. Narrowing wants `--failed --exclude slow`.
+
+Two sharp edges noted and deliberately left:
+- `test--resolve-lines` warns per *drain*, and the scoped runner drains per file, so
+  a `:lines` spec reaching the scoped path would warn once per file. Unreachable
+  from the CLI (a positional `FILE:LINE` forces the single-file path, one drain), so
+  it stays a latent note rather than a fix in search of a caller.
+- Group→test tag merging can duplicate a tag present at both levels. Matching is
+  by presence, so it is harmless.
